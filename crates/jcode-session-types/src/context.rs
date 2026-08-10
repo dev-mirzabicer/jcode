@@ -182,7 +182,7 @@ pub struct StoredContentTarget {
     pub expected_hash: u64,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum StoredContextBlockKind {
     Text,

@@ -24,6 +24,7 @@ members = [
     "crates/jcode-batch-types",
     "crates/jcode-build-support",
     "crates/jcode-compaction-core",
+    "crates/jcode-context-core",
     "crates/jcode-config-types",
     "crates/jcode-command-risk",
     "crates/jcode-core",

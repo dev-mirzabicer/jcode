@@ -1,0 +1,13 @@
+[package]
+name = "jcode-context-core"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+jcode-message-types = { path = "../jcode-message-types" }
+jcode-session-types = { path = "../jcode-session-types" }
+serde_json = "1"
+
+[dev-dependencies]
+chrono = { version = "0.4", features = ["serde"] }
