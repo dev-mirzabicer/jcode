@@ -61,7 +61,7 @@ pub(super) fn bash_parameters_schema() -> serde_json::Value {
             },
             "timeout": {
                 "type": "integer",
-                "description": "Timeout in MILLISECONDS (not seconds), e.g. 600000 = 10min; kills with exit 124. Omit for no timeout."
+                "description": "Optional deadline in MILLISECONDS (not seconds), e.g. 600000 = 10min. Foreground commands continue as background tasks after the deadline; background commands are terminated with exit 124. Omit for no deadline."
             },
             "run_in_background": {
                 "type": "boolean",

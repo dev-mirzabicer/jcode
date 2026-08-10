@@ -24,15 +24,14 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command as TokioCommand;
 
 const MAX_OUTPUT_LEN: usize = 30000;
-const DEFAULT_TIMEOUT_MS: u64 = 120000;
 const STDIN_POLL_INTERVAL_MS: u64 = 500;
 const STDIN_INITIAL_DELAY_MS: u64 = 300;
 const PROGRESS_MARKER_PREFIX: &str = "JCODE_PROGRESS ";
 const CHECKPOINT_MARKER_PREFIX: &str = "JCODE_CHECKPOINT ";
 const BACKGROUND_PROGRESS_GUIDANCE: &str = "For long-running background commands, prefer scripts or commands that periodically print progress updates. Best format: print lines starting with `JCODE_PROGRESS ` followed by JSON like {\"percent\":42,\"message\":\"Running\"} or {\"current\":120,\"total\":1000,\"unit\":\"batches\",\"message\":\"Epoch 2/5\",\"eta_seconds\":30}. Supported JSON fields are `percent`, `message`, `current`, `total`, `unit`, `eta_seconds`, and optional `kind`=`indeterminate` or `kind`=`checkpoint`. For milestone-style wakeups, print `JCODE_CHECKPOINT {\"message\":\"Unit tests passed\"}`. Generic fallback output that can be parsed includes `42%`, `3/10 tests`, `3 of 10 steps`, `1.5/3.0 GiB`, or phase lines like `Compiling ...`, `Downloading ...`, `Running ...`, and `Building ...`. If you are writing the script yourself, add these progress/checkpoint lines explicitly. Put large temporary files, worktrees, and virtual environments under `$JCODE_SCRATCH_DIR`, not `/tmp`, because `/tmp` may be RAM-backed.";
-const BASH_TOOL_DESCRIPTION: &str = "Run a bash command.";
-const WINDOWS_SHELL_TOOL_DESCRIPTION: &str =
-    "Run a Windows cmd.exe command (compatibility name `bash`). Use cmd.exe syntax, not Bash.";
+const BASH_TOOL_DESCRIPTION: &str =
+    "Run a bash command. Commands have no default deadline; set timeout only when intentional.";
+const WINDOWS_SHELL_TOOL_DESCRIPTION: &str = "Run a Windows cmd.exe command (compatibility name `bash`). Commands have no default deadline; set timeout only when intentional. Use cmd.exe syntax, not Bash.";
 
 #[cfg(unix)]
 fn shell_single_quote(value: &str) -> String {
@@ -778,9 +777,6 @@ impl BashTool {
                 .await;
         }
 
-        let timeout_ms = params.timeout.unwrap_or(DEFAULT_TIMEOUT_MS).min(600000);
-        let timeout_duration = Duration::from_millis(timeout_ms);
-
         let has_stdin_channel = ctx.stdin_request_tx.is_some();
 
         let mut command = build_shell_command(&params.command);
@@ -920,7 +916,15 @@ impl BashTool {
                 Ok(ToolOutput::new(output).with_title(title_for_work))
             });
 
-        match tokio::time::timeout(timeout_duration, &mut work_handle).await {
+        let Some(timeout_ms) = params.timeout else {
+            return match work_handle.await {
+                Ok(Ok(output)) => Ok(output),
+                Ok(Err(error)) => Err(anyhow::anyhow!("Command failed: {}", error)),
+                Err(join_error) => Err(anyhow::anyhow!("Command task panicked: {}", join_error)),
+            };
+        };
+
+        match tokio::time::timeout(Duration::from_millis(timeout_ms), &mut work_handle).await {
             Ok(join_result) => match join_result {
                 Ok(Ok(output)) => Ok(output),
                 Ok(Err(e)) => Err(anyhow::anyhow!("Command failed: {}", e)),
@@ -992,8 +996,7 @@ impl BashTool {
         params: &BashInput,
         ctx: &ToolContext,
     ) -> Result<ToolOutput> {
-        let timeout_ms = params.timeout.unwrap_or(DEFAULT_TIMEOUT_MS).min(600000);
-        let timeout_duration = Duration::from_millis(timeout_ms);
+        let timeout_duration = params.timeout.map(Duration::from_millis);
         let started_at = Utc::now().to_rfc3339();
         let started = Instant::now();
         let manager = crate::background::global();
@@ -1032,7 +1035,13 @@ impl BashTool {
                 );
             }
 
-            if started.elapsed() >= timeout_duration {
+            if timeout_duration
+                .map(|timeout| started.elapsed() >= timeout)
+                .unwrap_or(false)
+            {
+                let timeout_ms = params
+                    .timeout
+                    .expect("timeout duration exists only when timeout was provided");
                 let elapsed = started.elapsed();
                 manager
                     .register_detached_task(
@@ -1137,7 +1146,7 @@ impl BashTool {
         let description = params.intent.clone();
         let display_name = summarize_background_command(description.as_deref(), &command);
         let working_dir = ctx.working_dir.clone();
-        let timeout_ms = params.timeout.map(|timeout| timeout.min(600000));
+        let timeout_ms = params.timeout;
         let timeout_duration = timeout_ms.map(Duration::from_millis);
 
         let wake = params.wake;

@@ -176,7 +176,7 @@ async fn wait_returns_when_task_finishes() -> Result<()> {
         .await;
 
     let wait_result = manager
-        .wait(&info.task_id, Duration::from_secs(2), true)
+        .wait(&info.task_id, None, true)
         .await
         .ok_or_else(|| anyhow!("task should exist"))?;
 
@@ -217,7 +217,7 @@ async fn wait_returns_on_progress_checkpoint() -> Result<()> {
         source: BackgroundTaskProgressSource::Reported,
     };
 
-    let waiter = manager.wait(&info.task_id, Duration::from_secs(2), true);
+    let waiter = manager.wait(&info.task_id, Some(Duration::from_secs(2)), true);
     let updater = async {
         sleep(Duration::from_millis(25)).await;
         manager
@@ -258,7 +258,7 @@ async fn wait_returns_on_timeout() -> Result<()> {
         .await;
 
     let wait_result = manager
-        .wait(&info.task_id, Duration::from_millis(25), true)
+        .wait(&info.task_id, Some(Duration::from_millis(25)), true)
         .await
         .ok_or_else(|| anyhow!("task should exist"))?;
 
@@ -462,7 +462,7 @@ async fn status_read_self_heals_orphaned_task() -> Result<()> {
 
     // And wait() returns immediately instead of blocking to timeout.
     let wait_result = manager
-        .wait("orphan3cccc", Duration::from_secs(5), false)
+        .wait("orphan3cccc", Some(Duration::from_secs(5)), false)
         .await
         .ok_or_else(|| anyhow!("wait should find the task"))?;
     assert_eq!(

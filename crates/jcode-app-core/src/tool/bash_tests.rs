@@ -63,6 +63,30 @@ async fn test_basic_command_no_stdin() {
     assert!(result.output.contains("hello"));
 }
 
+#[test]
+fn bash_schema_documents_no_default_deadline() {
+    let schema = BashTool::new().parameters_schema();
+    let description = schema["properties"]["timeout"]["description"]
+        .as_str()
+        .expect("timeout description");
+    assert!(description.contains("Omit for no deadline"));
+    assert!(!description.contains("cap"));
+}
+
+#[test]
+fn explicit_timeout_is_not_capped() {
+    let input: BashInput = serde_json::from_value(json!({
+        "command": "sleep 1",
+        "timeout": 7_200_000u64
+    }))
+    .expect("parse bash input");
+    assert_eq!(input.timeout, Some(7_200_000));
+
+    let no_deadline: BashInput = serde_json::from_value(json!({"command": "sleep 1"}))
+        .expect("parse bash input without timeout");
+    assert_eq!(no_deadline.timeout, None);
+}
+
 #[tokio::test]
 async fn test_basic_command_with_unused_stdin_channel() {
     let (tx, _rx) = mpsc::unbounded_channel();

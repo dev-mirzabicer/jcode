@@ -959,7 +959,7 @@ export -f cargo
 
         // Wait inline for the build (and anything queued ahead of it) to finish.
         let wait = std::time::Duration::from_secs(SelfDevTool::build_reload_wait_secs());
-        let wait_result = background::global().wait(&task_id, wait, false).await;
+        let wait_result = background::global().wait(&task_id, Some(wait), false).await;
 
         let finished = matches!(
             wait_result

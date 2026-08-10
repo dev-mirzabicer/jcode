@@ -861,15 +861,16 @@ impl BackgroundTaskManager {
         fs::read_to_string(&output_path).await.ok()
     }
 
-    /// Wait for a task to finish, emit progress, or reach the caller's maximum wait.
+    /// Wait for a task to finish, emit progress, or reach an optional caller deadline.
     ///
-    /// This combines bus-driven wakeups with a light periodic status reconciliation so
-    /// detached tasks, missed broadcast messages, or crash/reload edges still return no
-    /// later than `max_wait` and can notice completion without active polling by the agent.
+    /// This combines bus-driven wakeups with light periodic status reconciliation so
+    /// detached tasks, missed broadcasts, and crash or reload edges are still observed
+    /// without active polling by the agent. A `None` deadline waits until a terminal or
+    /// requested progress event, however long that takes.
     pub async fn wait(
         &self,
         task_id: &str,
-        max_wait: Duration,
+        max_wait: Option<Duration>,
         return_on_progress: bool,
     ) -> Option<BackgroundTaskWaitResult> {
         let mut bus_rx = Bus::global().subscribe();
@@ -882,7 +883,7 @@ impl BackgroundTaskManager {
                 event_record: None,
             });
         }
-        if max_wait.is_zero() {
+        if max_wait.map(|duration| duration.is_zero()).unwrap_or(false) {
             return Some(BackgroundTaskWaitResult {
                 reason: BackgroundTaskWaitReason::Timeout,
                 task: initial,
@@ -892,15 +893,21 @@ impl BackgroundTaskManager {
         }
 
         let mut last_progress = initial.progress.clone();
-        let deadline = TokioInstant::now() + max_wait;
-        let timeout = tokio::time::sleep_until(deadline);
+        let timeout =
+            max_wait.map(|duration| tokio::time::sleep_until(TokioInstant::now() + duration));
         tokio::pin!(timeout);
         let mut poll = tokio::time::interval(Duration::from_secs(1));
         poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut bus_open = true;
 
         loop {
             tokio::select! {
-                _ = &mut timeout => {
+                _ = async {
+                    match timeout.as_mut().as_pin_mut() {
+                        Some(timeout) => timeout.await,
+                        None => std::future::pending().await,
+                    }
+                }, if max_wait.is_some() => {
                     let task = self.status(task_id).await?;
                     let reason = if task.status == BackgroundTaskStatus::Running {
                         BackgroundTaskWaitReason::Timeout
@@ -935,7 +942,7 @@ impl BackgroundTaskManager {
                     }
                     last_progress = task.progress.clone();
                 }
-                event = bus_rx.recv() => {
+                event = bus_rx.recv(), if bus_open => {
                     match event {
                         Ok(BusEvent::BackgroundTaskCompleted(event)) if event.task_id == task_id => {
                             let task = self.status(task_id).await?;
@@ -981,17 +988,15 @@ impl BackgroundTaskManager {
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                             let task = self.status(task_id).await?;
-                            let reason = if task.status == BackgroundTaskStatus::Running {
-                                BackgroundTaskWaitReason::Timeout
-                            } else {
-                                BackgroundTaskWaitReason::Finished
-                            };
-                            return Some(BackgroundTaskWaitResult {
-                                reason,
-                                task,
-                                progress_event: None,
-                                event_record: None,
-                            });
+                            if task.status != BackgroundTaskStatus::Running {
+                                return Some(BackgroundTaskWaitResult {
+                                    reason: BackgroundTaskWaitReason::Finished,
+                                    task,
+                                    progress_event: None,
+                                    event_record: None,
+                                });
+                            }
+                            bus_open = false;
                         }
                         _ => {}
                     }

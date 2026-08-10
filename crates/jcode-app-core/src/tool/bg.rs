@@ -25,8 +25,6 @@ fn default_wait_return_on_progress() -> bool {
     true
 }
 
-const DEFAULT_WAIT_SECONDS: u64 = 60;
-const MAX_WAIT_SECONDS: u64 = 60 * 60;
 const DEFAULT_TAIL_LINES: usize = 80;
 const DEFAULT_WAIT_PREVIEW_LINES: usize = 40;
 const MAX_OUTPUT_BYTES: usize = 50_000;
@@ -74,7 +72,7 @@ struct BgInput {
     /// Whether to wake on completion when using watch/delivery (default: true)
     #[serde(default)]
     wake: Option<bool>,
-    /// Max seconds to block when using wait (default: 60, capped at 3600)
+    /// Optional maximum seconds to block when using wait. Omitted means no deadline.
     #[serde(default)]
     max_wait_seconds: Option<u64>,
     /// Whether wait should return on progress/checkpoint events (default: true)
@@ -403,11 +401,11 @@ async fn resolve_task_ids(
 async fn wait_many_polling(
     manager: &background::BackgroundTaskManager,
     task_ids: &[String],
-    max_wait: Duration,
+    max_wait: Option<Duration>,
     return_on_progress: bool,
     mode: &str,
 ) -> Result<(String, Vec<background::TaskStatusFile>)> {
-    let deadline = Instant::now() + max_wait;
+    let deadline = max_wait.map(|duration| Instant::now() + duration);
     let mut last_progress = std::collections::HashMap::new();
     for task_id in task_ids {
         if let Some(task) = manager.status(task_id).await {
@@ -445,7 +443,10 @@ async fn wait_many_polling(
             }
         }
 
-        if Instant::now() >= deadline {
+        if deadline
+            .map(|deadline| Instant::now() >= deadline)
+            .unwrap_or(false)
+        {
             return Ok(("timeout".to_string(), tasks));
         }
         for task in &tasks {
@@ -491,7 +492,7 @@ impl Tool for BgTool {
                 "dry_run": { "type": "boolean", "description": "For cleanup, report what would be removed without deleting." },
                 "notify": { "type": "boolean", "description": "When using delivery/watch/subscribe, whether to notify on completion. Defaults to true." },
                 "wake": { "type": "boolean", "description": "When using delivery/watch/subscribe, whether to wake on completion. Defaults to true." },
-                "max_wait_seconds": { "type": "integer", "description": "For wait: max seconds to block. Default 60, cap 3600, 0 = immediate check." },
+                "max_wait_seconds": { "type": "integer", "description": "For wait: optional maximum seconds to block. Omit to wait without a deadline; 0 performs an immediate check." },
                 "return_on_progress": { "type": "boolean", "description": "For wait: return on the first progress/checkpoint event too. Defaults to true." },
                 "wait_mode": { "type": "string", "enum": ["any", "all", "first_failure"], "description": "For multi-task wait, return on any completion, all completions, or first failure. Defaults to any." },
                 "tail_lines": { "type": "integer", "description": "Return only the last N output lines for output/tail/wait preview." },
@@ -685,9 +686,7 @@ impl Tool for BgTool {
 
             "wait" => {
                 let task_ids = resolve_task_ids(manager, &ctx, &params, "wait", true).await?;
-                let requested_wait = params.max_wait_seconds.unwrap_or(DEFAULT_WAIT_SECONDS);
-                let capped_wait = requested_wait.min(MAX_WAIT_SECONDS);
-                let wait_duration = Duration::from_secs(capped_wait);
+                let wait_duration = params.max_wait_seconds.map(Duration::from_secs);
 
                 if task_ids.len() > 1 {
                     let mode = params.wait_mode.as_deref().unwrap_or("any");
@@ -723,7 +722,7 @@ impl Tool for BgTool {
                         "wait_reason": reason,
                         "wait_mode": mode,
                         "timed_out": reason == "timeout",
-                        "max_wait_seconds": capped_wait,
+                        "max_wait_seconds": params.max_wait_seconds,
                         "tasks": tasks.iter().map(|task| task_metadata(manager, task)).collect::<Vec<_>>(),
                     })));
                 }
@@ -762,17 +761,11 @@ impl Tool for BgTool {
                             }
                             background::BackgroundTaskWaitReason::Timeout => format!(
                                 "No terminal event before max wait of {}s. Check again with `bg action=\"wait\" task_id=\"{}\"` or inspect status/output.\n\n",
-                                capped_wait, task_id
+                                params.max_wait_seconds.unwrap_or_default(),
+                                task_id
                             ),
                         };
                         output.push_str(&format_task_details(&task));
-                        if requested_wait > MAX_WAIT_SECONDS {
-                            output.push_str(&format!(
-                                "Requested wait was capped from {}s to {}s.\n",
-                                requested_wait, MAX_WAIT_SECONDS
-                            ));
-                        }
-
                         let include_preview = params.include_output_preview.unwrap_or({
                             matches!(task.status, BackgroundTaskStatus::Failed)
                                 || matches!(reason, background::BackgroundTaskWaitReason::Finished)
@@ -812,7 +805,7 @@ impl Tool for BgTool {
                                 "status": status_label(&task.status),
                                 "wait_reason": reason_str,
                                 "timed_out": matches!(reason, background::BackgroundTaskWaitReason::Timeout),
-                                "max_wait_seconds": capped_wait,
+                                "max_wait_seconds": params.max_wait_seconds,
                                 "return_on_progress": params.return_on_progress.unwrap_or_else(default_wait_return_on_progress),
                                 "exit_code": task.exit_code,
                                 "progress": task.progress,
@@ -849,6 +842,16 @@ mod tests {
         assert_eq!(branches[1]["type"], json!("array"));
         assert_eq!(branches[1]["items"]["type"], json!("string"));
         Ok(())
+    }
+
+    #[test]
+    fn wait_schema_documents_unbounded_default() {
+        let schema = BgTool::new().parameters_schema();
+        let description = schema["properties"]["max_wait_seconds"]["description"]
+            .as_str()
+            .expect("max_wait_seconds description");
+        assert!(description.contains("Omit to wait without a deadline"));
+        assert!(!description.contains("cap"));
     }
 
     #[test]
