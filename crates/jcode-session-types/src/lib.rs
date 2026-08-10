@@ -3,6 +3,9 @@ use jcode_message_types::{ContentBlock, Message, Role, ToolCall};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
+mod context;
+pub use context::*;
+
 /// Identifies a session to resume, across the agent backends jcode can import
 /// from. This is pure data (only ids/paths) with no UI dependency; it lives in
 /// `jcode-session-types` so the foundation/import layer can match on it without
@@ -257,6 +260,7 @@ pub struct StoredTokenUsage {
     pub cache_creation_input_tokens: Option<u64>,
 }
 
+/// Legacy prefix-compaction state retained only for loading and migration of old sessions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoredCompactionState {
     pub summary_text: String,
