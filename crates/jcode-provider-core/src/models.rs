@@ -283,6 +283,10 @@ pub fn context_limit_for_model_with_provider_and_cache(
         return Some(1_000_000);
     }
 
+    if model.starts_with("gpt-5.6") {
+        return Some(372_000);
+    }
+
     // Most GPT-5.x codex/reasoning models: 272k per Codex backend API.
     if model.starts_with("gpt-5") {
         return Some(272_000);
