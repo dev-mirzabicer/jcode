@@ -2287,9 +2287,18 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn execute_records_off_catalog_selection_without_provider_information() {
+    #[test]
+    fn execute_records_off_catalog_selection_without_provider_information() {
         let _guard = crate::storage::lock_test_env();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build off-catalog discovery test runtime");
+        runtime
+            .block_on(execute_records_off_catalog_selection_without_provider_information_async());
+    }
+
+    async fn execute_records_off_catalog_selection_without_provider_information_async() {
         let prev_home = std::env::var_os("JCODE_HOME");
         let temp = tempfile::tempdir().unwrap();
         crate::env::set_var("JCODE_HOME", temp.path());
@@ -2346,9 +2355,17 @@ mod tests {
         crate::config::Config::invalidate_cache();
     }
 
-    #[tokio::test]
-    async fn execute_end_to_end_with_enabled_config_and_local_server() {
+    #[test]
+    fn execute_end_to_end_with_enabled_config_and_local_server() {
         let _guard = crate::storage::lock_test_env();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build end-to-end discovery test runtime");
+        runtime.block_on(execute_end_to_end_with_enabled_config_and_local_server_async());
+    }
+
+    async fn execute_end_to_end_with_enabled_config_and_local_server_async() {
         let prev_home = std::env::var_os("JCODE_HOME");
         let temp = tempfile::tempdir().unwrap();
         crate::env::set_var("JCODE_HOME", temp.path());

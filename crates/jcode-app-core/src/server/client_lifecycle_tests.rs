@@ -193,9 +193,17 @@ async fn busy_agent_request_rejection_does_not_wait_for_agent_lock() {
     assert!(client_event_rx.try_recv().is_err());
 }
 
-#[tokio::test]
-async fn context_message_persists_without_starting_turn() {
+#[test]
+fn context_message_persists_without_starting_turn() {
     let _guard = crate::storage::lock_test_env();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build context-message test runtime");
+    runtime.block_on(context_message_persists_without_starting_turn_async());
+}
+
+async fn context_message_persists_without_starting_turn_async() {
     let _env = IsolatedReloadRecoveryEnv::new();
     let session_id = "session_context_only_no_reply";
     let forked = Arc::new(AtomicBool::new(false));
@@ -952,9 +960,19 @@ fn reload_starting_rejects_new_turn_without_spawning_processing_task() {
     });
 }
 
-#[tokio::test]
-async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attachments() {
+#[test]
+fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attachments() {
     let _guard = crate::storage::lock_test_env();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build live-attachment test runtime");
+    runtime.block_on(
+        client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attachments_async(),
+    );
+}
+
+async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attachments_async() {
     let _runtime = IsolatedRuntimeDir::new();
     let session_id = "session_live_attachment_fanout";
 

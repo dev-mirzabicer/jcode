@@ -216,11 +216,19 @@ fn description_tells_models_to_check_status_before_setup() {
 }
 
 #[cfg(unix)]
-#[tokio::test]
-async fn readiness_does_not_trust_a_stale_setup_marker() {
-    use std::os::unix::fs::PermissionsExt;
-
+#[test]
+fn readiness_does_not_trust_a_stale_setup_marker() {
     let _guard = jcode_base::storage::lock_test_env();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build browser readiness test runtime");
+    runtime.block_on(readiness_does_not_trust_a_stale_setup_marker_async());
+}
+
+#[cfg(unix)]
+async fn readiness_does_not_trust_a_stale_setup_marker_async() {
+    use std::os::unix::fs::PermissionsExt;
     let prev_home = std::env::var_os("JCODE_HOME");
     let temp = tempfile::TempDir::new().expect("create temp dir");
     jcode_base::env::set_var("JCODE_HOME", temp.path());

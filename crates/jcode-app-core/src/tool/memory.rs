@@ -498,9 +498,17 @@ mod tests {
     /// Issue #491 regression: project-scoped remember followed by list must
     /// round-trip through the real (non-test-mode) manager when the tool
     /// context carries a working dir.
-    #[tokio::test]
-    async fn project_scope_round_trips_with_working_dir() {
+    #[test]
+    fn project_scope_round_trips_with_working_dir() {
         let _guard = crate::storage::lock_test_env();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build project-memory test runtime");
+        runtime.block_on(project_scope_round_trips_with_working_dir_async());
+    }
+
+    async fn project_scope_round_trips_with_working_dir_async() {
         let home = tempfile::tempdir().expect("home");
         let project = tempfile::tempdir().expect("project");
         let prev_home = std::env::var_os("JCODE_HOME");
@@ -552,9 +560,18 @@ mod tests {
     ///
     /// Driving `Tool::execute` (rather than inspecting a flag) means this stays
     /// honest even if the internals are refactored.
-    #[tokio::test]
-    async fn swarm_worker_memory_sees_the_spawning_session_only_without_isolation() {
+    #[test]
+    fn swarm_worker_memory_sees_the_spawning_session_only_without_isolation() {
         let _guard = crate::storage::lock_test_env();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build swarm-memory test runtime");
+        runtime
+            .block_on(swarm_worker_memory_sees_the_spawning_session_only_without_isolation_async());
+    }
+
+    async fn swarm_worker_memory_sees_the_spawning_session_only_without_isolation_async() {
         let home = tempfile::tempdir().expect("home");
         let project = tempfile::tempdir().expect("project");
         let prev_home = std::env::var_os("JCODE_HOME");
