@@ -124,8 +124,8 @@ fn profile_shadowing_builtin_name_with_other_base_is_user_named() {
 /// End-to-end guard for issue #579: parse a real `config.toml` snippet, build
 /// the provider from it, perform a live `/models` fetch whose catalog omits the
 /// user's declared model, and assert the picker still offers it.
-#[tokio::test]
-async fn config_toml_models_survive_a_real_catalog_fetch() {
+#[test]
+fn config_toml_models_survive_a_real_catalog_fetch() {
     let _lock = ENV_LOCK.lock();
     let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
 
@@ -159,9 +159,11 @@ context_window = 128000
 
     // Real HTTP catalog fetch, mirroring the background refresh that used to
     // drop config-declared models.
-    provider
-        .fetch_models()
-        .await
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build catalog-fetch test runtime")
+        .block_on(provider.fetch_models())
         .expect("live catalog fetch should succeed");
 
     let models = provider.available_models_display();
