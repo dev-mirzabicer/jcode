@@ -1,7 +1,9 @@
 use jcode_message_types::{
     ContentBlock, Message, Role, TOOL_OUTPUT_MISSING_TEXT, ToolDefinition, sanitize_tool_id,
 };
-use jcode_provider_core::anthropic_map_tool_name_for_oauth as map_tool_name_for_oauth;
+use jcode_provider_core::{
+    ContextRequestBuilderValidation, anthropic_map_tool_name_for_oauth as map_tool_name_for_oauth,
+};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -390,6 +392,104 @@ pub fn format_content_blocks(blocks: &[ContentBlock], is_oauth: bool) -> Vec<Api
         }
     }
     result
+}
+
+/// Validate projected provider messages through the production Anthropic formatter.
+///
+/// This validates formatter output rather than duplicating the wire serializer. It rejects
+/// unsigned thinking and verifies strict tool-result placement after normal merging,
+/// deduplication, image association, and dangling-result repair have run.
+pub fn validate_projected_messages(
+    messages: &[Message],
+    is_oauth: bool,
+) -> Result<ContextRequestBuilderValidation, String> {
+    use std::collections::HashSet;
+
+    let formatted = format_messages(messages, is_oauth);
+    if formatted.is_empty() {
+        return Err(
+            "Projected history normalizes to no Anthropic request messages; the request would not contain a valid conversation turn."
+                .to_string(),
+        );
+    }
+
+    for pair in formatted.windows(2) {
+        if pair[0].role == pair[1].role {
+            return Err(format!(
+                "Anthropic formatter left consecutive '{}' messages instead of strict role alternation.",
+                pair[0].role
+            ));
+        }
+    }
+
+    let mut seen_tool_use_ids = HashSet::new();
+    for (message_index, message) in formatted.iter().enumerate() {
+        for block in &message.content {
+            if let ApiContentBlock::Thinking {
+                thinking,
+                signature,
+            } = block
+                && (thinking.trim().is_empty() || signature.trim().is_empty())
+            {
+                return Err(format!(
+                    "Anthropic message {message_index} contains thinking text without a complete non-empty signature."
+                ));
+            }
+        }
+
+        if message.role != "assistant" {
+            continue;
+        }
+        let tool_use_ids: Vec<&str> = message
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                ApiContentBlock::ToolUse { id, .. } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
+        if tool_use_ids.is_empty() {
+            continue;
+        }
+        for tool_use_id in &tool_use_ids {
+            if !seen_tool_use_ids.insert(*tool_use_id) {
+                return Err(format!(
+                    "Anthropic projected history contains duplicate normalized tool_use id '{tool_use_id}'."
+                ));
+            }
+        }
+
+        let next = formatted.get(message_index + 1).ok_or_else(|| {
+            format!(
+                "Anthropic assistant message {message_index} contains tool calls but no following user tool-result message."
+            )
+        })?;
+        if next.role != "user" {
+            return Err(format!(
+                "Anthropic assistant message {message_index} contains tool calls but the following message has role '{}'.",
+                next.role
+            ));
+        }
+
+        let expected: HashSet<&str> = tool_use_ids.iter().copied().collect();
+        let contiguous_results: Vec<&str> = next
+            .content
+            .iter()
+            .take_while(|block| matches!(block, ApiContentBlock::ToolResult { .. }))
+            .filter_map(|block| match block {
+                ApiContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        let actual: HashSet<&str> = contiguous_results.iter().copied().collect();
+        if contiguous_results.len() != expected.len() || actual != expected {
+            return Err(format!(
+                "Anthropic assistant message {message_index} does not have one contiguous leading tool_result block for every tool_use in the following user message."
+            ));
+        }
+    }
+
+    Ok(ContextRequestBuilderValidation::new(formatted.len()))
 }
 
 /// Convert tool definitions to Anthropic API format
@@ -1196,3 +1296,7 @@ mod duplicate_tool_result_tests;
 #[cfg(test)]
 #[path = "wedge_fixture_check.rs"]
 mod wedge_fixture_check;
+
+#[cfg(test)]
+#[path = "context_validation_tests.rs"]
+mod context_validation_tests;

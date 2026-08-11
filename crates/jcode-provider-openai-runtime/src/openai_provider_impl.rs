@@ -1186,6 +1186,38 @@ impl Provider for OpenAIProvider {
         self.clear_persistent_ws_try(reason);
     }
 
+    fn validate_projected_context(
+        &self,
+        messages: &[ChatMessage],
+        operations: &[jcode_provider_core::ContextProjectionValidationOperation],
+    ) -> jcode_provider_core::ContextProjectionValidationReport {
+        use jcode_provider_core::{
+            ContextProviderFamily, ContextProviderValidationIdentity, ContextReasoningBlockKind,
+            context_projection_validation_report,
+        };
+
+        let model = self.model();
+        let builder_result = if is_chatgpt_web_model(&model) {
+            Err(format!(
+                "OpenAI model '{model}' uses the ChatGPT web conversation route, not the Responses input builder; projected-history operations remain disabled until that production route has its own validation adapter."
+            ))
+        } else {
+            jcode_provider_openai::validate_projected_messages(messages)
+        };
+        context_projection_validation_report(
+            ContextProviderValidationIdentity {
+                family: ContextProviderFamily::OpenAiResponses,
+                provider_name: self.name().to_string(),
+                provider_display_name: self.display_name(),
+                model,
+                evidence_tag: "openai_responses_input_builder_v1".to_string(),
+            },
+            operations,
+            Some(ContextReasoningBlockKind::OpenAiReasoning),
+            builder_result,
+        )
+    }
+
     fn fork(&self) -> Arc<dyn Provider> {
         let model = self.model();
         Arc::new(OpenAIProvider {

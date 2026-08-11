@@ -2,8 +2,9 @@ use jcode_message_types::{
     ContentBlock, Message as ChatMessage, Role, TOOL_OUTPUT_MISSING_TEXT, ToolDefinition,
     sanitize_tool_id,
 };
-use jcode_provider_core::openai_schema::{
-    openai_compatible_schema, schema_supports_strict, strict_normalize_schema,
+use jcode_provider_core::{
+    ContextRequestBuilderValidation,
+    openai_schema::{openai_compatible_schema, schema_supports_strict, strict_normalize_schema},
 };
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -558,6 +559,149 @@ pub fn build_responses_input_with_logger(
     ordered
 }
 
+/// Validate projected provider messages through the production Responses input builder.
+///
+/// The builder's real repair and ordering behavior runs first. Validation then proves that every
+/// function call is immediately paired with its output, retained reasoning items are complete,
+/// and the new context subsystem did not emit a native compaction item.
+pub fn validate_projected_messages(
+    messages: &[ChatMessage],
+) -> Result<ContextRequestBuilderValidation, String> {
+    if messages.iter().any(|message| {
+        message
+            .content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::OpenAICompaction { .. }))
+    }) {
+        return Err(
+            "Projected history contains an OpenAI native compaction item. New context transactions must use provider-neutral summaries and cannot generate or retain native compaction state."
+                .to_string(),
+        );
+    }
+
+    let mut normalization_notes = Vec::new();
+    let items = build_responses_input_with_logger(messages, |_, message| {
+        normalization_notes.push(message.to_string());
+    });
+    if items.is_empty() {
+        return Err(
+            "Projected history normalizes to no OpenAI Responses input items; the request would not contain a valid conversation turn."
+                .to_string(),
+        );
+    }
+
+    let mut seen_call_ids = HashSet::new();
+    let mut seen_output_ids = HashSet::new();
+    for (index, item) in items.iter().enumerate() {
+        let item_type = item.get("type").and_then(Value::as_str).unwrap_or("");
+        match item_type {
+            "message" => {
+                let role = item.get("role").and_then(Value::as_str).unwrap_or("");
+                if !matches!(role, "user" | "assistant") {
+                    return Err(format!(
+                        "OpenAI Responses input item {index} has invalid message role '{role}'."
+                    ));
+                }
+                if !item
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .is_some_and(|content| !content.is_empty())
+                {
+                    return Err(format!(
+                        "OpenAI Responses message item {index} has no non-empty content array."
+                    ));
+                }
+            }
+            "reasoning" => {
+                if item
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .is_none_or(str::is_empty)
+                {
+                    return Err(format!(
+                        "OpenAI Responses reasoning item {index} has no stable non-empty id."
+                    ));
+                }
+                if !item.get("summary").is_some_and(Value::is_array) {
+                    return Err(format!(
+                        "OpenAI Responses reasoning item {index} has no summary array."
+                    ));
+                }
+            }
+            "function_call" | "custom_tool_call" => {
+                let call_id = item
+                    .get("call_id")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty())
+                    .ok_or_else(|| {
+                        format!("OpenAI Responses function call item {index} has no call_id.")
+                    })?;
+                if !seen_call_ids.insert(call_id) {
+                    return Err(format!(
+                        "OpenAI Responses projected history contains duplicate normalized function call id '{call_id}'."
+                    ));
+                }
+                let output = items.get(index + 1).ok_or_else(|| {
+                    format!(
+                        "OpenAI Responses function call item {index} has no immediately following output."
+                    )
+                })?;
+                if output.get("type").and_then(Value::as_str) != Some("function_call_output")
+                    || output.get("call_id").and_then(Value::as_str) != Some(call_id)
+                {
+                    return Err(format!(
+                        "OpenAI Responses function call item {index} is not immediately followed by its matching function_call_output."
+                    ));
+                }
+            }
+            "function_call_output" => {
+                let call_id = item
+                    .get("call_id")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty())
+                    .ok_or_else(|| {
+                        format!(
+                            "OpenAI Responses function_call_output item {index} has no call_id."
+                        )
+                    })?;
+                if !seen_output_ids.insert(call_id) {
+                    return Err(format!(
+                        "OpenAI Responses projected history contains duplicate normalized function call output id '{call_id}'."
+                    ));
+                }
+                let paired = index > 0
+                    && matches!(
+                        items[index - 1].get("type").and_then(Value::as_str),
+                        Some("function_call") | Some("custom_tool_call")
+                    )
+                    && items[index - 1].get("call_id").and_then(Value::as_str) == Some(call_id);
+                if !paired {
+                    return Err(format!(
+                        "OpenAI Responses function_call_output item {index} is orphaned or out of order."
+                    ));
+                }
+            }
+            "compaction" => {
+                return Err(
+                    "OpenAI Responses request builder emitted a native compaction item from projected context."
+                        .to_string(),
+                );
+            }
+            other => {
+                return Err(format!(
+                    "OpenAI Responses request builder emitted unsupported input item type '{other}' at index {index}."
+                ));
+            }
+        }
+    }
+
+    Ok(ContextRequestBuilderValidation {
+        normalized_item_count: items.len(),
+        formatter_placeholder_count: 0,
+        normalization_notes,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -655,6 +799,101 @@ mod tests {
             items[0]["summary"],
             json!([{ "type": "summary_text", "text": "Checked constraints." }])
         );
+
+        let validation = validate_projected_messages(&messages)
+            .expect("retained encrypted reasoning must validate through the real builder");
+        assert_eq!(validation.normalized_item_count, 1);
+    }
+
+    #[test]
+    fn projected_history_without_text_only_reasoning_validates() {
+        let messages = vec![
+            ChatMessage::user("Investigate the failure."),
+            ChatMessage::assistant_text("The failure is caused by a stale fixture."),
+            ChatMessage::user("Apply the fix."),
+        ];
+
+        let validation = validate_projected_messages(&messages)
+            .expect("removing a complete historical reasoning item must remain valid");
+        let items = build_responses_input(&messages);
+        assert_eq!(validation.normalized_item_count, items.len());
+        assert!(items.iter().all(|item| item["type"] != json!("reasoning")));
+    }
+
+    #[test]
+    fn projected_history_without_function_call_reasoning_keeps_call_output_pair() {
+        let messages = vec![
+            ChatMessage::user("Read Cargo.toml."),
+            ChatMessage {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "call_read".to_string(),
+                    name: "read".to_string(),
+                    input: json!({"file_path":"Cargo.toml"}),
+                    thought_signature: None,
+                }],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+            ChatMessage::tool_result("call_read", "[package]", false),
+            ChatMessage::assistant_text("Cargo.toml was read successfully."),
+            ChatMessage::user("Continue."),
+        ];
+
+        validate_projected_messages(&messages)
+            .expect("suppression around a function call must keep the request valid");
+        let items = build_responses_input(&messages);
+        let call_index = items
+            .iter()
+            .position(|item| item["type"] == json!("function_call"))
+            .expect("function call item");
+        assert_eq!(items[call_index + 1]["type"], json!("function_call_output"));
+        assert_eq!(items[call_index + 1]["call_id"], json!("call_read"));
+    }
+
+    #[test]
+    fn projected_history_rejects_native_compaction_state() {
+        let messages = vec![ChatMessage {
+            role: Role::User,
+            content: vec![ContentBlock::OpenAICompaction {
+                encrypted_content: "legacy-native-state".to_string(),
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        }];
+
+        let error = validate_projected_messages(&messages).unwrap_err();
+        assert!(error.contains("cannot generate or retain native compaction state"));
+    }
+
+    #[test]
+    fn projected_history_rejects_normalized_function_call_id_collisions() {
+        let messages = vec![
+            ChatMessage {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::ToolUse {
+                        id: "call.a".to_string(),
+                        name: "read".to_string(),
+                        input: json!({"file_path":"a"}),
+                        thought_signature: None,
+                    },
+                    ContentBlock::ToolUse {
+                        id: "call_a".to_string(),
+                        name: "read".to_string(),
+                        input: json!({"file_path":"b"}),
+                        thought_signature: None,
+                    },
+                ],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+            ChatMessage::tool_result("call.a", "a", false),
+            ChatMessage::tool_result("call_a", "b", false),
+        ];
+
+        let error = validate_projected_messages(&messages).unwrap_err();
+        assert!(error.contains("duplicate normalized function call id 'call_a'"));
     }
 
     /// Integration-level regression test for issue #687: the payload actually

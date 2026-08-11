@@ -2453,6 +2453,53 @@ fn strict_openai_schema_endpoint_allows_other_providers() {
 }
 
 #[test]
+fn strict_openai_schema_route_reports_generic_reasoning_as_not_replayed() {
+    let mut provider = make_custom_compatible_provider();
+    provider.profile_id = Some("mistral".to_string());
+    provider.api_base = "https://api.mistral.ai/v1".to_string();
+    let report = provider.validate_projected_context(
+        &[Message::user("Continue")],
+        &[jcode_provider_core::ContextProjectionValidationOperation {
+            id: "reasoning-1".to_string(),
+            kind: jcode_provider_core::ContextProjectionOperationKind::ReasoningSuppression {
+                block_kind: jcode_provider_core::ContextReasoningBlockKind::GenericReasoning,
+            },
+        }],
+    );
+
+    assert!(!report.is_supported());
+    assert!(
+        report
+            .unsupported_reasons()
+            .iter()
+            .any(|reason| reason.contains("is not replayed"))
+    );
+}
+
+#[test]
+fn projected_context_validation_fails_closed_while_model_state_is_locked() {
+    let provider = make_custom_compatible_provider();
+    let _model_guard = provider.model.try_write().expect("lock model for test");
+
+    let report = provider.validate_projected_context(
+        &[Message::user("Continue")],
+        &[jcode_provider_core::ContextProjectionValidationOperation {
+            id: "summary-1".to_string(),
+            kind: jcode_provider_core::ContextProjectionOperationKind::RangeSummary,
+        }],
+    );
+
+    assert!(!report.is_supported());
+    assert_eq!(report.model, "<model state unavailable>");
+    assert!(
+        report
+            .unsupported_reasons()
+            .iter()
+            .any(|reason| reason.contains("must be retried"))
+    );
+}
+
+#[test]
 fn runtime_display_name_for_profile_runtime_instance() {
     // Direct unit coverage of the per-instance resolver used by
     // `Provider::display_name`.

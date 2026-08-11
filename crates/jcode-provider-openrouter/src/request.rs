@@ -1,6 +1,7 @@
 use jcode_message_types::{
     ContentBlock, Message, Role, TOOL_OUTPUT_MISSING_TEXT, sanitize_tool_id,
 };
+use jcode_provider_core::ContextRequestBuilderValidation;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
@@ -534,6 +535,151 @@ pub fn build_chat_messages(
     api_messages
 }
 
+/// Validate projected messages through the production OpenRouter/OpenAI-compatible formatter.
+///
+/// The exact route flags are supplied by the runtime. Formatter-injected one-space
+/// `reasoning_content` placeholders are counted separately so later economics never mistake them
+/// for meaningful retained reasoning.
+pub fn validate_projected_messages(
+    messages: &[Message],
+    allow_reasoning: bool,
+    include_reasoning_content: bool,
+    allow_image_input: bool,
+) -> Result<ContextRequestBuilderValidation, String> {
+    if messages.iter().any(|message| {
+        message
+            .content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::OpenAICompaction { .. }))
+    }) {
+        return Err(
+            "Projected OpenRouter/OpenAI-compatible history contains OpenAI-native compaction state that the chat builder cannot replay."
+                .to_string(),
+        );
+    }
+
+    let formatted = build_chat_messages(
+        messages,
+        "",
+        allow_reasoning,
+        include_reasoning_content,
+        allow_image_input,
+    );
+    if formatted.is_empty() {
+        return Err(
+            "Projected history normalizes to no OpenRouter/OpenAI-compatible chat messages; the request would not contain a valid conversation turn."
+                .to_string(),
+        );
+    }
+
+    let mut formatter_placeholder_count = 0usize;
+    let mut seen_tool_call_ids = HashSet::new();
+    let mut seen_tool_output_ids = HashSet::new();
+    for (index, message) in formatted.iter().enumerate() {
+        let role = message.get("role").and_then(Value::as_str).unwrap_or("");
+        if !matches!(role, "system" | "user" | "assistant" | "tool") {
+            return Err(format!(
+                "OpenRouter/OpenAI-compatible message {index} has invalid role '{role}'."
+            ));
+        }
+
+        if role == "assistant" {
+            let has_content = message.get("content").is_some();
+            let tool_calls = message.get("tool_calls").and_then(Value::as_array);
+            let has_tool_calls = tool_calls.is_some_and(|calls| !calls.is_empty());
+            if !has_content && !has_tool_calls {
+                return Err(format!(
+                    "OpenRouter/OpenAI-compatible assistant message {index} has neither content nor tool_calls."
+                ));
+            }
+
+            if message
+                .get("reasoning_content")
+                .and_then(Value::as_str)
+                .is_some_and(|reasoning| reasoning.trim().is_empty())
+            {
+                formatter_placeholder_count += 1;
+            }
+
+            if let Some(tool_calls) = tool_calls {
+                for (offset, call) in tool_calls.iter().enumerate() {
+                    let call_id = call
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .filter(|id| !id.is_empty())
+                        .ok_or_else(|| {
+                            format!(
+                                "OpenRouter/OpenAI-compatible assistant message {index} contains a tool call without an id."
+                            )
+                        })?;
+                    if !seen_tool_call_ids.insert(call_id) {
+                        return Err(format!(
+                            "OpenRouter/OpenAI-compatible projected history contains duplicate normalized tool-call id '{call_id}'."
+                        ));
+                    }
+                    let output = formatted.get(index + 1 + offset).ok_or_else(|| {
+                        format!(
+                            "OpenRouter/OpenAI-compatible tool call '{call_id}' has no immediately following tool output."
+                        )
+                    })?;
+                    if output.get("role").and_then(Value::as_str) != Some("tool")
+                        || output.get("tool_call_id").and_then(Value::as_str) != Some(call_id)
+                    {
+                        return Err(format!(
+                            "OpenRouter/OpenAI-compatible tool call '{call_id}' is not immediately followed by its matching tool output."
+                        ));
+                    }
+                }
+            }
+        }
+
+        if role == "tool" {
+            let tool_call_id = message
+                .get("tool_call_id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| {
+                    format!(
+                        "OpenRouter/OpenAI-compatible tool message {index} has no tool_call_id."
+                    )
+                })?;
+            if !seen_tool_output_ids.insert(tool_call_id) {
+                return Err(format!(
+                    "OpenRouter/OpenAI-compatible projected history contains duplicate normalized tool output id '{tool_call_id}'."
+                ));
+            }
+            let paired = formatted[..index].iter().rev().find_map(|prior| {
+                (prior.get("role").and_then(Value::as_str) == Some("assistant"))
+                    .then(|| prior.get("tool_calls").and_then(Value::as_array))
+                    .flatten()
+            });
+            if !paired.is_some_and(|calls| {
+                calls
+                    .iter()
+                    .any(|call| call.get("id").and_then(Value::as_str) == Some(tool_call_id))
+            }) {
+                return Err(format!(
+                    "OpenRouter/OpenAI-compatible tool message {index} is orphaned from its assistant tool call."
+                ));
+            }
+        }
+    }
+
+    let normalization_notes = if formatter_placeholder_count == 0 {
+        Vec::new()
+    } else {
+        vec![format!(
+            "The request formatter inserted {formatter_placeholder_count} required whitespace-only reasoning_content placeholder(s); these placeholders are structural and must not be counted as retained reasoning tokens."
+        )]
+    };
+
+    Ok(ContextRequestBuilderValidation {
+        normalized_item_count: formatted.len(),
+        formatter_placeholder_count,
+        normalization_notes,
+    })
+}
+
 #[cfg(test)]
 mod sanitize_schema_tests {
     use super::sanitize_tool_parameters_schema;
@@ -682,3 +828,7 @@ mod sanitize_schema_tests {
         assert_eq!(sanitized["properties"], json!({}));
     }
 }
+
+#[cfg(test)]
+#[path = "context_validation_tests.rs"]
+mod context_validation_tests;

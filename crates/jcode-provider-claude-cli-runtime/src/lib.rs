@@ -786,6 +786,33 @@ impl Provider for ClaudeProvider {
             .clone()
     }
 
+    fn validate_projected_context(
+        &self,
+        _messages: &[Message],
+        operations: &[jcode_provider_core::ContextProjectionValidationOperation],
+    ) -> jcode_provider_core::ContextProjectionValidationReport {
+        use jcode_provider_core::{
+            ContextProviderFamily, ContextProviderValidationIdentity,
+            context_projection_validation_report,
+        };
+
+        context_projection_validation_report(
+            ContextProviderValidationIdentity {
+                family: ContextProviderFamily::Unknown,
+                provider_name: self.name().to_string(),
+                provider_display_name: self.display_name(),
+                model: self.model(),
+                evidence_tag: "claude_cli_latest_prompt_and_opaque_resume_v1".to_string(),
+            },
+            operations,
+            None,
+            Err(
+                "Claude CLI sends only the latest user prompt and relies on an opaque upstream --resume session instead of rebuilding historical messages; projected historical context edits cannot be replayed or validated on this deprecated route. Use the native Anthropic provider for context transactions."
+                    .to_string(),
+            ),
+        )
+    }
+
     fn set_model(&self, model: &str) -> Result<()> {
         if !jcode_base::provider::known_anthropic_model_ids()
             .iter()
@@ -1139,4 +1166,36 @@ fn to_internal_tool_name(name: &str) -> String {
         _ => name,
     }
     .to_string()
+}
+
+#[cfg(test)]
+mod context_validation_tests {
+    use super::*;
+    use jcode_provider_core::{
+        ContextProjectionOperationKind, ContextProjectionValidationOperation,
+    };
+
+    #[test]
+    fn claude_cli_projected_context_is_precisely_unsupported() {
+        let provider = ClaudeProvider::new();
+        let report = provider.validate_projected_context(
+            &[Message::user("Projected summary")],
+            &[ContextProjectionValidationOperation {
+                id: "summary-1".to_string(),
+                kind: ContextProjectionOperationKind::RangeSummary,
+            }],
+        );
+
+        assert!(!report.is_supported());
+        assert_eq!(
+            report.evidence_tag,
+            "claude_cli_latest_prompt_and_opaque_resume_v1"
+        );
+        assert!(
+            report
+                .unsupported_reasons()
+                .iter()
+                .any(|reason| reason.contains("opaque upstream --resume session"))
+        );
+    }
 }

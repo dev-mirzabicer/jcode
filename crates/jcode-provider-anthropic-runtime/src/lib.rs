@@ -1383,6 +1383,60 @@ impl Provider for AnthropicProvider {
         true
     }
 
+    fn validate_projected_context(
+        &self,
+        messages: &[Message],
+        operations: &[jcode_provider_core::ContextProjectionValidationOperation],
+    ) -> jcode_provider_core::ContextProjectionValidationReport {
+        use jcode_provider_core::{
+            ContextProviderFamily, ContextProviderValidationIdentity, ContextReasoningBlockKind,
+            context_projection_validation_report,
+        };
+
+        let builder_result = match self.credential_mode_snapshot() {
+            AnthropicCredentialMode::OAuth => {
+                jcode_provider_anthropic::validate_projected_messages(messages, true)
+            }
+            AnthropicCredentialMode::ApiKey => {
+                jcode_provider_anthropic::validate_projected_messages(messages, false)
+            }
+            AnthropicCredentialMode::Auto => {
+                let mut api_key =
+                    jcode_provider_anthropic::validate_projected_messages(messages, false);
+                match (
+                    api_key.as_mut(),
+                    jcode_provider_anthropic::validate_projected_messages(messages, true),
+                ) {
+                    (Ok(api_key), Ok(oauth)) => {
+                        api_key.normalized_item_count = api_key
+                            .normalized_item_count
+                            .max(oauth.normalized_item_count);
+                        api_key.normalization_notes.push(
+                            "Anthropic credential mode is auto; both API-key and OAuth message formatter variants passed validation."
+                                .to_string(),
+                        );
+                        Ok(api_key.clone())
+                    }
+                    (Err(error), _) => Err(error.clone()),
+                    (_, Err(error)) => Err(error),
+                }
+            }
+        };
+
+        context_projection_validation_report(
+            ContextProviderValidationIdentity {
+                family: ContextProviderFamily::Anthropic,
+                provider_name: self.name().to_string(),
+                provider_display_name: self.display_name(),
+                model: self.model(),
+                evidence_tag: "anthropic_messages_formatter_v1".to_string(),
+            },
+            operations,
+            Some(ContextReasoningBlockKind::AnthropicThinking),
+            builder_result,
+        )
+    }
+
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(Self {
             client: self.client.clone(),

@@ -2,6 +2,7 @@ use jcode_message_types::{
     ContentBlock, Message as ChatMessage, Role, TOOL_OUTPUT_MISSING_TEXT, ToolDefinition,
     sanitize_tool_id,
 };
+use jcode_provider_core::ContextRequestBuilderValidation;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
@@ -220,6 +221,159 @@ pub fn build_messages(system: &str, messages: &[ChatMessage]) -> Vec<Value> {
     result
 }
 
+/// Validate projected history through the production GitHub Copilot chat builder.
+pub fn validate_projected_messages(
+    messages: &[ChatMessage],
+) -> Result<ContextRequestBuilderValidation, String> {
+    if messages.iter().any(|message| {
+        message
+            .content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::OpenAICompaction { .. }))
+    }) {
+        return Err(
+            "Projected Copilot history contains OpenAI-native compaction state that the chat-completions builder cannot replay."
+                .to_string(),
+        );
+    }
+
+    let formatted = build_messages("", messages);
+    if formatted.is_empty() {
+        return Err(
+            "Projected history normalizes to no GitHub Copilot chat messages; the request would not contain a valid conversation turn."
+                .to_string(),
+        );
+    }
+
+    let mut tool_call_positions = HashMap::new();
+    let mut synthetic_missing_outputs = 0usize;
+    let missing_output = format!("[Error] {TOOL_OUTPUT_MISSING_TEXT}");
+
+    for (index, message) in formatted.iter().enumerate() {
+        let role = message.get("role").and_then(Value::as_str).unwrap_or("");
+        if !matches!(role, "user" | "assistant" | "tool") {
+            return Err(format!(
+                "GitHub Copilot chat message {index} has invalid role '{role}'."
+            ));
+        }
+
+        match role {
+            "user" => {
+                if !message
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .is_some_and(|content| !content.is_empty())
+                {
+                    return Err(format!(
+                        "GitHub Copilot user message {index} has no text content."
+                    ));
+                }
+            }
+            "assistant" => {
+                let has_content = message
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .is_some_and(|content| !content.is_empty());
+                let tool_calls = message.get("tool_calls").and_then(Value::as_array);
+                let has_tool_calls = tool_calls.is_some_and(|calls| !calls.is_empty());
+                if !has_content && !has_tool_calls {
+                    return Err(format!(
+                        "GitHub Copilot assistant message {index} has neither content nor tool_calls."
+                    ));
+                }
+
+                if let Some(tool_calls) = tool_calls {
+                    for (offset, call) in tool_calls.iter().enumerate() {
+                        let call_id = call
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .filter(|id| !id.is_empty())
+                            .ok_or_else(|| {
+                                format!(
+                                    "GitHub Copilot assistant message {index} contains a tool call without an id."
+                                )
+                            })?;
+                        if tool_call_positions
+                            .insert(call_id.to_string(), index)
+                            .is_some()
+                        {
+                            return Err(format!(
+                                "GitHub Copilot projected history contains duplicate normalized tool-call id '{call_id}'."
+                            ));
+                        }
+                        let function = call.get("function").ok_or_else(|| {
+                            format!("GitHub Copilot tool call '{call_id}' has no function payload.")
+                        })?;
+                        if !function
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .is_some_and(|name| !name.is_empty())
+                            || function.get("arguments").and_then(Value::as_str).is_none()
+                        {
+                            return Err(format!(
+                                "GitHub Copilot tool call '{call_id}' has an invalid function payload."
+                            ));
+                        }
+
+                        let output = formatted.get(index + 1 + offset).ok_or_else(|| {
+                            format!(
+                                "GitHub Copilot tool call '{call_id}' has no immediately following tool output."
+                            )
+                        })?;
+                        if output.get("role").and_then(Value::as_str) != Some("tool")
+                            || output.get("tool_call_id").and_then(Value::as_str) != Some(call_id)
+                        {
+                            return Err(format!(
+                                "GitHub Copilot tool call '{call_id}' is not immediately followed by its matching tool output."
+                            ));
+                        }
+                    }
+                }
+            }
+            "tool" => {
+                let tool_call_id = message
+                    .get("tool_call_id")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty())
+                    .ok_or_else(|| {
+                        format!("GitHub Copilot tool message {index} has no tool_call_id.")
+                    })?;
+                if !tool_call_positions
+                    .get(tool_call_id)
+                    .is_some_and(|call_index| *call_index < index)
+                {
+                    return Err(format!(
+                        "GitHub Copilot tool message {index} is orphaned from its assistant tool call."
+                    ));
+                }
+                let content = message
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        format!("GitHub Copilot tool message {index} has non-text content.")
+                    })?;
+                if content == missing_output {
+                    synthetic_missing_outputs += 1;
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    let normalization_notes = if synthetic_missing_outputs == 0 {
+        Vec::new()
+    } else {
+        vec![format!(
+            "The production Copilot formatter inserted {synthetic_missing_outputs} explicit missing tool-output placeholder(s)."
+        )]
+    };
+    Ok(ContextRequestBuilderValidation {
+        normalized_item_count: formatted.len(),
+        formatter_placeholder_count: 0,
+        normalization_notes,
+    })
+}
+
 /// Build OpenAI-compatible tools array.
 pub fn build_tools(tools: &[ToolDefinition]) -> Vec<Value> {
     tools
@@ -309,5 +463,80 @@ mod tests {
         assert!(parameters["properties"]["message"].is_object());
         assert!(parameters["properties"]["label"].is_object());
         assert_eq!(parameters["required"], json!(["action"]));
+    }
+
+    #[test]
+    fn projected_history_validation_accepts_paired_tool_calls() {
+        let messages = vec![
+            ChatMessage {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "call-1".to_string(),
+                    name: "read".to_string(),
+                    input: json!({"path": "README.md"}),
+                    thought_signature: None,
+                }],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+            ChatMessage::tool_result("call-1", "contents", false),
+            ChatMessage::user("Continue."),
+        ];
+
+        let validation = validate_projected_messages(&messages)
+            .expect("paired Copilot chat history must validate");
+        assert_eq!(validation.normalized_item_count, 3);
+    }
+
+    #[test]
+    fn projected_history_validation_rejects_delayed_tool_outputs() {
+        let messages = vec![
+            ChatMessage {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "call-1".to_string(),
+                    name: "read".to_string(),
+                    input: json!({"path": "README.md"}),
+                    thought_signature: None,
+                }],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+            ChatMessage::user("An unrelated user turn."),
+            ChatMessage::tool_result("call-1", "contents", false),
+        ];
+
+        let error = validate_projected_messages(&messages).unwrap_err();
+        assert!(error.contains("not immediately followed"));
+    }
+
+    #[test]
+    fn projected_history_validation_rejects_normalized_tool_id_collisions() {
+        let messages = vec![
+            ChatMessage {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::ToolUse {
+                        id: "call.a".to_string(),
+                        name: "read".to_string(),
+                        input: json!({"file_path": "a"}),
+                        thought_signature: None,
+                    },
+                    ContentBlock::ToolUse {
+                        id: "call_a".to_string(),
+                        name: "read".to_string(),
+                        input: json!({"file_path": "b"}),
+                        thought_signature: None,
+                    },
+                ],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+            ChatMessage::tool_result("call.a", "a", false),
+            ChatMessage::tool_result("call_a", "b", false),
+        ];
+
+        let error = validate_projected_messages(&messages).unwrap_err();
+        assert!(error.contains("duplicate normalized tool-call id 'call_a'"));
     }
 }

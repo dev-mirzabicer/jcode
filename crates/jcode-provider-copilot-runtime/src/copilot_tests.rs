@@ -1,4 +1,7 @@
 use super::*;
+use jcode_provider_core::{
+    ContextProjectionOperationKind, ContextProjectionValidationOperation, ContextProviderFamily,
+};
 
 fn make_test_provider(fetched: Vec<String>) -> CopilotApiProvider {
     CopilotApiProvider {
@@ -17,6 +20,48 @@ fn make_test_provider(fetched: Vec<String>) -> CopilotApiProvider {
         reasoning_effort: Arc::new(RwLock::new(None)),
         created_at: std::time::Instant::now(),
     }
+}
+
+#[test]
+fn projected_context_validation_uses_copilot_chat_builder() {
+    let provider = make_test_provider(Vec::new());
+    let report = provider.validate_projected_context(
+        &[ChatMessage::user("Projected summary")],
+        &[ContextProjectionValidationOperation {
+            id: "summary-1".to_string(),
+            kind: ContextProjectionOperationKind::RangeSummary,
+        }],
+    );
+
+    assert!(report.is_supported(), "{:#?}", report.findings);
+    assert_eq!(
+        report.provider_family,
+        ContextProviderFamily::OpenRouterCompatible
+    );
+    assert_eq!(report.evidence_tag, "copilot_chat_messages_builder_v1");
+}
+
+#[test]
+fn projected_context_validation_fails_closed_while_model_state_is_locked() {
+    let provider = make_test_provider(Vec::new());
+    let _model_guard = provider.model.try_write().expect("lock model for test");
+
+    let report = provider.validate_projected_context(
+        &[ChatMessage::user("Projected summary")],
+        &[ContextProjectionValidationOperation {
+            id: "summary-1".to_string(),
+            kind: ContextProjectionOperationKind::RangeSummary,
+        }],
+    );
+
+    assert!(!report.is_supported());
+    assert_eq!(report.model, "<model state unavailable>");
+    assert!(
+        report
+            .unsupported_reasons()
+            .iter()
+            .any(|reason| reason.contains("must be retried"))
+    );
 }
 
 #[test]

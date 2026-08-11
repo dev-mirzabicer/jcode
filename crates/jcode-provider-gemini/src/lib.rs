@@ -1,5 +1,6 @@
 use anyhow::Result;
 use jcode_message_types::{ContentBlock, Message, Role, ToolCall, ToolDefinition};
+use jcode_provider_core::ContextRequestBuilderValidation;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashSet;
@@ -414,6 +415,149 @@ pub fn build_contents_with_signature_policy(
             }
         })
         .collect()
+}
+
+/// Validate projected messages through the production Gemini `generateContent` builder.
+///
+/// Thought signatures are checked after the real carry-forward policy runs. A context summary
+/// that removes the only usable signature while leaving later function calls therefore fails here
+/// before a transaction can be committed instead of causing a provider 400 on the next turn.
+pub fn validate_projected_messages(
+    messages: &[Message],
+) -> Result<ContextRequestBuilderValidation, String> {
+    use std::collections::HashMap;
+
+    if messages.iter().any(|message| {
+        message
+            .content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::OpenAICompaction { .. }))
+    }) {
+        return Err(
+            "Projected Gemini history contains OpenAI-native compaction state that the generateContent builder cannot replay."
+                .to_string(),
+        );
+    }
+
+    let contents = build_contents(messages);
+    if contents.is_empty() {
+        return Err(
+            "Projected history normalizes to no Gemini generateContent messages; the request would not contain a valid conversation turn."
+                .to_string(),
+        );
+    }
+
+    let mut function_call_positions = HashMap::new();
+    let mut carried_signature_count = 0usize;
+    let raw_calls: Vec<(&str, Option<&str>)> = messages
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .filter_map(|block| match block {
+            ContentBlock::ToolUse {
+                id,
+                thought_signature,
+                ..
+            } => Some((id.as_str(), thought_signature.as_deref())),
+            _ => None,
+        })
+        .collect();
+    let mut normalized_call_index = 0usize;
+
+    for (message_index, content) in contents.iter().enumerate() {
+        if !matches!(content.role.as_str(), "user" | "model") {
+            return Err(format!(
+                "Gemini generateContent message {message_index} has invalid role '{}'.",
+                content.role
+            ));
+        }
+        if content.parts.is_empty() {
+            return Err(format!(
+                "Gemini generateContent message {message_index} has no content parts."
+            ));
+        }
+
+        for (part_index, part) in content.parts.iter().enumerate() {
+            if let Some(call) = &part.function_call {
+                let call_id = call
+                    .id
+                    .as_deref()
+                    .filter(|id| !id.is_empty())
+                    .ok_or_else(|| {
+                        format!("Gemini functionCall in message {message_index} has no stable id.")
+                    })?;
+                let signature = part
+                    .thought_signature
+                    .as_deref()
+                    .filter(|signature| !signature.is_empty())
+                    .ok_or_else(|| {
+                        format!(
+                            "Gemini functionCall '{call_id}' has no usable thoughtSignature after production request normalization. The selected summary removed provider-required function-call state."
+                        )
+                    })?;
+                if let Some((raw_id, raw_signature)) = raw_calls.get(normalized_call_index)
+                    && *raw_id == call_id
+                    && raw_signature.is_none()
+                    && !signature.is_empty()
+                {
+                    carried_signature_count += 1;
+                }
+                normalized_call_index += 1;
+                if function_call_positions
+                    .insert(call_id.to_string(), (message_index, part_index))
+                    .is_some()
+                {
+                    return Err(format!(
+                        "Gemini projected history contains duplicate functionCall id '{call_id}'."
+                    ));
+                }
+            }
+        }
+    }
+
+    for (message_index, content) in contents.iter().enumerate() {
+        for (part_index, response) in
+            content
+                .parts
+                .iter()
+                .enumerate()
+                .filter_map(|(part_index, part)| {
+                    part.function_response
+                        .as_ref()
+                        .map(|response| (part_index, response))
+                })
+        {
+            let response_id = response
+                .id
+                .as_deref()
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| {
+                    format!("Gemini functionResponse in message {message_index} has no stable id.")
+                })?;
+            let Some(call_position) = function_call_positions.get(response_id) else {
+                return Err(format!(
+                    "Gemini functionResponse '{response_id}' has no matching functionCall in projected history."
+                ));
+            };
+            if *call_position >= (message_index, part_index) {
+                return Err(format!(
+                    "Gemini functionResponse '{response_id}' appears before its matching functionCall in projected history."
+                ));
+            }
+        }
+    }
+
+    let normalization_notes = if carried_signature_count == 0 {
+        Vec::new()
+    } else {
+        vec![format!(
+            "The production Gemini formatter carried a prior thoughtSignature forward onto {carried_signature_count} unsigned function call(s)."
+        )]
+    };
+    Ok(ContextRequestBuilderValidation {
+        normalized_item_count: contents.len(),
+        formatter_placeholder_count: 0,
+        normalization_notes,
+    })
 }
 
 fn tool_name_from_tool_result(tool_use_id: &str, messages: &[Message]) -> String {

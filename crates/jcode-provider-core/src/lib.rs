@@ -2,6 +2,7 @@ pub mod anthropic;
 pub mod attempt_tracker;
 pub mod auth_mode;
 pub mod catalog_refresh;
+pub mod context_validation;
 pub mod failover;
 pub mod fallback_pick;
 pub mod fingerprint;
@@ -28,6 +29,13 @@ pub use auth_mode::{
     runtime_env_pinned_mode,
 };
 pub use catalog_refresh::{ModelCatalogRefreshSummary, summarize_model_catalog_refresh};
+pub use context_validation::{
+    ContextProjectionOperationKind, ContextProjectionValidationFinding,
+    ContextProjectionValidationOperation, ContextProjectionValidationReport,
+    ContextProjectionValidationStage, ContextProjectionValidationStatus, ContextProviderFamily,
+    ContextProviderValidationIdentity, ContextReasoningBlockKind, ContextRequestBuilderValidation,
+    context_projection_validation_report,
+};
 pub use failover::{
     FailoverDecision, ProviderFailoverPrompt, classify_failover_error_message,
     parse_failover_prompt_message,
@@ -254,6 +262,34 @@ pub trait Provider: Send + Sync {
     /// Providers that retain an upstream response chain or incremental transport state must
     /// override this so the next completion starts from the complete current provider view.
     fn invalidate_context_continuation(&self, _reason: &str) {}
+
+    /// Validate a projected provider history through this runtime's production request builder.
+    ///
+    /// The default is intentionally unsupported. Provider runtimes must opt in by invoking their
+    /// real formatter and returning provider/model-specific evidence. This keeps a future context
+    /// transaction from being committed on the strength of a provider-neutral approximation.
+    fn validate_projected_context(
+        &self,
+        _messages: &[Message],
+        operations: &[ContextProjectionValidationOperation],
+    ) -> ContextProjectionValidationReport {
+        context_projection_validation_report(
+            ContextProviderValidationIdentity {
+                family: ContextProviderFamily::Unknown,
+                provider_name: self.name().to_string(),
+                provider_display_name: self.display_name(),
+                model: self.model(),
+                evidence_tag: "provider_default_no_validation_adapter_v1".to_string(),
+            },
+            operations,
+            None,
+            Err(format!(
+                "Provider '{}' model '{}' has no production request-builder validation adapter for projected context.",
+                self.display_name(),
+                self.model()
+            )),
+        )
+    }
 
     /// Called when auth credentials change for an already-open session that
     /// should learn about refreshed credentials without being silently moved to

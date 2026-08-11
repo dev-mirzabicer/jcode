@@ -624,6 +624,129 @@ impl BedrockProvider {
     }
 
     #[cfg(feature = "aws-sdk")]
+    fn validate_projected_messages(
+        messages: &[JMessage],
+        allow_images: bool,
+    ) -> Result<jcode_provider_core::ContextRequestBuilderValidation, String> {
+        if messages.iter().any(|message| {
+            message
+                .content
+                .iter()
+                .any(|block| matches!(block, JContentBlock::OpenAICompaction { .. }))
+        }) {
+            return Err(
+                "Projected Bedrock history contains OpenAI-native compaction state that the Converse builder cannot replay."
+                    .to_string(),
+            );
+        }
+
+        let request_messages =
+            Self::to_bedrock_messages(messages, allow_images).map_err(|error| {
+                format!("Bedrock Converse message builder rejected projected history: {error}")
+            })?;
+        if request_messages.is_empty() {
+            return Err(
+                "Projected history normalizes to no Amazon Bedrock Converse messages; the request would not contain a valid conversation turn."
+                    .to_string(),
+            );
+        }
+
+        let mut last_role = None;
+        let mut tool_calls = HashMap::new();
+        let mut tool_results = HashSet::new();
+        let mut replayable_message_count = 0usize;
+
+        for (message_index, message) in messages.iter().enumerate() {
+            let replayable = message.content.iter().any(|block| {
+                matches!(
+                    block,
+                    JContentBlock::Text { .. }
+                        | JContentBlock::Image { .. }
+                        | JContentBlock::ToolUse { .. }
+                        | JContentBlock::ToolResult { .. }
+                )
+            });
+            if !replayable {
+                continue;
+            }
+            replayable_message_count += 1;
+
+            if last_role.as_ref() == Some(&message.role) {
+                return Err(format!(
+                    "Amazon Bedrock Converse projected message {message_index} repeats the previous {:?} role; the production builder does not merge adjacent same-role turns.",
+                    message.role
+                ));
+            }
+            last_role = Some(message.role.clone());
+
+            for block in &message.content {
+                match block {
+                    JContentBlock::ToolUse { id, name, .. } => {
+                        if message.role != JRole::Assistant {
+                            return Err(format!(
+                                "Amazon Bedrock toolUse '{id}' is not in an assistant message."
+                            ));
+                        }
+                        if id.is_empty() || name.is_empty() {
+                            return Err(format!(
+                                "Amazon Bedrock projected message {message_index} contains a toolUse without a stable id and name."
+                            ));
+                        }
+                        if tool_calls.insert(id.clone(), message_index).is_some() {
+                            return Err(format!(
+                                "Amazon Bedrock projected history contains duplicate toolUse id '{id}'."
+                            ));
+                        }
+                    }
+                    JContentBlock::ToolResult { tool_use_id, .. } => {
+                        if message.role != JRole::User {
+                            return Err(format!(
+                                "Amazon Bedrock toolResult '{tool_use_id}' is not in a user message."
+                            ));
+                        }
+                        let Some(call_index) = tool_calls.get(tool_use_id) else {
+                            return Err(format!(
+                                "Amazon Bedrock toolResult '{tool_use_id}' has no matching earlier toolUse."
+                            ));
+                        };
+                        if *call_index + 1 != message_index {
+                            return Err(format!(
+                                "Amazon Bedrock toolResult '{tool_use_id}' is not in the immediately following user message after its matching toolUse."
+                            ));
+                        }
+                        if !tool_results.insert(tool_use_id.clone()) {
+                            return Err(format!(
+                                "Amazon Bedrock projected history contains duplicate toolResult id '{tool_use_id}'."
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if let Some(missing_id) = tool_calls
+            .keys()
+            .find(|tool_use_id| !tool_results.contains(*tool_use_id))
+        {
+            return Err(format!(
+                "Amazon Bedrock toolUse '{missing_id}' has no matching toolResult in projected history."
+            ));
+        }
+
+        if replayable_message_count != request_messages.len() {
+            return Err(format!(
+                "Amazon Bedrock Converse builder produced {} messages from {replayable_message_count} replayable projected turns.",
+                request_messages.len()
+            ));
+        }
+
+        Ok(jcode_provider_core::ContextRequestBuilderValidation::new(
+            request_messages.len(),
+        ))
+    }
+
+    #[cfg(feature = "aws-sdk")]
     fn tool_config(tools: &[ToolDefinition]) -> Option<ToolConfiguration> {
         if tools.is_empty() {
             return None;
@@ -1343,6 +1466,41 @@ impl Provider for BedrockProvider {
         self.model.read().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
+    fn validate_projected_context(
+        &self,
+        messages: &[JMessage],
+        operations: &[jcode_provider_core::ContextProjectionValidationOperation],
+    ) -> jcode_provider_core::ContextProjectionValidationReport {
+        use jcode_provider_core::{
+            ContextProviderFamily, ContextProviderValidationIdentity,
+            context_projection_validation_report,
+        };
+
+        let model = self.model();
+        #[cfg(feature = "aws-sdk")]
+        let builder_result =
+            Self::validate_projected_messages(messages, Self::model_info(&model).supports_vision);
+        #[cfg(not(feature = "aws-sdk"))]
+        let _ = messages;
+        #[cfg(not(feature = "aws-sdk"))]
+        let builder_result = Err(format!(
+            "Amazon Bedrock projected-context validation is unavailable because {NO_AWS_SDK_SUPPORT}."
+        ));
+
+        context_projection_validation_report(
+            ContextProviderValidationIdentity {
+                family: ContextProviderFamily::BedrockConverse,
+                provider_name: self.name().to_string(),
+                provider_display_name: self.display_name(),
+                model,
+                evidence_tag: "bedrock_converse_message_builder_v1".to_string(),
+            },
+            operations,
+            None,
+            builder_result,
+        )
+    }
+
     fn supports_image_input(&self) -> bool {
         Self::model_info(&self.model()).supports_vision
     }
@@ -1492,6 +1650,10 @@ impl Provider for BedrockProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jcode_provider_core::{
+        ContextProjectionOperationKind, ContextProjectionValidationOperation,
+        ContextProviderFamily, ContextReasoningBlockKind,
+    };
     use std::ffi::{OsStr, OsString};
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -1517,6 +1679,86 @@ mod tests {
         assert!(normalized["properties"]["query"].is_object());
         assert!(normalized["properties"]["category"].is_object());
         assert_eq!(normalized["required"], json!(["category"]));
+    }
+
+    #[cfg(feature = "aws-sdk")]
+    #[test]
+    fn projected_context_validation_uses_bedrock_converse_builder() {
+        let provider = BedrockProvider::new();
+        let projected = vec![
+            JMessage {
+                role: JRole::Assistant,
+                content: vec![JContentBlock::ToolUse {
+                    id: "call-1".to_string(),
+                    name: "read".to_string(),
+                    input: json!({"path": "README.md"}),
+                    thought_signature: None,
+                }],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+            JMessage::tool_result("call-1", "contents", false),
+            JMessage::assistant_text("The historical tool call completed."),
+            JMessage::user("Continue."),
+        ];
+        let report = provider.validate_projected_context(
+            &projected,
+            &[ContextProjectionValidationOperation {
+                id: "summary-1".to_string(),
+                kind: ContextProjectionOperationKind::RangeSummary,
+            }],
+        );
+
+        assert!(report.is_supported(), "{:#?}", report.findings);
+        assert_eq!(
+            report.provider_family,
+            ContextProviderFamily::BedrockConverse
+        );
+        assert_eq!(report.evidence_tag, "bedrock_converse_message_builder_v1");
+    }
+
+    #[cfg(feature = "aws-sdk")]
+    #[test]
+    fn bedrock_rejects_adjacent_same_role_projected_turns() {
+        let provider = BedrockProvider::new();
+        let report = provider.validate_projected_context(
+            &[JMessage::user("Summary"), JMessage::user("Continue")],
+            &[ContextProjectionValidationOperation {
+                id: "summary-1".to_string(),
+                kind: ContextProjectionOperationKind::RangeSummary,
+            }],
+        );
+
+        assert!(!report.is_supported());
+        assert!(
+            report
+                .unsupported_reasons()
+                .iter()
+                .any(|reason| reason.contains("does not merge adjacent same-role turns"))
+        );
+    }
+
+    #[cfg(feature = "aws-sdk")]
+    #[test]
+    fn bedrock_reports_replayed_reasoning_suppression_as_unsupported() {
+        let provider = BedrockProvider::new();
+        let report = provider.validate_projected_context(
+            &[JMessage::user("Continue")],
+            &[ContextProjectionValidationOperation {
+                id: "reasoning-1".to_string(),
+                kind: ContextProjectionOperationKind::ReasoningSuppression {
+                    block_kind: ContextReasoningBlockKind::AnthropicThinking,
+                },
+            }],
+        );
+
+        assert!(!report.is_supported());
+        assert!(
+            report
+                .unsupported_reasons()
+                .iter()
+                .any(|reason| reason.contains("is not replayed"))
+        );
     }
 
     fn lock_test_env() -> MutexGuard<'static, ()> {
@@ -1560,7 +1802,7 @@ mod tests {
     fn detects_env_credentials_requires_region_and_credential_hint() {
         let _guard = lock_test_env();
         let temp = tempfile::tempdir().unwrap();
-        let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
+        let _home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
         let _removed = [
             "JCODE_BEDROCK_ENABLE",
             API_KEY_ENV,
@@ -1593,7 +1835,7 @@ mod tests {
     fn detects_bedrock_login_env_file_credentials() {
         let _guard = lock_test_env();
         let temp = tempfile::tempdir().unwrap();
-        let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
+        let _home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
         for key in [
             "JCODE_BEDROCK_ENABLE",
             API_KEY_ENV,
@@ -1632,7 +1874,7 @@ mod tests {
     fn configured_profile_from_bedrock_env_overrides_stale_bearer_token() {
         let _guard = lock_test_env();
         let temp = tempfile::tempdir().unwrap();
-        let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
+        let _home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
         let _removed = [
             "JCODE_BEDROCK_ENABLE",
             API_KEY_ENV,
@@ -1687,7 +1929,7 @@ mod tests {
     fn maps_profile_required_foundation_model_to_inference_profile() {
         let _guard = lock_test_env();
         let temp = tempfile::tempdir().unwrap();
-        let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
+        let _home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
         let p = BedrockProvider::new();
         p.profile_required_models
             .write()
@@ -1707,7 +1949,7 @@ mod tests {
     fn maps_foundation_model_from_stale_cached_profile_list() {
         let _guard = lock_test_env();
         let temp = tempfile::tempdir().unwrap();
-        let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
+        let _home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
         let p = BedrockProvider::new();
         *p.fetched_inference_profiles.write().unwrap() = vec![
             "global.amazon.nova-2-lite-v1:0".to_string(),
@@ -1723,7 +1965,7 @@ mod tests {
     fn hides_profile_required_foundation_model_when_profile_route_exists() {
         let _guard = lock_test_env();
         let temp = tempfile::tempdir().unwrap();
-        let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
+        let _home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
         let p = BedrockProvider::new();
         *p.fetched_models.write().unwrap() = vec!["amazon.nova-2-lite-v1:0".to_string()];
         *p.fetched_inference_profiles.write().unwrap() =
@@ -1755,7 +1997,7 @@ mod tests {
     fn hides_foundation_model_when_profile_route_exists() {
         let _guard = lock_test_env();
         let temp = tempfile::tempdir().unwrap();
-        let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
+        let _home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
         let p = BedrockProvider::new();
         *p.fetched_models.write().unwrap() = vec!["amazon.nova-2-lite-v1:0".to_string()];
         *p.fetched_inference_profiles.write().unwrap() =
@@ -1783,7 +2025,7 @@ mod tests {
     fn profile_required_foundation_model_without_profile_route_is_disabled() {
         let _guard = lock_test_env();
         let temp = tempfile::tempdir().unwrap();
-        let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
+        let _home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
         let p = BedrockProvider::new();
         *p.fetched_models.write().unwrap() = vec!["amazon.nova-2-lite-v1:0".to_string()];
         p.profile_required_models
@@ -1827,7 +2069,7 @@ mod tests {
     fn ignores_persisted_bedrock_catalog_from_different_region() {
         let _guard = lock_test_env();
         let temp = tempfile::tempdir().unwrap();
-        let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
+        let _home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
         {
             let _region = EnvVarGuard::set(REGION_ENV, "us-east-1");
             BedrockProvider::persist_catalog(
@@ -1944,7 +2186,7 @@ mod tests {
     fn legacy_model_route_is_unavailable_with_reason() {
         let _guard = lock_test_env();
         let temp = tempfile::tempdir().unwrap();
-        let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
+        let _home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
         let p = BedrockProvider::new();
         *p.fetched_models.write().unwrap() =
             vec!["anthropic.claude-3-haiku-20240307-v1:0".to_string()];

@@ -11,6 +11,9 @@ pub mod projection;
 pub mod target;
 pub mod validation;
 
+#[cfg(test)]
+mod provider_validation_tests;
+
 pub use closure::*;
 pub use economics::*;
 pub use estimate::*;

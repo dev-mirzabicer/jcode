@@ -55,14 +55,19 @@ pub use jcode_provider_core::attempt_tracker;
 pub use jcode_provider_core::cli_provider_arg_for_session_key;
 pub use jcode_provider_core::{
     ALL_CLAUDE_MODELS, ALL_OPENAI_MODELS, CHATGPT_WEB_MODEL, CHEAPNESS_REFERENCE_INPUT_TOKENS,
-    CHEAPNESS_REFERENCE_OUTPUT_TOKENS, CredentialMode, DEFAULT_CONTEXT_LIMIT, EventStream,
-    JCODE_USER_AGENT, ModelCapabilities, ModelCatalogRefreshSummary, ModelRoute,
-    ModelRouteApiMethod, NativeCompactionResult, NativeToolResult, NativeToolResultSender,
-    PremiumMode, Provider, RouteBillingKind, RouteCheapnessEstimate, RouteCostConfidence,
-    RouteCostSource, RouteSelection, RuntimeKey, dedupe_model_routes,
-    explicit_model_provider_prefix, fresh_transport_client, inferred_reasoning_efforts,
-    model_name_for_provider, normalize_copilot_model_name, provider_from_model_key,
-    shared_http_client, summarize_model_catalog_refresh,
+    CHEAPNESS_REFERENCE_OUTPUT_TOKENS, ContextProjectionOperationKind,
+    ContextProjectionValidationFinding, ContextProjectionValidationOperation,
+    ContextProjectionValidationReport, ContextProjectionValidationStage,
+    ContextProjectionValidationStatus, ContextProviderFamily, ContextProviderValidationIdentity,
+    ContextReasoningBlockKind, ContextRequestBuilderValidation, CredentialMode,
+    DEFAULT_CONTEXT_LIMIT, EventStream, JCODE_USER_AGENT, ModelCapabilities,
+    ModelCatalogRefreshSummary, ModelRoute, ModelRouteApiMethod, NativeCompactionResult,
+    NativeToolResult, NativeToolResultSender, PremiumMode, Provider, RouteBillingKind,
+    RouteCheapnessEstimate, RouteCostConfidence, RouteCostSource, RouteSelection, RuntimeKey,
+    context_projection_validation_report, dedupe_model_routes, explicit_model_provider_prefix,
+    fresh_transport_client, inferred_reasoning_efforts, model_name_for_provider,
+    normalize_copilot_model_name, provider_from_model_key, shared_http_client,
+    summarize_model_catalog_refresh,
 };
 pub use jcode_provider_core::{
     FallbackPickOptions, error_looks_like_credential_failure, model_route_provider_labels_match,
@@ -2280,6 +2285,45 @@ impl Provider for MultiProvider {
         if let Some(provider) = provider {
             provider.invalidate_context_continuation(reason);
         }
+    }
+
+    fn validate_projected_context(
+        &self,
+        messages: &[Message],
+        operations: &[ContextProjectionValidationOperation],
+    ) -> ContextProjectionValidationReport {
+        let active = self.active_provider();
+        let provider = match active {
+            ActiveProvider::Claude => self.anthropic_provider().or_else(|| self.claude_provider()),
+            ActiveProvider::OpenAI => self.openai_provider(),
+            ActiveProvider::Copilot => self.copilot_provider(),
+            ActiveProvider::Antigravity => self.antigravity_provider(),
+            ActiveProvider::Gemini => self.gemini_provider(),
+            ActiveProvider::Cursor => self.cursor_provider(),
+            ActiveProvider::Bedrock => self
+                .bedrock_provider()
+                .map(|provider| provider as Arc<dyn Provider>),
+            ActiveProvider::OpenRouter => self.active_openrouter_execution_provider(),
+        };
+        if let Some(provider) = provider {
+            return provider.validate_projected_context(messages, operations);
+        }
+
+        context_projection_validation_report(
+            ContextProviderValidationIdentity {
+                family: ContextProviderFamily::Unknown,
+                provider_name: self.name().to_string(),
+                provider_display_name: self.display_name(),
+                model: self.model(),
+                evidence_tag: "multi_provider_missing_active_runtime_v1".to_string(),
+            },
+            operations,
+            None,
+            Err(format!(
+                "The active provider slot '{}' has no available execution runtime for projected-history validation.",
+                Self::provider_label(active)
+            )),
+        )
     }
 
     fn on_auth_changed_preserve_current_provider(&self) {

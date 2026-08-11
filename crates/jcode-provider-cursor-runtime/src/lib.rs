@@ -106,6 +106,51 @@ fn build_cli_prompt(system: &str, messages: &[Message]) -> String {
     )
 }
 
+fn validate_projected_messages(
+    messages: &[Message],
+) -> Result<jcode_provider_core::ContextRequestBuilderValidation, String> {
+    if messages.iter().any(|message| {
+        message
+            .content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::OpenAICompaction { .. }))
+    }) {
+        return Err(
+            "Projected Cursor history contains OpenAI-native compaction state that the Cursor Agent prompt builder cannot replay."
+                .to_string(),
+        );
+    }
+
+    let has_provider_visible_content = messages.iter().any(|message| {
+        message.content.iter().any(|block| match block {
+            ContentBlock::Text { text, .. } => !text.is_empty(),
+            ContentBlock::ToolUse { .. }
+            | ContentBlock::ToolResult { .. }
+            | ContentBlock::Image { .. } => true,
+            ContentBlock::Reasoning { .. }
+            | ContentBlock::ReasoningTrace { .. }
+            | ContentBlock::AnthropicThinking { .. }
+            | ContentBlock::OpenAIReasoning { .. }
+            | ContentBlock::OpenAICompaction { .. } => false,
+        })
+    });
+    if !has_provider_visible_content {
+        return Err(
+            "Projected history contains no content replayed by the Cursor Agent prompt builder."
+                .to_string(),
+        );
+    }
+
+    let prompt = build_cli_prompt("", messages);
+    if prompt.starts_with("[Earlier conversation truncated to fit prompt limits]") {
+        return Err(format!(
+            "Projected Cursor history exceeds the production prompt limit of {MAX_PROMPT_CHARS} characters; accepting the transaction would rely on the builder discarding an earlier provider-context prefix."
+        ));
+    }
+
+    Ok(jcode_provider_core::ContextRequestBuilderValidation::new(1))
+}
+
 #[derive(Debug, Deserialize)]
 struct CursorModelsResponse {
     #[serde(default)]
@@ -302,6 +347,30 @@ impl Provider for CursorCliProvider {
             .clone()
     }
 
+    fn validate_projected_context(
+        &self,
+        messages: &[Message],
+        operations: &[jcode_provider_core::ContextProjectionValidationOperation],
+    ) -> jcode_provider_core::ContextProjectionValidationReport {
+        use jcode_provider_core::{
+            ContextProviderFamily, ContextProviderValidationIdentity,
+            context_projection_validation_report,
+        };
+
+        context_projection_validation_report(
+            ContextProviderValidationIdentity {
+                family: ContextProviderFamily::CursorAgent,
+                provider_name: self.name().to_string(),
+                provider_display_name: self.display_name(),
+                model: self.model(),
+                evidence_tag: "cursor_agent_text_prompt_builder_v1".to_string(),
+            },
+            operations,
+            None,
+            validate_projected_messages(messages),
+        )
+    }
+
     fn set_model(&self, model: &str) -> Result<()> {
         // See `strip_own_model_prefix`: `--provider cursor` routes through this
         // runtime directly, so session restore hands it `cursor:<model>`.
@@ -421,6 +490,74 @@ async fn run_native_text_command(
             crate::agent_transport::run_agent_turn(&refreshed.access_token, prompt, model, tx).await
         }
         Err(err) => Err(err),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jcode_provider_core::{
+        ContextProjectionOperationKind, ContextProjectionValidationOperation,
+        ContextProviderFamily, ContextReasoningBlockKind,
+    };
+
+    #[test]
+    fn projected_context_validation_uses_cursor_prompt_builder() {
+        let provider = CursorCliProvider::new();
+        let report = provider.validate_projected_context(
+            &[Message::user("Projected summary")],
+            &[ContextProjectionValidationOperation {
+                id: "summary-1".to_string(),
+                kind: ContextProjectionOperationKind::RangeSummary,
+            }],
+        );
+
+        assert!(report.is_supported(), "{:#?}", report.findings);
+        assert_eq!(report.provider_family, ContextProviderFamily::CursorAgent);
+        assert_eq!(report.evidence_tag, "cursor_agent_text_prompt_builder_v1");
+    }
+
+    #[test]
+    fn projected_context_validation_rejects_cursor_prefix_truncation() {
+        let provider = CursorCliProvider::new();
+        let oversized = "x".repeat(MAX_PROMPT_CHARS + 1);
+        let report = provider.validate_projected_context(
+            &[Message::user(&oversized)],
+            &[ContextProjectionValidationOperation {
+                id: "summary-1".to_string(),
+                kind: ContextProjectionOperationKind::RangeSummary,
+            }],
+        );
+
+        assert!(!report.is_supported());
+        assert!(
+            report
+                .unsupported_reasons()
+                .iter()
+                .any(|reason| reason.contains("discarding an earlier provider-context prefix"))
+        );
+    }
+
+    #[test]
+    fn cursor_reports_replayed_reasoning_suppression_as_unsupported() {
+        let provider = CursorCliProvider::new();
+        let report = provider.validate_projected_context(
+            &[Message::user("Continue")],
+            &[ContextProjectionValidationOperation {
+                id: "reasoning-1".to_string(),
+                kind: ContextProjectionOperationKind::ReasoningSuppression {
+                    block_kind: ContextReasoningBlockKind::GenericReasoning,
+                },
+            }],
+        );
+
+        assert!(!report.is_supported());
+        assert!(
+            report
+                .unsupported_reasons()
+                .iter()
+                .any(|reason| reason.contains("is not replayed"))
+        );
     }
 }
 

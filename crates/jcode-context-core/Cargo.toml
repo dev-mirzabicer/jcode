@@ -11,3 +11,7 @@ serde_json = "1"
 
 [dev-dependencies]
 chrono = { version = "0.4", features = ["serde"] }
+jcode-provider-anthropic = { path = "../jcode-provider-anthropic" }
+jcode-provider-gemini = { path = "../jcode-provider-gemini" }
+jcode-provider-openai = { path = "../jcode-provider-openai" }
+jcode-provider-openrouter = { path = "../jcode-provider-openrouter" }

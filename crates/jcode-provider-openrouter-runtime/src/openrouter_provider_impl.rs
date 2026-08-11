@@ -2,6 +2,75 @@ use super::openrouter_sse_stream::run_stream_with_retries;
 use super::*;
 use jcode_base::provider::{ModelCatalogRefreshSummary, summarize_model_catalog_refresh};
 
+#[derive(Clone, Copy, Debug)]
+struct OpenRouterMessageFormatOptions {
+    allow_reasoning: bool,
+    include_reasoning_content: bool,
+    allow_image_input: bool,
+    thinking_enabled: Option<bool>,
+    strict_openai_schema: bool,
+}
+
+impl OpenRouterProvider {
+    fn supports_image_input_for_model(&self, raw_model: &str) -> bool {
+        let model_id = self
+            .strip_session_profile_prefix(raw_model)
+            .trim()
+            .to_ascii_lowercase();
+        if let Some(supports_images) = self.static_image_input_support.get(&model_id) {
+            return *supports_images;
+        }
+        if Self::profile_rejects_image_input(self.profile_id.as_deref()) {
+            return false;
+        }
+
+        // Direct OpenAI-compatible local providers such as Ollama and LM Studio
+        // document image content support on /v1/chat/completions. We already
+        // serialize image blocks using OpenAI's image_url content-part shape in
+        // complete(), so advertise support for direct compatibility profiles.
+        // Keep the legacy OpenRouter aggregator behavior unchanged here because
+        // image availability is model/provider-route dependent there.
+        !self.supports_provider_features
+    }
+
+    /// Resolve the exact message-shaping flags used by the production request path.
+    /// Context validation calls this same helper so direct compatibility profiles and strict
+    /// OpenAI-schema endpoints cannot drift from live request behavior.
+    fn message_format_options(&self, model: &str) -> OpenRouterMessageFormatOptions {
+        let thinking_override = Self::thinking_override();
+        let kimi_coding_endpoint = self.is_kimi_coding_endpoint(model);
+        let thinking_enabled = thinking_override.or_else(|| {
+            if Self::is_kimi_model(model) {
+                Some(true)
+            } else {
+                None
+            }
+        });
+        // Direct DeepSeek-family profiles replay returned reasoning even though they do not expose
+        // OpenRouter's provider-feature surface. Unlike Kimi, this only unlocks stored reasoning.
+        let direct_deepseek_model =
+            !self.supports_provider_features && Self::model_is_deepseek_family(model);
+        let allow_reasoning =
+            (self.supports_provider_features || kimi_coding_endpoint || direct_deepseek_model)
+                && thinking_enabled != Some(false);
+        let include_reasoning_content = thinking_enabled == Some(true)
+            || (allow_reasoning && Self::is_kimi_model(model))
+            || kimi_coding_endpoint;
+        // Strict OpenAI-compatible endpoints such as Mistral reject both the non-standard
+        // `reasoning_content` message field and the top-level `thinking` request field.
+        let strict_openai_schema =
+            Self::strict_openai_schema_endpoint(self.profile_id.as_deref(), &self.api_base);
+
+        OpenRouterMessageFormatOptions {
+            allow_reasoning: allow_reasoning && !strict_openai_schema,
+            include_reasoning_content: include_reasoning_content && !strict_openai_schema,
+            allow_image_input: self.supports_image_input_for_model(model),
+            thinking_enabled,
+            strict_openai_schema,
+        }
+    }
+}
+
 #[async_trait]
 impl Provider for OpenRouterProvider {
     fn runtime_display_name(&self) -> String {
@@ -43,7 +112,6 @@ impl Provider for OpenRouterProvider {
     ) -> Result<EventStream> {
         let model = self.model.read().await.clone();
         let reasoning_effort = self.reasoning_effort();
-        let thinking_override = Self::thinking_override();
         // Moonshot's dedicated Kimi coding endpoint enables thinking server-side
         // by default and rejects any assistant tool-call message that lacks
         // `reasoning_content`, even though its model id (`kimi-for-coding`) is
@@ -52,39 +120,7 @@ impl Provider for OpenRouterProvider {
         // those messages, but must NOT add the OpenRouter-specific top-level
         // `thinking` field (the endpoint already manages thinking itself), so
         // this is kept separate from `thinking_enabled`.
-        let kimi_coding_endpoint = self.is_kimi_coding_endpoint(&model);
-        let thinking_enabled = thinking_override.or_else(|| {
-            if Self::is_kimi_model(&model) {
-                Some(true)
-            } else {
-                None
-            }
-        });
-        // DeepSeek-family models served through a direct OpenAI-compatible
-        // profile can run thinking mode server-side. Their follow-up requests
-        // must replay the `reasoning_content` returned with an assistant tool
-        // call even though the route has no OpenRouter provider features
-        // (issue #815). Unlike Kimi, this only unlocks stored reasoning: it does
-        // not synthesize the field when the prior turn did not return one.
-        let direct_deepseek_model =
-            !self.supports_provider_features && Self::model_is_deepseek_family(&model);
-        let allow_reasoning =
-            (self.supports_provider_features || kimi_coding_endpoint || direct_deepseek_model)
-                && thinking_enabled != Some(false);
-        let include_reasoning_content = thinking_enabled == Some(true)
-            || (allow_reasoning && Self::is_kimi_model(&model))
-            || kimi_coding_endpoint;
-
-        // Some OpenAI-compatible providers (e.g. Mistral) strictly enforce the
-        // OpenAI schema and reject the non-standard `reasoning_content` message
-        // field and top-level `thinking` request field with a 422 error
-        // ("Extra inputs are not permitted"). Suppress both for those endpoints
-        // regardless of any thinking override (issue #261).
-        let strict_openai_schema =
-            Self::strict_openai_schema_endpoint(self.profile_id.as_deref(), &self.api_base);
-        let allow_reasoning = allow_reasoning && !strict_openai_schema;
-        let include_reasoning_content = include_reasoning_content && !strict_openai_schema;
-        let allow_image_input = self.supports_image_input();
+        let format_options = self.message_format_options(&model);
 
         let mut effective_messages: Vec<Message> = messages.to_vec();
         let cache_supported = self.model_supports_cache(&model).await;
@@ -97,9 +133,9 @@ impl Provider for OpenRouterProvider {
         let api_messages = jcode_provider_openrouter::request::build_chat_messages(
             &effective_messages,
             system,
-            allow_reasoning,
-            include_reasoning_content,
-            allow_image_input,
+            format_options.allow_reasoning,
+            format_options.include_reasoning_content,
+            format_options.allow_image_input,
         );
 
         // Build tools in OpenAI format
@@ -191,9 +227,9 @@ impl Provider for OpenRouterProvider {
         // Optional thinking override for OpenRouter (provider-specific).
         // Skip for strict OpenAI-schema endpoints (e.g. Mistral) which reject
         // the non-standard top-level `thinking` field with a 422 (issue #261).
-        if let Some(enable) = thinking_enabled
+        if let Some(enable) = format_options.thinking_enabled
             && !sent_reasoning_config
-            && !strict_openai_schema
+            && !format_options.strict_openai_schema
         {
             request["thinking"] = serde_json::json!({
                 "type": if enable { "enabled" } else { "disabled" }
@@ -284,7 +320,10 @@ impl Provider for OpenRouterProvider {
             &[
                 ("cache_supported", cache_supported.to_string()),
                 ("cache_control_added", cache_control_added.to_string()),
-                ("thinking_enabled", format!("{:?}", thinking_enabled)),
+                (
+                    "thinking_enabled",
+                    format!("{:?}", format_options.thinking_enabled),
+                ),
                 (
                     "provider_features",
                     self.supports_provider_features.to_string(),
@@ -345,26 +384,62 @@ impl Provider for OpenRouterProvider {
             .unwrap_or_else(|_| DEFAULT_MODEL.to_string())
     }
 
+    fn validate_projected_context(
+        &self,
+        messages: &[Message],
+        operations: &[jcode_provider_core::ContextProjectionValidationOperation],
+    ) -> jcode_provider_core::ContextProjectionValidationReport {
+        use jcode_provider_core::{
+            ContextProviderFamily, ContextProviderValidationIdentity, ContextReasoningBlockKind,
+            context_projection_validation_report,
+        };
+
+        let model = match self.model.try_read() {
+            Ok(model) => model.clone(),
+            Err(_) => {
+                return context_projection_validation_report(
+                    ContextProviderValidationIdentity {
+                        family: ContextProviderFamily::OpenRouterCompatible,
+                        provider_name: self.name().to_string(),
+                        provider_display_name: self.display_name(),
+                        model: "<model state unavailable>".to_string(),
+                        evidence_tag: "openrouter_chat_messages_builder_v1".to_string(),
+                    },
+                    operations,
+                    None,
+                    Err(
+                        "OpenRouter/OpenAI-compatible model state is currently locked; projected-history validation must be retried instead of assuming a fallback model or request shape."
+                            .to_string(),
+                    ),
+                );
+            }
+        };
+        let options = self.message_format_options(&model);
+        let builder_result = jcode_provider_openrouter::request::validate_projected_messages(
+            messages,
+            options.allow_reasoning,
+            options.include_reasoning_content,
+            options.allow_image_input,
+        );
+        context_projection_validation_report(
+            ContextProviderValidationIdentity {
+                family: ContextProviderFamily::OpenRouterCompatible,
+                provider_name: self.name().to_string(),
+                provider_display_name: self.display_name(),
+                model,
+                evidence_tag: "openrouter_chat_messages_builder_v1".to_string(),
+            },
+            operations,
+            options
+                .allow_reasoning
+                .then_some(ContextReasoningBlockKind::GenericReasoning),
+            builder_result,
+        )
+    }
+
     fn supports_image_input(&self) -> bool {
         let raw_model = self.model();
-        let model_id = self
-            .strip_session_profile_prefix(&raw_model)
-            .trim()
-            .to_ascii_lowercase();
-        if let Some(supports_images) = self.static_image_input_support.get(&model_id) {
-            return *supports_images;
-        }
-        if Self::profile_rejects_image_input(self.profile_id.as_deref()) {
-            return false;
-        }
-
-        // Direct OpenAI-compatible local providers such as Ollama and LM Studio
-        // document image content support on /v1/chat/completions. We already
-        // serialize image blocks using OpenAI's image_url content-part shape in
-        // complete(), so advertise support for direct compatibility profiles.
-        // Keep the legacy OpenRouter aggregator behavior unchanged here because
-        // image availability is model/provider-route dependent there.
-        !self.supports_provider_features
+        self.supports_image_input_for_model(&raw_model)
     }
 
     fn set_model(&self, model: &str) -> Result<()> {

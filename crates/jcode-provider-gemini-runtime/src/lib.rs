@@ -22,7 +22,7 @@ pub use jcode_provider_gemini::{
     build_system_instruction_with_tool_guard, build_tools, choose_onboard_tier, client_metadata,
     extract_gemini_model_ids, gemini_fallback_models, google_cloud_project_from_env,
     ineligible_or_project_error, is_gemini_model_id, load_code_assist_request,
-    merge_gemini_model_lists, validate_load_code_assist_response,
+    merge_gemini_model_lists, validate_load_code_assist_response, validate_projected_messages,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -1009,6 +1009,30 @@ impl Provider for GeminiProvider {
 
     fn supports_image_input(&self) -> bool {
         true
+    }
+
+    fn validate_projected_context(
+        &self,
+        messages: &[Message],
+        operations: &[jcode_provider_core::ContextProjectionValidationOperation],
+    ) -> jcode_provider_core::ContextProjectionValidationReport {
+        use jcode_provider_core::{
+            ContextProviderFamily, ContextProviderValidationIdentity,
+            context_projection_validation_report,
+        };
+
+        context_projection_validation_report(
+            ContextProviderValidationIdentity {
+                family: ContextProviderFamily::Gemini,
+                provider_name: self.name().to_string(),
+                provider_display_name: self.display_name(),
+                model: self.model(),
+                evidence_tag: "gemini_generate_content_builder_v1".to_string(),
+            },
+            operations,
+            None,
+            validate_projected_messages(messages),
+        )
     }
 
     fn set_model(&self, model: &str) -> Result<()> {

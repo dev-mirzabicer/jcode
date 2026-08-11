@@ -777,6 +777,30 @@ impl Provider for AntigravityProvider {
             .clone()
     }
 
+    fn validate_projected_context(
+        &self,
+        messages: &[Message],
+        operations: &[jcode_provider_core::ContextProjectionValidationOperation],
+    ) -> jcode_provider_core::ContextProjectionValidationReport {
+        use jcode_provider_core::{
+            ContextProviderFamily, ContextProviderValidationIdentity,
+            context_projection_validation_report,
+        };
+
+        context_projection_validation_report(
+            ContextProviderValidationIdentity {
+                family: ContextProviderFamily::Gemini,
+                provider_name: self.name().to_string(),
+                provider_display_name: self.display_name(),
+                model: self.model(),
+                evidence_tag: "antigravity_gemini_contents_builder_v1".to_string(),
+            },
+            operations,
+            None,
+            jcode_provider_gemini::validate_projected_messages(messages),
+        )
+    }
+
     fn set_model(&self, model: &str) -> Result<()> {
         // `--provider antigravity` uses this runtime directly, so session
         // restore hands it the routing spec `antigravity:<model>` rather than a

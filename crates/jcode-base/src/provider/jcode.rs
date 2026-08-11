@@ -1,4 +1,7 @@
-use super::{EventStream, ModelRoute, MultiProvider, NativeToolResultSender, Provider, copilot};
+use super::{
+    ContextProjectionValidationOperation, ContextProjectionValidationReport, EventStream,
+    ModelRoute, MultiProvider, NativeToolResultSender, Provider, copilot,
+};
 use crate::message::{Message, ToolDefinition};
 use crate::provider::models::ensure_model_allowed_for_subscription;
 use anyhow::Result;
@@ -189,6 +192,15 @@ impl Provider for JcodeProvider {
 
     fn invalidate_context_continuation(&self, reason: &str) {
         self.inner.invalidate_context_continuation(reason);
+    }
+
+    fn validate_projected_context(
+        &self,
+        messages: &[Message],
+        operations: &[ContextProjectionValidationOperation],
+    ) -> ContextProjectionValidationReport {
+        self.ensure_runtime_mode();
+        self.inner.validate_projected_context(messages, operations)
     }
 
     fn auth_model_refresh_pending(&self) -> bool {

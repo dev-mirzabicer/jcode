@@ -975,6 +975,51 @@ impl Provider for CopilotApiProvider {
             .unwrap_or_else(|_| DEFAULT_MODEL.to_string())
     }
 
+    fn validate_projected_context(
+        &self,
+        messages: &[ChatMessage],
+        operations: &[jcode_provider_core::ContextProjectionValidationOperation],
+    ) -> jcode_provider_core::ContextProjectionValidationReport {
+        use jcode_provider_core::{
+            ContextProviderFamily, ContextProviderValidationIdentity,
+            context_projection_validation_report,
+        };
+
+        let model = match self.model.try_read() {
+            Ok(model) => model.clone(),
+            Err(_) => {
+                return context_projection_validation_report(
+                    ContextProviderValidationIdentity {
+                        family: ContextProviderFamily::OpenRouterCompatible,
+                        provider_name: self.name().to_string(),
+                        provider_display_name: self.display_name(),
+                        model: "<model state unavailable>".to_string(),
+                        evidence_tag: "copilot_chat_messages_builder_v1".to_string(),
+                    },
+                    operations,
+                    None,
+                    Err(
+                        "GitHub Copilot model state is currently locked; projected-history validation must be retried instead of recording fallback model evidence."
+                            .to_string(),
+                    ),
+                );
+            }
+        };
+
+        context_projection_validation_report(
+            ContextProviderValidationIdentity {
+                family: ContextProviderFamily::OpenRouterCompatible,
+                provider_name: self.name().to_string(),
+                provider_display_name: self.display_name(),
+                model,
+                evidence_tag: "copilot_chat_messages_builder_v1".to_string(),
+            },
+            operations,
+            None,
+            jcode_provider_copilot::validate_projected_messages(messages),
+        )
+    }
+
     fn set_model(&self, model: &str) -> Result<()> {
         // See `strip_own_model_prefix`: `--provider copilot` routes through this
         // runtime directly, so session restore hands it `copilot:<model>`.

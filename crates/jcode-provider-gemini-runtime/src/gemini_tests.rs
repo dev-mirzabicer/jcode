@@ -201,6 +201,52 @@ fn build_contents_replays_thought_signature_on_function_call() {
         "an unsigned later call must inherit the most recent real signature so \
          the backend does not reject a fully-unsigned turn"
     );
+
+    let validation = validate_projected_messages(&messages)
+        .expect("carried-forward thought signatures must validate");
+    assert_eq!(validation.normalization_notes.len(), 1);
+    assert!(validation.normalization_notes[0].contains("1 unsigned function call"));
+}
+
+#[test]
+fn projected_summary_rejects_later_call_when_it_removed_the_only_signature() {
+    let projected = vec![
+        Message::user(
+            "## Selected Conversation Summary\n\nAn earlier signed Gemini tool turn completed successfully.",
+        ),
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "call_after_summary".to_string(),
+                name: "bash".to_string(),
+                input: json!({"command":"true"}),
+                thought_signature: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+        Message::tool_result("call_after_summary", "ok", false),
+        Message::user("Continue."),
+    ];
+
+    let error = validate_projected_messages(&projected).unwrap_err();
+    assert!(error.contains("no usable thoughtSignature"));
+    assert!(error.contains("selected summary removed provider-required"));
+}
+
+#[test]
+fn projected_summary_replacing_complete_function_call_result_range_validates() {
+    let projected = vec![
+        Message::user(
+            "## Selected Conversation Summary\n\nThe complete historical Gemini function-call/result range succeeded.",
+        ),
+        Message::assistant_text("I can continue without replaying the removed call state."),
+        Message::user("Proceed."),
+    ];
+
+    let validation = validate_projected_messages(&projected)
+        .expect("a summary that replaces the complete call/result range must validate");
+    assert_eq!(validation.normalized_item_count, 3);
 }
 
 #[test]

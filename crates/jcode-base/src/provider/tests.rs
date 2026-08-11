@@ -800,6 +800,7 @@ struct StubExternalRuntime {
     model: std::sync::RwLock<String>,
     credential_mode: std::sync::RwLock<jcode_provider_core::CredentialMode>,
     context_continuation_invalidations: std::sync::atomic::AtomicUsize,
+    context_validations: std::sync::atomic::AtomicUsize,
 }
 
 impl StubExternalRuntime {
@@ -817,11 +818,17 @@ impl StubExternalRuntime {
             model: std::sync::RwLock::new(models[0].to_string()),
             credential_mode: std::sync::RwLock::new(jcode_provider_core::CredentialMode::Auto),
             context_continuation_invalidations: std::sync::atomic::AtomicUsize::new(0),
+            context_validations: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
     fn context_continuation_invalidation_count(&self) -> usize {
         self.context_continuation_invalidations
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn context_validation_count(&self) -> usize {
+        self.context_validations
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
@@ -941,6 +948,26 @@ impl Provider for StubExternalRuntime {
     fn invalidate_context_continuation(&self, _reason: &str) {
         self.context_continuation_invalidations
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    fn validate_projected_context(
+        &self,
+        messages: &[Message],
+        operations: &[ContextProjectionValidationOperation],
+    ) -> ContextProjectionValidationReport {
+        self.context_validations
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        context_projection_validation_report(
+            ContextProviderValidationIdentity {
+                family: ContextProviderFamily::Unknown,
+                provider_name: self.name.to_string(),
+                provider_display_name: self.provider_label.to_string(),
+                model: self.model(),
+                evidence_tag: format!("stub-{}-builder-v1", self.name),
+            },
+            operations,
+            None,
+            Ok(ContextRequestBuilderValidation::new(messages.len())),
+        )
     }
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(StubExternalRuntime::new(
@@ -1073,6 +1100,43 @@ fn context_continuation_invalidation_delegates_only_to_the_active_runtime() {
     provider.invalidate_context_continuation("conversation rewind");
     assert_eq!(openai.context_continuation_invalidation_count(), 1);
     assert_eq!(cursor.context_continuation_invalidation_count(), 1);
+}
+
+#[test]
+fn projected_context_validation_delegates_only_to_the_active_runtime() {
+    let openai = Arc::new(StubExternalRuntime::openai());
+    let cursor = Arc::new(StubExternalRuntime::cursor());
+    let provider = MultiProvider {
+        claude: RwLock::new(None),
+        anthropic: RwLock::new(None),
+        openai: RwLock::new(Some(openai.clone() as Arc<dyn Provider>)),
+        copilot_api: RwLock::new(None),
+        antigravity: RwLock::new(None),
+        gemini: RwLock::new(None),
+        cursor: RwLock::new(Some(cursor.clone() as Arc<dyn Provider>)),
+        bedrock: RwLock::new(None),
+        openrouter: RwLock::new(None),
+        openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
+        active_openai_compatible_profile: RwLock::new(None),
+        active: RwLock::new(ActiveProvider::OpenAI),
+        use_claude_cli: false,
+        startup_notices: RwLock::new(Vec::new()),
+        initial_provider: None,
+        routes_memo: std::sync::Mutex::new(None),
+        post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+    };
+    let messages = [Message::user("projected")];
+
+    let openai_report = provider.validate_projected_context(&messages, &[]);
+    assert_eq!(openai_report.provider_name, "openai");
+    assert_eq!(openai.context_validation_count(), 1);
+    assert_eq!(cursor.context_validation_count(), 0);
+
+    provider.set_active_provider(ActiveProvider::Cursor);
+    let cursor_report = provider.validate_projected_context(&messages, &[]);
+    assert_eq!(cursor_report.provider_name, "cursor");
+    assert_eq!(openai.context_validation_count(), 1);
+    assert_eq!(cursor.context_validation_count(), 1);
 }
 
 #[test]

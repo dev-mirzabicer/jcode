@@ -4,6 +4,9 @@ use jcode_provider_antigravity::{
     FetchAvailableModelsResponse, parse_fetch_available_models_response,
 };
 use jcode_provider_core::Provider;
+use jcode_provider_core::{
+    ContextProjectionOperationKind, ContextProjectionValidationOperation, ContextProviderFamily,
+};
 use tokio_stream::StreamExt;
 
 #[test]
@@ -97,6 +100,40 @@ fn available_models_display_includes_dynamic_cache_and_current_override() {
     assert!(models.contains(&"claude-opus-4-6-thinking".to_string()));
     assert!(models.contains(&"gemini-3-pro-high".to_string()));
     assert!(models.contains(&"custom-antigravity-model".to_string()));
+}
+
+#[test]
+fn projected_context_validation_uses_antigravity_gemini_builder() {
+    let provider = AntigravityProvider::new();
+    let projected = vec![
+        Message {
+            role: jcode_message_types::Role::Assistant,
+            content: vec![jcode_message_types::ContentBlock::ToolUse {
+                id: "signed-call".to_string(),
+                name: "read".to_string(),
+                input: serde_json::json!({"path": "README.md"}),
+                thought_signature: Some("signature".to_string()),
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+        Message::tool_result("signed-call", "contents", false),
+        Message::user("Continue."),
+    ];
+    let report = provider.validate_projected_context(
+        &projected,
+        &[ContextProjectionValidationOperation {
+            id: "summary-1".to_string(),
+            kind: ContextProjectionOperationKind::RangeSummary,
+        }],
+    );
+
+    assert!(report.is_supported(), "{:#?}", report.findings);
+    assert_eq!(report.provider_family, ContextProviderFamily::Gemini);
+    assert_eq!(
+        report.evidence_tag,
+        "antigravity_gemini_contents_builder_v1"
+    );
 }
 
 #[test]
