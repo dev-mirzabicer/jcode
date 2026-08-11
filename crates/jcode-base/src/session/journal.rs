@@ -2,8 +2,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    EnvSnapshot, SessionImproveMode, SessionStatus, StoredCompactionState, StoredMemoryInjection,
-    StoredMessage, StoredReplayEvent,
+    EnvSnapshot, SessionImproveMode, SessionStatus, StoredCompactionState, StoredContextViewState,
+    StoredMemoryInjection, StoredMessage, StoredReplayEvent,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -14,6 +14,8 @@ pub(super) struct SessionJournalMeta {
     pub(super) custom_title: Option<String>,
     pub(super) updated_at: DateTime<Utc>,
     pub(super) compaction: Option<StoredCompactionState>,
+    #[serde(default, skip_serializing_if = "StoredContextViewState::is_default")]
+    pub(super) context_view: StoredContextViewState,
     pub(super) provider_session_id: Option<String>,
     pub(super) provider_key: Option<String>,
     pub(super) model: Option<String>,
@@ -77,6 +79,7 @@ pub(super) fn metadata_requires_snapshot(
     prev.parent_id != current.parent_id
         || prev.title != current.title
         || prev.custom_title != current.custom_title
+        || prev.context_view != current.context_view
         || prev.provider_key != current.provider_key
         || prev.reasoning_effort != current.reasoning_effort
         || prev.subagent_model != current.subagent_model

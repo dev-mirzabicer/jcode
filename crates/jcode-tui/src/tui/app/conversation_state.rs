@@ -6,7 +6,7 @@ impl App {
             return;
         }
 
-        let provider_messages = self.session.messages_for_provider_uncached();
+        let provider_messages = self.session.raw_messages_for_provider_uncached();
         self.replace_provider_messages(provider_messages);
     }
 
@@ -14,7 +14,7 @@ impl App {
         if self.is_remote || !self.messages.is_empty() {
             self.messages.clone()
         } else {
-            self.session.messages_for_provider_uncached()
+            self.session.raw_messages_for_provider_uncached()
         }
     }
 

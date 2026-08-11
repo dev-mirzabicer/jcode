@@ -66,14 +66,14 @@ fn main() -> anyhow::Result<()> {
 
     let resident_provider_messages = match args.mode {
         BenchMode::Local => Vec::new(),
-        BenchMode::Duplicated => session.messages_for_provider_uncached(),
+        BenchMode::Duplicated => session.raw_messages_for_provider_uncached(),
     };
 
     let process_after_build =
         process_memory::snapshot_with_source("bench:session-memory:after-build");
 
     let materialized_provider_messages = match args.mode {
-        BenchMode::Local => session.messages_for_provider_uncached(),
+        BenchMode::Local => session.raw_messages_for_provider_uncached(),
         BenchMode::Duplicated => resident_provider_messages.clone(),
     };
     let provider_view_source = match args.mode {

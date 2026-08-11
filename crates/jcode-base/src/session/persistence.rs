@@ -250,6 +250,32 @@ impl Session {
         if replay_stats.is_corrupt() {
             session.schedule_checkpoint_after_corrupt_journal(&journal_path);
         }
+        let migration = session.migrate_legacy_compaction_state();
+        match &migration {
+            super::LegacyContextMigrationOutcome::MigratedTextSummary { transaction_id } => {
+                crate::logging::info(&format!(
+                    "Migrated legacy context state for session {} into transaction {}",
+                    session.id, transaction_id
+                ));
+            }
+            super::LegacyContextMigrationOutcome::RestoredRaw { issue } => {
+                crate::logging::warn(&format!(
+                    "Restored raw provider context while migrating session {}: {:?}",
+                    session.id, issue
+                ));
+            }
+            super::LegacyContextMigrationOutcome::Blocked { issue } => {
+                crate::logging::warn(&format!(
+                    "Blocked legacy context migration for session {} without changing state: {:?}",
+                    session.id, issue
+                ));
+            }
+            super::LegacyContextMigrationOutcome::NotNeeded
+            | super::LegacyContextMigrationOutcome::AlreadyMigrated => {}
+        }
+        if migration.changed_state() {
+            session.checkpoint_snapshot(path, &journal_path)?;
+        }
         let finalize_ms = finalize_start.elapsed().as_millis();
         // Bulk scans of a large sessions directory can drive tens of thousands
         // of loads through here. Logging each one floods the log and hides the
@@ -338,6 +364,24 @@ impl Session {
         session.reset_persist_state(path.exists());
         session.reset_provider_messages_cache();
         session.mark_memory_profile_dirty();
+        let migration = session.migrate_legacy_compaction_state();
+        match &migration {
+            super::LegacyContextMigrationOutcome::RestoredRaw { issue } => {
+                crate::logging::warn(&format!(
+                    "Restored raw provider context during remote startup for session {}: {:?}",
+                    session.id, issue
+                ));
+            }
+            super::LegacyContextMigrationOutcome::Blocked { issue } => {
+                crate::logging::warn(&format!(
+                    "Blocked legacy context migration during remote startup for session {} without changing state: {:?}",
+                    session.id, issue
+                ));
+            }
+            super::LegacyContextMigrationOutcome::NotNeeded
+            | super::LegacyContextMigrationOutcome::AlreadyMigrated
+            | super::LegacyContextMigrationOutcome::MigratedTextSummary { .. } => {}
+        }
         let finalize_ms = finalize_start.elapsed().as_millis();
         crate::logging::info(&format!(
             "[TIMING] remote_startup_load: session={}, snapshot={}ms, journal={}ms, finalize={}ms, snapshot_bytes={}, journal_bytes={}, journal_entries={}, messages={}, total={}ms",

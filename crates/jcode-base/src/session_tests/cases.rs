@@ -753,7 +753,7 @@ fn test_save_persists_full_session_content() -> Result<()> {
 }
 
 #[test]
-fn test_save_persists_compaction_state() -> Result<()> {
+fn test_save_migrates_valid_legacy_compaction_state() -> Result<()> {
     let _env_lock = lock_env();
     let temp_home = tempfile::Builder::new()
         .prefix("jcode-session-compaction-save-test-")
@@ -766,6 +766,19 @@ fn test_save_persists_compaction_state() -> Result<()> {
         None,
         Some("compaction persistence test".to_string()),
     );
+    for index in 0..8 {
+        session.add_message(
+            if index % 2 == 0 {
+                Role::User
+            } else {
+                Role::Assistant
+            },
+            vec![ContentBlock::Text {
+                text: format!("legacy message {index}"),
+                cache_control: None,
+            }],
+        );
+    }
     session.compaction = Some(StoredCompactionState {
         summary_text: "saved summary".to_string(),
         openai_encrypted_content: None,
@@ -776,8 +789,11 @@ fn test_save_persists_compaction_state() -> Result<()> {
 
     session.save()?;
 
-    let loaded = Session::load("session_compaction_persist_test")?;
+    let mut loaded = Session::load("session_compaction_persist_test")?;
     assert_eq!(loaded.compaction, session.compaction);
+    assert_eq!(loaded.context_view.revision, 1);
+    assert_eq!(loaded.context_view.transactions.len(), 1);
+    assert_eq!(loaded.projected_provider_messages()?.len(), 1);
     Ok(())
 }
 
@@ -2230,7 +2246,7 @@ fn fork_notice_is_model_visible_but_hidden_from_transcript() {
     assert!(text.contains("otter"));
 
     // Model-visible: included in the provider message list.
-    let provider_messages = session.messages_for_provider_uncached();
+    let provider_messages = session.raw_messages_for_provider_uncached();
     assert!(
         provider_messages.iter().any(|message| {
             message.content.iter().any(|block| {

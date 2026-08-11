@@ -1975,7 +1975,7 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
         app.provider_session_id = snapshot.provider_session_id;
         app.session.provider_session_id = snapshot.session_provider_session_id;
         app.session.updated_at = chrono::Utc::now();
-        let provider_messages = app.session.messages_for_provider_uncached();
+        let provider_messages = app.session.raw_messages_for_provider_uncached();
         app.replace_provider_messages(provider_messages);
 
         app.clear_display_messages();
@@ -2053,7 +2053,7 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
                     visible_message_count: visible_count,
                 });
                 app.session.truncate_messages(targets[n - 1] + 1);
-                let provider_messages = app.session.messages_for_provider_uncached();
+                let provider_messages = app.session.raw_messages_for_provider_uncached();
                 app.replace_provider_messages(provider_messages);
                 app.session.updated_at = chrono::Utc::now();
 

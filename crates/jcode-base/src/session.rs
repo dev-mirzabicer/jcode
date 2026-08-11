@@ -48,7 +48,8 @@ pub use crash::{
 };
 pub use jcode_session_types::{
     EnvSnapshot, GitState, SessionImproveMode, SessionStatus, StoredCompactionState,
-    StoredDisplayRole, StoredMemoryInjection, StoredMessage, StoredTokenUsage,
+    StoredContextViewState, StoredDisplayRole, StoredMemoryInjection, StoredMessage,
+    StoredTokenUsage,
 };
 use journal::{PersistVectorMode, SessionJournalMeta, SessionPersistState};
 pub use maintenance::prune_old_session_backups;
@@ -115,6 +116,9 @@ pub struct Session {
     /// active summary + recent tail instead of re-sending the full transcript.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction: Option<StoredCompactionState>,
+    /// Persisted, reversible provider-facing projection over the authoritative transcript.
+    #[serde(default, skip_serializing_if = "StoredContextViewState::is_default")]
+    pub context_view: StoredContextViewState,
     /// Provider-specific session ID (e.g., Claude Code CLI session for resume)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_session_id: Option<String>,
@@ -194,6 +198,16 @@ pub struct Session {
     #[serde(skip)]
     provider_messages_cache_mode: PersistVectorMode,
     #[serde(skip)]
+    projected_provider_messages_cache: Vec<Message>,
+    #[serde(skip)]
+    projected_provider_message_prefix_hashes_cache: Vec<u64>,
+    #[serde(skip)]
+    projected_provider_messages_cache_len: usize,
+    #[serde(skip)]
+    projected_provider_messages_cache_revision: u64,
+    #[serde(skip)]
+    projected_provider_messages_cache_mode: PersistVectorMode,
+    #[serde(skip)]
     memory_profile_cache: SessionMemoryProfileCache,
     #[serde(skip)]
     memory_profile_dirty: bool,
@@ -212,6 +226,8 @@ struct SessionStartupStub {
     updated_at: DateTime<Utc>,
     #[serde(default)]
     compaction: Option<StoredCompactionState>,
+    #[serde(default)]
+    context_view: StoredContextViewState,
     #[serde(default)]
     provider_session_id: Option<String>,
     #[serde(default)]
@@ -253,6 +269,42 @@ struct SessionStartupStub {
 }
 
 const MAX_SESSION_JOURNAL_BYTES: u64 = 512 * 1024;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LegacyContextMigrationOutcome {
+    NotNeeded,
+    AlreadyMigrated,
+    MigratedTextSummary { transaction_id: String },
+    RestoredRaw { issue: LegacyContextMigrationIssue },
+    Blocked { issue: LegacyContextMigrationIssue },
+}
+
+impl LegacyContextMigrationOutcome {
+    fn changed_state(&self) -> bool {
+        matches!(
+            self,
+            Self::MigratedTextSummary { .. } | Self::RestoredRaw { .. }
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LegacyContextMigrationIssue {
+    EmptyState,
+    EncryptedOnly,
+    InvalidCompactedCount {
+        compacted_count: usize,
+        message_count: usize,
+    },
+    RangeNotStructurallyClosed {
+        stored_end: usize,
+        required_start: usize,
+        required_end: usize,
+    },
+    InvalidContextState(String),
+    ProjectionRejected(String),
+    RevisionExhausted,
+}
 
 /// Max number of environment snapshots to retain per session
 const MAX_ENV_SNAPSHOTS: usize = 8;
@@ -325,6 +377,7 @@ impl Session {
         session.created_at = stub.created_at;
         session.updated_at = stub.updated_at;
         session.compaction = stub.compaction;
+        session.context_view = stub.context_view;
         session.provider_session_id = stub.provider_session_id;
         session.provider_key = stub.provider_key;
         session.model = stub.model;
@@ -360,6 +413,7 @@ impl Session {
         session.updated_at = snapshot.updated_at;
         session.messages = snapshot.messages;
         session.compaction = snapshot.compaction;
+        session.context_view = snapshot.context_view;
         session.provider_session_id = snapshot.provider_session_id;
         session.provider_key = snapshot.provider_key;
         session.model = snapshot.model;
@@ -403,6 +457,16 @@ impl Session {
             .iter()
             .map(estimate_json_bytes)
             .sum();
+        let projected_provider_cache_stats = summarize_message_content(
+            self.projected_provider_messages_cache
+                .iter()
+                .map(|message| &message.content),
+        );
+        let projected_provider_messages_cache_json_bytes: usize = self
+            .projected_provider_messages_cache
+            .iter()
+            .map(estimate_json_bytes)
+            .sum();
         let env_snapshots_json_bytes: usize =
             self.env_snapshots.iter().map(estimate_json_bytes).sum();
         let memory_injections_json_bytes: usize =
@@ -425,6 +489,7 @@ impl Session {
             .and_then(|c| c.openai_encrypted_content.as_ref())
             .map(|text| text.len())
             .unwrap_or(0);
+        let context_view_json_bytes = estimate_json_bytes(&self.context_view);
 
         serde_json::json!({
             "session_id": self.id,
@@ -454,6 +519,12 @@ impl Session {
                 "summary_text_bytes": compaction_summary_bytes,
                 "encrypted_content_bytes": compaction_encrypted_bytes,
             },
+            "context_view": {
+                "revision": self.context_view.revision,
+                "transactions": self.context_view.transactions.len(),
+                "active_transactions": self.context_view.active_transaction_count(),
+                "json_bytes": context_view_json_bytes,
+            },
             "env_snapshots": {
                 "count": self.env_snapshots.len(),
                 "json_bytes": env_snapshots_json_bytes,
@@ -473,6 +544,14 @@ impl Session {
                 "json_bytes": provider_messages_cache_json_bytes,
                 "memory": provider_cache_stats.to_json(),
             },
+            "projected_provider_messages_cache": {
+                "count": self.projected_provider_messages_cache.len(),
+                "source_len": self.projected_provider_messages_cache_len,
+                "revision": self.projected_provider_messages_cache_revision,
+                "mode": persist_vector_mode_label(self.projected_provider_messages_cache_mode),
+                "json_bytes": projected_provider_messages_cache_json_bytes,
+                "memory": projected_provider_cache_stats.to_json(),
+            },
             "totals": {
                 "payload_text_bytes": message_stats.payload_text_bytes(),
                 "json_bytes": session_message_json_bytes
@@ -480,13 +559,19 @@ impl Session {
                     + env_snapshots_json_bytes
                     + memory_injections_json_bytes
                     + replay_events_json_bytes
-                    + compaction_json_bytes,
+                    + compaction_json_bytes
+                    + context_view_json_bytes
+                    + projected_provider_messages_cache_json_bytes,
                 "canonical_transcript_json_bytes": session_message_json_bytes,
                 "provider_cache_json_bytes": provider_messages_cache_json_bytes,
+                "projected_provider_cache_json_bytes": projected_provider_messages_cache_json_bytes,
+                "context_view_json_bytes": context_view_json_bytes,
                 "canonical_tool_result_bytes": message_stats.tool_result_bytes,
                 "provider_cache_tool_result_bytes": provider_cache_stats.tool_result_bytes,
+                "projected_provider_cache_tool_result_bytes": projected_provider_cache_stats.tool_result_bytes,
                 "canonical_large_blob_bytes": message_stats.large_block_bytes,
                 "provider_cache_large_blob_bytes": provider_cache_stats.large_block_bytes,
+                "projected_provider_cache_large_blob_bytes": projected_provider_cache_stats.large_block_bytes,
             }
         })
     }
@@ -498,6 +583,7 @@ impl Session {
             custom_title: self.custom_title.clone(),
             updated_at: self.updated_at,
             compaction: self.compaction.clone(),
+            context_view: self.context_view.clone(),
             provider_session_id: self.provider_session_id.clone(),
             provider_key: self.provider_key.clone(),
             model: self.model.clone(),
@@ -539,9 +625,15 @@ impl Session {
         self.provider_message_prefix_hashes_cache.clear();
         self.provider_messages_cache_len = 0;
         self.provider_messages_cache_mode = PersistVectorMode::Full;
+        self.projected_provider_messages_cache.clear();
+        self.projected_provider_message_prefix_hashes_cache.clear();
+        self.projected_provider_messages_cache_len = 0;
+        self.projected_provider_messages_cache_revision = 0;
+        self.projected_provider_messages_cache_mode = PersistVectorMode::Full;
         self.memory_profile_cache.provider_cache_count = 0;
         self.memory_profile_cache.provider_cache_json_bytes = 0;
         self.memory_profile_cache.provider_cache_stats = ContentBlockMemoryStats::default();
+        self.reset_projected_provider_cache_memory_profile();
     }
 
     /// Drop the derived provider-facing transcript once the current request has
@@ -556,9 +648,15 @@ impl Session {
         self.provider_message_prefix_hashes_cache = Vec::new();
         self.provider_messages_cache_len = 0;
         self.provider_messages_cache_mode = PersistVectorMode::Full;
+        self.projected_provider_messages_cache = Vec::new();
+        self.projected_provider_message_prefix_hashes_cache = Vec::new();
+        self.projected_provider_messages_cache_len = 0;
+        self.projected_provider_messages_cache_revision = 0;
+        self.projected_provider_messages_cache_mode = PersistVectorMode::Full;
         self.memory_profile_cache.provider_cache_count = 0;
         self.memory_profile_cache.provider_cache_json_bytes = 0;
         self.memory_profile_cache.provider_cache_stats = ContentBlockMemoryStats::default();
+        self.reset_projected_provider_cache_memory_profile();
     }
 
     fn push_provider_message_cache_entry(&mut self, message: Message) {
@@ -578,6 +676,37 @@ impl Session {
         self.provider_message_prefix_hashes_cache.push(prefix_hash);
     }
 
+    fn push_projected_provider_message_cache_entry(&mut self, message: Message) {
+        let message_hash =
+            crate::message::cache_relevant_message_hashes(std::slice::from_ref(&message))
+                .into_iter()
+                .next()
+                .unwrap_or_default();
+        let prefix_hash = self
+            .projected_provider_message_prefix_hashes_cache
+            .last()
+            .copied()
+            .map(|previous| crate::message::extend_stable_hash(previous, message_hash))
+            .unwrap_or(message_hash);
+        self.memory_profile_cache.projected_provider_cache_count += 1;
+        self.memory_profile_cache
+            .projected_provider_cache_json_bytes += estimate_json_bytes(&message);
+        self.memory_profile_cache
+            .projected_provider_cache_stats
+            .merge_from(&summarize_blocks(&message.content));
+        self.projected_provider_messages_cache.push(message);
+        self.projected_provider_message_prefix_hashes_cache
+            .push(prefix_hash);
+    }
+
+    fn reset_projected_provider_cache_memory_profile(&mut self) {
+        self.memory_profile_cache.projected_provider_cache_count = 0;
+        self.memory_profile_cache
+            .projected_provider_cache_json_bytes = 0;
+        self.memory_profile_cache.projected_provider_cache_stats =
+            ContentBlockMemoryStats::default();
+    }
+
     fn mark_memory_profile_dirty(&mut self) {
         self.memory_profile_dirty = true;
     }
@@ -587,6 +716,11 @@ impl Session {
             summarize_message_content(self.messages.iter().map(|message| &message.content));
         let provider_cache_stats = summarize_message_content(
             self.provider_messages_cache
+                .iter()
+                .map(|message| &message.content),
+        );
+        let projected_provider_cache_stats = summarize_message_content(
+            self.projected_provider_messages_cache
                 .iter()
                 .map(|message| &message.content),
         );
@@ -612,6 +746,13 @@ impl Session {
                 .map(estimate_json_bytes)
                 .sum(),
             provider_cache_stats,
+            projected_provider_cache_count: self.projected_provider_messages_cache.len(),
+            projected_provider_cache_json_bytes: self
+                .projected_provider_messages_cache
+                .iter()
+                .map(estimate_json_bytes)
+                .sum(),
+            projected_provider_cache_stats,
         };
         self.memory_profile_dirty = false;
     }
@@ -629,10 +770,14 @@ impl Session {
             .as_ref()
             .map(estimate_json_bytes)
             .unwrap_or(0);
+        let context_view_json_bytes = estimate_json_bytes(&self.context_view);
 
         SessionMemoryProfileSnapshot {
             message_count: self.memory_profile_cache.messages_count,
             provider_cache_message_count: self.memory_profile_cache.provider_cache_count,
+            projected_provider_cache_message_count: self
+                .memory_profile_cache
+                .projected_provider_cache_count,
             env_snapshot_count: self.memory_profile_cache.env_snapshots_count,
             memory_injection_count: self.memory_profile_cache.memory_injections_count,
             replay_event_count: self.memory_profile_cache.replay_events_count,
@@ -642,17 +787,33 @@ impl Session {
                 + self.memory_profile_cache.env_snapshots_json_bytes
                 + self.memory_profile_cache.memory_injections_json_bytes
                 + self.memory_profile_cache.replay_events_json_bytes
-                + compaction_json_bytes,
+                + compaction_json_bytes
+                + context_view_json_bytes
+                + self
+                    .memory_profile_cache
+                    .projected_provider_cache_json_bytes,
             provider_cache_json_bytes: self.memory_profile_cache.provider_cache_json_bytes,
+            projected_provider_cache_json_bytes: self
+                .memory_profile_cache
+                .projected_provider_cache_json_bytes,
+            context_view_json_bytes,
             canonical_tool_result_bytes: self.memory_profile_cache.message_stats.tool_result_bytes,
             provider_cache_tool_result_bytes: self
                 .memory_profile_cache
                 .provider_cache_stats
                 .tool_result_bytes,
+            projected_provider_cache_tool_result_bytes: self
+                .memory_profile_cache
+                .projected_provider_cache_stats
+                .tool_result_bytes,
             canonical_large_blob_bytes: self.memory_profile_cache.message_stats.large_block_bytes,
             provider_cache_large_blob_bytes: self
                 .memory_profile_cache
                 .provider_cache_stats
+                .large_block_bytes,
+            projected_provider_cache_large_blob_bytes: self
+                .memory_profile_cache
+                .projected_provider_cache_stats
                 .large_block_bytes,
         }
     }
@@ -664,11 +825,15 @@ impl Session {
         if self.provider_messages_cache_mode != PersistVectorMode::Full {
             self.provider_messages_cache_mode = PersistVectorMode::Append;
         }
+        if self.projected_provider_messages_cache_mode != PersistVectorMode::Full {
+            self.projected_provider_messages_cache_mode = PersistVectorMode::Append;
+        }
     }
 
     fn mark_messages_full_dirty(&mut self) {
         self.persist_state.messages_mode = PersistVectorMode::Full;
         self.provider_messages_cache_mode = PersistVectorMode::Full;
+        self.projected_provider_messages_cache_mode = PersistVectorMode::Full;
     }
 
     fn mark_env_snapshots_append_dirty(&mut self) {
@@ -699,6 +864,7 @@ impl Session {
         self.custom_title = meta.custom_title;
         self.updated_at = meta.updated_at;
         self.compaction = meta.compaction;
+        self.context_view = meta.context_view;
         self.provider_session_id = meta.provider_session_id;
         self.provider_key = meta.provider_key;
         self.model = meta.model;
@@ -720,6 +886,188 @@ impl Session {
         self.mark_memory_profile_dirty();
     }
 
+    pub fn migrate_legacy_compaction_state(&mut self) -> LegacyContextMigrationOutcome {
+        let Some(compaction) = self.compaction.clone() else {
+            return LegacyContextMigrationOutcome::NotNeeded;
+        };
+        if self.context_view.transactions.iter().any(|transaction| {
+            matches!(
+                transaction.authorization,
+                jcode_session_types::StoredContextAuthorization::LegacyMigration { .. }
+            )
+        }) {
+            return LegacyContextMigrationOutcome::AlreadyMigrated;
+        }
+        if let Err(error) = jcode_context_core::validate_context_state(&self.context_view) {
+            return LegacyContextMigrationOutcome::Blocked {
+                issue: LegacyContextMigrationIssue::InvalidContextState(error.to_string()),
+            };
+        }
+
+        if compaction.summary_text.trim().is_empty() {
+            self.compaction = None;
+            self.reset_provider_messages_cache();
+            self.mark_memory_profile_dirty();
+            return LegacyContextMigrationOutcome::RestoredRaw {
+                issue: if compaction.openai_encrypted_content.is_some() {
+                    LegacyContextMigrationIssue::EncryptedOnly
+                } else {
+                    LegacyContextMigrationIssue::EmptyState
+                },
+            };
+        }
+
+        if compaction.compacted_count == 0 || compaction.compacted_count > self.messages.len() {
+            self.compaction = None;
+            self.reset_provider_messages_cache();
+            self.mark_memory_profile_dirty();
+            return LegacyContextMigrationOutcome::RestoredRaw {
+                issue: LegacyContextMigrationIssue::InvalidCompactedCount {
+                    compacted_count: compaction.compacted_count,
+                    message_count: self.messages.len(),
+                },
+            };
+        }
+
+        let stored_end = compaction.compacted_count - 1;
+        let closed = match jcode_context_core::close_message_range(
+            &self.messages,
+            &self.context_view,
+            0,
+            stored_end,
+        ) {
+            Ok(closed) => closed,
+            Err(error) => {
+                self.compaction = None;
+                self.reset_provider_messages_cache();
+                self.mark_memory_profile_dirty();
+                return LegacyContextMigrationOutcome::RestoredRaw {
+                    issue: LegacyContextMigrationIssue::ProjectionRejected(error.to_string()),
+                };
+            }
+        };
+        if (closed.start, closed.end) != (0, stored_end) {
+            self.compaction = None;
+            self.reset_provider_messages_cache();
+            self.mark_memory_profile_dirty();
+            return LegacyContextMigrationOutcome::RestoredRaw {
+                issue: LegacyContextMigrationIssue::RangeNotStructurallyClosed {
+                    stored_end,
+                    required_start: closed.start,
+                    required_end: closed.end,
+                },
+            };
+        }
+
+        let Some(next_revision) = self.context_view.revision.checked_add(1) else {
+            return LegacyContextMigrationOutcome::Blocked {
+                issue: LegacyContextMigrationIssue::RevisionExhausted,
+            };
+        };
+        let source_range = match closed.to_stored_range(&self.messages) {
+            Ok(range) => range,
+            Err(error) => {
+                self.compaction = None;
+                self.reset_provider_messages_cache();
+                self.mark_memory_profile_dirty();
+                return LegacyContextMigrationOutcome::RestoredRaw {
+                    issue: LegacyContextMigrationIssue::ProjectionRejected(error.to_string()),
+                };
+            }
+        };
+        let source_messages = self.messages[..compaction.compacted_count]
+            .iter()
+            .map(StoredMessage::to_message)
+            .collect::<Vec<_>>();
+        let source_token_estimate = jcode_context_core::estimate_messages_tokens(&source_messages);
+        let migration_identity = serde_json::json!({
+            "session_id": self.id.as_str(),
+            "source_digest": source_range.source_digest,
+            "compacted_count": compaction.compacted_count,
+            "original_turn_count": compaction.original_turn_count,
+            "summary_text": compaction.summary_text.as_str(),
+        })
+        .to_string();
+        let transaction_id = format!(
+            "legacy-context-{}",
+            uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, migration_identity.as_bytes())
+        );
+        let transaction = jcode_session_types::StoredContextTransaction {
+            id: transaction_id.clone(),
+            base_revision: self.context_view.revision,
+            created_at: self.updated_at,
+            authorization: jcode_session_types::StoredContextAuthorization::LegacyMigration {
+                source: jcode_session_types::StoredLegacyContextSource::JcodeTextCompaction,
+            },
+            operations: vec![jcode_session_types::StoredContextOperation::RangeSummary(
+                jcode_session_types::StoredRangeSummary {
+                    source_range,
+                    summary_text: compaction.summary_text,
+                    file_change_digest: String::new(),
+                    changed_files: Vec::new(),
+                    change_evidence_complete: false,
+                    boundary_expansions: closed.expansions,
+                    generator: None,
+                    source_token_estimate,
+                    replacement_token_estimate: 0,
+                    warnings: Vec::new(),
+                    created_at: self.updated_at,
+                    legacy_coverage: Some(jcode_session_types::StoredLegacyCompactionCoverage {
+                        covers_up_to_turn: compaction.covers_up_to_turn,
+                        original_turn_count: compaction.original_turn_count,
+                        compacted_count: compaction.compacted_count,
+                    }),
+                },
+            )],
+            status_events: vec![jcode_session_types::StoredContextStatusEvent {
+                revision: next_revision,
+                timestamp: self.updated_at,
+                kind: jcode_session_types::StoredContextTransactionStatusKind::Applied,
+                reason: Some("Imported from legacy Jcode text compaction".to_string()),
+            }],
+            application: None,
+            economics: None,
+            curator_usage: Vec::new(),
+        };
+        let mut migrated = self.context_view.clone();
+        migrated.revision = next_revision;
+        migrated.transactions.push(transaction);
+        let projection = match jcode_context_core::project_context(&self.messages, &migrated) {
+            Ok(projection) => projection,
+            Err(error) => {
+                self.compaction = None;
+                self.reset_provider_messages_cache();
+                self.mark_memory_profile_dirty();
+                return LegacyContextMigrationOutcome::RestoredRaw {
+                    issue: LegacyContextMigrationIssue::ProjectionRejected(error.to_string()),
+                };
+            }
+        };
+        if let Some(summary_index) = projection.sources.iter().position(|source| {
+            matches!(
+                source,
+                jcode_context_core::ProjectedMessageSource::RangeSummary { operation, .. }
+                    if operation.transaction_id == transaction_id
+            )
+        }) && let Some(message) = projection.messages.get(summary_index)
+            && let Some(jcode_session_types::StoredContextOperation::RangeSummary(summary)) =
+                migrated
+                    .transactions
+                    .last_mut()
+                    .and_then(|transaction| transaction.operations.first_mut())
+        {
+            summary.replacement_token_estimate =
+                jcode_context_core::estimate_message_tokens(message);
+        }
+
+        self.context_view = migrated;
+        // The legacy field remains temporarily readable by the old compaction manager until the
+        // runtime request cutover. The new projected view is already complete and authoritative.
+        self.reset_provider_messages_cache();
+        self.mark_memory_profile_dirty();
+        LegacyContextMigrationOutcome::MigratedTextSummary { transaction_id }
+    }
+
     pub fn create_with_id(
         session_id: String,
         parent_id: Option<String>,
@@ -738,6 +1086,7 @@ impl Session {
             updated_at: now,
             messages: Vec::new(),
             compaction: None,
+            context_view: StoredContextViewState::default(),
             provider_session_id: None,
             provider_key: None,
             model: None,
@@ -765,6 +1114,11 @@ impl Session {
             provider_message_prefix_hashes_cache: Vec::new(),
             provider_messages_cache_len: 0,
             provider_messages_cache_mode: PersistVectorMode::Full,
+            projected_provider_messages_cache: Vec::new(),
+            projected_provider_message_prefix_hashes_cache: Vec::new(),
+            projected_provider_messages_cache_len: 0,
+            projected_provider_messages_cache_revision: 0,
+            projected_provider_messages_cache_mode: PersistVectorMode::Full,
             memory_profile_cache: SessionMemoryProfileCache::default(),
             memory_profile_dirty: false,
         };
@@ -792,6 +1146,7 @@ impl Session {
             updated_at: now,
             messages: Vec::new(),
             compaction: None,
+            context_view: StoredContextViewState::default(),
             provider_session_id: None,
             provider_key: None,
             model: None,
@@ -819,6 +1174,11 @@ impl Session {
             provider_message_prefix_hashes_cache: Vec::new(),
             provider_messages_cache_len: 0,
             provider_messages_cache_mode: PersistVectorMode::Full,
+            projected_provider_messages_cache: Vec::new(),
+            projected_provider_message_prefix_hashes_cache: Vec::new(),
+            projected_provider_messages_cache_len: 0,
+            projected_provider_messages_cache_revision: 0,
+            projected_provider_messages_cache_mode: PersistVectorMode::Full,
             memory_profile_cache: SessionMemoryProfileCache::default(),
             memory_profile_dirty: false,
         };
@@ -1125,6 +1485,7 @@ request in this new forked session, using the inherited conversation only as con
         if let Some(compaction) = redacted.compaction.as_mut() {
             compaction.summary_text = crate::message::redact_secrets(&compaction.summary_text);
         }
+        redact_context_view(&mut redacted.context_view);
         for msg in &mut redacted.messages {
             for block in &mut msg.content {
                 match block {
@@ -1517,8 +1878,66 @@ request in this new forked session, using the inherited conversation only as con
         &self.provider_message_prefix_hashes_cache
     }
 
-    pub fn messages_for_provider_uncached(&self) -> Vec<Message> {
+    /// Convert the authoritative transcript directly, without applying context transforms.
+    pub fn raw_messages_for_provider_uncached(&self) -> Vec<Message> {
         stored_messages_to_messages(&self.messages)
+    }
+
+    pub fn projected_provider_messages(
+        &mut self,
+    ) -> Result<&[Message], jcode_context_core::ContextProjectionError> {
+        let needs_full_rebuild = self.projected_provider_messages_cache_mode
+            == PersistVectorMode::Full
+            || self.projected_provider_messages_cache_len > self.messages.len()
+            || self.projected_provider_messages_cache_revision != self.context_view.revision;
+
+        if needs_full_rebuild {
+            let projection =
+                jcode_context_core::project_context(&self.messages, &self.context_view)?;
+            self.projected_provider_messages_cache.clear();
+            self.projected_provider_message_prefix_hashes_cache.clear();
+            self.reset_projected_provider_cache_memory_profile();
+            self.projected_provider_messages_cache
+                .reserve(projection.messages.len());
+            self.projected_provider_message_prefix_hashes_cache
+                .reserve(projection.messages.len());
+            for message in projection.messages {
+                self.push_projected_provider_message_cache_entry(message);
+            }
+            self.projected_provider_messages_cache_len = self.messages.len();
+            self.projected_provider_messages_cache_revision = self.context_view.revision;
+            self.projected_provider_messages_cache_mode = PersistVectorMode::Clean;
+            return Ok(&self.projected_provider_messages_cache);
+        }
+
+        if self.projected_provider_messages_cache_mode == PersistVectorMode::Append
+            && self.projected_provider_messages_cache_len < self.messages.len()
+        {
+            let appended_len = self.messages.len() - self.projected_provider_messages_cache_len;
+            self.projected_provider_messages_cache.reserve(appended_len);
+            self.projected_provider_message_prefix_hashes_cache
+                .reserve(appended_len);
+            for index in self.projected_provider_messages_cache_len..self.messages.len() {
+                self.push_projected_provider_message_cache_entry(self.messages[index].to_message());
+            }
+            self.projected_provider_messages_cache_len = self.messages.len();
+            self.projected_provider_messages_cache_mode = PersistVectorMode::Clean;
+        }
+
+        Ok(&self.projected_provider_messages_cache)
+    }
+
+    pub fn projected_provider_message_prefix_hashes(
+        &mut self,
+    ) -> Result<&[u64], jcode_context_core::ContextProjectionError> {
+        let _ = self.projected_provider_messages()?;
+        Ok(&self.projected_provider_message_prefix_hashes_cache)
+    }
+
+    pub fn projected_messages_for_provider(
+        &mut self,
+    ) -> Result<Vec<Message>, jcode_context_core::ContextProjectionError> {
+        Ok(self.projected_provider_messages()?.to_vec())
     }
 
     pub fn messages_for_provider(&mut self) -> Vec<Message> {
@@ -1532,6 +1951,7 @@ request in this new forked session, using the inherited conversation only as con
     pub fn strip_transcript_for_remote_client(&mut self) {
         self.messages.clear();
         self.compaction = None;
+        self.context_view = StoredContextViewState::default();
         self.env_snapshots.clear();
         self.memory_injections.clear();
         self.replay_events.clear();
@@ -1574,6 +1994,79 @@ fn redact_json_value(value: &mut serde_json::Value) {
     }
 }
 
+fn redact_context_view(context_view: &mut StoredContextViewState) {
+    for transaction in &mut context_view.transactions {
+        match &mut transaction.authorization {
+            jcode_session_types::StoredContextAuthorization::Manual { initiated_by } => {
+                if let Some(value) = initiated_by.as_mut() {
+                    *value = crate::message::redact_secrets(value);
+                }
+            }
+            jcode_session_types::StoredContextAuthorization::UnattendedEmergency {
+                authorization_source,
+                trigger,
+            } => {
+                *authorization_source = crate::message::redact_secrets(authorization_source);
+                if let Some(value) = trigger.as_mut() {
+                    *value = crate::message::redact_secrets(value);
+                }
+            }
+            jcode_session_types::StoredContextAuthorization::LegacyMigration { .. } => {}
+        }
+        for status in &mut transaction.status_events {
+            if let Some(reason) = status.reason.as_mut() {
+                *reason = crate::message::redact_secrets(reason);
+            }
+        }
+        for operation in &mut transaction.operations {
+            match operation {
+                jcode_session_types::StoredContextOperation::RangeSummary(summary) => {
+                    summary.summary_text = crate::message::redact_secrets(&summary.summary_text);
+                    summary.file_change_digest =
+                        crate::message::redact_secrets(&summary.file_change_digest);
+                    for path in &mut summary.changed_files {
+                        *path = crate::message::redact_secrets(path);
+                    }
+                    for warning in &mut summary.warnings {
+                        *warning = crate::message::redact_secrets(warning);
+                    }
+                }
+                jcode_session_types::StoredContextOperation::ReasoningSuppression(suppression) => {
+                    for validation in &mut suppression.validation {
+                        for warning in &mut validation.warnings {
+                            *warning = crate::message::redact_secrets(warning);
+                        }
+                    }
+                }
+                jcode_session_types::StoredContextOperation::ToolResultDistillation(
+                    distillation,
+                ) => {
+                    distillation.replacement_content =
+                        crate::message::redact_secrets(&distillation.replacement_content);
+                    distillation.preservation_rationale =
+                        crate::message::redact_secrets(&distillation.preservation_rationale);
+                    for uncertainty in &mut distillation.uncertainties {
+                        *uncertainty = crate::message::redact_secrets(uncertainty);
+                    }
+                }
+            }
+        }
+        if let Some(economics) = transaction.economics.as_mut() {
+            for assumption in &mut economics.assumptions {
+                *assumption = crate::message::redact_secrets(assumption);
+            }
+        }
+    }
+
+    if let jcode_session_types::StoredContextEmergencyPolicy::Authorized {
+        authorization_source,
+        ..
+    } = &mut context_view.emergency_policy
+    {
+        *authorization_source = crate::message::redact_secrets(authorization_source);
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct RemoteStartupSessionSnapshot {
     id: String,
@@ -1589,6 +2082,8 @@ struct RemoteStartupSessionSnapshot {
     messages: Vec<StoredMessage>,
     #[serde(default)]
     compaction: Option<StoredCompactionState>,
+    #[serde(default)]
+    context_view: StoredContextViewState,
     #[serde(default)]
     provider_session_id: Option<String>,
     #[serde(default)]

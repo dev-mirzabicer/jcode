@@ -192,20 +192,28 @@ pub(super) struct SessionMemoryProfileCache {
     pub(super) provider_cache_count: usize,
     pub(super) provider_cache_json_bytes: usize,
     pub(super) provider_cache_stats: ContentBlockMemoryStats,
+    pub(super) projected_provider_cache_count: usize,
+    pub(super) projected_provider_cache_json_bytes: usize,
+    pub(super) projected_provider_cache_stats: ContentBlockMemoryStats,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionMemoryProfileSnapshot {
     pub message_count: usize,
     pub provider_cache_message_count: usize,
+    pub projected_provider_cache_message_count: usize,
     pub env_snapshot_count: usize,
     pub memory_injection_count: usize,
     pub replay_event_count: usize,
     pub payload_text_bytes: usize,
     pub total_json_bytes: usize,
     pub provider_cache_json_bytes: usize,
+    pub projected_provider_cache_json_bytes: usize,
+    pub context_view_json_bytes: usize,
     pub canonical_tool_result_bytes: usize,
     pub provider_cache_tool_result_bytes: usize,
+    pub projected_provider_cache_tool_result_bytes: usize,
     pub canonical_large_blob_bytes: usize,
     pub provider_cache_large_blob_bytes: usize,
+    pub projected_provider_cache_large_blob_bytes: usize,
 }

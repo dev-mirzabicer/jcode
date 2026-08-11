@@ -28,7 +28,7 @@ impl App {
             } else {
                 (
                     "session_materialized",
-                    Cow::Owned(self.session.messages_for_provider_uncached()),
+                    Cow::Owned(self.session.raw_messages_for_provider_uncached()),
                 )
             };
         let transcript_memory = crate::tui::transcript_memory_profile(

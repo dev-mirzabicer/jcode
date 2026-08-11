@@ -381,7 +381,7 @@ mod tests {
         );
 
         let display_messages = crate::tui::display_messages_from_session(&session);
-        let provider_messages = session.messages_for_provider_uncached();
+        let provider_messages = session.raw_messages_for_provider_uncached();
         let side_panel = SidePanelSnapshot {
             focused_page_id: Some("page_a".to_string()),
             pages: vec![
