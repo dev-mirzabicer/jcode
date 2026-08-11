@@ -428,8 +428,8 @@ mod tests {
     use crate::mcp::protocol::McpConfig;
     use std::sync::Arc;
 
-    #[tokio::test]
-    async fn issue_790_reload_reuses_default_config_directory() {
+    #[test]
+    fn issue_790_reload_reuses_default_config_directory() {
         let _guard = crate::storage::lock_test_env();
         let original_cwd = std::env::current_dir().expect("current cwd");
         let previous_home = std::env::var_os("JCODE_HOME");
@@ -448,19 +448,26 @@ mod tests {
         )
         .expect("write second project config");
 
-        std::env::set_current_dir(first_project.path()).expect("set first project cwd");
-        let pool = SharedMcpPool::from_default_config();
-        let initially_loaded_first = pool.config().await.servers.contains_key("first");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build MCP pool test runtime");
+        let (initially_loaded_first, reloaded) = runtime.block_on(async {
+            std::env::set_current_dir(first_project.path()).expect("set first project cwd");
+            let pool = SharedMcpPool::from_default_config();
+            let initially_loaded_first = pool.config().await.servers.contains_key("first");
 
-        std::fs::write(
-            first_project.path().join(".mcp.json"),
-            r#"{"mcpServers":{"first-reloaded":{"command":"first-reloaded-server","shared":false}}}"#,
-        )
-        .expect("update first project config");
+            std::fs::write(
+                first_project.path().join(".mcp.json"),
+                r#"{"mcpServers":{"first-reloaded":{"command":"first-reloaded-server","shared":false}}}"#,
+            )
+            .expect("update first project config");
 
-        std::env::set_current_dir(second_project.path()).expect("set second project cwd");
-        let _ = pool.reload().await;
-        let reloaded = pool.config().await;
+            std::env::set_current_dir(second_project.path()).expect("set second project cwd");
+            let _ = pool.reload().await;
+            let reloaded = pool.config().await;
+            (initially_loaded_first, reloaded)
+        });
 
         std::env::set_current_dir(original_cwd).expect("restore cwd");
         if let Some(previous_home) = previous_home {
