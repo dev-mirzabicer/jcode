@@ -116,31 +116,7 @@ impl Agent {
                     repaired
                 ));
             }
-            let (messages, compaction_event) = self.messages_for_provider();
-            if let Some(event) = compaction_event {
-                // Reset cache tracker and tool lock on compaction since the message history changes
-                self.cache_tracker.reset();
-                self.locked_tools = None;
-                logging::info(&format!(
-                    "Context compacted ({}{})",
-                    event.trigger,
-                    event
-                        .pre_tokens
-                        .map(|t| format!(" {} tokens", t))
-                        .unwrap_or_default()
-                ));
-                let _ = event_tx.send(ServerEvent::Compaction {
-                    trigger: event.trigger.clone(),
-                    pre_tokens: event.pre_tokens,
-                    post_tokens: event.post_tokens,
-                    tokens_saved: event.tokens_saved,
-                    duration_ms: event.duration_ms,
-                    messages_dropped: None,
-                    messages_compacted: event.messages_compacted,
-                    summary_chars: event.summary_chars,
-                    active_messages: event.active_messages,
-                });
-            }
+            let messages = self.messages_for_provider()?;
 
             let tools = self.tool_definitions().await;
             let messages: std::sync::Arc<[Message]> = messages.into();

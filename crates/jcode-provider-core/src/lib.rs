@@ -248,6 +248,13 @@ pub trait Provider: Send + Sync {
     /// Called when auth credentials change (e.g., after login).
     fn on_auth_changed(&self) {}
 
+    /// Invalidate provider-native continuation state after historical provider input changes.
+    ///
+    /// Most providers are stateless at this layer and intentionally keep the no-op default.
+    /// Providers that retain an upstream response chain or incremental transport state must
+    /// override this so the next completion starts from the complete current provider view.
+    fn invalidate_context_continuation(&self, _reason: &str) {}
+
     /// Called when auth credentials change for an already-open session that
     /// should learn about refreshed credentials without being silently moved to
     /// a newly activated provider/profile.
@@ -1590,6 +1597,11 @@ mod tests {
         assert_eq!(snapshot.available_models, ["snapshot-model"]);
         assert!(snapshot.has_routes());
         assert_eq!(snapshot.model_routes[0].api_method, "snapshot-api");
+    }
+
+    #[test]
+    fn context_continuation_invalidation_defaults_to_no_op() {
+        SnapshotTestProvider.invalidate_context_continuation("historical context changed");
     }
 
     #[test]

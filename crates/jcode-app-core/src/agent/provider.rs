@@ -61,8 +61,8 @@ impl Agent {
         Ok(())
     }
 
-    pub fn provider_messages(&mut self) -> Vec<Message> {
-        self.session.messages_for_provider()
+    pub fn provider_messages(&mut self) -> Result<Vec<Message>> {
+        self.messages_for_provider()
     }
 
     pub fn set_model(&mut self, model: &str) -> Result<()> {

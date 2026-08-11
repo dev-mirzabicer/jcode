@@ -2264,6 +2264,24 @@ impl Provider for MultiProvider {
         self.handle_auth_changed(false);
     }
 
+    fn invalidate_context_continuation(&self, reason: &str) {
+        let provider = match self.active_provider() {
+            ActiveProvider::Claude => self.anthropic_provider().or_else(|| self.claude_provider()),
+            ActiveProvider::OpenAI => self.openai_provider(),
+            ActiveProvider::Copilot => self.copilot_provider(),
+            ActiveProvider::Antigravity => self.antigravity_provider(),
+            ActiveProvider::Gemini => self.gemini_provider(),
+            ActiveProvider::Cursor => self.cursor_provider(),
+            ActiveProvider::Bedrock => self
+                .bedrock_provider()
+                .map(|provider| provider as Arc<dyn Provider>),
+            ActiveProvider::OpenRouter => self.active_openrouter_execution_provider(),
+        };
+        if let Some(provider) = provider {
+            provider.invalidate_context_continuation(reason);
+        }
+    }
+
     fn on_auth_changed_preserve_current_provider(&self) {
         self.handle_auth_changed(true);
     }

@@ -424,6 +424,7 @@ impl AmbientRunnerHandle {
                 );
                 child.replace_messages(parent.messages.clone());
                 child.compaction = parent.compaction.clone();
+                child.context_view = parent.context_view.clone();
                 child.provider_key = parent.provider_key.clone();
                 child.route_api_method = parent.route_api_method.clone();
                 child.model = parent.model.clone();

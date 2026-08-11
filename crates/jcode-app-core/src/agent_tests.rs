@@ -5,6 +5,14 @@ use crate::provider::{EventStream, Provider};
 use crate::tool::Registry;
 use crate::tool::ToolOutput;
 use async_trait::async_trait;
+use jcode_context_core::{build_content_target, build_message_range};
+use jcode_session_types::{
+    StoredContextArtifactGenerator, StoredContextAuthorization, StoredContextOperation,
+    StoredContextStatusEvent, StoredContextTransaction, StoredContextTransactionStatusKind,
+    StoredContextViewState, StoredRangeSummary, StoredReasoningSelection,
+    StoredReasoningSuppression, StoredToolResultDistillation,
+};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -18,6 +26,45 @@ struct NativeAutoCompactionProvider;
 struct NativeCompactionStreamProvider;
 
 #[derive(Clone)]
+struct ProjectedRequestProvider {
+    state: Arc<ProjectedRequestProviderState>,
+    context_window: usize,
+}
+
+#[derive(Default)]
+struct ProjectedRequestProviderState {
+    requests: std::sync::Mutex<Vec<Vec<Message>>>,
+    invalidation_reasons: std::sync::Mutex<Vec<String>>,
+    invalidations: AtomicUsize,
+    summary_requests: AtomicUsize,
+}
+
+impl ProjectedRequestProvider {
+    fn new(context_window: usize) -> Self {
+        Self {
+            state: Arc::new(ProjectedRequestProviderState::default()),
+            context_window,
+        }
+    }
+
+    fn requests(&self) -> Vec<Vec<Message>> {
+        self.state.requests.lock().unwrap().clone()
+    }
+
+    fn invalidation_count(&self) -> usize {
+        self.state.invalidations.load(Ordering::SeqCst)
+    }
+
+    fn invalidation_reasons(&self) -> Vec<String> {
+        self.state.invalidation_reasons.lock().unwrap().clone()
+    }
+
+    fn summary_request_count(&self) -> usize {
+        self.state.summary_requests.load(Ordering::SeqCst)
+    }
+}
+
+#[derive(Clone)]
 struct SwitchableBudgetProvider {
     model: Arc<std::sync::Mutex<String>>,
 }
@@ -28,6 +75,255 @@ impl SwitchableBudgetProvider {
             model: Arc::new(std::sync::Mutex::new(model.to_string())),
         }
     }
+}
+
+#[async_trait]
+impl Provider for ProjectedRequestProvider {
+    async fn complete(
+        &self,
+        messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        self.state.requests.lock().unwrap().push(messages.to_vec());
+        let (tx, rx) = tokio_mpsc::channel::<Result<StreamEvent>>(4);
+        tokio::spawn(async move {
+            let _ = tx
+                .send(Ok(StreamEvent::TextDelta("projected response".to_string())))
+                .await;
+            let _ = tx
+                .send(Ok(StreamEvent::MessageEnd {
+                    stop_reason: Some("end_turn".to_string()),
+                }))
+                .await;
+        });
+        Ok(Box::pin(ReceiverStream::new(rx)))
+    }
+
+    fn name(&self) -> &str {
+        "projected-request-test"
+    }
+
+    fn model(&self) -> String {
+        "projected-request-model".to_string()
+    }
+
+    fn supports_compaction(&self) -> bool {
+        true
+    }
+
+    fn uses_jcode_compaction(&self) -> bool {
+        true
+    }
+
+    fn context_window(&self) -> usize {
+        self.context_window
+    }
+
+    async fn complete_simple(&self, _prompt: &str, _system: &str) -> Result<String> {
+        self.state.summary_requests.fetch_add(1, Ordering::SeqCst);
+        Ok("legacy summary must not be requested".to_string())
+    }
+
+    fn invalidate_context_continuation(&self, reason: &str) {
+        self.state.invalidations.fetch_add(1, Ordering::SeqCst);
+        self.state
+            .invalidation_reasons
+            .lock()
+            .unwrap()
+            .push(reason.to_string());
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+fn context_test_timestamp() -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339("2026-08-11T12:00:00Z")
+        .expect("valid context test timestamp")
+        .with_timezone(&chrono::Utc)
+}
+
+fn context_test_generator() -> StoredContextArtifactGenerator {
+    StoredContextArtifactGenerator {
+        provider: "test-provider".to_string(),
+        model: "test-model".to_string(),
+        route: "test-route".to_string(),
+        prompt_version: "phase-5-projection-test".to_string(),
+        effort: None,
+    }
+}
+
+fn context_test_message(id: &str, role: Role, content: Vec<ContentBlock>) -> StoredMessage {
+    StoredMessage {
+        id: id.to_string(),
+        role,
+        content,
+        display_role: None,
+        timestamp: None,
+        tool_duration_ms: None,
+        token_usage: None,
+    }
+}
+
+fn context_test_text(id: &str, role: Role, text: &str) -> StoredMessage {
+    context_test_message(
+        id,
+        role,
+        vec![ContentBlock::Text {
+            text: text.to_string(),
+            cache_control: None,
+        }],
+    )
+}
+
+fn applied_context_state(operations: Vec<StoredContextOperation>) -> StoredContextViewState {
+    StoredContextViewState {
+        revision: 1,
+        transactions: vec![StoredContextTransaction {
+            id: "phase-5-context-transaction".to_string(),
+            base_revision: 0,
+            created_at: context_test_timestamp(),
+            authorization: StoredContextAuthorization::Manual { initiated_by: None },
+            operations,
+            status_events: vec![StoredContextStatusEvent {
+                revision: 1,
+                timestamp: context_test_timestamp(),
+                kind: StoredContextTransactionStatusKind::Applied,
+                reason: Some("phase 5 projected request test".to_string()),
+            }],
+            application: None,
+            economics: None,
+            curator_usage: Vec::new(),
+        }],
+        ..StoredContextViewState::default()
+    }
+}
+
+fn range_summary_operation(
+    messages: &[StoredMessage],
+    start: usize,
+    end: usize,
+    summary_text: &str,
+) -> StoredContextOperation {
+    StoredContextOperation::RangeSummary(StoredRangeSummary {
+        source_range: build_message_range(messages, start, end).expect("valid summary range"),
+        summary_text: summary_text.to_string(),
+        file_change_digest: "No changed files in fixture".to_string(),
+        changed_files: Vec::new(),
+        change_evidence_complete: true,
+        boundary_expansions: Vec::new(),
+        generator: Some(context_test_generator()),
+        source_token_estimate: 1_000,
+        replacement_token_estimate: 100,
+        warnings: Vec::new(),
+        created_at: context_test_timestamp(),
+        legacy_coverage: None,
+    })
+}
+
+fn reasoning_suppression_operation(
+    messages: &[StoredMessage],
+    message_index: usize,
+    block_index: usize,
+) -> StoredContextOperation {
+    let target =
+        build_content_target(messages, message_index, block_index).expect("valid reasoning target");
+    StoredContextOperation::ReasoningSuppression(StoredReasoningSuppression {
+        selection: StoredReasoningSelection::MessageRanges {
+            ranges: vec![
+                build_message_range(messages, message_index, message_index)
+                    .expect("valid reasoning range"),
+            ],
+        },
+        targets: vec![target.clone()],
+        assistant_turns_affected: 1,
+        replay_block_kinds: vec![target.kind],
+        original_token_estimate: 100,
+        validation_evidence_version: 1,
+        validation: Vec::new(),
+    })
+}
+
+fn tool_distillation_operation(
+    messages: &[StoredMessage],
+    message_index: usize,
+    block_index: usize,
+    replacement_content: &str,
+) -> StoredContextOperation {
+    StoredContextOperation::ToolResultDistillation(StoredToolResultDistillation {
+        target: build_content_target(messages, message_index, block_index)
+            .expect("valid tool-result target"),
+        tool_name: "bash".to_string(),
+        tool_call_id: "phase-5-tool".to_string(),
+        replacement_content: replacement_content.to_string(),
+        original_token_estimate: 100,
+        replacement_token_estimate: 10,
+        replacement_ratio_millionths: 100_000,
+        preservation_rationale: "Exact fixture facts preserved".to_string(),
+        uncertainties: Vec::new(),
+        generator: context_test_generator(),
+        created_at: context_test_timestamp(),
+    })
+}
+
+fn combined_projected_session() -> Session {
+    let mut session = Session::create(None, None);
+    session.append_stored_message(context_test_text(
+        "summary-user",
+        Role::User,
+        "source range user text",
+    ));
+    session.append_stored_message(context_test_text(
+        "summary-assistant",
+        Role::Assistant,
+        "source range assistant text",
+    ));
+    session.append_stored_message(context_test_message(
+        "reasoning-message",
+        Role::Assistant,
+        vec![
+            ContentBlock::Reasoning {
+                text: "targeted replay reasoning".to_string(),
+            },
+            ContentBlock::Text {
+                text: "visible reasoning answer".to_string(),
+                cache_control: None,
+            },
+        ],
+    ));
+    session.append_stored_message(context_test_message(
+        "tool-call-message",
+        Role::Assistant,
+        vec![ContentBlock::ToolUse {
+            id: "phase-5-tool".to_string(),
+            name: "bash".to_string(),
+            input: serde_json::json!({"command": "printf fixture"}),
+            thought_signature: Some("preserved-thought-signature".to_string()),
+        }],
+    ));
+    session.append_stored_message(context_test_message(
+        "tool-result-message",
+        Role::User,
+        vec![ContentBlock::ToolResult {
+            tool_use_id: "phase-5-tool".to_string(),
+            content: "large original tool output with exact facts".repeat(20),
+            is_error: Some(true),
+        }],
+    ));
+    session.append_stored_message(context_test_text(
+        "tail-message",
+        Role::User,
+        "unmodified tail",
+    ));
+    session.context_view = applied_context_state(vec![
+        range_summary_operation(&session.messages, 0, 1, "selected historical summary"),
+        reasoning_suppression_operation(&session.messages, 2, 0),
+        tool_distillation_operation(&session.messages, 4, 0, "distilled exact tool facts"),
+    ]);
+    session
 }
 
 #[derive(Clone)]
@@ -559,174 +855,416 @@ async fn run_turn_streaming_mpsc_emits_model_changed_on_midstream_switch() {
     );
 }
 
-#[tokio::test]
-async fn messages_for_provider_replays_persisted_native_compaction_in_auto_mode() {
-    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
-    let registry = Registry::new(provider.clone()).await;
-    let mut agent = Agent::new(provider, registry);
+#[test]
+fn projected_request_defaults_to_raw_history_without_mutating_transcript() {
+    let provider = Arc::new(ProjectedRequestProvider::new(10_000));
+    let provider_dyn: Arc<dyn Provider> = provider;
+    let mut session = Session::create(None, None);
+    session.append_stored_message(context_test_text("default-user", Role::User, "hello"));
+    session.append_stored_message(context_test_text(
+        "default-assistant",
+        Role::Assistant,
+        "world",
+    ));
+    let mut agent = Agent::new_with_session(provider_dyn, Registry::empty(), session, None);
+    let raw_before = serde_json::to_vec(&agent.session.messages).unwrap();
+    let raw_provider = agent.session.raw_messages_for_provider_uncached();
 
+    let projected = agent.messages_for_provider().expect("default projection");
+
+    assert_eq!(
+        serde_json::to_vec(&projected).unwrap(),
+        serde_json::to_vec(&raw_provider).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_vec(&agent.session.messages).unwrap(),
+        raw_before
+    );
+}
+
+#[test]
+fn projected_request_applies_selected_summary_at_the_original_position() {
+    let provider: Arc<dyn Provider> = Arc::new(ProjectedRequestProvider::new(10_000));
+    let mut session = Session::create(None, None);
+    session.append_stored_message(context_test_text("prefix", Role::User, "prefix remains"));
+    session.append_stored_message(context_test_text(
+        "summary-source-user",
+        Role::User,
+        "selected user source",
+    ));
+    session.append_stored_message(context_test_text(
+        "summary-source-assistant",
+        Role::Assistant,
+        "selected assistant source",
+    ));
+    session.append_stored_message(context_test_text("suffix", Role::User, "suffix remains"));
+    session.context_view = applied_context_state(vec![range_summary_operation(
+        &session.messages,
+        1,
+        2,
+        "middle range summary",
+    )]);
+    let mut agent = Agent::new_with_session(provider, Registry::empty(), session, None);
+    let raw_before = serde_json::to_vec(&agent.session.messages).unwrap();
+
+    let projected = agent.messages_for_provider().expect("summary projection");
+    let encoded = serde_json::to_string(&projected).unwrap();
+
+    assert!(encoded.contains("prefix remains"));
+    assert!(encoded.contains("middle range summary"));
+    assert!(encoded.contains("suffix remains"));
+    assert!(!encoded.contains("selected user source"));
+    assert!(!encoded.contains("selected assistant source"));
+    assert_eq!(
+        serde_json::to_vec(&agent.session.messages).unwrap(),
+        raw_before
+    );
+}
+
+#[test]
+fn projected_request_suppresses_only_the_targeted_replayed_reasoning() {
+    let provider: Arc<dyn Provider> = Arc::new(ProjectedRequestProvider::new(10_000));
+    let mut session = Session::create(None, None);
+    session.append_stored_message(context_test_text("reason-user", Role::User, "question"));
+    session.append_stored_message(context_test_message(
+        "targeted-reasoning",
+        Role::Assistant,
+        vec![
+            ContentBlock::Reasoning {
+                text: "remove this replay reasoning".to_string(),
+            },
+            ContentBlock::Text {
+                text: "targeted visible answer".to_string(),
+                cache_control: None,
+            },
+        ],
+    ));
+    session.append_stored_message(context_test_message(
+        "retained-reasoning",
+        Role::Assistant,
+        vec![
+            ContentBlock::Reasoning {
+                text: "retain this replay reasoning".to_string(),
+            },
+            ContentBlock::Text {
+                text: "retained visible answer".to_string(),
+                cache_control: None,
+            },
+        ],
+    ));
+    session.context_view = applied_context_state(vec![reasoning_suppression_operation(
+        &session.messages,
+        1,
+        0,
+    )]);
+    let mut agent = Agent::new_with_session(provider, Registry::empty(), session, None);
+
+    let projected = agent.messages_for_provider().expect("reasoning projection");
+    let encoded = serde_json::to_string(&projected).unwrap();
+
+    assert!(!encoded.contains("remove this replay reasoning"));
+    assert!(encoded.contains("targeted visible answer"));
+    assert!(encoded.contains("retain this replay reasoning"));
+    assert!(encoded.contains("retained visible answer"));
+}
+
+#[test]
+fn projected_request_distills_tool_result_without_changing_pair_metadata() {
+    let provider: Arc<dyn Provider> = Arc::new(ProjectedRequestProvider::new(10_000));
+    let mut session = Session::create(None, None);
+    session.append_stored_message(context_test_message(
+        "distill-call",
+        Role::Assistant,
+        vec![ContentBlock::ToolUse {
+            id: "phase-5-tool".to_string(),
+            name: "bash".to_string(),
+            input: serde_json::json!({"command": "false"}),
+            thought_signature: Some("signature-must-survive".to_string()),
+        }],
+    ));
+    session.append_stored_message(context_test_message(
+        "distill-result",
+        Role::User,
+        vec![ContentBlock::ToolResult {
+            tool_use_id: "phase-5-tool".to_string(),
+            content: "original large result".repeat(30),
+            is_error: Some(true),
+        }],
+    ));
+    session.context_view = applied_context_state(vec![tool_distillation_operation(
+        &session.messages,
+        1,
+        0,
+        "distilled result",
+    )]);
+    let mut agent = Agent::new_with_session(provider, Registry::empty(), session, None);
+
+    let projected = agent.messages_for_provider().expect("distilled projection");
+    let tool_use = projected
+        .iter()
+        .flat_map(|message| &message.content)
+        .find_map(|block| match block {
+            ContentBlock::ToolUse {
+                id,
+                thought_signature,
+                ..
+            } => Some((id, thought_signature)),
+            _ => None,
+        })
+        .expect("projected tool use");
+    let tool_result = projected
+        .iter()
+        .flat_map(|message| &message.content)
+        .find_map(|block| match block {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => Some((tool_use_id, content, is_error)),
+            _ => None,
+        })
+        .expect("projected tool result");
+
+    assert_eq!(tool_use.0, "phase-5-tool");
+    assert_eq!(tool_use.1.as_deref(), Some("signature-must-survive"));
+    assert_eq!(tool_result.0, "phase-5-tool");
+    assert_eq!(tool_result.1, "distilled result");
+    assert_eq!(*tool_result.2, Some(true));
+}
+
+#[tokio::test]
+async fn live_agent_request_matches_combined_projection_without_starting_legacy_compaction() {
+    let _guard = crate::storage::lock_test_env();
+    let provider = Arc::new(ProjectedRequestProvider::new(1_000));
+    let provider_dyn: Arc<dyn Provider> = provider.clone();
+    let mut agent = Agent::new_with_session(
+        provider_dyn,
+        Registry::empty(),
+        combined_projected_session(),
+        None,
+    );
+    agent.set_memory_enabled(false);
+    let raw_message_count_before = agent.session.messages.len();
+    let raw_before = serde_json::to_vec(&agent.session.messages).unwrap();
+    let expected =
+        jcode_context_core::project_context(&agent.session.messages, &agent.session.context_view)
+            .expect("pure-core projection")
+            .messages;
+    let expected_stats = agent_context_budget_stats(&agent).await;
+    assert_eq!(expected_stats.message_count, expected.len());
+    assert_eq!(
+        expected_stats.estimated_message_tokens,
+        estimated_message_tokens(&expected)
+    );
+
+    {
+        let legacy = agent.registry.legacy_compaction();
+        legacy.write().await.update_observed_input_tokens(999);
+    }
+    let invalidations_before_request = provider.invalidation_count();
+
+    let response = agent.run_turn(false).await.expect("live projected turn");
+
+    assert_eq!(response, "projected response");
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        crate::message::cache_relevant_messages(&requests[0]),
+        crate::message::cache_relevant_messages(&expected)
+    );
+    assert_eq!(provider.summary_request_count(), 0);
+    assert_eq!(provider.invalidation_count(), invalidations_before_request);
+    assert!(agent.session.compaction.is_none());
+    assert_eq!(
+        serde_json::to_vec(&agent.session.messages[..raw_message_count_before]).unwrap(),
+        raw_before
+    );
+    let legacy = agent.registry.legacy_compaction();
+    let raw_provider = agent.session.raw_messages_for_provider_uncached();
+    assert!(!legacy.read().await.stats_with(&raw_provider).is_compacting);
+}
+
+#[test]
+fn stale_projection_blocks_request_without_raw_fallback_or_legacy_compaction() {
+    let provider = Arc::new(ProjectedRequestProvider::new(1_000));
+    let provider_dyn: Arc<dyn Provider> = provider.clone();
+    let mut session = Session::create(None, None);
+    session.append_stored_message(context_test_text("stale-user", Role::User, "original"));
+    session.append_stored_message(context_test_text(
+        "stale-assistant",
+        Role::Assistant,
+        "answer",
+    ));
+    session.context_view = applied_context_state(vec![range_summary_operation(
+        &session.messages,
+        0,
+        1,
+        "stale summary",
+    )]);
+    session.messages[0].content = vec![ContentBlock::Text {
+        text: "historically edited after draft".to_string(),
+        cache_control: None,
+    }];
+    let mut agent = Agent::new_with_session(provider_dyn, Registry::empty(), session, None);
+    let raw_before = serde_json::to_vec(&agent.session.messages).unwrap();
+
+    let error = agent
+        .messages_for_provider()
+        .expect_err("stale target must block projected request");
+
+    assert!(error.to_string().contains("provider request was not sent"));
+    assert!(provider.requests().is_empty());
+    assert_eq!(provider.summary_request_count(), 0);
+    assert!(agent.session.compaction.is_none());
+    assert_eq!(
+        serde_json::to_vec(&agent.session.messages).unwrap(),
+        raw_before
+    );
+    let legacy = agent.registry.legacy_compaction();
+    let raw_provider = agent.session.raw_messages_for_provider_uncached();
+    assert!(
+        !legacy
+            .try_read()
+            .unwrap()
+            .stats_with(&raw_provider)
+            .is_compacting
+    );
+}
+
+#[test]
+fn projected_append_preserves_cache_prefix_and_does_not_invalidate_continuation() {
+    let _guard = crate::storage::lock_test_env();
+    let previous = std::env::var_os("JCODE_TRACK_CLIENT_CACHE");
+    crate::env::set_var("JCODE_TRACK_CLIENT_CACHE", "1");
+    let provider = Arc::new(ProjectedRequestProvider::new(10_000));
+    let provider_dyn: Arc<dyn Provider> = provider.clone();
+    let mut agent = Agent::new(provider_dyn, Registry::empty());
     agent.add_message(
         Role::User,
         vec![ContentBlock::Text {
-            text: "first".to_string(),
+            text: "first append baseline".to_string(),
+            cache_control: None,
+        }],
+    );
+    let first = agent.messages_for_provider().expect("first projection");
+    agent.record_client_cache_request(&first);
+
+    agent.add_message(
+        Role::Assistant,
+        vec![ContentBlock::Text {
+            text: "second append".to_string(),
+            cache_control: None,
+        }],
+    );
+    let second = agent.messages_for_provider().expect("append projection");
+    agent.record_client_cache_request(&second);
+
+    assert_eq!(agent.cache_tracker.turn_count(), 2);
+    assert_eq!(agent.cache_tracker.previous_message_count(), second.len());
+    assert!(!agent.cache_tracker.had_violation());
+    assert_eq!(provider.invalidation_count(), 0);
+    match previous {
+        Some(value) => crate::env::set_var("JCODE_TRACK_CLIENT_CACHE", value),
+        None => crate::env::remove_var("JCODE_TRACK_CLIENT_CACHE"),
+    }
+}
+
+#[tokio::test]
+async fn historical_context_change_resets_provider_runtime_exactly_once() {
+    let provider = Arc::new(ProjectedRequestProvider::new(10_000));
+    let provider_dyn: Arc<dyn Provider> = provider.clone();
+    let mut agent = Agent::new(provider_dyn, Registry::empty());
+    agent.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "historical one".to_string(),
             cache_control: None,
         }],
     );
     agent.add_message(
         Role::Assistant,
         vec![ContentBlock::Text {
-            text: "second".to_string(),
+            text: "historical two".to_string(),
             cache_control: None,
         }],
     );
+    let before = agent.messages_for_provider().expect("baseline projection");
+    agent.cache_tracker.record_request(&before);
+    agent.locked_tools = Some(Vec::new());
+    agent.mcp_late_register_resolved = true;
+    agent.provider_session_id = Some("agent-provider-session".to_string());
+    agent.session.provider_session_id = Some("stored-provider-session".to_string());
+    agent.update_context_usage_from_stream(9_000, None, None);
+    let start = agent.session.messages.len() - 2;
+    agent.session.context_view = applied_context_state(vec![range_summary_operation(
+        &agent.session.messages,
+        start,
+        start + 1,
+        "historical reset summary",
+    )]);
+    crate::cache_invalidation::clear_for_tests();
+    let invalidation_started = Instant::now();
 
-    agent.update_context_usage_from_stream(900, None, None);
     agent
-        .apply_openai_native_compaction("enc_auto".to_string(), 1)
-        .expect("persist native compaction");
+        .after_provider_context_changed("context transaction", "context revision 1 applied", true)
+        .expect("changed projection remains valid");
 
-    let (messages, event) = agent.messages_for_provider();
-    assert!(event.is_none());
-    assert!(!messages.is_empty());
-    match &messages[0].content[0] {
-        ContentBlock::OpenAICompaction { encrypted_content } => {
-            assert_eq!(encrypted_content, "enc_auto");
-        }
-        other => panic!("expected OpenAI compaction block, got {other:?}"),
-    }
-    assert!(
-        messages
-            .iter()
-            .any(|message| message.role == Role::Assistant)
+    assert_eq!(provider.invalidation_count(), 1);
+    assert_eq!(
+        provider.invalidation_reasons(),
+        vec!["context revision 1 applied".to_string()]
     );
+    assert!(agent.provider_session_id.is_none());
+    assert!(agent.session.provider_session_id.is_none());
+    assert!(agent.locked_tools.is_none());
+    assert!(!agent.mcp_late_register_resolved);
+    assert_eq!(agent.cache_tracker.turn_count(), 0);
+    let projected = agent.messages_for_provider().expect("changed projection");
     let stats = agent_context_budget_stats(&agent).await;
-    assert_eq!(stats.message_count, messages.len());
+    assert_eq!(stats.observed_input_tokens, None);
+    assert_eq!(stats.message_count, projected.len());
     assert_eq!(
         stats.estimated_message_tokens,
-        estimated_message_tokens(&messages)
+        estimated_message_tokens(&projected)
     );
-    assert_eq!(stats.observed_input_tokens, None);
+    let documented = crate::cache_invalidation::most_recent_since(invalidation_started)
+        .expect("intentional invalidation documented");
+    assert_eq!(documented.source, "context transaction");
+    assert_eq!(documented.detail, "context revision 1 applied");
 }
 
-#[tokio::test]
-async fn oversized_openai_native_compaction_is_persisted_as_text_fallback() {
-    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
-    let registry = Registry::new(provider.clone()).await;
-    let mut agent = Agent::new(provider, registry);
-
-    agent.add_message(
-        Role::User,
-        vec![ContentBlock::Text {
-            text: "first".to_string(),
-            cache_control: None,
-        }],
-    );
-    agent.add_message(
-        Role::Assistant,
-        vec![ContentBlock::Text {
-            text: "second".to_string(),
-            cache_control: None,
-        }],
-    );
-
-    let oversized =
-        "x".repeat(crate::provider::openai_request::OPENAI_ENCRYPTED_CONTENT_SAFE_MAX_CHARS + 1);
-    agent
-        .apply_openai_native_compaction(oversized, 1)
-        .expect("persist fallback compaction");
-
-    let state = agent
-        .session
-        .compaction
-        .as_ref()
-        .expect("compaction should be persisted");
-    assert!(state.openai_encrypted_content.is_none());
-    assert!(
-        state
-            .summary_text
-            .contains("OpenAI native compaction state was discarded")
-    );
-
-    let (messages, event) = agent.messages_for_provider();
-    assert!(event.is_none());
-    assert!(!messages.is_empty());
-    assert!(messages.iter().all(|message| {
-        message
-            .content
-            .iter()
-            .all(|block| !matches!(block, ContentBlock::OpenAICompaction { .. }))
-    }));
-    match &messages[0].content[0] {
-        ContentBlock::Text { text, .. } => {
-            assert!(text.contains("Previous Conversation Summary"));
-            assert!(text.contains("OpenAI native compaction state was discarded"));
-        }
-        other => panic!("expected text fallback summary, got {other:?}"),
-    }
-    assert!(
-        messages
-            .iter()
-            .any(|message| message.role == Role::Assistant)
-    );
-}
-
-#[tokio::test]
-async fn messages_for_provider_applies_manual_compaction_in_native_auto_mode() {
-    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
-    let registry = Registry::new(provider.clone()).await;
-    let mut agent = Agent::new(provider, registry);
-
-    for i in 0..30 {
+#[test]
+fn projected_agent_rejects_ineffective_legacy_manual_and_hard_compaction() {
+    let provider = Arc::new(ProjectedRequestProvider::new(1_000));
+    let provider_dyn: Arc<dyn Provider> = provider.clone();
+    let mut agent = Agent::new(provider_dyn, Registry::empty());
+    for index in 0..20 {
         agent.add_message(
             Role::User,
             vec![ContentBlock::Text {
-                text: format!("turn {i} {}", "x".repeat(120)),
+                text: format!("large message {index} {}", "x".repeat(200)),
                 cache_control: None,
             }],
         );
     }
+    let raw_before = serde_json::to_vec(&agent.session.messages).unwrap();
+    let projected_before = agent.messages_for_provider().expect("projected history");
 
-    agent.provider_session_id = Some("stale-provider-session".to_string());
-    agent.session.provider_session_id = Some("stale-provider-session".to_string());
+    let (message, started) = agent.request_manual_compaction();
+    assert!(!started);
+    assert!(message.contains("provider projection were not changed"));
+    assert!(!agent.try_auto_compact_after_context_limit("maximum context length exceeded"));
 
-    let provider_messages = agent.provider_messages();
-    agent.update_context_usage_from_stream(999_000, None, None);
-    let (message, success) = agent.request_manual_compaction();
-    assert!(success, "manual compaction should start: {message}");
-
-    let deadline = Instant::now() + Duration::from_secs(2);
-    let mut event = None;
-    let mut compacted_messages = Vec::new();
-    while Instant::now() < deadline {
-        let (messages, maybe_event) = agent.messages_for_provider();
-        if maybe_event.is_some() {
-            event = maybe_event;
-            compacted_messages = messages;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-
-    let event = event.expect("manual compaction event should be applied");
-    assert_eq!(event.trigger, "manual");
-    assert!(agent.session.compaction.is_some());
-    assert!(agent.provider_session_id.is_none());
-    assert!(agent.session.provider_session_id.is_none());
-    assert!(compacted_messages.len() < provider_messages.len());
-    match &compacted_messages[0].content[0] {
-        ContentBlock::Text { text, .. } => {
-            assert!(text.contains("Previous Conversation Summary"));
-            assert!(text.contains("manual summary from native-auto provider"));
-        }
-        other => panic!("expected text summary block, got {other:?}"),
-    }
-    let stats = agent_context_budget_stats(&agent).await;
-    assert_eq!(stats.message_count, compacted_messages.len());
+    assert_eq!(provider.summary_request_count(), 0);
+    assert!(agent.session.compaction.is_none());
     assert_eq!(
-        stats.estimated_message_tokens,
-        estimated_message_tokens(&compacted_messages)
+        serde_json::to_vec(&agent.session.messages).unwrap(),
+        raw_before
     );
-    assert_eq!(stats.observed_input_tokens, None);
+    assert_eq!(
+        serde_json::to_vec(&agent.messages_for_provider().expect("unchanged projection")).unwrap(),
+        serde_json::to_vec(&projected_before).unwrap()
+    );
 }
 
 #[tokio::test]
@@ -736,7 +1274,7 @@ async fn context_budget_tracks_agent_create_append_usage_and_model_switch_withou
     let registry = Registry::empty();
     let mut agent = Agent::new(provider, registry);
 
-    let initial_provider_messages = agent.session.provider_messages().to_vec();
+    let initial_provider_messages = agent.messages_for_provider().expect("initial projection");
     let initial_stats = agent_context_budget_stats(&agent).await;
     assert_eq!(initial_stats.token_budget, 10_000);
     assert_eq!(initial_stats.message_count, initial_provider_messages.len());
@@ -819,7 +1357,7 @@ async fn context_budget_tracks_agent_create_append_usage_and_model_switch_withou
     let route_switched_stats = agent_context_budget_stats(&agent).await;
     assert_eq!(route_switched_stats.token_budget, 50_000);
     assert_eq!(route_switched_stats.observed_input_tokens, None);
-    let route_messages = agent.session.provider_messages().to_vec();
+    let route_messages = agent.messages_for_provider().expect("route projection");
     let legacy_observation = {
         let legacy_compaction = agent.registry.legacy_compaction();
         legacy_compaction
@@ -834,7 +1372,7 @@ async fn context_budget_tracks_agent_create_append_usage_and_model_switch_withou
         context_before_append
     );
 
-    let provider_messages = agent.session.provider_messages().to_vec();
+    let provider_messages = agent.messages_for_provider().expect("reseed projection");
     agent.reseed_context_budget_from_messages(&provider_messages, "test reseed");
     assert_eq!(
         serde_json::to_vec(&agent.session.context_view).unwrap(),
@@ -843,8 +1381,9 @@ async fn context_budget_tracks_agent_create_append_usage_and_model_switch_withou
 }
 
 #[tokio::test]
-async fn context_budget_attach_with_legacy_summary_uses_summary_plus_tail() {
-    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+async fn legacy_summary_attach_migrates_to_projection_and_invalidates_once() {
+    let provider = Arc::new(ProjectedRequestProvider::new(10_000));
+    let provider_dyn: Arc<dyn Provider> = provider.clone();
     let mut session = Session::create(None, None);
     for index in 0..4 {
         session.add_message(
@@ -859,8 +1398,7 @@ async fn context_budget_attach_with_legacy_summary_uses_summary_plus_tail() {
             }],
         );
     }
-    let raw_messages = session.provider_messages().to_vec();
-    let raw_tokens = estimated_message_tokens(&raw_messages);
+    let raw_before = serde_json::to_vec(&session.messages).unwrap();
     session.compaction = Some(crate::session::StoredCompactionState {
         summary_text: "concise legacy summary".to_string(),
         openai_encrypted_content: None,
@@ -868,26 +1406,37 @@ async fn context_budget_attach_with_legacy_summary_uses_summary_plus_tail() {
         original_turn_count: 4,
         compacted_count: 2,
     });
+    session.provider_session_id = Some("stale-migrated-session".to_string());
 
     let registry = Registry::empty();
-    let mut agent = Agent::new_with_session(provider, registry, session, None);
-    let effective_messages = {
-        let legacy_compaction = agent.registry.legacy_compaction();
-        let mut manager = legacy_compaction.write().await;
-        manager.messages_for_api_with(agent.session.provider_messages())
-    };
+    let mut agent = Agent::new_with_session(provider_dyn, registry, session, None);
+    let effective_messages = agent.messages_for_provider().expect("migrated projection");
+    let raw_messages = agent.session.raw_messages_for_provider_uncached();
     let stats = agent_context_budget_stats(&agent).await;
     let effective_tokens = estimated_message_tokens(&effective_messages);
     assert_eq!(stats.message_count, effective_messages.len());
     assert_eq!(stats.estimated_message_tokens, effective_tokens);
-    assert!(effective_tokens < raw_tokens);
+    assert!(effective_tokens < estimated_message_tokens(&raw_messages));
+    assert!(agent.session.compaction.is_none());
+    assert!(agent.session.provider_session_id.is_none());
+    assert_eq!(agent.session.context_view.active_transaction_count(), 1);
+    assert_eq!(provider.invalidation_count(), 1);
+    assert_eq!(
+        provider.invalidation_reasons(),
+        vec!["legacy context migration activated while attaching session".to_string()]
+    );
+    assert_eq!(
+        serde_json::to_vec(&agent.session.messages[..4]).unwrap(),
+        raw_before
+    );
 }
 
 #[tokio::test]
 async fn context_budget_rewind_undo_and_repair_reseed_exactly_and_clear_observation() {
-    let provider: Arc<dyn Provider> = Arc::new(SwitchableBudgetProvider::new("small"));
+    let provider = Arc::new(ProjectedRequestProvider::new(10_000));
+    let provider_dyn: Arc<dyn Provider> = provider.clone();
     let registry = Registry::empty();
-    let mut agent = Agent::new(provider, registry);
+    let mut agent = Agent::new(provider_dyn, registry);
     agent.add_message(
         Role::User,
         vec![ContentBlock::Text {
@@ -904,9 +1453,14 @@ async fn context_budget_rewind_undo_and_repair_reseed_exactly_and_clear_observat
     );
     let before_rewind = agent_context_budget_stats(&agent).await;
     agent.update_context_usage_from_stream(9_500, None, None);
+    agent.provider_session_id = Some("rewind-agent-session".to_string());
+    agent.session.provider_session_id = Some("rewind-stored-session".to_string());
 
     assert_eq!(agent.rewind_to_message(1).expect("rewind"), 1);
-    let rewound_messages = agent.session.provider_messages().to_vec();
+    assert_eq!(provider.invalidation_count(), 1);
+    assert!(agent.provider_session_id.is_none());
+    assert!(agent.session.provider_session_id.is_none());
+    let rewound_messages = agent.messages_for_provider().expect("rewound projection");
     let rewound_stats = agent_context_budget_stats(&agent).await;
     assert_eq!(rewound_stats.observed_input_tokens, None);
     assert_eq!(rewound_stats.message_count, rewound_messages.len());
@@ -915,7 +1469,12 @@ async fn context_budget_rewind_undo_and_repair_reseed_exactly_and_clear_observat
         estimated_message_tokens(&rewound_messages)
     );
 
+    agent.provider_session_id = Some("undo-agent-session".to_string());
+    agent.session.provider_session_id = Some("undo-stored-session".to_string());
     assert_eq!(agent.undo_rewind().expect("undo rewind"), 1);
+    assert_eq!(provider.invalidation_count(), 2);
+    assert!(agent.provider_session_id.is_none());
+    assert!(agent.session.provider_session_id.is_none());
     let restored_stats = agent_context_budget_stats(&agent).await;
     assert_eq!(restored_stats.observed_input_tokens, None);
     assert_eq!(restored_stats.message_count, before_rewind.message_count);
@@ -935,9 +1494,14 @@ async fn context_budget_rewind_undo_and_repair_reseed_exactly_and_clear_observat
         }],
     );
     agent.update_context_usage_from_stream(9_900, None, None);
+    agent.provider_session_id = Some("repair-agent-session".to_string());
+    agent.session.provider_session_id = Some("repair-stored-session".to_string());
     assert_eq!(agent.repair_missing_tool_outputs(), 1);
 
-    let repaired_messages = agent.session.provider_messages().to_vec();
+    assert_eq!(provider.invalidation_count(), 3);
+    assert!(agent.provider_session_id.is_none());
+    assert!(agent.session.provider_session_id.is_none());
+    let repaired_messages = agent.messages_for_provider().expect("repaired projection");
     let repaired_stats = agent_context_budget_stats(&agent).await;
     assert_eq!(repaired_stats.observed_input_tokens, None);
     assert_eq!(repaired_stats.message_count, repaired_messages.len());

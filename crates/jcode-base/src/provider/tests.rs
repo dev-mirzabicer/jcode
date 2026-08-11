@@ -799,6 +799,7 @@ struct StubExternalRuntime {
     models: &'static [&'static str],
     model: std::sync::RwLock<String>,
     credential_mode: std::sync::RwLock<jcode_provider_core::CredentialMode>,
+    context_continuation_invalidations: std::sync::atomic::AtomicUsize,
 }
 
 impl StubExternalRuntime {
@@ -815,7 +816,13 @@ impl StubExternalRuntime {
             models,
             model: std::sync::RwLock::new(models[0].to_string()),
             credential_mode: std::sync::RwLock::new(jcode_provider_core::CredentialMode::Auto),
+            context_continuation_invalidations: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    fn context_continuation_invalidation_count(&self) -> usize {
+        self.context_continuation_invalidations
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     fn cursor() -> Self {
@@ -931,6 +938,10 @@ impl Provider for StubExternalRuntime {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = mode;
         Ok(())
     }
+    fn invalidate_context_continuation(&self, _reason: &str) {
+        self.context_continuation_invalidations
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(StubExternalRuntime::new(
             self.name,
@@ -1028,6 +1039,40 @@ fn test_multi_provider_with_cursor() -> MultiProvider {
         routes_memo: std::sync::Mutex::new(None),
         post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     }
+}
+
+#[test]
+fn context_continuation_invalidation_delegates_only_to_the_active_runtime() {
+    let openai = Arc::new(StubExternalRuntime::openai());
+    let cursor = Arc::new(StubExternalRuntime::cursor());
+    let provider = MultiProvider {
+        claude: RwLock::new(None),
+        anthropic: RwLock::new(None),
+        openai: RwLock::new(Some(openai.clone() as Arc<dyn Provider>)),
+        copilot_api: RwLock::new(None),
+        antigravity: RwLock::new(None),
+        gemini: RwLock::new(None),
+        cursor: RwLock::new(Some(cursor.clone() as Arc<dyn Provider>)),
+        bedrock: RwLock::new(None),
+        openrouter: RwLock::new(None),
+        openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
+        active_openai_compatible_profile: RwLock::new(None),
+        active: RwLock::new(ActiveProvider::OpenAI),
+        use_claude_cli: false,
+        startup_notices: RwLock::new(Vec::new()),
+        initial_provider: None,
+        routes_memo: std::sync::Mutex::new(None),
+        post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+    };
+
+    provider.invalidate_context_continuation("context revision 3 applied");
+    assert_eq!(openai.context_continuation_invalidation_count(), 1);
+    assert_eq!(cursor.context_continuation_invalidation_count(), 0);
+
+    provider.set_active_provider(ActiveProvider::Cursor);
+    provider.invalidate_context_continuation("conversation rewind");
+    assert_eq!(openai.context_continuation_invalidation_count(), 1);
+    assert_eq!(cursor.context_continuation_invalidation_count(), 1);
 }
 
 #[test]

@@ -786,13 +786,18 @@ fn test_save_migrates_valid_legacy_compaction_state() -> Result<()> {
         original_turn_count: 8,
         compacted_count: 8,
     });
+    session.provider_session_id = Some("stale-legacy-provider-session".to_string());
+    let raw_before = serde_json::to_vec(&session.messages)?;
 
     session.save()?;
 
     let mut loaded = Session::load("session_compaction_persist_test")?;
-    assert_eq!(loaded.compaction, session.compaction);
+    assert!(loaded.compaction.is_none());
+    assert!(loaded.provider_session_id.is_none());
+    assert_eq!(serde_json::to_vec(&loaded.messages)?, raw_before);
     assert_eq!(loaded.context_view.revision, 1);
     assert_eq!(loaded.context_view.transactions.len(), 1);
+    assert_eq!(loaded.context_view.active_transaction_count(), 1);
     assert_eq!(loaded.projected_provider_messages()?.len(), 1);
     Ok(())
 }

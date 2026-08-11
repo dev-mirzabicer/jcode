@@ -187,6 +187,10 @@ impl Provider for JcodeProvider {
             .set_model(&Self::runtime_model_spec(&selected_model));
     }
 
+    fn invalidate_context_continuation(&self, reason: &str) {
+        self.inner.invalidate_context_continuation(reason);
+    }
+
     fn auth_model_refresh_pending(&self) -> bool {
         self.inner.auth_model_refresh_pending()
     }

@@ -175,6 +175,7 @@ fn create_coordinator_session(parent: &Session, mission: &Option<String>) -> Res
     let mut child = Session::create(Some(parent.id.clone()), title);
     child.replace_messages(parent.messages.clone());
     child.compaction = parent.compaction.clone();
+    child.context_view = parent.context_view.clone();
     child.provider_key = parent.provider_key.clone();
     child.route_api_method = parent.route_api_method.clone();
     child.reasoning_effort = parent.reasoning_effort.clone();
@@ -1083,6 +1084,39 @@ mod tests {
             validation_dir: run_dir.join("validation"),
             last_activity_at: now,
         }
+    }
+
+    #[test]
+    fn coordinator_session_inherits_projected_context_state() {
+        let mut parent =
+            Session::create_with_id("overnight-context-parent".to_string(), None, None);
+        parent.add_message(
+            crate::message::Role::User,
+            vec![crate::message::ContentBlock::Text {
+                text: "historical overnight context".to_string(),
+                cache_control: None,
+            }],
+        );
+        parent.compaction = Some(crate::session::StoredCompactionState {
+            summary_text: "overnight context summary".to_string(),
+            openai_encrypted_content: None,
+            covers_up_to_turn: 1,
+            original_turn_count: 1,
+            compacted_count: 1,
+        });
+        assert!(parent.migrate_legacy_compaction_state().changed_state());
+        assert!(parent.compaction.is_none());
+        assert_eq!(parent.context_view.active_transaction_count(), 1);
+
+        let child = create_coordinator_session(&parent, &Some("continue work".to_string()))
+            .expect("create overnight coordinator");
+
+        assert!(child.compaction.is_none());
+        assert_eq!(child.context_view, parent.context_view);
+        assert_eq!(
+            serde_json::to_vec(&child.messages).expect("serialize child messages"),
+            serde_json::to_vec(&parent.messages).expect("serialize parent messages")
+        );
     }
 
     #[test]

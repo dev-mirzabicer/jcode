@@ -1182,6 +1182,10 @@ impl Provider for OpenAIProvider {
             .unwrap_or(jcode_provider_core::DEFAULT_CONTEXT_LIMIT)
     }
 
+    fn invalidate_context_continuation(&self, reason: &str) {
+        self.clear_persistent_ws_try(reason);
+    }
+
     fn fork(&self) -> Arc<dyn Provider> {
         let model = self.model();
         Arc::new(OpenAIProvider {

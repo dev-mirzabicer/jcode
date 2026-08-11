@@ -409,6 +409,7 @@ fn valid_legacy_text_migration_is_exact_deterministic_idempotent_and_checkpointe
     append_all(&mut session, &raw);
     session.save()?;
     session.compaction = Some(compaction.clone());
+    session.provider_session_id = Some("stale-legacy-provider-session".to_string());
     session.save()?;
 
     let journal_path = session_journal_path(id)?;
@@ -420,7 +421,8 @@ fn valid_legacy_text_migration_is_exact_deterministic_idempotent_and_checkpointe
 
     let mut loaded = Session::load(id)?;
     assert_eq!(serde_json::to_vec(&loaded.messages)?, raw_before);
-    assert_eq!(loaded.compaction.as_ref(), Some(&compaction));
+    assert!(loaded.compaction.is_none());
+    assert!(loaded.provider_session_id.is_none());
     assert_eq!(loaded.context_view.revision, 1);
     assert_eq!(loaded.context_view.transactions.len(), 1);
     assert!(
@@ -461,7 +463,8 @@ fn valid_legacy_text_migration_is_exact_deterministic_idempotent_and_checkpointe
     assert_eq!(loaded_again.context_view, loaded.context_view);
     assert_eq!(loaded_again.context_view.transactions.len(), 1);
     assert_eq!(loaded_again.context_view.transactions[0].id, transaction_id);
-    assert_eq!(loaded_again.compaction.as_ref(), Some(&compaction));
+    assert!(loaded_again.compaction.is_none());
+    assert!(loaded_again.provider_session_id.is_none());
 
     let mut first = Session::create_with_id(id.to_string(), None, None);
     first.updated_at = timestamp();
@@ -475,6 +478,37 @@ fn valid_legacy_text_migration_is_exact_deterministic_idempotent_and_checkpointe
     let second_outcome = second.migrate_legacy_compaction_state();
     assert_eq!(first_outcome, second_outcome);
     assert_eq!(first.context_view, second.context_view);
+    assert!(first.compaction.is_none());
+    assert!(second.compaction.is_none());
+    Ok(())
+}
+
+#[test]
+fn already_migrated_context_retires_duplicated_legacy_state_and_provider_session() -> Result<()> {
+    let raw = text_transcript(5);
+    let mut session = Session::create_with_id("retire-legacy-duplicate".to_string(), None, None);
+    append_all(&mut session, &raw);
+    session.context_view = applied_summary_state(&session.messages, 0, 1, "migrated summary");
+    session.context_view.transactions[0].authorization =
+        StoredContextAuthorization::LegacyMigration {
+            source: StoredLegacyContextSource::JcodeTextCompaction,
+        };
+    session.compaction = Some(legacy_compaction("migrated summary", 2, None));
+    session.provider_session_id = Some("stale-provider-session".to_string());
+    let raw_before = serde_json::to_vec(&session.messages)?;
+    let context_before = session.context_view.clone();
+
+    let outcome = session.migrate_legacy_compaction_state();
+
+    assert_eq!(
+        outcome,
+        LegacyContextMigrationOutcome::RetiredMigratedLegacyState
+    );
+    assert!(outcome.changed_state());
+    assert!(session.compaction.is_none());
+    assert!(session.provider_session_id.is_none());
+    assert_eq!(session.context_view, context_before);
+    assert_eq!(serde_json::to_vec(&session.messages)?, raw_before);
     Ok(())
 }
 
@@ -490,6 +524,7 @@ fn remote_startup_migrates_in_memory_without_becoming_an_unexpected_writer() -> 
     let remote = Session::load_for_remote_startup(id)?;
     assert_eq!(remote.context_view.revision, 1);
     assert_eq!(remote.context_view.transactions.len(), 1);
+    assert!(remote.compaction.is_none());
 
     let before_authoritative_load = Session::load_startup_stub(id)?;
     assert!(before_authoritative_load.context_view.is_default());

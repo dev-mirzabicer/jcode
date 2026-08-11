@@ -581,6 +581,9 @@ async fn enter_creates_selfdev_session_in_test_mode() {
     });
     parent.record_replay_display_message("system", None, "remember this context");
     parent.save().expect("save parent session");
+    let migrated_parent = session::Session::load(&parent.id).expect("migrate parent session");
+    assert!(migrated_parent.compaction.is_none());
+    assert_eq!(migrated_parent.context_view.active_transaction_count(), 1);
 
     let tool = SelfDevTool::new();
     let ctx = create_test_context(&parent.id, Some(repo.path().to_path_buf()));
@@ -621,7 +624,8 @@ async fn enter_creates_selfdev_session_in_test_mode() {
     assert_eq!(session.parent_id.as_deref(), Some(parent.id.as_str()));
     assert_eq!(session.messages.len(), parent.messages.len());
     assert_eq!(session.messages[0].content_preview(), "hello from parent");
-    assert_eq!(session.compaction, parent.compaction);
+    assert!(session.compaction.is_none());
+    assert_eq!(session.context_view, migrated_parent.context_view);
     assert_eq!(session.model, parent.model);
     assert_eq!(session.provider_key, parent.provider_key);
     assert_eq!(session.subagent_model, parent.subagent_model);

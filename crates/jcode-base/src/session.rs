@@ -273,17 +273,19 @@ const MAX_SESSION_JOURNAL_BYTES: u64 = 512 * 1024;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LegacyContextMigrationOutcome {
     NotNeeded,
-    AlreadyMigrated,
+    RetiredMigratedLegacyState,
     MigratedTextSummary { transaction_id: String },
     RestoredRaw { issue: LegacyContextMigrationIssue },
     Blocked { issue: LegacyContextMigrationIssue },
 }
 
 impl LegacyContextMigrationOutcome {
-    fn changed_state(&self) -> bool {
+    pub fn changed_state(&self) -> bool {
         matches!(
             self,
-            Self::MigratedTextSummary { .. } | Self::RestoredRaw { .. }
+            Self::RetiredMigratedLegacyState
+                | Self::MigratedTextSummary { .. }
+                | Self::RestoredRaw { .. }
         )
     }
 }
@@ -896,7 +898,11 @@ impl Session {
                 jcode_session_types::StoredContextAuthorization::LegacyMigration { .. }
             )
         }) {
-            return LegacyContextMigrationOutcome::AlreadyMigrated;
+            self.compaction = None;
+            self.provider_session_id = None;
+            self.reset_provider_messages_cache();
+            self.mark_memory_profile_dirty();
+            return LegacyContextMigrationOutcome::RetiredMigratedLegacyState;
         }
         if let Err(error) = jcode_context_core::validate_context_state(&self.context_view) {
             return LegacyContextMigrationOutcome::Blocked {
@@ -906,6 +912,7 @@ impl Session {
 
         if compaction.summary_text.trim().is_empty() {
             self.compaction = None;
+            self.provider_session_id = None;
             self.reset_provider_messages_cache();
             self.mark_memory_profile_dirty();
             return LegacyContextMigrationOutcome::RestoredRaw {
@@ -919,6 +926,7 @@ impl Session {
 
         if compaction.compacted_count == 0 || compaction.compacted_count > self.messages.len() {
             self.compaction = None;
+            self.provider_session_id = None;
             self.reset_provider_messages_cache();
             self.mark_memory_profile_dirty();
             return LegacyContextMigrationOutcome::RestoredRaw {
@@ -939,6 +947,7 @@ impl Session {
             Ok(closed) => closed,
             Err(error) => {
                 self.compaction = None;
+                self.provider_session_id = None;
                 self.reset_provider_messages_cache();
                 self.mark_memory_profile_dirty();
                 return LegacyContextMigrationOutcome::RestoredRaw {
@@ -948,6 +957,7 @@ impl Session {
         };
         if (closed.start, closed.end) != (0, stored_end) {
             self.compaction = None;
+            self.provider_session_id = None;
             self.reset_provider_messages_cache();
             self.mark_memory_profile_dirty();
             return LegacyContextMigrationOutcome::RestoredRaw {
@@ -968,6 +978,7 @@ impl Session {
             Ok(range) => range,
             Err(error) => {
                 self.compaction = None;
+                self.provider_session_id = None;
                 self.reset_provider_messages_cache();
                 self.mark_memory_profile_dirty();
                 return LegacyContextMigrationOutcome::RestoredRaw {
@@ -1036,6 +1047,7 @@ impl Session {
             Ok(projection) => projection,
             Err(error) => {
                 self.compaction = None;
+                self.provider_session_id = None;
                 self.reset_provider_messages_cache();
                 self.mark_memory_profile_dirty();
                 return LegacyContextMigrationOutcome::RestoredRaw {
@@ -1061,8 +1073,8 @@ impl Session {
         }
 
         self.context_view = migrated;
-        // The legacy field remains temporarily readable by the old compaction manager until the
-        // runtime request cutover. The new projected view is already complete and authoritative.
+        self.compaction = None;
+        self.provider_session_id = None;
         self.reset_provider_messages_cache();
         self.mark_memory_profile_dirty();
         LegacyContextMigrationOutcome::MigratedTextSummary { transaction_id }

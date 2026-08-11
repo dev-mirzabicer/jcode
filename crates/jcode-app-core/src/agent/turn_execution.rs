@@ -212,14 +212,24 @@ impl Agent {
         self.session = new_session;
         self.reconcile_explicit_provider_pin_route();
         self.reset_runtime_state_for_session_change();
-        self.provider_session_id = None;
-        self.reseed_context_runtime_from_session();
+        if let Err(error) = self.after_provider_context_changed(
+            "session clear",
+            "session clear replaced the complete provider history",
+            true,
+        ) {
+            logging::error(&format!(
+                "Cleared session has an invalid provider projection: {}",
+                error
+            ));
+        }
     }
 
     /// Clear provider session so the next turn sends full context.
     pub fn reset_provider_session(&mut self) {
         self.provider_session_id = None;
         self.session.provider_session_id = None;
+        self.provider
+            .invalidate_context_continuation("provider session reset requested");
         self.persist_session_best_effort("provider session reset");
     }
 
@@ -248,18 +258,21 @@ impl Agent {
         let removed = message_count - message_index;
         self.rewind_undo_snapshot = Some(RewindUndoSnapshot {
             messages: self.session.messages.clone(),
-            provider_session_id: self.provider_session_id.clone(),
-            session_provider_session_id: self.session.provider_session_id.clone(),
             visible_message_count: message_count,
         });
         self.session.truncate_messages(stored_len);
         self.session.updated_at = chrono::Utc::now();
-        self.provider_session_id = None;
-        self.session.provider_session_id = None;
-        self.cache_tracker.reset();
-        self.locked_tools = None;
         self.reset_tool_output_tracking();
-        self.reseed_context_runtime_from_session();
+        if let Err(error) = self.after_provider_context_changed(
+            "conversation rewind",
+            format!("conversation rewound to stored message count {stored_len}"),
+            true,
+        ) {
+            logging::error(&format!(
+                "Conversation rewind produced an invalid provider projection: {}",
+                error
+            ));
+        }
         self.persist_session_best_effort("conversation rewind");
         Ok(removed)
     }
@@ -272,13 +285,18 @@ impl Agent {
         let current_count = self.session.rewind_target_count();
         let restored = snapshot.visible_message_count.saturating_sub(current_count);
         self.session.replace_messages(snapshot.messages);
-        self.provider_session_id = snapshot.provider_session_id;
-        self.session.provider_session_id = snapshot.session_provider_session_id;
         self.session.updated_at = chrono::Utc::now();
-        self.cache_tracker.reset();
-        self.locked_tools = None;
         self.reset_tool_output_tracking();
-        self.reseed_context_runtime_from_session();
+        if let Err(error) = self.after_provider_context_changed(
+            "conversation rewind undo",
+            "conversation rewind undo restored prior historical provider input",
+            true,
+        ) {
+            logging::error(&format!(
+                "Conversation rewind undo restored an invalid provider projection: {}",
+                error
+            ));
+        }
         self.persist_session_best_effort("conversation rewind undo");
         Ok(restored)
     }
@@ -678,6 +696,8 @@ impl Agent {
         ));
         let compaction_start = Instant::now();
         self.reseed_context_runtime_from_session();
+        self.provider
+            .invalidate_context_continuation("session restored into provider runtime");
         let compaction_ms = compaction_start.elapsed().as_millis();
 
         let env_snapshot_start = Instant::now();

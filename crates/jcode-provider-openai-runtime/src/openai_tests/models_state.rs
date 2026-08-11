@@ -276,6 +276,128 @@ async fn test_set_model_clears_persistent_ws_state() {
 }
 
 #[tokio::test]
+async fn context_continuation_invalidation_forces_a_fresh_openai_request() {
+    let provider = OpenAIProvider::new(CodexCredentials {
+        access_token: "test".to_string(),
+        refresh_token: String::new(),
+        id_token: None,
+        account_id: None,
+        expires_at: None,
+    });
+    let (state, server) = test_persistent_ws_state().await;
+    *provider.persistent_ws.lock().await = Some(state);
+
+    provider.invalidate_context_continuation("context revision 7 applied");
+
+    assert!(
+        provider.persistent_ws.lock().await.is_none(),
+        "historical context changes must discard previous_response_id and input-count state"
+    );
+    let (tx, _rx) = mpsc::channel(1);
+    let result = try_persistent_ws_continuation(
+        &provider.persistent_ws,
+        &serde_json::json!({"model": "gpt-5.6-sol"}),
+        &[serde_json::json!({
+            "type": "message",
+            "role": "user",
+            "content": "complete projected history"
+        })],
+        1,
+        &tx,
+    )
+    .await;
+    assert!(matches!(result, PersistentWsResult::NotAvailable));
+    server.abort();
+
+    // A successful fresh full request establishes a new response baseline. Only
+    // after that baseline exists may the runtime resume incremental delivery.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind continuation websocket listener");
+    let addr = listener.local_addr().expect("continuation listener addr");
+    let continuation_server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept continuation client");
+        let mut ws = tokio_tungstenite::accept_async(stream)
+            .await
+            .expect("accept continuation websocket");
+        let request = ws
+            .next()
+            .await
+            .expect("receive continuation request")
+            .expect("valid continuation request");
+        let WsMessage::Text(request) = request else {
+            panic!("expected text continuation request");
+        };
+        let request: serde_json::Value =
+            serde_json::from_str(&request).expect("parse continuation request");
+        assert_eq!(request["previous_response_id"], "resp_fresh_baseline");
+        assert_eq!(
+            request["input"].as_array().map(Vec::len),
+            Some(1),
+            "continuation after a fresh baseline must contain only the appended item"
+        );
+        assert_eq!(
+            request["input"][0]["content"],
+            "second after fresh baseline"
+        );
+        ws.send(WsMessage::Text(
+            r#"{"type":"response.created","response":{"id":"resp_after_continuation"}}"#.into(),
+        ))
+        .await
+        .expect("send response.created");
+        ws.send(WsMessage::Text(
+            r#"{"type":"response.completed","response":{"status":"completed"}}"#.into(),
+        ))
+        .await
+        .expect("send response.completed");
+    });
+    let (client_ws, _) = connect_async(format!("ws://{addr}"))
+        .await
+        .expect("connect continuation websocket");
+    *provider.persistent_ws.lock().await = Some(PersistentWsState {
+        ws_stream: client_ws,
+        last_response_id: "resp_fresh_baseline".to_string(),
+        connected_at: Instant::now(),
+        last_activity_at: Instant::now(),
+        last_response_completed_at: Instant::now(),
+        message_count: 1,
+        last_input_item_count: 1,
+    });
+    let (tx, _rx) = mpsc::channel(8);
+    let result = try_persistent_ws_continuation(
+        &provider.persistent_ws,
+        &serde_json::json!({"model": "gpt-5.6-sol"}),
+        &[
+            serde_json::json!({
+                "type": "message",
+                "role": "user",
+                "content": "complete projected history"
+            }),
+            serde_json::json!({
+                "type": "message",
+                "role": "user",
+                "content": "second after fresh baseline"
+            }),
+        ],
+        2,
+        &tx,
+    )
+    .await;
+    assert!(matches!(result, PersistentWsResult::Success));
+    {
+        let guard = provider.persistent_ws.lock().await;
+        let state = guard
+            .as_ref()
+            .expect("completed continuation remains reusable");
+        assert_eq!(state.last_response_id, "resp_after_continuation");
+        assert_eq!(state.last_input_item_count, 2);
+    }
+    continuation_server
+        .await
+        .expect("continuation websocket server");
+}
+
+#[tokio::test]
 // The test-env lock is intentionally held across awaits to serialize
 // process-global env access with other tests (see comment below).
 #[allow(clippy::await_holding_lock)]

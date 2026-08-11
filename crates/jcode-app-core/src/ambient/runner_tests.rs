@@ -140,7 +140,24 @@ async fn spawn_target_creates_one_child_session_and_runs_task() {
         Some("Parent".to_string()),
     );
     parent.working_dir = Some(temp.path().display().to_string());
+    parent.add_message(
+        Role::User,
+        vec![crate::message::ContentBlock::Text {
+            text: "historical scheduled-task context".to_string(),
+            cache_control: None,
+        }],
+    );
+    parent.compaction = Some(crate::session::StoredCompactionState {
+        summary_text: "scheduled-task context summary".to_string(),
+        openai_encrypted_content: None,
+        covers_up_to_turn: 1,
+        original_turn_count: 1,
+        compacted_count: 1,
+    });
     parent.save().expect("save parent session");
+    let migrated_parent = Session::load(&parent.id).expect("migrate parent context");
+    assert!(migrated_parent.compaction.is_none());
+    assert_eq!(migrated_parent.context_view.active_transaction_count(), 1);
 
     let item = ScheduledItem {
         id: "sched_spawn_test".to_string(),
@@ -170,6 +187,8 @@ async fn spawn_target_creates_one_child_session_and_runs_task() {
     let child = Session::load(&child_session_id).expect("load spawned child session");
     assert_eq!(child.parent_id.as_deref(), Some(parent.id.as_str()));
     assert_eq!(child.working_dir, parent.working_dir);
+    assert!(child.compaction.is_none());
+    assert_eq!(child.context_view, migrated_parent.context_view);
     assert!(child.messages.iter().any(|message| {
         message.role == Role::User
             && message.content_preview().contains("[Scheduled task]")

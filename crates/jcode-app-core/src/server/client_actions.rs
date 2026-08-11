@@ -661,6 +661,7 @@ fn clone_split_session(parent_session_id: &str) -> anyhow::Result<(String, Strin
     let mut child = Session::create(Some(parent_session_id.to_string()), None);
     child.replace_messages(parent.messages.clone());
     child.compaction = parent.compaction.clone();
+    child.context_view = parent.context_view.clone();
     child.working_dir = parent.working_dir.clone();
     child.model = parent.model.clone();
     child.status = crate::session::SessionStatus::Closed;

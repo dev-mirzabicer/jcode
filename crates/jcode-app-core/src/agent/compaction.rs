@@ -1,33 +1,33 @@
 use super::*;
+use crate::compaction::CompactionEvent;
 
 impl Agent {
     pub(super) fn note_compaction_applied(&mut self) {
-        self.cache_tracker.reset();
-        self.locked_tools = None;
-        self.provider_session_id = None;
-        self.session.provider_session_id = None;
+        if let Err(error) = self.after_provider_context_changed(
+            "legacy compaction transition",
+            "legacy compaction changed historical provider input",
+            true,
+        ) {
+            logging::error(&format!(
+                "Legacy compaction produced an invalid projected provider view: {}",
+                error
+            ));
+        }
     }
 
     pub fn poll_compaction_completion_event(&mut self) -> Option<CompactionEvent> {
         let provider_messages = self.session.messages_for_provider();
         let legacy_compaction = self.registry.legacy_compaction();
-        let (event, effective_messages) = match legacy_compaction.try_write() {
+        let event = match legacy_compaction.try_write() {
             Ok(mut manager) => {
                 let event = manager.poll_compaction_event_with(&provider_messages);
-                let effective_messages = if event.is_some() {
+                if event.is_some() {
                     self.sync_session_compaction_state_from_manager(&manager);
-                    Some(manager.messages_for_api_with(&provider_messages))
-                } else {
-                    None
-                };
-                (event, effective_messages)
+                }
+                event
             }
             Err(_) => return None,
         };
-
-        if let Some(messages) = effective_messages {
-            self.reseed_context_budget_from_messages(&messages, "background compaction completion");
-        }
 
         if event.is_some() {
             self.note_compaction_applied();
@@ -38,60 +38,11 @@ impl Agent {
     }
 
     pub fn request_manual_compaction(&mut self) -> (String, bool) {
-        if !self.provider.supports_compaction() {
-            return (
-                "Manual compaction is not available for this provider.".to_string(),
-                false,
-            );
-        }
-
-        let provider = self.provider.fork();
-        let messages = self.session.messages_for_provider();
-        let compaction = self.registry.legacy_compaction();
-
-        match compaction.try_write() {
-            Ok(mut manager) => {
-                let stats = manager.stats_with(&messages);
-                let status_msg = format!(
-                    "**Context Status:**\n\
-                    • Messages: {} (active), {} (total history)\n\
-                    • Token usage: ~{}k (estimate ~{}k) / {}k ({:.1}%)\n\
-                    • Has summary: {}\n\
-                    • Compacting: {}",
-                    stats.active_messages,
-                    stats.total_turns,
-                    stats.effective_tokens / 1000,
-                    stats.token_estimate / 1000,
-                    manager.token_budget() / 1000,
-                    stats.context_usage * 100.0,
-                    if stats.has_summary { "yes" } else { "no" },
-                    if stats.is_compacting {
-                        "in progress..."
-                    } else {
-                        "no"
-                    }
-                );
-
-                match manager.force_compact_with(&messages, provider) {
-                    Ok(()) => (
-                        format!(
-                            "{}\n\n📦 **Compacting context** (manual) — summarizing older messages in the background to stay within the context window.\n\
-                            The summary will be applied automatically when ready.",
-                            status_msg
-                        ),
-                        true,
-                    ),
-                    Err(reason) => (
-                        format!("{status_msg}\n\n⚠ **Cannot compact:** {reason}"),
-                        false,
-                    ),
-                }
-            }
-            Err(_) => (
-                "⚠ Cannot access compaction manager (lock held)".to_string(),
-                false,
-            ),
-        }
+        (
+            "Manual legacy compaction is unavailable for projected Agent history. The authoritative transcript and provider projection were not changed."
+                .to_string(),
+            false,
+        )
     }
 
     fn is_context_limit_error(error: &str) -> bool {
@@ -110,10 +61,11 @@ impl Agent {
             || (lower.contains("exceeded") && lower.contains("tokens"))
     }
 
-    /// Best-effort emergency recovery after a context-limit error.
+    /// Handle legacy recovery cases after a provider request failure.
     ///
-    /// Performs a synchronous hard compaction and resets provider session state,
-    /// allowing the caller to retry the same turn immediately.
+    /// Transitional payload and oversized native-state recovery may still produce
+    /// a genuinely smaller retry. Token-context overflow never mutates the legacy
+    /// manager now that Agent requests use persisted projected history exclusively.
     pub(super) fn try_auto_compact_after_context_limit(&mut self, error: &str) -> bool {
         if crate::provider::openai_request::is_openai_encrypted_content_too_large_error(error)
             && self.try_recover_oversized_openai_native_compaction()
@@ -131,68 +83,15 @@ impl Agent {
         if !Self::is_context_limit_error(error) {
             return false;
         }
-        if !self.provider.supports_compaction() {
-            return false;
-        }
-
-        let context_limit = self.provider.context_window() as u64;
-        let compaction = self.registry.legacy_compaction();
-
-        let (dropped, usage_pct, effective_messages) = match compaction.try_write() {
-            Ok(mut manager) => {
-                let (dropped, usage_pct) = {
-                    let all_messages = self.session.provider_messages();
-                    manager.update_observed_input_tokens(context_limit);
-                    let usage_pct = manager.context_usage_with(all_messages) * 100.0;
-                    let dropped = match manager.hard_compact_with(all_messages) {
-                        Ok(dropped) => dropped,
-                        Err(reason) => {
-                            logging::warn(&format!(
-                                "Context-limit auto-recovery failed: hard compact failed ({})",
-                                reason
-                            ));
-                            return false;
-                        }
-                    };
-                    (dropped, usage_pct)
-                };
-                self.sync_session_compaction_state_from_manager(&manager);
-                let effective_messages =
-                    manager.messages_for_api_with(self.session.provider_messages());
-                (dropped, usage_pct, effective_messages)
-            }
-            Err(_) => {
-                logging::warn("Context-limit auto-recovery skipped: compaction manager lock busy");
-                return false;
-            }
-        };
-        self.reseed_context_budget_from_messages(
-            &effective_messages,
-            "context-limit hard compaction",
+        // Agent requests now use the persisted context projection exclusively.
+        // Mutating the transitional legacy manager would not change the retried
+        // request, so claiming recovery here would loop on the same oversized
+        // provider input. Prompt-preserving context-limit UX replaces this call
+        // path in the dedicated preflight phase.
+        logging::warn(
+            "Context-limit automatic legacy compaction is disabled for projected Agent history; the unchanged request will not be retried",
         );
-
-        self.cache_tracker.reset();
-        self.locked_tools = None;
-        self.provider_session_id = None;
-        self.session.provider_session_id = None;
-
-        logging::warn(&format!(
-            "Context limit exceeded; auto-compacted and retrying (dropped {} messages, usage was {:.1}%)",
-            dropped, usage_pct
-        ));
-        crate::runtime_memory_log::emit_event(
-            crate::runtime_memory_log::RuntimeMemoryLogEvent::new(
-                "auto_compaction_applied",
-                "context_limit_auto_compaction",
-            )
-            .with_session_id(self.session.id.clone())
-            .with_detail(format!(
-                "dropped_messages={dropped},usage_pct={usage_pct:.1}"
-            ))
-            .force_attribution(),
-        );
-
-        true
+        false
     }
 
     /// Best-effort recovery after a provider HTTP 413 "request too large" error.
@@ -220,7 +119,7 @@ impl Agent {
         // The transcript changed; reseed compaction bookkeeping and reset
         // provider session/cache state so the retry sends the reduced payload.
         let compaction = self.registry.legacy_compaction();
-        let effective_messages = if let Ok(mut manager) = compaction.try_write() {
+        if let Ok(mut manager) = compaction.try_write() {
             let provider_messages = self.session.messages_for_provider();
             manager.reset();
             manager.set_budget(self.provider.context_window());
@@ -230,21 +129,18 @@ impl Agent {
                 manager.seed_restored_messages_with(&provider_messages);
             }
             self.sync_session_compaction_state_from_manager(&manager);
-            Some(manager.messages_for_api_with(&provider_messages))
-        } else {
-            None
-        };
-        if let Some(messages) = effective_messages {
-            self.reseed_context_budget_from_messages(
-                &messages,
-                "payload recovery transcript replacement",
-            );
         }
-
-        self.cache_tracker.reset();
-        self.locked_tools = None;
-        self.provider_session_id = None;
-        self.session.provider_session_id = None;
+        if let Err(error) = self.after_provider_context_changed(
+            "payload recovery transcript replacement",
+            format!("payload recovery stripped {stripped} image(s) from prior provider input"),
+            true,
+        ) {
+            logging::error(&format!(
+                "Payload recovery produced an invalid projected provider view: {}",
+                error
+            ));
+            return false;
+        }
 
         logging::warn(&format!(
             "Request body exceeded provider size limit; stripped {} oversized inline image(s) and retrying",
@@ -265,38 +161,37 @@ impl Agent {
 
     fn try_recover_oversized_openai_native_compaction(&mut self) -> bool {
         let compaction = self.registry.legacy_compaction();
-        let (recovered, effective_messages) = match compaction.try_write() {
+        let recovered = match compaction.try_write() {
             Ok(mut manager) => {
                 if !manager.discard_oversized_openai_native_compaction() {
                     return false;
                 }
                 self.sync_session_compaction_state_from_manager(&manager);
-                let messages = manager.messages_for_api_with(self.session.provider_messages());
-                (true, Some(messages))
+                true
             }
             Err(_) => {
                 logging::warn(
                     "OpenAI native compaction recovery skipped: compaction manager lock busy",
                 );
-                (false, None)
+                false
             }
         };
-
-        if let Some(messages) = effective_messages {
-            self.reseed_context_budget_from_messages(
-                &messages,
-                "OpenAI native compaction recovery",
-            );
-        }
 
         if !recovered {
             return false;
         }
 
-        self.cache_tracker.reset();
-        self.locked_tools = None;
-        self.provider_session_id = None;
-        self.session.provider_session_id = None;
+        if let Err(error) = self.after_provider_context_changed(
+            "OpenAI native compaction recovery",
+            "discarded oversized OpenAI native compaction state",
+            true,
+        ) {
+            logging::error(&format!(
+                "OpenAI native compaction recovery produced an invalid projected view: {}",
+                error
+            ));
+            return false;
+        }
 
         logging::warn(
             "OpenAI native compaction payload exceeded provider size limit; discarded native state and retrying with text fallback",

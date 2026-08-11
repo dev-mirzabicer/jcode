@@ -133,6 +133,9 @@ fn clone_split_session_uses_persisted_session_state() {
         compacted_count: 1,
     });
     parent.save().expect("save parent");
+    let migrated_parent = crate::session::Session::load(&parent.id).expect("migrate parent");
+    assert!(migrated_parent.compaction.is_none());
+    assert_eq!(migrated_parent.context_view.active_transaction_count(), 1);
 
     let (child_id, _child_name) = clone_split_session(&parent.id).expect("clone split");
     let child = crate::session::Session::load(&child_id).expect("load child");
@@ -158,7 +161,8 @@ fn clone_split_session_uses_persisted_session_state() {
         fork_notice_text.contains("forked") && fork_notice_text.contains(parent.id.as_str()),
         "fork notice should mention the parent session: {fork_notice_text}"
     );
-    assert_eq!(child.compaction, parent.compaction);
+    assert!(child.compaction.is_none());
+    assert_eq!(child.context_view, migrated_parent.context_view);
     assert_eq!(child.working_dir, parent.working_dir);
     assert_eq!(child.model, parent.model);
     assert_eq!(child.status, crate::session::SessionStatus::Closed);

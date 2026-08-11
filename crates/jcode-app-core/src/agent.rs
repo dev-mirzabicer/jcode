@@ -25,7 +25,6 @@ use self::utils::trace_enabled;
 use crate::build;
 use crate::bus::{Bus, BusEvent, SubagentStatus, ToolEvent, ToolStatus};
 use crate::cache_tracker::CacheTracker;
-use crate::compaction::CompactionEvent;
 use crate::id;
 use crate::logging;
 use crate::message::{
@@ -173,8 +172,6 @@ pub struct TokenUsage {
 #[derive(Debug, Clone)]
 struct RewindUndoSnapshot {
     messages: Vec<StoredMessage>,
-    provider_session_id: Option<String>,
-    session_provider_session_id: Option<String>,
     visible_message_count: usize,
 }
 
@@ -385,6 +382,9 @@ impl Agent {
         session: Session,
         allowed_tools: Option<HashSet<String>>,
     ) -> Self {
+        let mut session = session;
+        let migration = session.migrate_legacy_compaction_state();
+        let migration_changed_provider_context = migration.changed_state();
         let tool_selection = if let Some(allowed_tools) = allowed_tools {
             crate::config::ToolSelection {
                 allowed_tools: Some(allowed_tools),
@@ -428,7 +428,24 @@ impl Agent {
         agent.restore_reasoning_effort_from_session();
         agent.session.ensure_initial_session_context_message();
         agent.sync_memory_dedup_state_from_session();
-        agent.reseed_context_runtime_from_session();
+        if migration_changed_provider_context {
+            agent.restore_legacy_compaction_runtime_from_session();
+            if let Err(error) = agent.after_provider_context_changed(
+                "legacy context migration",
+                "legacy context migration activated while attaching session",
+                true,
+            ) {
+                logging::error(&format!(
+                    "Migrated session {} has an invalid provider projection: {}",
+                    agent.session.id, error
+                ));
+            }
+        } else {
+            agent.reseed_context_runtime_from_session();
+            agent
+                .provider
+                .invalidate_context_continuation("session attached to provider runtime");
+        }
         agent.log_env_snapshot("attach");
         agent.fire_session_lifecycle_hook("session_start", "attach");
         crate::telemetry::begin_session_with_parent(
@@ -445,37 +462,47 @@ impl Agent {
             "reseed_context_runtime_from_session: session has {} messages",
             self.session.messages.len()
         ));
-        let legacy_compaction = self.registry.legacy_compaction();
-        let mut manager = match legacy_compaction.try_write() {
-            Ok(manager) => manager,
-            Err(_) => {
-                logging::warn(
-                    "reseed_context_runtime_from_session: legacy compaction lock unavailable, skipping restore",
-                );
-                return;
+        self.restore_legacy_compaction_runtime_from_session();
+
+        match self.projected_provider_messages_for_request() {
+            Ok(provider_messages) => {
+                logging::info(&format!(
+                    "reseed_context_runtime_from_session: seeded {} projected provider messages from {} stored messages at revision {}",
+                    provider_messages.len(),
+                    self.session.messages.len(),
+                    self.session.context_view.revision,
+                ));
+                self.reseed_context_budget_from_messages(&provider_messages, "session reseed");
             }
-        };
-        manager.reset();
-        let budget = self.provider.context_window();
-        manager.set_budget(budget);
-        if let Some(state) = self.session.compaction.as_ref() {
-            manager.restore_persisted_stored_state_with(state, &self.session.messages);
-        } else {
-            manager.seed_restored_stored_messages_with(&self.session.messages);
+            Err(error) => {
+                self.reseed_context_budget_from_messages(&[], "invalid session projection");
+                logging::error(&format!(
+                    "Cannot seed provider context for session {}: {}",
+                    self.session.id, error
+                ));
+            }
         }
-        let sanitized_state = if manager.discard_oversized_openai_native_compaction() {
-            Some(manager.persisted_state())
+    }
+
+    fn restore_legacy_compaction_runtime_from_session(&mut self) {
+        let legacy_compaction = self.registry.legacy_compaction();
+        let sanitized_state = if let Ok(mut manager) = legacy_compaction.try_write() {
+            manager.reset();
+            manager.set_budget(self.provider.context_window());
+            if let Some(state) = self.session.compaction.as_ref() {
+                manager.restore_persisted_stored_state_with(state, &self.session.messages);
+            } else {
+                manager.seed_restored_stored_messages_with(&self.session.messages);
+            }
+            manager
+                .discard_oversized_openai_native_compaction()
+                .then(|| manager.persisted_state())
         } else {
+            logging::warn(
+                "reseed_context_runtime_from_session: legacy compaction lock unavailable; projected accounting will still be restored",
+            );
             None
         };
-        let provider_messages = manager.messages_for_api_with(self.session.provider_messages());
-        logging::info(&format!(
-            "reseed_context_runtime_from_session: seeded {} provider messages from {} stored messages",
-            provider_messages.len(),
-            self.session.messages.len(),
-        ));
-        drop(manager);
-        self.reseed_context_budget_from_messages(&provider_messages, "session reseed");
         if let Some(state) = sanitized_state {
             self.session.compaction = state;
             self.persist_session_best_effort("sanitized oversized OpenAI native compaction");
@@ -626,6 +653,47 @@ impl Agent {
         self.rewind_undo_snapshot = None;
     }
 
+    fn projected_provider_messages_for_request(&mut self) -> Result<Vec<Message>> {
+        self.session.projected_messages_for_provider().map_err(|error| {
+            anyhow::anyhow!(
+                "Context projection failed for session {} at revision {}: {}. The provider request was not sent; review or repair the active context transactions.",
+                self.session.id,
+                self.session.context_view.revision,
+                error
+            )
+        })
+    }
+
+    fn after_provider_context_changed(
+        &mut self,
+        source: &'static str,
+        detail: impl Into<String>,
+        document_cache_invalidation: bool,
+    ) -> Result<()> {
+        let detail = detail.into();
+        if document_cache_invalidation {
+            crate::cache_invalidation::record(source, detail.clone());
+        }
+
+        self.cache_tracker.reset();
+        self.locked_tools = None;
+        self.mcp_late_register_resolved = false;
+        self.provider_session_id = None;
+        self.session.provider_session_id = None;
+        self.provider.invalidate_context_continuation(&detail);
+
+        match self.projected_provider_messages_for_request() {
+            Ok(messages) => {
+                self.reseed_context_budget_from_messages(&messages, &detail);
+                Ok(())
+            }
+            Err(error) => {
+                self.reseed_context_budget_from_messages(&[], "invalid changed provider context");
+                Err(error)
+            }
+        }
+    }
+
     fn sync_session_compaction_state_from_manager(
         &mut self,
         manager: &crate::compaction::CompactionManager,
@@ -675,23 +743,19 @@ impl Agent {
 
         self.session.compaction = Some(state.clone());
         let legacy_compaction = self.registry.legacy_compaction();
-        let effective_messages = if let Ok(mut manager) = legacy_compaction.try_write() {
+        if let Ok(mut manager) = legacy_compaction.try_write() {
             manager.set_budget(self.provider.context_window());
             manager.restore_persisted_stored_state_with(&state, &self.session.messages);
-            Some(manager.messages_for_api_with(self.session.provider_messages()))
-        } else {
-            None
-        };
-        if let Some(messages) = effective_messages {
-            self.reseed_context_budget_from_messages(&messages, "OpenAI native compaction");
         }
 
-        self.cache_tracker.reset();
-        self.locked_tools = None;
-        self.mcp_late_register_resolved = false;
-        self.provider_session_id = None;
-        self.session.provider_session_id = None;
         self.session.save()?;
+        self.after_provider_context_changed(
+            "OpenAI native compaction",
+            format!(
+                "OpenAI native compaction changed historical provider state at stored count {compacted_count}"
+            ),
+            true,
+        )?;
         crate::runtime_memory_log::emit_event(
             crate::runtime_memory_log::RuntimeMemoryLogEvent::new(
                 "native_compaction_applied",
@@ -703,87 +767,21 @@ impl Agent {
         Ok(())
     }
 
-    fn messages_for_provider(&mut self) -> (Vec<Message>, Option<CompactionEvent>) {
-        if self.provider.supports_compaction() || self.session.compaction.is_some() {
-            let legacy_compaction = self.registry.legacy_compaction();
-            match legacy_compaction.try_write() {
-                Ok(mut manager) => {
-                    let discarded_oversized_native =
-                        manager.discard_oversized_openai_native_compaction();
-                    let messages = {
-                        let all_messages = self.session.provider_messages();
-                        if self.provider.uses_jcode_compaction() {
-                            let action =
-                                manager.ensure_context_fits(all_messages, self.provider.clone());
-                            match action {
-                                crate::compaction::CompactionAction::BackgroundStarted {
-                                    trigger,
-                                } => {
-                                    logging::info(&format!(
-                                        "Background compaction started ({})",
-                                        trigger
-                                    ));
-                                }
-                                crate::compaction::CompactionAction::HardCompacted(dropped) => {
-                                    logging::warn(&format!(
-                                        "Emergency hard compact: dropped {} messages (context was critical)",
-                                        dropped
-                                    ));
-                                }
-                                crate::compaction::CompactionAction::None => {}
-                            }
-                        }
-                        manager.messages_for_api_with(all_messages)
-                    };
-                    let event = manager.take_compaction_event();
-                    let context_changed = event.is_some() || discarded_oversized_native;
-                    if context_changed {
-                        self.sync_session_compaction_state_from_manager(&manager);
-                    }
-                    if event.is_some() {
-                        self.note_compaction_applied();
-                        self.persist_session_best_effort("compaction completion");
-                    }
-                    drop(manager);
-                    if context_changed {
-                        self.reseed_context_budget_from_messages(
-                            &messages,
-                            "legacy compaction transition",
-                        );
-                    }
-                    let user_count = messages
-                        .iter()
-                        .filter(|message| matches!(message.role, Role::User))
-                        .count();
-                    let assistant_count = messages.len().saturating_sub(user_count);
-                    logging::info(&format!(
-                        "messages_for_provider (compaction): returning {} messages (user={}, assistant={})",
-                        messages.len(),
-                        user_count,
-                        assistant_count,
-                    ));
-                    return (messages, event);
-                }
-                Err(_) => {
-                    logging::info("messages_for_provider: compaction lock failed, using session");
-                }
-            };
-        }
-
-        let all_messages = self.session.provider_messages();
-        let messages = all_messages.to_vec();
+    fn messages_for_provider(&mut self) -> Result<Vec<Message>> {
+        let messages = self.projected_provider_messages_for_request()?;
         let user_count = messages
             .iter()
             .filter(|message| matches!(message.role, Role::User))
             .count();
         let assistant_count = messages.len().saturating_sub(user_count);
         logging::info(&format!(
-            "messages_for_provider (session): returning {} messages (user={}, assistant={})",
+            "messages_for_provider (projected revision {}): returning {} messages (user={}, assistant={})",
+            self.session.context_view.revision,
             messages.len(),
             user_count,
             assistant_count,
         ));
-        (messages, None)
+        Ok(messages)
     }
 
     fn record_client_cache_request(&mut self, messages: &[Message]) {
@@ -791,10 +789,9 @@ impl Agent {
             return;
         }
 
-        let fast_snapshot =
-            if !self.provider.uses_jcode_compaction() && self.session.compaction.is_none() {
-                let previous_count = self.cache_tracker.previous_message_count();
-                let prefix_hashes = self.session.provider_message_prefix_hashes();
+        let previous_count = self.cache_tracker.previous_message_count();
+        let fast_snapshot = match self.session.projected_provider_message_prefix_hashes() {
+            Ok(prefix_hashes) => {
                 let current_count = prefix_hashes.len();
                 let current_full_hash = prefix_hashes.last().copied();
                 let prefix_hash_at_previous_count =
@@ -808,9 +805,15 @@ impl Agent {
                     prefix_hash_at_previous_count,
                     current_full_hash,
                 ))
-            } else {
+            }
+            Err(error) => {
+                logging::warn(&format!(
+                    "Projected cache-prefix snapshot unavailable after successful request projection: {}",
+                    error
+                ));
                 None
-            };
+            }
+        };
 
         let violation =
             if let Some((current_count, prefix_hash_at_previous_count, current_full_hash)) =
@@ -926,10 +929,16 @@ impl Agent {
 
         if repaired > 0 {
             self.persist_session_best_effort("missing tool-output repair");
-            self.cache_tracker.reset();
-            self.locked_tools = None;
-            self.mcp_late_register_resolved = false;
-            self.reseed_context_runtime_from_session();
+            if let Err(error) = self.after_provider_context_changed(
+                "historical tool repair",
+                format!("inserted {repaired} missing tool output(s) into prior provider history"),
+                true,
+            ) {
+                logging::error(&format!(
+                    "Missing tool-output repair left an invalid provider projection: {}",
+                    error
+                ));
+            }
         }
 
         repaired

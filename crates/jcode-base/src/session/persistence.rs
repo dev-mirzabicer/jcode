@@ -270,8 +270,13 @@ impl Session {
                     session.id, issue
                 ));
             }
-            super::LegacyContextMigrationOutcome::NotNeeded
-            | super::LegacyContextMigrationOutcome::AlreadyMigrated => {}
+            super::LegacyContextMigrationOutcome::RetiredMigratedLegacyState => {
+                crate::logging::info(&format!(
+                    "Retired duplicated legacy compaction state for migrated session {}",
+                    session.id
+                ));
+            }
+            super::LegacyContextMigrationOutcome::NotNeeded => {}
         }
         if migration.changed_state() {
             session.checkpoint_snapshot(path, &journal_path)?;
@@ -378,8 +383,8 @@ impl Session {
                     session.id, issue
                 ));
             }
-            super::LegacyContextMigrationOutcome::NotNeeded
-            | super::LegacyContextMigrationOutcome::AlreadyMigrated
+            super::LegacyContextMigrationOutcome::RetiredMigratedLegacyState
+            | super::LegacyContextMigrationOutcome::NotNeeded
             | super::LegacyContextMigrationOutcome::MigratedTextSummary { .. } => {}
         }
         let finalize_ms = finalize_start.elapsed().as_millis();
