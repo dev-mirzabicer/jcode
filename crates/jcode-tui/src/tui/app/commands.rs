@@ -3316,7 +3316,7 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
     if trimmed == "/compact mode" || trimmed == "/compact mode status" {
         let mode = app
             .registry
-            .compaction()
+            .legacy_compaction()
             .try_read()
             .map(|manager| manager.mode())
             .unwrap_or_default();
@@ -3336,7 +3336,7 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
             return true;
         };
 
-        match app.registry.compaction().try_write() {
+        match app.registry.legacy_compaction().try_write() {
             Ok(mut manager) => {
                 manager.set_mode(mode.clone());
                 let label = mode.as_str();
@@ -3362,7 +3362,7 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
             ));
             return true;
         }
-        let compaction = app.registry.compaction();
+        let compaction = app.registry.legacy_compaction();
         match compaction.try_write() {
             Ok(mut manager) => {
                 let provider_messages = app.materialized_provider_messages();

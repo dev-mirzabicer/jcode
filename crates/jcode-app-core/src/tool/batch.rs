@@ -103,6 +103,16 @@ impl BatchTool {
     }
 }
 
+pub(super) async fn execute_with_registry(
+    registry: &Registry,
+    input: Value,
+    ctx: ToolContext,
+) -> Result<ToolOutput> {
+    BatchTool::new(registry.clone_with_shared_context_runtime())
+        .execute(input, ctx)
+        .await
+}
+
 #[derive(Deserialize)]
 struct BatchInput {
     tool_calls: Vec<ToolCallInput>,
@@ -282,7 +292,7 @@ impl Tool for BatchTool {
         let mut stream: futures::stream::FuturesUnordered<_> = subcalls
             .iter()
             .map(|(i, tool_name, parameters)| {
-                let registry = self.registry.clone();
+                let registry = self.registry.clone_with_shared_context_runtime();
                 let i = *i;
                 let tool_name = tool_name.clone();
                 let parameters = parameters.clone();

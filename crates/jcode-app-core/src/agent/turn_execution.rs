@@ -213,7 +213,7 @@ impl Agent {
         self.reconcile_explicit_provider_pin_route();
         self.reset_runtime_state_for_session_change();
         self.provider_session_id = None;
-        self.seed_compaction_from_session();
+        self.reseed_context_runtime_from_session();
     }
 
     /// Clear provider session so the next turn sends full context.
@@ -259,6 +259,7 @@ impl Agent {
         self.cache_tracker.reset();
         self.locked_tools = None;
         self.reset_tool_output_tracking();
+        self.reseed_context_runtime_from_session();
         self.persist_session_best_effort("conversation rewind");
         Ok(removed)
     }
@@ -277,6 +278,7 @@ impl Agent {
         self.cache_tracker.reset();
         self.locked_tools = None;
         self.reset_tool_output_tracking();
+        self.reseed_context_runtime_from_session();
         self.persist_session_best_effort("conversation rewind undo");
         Ok(restored)
     }
@@ -670,12 +672,12 @@ impl Agent {
         self.sync_memory_dedup_state_from_session();
 
         logging::info(&format!(
-            "restore_session: loaded session {} with {} messages, calling seed_compaction",
+            "restore_session: loaded session {} with {} messages, reseeding context runtime",
             session_id,
             self.session.messages.len()
         ));
         let compaction_start = Instant::now();
-        self.seed_compaction_from_session();
+        self.reseed_context_runtime_from_session();
         let compaction_ms = compaction_start.elapsed().as_millis();
 
         let env_snapshot_start = Instant::now();

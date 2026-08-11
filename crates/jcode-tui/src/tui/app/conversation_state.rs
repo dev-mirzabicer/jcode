@@ -205,10 +205,20 @@ impl App {
             self.ensure_provider_messages_hydrated();
             self.messages.push(message.clone());
         }
+
+        if !self.is_remote {
+            let context_budget = self.registry.context_budget();
+            if let Ok(mut tracker) = context_budget.try_write() {
+                tracker.record_message(&message);
+            } else {
+                crate::logging::warn("Context budget lock unavailable during TUI message append");
+            }
+        }
+
         if self.is_remote || !self.provider.uses_jcode_compaction() {
             return;
         }
-        let compaction = self.registry.compaction();
+        let compaction = self.registry.legacy_compaction();
         if let Ok(mut manager) = compaction.try_write() {
             manager.notify_message_added_with(&message);
         };
@@ -218,7 +228,7 @@ impl App {
         self.messages = messages;
         self.last_injected_memory_signature = None;
         self.reset_tool_output_tracking();
-        self.reseed_compaction_from_provider_messages();
+        self.reseed_context_runtime_from_provider_messages();
         self.note_runtime_memory_event_force("provider_messages_replaced", "provider_view_reset");
     }
 
@@ -226,7 +236,7 @@ impl App {
         self.messages.clear();
         self.last_injected_memory_signature = None;
         self.reset_tool_output_tracking();
-        self.reseed_compaction_from_provider_messages();
+        self.reseed_context_runtime_from_provider_messages();
         self.note_runtime_memory_event_force("provider_messages_cleared", "provider_view_cleared");
     }
 
@@ -236,26 +246,57 @@ impl App {
         self.tool_output_scan_index = 0;
     }
 
-    pub(super) fn reseed_compaction_from_provider_messages(&mut self) {
-        if self.is_remote
-            || (!self.provider.uses_jcode_compaction() && self.session.compaction.is_none())
-        {
+    pub(super) fn reseed_context_runtime_from_provider_messages(&mut self) {
+        if self.is_remote {
+            let context_budget = self.registry.context_budget();
+            if let Ok(mut tracker) = context_budget.try_write() {
+                tracker.set_budget(self.context_limit as usize);
+                tracker.reset();
+            } else {
+                crate::logging::warn(
+                    "Context budget lock unavailable during remote TUI history replacement",
+                );
+            }
             return;
         }
+
         let provider_messages = self.materialized_provider_messages();
-        let compaction = self.registry.compaction();
-        if let Ok(mut manager) = compaction.try_write() {
-            manager.reset();
-            manager.set_budget(self.context_limit as usize);
-            if let Some(state) = self.session.compaction.as_ref() {
-                manager.restore_persisted_state_with(state, &provider_messages);
+        let mut effective_messages = provider_messages.clone();
+
+        if self.provider.uses_jcode_compaction() || self.session.compaction.is_some() {
+            let legacy_compaction = self.registry.legacy_compaction();
+            if let Ok(mut manager) = legacy_compaction.try_write() {
+                manager.reset();
+                manager.set_budget(self.context_limit as usize);
+                if let Some(state) = self.session.compaction.as_ref() {
+                    manager.restore_persisted_state_with(state, &provider_messages);
+                } else {
+                    manager.seed_restored_messages_with(&provider_messages);
+                }
+                if manager.discard_oversized_openai_native_compaction() {
+                    self.sync_session_compaction_state_from_manager(&manager);
+                }
+                effective_messages = manager.messages_for_api_with(&provider_messages);
             } else {
-                manager.seed_restored_messages_with(&provider_messages);
+                crate::logging::warn(
+                    "Legacy compaction lock unavailable during TUI context reseed",
+                );
             }
-            if manager.discard_oversized_openai_native_compaction() {
-                self.sync_session_compaction_state_from_manager(&manager);
-            }
-        };
+        }
+
+        self.reseed_context_budget_from_messages(&effective_messages, "TUI provider-view reseed");
+    }
+
+    pub(super) fn reseed_context_budget_from_messages(&self, messages: &[Message], reason: &str) {
+        let context_budget = self.registry.context_budget();
+        if let Ok(mut tracker) = context_budget.try_write() {
+            tracker.set_budget(self.context_limit as usize);
+            tracker.seed_messages(messages);
+        } else {
+            crate::logging::warn(&format!(
+                "Context budget lock unavailable during {reason}; accounting was not reseeded"
+            ));
+        }
     }
 
     pub(super) fn sync_session_compaction_state_from_manager(
@@ -306,12 +347,7 @@ impl App {
         };
 
         self.session.compaction = Some(state.clone());
-        let provider_messages = self.materialized_provider_messages();
-        let compaction = self.registry.compaction();
-        if let Ok(mut manager) = compaction.try_write() {
-            manager.set_budget(self.context_limit as usize);
-            manager.restore_persisted_state_with(&state, &provider_messages);
-        }
+        self.reseed_context_runtime_from_provider_messages();
 
         self.invalidate_kv_cache_after_compaction();
         self.session.save()?;
@@ -328,7 +364,7 @@ impl App {
         if !self.provider.supports_compaction() && self.session.compaction.is_none() {
             return (base_messages, None);
         }
-        let compaction = self.registry.compaction();
+        let compaction = self.registry.legacy_compaction();
         match compaction.try_write() {
             Ok(mut manager) => {
                 let discarded_oversized_native =
@@ -348,8 +384,16 @@ impl App {
                 }
                 let messages = manager.messages_for_api_with(&base_messages);
                 let event = manager.take_compaction_event();
-                if event.is_some() || discarded_oversized_native {
+                let context_changed = event.is_some() || discarded_oversized_native;
+                if context_changed {
                     self.sync_session_compaction_state_from_manager(&manager);
+                }
+                drop(manager);
+                if context_changed {
+                    self.reseed_context_budget_from_messages(
+                        &messages,
+                        "TUI legacy compaction transition",
+                    );
                 }
                 (messages, event)
             }
@@ -364,11 +408,21 @@ impl App {
             return false;
         }
         let provider_messages = self.materialized_provider_messages();
-        let compaction = self.registry.compaction();
-        if let Ok(mut manager) = compaction.try_write()
+        let compaction = self.registry.legacy_compaction();
+        let completed = if let Ok(mut manager) = compaction.try_write()
             && let Some(event) = manager.poll_compaction_event_with(&provider_messages)
         {
             self.sync_session_compaction_state_from_manager(&manager);
+            let messages = manager.messages_for_api_with(&provider_messages);
+            Some((event, messages))
+        } else {
+            None
+        };
+        if let Some((event, messages)) = completed {
+            self.reseed_context_budget_from_messages(
+                &messages,
+                "TUI background compaction completion",
+            );
             self.handle_compaction_event(event);
             return true;
         }
@@ -799,7 +853,7 @@ impl App {
         self.tool_output_scan_index = self.local_transcript_message_count();
 
         if repaired > 0 {
-            self.reseed_compaction_from_provider_messages();
+            self.reseed_context_runtime_from_provider_messages();
             let _ = self.session.save();
         }
 
@@ -825,6 +879,7 @@ impl App {
         new_session.save_label = old_session.save_label.clone();
         new_session.working_dir = old_session.working_dir.clone();
 
+        self.session = new_session;
         self.clear_provider_messages();
         self.clear_display_messages();
         // Ctrl+R is reachable mid-stream (turn.rs key handling); drop the
@@ -840,7 +895,6 @@ impl App {
         self.pending_images.clear();
         self.active_skill = None;
         self.provider_session_id = None;
-        self.session = new_session;
         self.set_side_panel_snapshot(
             crate::side_panel::snapshot_for_session(&self.session.id).unwrap_or_default(),
         );

@@ -10,17 +10,24 @@ impl Agent {
 
     pub fn poll_compaction_completion_event(&mut self) -> Option<CompactionEvent> {
         let provider_messages = self.session.messages_for_provider();
-        let compaction = self.registry.compaction();
-        let event = match compaction.try_write() {
+        let legacy_compaction = self.registry.legacy_compaction();
+        let (event, effective_messages) = match legacy_compaction.try_write() {
             Ok(mut manager) => {
                 let event = manager.poll_compaction_event_with(&provider_messages);
-                if event.is_some() {
+                let effective_messages = if event.is_some() {
                     self.sync_session_compaction_state_from_manager(&manager);
-                }
-                event
+                    Some(manager.messages_for_api_with(&provider_messages))
+                } else {
+                    None
+                };
+                (event, effective_messages)
             }
             Err(_) => return None,
         };
+
+        if let Some(messages) = effective_messages {
+            self.reseed_context_budget_from_messages(&messages, "background compaction completion");
+        }
 
         if event.is_some() {
             self.note_compaction_applied();
@@ -40,7 +47,7 @@ impl Agent {
 
         let provider = self.provider.fork();
         let messages = self.session.messages_for_provider();
-        let compaction = self.registry.compaction();
+        let compaction = self.registry.legacy_compaction();
 
         match compaction.try_write() {
             Ok(mut manager) => {
@@ -129,9 +136,9 @@ impl Agent {
         }
 
         let context_limit = self.provider.context_window() as u64;
-        let compaction = self.registry.compaction();
+        let compaction = self.registry.legacy_compaction();
 
-        let (dropped, usage_pct) = match compaction.try_write() {
+        let (dropped, usage_pct, effective_messages) = match compaction.try_write() {
             Ok(mut manager) => {
                 let (dropped, usage_pct) = {
                     let all_messages = self.session.provider_messages();
@@ -150,13 +157,19 @@ impl Agent {
                     (dropped, usage_pct)
                 };
                 self.sync_session_compaction_state_from_manager(&manager);
-                (dropped, usage_pct)
+                let effective_messages =
+                    manager.messages_for_api_with(self.session.provider_messages());
+                (dropped, usage_pct, effective_messages)
             }
             Err(_) => {
                 logging::warn("Context-limit auto-recovery skipped: compaction manager lock busy");
                 return false;
             }
         };
+        self.reseed_context_budget_from_messages(
+            &effective_messages,
+            "context-limit hard compaction",
+        );
 
         self.cache_tracker.reset();
         self.locked_tools = None;
@@ -206,8 +219,8 @@ impl Agent {
 
         // The transcript changed; reseed compaction bookkeeping and reset
         // provider session/cache state so the retry sends the reduced payload.
-        let compaction = self.registry.compaction();
-        if let Ok(mut manager) = compaction.try_write() {
+        let compaction = self.registry.legacy_compaction();
+        let effective_messages = if let Ok(mut manager) = compaction.try_write() {
             let provider_messages = self.session.messages_for_provider();
             manager.reset();
             manager.set_budget(self.provider.context_window());
@@ -217,6 +230,15 @@ impl Agent {
                 manager.seed_restored_messages_with(&provider_messages);
             }
             self.sync_session_compaction_state_from_manager(&manager);
+            Some(manager.messages_for_api_with(&provider_messages))
+        } else {
+            None
+        };
+        if let Some(messages) = effective_messages {
+            self.reseed_context_budget_from_messages(
+                &messages,
+                "payload recovery transcript replacement",
+            );
         }
 
         self.cache_tracker.reset();
@@ -242,22 +264,30 @@ impl Agent {
     }
 
     fn try_recover_oversized_openai_native_compaction(&mut self) -> bool {
-        let compaction = self.registry.compaction();
-        let recovered = match compaction.try_write() {
+        let compaction = self.registry.legacy_compaction();
+        let (recovered, effective_messages) = match compaction.try_write() {
             Ok(mut manager) => {
                 if !manager.discard_oversized_openai_native_compaction() {
                     return false;
                 }
                 self.sync_session_compaction_state_from_manager(&manager);
-                true
+                let messages = manager.messages_for_api_with(self.session.provider_messages());
+                (true, Some(messages))
             }
             Err(_) => {
                 logging::warn(
                     "OpenAI native compaction recovery skipped: compaction manager lock busy",
                 );
-                false
+                (false, None)
             }
         };
+
+        if let Some(messages) = effective_messages {
+            self.reseed_context_budget_from_messages(
+                &messages,
+                "OpenAI native compaction recovery",
+            );
+        }
 
         if !recovered {
             return false;
@@ -289,9 +319,8 @@ impl Agent {
         cache_read_input_tokens: Option<u64>,
         cache_creation_input_tokens: Option<u64>,
     ) -> u64 {
-        // Shared heuristic (jcode-compaction-core): keeps the compaction
-        // manager's observed-token feed consistent with the client-side
-        // context display.
+        // Shared heuristic keeps provider-observed context accounting consistent
+        // between the policy-free tracker, legacy compaction, and the TUI.
         crate::compaction::effective_context_tokens_from_usage(
             self.provider.name(),
             input_tokens,
@@ -300,13 +329,13 @@ impl Agent {
         )
     }
 
-    pub(super) fn update_compaction_usage_from_stream(
+    pub(super) fn update_context_usage_from_stream(
         &mut self,
         input_tokens: u64,
         cache_read_input_tokens: Option<u64>,
         cache_creation_input_tokens: Option<u64>,
     ) {
-        if !self.provider.uses_jcode_compaction() || input_tokens == 0 {
+        if input_tokens == 0 {
             return;
         }
         let observed = self.effective_context_tokens_from_usage(
@@ -314,8 +343,18 @@ impl Agent {
             cache_read_input_tokens,
             cache_creation_input_tokens,
         );
-        let compaction = self.registry.compaction();
-        if let Ok(mut manager) = compaction.try_write() {
+        let context_budget = self.registry.context_budget();
+        if let Ok(mut tracker) = context_budget.try_write() {
+            tracker.update_observed_input_tokens(observed);
+        } else {
+            logging::warn("Context budget lock unavailable during provider usage update");
+        }
+
+        if !self.provider.uses_jcode_compaction() {
+            return;
+        }
+        let legacy_compaction = self.registry.legacy_compaction();
+        if let Ok(mut manager) = legacy_compaction.try_write() {
             manager.update_observed_input_tokens(observed);
             manager.push_token_snapshot(observed);
         };
@@ -327,7 +366,7 @@ impl Agent {
     pub(super) fn push_embedding_snapshot_if_semantic(&mut self, text: &str) {
         use crate::config::CompactionMode;
         let is_semantic = {
-            let compaction = self.registry.compaction();
+            let compaction = self.registry.legacy_compaction();
             compaction
                 .try_read()
                 .map(|m| m.mode() == CompactionMode::Semantic)
@@ -336,7 +375,7 @@ impl Agent {
         if !is_semantic {
             return;
         }
-        let compaction = self.registry.compaction();
+        let compaction = self.registry.legacy_compaction();
         if let Ok(mut manager) = compaction.try_write() {
             manager.push_embedding_snapshot(text);
         };

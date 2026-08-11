@@ -427,7 +427,7 @@ impl CompactionManager {
 
     /// Record the observed token count after a completed turn.
     ///
-    /// Called by the agent after `update_compaction_usage_from_stream`.
+    /// Called by the agent after `update_context_usage_from_stream`.
     /// Pushes the value into the rolling history window used by the proactive
     /// and semantic modes. Also increments the cooldown counter.
     pub fn push_token_snapshot(&mut self, tokens: u64) {
@@ -802,6 +802,10 @@ impl CompactionManager {
     /// Store provider-reported input token usage for compaction decisions.
     pub fn update_observed_input_tokens(&mut self, tokens: u64) {
         self.observed_input_tokens = Some(tokens);
+    }
+
+    pub fn clear_observed_input_tokens(&mut self) {
+        self.observed_input_tokens = None;
     }
 
     /// Best-effort current token count using the caller's messages.

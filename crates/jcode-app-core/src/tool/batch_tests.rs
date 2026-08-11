@@ -127,16 +127,7 @@ fn test_normalize_arguments_aliases_to_parameters() {
 
 #[test]
 fn test_schema_only_requires_tool() {
-    let schema = BatchTool::new(Registry {
-        tools: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        skills: std::sync::Arc::new(tokio::sync::RwLock::new(
-            crate::skill::SkillRegistry::default(),
-        )),
-        compaction: std::sync::Arc::new(tokio::sync::RwLock::new(
-            crate::compaction::CompactionManager::new(),
-        )),
-    })
-    .parameters_schema();
+    let schema = BatchTool::new(Registry::empty()).parameters_schema();
 
     assert_eq!(
         schema["properties"]["tool_calls"]["items"]["required"],

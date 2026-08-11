@@ -921,7 +921,7 @@ pub(super) async fn handle_set_compaction_mode(
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
     if let Ok(agent_guard) = agent.try_lock() {
-        let registry = agent_guard.registry();
+        let registry = agent_guard.shared_runtime_registry();
         drop(agent_guard);
         apply_set_compaction_mode(id, mode, registry, client_event_tx).await;
     } else {
@@ -936,7 +936,7 @@ async fn apply_set_compaction_mode(
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
     let result = {
-        let compaction = registry.compaction();
+        let compaction = registry.legacy_compaction();
         let mut manager = compaction.write().await;
         manager.set_mode(mode);
         Ok::<(), anyhow::Error>(())
@@ -944,7 +944,7 @@ async fn apply_set_compaction_mode(
 
     match result {
         Ok(()) => {
-            let updated_mode = registry.compaction().read().await.mode();
+            let updated_mode = registry.legacy_compaction().read().await.mode();
             let _ = client_event_tx.send(ServerEvent::CompactionModeChanged {
                 id,
                 mode: updated_mode,
@@ -952,7 +952,7 @@ async fn apply_set_compaction_mode(
             });
         }
         Err(e) => {
-            let fallback_mode = registry.compaction().read().await.mode();
+            let fallback_mode = registry.legacy_compaction().read().await.mode();
             let _ = client_event_tx.send(ServerEvent::CompactionModeChanged {
                 id,
                 mode: fallback_mode,
@@ -973,7 +973,7 @@ fn spawn_deferred_set_compaction_mode(
         let registry = {
             let agent_guard = agent.lock().await;
             log_provider_control_lock_acquired("set_compaction_mode", id, queued_at);
-            agent_guard.registry()
+            agent_guard.shared_runtime_registry()
         };
         apply_set_compaction_mode(id, mode, registry, &client_event_tx).await;
         log_provider_control_completed("set_compaction_mode", id, queued_at);

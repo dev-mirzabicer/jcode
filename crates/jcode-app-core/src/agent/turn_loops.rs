@@ -450,7 +450,7 @@ impl Agent {
                             usage_cache_creation = cache_creation_input_tokens;
                         }
                         if let Some(input) = usage_input {
-                            self.update_compaction_usage_from_stream(
+                            self.update_context_usage_from_stream(
                                 input,
                                 usage_cache_read,
                                 usage_cache_creation,

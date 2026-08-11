@@ -18,6 +18,19 @@ struct NativeAutoCompactionProvider;
 struct NativeCompactionStreamProvider;
 
 #[derive(Clone)]
+struct SwitchableBudgetProvider {
+    model: Arc<std::sync::Mutex<String>>,
+}
+
+impl SwitchableBudgetProvider {
+    fn new(model: &str) -> Self {
+        Self {
+            model: Arc::new(std::sync::Mutex::new(model.to_string())),
+        }
+    }
+}
+
+#[derive(Clone)]
 struct ExplicitPinProvider {
     model: Arc<std::sync::Mutex<String>>,
     pin: Arc<std::sync::Mutex<Option<String>>>,
@@ -76,6 +89,63 @@ impl Provider for ExplicitPinProvider {
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(self.clone())
     }
+}
+
+#[async_trait]
+impl Provider for SwitchableBudgetProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        unreachable!("SwitchableBudgetProvider does not complete requests")
+    }
+
+    fn name(&self) -> &str {
+        "switchable-budget"
+    }
+
+    fn model(&self) -> String {
+        self.model.lock().unwrap().clone()
+    }
+
+    fn set_model(&self, request: &str) -> Result<()> {
+        *self.model.lock().unwrap() = request.to_string();
+        Ok(())
+    }
+
+    fn context_window(&self) -> usize {
+        match self.model.lock().unwrap().as_str() {
+            "large" => 50_000,
+            _ => 10_000,
+        }
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+async fn agent_context_budget_stats(agent: &Agent) -> crate::context_budget::ContextBudgetStats {
+    let context_budget = agent.registry.context_budget();
+    context_budget.read().await.stats()
+}
+
+fn estimated_message_tokens(messages: &[Message]) -> usize {
+    let mut tracker = crate::context_budget::ContextBudgetTracker::new().with_budget(1);
+    tracker.seed_messages(messages);
+    tracker.estimated_message_tokens()
+}
+
+fn estimated_content_tokens(content: Vec<ContentBlock>) -> usize {
+    estimated_message_tokens(&[Message {
+        role: Role::User,
+        content,
+        timestamp: None,
+        tool_duration_ms: None,
+    }])
 }
 
 fn content_text(content: &[ContentBlock]) -> &str {
@@ -510,6 +580,7 @@ async fn messages_for_provider_replays_persisted_native_compaction_in_auto_mode(
         }],
     );
 
+    agent.update_context_usage_from_stream(900, None, None);
     agent
         .apply_openai_native_compaction("enc_auto".to_string(), 1)
         .expect("persist native compaction");
@@ -528,6 +599,13 @@ async fn messages_for_provider_replays_persisted_native_compaction_in_auto_mode(
             .iter()
             .any(|message| message.role == Role::Assistant)
     );
+    let stats = agent_context_budget_stats(&agent).await;
+    assert_eq!(stats.message_count, messages.len());
+    assert_eq!(
+        stats.estimated_message_tokens,
+        estimated_message_tokens(&messages)
+    );
+    assert_eq!(stats.observed_input_tokens, None);
 }
 
 #[tokio::test]
@@ -612,6 +690,7 @@ async fn messages_for_provider_applies_manual_compaction_in_native_auto_mode() {
     agent.session.provider_session_id = Some("stale-provider-session".to_string());
 
     let provider_messages = agent.provider_messages();
+    agent.update_context_usage_from_stream(999_000, None, None);
     let (message, success) = agent.request_manual_compaction();
     assert!(success, "manual compaction should start: {message}");
 
@@ -641,6 +720,235 @@ async fn messages_for_provider_applies_manual_compaction_in_native_auto_mode() {
         }
         other => panic!("expected text summary block, got {other:?}"),
     }
+    let stats = agent_context_budget_stats(&agent).await;
+    assert_eq!(stats.message_count, compacted_messages.len());
+    assert_eq!(
+        stats.estimated_message_tokens,
+        estimated_message_tokens(&compacted_messages)
+    );
+    assert_eq!(stats.observed_input_tokens, None);
+}
+
+#[tokio::test]
+async fn context_budget_tracks_agent_create_append_usage_and_model_switch_without_transforming_context()
+ {
+    let provider: Arc<dyn Provider> = Arc::new(SwitchableBudgetProvider::new("small"));
+    let registry = Registry::empty();
+    let mut agent = Agent::new(provider, registry);
+
+    let initial_provider_messages = agent.session.provider_messages().to_vec();
+    let initial_stats = agent_context_budget_stats(&agent).await;
+    assert_eq!(initial_stats.token_budget, 10_000);
+    assert_eq!(initial_stats.message_count, initial_provider_messages.len());
+    assert_eq!(
+        initial_stats.estimated_message_tokens,
+        estimated_message_tokens(&initial_provider_messages)
+    );
+
+    let messages_before_accounting = serde_json::to_vec(&agent.session.messages).unwrap();
+    let context_before_accounting = serde_json::to_vec(&agent.session.context_view).unwrap();
+    agent.update_context_usage_from_stream(9_000, None, None);
+    assert_eq!(
+        agent_context_budget_stats(&agent)
+            .await
+            .observed_input_tokens,
+        Some(9_000)
+    );
+
+    agent.set_model("large").expect("switch model");
+    let switched_stats = agent_context_budget_stats(&agent).await;
+    assert_eq!(switched_stats.token_budget, 50_000);
+    assert_eq!(switched_stats.observed_input_tokens, None);
+    assert_eq!(
+        serde_json::to_vec(&agent.session.messages).unwrap(),
+        messages_before_accounting
+    );
+    assert_eq!(
+        serde_json::to_vec(&agent.session.context_view).unwrap(),
+        context_before_accounting
+    );
+
+    let stats_before_append = switched_stats;
+    let context_before_append = serde_json::to_vec(&agent.session.context_view).unwrap();
+    let old_messages = agent.session.messages.clone();
+    let appended_content = vec![ContentBlock::Text {
+        text: "accounted append".to_string(),
+        cache_control: None,
+    }];
+    agent.add_message(Role::User, appended_content.clone());
+    let stats_after_append = agent_context_budget_stats(&agent).await;
+    assert_eq!(
+        stats_after_append.message_count,
+        stats_before_append.message_count.saturating_add(1)
+    );
+    assert_eq!(
+        stats_after_append.estimated_message_tokens,
+        stats_before_append
+            .estimated_message_tokens
+            .saturating_add(estimated_content_tokens(appended_content))
+    );
+    assert_eq!(
+        serde_json::to_vec(&agent.session.messages[..old_messages.len()]).unwrap(),
+        serde_json::to_vec(&old_messages).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_vec(&agent.session.context_view).unwrap(),
+        context_before_append
+    );
+
+    agent
+        .set_model("small")
+        .expect("switch back to small model");
+    agent.update_context_usage_from_stream(9_500, None, None);
+    {
+        let legacy_compaction = agent.registry.legacy_compaction();
+        legacy_compaction
+            .write()
+            .await
+            .update_observed_input_tokens(9_500);
+    }
+    agent
+        .set_route_selection(&crate::provider::RouteSelection {
+            model: "large".to_string(),
+            runtime_key: crate::provider::RuntimeKey::Current,
+            api_method: "current".to_string(),
+            provider_label: "current".to_string(),
+            detail: String::new(),
+        })
+        .expect("switch route");
+    let route_switched_stats = agent_context_budget_stats(&agent).await;
+    assert_eq!(route_switched_stats.token_budget, 50_000);
+    assert_eq!(route_switched_stats.observed_input_tokens, None);
+    let route_messages = agent.session.provider_messages().to_vec();
+    let legacy_observation = {
+        let legacy_compaction = agent.registry.legacy_compaction();
+        legacy_compaction
+            .read()
+            .await
+            .stats_with(&route_messages)
+            .observed_input_tokens
+    };
+    assert_eq!(legacy_observation, None);
+    assert_eq!(
+        serde_json::to_vec(&agent.session.context_view).unwrap(),
+        context_before_append
+    );
+
+    let provider_messages = agent.session.provider_messages().to_vec();
+    agent.reseed_context_budget_from_messages(&provider_messages, "test reseed");
+    assert_eq!(
+        serde_json::to_vec(&agent.session.context_view).unwrap(),
+        context_before_append
+    );
+}
+
+#[tokio::test]
+async fn context_budget_attach_with_legacy_summary_uses_summary_plus_tail() {
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let mut session = Session::create(None, None);
+    for index in 0..4 {
+        session.add_message(
+            if index % 2 == 0 {
+                Role::User
+            } else {
+                Role::Assistant
+            },
+            vec![ContentBlock::Text {
+                text: format!("raw-{index}-{}", "x".repeat(8_000)),
+                cache_control: None,
+            }],
+        );
+    }
+    let raw_messages = session.provider_messages().to_vec();
+    let raw_tokens = estimated_message_tokens(&raw_messages);
+    session.compaction = Some(crate::session::StoredCompactionState {
+        summary_text: "concise legacy summary".to_string(),
+        openai_encrypted_content: None,
+        covers_up_to_turn: 2,
+        original_turn_count: 4,
+        compacted_count: 2,
+    });
+
+    let registry = Registry::empty();
+    let mut agent = Agent::new_with_session(provider, registry, session, None);
+    let effective_messages = {
+        let legacy_compaction = agent.registry.legacy_compaction();
+        let mut manager = legacy_compaction.write().await;
+        manager.messages_for_api_with(agent.session.provider_messages())
+    };
+    let stats = agent_context_budget_stats(&agent).await;
+    let effective_tokens = estimated_message_tokens(&effective_messages);
+    assert_eq!(stats.message_count, effective_messages.len());
+    assert_eq!(stats.estimated_message_tokens, effective_tokens);
+    assert!(effective_tokens < raw_tokens);
+}
+
+#[tokio::test]
+async fn context_budget_rewind_undo_and_repair_reseed_exactly_and_clear_observation() {
+    let provider: Arc<dyn Provider> = Arc::new(SwitchableBudgetProvider::new("small"));
+    let registry = Registry::empty();
+    let mut agent = Agent::new(provider, registry);
+    agent.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "first visible message".to_string(),
+            cache_control: None,
+        }],
+    );
+    agent.add_message(
+        Role::Assistant,
+        vec![ContentBlock::Text {
+            text: "second visible message".to_string(),
+            cache_control: None,
+        }],
+    );
+    let before_rewind = agent_context_budget_stats(&agent).await;
+    agent.update_context_usage_from_stream(9_500, None, None);
+
+    assert_eq!(agent.rewind_to_message(1).expect("rewind"), 1);
+    let rewound_messages = agent.session.provider_messages().to_vec();
+    let rewound_stats = agent_context_budget_stats(&agent).await;
+    assert_eq!(rewound_stats.observed_input_tokens, None);
+    assert_eq!(rewound_stats.message_count, rewound_messages.len());
+    assert_eq!(
+        rewound_stats.estimated_message_tokens,
+        estimated_message_tokens(&rewound_messages)
+    );
+
+    assert_eq!(agent.undo_rewind().expect("undo rewind"), 1);
+    let restored_stats = agent_context_budget_stats(&agent).await;
+    assert_eq!(restored_stats.observed_input_tokens, None);
+    assert_eq!(restored_stats.message_count, before_rewind.message_count);
+    assert_eq!(
+        restored_stats.estimated_message_tokens,
+        before_rewind.estimated_message_tokens
+    );
+
+    let context_before_repair = serde_json::to_vec(&agent.session.context_view).unwrap();
+    agent.add_message(
+        Role::Assistant,
+        vec![ContentBlock::ToolUse {
+            id: "missing-result-call".to_string(),
+            name: "read".to_string(),
+            input: serde_json::json!({"file_path": "src/lib.rs"}),
+            thought_signature: None,
+        }],
+    );
+    agent.update_context_usage_from_stream(9_900, None, None);
+    assert_eq!(agent.repair_missing_tool_outputs(), 1);
+
+    let repaired_messages = agent.session.provider_messages().to_vec();
+    let repaired_stats = agent_context_budget_stats(&agent).await;
+    assert_eq!(repaired_stats.observed_input_tokens, None);
+    assert_eq!(repaired_stats.message_count, repaired_messages.len());
+    assert_eq!(
+        repaired_stats.estimated_message_tokens,
+        estimated_message_tokens(&repaired_messages)
+    );
+    assert_eq!(
+        serde_json::to_vec(&agent.session.context_view).unwrap(),
+        context_before_repair
+    );
 }
 
 // ── InterruptSignal tests ────────────────────────────────────────────────

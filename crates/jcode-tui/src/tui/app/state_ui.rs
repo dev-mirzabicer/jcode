@@ -1984,11 +1984,56 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
                 )
             };
 
+        let context_budget_summary = {
+            let context_budget = app.registry.context_budget();
+            if let Ok(tracker) = context_budget.try_read() {
+                let stats = tracker.stats();
+                if app.is_remote {
+                    format!(
+                        "- provider-message estimate: unavailable (remote server projection is not exposed to this client)\n- latest server-observed context tokens: {}\n- observed usage: {}\n- budget: {}",
+                        stats
+                            .observed_input_tokens
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "n/a".to_string()),
+                        stats
+                            .observed_input_tokens
+                            .map(|_| format!("{:.1}%", stats.context_usage * 100.0))
+                            .unwrap_or_else(|| "n/a".to_string()),
+                        stats.token_budget,
+                    )
+                } else {
+                    format!(
+                        "- accounted provider messages: {}\n- estimated provider-message chars: {}\n- estimated message tokens: {}\n- estimated static overhead tokens: {}\n- estimated context tokens: {}\n- effective context tokens: {}\n- observed provider tokens: {}\n- usage: {:.1}%\n- budget: {}",
+                        stats.message_count,
+                        stats.estimated_message_chars,
+                        stats.estimated_message_tokens,
+                        stats.estimated_static_overhead_tokens,
+                        stats.token_estimate,
+                        stats.effective_tokens,
+                        stats
+                            .observed_input_tokens
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "n/a".to_string()),
+                        stats.context_usage * 100.0,
+                        stats.token_budget,
+                    )
+                }
+            } else {
+                "- state: unavailable (context budget tracker busy)".to_string()
+            }
+        };
+
+        let context_projection_summary = format!(
+            "- revision: {}\n- transactions: {} total, {} active\n- authoritative stored messages: {}",
+            app.session.context_view.revision,
+            app.session.context_view.transactions.len(),
+            app.session.context_view.active_transaction_count(),
+            app.session.messages.len(),
+        );
+
         let compaction_summary = if app.provider.supports_compaction() {
-            let manager = app.registry.compaction();
+            let manager = app.registry.legacy_compaction();
             if let Ok(manager) = manager.try_read() {
-                let provider_messages = app.materialized_provider_messages();
-                let stats = manager.stats_with(&provider_messages);
                 let mode = if app.is_remote {
                     app.remote_compaction_mode
                         .as_ref()
@@ -2005,30 +2050,27 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
                     None => "none",
                 };
                 format!(
-                    "- supported: yes\n- mode: {}\n- jcode-managed: {}\n- active summary: {} ({})\n- compacted messages: {}\n- active messages: {}\n- summary chars: {}\n- estimated tokens: {}\n- effective tokens: {}\n- observed tokens: {}\n- usage: {:.1}%\n- compacting now: {}\n- budget: {}",
+                    "- supported: yes\n- mode: {}\n- jcode-managed: {}\n- active summary: {} ({})\n- compacted messages: {}\n- active messages: {}\n- summary chars: {}\n- compacting now: {}",
                     mode,
                     if app.provider.uses_jcode_compaction() {
                         "yes"
                     } else {
                         "no"
                     },
-                    if stats.has_summary { "yes" } else { "no" },
+                    if manager.persisted_state().is_some() {
+                        "yes"
+                    } else {
+                        "no"
+                    },
                     summary_kind,
                     manager.compacted_count(),
-                    stats.active_messages,
+                    manager.active_messages_count(),
                     manager.summary_chars(),
-                    stats.token_estimate,
-                    stats.effective_tokens,
-                    stats
-                        .observed_input_tokens
-                        .map(|v| v.to_string())
-                        .unwrap_or_else(|| "n/a".to_string()),
-                    stats.context_usage * 100.0,
-                    if stats.is_compacting { "yes" } else { "no" },
-                    manager.token_budget(),
+                    if manager.is_compacting() { "yes" } else { "no" },
                 )
             } else {
-                "- supported: yes\n- state: unavailable (compaction manager busy)".to_string()
+                "- supported: yes\n- state: unavailable (legacy compaction manager busy)"
+                    .to_string()
             }
         } else {
             "- supported: no".to_string()
@@ -2152,7 +2194,11 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
             context.tool_results_chars,
             context.tool_results_count,
         ));
-        context_report.push_str("\nCompaction\n");
+        context_report.push_str("\nContext Budget\n");
+        context_report.push_str(&context_budget_summary);
+        context_report.push_str("\n\nContext Projection\n");
+        context_report.push_str(&context_projection_summary);
+        context_report.push_str("\n\nLegacy Compaction\n");
         context_report.push_str(&compaction_summary);
         context_report.push_str("\n\nSession State\n");
         context_report.push_str(&format!(

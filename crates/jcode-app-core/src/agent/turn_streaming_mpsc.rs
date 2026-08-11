@@ -694,7 +694,7 @@ impl Agent {
                             usage_cache_creation = cache_creation_input_tokens;
                         }
                         if let Some(input) = usage_input {
-                            self.update_compaction_usage_from_stream(
+                            self.update_context_usage_from_stream(
                                 input,
                                 usage_cache_read,
                                 usage_cache_creation,
@@ -1370,7 +1370,7 @@ impl Agent {
                 let tool_start = Instant::now();
 
                 // Spawn tool in its own task so we can detach it to background on Alt+B
-                let registry_clone = self.registry.clone();
+                let registry_clone = self.registry.clone_with_shared_context_runtime();
                 let tool_name_for_spawn = tc.name.clone();
                 let tool_input_for_spawn = tc.input.clone();
                 let tool_handle = tokio::spawn(async move {

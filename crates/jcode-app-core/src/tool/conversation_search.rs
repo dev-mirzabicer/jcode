@@ -1,9 +1,9 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
-//! Conversation search tool - RAG for compacted conversation history
+//! Conversation search over the authoritative stored conversation history.
 
 use super::{Tool, ToolContext, ToolOutput};
-use crate::compaction::CompactionManager;
+use crate::context_budget::ContextBudgetTracker;
 use crate::message::{Message, Role};
 use crate::session::Session;
 use anyhow::Result;
@@ -35,13 +35,23 @@ struct TurnRange {
 }
 
 pub struct ConversationSearchTool {
-    compaction: Arc<RwLock<CompactionManager>>,
+    context_budget: Arc<RwLock<ContextBudgetTracker>>,
 }
 
 impl ConversationSearchTool {
-    pub fn new(compaction: Arc<RwLock<CompactionManager>>) -> Self {
-        Self { compaction }
+    pub fn new(context_budget: Arc<RwLock<ContextBudgetTracker>>) -> Self {
+        Self { context_budget }
     }
+}
+
+pub(super) async fn execute_with_context_budget(
+    context_budget: &Arc<RwLock<ContextBudgetTracker>>,
+    input: Value,
+    ctx: ToolContext,
+) -> Result<ToolOutput> {
+    ConversationSearchTool::new(context_budget.clone())
+        .execute(input, ctx)
+        .await
 }
 
 #[async_trait]
@@ -82,33 +92,68 @@ impl Tool for ConversationSearchTool {
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: SearchInput = serde_json::from_value(input)?;
-        let manager = self.compaction.read().await;
-        let session_messages = load_session_messages(&ctx.session_id);
-        if session_messages.is_none() {
+        let session = load_session(&ctx.session_id);
+        if session.is_none() {
             crate::logging::warn(&format!(
                 "[tool:conversation_search] failed to load session history for session {}",
                 ctx.session_id
             ));
         }
+        let session_messages = session.as_ref().map(|session| {
+            session
+                .messages
+                .iter()
+                .map(|message| message.to_message())
+                .collect::<Vec<_>>()
+        });
 
         let mut output = String::new();
 
         // Handle stats request
         if params.stats == Some(true) {
-            let stats = manager.stats();
+            let stats = self.context_budget.read().await.stats();
+            let total_stored_messages = session
+                .as_ref()
+                .map(|session| session.messages.len())
+                .unwrap_or_default();
+            let context_revision = session
+                .as_ref()
+                .map(|session| session.context_view.revision)
+                .unwrap_or_default();
+            let active_context_transactions = session
+                .as_ref()
+                .map(|session| session.context_view.active_transaction_count())
+                .unwrap_or_default();
+            let legacy_summary_present = session
+                .as_ref()
+                .and_then(|session| session.compaction.as_ref())
+                .is_some();
             output.push_str(&format!(
                 "## Conversation Stats\n\n\
-                 - Total turns: {}\n\
-                 - Active messages in context: {}\n\
-                 - Has summary: {}\n\
-                 - Compaction in progress: {}\n\
-                 - Estimated tokens: {}\n\
+                 - Total stored messages: {}\n\
+                 - Context-view revision: {}\n\
+                 - Active context transactions: {}\n\
+                 - Legacy summary present: {}\n\
+                 - Accounted provider messages: {}\n\
+                 - Estimated message tokens: {}\n\
+                 - Estimated context tokens: {}\n\
+                 - Observed provider tokens: {}\n\
+                 - Effective context tokens: {}\n\
+                 - Token budget: {}\n\
                  - Context usage: {:.1}%\n",
-                stats.total_turns,
-                stats.active_messages,
-                stats.has_summary,
-                stats.is_compacting,
+                total_stored_messages,
+                context_revision,
+                active_context_transactions,
+                legacy_summary_present,
+                stats.message_count,
+                stats.estimated_message_tokens,
                 stats.token_estimate,
+                stats
+                    .observed_input_tokens
+                    .map(|tokens| tokens.to_string())
+                    .unwrap_or_else(|| "n/a".to_string()),
+                stats.effective_tokens,
+                stats.token_budget,
                 stats.context_usage * 100.0
             ));
         }
@@ -239,15 +284,8 @@ struct SearchResult {
     snippet: String,
 }
 
-fn load_session_messages(session_id: &str) -> Option<Vec<Message>> {
-    let session = Session::load(session_id).ok()?;
-    Some(
-        session
-            .messages
-            .into_iter()
-            .map(|msg| msg.to_message())
-            .collect(),
-    )
+fn load_session(session_id: &str) -> Option<Session> {
+    Session::load(session_id).ok()
 }
 
 fn search_messages(messages: &[Message], query: &str) -> Vec<SearchResult> {
@@ -305,12 +343,16 @@ fn extract_snippet(text: &str, query: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compaction::CompactionManager;
+    use crate::context_budget::ContextBudgetTracker;
+    use jcode_session_types::{
+        StoredContextAuthorization, StoredContextStatusEvent, StoredContextTransaction,
+        StoredContextTransactionStatusKind,
+    };
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn create_test_tool() -> ConversationSearchTool {
-        let manager = Arc::new(RwLock::new(CompactionManager::new()));
-        ConversationSearchTool::new(manager)
+        let context_budget = Arc::new(RwLock::new(ContextBudgetTracker::new()));
+        ConversationSearchTool::new(context_budget)
     }
 
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -366,13 +408,103 @@ mod tests {
     #[tokio::test]
     async fn test_stats() {
         let _guard = env_lock();
-        let tool = create_test_tool();
-        let (ctx, base, previous_home) = setup_session(Vec::new());
+        let context_budget = Arc::new(RwLock::new(ContextBudgetTracker::new().with_budget(10_000)));
+        {
+            let mut tracker = context_budget.write().await;
+            tracker.seed_messages(&[Message::user("raw authoritative needle")]);
+            tracker.update_observed_input_tokens(7_000);
+        }
+        let tool = ConversationSearchTool::new(context_budget);
+        let (ctx, base, previous_home) =
+            setup_session(vec![Message::user("raw authoritative needle")]);
+        let mut session = Session::load(&ctx.session_id).expect("load test session");
+        session.context_view.revision = 1;
+        session
+            .context_view
+            .transactions
+            .push(StoredContextTransaction {
+                id: "context-transaction-1".to_string(),
+                base_revision: 0,
+                created_at: chrono::Utc::now(),
+                authorization: StoredContextAuthorization::Manual { initiated_by: None },
+                operations: Vec::new(),
+                status_events: vec![StoredContextStatusEvent {
+                    revision: 1,
+                    timestamp: chrono::Utc::now(),
+                    kind: StoredContextTransactionStatusKind::Applied,
+                    reason: None,
+                }],
+                application: None,
+                economics: None,
+                curator_usage: Vec::new(),
+            });
+        session.save().expect("save context state");
         let input = json!({"stats": true});
 
         let result = tool.execute(input, ctx).await.unwrap();
         assert!(result.output.contains("Conversation Stats"));
-        assert!(result.output.contains("Total turns"));
+        assert!(result.output.contains("Total stored messages: 1"));
+        assert!(result.output.contains("Context-view revision: 1"));
+        assert!(result.output.contains("Active context transactions: 1"));
+        assert!(result.output.contains("Observed provider tokens: 7000"));
+        assert!(result.output.contains("Effective context tokens: 7000"));
+        assert!(result.output.contains("Token budget: 10000"));
+        restore_env(base, previous_home);
+    }
+
+    #[tokio::test]
+    async fn registry_execution_uses_the_current_clone_context_budget() {
+        let _guard = env_lock();
+        let template_budget = Arc::new(RwLock::new(ContextBudgetTracker::new().with_budget(1_000)));
+        template_budget
+            .write()
+            .await
+            .update_observed_input_tokens(111);
+
+        let mut tools = std::collections::HashMap::new();
+        tools.insert(
+            "conversation_search".to_string(),
+            Arc::new(ConversationSearchTool::new(template_budget.clone())) as Arc<dyn Tool>,
+        );
+        let template = crate::tool::Registry {
+            tools: Arc::new(RwLock::new(tools)),
+            skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
+            context_budget: template_budget,
+            legacy_compaction: Arc::new(RwLock::new(crate::compaction::CompactionManager::new())),
+        };
+        let registry = template.clone();
+        {
+            let context_budget = registry.context_budget();
+            let mut tracker = context_budget.write().await;
+            tracker.set_budget(10_000);
+            tracker.update_observed_input_tokens(7_000);
+        }
+
+        let (ctx, base, previous_home) = setup_session(vec![Message::user("clone stats")]);
+        let result = registry
+            .execute("conversation_search", json!({"stats": true}), ctx)
+            .await
+            .expect("conversation search should execute");
+
+        assert!(result.output.contains("Observed provider tokens: 7000"));
+        assert!(result.output.contains("Token budget: 10000"));
+        assert!(!result.output.contains("Observed provider tokens: 111"));
+        restore_env(base, previous_home);
+    }
+
+    #[tokio::test]
+    async fn search_uses_raw_authoritative_history_when_context_state_is_active() {
+        let _guard = env_lock();
+        let tool = create_test_tool();
+        let (ctx, base, previous_home) =
+            setup_session(vec![Message::user("raw-only-search-needle")]);
+
+        let result = tool
+            .execute(json!({"query": "raw-only-search-needle"}), ctx)
+            .await
+            .unwrap();
+        assert!(result.output.contains("Found 1 matches"));
+        assert!(result.output.contains("raw-only-search-needle"));
         restore_env(base, previous_home);
     }
 

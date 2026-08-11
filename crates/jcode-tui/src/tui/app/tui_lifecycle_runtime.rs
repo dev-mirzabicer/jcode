@@ -235,7 +235,7 @@ impl App {
     pub async fn init_mcp(&mut self) {
         // Always register the MCP management tool so agent can connect servers
         let mcp_tool = crate::tool::mcp::McpManagementTool::new(Arc::clone(&self.mcp_manager))
-            .with_registry(self.registry.clone());
+            .with_registry(self.registry.clone_with_shared_context_runtime());
         self.registry
             .register("mcp".to_string(), Arc::new(mcp_tool))
             .await;

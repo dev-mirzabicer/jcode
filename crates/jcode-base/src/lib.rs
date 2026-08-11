@@ -28,6 +28,7 @@ pub mod client_input;
 pub mod compaction;
 pub mod config;
 pub mod console;
+pub mod context_budget;
 pub mod copilot_usage;
 pub mod dictation;
 #[cfg(feature = "embeddings")]

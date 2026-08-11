@@ -1624,7 +1624,7 @@ fn test_compact_mode_command_updates_local_session_mode() {
     app.submit_input();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let mode = rt.block_on(async { app.registry.compaction().read().await.mode() });
+    let mode = rt.block_on(async { app.registry.legacy_compaction().read().await.mode() });
     assert_eq!(mode, crate::config::CompactionMode::Semantic);
 
     let last = app.display_messages().last().expect("missing response");
@@ -1637,7 +1637,7 @@ fn test_compact_mode_status_shows_local_mode() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        let compaction = app.registry.compaction();
+        let compaction = app.registry.legacy_compaction();
         let mut manager = compaction.write().await;
         manager.set_mode(crate::config::CompactionMode::Proactive);
     });

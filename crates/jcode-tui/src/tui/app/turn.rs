@@ -638,7 +638,7 @@ impl App {
                                             usage_changed = true;
                                         }
                                         if usage_changed {
-                                            self.update_compaction_usage_from_stream();
+                                            self.update_context_usage_from_stream();
                                             if let Some(context_tokens) = self.current_stream_context_tokens() {
                                                 self.check_context_warning(context_tokens);
                                             }
@@ -1277,7 +1277,7 @@ impl App {
 
                 // Make tool execution non-blocking - poll in select! so we can handle input
                 // Clone registry to avoid borrow issues
-                let registry = self.registry.clone();
+                let registry = self.registry.clone_with_shared_context_runtime();
                 let tool_name = tc.name.clone();
                 let tool_input = tc.input.clone();
                 let tool_start = Instant::now();

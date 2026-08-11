@@ -31,6 +31,26 @@ impl Provider for MockProvider {
     }
 }
 
+fn registry_with_context_budget(budget: usize) -> Registry {
+    registry_with_context_budget_and_observation(budget, None)
+}
+
+fn registry_with_context_budget_and_observation(
+    budget: usize,
+    observed_input_tokens: Option<u64>,
+) -> Registry {
+    let mut context_budget = ContextBudgetTracker::new().with_budget(budget);
+    if let Some(tokens) = observed_input_tokens {
+        context_budget.update_observed_input_tokens(tokens);
+    }
+    Registry {
+        tools: Arc::new(RwLock::new(HashMap::new())),
+        skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
+        context_budget: Arc::new(RwLock::new(context_budget)),
+        legacy_compaction: Arc::new(RwLock::new(CompactionManager::new())),
+    }
+}
+
 #[tokio::test]
 async fn test_tool_definitions_are_sorted() {
     // Create registry with mock provider
@@ -654,12 +674,7 @@ fn test_schema_validator_rejects_any_of_branches_without_type() {
 
 #[tokio::test]
 async fn test_context_guard_small_output_passes_through() {
-    let compaction = Arc::new(RwLock::new(CompactionManager::new().with_budget(200_000)));
-    let registry = Registry {
-        tools: Arc::new(RwLock::new(HashMap::new())),
-        skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
-        compaction,
-    };
+    let registry = registry_with_context_budget(200_000);
 
     let output = ToolOutput::new("small output");
     let result = registry.guard_context_overflow("test", output, false).await;
@@ -667,13 +682,133 @@ async fn test_context_guard_small_output_passes_through() {
 }
 
 #[tokio::test]
+async fn context_guard_is_independent_of_legacy_compaction_state() {
+    let registry = registry_with_context_budget(1_000);
+    let payload = "x".repeat(8_000);
+    let before = registry
+        .guard_context_overflow("test", ToolOutput::new(payload.clone()), false)
+        .await;
+
+    {
+        let legacy_compaction = registry.legacy_compaction();
+        let mut manager = legacy_compaction.write().await;
+        *manager = CompactionManager::new().with_budget(1_000_000);
+    }
+
+    let after = registry
+        .guard_context_overflow("test", ToolOutput::new(payload), false)
+        .await;
+    assert_eq!(before.output, after.output);
+    assert!(after.output.contains("OUTPUT WITHHELD"));
+}
+
+#[tokio::test]
+async fn registry_clone_shares_tools_and_skills_but_isolates_context_runtime() {
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider).await;
+    {
+        let context_budget = registry.context_budget();
+        let mut tracker = context_budget.write().await;
+        tracker.set_budget(10_000);
+        tracker.update_observed_input_tokens(7_000);
+    }
+    {
+        let legacy_compaction = registry.legacy_compaction();
+        legacy_compaction.write().await.set_budget(10_000);
+    }
+
+    let cloned = registry.clone();
+    assert!(Arc::ptr_eq(&registry.tools, &cloned.tools));
+    assert!(Arc::ptr_eq(&registry.skills, &cloned.skills));
+    assert!(!Arc::ptr_eq(
+        &registry.context_budget,
+        &cloned.context_budget
+    ));
+    assert!(!Arc::ptr_eq(
+        &registry.legacy_compaction,
+        &cloned.legacy_compaction
+    ));
+
+    {
+        let cloned_context_budget = cloned.context_budget();
+        let mut tracker = cloned_context_budget.write().await;
+        tracker.set_budget(50_000);
+        tracker.update_observed_input_tokens(42_000);
+    }
+    {
+        let cloned_legacy_compaction = cloned.legacy_compaction();
+        cloned_legacy_compaction.write().await.set_budget(50_000);
+    }
+
+    let root_stats = registry.context_budget().read().await.stats();
+    let cloned_stats = cloned.context_budget().read().await.stats();
+    assert_eq!(root_stats.token_budget, 10_000);
+    assert_eq!(root_stats.observed_input_tokens, Some(7_000));
+    assert_eq!(cloned_stats.token_budget, 50_000);
+    assert_eq!(cloned_stats.observed_input_tokens, Some(42_000));
+    assert_eq!(
+        registry.legacy_compaction().read().await.token_budget(),
+        10_000
+    );
+    assert_eq!(
+        cloned.legacy_compaction().read().await.token_budget(),
+        50_000
+    );
+}
+
+#[tokio::test]
+async fn same_session_registry_clone_shares_context_runtime_for_tool_guards() {
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider).await;
+    let shared = registry.clone_with_shared_context_runtime();
+
+    assert!(Arc::ptr_eq(&registry.tools, &shared.tools));
+    assert!(Arc::ptr_eq(&registry.skills, &shared.skills));
+    assert!(Arc::ptr_eq(
+        &registry.context_budget,
+        &shared.context_budget
+    ));
+    assert!(Arc::ptr_eq(
+        &registry.legacy_compaction,
+        &shared.legacy_compaction
+    ));
+
+    {
+        let context_budget = registry.context_budget();
+        let mut tracker = context_budget.write().await;
+        tracker.set_budget(10_000);
+        tracker.update_observed_input_tokens(9_990);
+    }
+    registry
+        .register(
+            "big_output".to_string(),
+            Arc::new(BigOutputTool { chars: 400_000 }),
+        )
+        .await;
+
+    let output = shared
+        .execute(
+            "big_output",
+            serde_json::json!({"intent": "verify shared context runtime"}),
+            ToolContext {
+                session_id: "same-session-registry-clone".to_string(),
+                message_id: "message".to_string(),
+                tool_call_id: "tool-call".to_string(),
+                working_dir: Some(std::env::temp_dir()),
+                stdin_request_tx: None,
+                graceful_shutdown_signal: None,
+                execution_mode: ToolExecutionMode::AgentTurn,
+            },
+        )
+        .await
+        .expect("tool execution should complete");
+
+    assert!(output.output.contains("CONTEXT LIMIT REACHED"));
+}
+
+#[tokio::test]
 async fn test_context_guard_withholds_huge_single_output_by_default() {
-    let compaction = Arc::new(RwLock::new(CompactionManager::new().with_budget(1000)));
-    let registry = Registry {
-        tools: Arc::new(RwLock::new(HashMap::new())),
-        skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
-        compaction,
-    };
+    let registry = registry_with_context_budget(1000);
 
     // 30% of 1000 = 300 tokens = 1200 chars max for a single output
     // Create output that's way larger
@@ -705,12 +840,7 @@ async fn test_context_guard_withholds_huge_single_output_by_default() {
 
 #[tokio::test]
 async fn test_context_guard_returns_truncated_output_when_caller_accepts() {
-    let compaction = Arc::new(RwLock::new(CompactionManager::new().with_budget(1000)));
-    let registry = Registry {
-        tools: Arc::new(RwLock::new(HashMap::new())),
-        skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
-        compaction,
-    };
+    let registry = registry_with_context_budget(1000);
 
     let big_output = "x".repeat(8000);
     let output = ToolOutput::new(big_output.clone());
@@ -736,16 +866,7 @@ async fn test_context_guard_reports_the_real_cost_and_affordable_size() {
     // 200k budget, 40k already used. A 90k-token result is over the 30%
     // single-output ceiling (60k), so it is withheld. The quoted numbers must
     // match the actual arithmetic, since the caller decides based on them.
-    let compaction = Arc::new(RwLock::new(CompactionManager::new().with_budget(200_000)));
-    {
-        let mut mgr = compaction.write().await;
-        mgr.update_observed_input_tokens(40_000);
-    }
-    let registry = Registry {
-        tools: Arc::new(RwLock::new(HashMap::new())),
-        skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
-        compaction,
-    };
+    let registry = registry_with_context_budget_and_observation(200_000, Some(40_000));
 
     let output = ToolOutput::new("x".repeat(360_000)); // ~90k tokens
     let result = registry.guard_context_overflow("test", output, false).await;
@@ -781,16 +902,7 @@ async fn test_context_guard_reports_the_real_cost_and_affordable_size() {
 
 #[tokio::test]
 async fn test_context_guard_truncates_when_context_nearly_full() {
-    let compaction = Arc::new(RwLock::new(CompactionManager::new().with_budget(10_000)));
-    {
-        let mut mgr = compaction.write().await;
-        mgr.update_observed_input_tokens(9500); // 95% full
-    }
-    let registry = Registry {
-        tools: Arc::new(RwLock::new(HashMap::new())),
-        skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
-        compaction,
-    };
+    let registry = registry_with_context_budget_and_observation(10_000, Some(9500));
 
     // Even a modest output should get truncated when context is 95% full
     let output = ToolOutput::new("x".repeat(4000)); // 1000 tokens
@@ -806,16 +918,7 @@ async fn test_context_guard_still_refuses_when_context_is_exhausted() {
     // With almost no room left there is nothing to spend, so accepting the cost
     // cannot buy anything. The opt-in must not become a way to blow past the
     // window entirely.
-    let compaction = Arc::new(RwLock::new(CompactionManager::new().with_budget(10_000)));
-    {
-        let mut mgr = compaction.write().await;
-        mgr.update_observed_input_tokens(9_990);
-    }
-    let registry = Registry {
-        tools: Arc::new(RwLock::new(HashMap::new())),
-        skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
-        compaction,
-    };
+    let registry = registry_with_context_budget_and_observation(10_000, Some(9_990));
 
     let payload = "x".repeat(400_000);
     let result = registry
@@ -835,12 +938,7 @@ async fn test_context_guard_still_refuses_when_context_is_exhausted() {
 
 #[tokio::test]
 async fn test_context_guard_zero_budget_passes_through() {
-    let compaction = Arc::new(RwLock::new(CompactionManager::new().with_budget(0)));
-    let registry = Registry {
-        tools: Arc::new(RwLock::new(HashMap::new())),
-        skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
-        compaction,
-    };
+    let registry = registry_with_context_budget(0);
 
     let output = ToolOutput::new("x".repeat(100_000));
     let result = registry.guard_context_overflow("test", output, false).await;
@@ -849,6 +947,15 @@ async fn test_context_guard_zero_budget_passes_through() {
         100_000,
         "Zero budget should pass through"
     );
+}
+
+#[tokio::test]
+async fn context_guard_handles_saturated_accounting_without_overflow() {
+    let registry = registry_with_context_budget_and_observation(usize::MAX, Some(u64::MAX));
+    let result = registry
+        .guard_context_overflow("test", ToolOutput::new("small output"), false)
+        .await;
+    assert!(result.output.contains("CONTEXT LIMIT REACHED"));
 }
 
 #[test]
@@ -1047,18 +1154,11 @@ async fn test_context_guard_never_spends_more_than_it_reports() {
         for fill_percent in [0usize, 25, 50, 80, 89, 95] {
             for payload_tokens in [1usize, 500, 5_000, 100_000] {
                 for accept in [false, true] {
-                    let compaction =
-                        Arc::new(RwLock::new(CompactionManager::new().with_budget(budget)));
                     let used = budget * fill_percent / 100;
-                    if used > 0 {
-                        let mut mgr = compaction.write().await;
-                        mgr.update_observed_input_tokens(used as u64);
-                    }
-                    let registry = Registry {
-                        tools: Arc::new(RwLock::new(HashMap::new())),
-                        skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
-                        compaction,
-                    };
+                    let registry = registry_with_context_budget_and_observation(
+                        budget,
+                        (used > 0).then_some(used as u64),
+                    );
 
                     let payload = "x".repeat(payload_tokens * 4);
                     let result = registry
@@ -1097,16 +1197,7 @@ async fn test_context_guard_refusal_reads_clearly_for_todays_regression() {
     // The exact shape that motivated this change: a 233k-token agentgrep result
     // against a 200k budget with 18k already used. Printed so the wording stays
     // reviewable, and asserted so it keeps naming the cost and the escape hatch.
-    let compaction = Arc::new(RwLock::new(CompactionManager::new().with_budget(200_000)));
-    {
-        let mut mgr = compaction.write().await;
-        mgr.update_observed_input_tokens(18_000);
-    }
-    let registry = Registry {
-        tools: Arc::new(RwLock::new(HashMap::new())),
-        skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
-        compaction,
-    };
+    let registry = registry_with_context_budget_and_observation(200_000, Some(18_000));
 
     let result = registry
         .guard_context_overflow("agentgrep", ToolOutput::new("x".repeat(932_000)), false)
@@ -1149,8 +1240,9 @@ async fn execute_big_output(input: Value) -> String {
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;
     {
-        let mut mgr = registry.compaction.write().await;
-        *mgr = CompactionManager::new().with_budget(10_000);
+        let context_budget = registry.context_budget();
+        let mut tracker = context_budget.write().await;
+        *tracker = ContextBudgetTracker::new().with_budget(10_000);
     }
     registry
         .register(
@@ -1301,8 +1393,9 @@ async fn test_batch_guards_both_its_subcalls_and_its_own_aggregate() {
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;
     {
-        let mut mgr = registry.compaction.write().await;
-        *mgr = CompactionManager::new().with_budget(10_000);
+        let context_budget = registry.context_budget();
+        let mut tracker = context_budget.write().await;
+        *tracker = ContextBudgetTracker::new().with_budget(10_000);
     }
     registry
         .register(
@@ -1381,22 +1474,57 @@ async fn test_batch_guards_both_its_subcalls_and_its_own_aggregate() {
 }
 
 #[tokio::test]
+async fn batch_subcalls_use_the_executing_registry_clone_context_budget() {
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let template = Registry::new(provider).await;
+    let registry = template.clone();
+    {
+        let context_budget = registry.context_budget();
+        let mut tracker = context_budget.write().await;
+        tracker.set_budget(10_000);
+    }
+    registry
+        .register(
+            "big_output".to_string(),
+            Arc::new(BigOutputTool { chars: 20_000 }),
+        )
+        .await;
+
+    let output = registry
+        .execute(
+            "batch",
+            serde_json::json!({
+                "accept_large_output": true,
+                "tool_calls": [{
+                    "tool": "big_output",
+                    "parameters": {"intent": "exercise the clone-local guard"}
+                }]
+            }),
+            ToolContext {
+                session_id: "batch-clone-context-budget".to_string(),
+                message_id: "message".to_string(),
+                tool_call_id: "batch-call".to_string(),
+                working_dir: Some(std::env::temp_dir()),
+                stdin_request_tx: None,
+                graceful_shutdown_signal: None,
+                execution_mode: ToolExecutionMode::AgentTurn,
+            },
+        )
+        .await
+        .expect("batch should execute");
+
+    assert!(output.output.contains("OUTPUT WITHHELD"));
+    assert!(!output.output.contains("OUTPUT TRUNCATED"));
+}
+
+#[tokio::test]
 async fn test_guard_withholds_large_output_on_a_million_token_window() {
     // The regression that made every other test in this file misleading. They
     // all pinned budgets of 1k to 200k, where 30% of the budget is a small
     // number. Production reported a 1M-token window, so 30% permitted a 300k
     // single result and a repo-wide grep costing 233k tokens sailed straight
     // through a guard that had unit tests passing.
-    let compaction = Arc::new(RwLock::new(CompactionManager::new().with_budget(1_000_000)));
-    {
-        let mut mgr = compaction.write().await;
-        mgr.update_observed_input_tokens(21_000);
-    }
-    let registry = Registry {
-        tools: Arc::new(RwLock::new(HashMap::new())),
-        skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
-        compaction,
-    };
+    let registry = registry_with_context_budget_and_observation(1_000_000, Some(21_000));
 
     // ~233k tokens: the real size of the agentgrep result that started this.
     let output = ToolOutput::new("x".repeat(932_000));
@@ -1422,12 +1550,7 @@ async fn test_single_output_ceiling_is_absolute_not_only_proportional() {
     // may never exceed the absolute ceiling. Without this, raising a model's
     // advertised context window silently raises the per-call blast radius.
     for budget in [200_000usize, 1_000_000, 2_000_000, 10_000_000] {
-        let compaction = Arc::new(RwLock::new(CompactionManager::new().with_budget(budget)));
-        let registry = Registry {
-            tools: Arc::new(RwLock::new(HashMap::new())),
-            skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
-            compaction,
-        };
+        let registry = registry_with_context_budget(budget);
 
         // Just over the absolute ceiling, but a trivial fraction of a huge window.
         let over_ceiling_tokens = Registry::SINGLE_OUTPUT_MAX_TOKENS + 10_000;

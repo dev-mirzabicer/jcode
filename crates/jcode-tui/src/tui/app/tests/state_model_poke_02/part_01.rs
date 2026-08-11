@@ -1044,6 +1044,36 @@ fn test_context_command_reports_session_context_snapshot() {
         )
         .expect("save todos");
 
+        app.session.context_view.revision = 7;
+        app.session.context_view.transactions.push(
+            jcode_session_types::StoredContextTransaction {
+                id: "context-report-transaction".to_string(),
+                base_revision: 6,
+                created_at: chrono::Utc::now(),
+                authorization: jcode_session_types::StoredContextAuthorization::Manual {
+                    initiated_by: None,
+                },
+                operations: Vec::new(),
+                status_events: vec![jcode_session_types::StoredContextStatusEvent {
+                    revision: 7,
+                    timestamp: chrono::Utc::now(),
+                    kind: jcode_session_types::StoredContextTransactionStatusKind::Applied,
+                    reason: None,
+                }],
+                application: None,
+                economics: None,
+                curator_usage: Vec::new(),
+            },
+        );
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let context_budget = app.registry.context_budget();
+            let mut tracker = context_budget.write().await;
+            tracker.set_budget(10_000);
+            tracker.seed_messages(&[Message::user("context report accounting")]);
+            tracker.update_observed_input_tokens(7_000);
+        });
+
         app.input = "/context".to_string();
         app.submit_input();
 
@@ -1054,7 +1084,14 @@ fn test_context_command_reports_session_context_snapshot() {
         assert_eq!(msg.title.as_deref(), Some("Context"));
         assert!(msg.content.contains("Session Context"));
         assert!(msg.content.contains("Prompt / Context Composition"));
-        assert!(msg.content.contains("Compaction"));
+        assert!(msg.content.contains("Context Budget"));
+        assert!(msg.content.contains("Context Projection"));
+        assert!(msg.content.contains("Legacy Compaction"));
+        assert!(msg.content.contains("estimated message tokens"));
+        assert!(msg.content.contains("effective context tokens: 7000"));
+        assert!(msg.content.contains("revision: 7"));
+        assert!(msg.content.contains("transactions: 1 total, 1 active"));
+        assert!(msg.content.contains("authoritative stored messages"));
         assert!(msg.content.contains("Session State"));
         assert!(msg.content.contains("Todos"));
         assert!(msg.content.contains("Side Panel"));

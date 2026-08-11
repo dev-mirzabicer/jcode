@@ -367,7 +367,7 @@ impl Agent {
         agent.session.provider_key = agent.provider_key_for_new_session();
         agent.reconcile_explicit_provider_pin_route();
         agent.session.ensure_initial_session_context_message();
-        agent.seed_compaction_from_session();
+        agent.reseed_context_runtime_from_session();
         agent.log_env_snapshot("create");
         agent.fire_session_lifecycle_hook("session_start", "create");
         crate::telemetry::begin_session_with_parent(
@@ -428,7 +428,7 @@ impl Agent {
         agent.restore_reasoning_effort_from_session();
         agent.session.ensure_initial_session_context_message();
         agent.sync_memory_dedup_state_from_session();
-        agent.seed_compaction_from_session();
+        agent.reseed_context_runtime_from_session();
         agent.log_env_snapshot("attach");
         agent.fire_session_lifecycle_hook("session_start", "attach");
         crate::telemetry::begin_session_with_parent(
@@ -440,17 +440,17 @@ impl Agent {
         agent
     }
 
-    fn seed_compaction_from_session(&mut self) {
+    fn reseed_context_runtime_from_session(&mut self) {
         logging::info(&format!(
-            "seed_compaction_from_session: session has {} messages",
+            "reseed_context_runtime_from_session: session has {} messages",
             self.session.messages.len()
         ));
-        let compaction = self.registry.compaction();
-        let mut manager = match compaction.try_write() {
+        let legacy_compaction = self.registry.legacy_compaction();
+        let mut manager = match legacy_compaction.try_write() {
             Ok(manager) => manager,
             Err(_) => {
                 logging::warn(
-                    "seed_compaction_from_session: compaction lock unavailable, skipping restore",
+                    "reseed_context_runtime_from_session: legacy compaction lock unavailable, skipping restore",
                 );
                 return;
             }
@@ -468,14 +468,70 @@ impl Agent {
         } else {
             None
         };
+        let provider_messages = manager.messages_for_api_with(self.session.provider_messages());
         logging::info(&format!(
-            "seed_compaction_from_session: seeded compaction with {} messages",
-            self.session.messages.len()
+            "reseed_context_runtime_from_session: seeded {} provider messages from {} stored messages",
+            provider_messages.len(),
+            self.session.messages.len(),
         ));
         drop(manager);
+        self.reseed_context_budget_from_messages(&provider_messages, "session reseed");
         if let Some(state) = sanitized_state {
             self.session.compaction = state;
             self.persist_session_best_effort("sanitized oversized OpenAI native compaction");
+        }
+    }
+
+    pub(super) fn reseed_context_budget_from_messages(&self, messages: &[Message], reason: &str) {
+        let context_budget = self.registry.context_budget();
+        match context_budget.try_write() {
+            Ok(mut tracker) => {
+                tracker.set_budget(self.provider.context_window());
+                tracker.seed_messages(messages);
+            }
+            Err(_) => logging::warn(&format!(
+                "Context budget lock unavailable during {reason}; accounting was not reseeded"
+            )),
+        }
+    }
+
+    pub(super) fn record_context_runtime_message_added(&self) {
+        let Some(message) = self.session.messages.last() else {
+            logging::warn("Context runtime append notification had no stored message");
+            return;
+        };
+
+        let legacy_compaction = self.registry.legacy_compaction();
+        if let Ok(mut manager) = legacy_compaction.try_write() {
+            manager.notify_message_added_blocks(&message.content);
+        } else {
+            logging::warn("Legacy compaction lock unavailable during message append");
+        }
+
+        let context_budget = self.registry.context_budget();
+        if let Ok(mut tracker) = context_budget.try_write() {
+            tracker.record_stored_message(message);
+        } else {
+            logging::warn("Context budget lock unavailable during message append");
+        }
+    }
+
+    pub(super) fn update_context_runtime_budget(&self) {
+        let budget = self.provider.context_window();
+        let context_budget = self.registry.context_budget();
+        if let Ok(mut tracker) = context_budget.try_write() {
+            tracker.set_budget(budget);
+            tracker.clear_observed_input_tokens();
+        } else {
+            logging::warn("Context budget lock unavailable during model budget update");
+        }
+
+        let legacy_compaction = self.registry.legacy_compaction();
+        if let Ok(mut manager) = legacy_compaction.try_write() {
+            manager.set_budget(budget);
+            manager.clear_observed_input_tokens();
+        } else {
+            logging::warn("Legacy compaction lock unavailable during model budget update");
         }
     }
 
@@ -618,10 +674,16 @@ impl Agent {
         };
 
         self.session.compaction = Some(state.clone());
-        let compaction = self.registry.compaction();
-        if let Ok(mut manager) = compaction.try_write() {
+        let legacy_compaction = self.registry.legacy_compaction();
+        let effective_messages = if let Ok(mut manager) = legacy_compaction.try_write() {
             manager.set_budget(self.provider.context_window());
             manager.restore_persisted_stored_state_with(&state, &self.session.messages);
+            Some(manager.messages_for_api_with(self.session.provider_messages()))
+        } else {
+            None
+        };
+        if let Some(messages) = effective_messages {
+            self.reseed_context_budget_from_messages(&messages, "OpenAI native compaction");
         }
 
         self.cache_tracker.reset();
@@ -643,8 +705,8 @@ impl Agent {
 
     fn messages_for_provider(&mut self) -> (Vec<Message>, Option<CompactionEvent>) {
         if self.provider.supports_compaction() || self.session.compaction.is_some() {
-            let compaction = self.registry.compaction();
-            match compaction.try_write() {
+            let legacy_compaction = self.registry.legacy_compaction();
+            match legacy_compaction.try_write() {
                 Ok(mut manager) => {
                     let discarded_oversized_native =
                         manager.discard_oversized_openai_native_compaction();
@@ -674,12 +736,20 @@ impl Agent {
                         manager.messages_for_api_with(all_messages)
                     };
                     let event = manager.take_compaction_event();
-                    if event.is_some() || discarded_oversized_native {
+                    let context_changed = event.is_some() || discarded_oversized_native;
+                    if context_changed {
                         self.sync_session_compaction_state_from_manager(&manager);
                     }
                     if event.is_some() {
                         self.note_compaction_applied();
                         self.persist_session_best_effort("compaction completion");
+                    }
+                    drop(manager);
+                    if context_changed {
+                        self.reseed_context_budget_from_messages(
+                            &messages,
+                            "legacy compaction transition",
+                        );
                     }
                     let user_count = messages
                         .iter()
@@ -859,6 +929,7 @@ impl Agent {
             self.cache_tracker.reset();
             self.locked_tools = None;
             self.mcp_late_register_resolved = false;
+            self.reseed_context_runtime_from_session();
         }
 
         repaired

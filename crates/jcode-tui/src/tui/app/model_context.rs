@@ -638,13 +638,21 @@ impl App {
         self.context_limit = limit as u64;
         self.context_warning_shown = false;
 
-        // Also update compaction manager's budget
-        {
-            let compaction = self.registry.compaction();
-            if let Ok(mut manager) = compaction.try_write() {
-                manager.set_budget(limit);
-            };
+        let context_budget = self.registry.context_budget();
+        if let Ok(mut tracker) = context_budget.try_write() {
+            tracker.set_budget(limit);
+            tracker.clear_observed_input_tokens();
+        } else {
+            crate::logging::warn("Context budget lock unavailable during TUI model switch");
         }
+
+        // Transitional policy state uses the same model limit until Step 5
+        // removes automatic compaction from provider requests.
+        let legacy_compaction = self.registry.legacy_compaction();
+        if let Ok(mut manager) = legacy_compaction.try_write() {
+            manager.set_budget(limit);
+            manager.clear_observed_input_tokens();
+        };
     }
 
     pub(super) fn effective_context_tokens_from_usage(
@@ -659,8 +667,8 @@ impl App {
             self.provider.name().to_string()
         };
 
-        // Shared heuristic (jcode-compaction-core): keeps the sidebar figure
-        // consistent with the compaction manager's observed-token feed.
+        // Shared heuristic keeps the sidebar, policy-free tracker, and
+        // transitional compaction policy on the same provider accounting basis.
         crate::compaction::effective_context_tokens_from_usage(
             &provider_name,
             input_tokens,
@@ -740,15 +748,23 @@ impl App {
         self.streaming.streaming_usage_call_reset_pending = true;
     }
 
-    pub(super) fn update_compaction_usage_from_stream(&mut self) {
-        if self.is_remote || !self.provider.uses_jcode_compaction() {
-            return;
-        }
+    pub(super) fn update_context_usage_from_stream(&mut self) {
         let Some(tokens) = self.current_stream_context_tokens() else {
             return;
         };
-        let compaction = self.registry.compaction();
-        if let Ok(mut manager) = compaction.try_write() {
+
+        let context_budget = self.registry.context_budget();
+        if let Ok(mut tracker) = context_budget.try_write() {
+            tracker.update_observed_input_tokens(tokens);
+        } else {
+            crate::logging::warn("Context budget lock unavailable during TUI usage update");
+        }
+
+        if self.is_remote || !self.provider.uses_jcode_compaction() {
+            return;
+        }
+        let legacy_compaction = self.registry.legacy_compaction();
+        if let Ok(mut manager) = legacy_compaction.try_write() {
             manager.update_observed_input_tokens(tokens);
         };
     }
@@ -794,7 +810,7 @@ impl App {
                 .strip_oversized_images(crate::compaction::PAYLOAD_IMAGE_CHAR_BUDGET);
             if stripped > 0 {
                 self.messages.clear();
-                self.reseed_compaction_from_provider_messages();
+                self.reseed_context_runtime_from_provider_messages();
                 self.push_display_message(DisplayMessage::error(format!(
                     "Error: {} Dropped {} oversized image(s); you can retry.",
                     error, stripped
@@ -845,7 +861,7 @@ impl App {
         if self.is_remote || !self.provider.supports_compaction() {
             return None;
         }
-        let compaction = self.registry.compaction();
+        let compaction = self.registry.legacy_compaction();
         let mut manager = compaction.try_write().ok()?;
         let mut provider_messages = self.materialized_provider_messages();
 
@@ -855,6 +871,11 @@ impl App {
             if recovery.did_anything() {
                 self.messages = provider_messages.clone();
                 self.sync_session_compaction_state_from_manager(&manager);
+                drop(manager);
+                self.reseed_context_budget_from_messages(
+                    &provider_messages,
+                    "TUI emergency context recovery",
+                );
                 return Some(format!(
                     "{} You can continue.",
                     recovery.summary_line(usage)
@@ -880,6 +901,12 @@ impl App {
                 match manager.hard_compact_with(&provider_messages) {
                     Ok(dropped) => {
                         self.sync_session_compaction_state_from_manager(&manager);
+                        let messages = manager.messages_for_api_with(&provider_messages);
+                        drop(manager);
+                        self.reseed_context_budget_from_messages(
+                            &messages,
+                            "TUI emergency hard compaction",
+                        );
                         Some(format!(
                             "⚡ Emergency compaction: dropped {} old messages. You can continue.",
                             dropped
@@ -888,7 +915,12 @@ impl App {
                     Err(_) => {
                         let truncated = manager.emergency_truncate_with(&mut provider_messages);
                         if truncated > 0 {
-                            self.messages = provider_messages;
+                            self.messages = provider_messages.clone();
+                            drop(manager);
+                            self.reseed_context_budget_from_messages(
+                                &provider_messages,
+                                "TUI emergency tool-result truncation",
+                            );
                             Some(format!(
                                 "⚡ Emergency truncation: shortened {} large tool result(s) to fit context. You can continue.",
                                 truncated
@@ -930,7 +962,7 @@ impl App {
         // next API call rebuilds from the reduced session, and reseed compaction
         // bookkeeping from the new provider view.
         self.messages.clear();
-        self.reseed_compaction_from_provider_messages();
+        self.reseed_context_runtime_from_provider_messages();
 
         self.push_display_message(DisplayMessage::system(format!(
             "⚡ Request was too large; dropped {} oversized image(s) and retrying...",
@@ -1006,7 +1038,7 @@ impl App {
         ));
 
         // Force the compaction manager to think we're at the limit
-        let compaction = self.registry.compaction();
+        let compaction = self.registry.legacy_compaction();
         let compact_started = match compaction.try_write() {
             Ok(mut manager) => {
                 let mut provider_messages = self.materialized_provider_messages();
@@ -1015,9 +1047,13 @@ impl App {
                 if usage > 1.5 {
                     let recovery = manager.recover_within_budget(&mut provider_messages);
                     if recovery.did_anything() {
-                        self.messages = provider_messages;
+                        self.messages = provider_messages.clone();
                         self.sync_session_compaction_state_from_manager(&manager);
                         drop(manager);
+                        self.reseed_context_budget_from_messages(
+                            &provider_messages,
+                            "TUI context-limit recovery",
+                        );
                         self.reset_state_for_compaction_retry();
 
                         self.push_display_message(DisplayMessage::system(format!(
@@ -1033,7 +1069,12 @@ impl App {
                         Err(_) => match manager.hard_compact_with(&provider_messages) {
                             Ok(_) => {
                                 self.sync_session_compaction_state_from_manager(&manager);
+                                let messages = manager.messages_for_api_with(&provider_messages);
                                 drop(manager);
+                                self.reseed_context_budget_from_messages(
+                                    &messages,
+                                    "TUI context-limit hard compaction",
+                                );
                                 self.reset_state_for_compaction_retry();
 
                                 self.push_display_message(DisplayMessage::system(
@@ -1071,16 +1112,26 @@ impl App {
             // Redraw UI while we wait
             let _ = terminal.draw(|frame| crate::tui::ui::draw(frame, self));
 
-            let compaction = self.registry.compaction();
-            let done = if let Ok(mut manager) = compaction.try_write() {
+            let compaction = self.registry.legacy_compaction();
+            let completion = if let Ok(mut manager) = compaction.try_write() {
                 let provider_messages = self.materialized_provider_messages();
                 if let Some(event) = manager.poll_compaction_event_with(&provider_messages) {
                     self.sync_session_compaction_state_from_manager(&manager);
-                    self.handle_compaction_event(event);
-                    true
+                    let messages = manager.messages_for_api_with(&provider_messages);
+                    Some((event, messages))
                 } else {
-                    false
+                    None
                 }
+            } else {
+                None
+            };
+            let done = if let Some((event, messages)) = completion {
+                self.reseed_context_budget_from_messages(
+                    &messages,
+                    "TUI awaited compaction completion",
+                );
+                self.handle_compaction_event(event);
+                true
             } else {
                 false
             };
@@ -1326,7 +1377,7 @@ impl App {
             let observed_tokens = self
                 .current_stream_context_tokens()
                 .or_else(|| context_error.then_some(self.context_limit));
-            let compaction = self.registry.compaction();
+            let compaction = self.registry.legacy_compaction();
             match compaction.try_write() {
                 Ok(mut manager) => {
                     let mut provider_messages = self.materialized_provider_messages();

@@ -38,6 +38,7 @@ mod websearch;
 mod write;
 
 use crate::compaction::CompactionManager;
+use crate::context_budget::ContextBudgetTracker;
 use crate::provider::Provider;
 use crate::skill::SkillRegistry;
 use anyhow::Result;
@@ -130,12 +131,14 @@ fn accepts_large_output(input: &Value) -> bool {
 
 /// Registry of available tools (Arc-wrapped for sharing)
 ///
-/// Clone creates a fresh CompactionManager so each subagent gets independent
-/// message history tracking. Tools and skills are shared via Arc.
+/// Clone creates fresh context accounting and legacy compaction policy state so
+/// each subagent gets independent message history tracking. Tools and skills are
+/// shared via Arc.
 pub struct Registry {
     tools: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
     skills: Arc<RwLock<SkillRegistry>>,
-    compaction: Arc<RwLock<CompactionManager>>,
+    context_budget: Arc<RwLock<ContextBudgetTracker>>,
+    legacy_compaction: Arc<RwLock<CompactionManager>>,
 }
 
 impl Clone for Registry {
@@ -143,14 +146,31 @@ impl Clone for Registry {
         Self {
             tools: self.tools.clone(),
             skills: self.skills.clone(),
-            // Each clone gets a fresh CompactionManager to prevent parallel
-            // subagents from corrupting each other's message history
-            compaction: Arc::new(RwLock::new(CompactionManager::new())),
+            // Each clone gets fresh session-local accounting and transitional
+            // compaction policy so parallel subagents cannot corrupt one another.
+            context_budget: Arc::new(RwLock::new(ContextBudgetTracker::new())),
+            legacy_compaction: Arc::new(RwLock::new(CompactionManager::new())),
         }
     }
 }
 
 impl Registry {
+    /// Clone this registry for work that remains part of the same session.
+    ///
+    /// Ordinary [`Clone`] deliberately creates fresh context accounting and
+    /// legacy compaction state for a new agent/session. Tool execution tasks,
+    /// batch subcalls, and same-session control operations must instead share
+    /// the current runtime state or the large-output guard will silently fall
+    /// back to an empty default tracker.
+    pub fn clone_with_shared_context_runtime(&self) -> Self {
+        Self {
+            tools: self.tools.clone(),
+            skills: self.skills.clone(),
+            context_budget: self.context_budget.clone(),
+            legacy_compaction: self.legacy_compaction.clone(),
+        }
+    }
+
     fn shared_skills_registry() -> Arc<RwLock<SkillRegistry>> {
         SkillRegistry::shared_registry()
     }
@@ -181,7 +201,8 @@ impl Registry {
         Self {
             tools: Arc::new(RwLock::new(HashMap::new())),
             skills: Arc::new(RwLock::new(SkillRegistry::default())),
-            compaction: Arc::new(RwLock::new(CompactionManager::new())),
+            context_budget: Arc::new(RwLock::new(ContextBudgetTracker::new())),
+            legacy_compaction: Arc::new(RwLock::new(CompactionManager::new())),
         }
     }
 
@@ -304,14 +325,16 @@ impl Registry {
         let skills_start = std::time::Instant::now();
         let skills = Self::shared_skills_registry();
         let skills_ms = skills_start.elapsed().as_millis();
-        let compaction_start = std::time::Instant::now();
-        let compaction = Arc::new(RwLock::new(CompactionManager::new()));
-        let compaction_ms = compaction_start.elapsed().as_millis();
+        let context_runtime_start = std::time::Instant::now();
+        let context_budget = Arc::new(RwLock::new(ContextBudgetTracker::new()));
+        let legacy_compaction = Arc::new(RwLock::new(CompactionManager::new()));
+        let context_runtime_ms = context_runtime_start.elapsed().as_millis();
         let registry_struct_start = std::time::Instant::now();
         let registry = Self {
             tools: Arc::new(RwLock::new(HashMap::new())),
             skills: skills.clone(),
-            compaction: compaction.clone(),
+            context_budget: context_budget.clone(),
+            legacy_compaction,
         };
         let registry_struct_ms = registry_struct_start.elapsed().as_millis();
 
@@ -324,12 +347,12 @@ impl Registry {
         Self::insert_tool(
             &mut tools_map,
             "batch",
-            batch::BatchTool::new(registry.clone()),
+            batch::BatchTool::new(registry.clone_with_shared_context_runtime()),
         );
         Self::insert_tool(
             &mut tools_map,
             "conversation_search",
-            conversation_search::ConversationSearchTool::new(compaction),
+            conversation_search::ConversationSearchTool::new(context_budget),
         );
         // Integration discovery is on by default (opt-out); when disabled the
         // tool is never registered and no discovery endpoint is ever
@@ -347,9 +370,9 @@ impl Registry {
         *registry.tools.write().await = tools_map;
         let write_ms = write_start.elapsed().as_millis();
         crate::logging::info(&format!(
-            "[TIMING] registry_new: skills={}ms, compaction={}ms, registry_struct={}ms, base_tools={}ms, session_tools={}ms, write={}ms, total={}ms",
+            "[TIMING] registry_new: skills={}ms, context_runtime={}ms, registry_struct={}ms, base_tools={}ms, session_tools={}ms, write={}ms, total={}ms",
             skills_ms,
-            compaction_ms,
+            context_runtime_ms,
             registry_struct_ms,
             base_ms,
             session_tools_ms,
@@ -705,7 +728,22 @@ impl Registry {
         );
 
         let started_at = std::time::Instant::now();
-        let result = tool.execute(input.clone(), ctx.clone()).await;
+        // `batch` and `conversation_search` are registered as shared built-in
+        // tools, while context accounting is deliberately session-local. Bind
+        // their execution to this Registry rather than the template Registry
+        // that originally created the shared tool map.
+        let result = if resolved_name == "batch" {
+            batch::execute_with_registry(self, input.clone(), ctx.clone()).await
+        } else if resolved_name == "conversation_search" {
+            conversation_search::execute_with_context_budget(
+                &self.context_budget,
+                input.clone(),
+                ctx.clone(),
+            )
+            .await
+        } else {
+            tool.execute(input.clone(), ctx.clone()).await
+        };
         let latency_ms = started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
 
         crate::telemetry::record_tool_execution(resolved_name, &input, result.is_ok(), latency_ms);
@@ -756,17 +794,17 @@ impl Registry {
         output: ToolOutput,
         accept_large_output: bool,
     ) -> ToolOutput {
-        let compaction = self.compaction.read().await;
-        let budget = compaction.token_budget();
+        let context_budget = self.context_budget.read().await;
+        let budget = context_budget.token_budget();
         if budget == 0 {
             return output;
         }
 
-        let current_tokens = compaction.effective_token_count();
+        let current_tokens = context_budget.effective_token_count();
         let output_tokens = Self::estimate_tokens(&output.output);
 
         // Check 1: Would adding this output push us over the safety threshold?
-        let projected = current_tokens + output_tokens;
+        let projected = current_tokens.saturating_add(output_tokens);
         let threshold_tokens = (budget as f32 * Self::CONTEXT_GUARD_THRESHOLD) as usize;
 
         // Check 2: Is this single output unreasonably large? Proportional to the
@@ -1214,9 +1252,16 @@ impl Registry {
         self.skills.clone()
     }
 
-    /// Get shared access to the compaction manager
-    pub fn compaction(&self) -> Arc<RwLock<CompactionManager>> {
-        self.compaction.clone()
+    /// Get shared access to policy-free context-budget accounting.
+    pub fn context_budget(&self) -> Arc<RwLock<ContextBudgetTracker>> {
+        self.context_budget.clone()
+    }
+
+    /// Transitional access to automatic compaction policy.
+    ///
+    /// This remains only until provider requests cut over to projected history.
+    pub fn legacy_compaction(&self) -> Arc<RwLock<CompactionManager>> {
+        self.legacy_compaction.clone()
     }
 }
 

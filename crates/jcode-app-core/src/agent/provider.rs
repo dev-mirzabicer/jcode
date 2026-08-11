@@ -46,12 +46,16 @@ impl Agent {
         self.registry.clone()
     }
 
+    pub(crate) fn shared_runtime_registry(&self) -> Registry {
+        self.registry.clone_with_shared_context_runtime()
+    }
+
     pub async fn compaction_mode(&self) -> crate::config::CompactionMode {
-        self.registry.compaction().read().await.mode()
+        self.registry.legacy_compaction().read().await.mode()
     }
 
     pub async fn set_compaction_mode(&self, mode: crate::config::CompactionMode) -> Result<()> {
-        let compaction = self.registry.compaction();
+        let compaction = self.registry.legacy_compaction();
         let mut manager = compaction.write().await;
         manager.set_mode(mode);
         Ok(())
@@ -100,6 +104,7 @@ impl Agent {
         self.session.model = Some(self.provider_model());
         let event = crate::provider::ProviderStateEvent::selected_model(source, resolved_model);
         self.provider_runtime_state.apply(event);
+        self.update_context_runtime_budget();
         self.persist_session_best_effort("route selection");
         self.log_env_snapshot("set_route_selection");
         Ok(())
@@ -128,6 +133,7 @@ impl Agent {
         self.session.model = Some(self.provider_model());
         let event = crate::provider::ProviderStateEvent::selected_model(source, resolved_model);
         self.provider_runtime_state.apply(event);
+        self.update_context_runtime_budget();
         self.persist_session_best_effort("model selection");
         self.log_env_snapshot("set_model");
         Ok(())
