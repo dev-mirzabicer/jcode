@@ -51,6 +51,10 @@ pub fn analyze_cache_prefix(old: &[Message], new: &[Message]) -> CachePrefixAnal
 #[derive(Clone, Debug)]
 pub struct ContextEconomicsInput<'a> {
     pub analysis: &'a CachePrefixAnalysis,
+    /// Whole-request estimates include provider messages plus system, tool, and
+    /// other request overhead. They are mandatory for tiered dollar estimates.
+    pub estimated_total_request_tokens_before: Option<usize>,
+    pub estimated_total_request_tokens_after: Option<usize>,
     pub context_window: Option<usize>,
     pub safe_input_budget: Option<usize>,
     pub pricing: Option<&'a StoredContextPricingSnapshot>,
@@ -66,82 +70,91 @@ pub fn calculate_context_economics(input: ContextEconomicsInput<'_>) -> StoredCo
 
     if let Some(pricing) = input.pricing {
         if pricing.billing_mode == StoredContextBillingMode::Metered {
-            match pricing.cache_warmth {
-                StoredContextCacheWarmth::Warm => {
-                    let old_rates = rates_for_tokens(pricing, analysis.old_total_tokens);
-                    let new_rates = rates_for_tokens(pricing, analysis.new_total_tokens);
-                    if let (Some(old_read), Some(new_rebuild)) = (
-                        old_rates.cache_read_usd_per_million,
-                        new_rates
-                            .cache_write_usd_per_million
-                            .or(new_rates.input_usd_per_million),
-                    ) {
-                        let delta = token_cost(analysis.new_affected_suffix_tokens, new_rebuild)
-                            - token_cost(analysis.old_affected_suffix_tokens, old_read);
-                        first_request_delta_usd = Some(delta);
-
-                        if input.resulting_suffix_cacheable
-                            && let Some(future_read) = new_rates.cache_read_usd_per_million
-                        {
-                            let recurring = token_cost(analysis.deleted_input_tokens, future_read);
-                            recurring_savings_per_turn_usd = Some(recurring);
-                            if recurring > 0.0 {
-                                break_even_turns = Some(if delta <= 0.0 {
-                                    0
-                                } else {
-                                    (delta / recurring).ceil() as u64
-                                });
+            let pricing_request_tokens =
+                pricing_request_token_totals(pricing, &input, analysis, &mut assumptions);
+            if let Some((old_pricing_tokens, new_pricing_tokens)) = pricing_request_tokens {
+                match pricing.cache_warmth {
+                    StoredContextCacheWarmth::Warm => {
+                        let old_rates =
+                            context_token_rates_for_input_tokens(pricing, old_pricing_tokens);
+                        let new_rates =
+                            context_token_rates_for_input_tokens(pricing, new_pricing_tokens);
+                        if let (Some(old_read), Some(new_read), Some(new_rebuild)) = (
+                            old_rates.cache_read_usd_per_million,
+                            new_rates.cache_read_usd_per_million,
+                            new_rates
+                                .cache_write_usd_per_million
+                                .or(new_rates.input_usd_per_million),
+                        ) {
+                            if let Some(stable_prefix_tokens) = stable_request_prefix_tokens(
+                                old_pricing_tokens,
+                                new_pricing_tokens,
+                                analysis,
+                                &mut assumptions,
+                            ) {
+                                let old_cost = token_cost(stable_prefix_tokens, old_read)
+                                    + token_cost(analysis.old_affected_suffix_tokens, old_read);
+                                let new_cost = token_cost(stable_prefix_tokens, new_read)
+                                    + token_cost(analysis.new_affected_suffix_tokens, new_rebuild);
+                                first_request_delta_usd = Some(new_cost - old_cost);
                             }
+                        } else {
+                            assumptions.push(
+                                "cache-read or rebuild price is unavailable; first-request dollar economics omitted"
+                                    .to_string(),
+                            );
                         }
-                    } else {
-                        assumptions.push(
-                            "cache-read or rebuild price is unavailable; dollar economics omitted"
-                                .to_string(),
+                        recurring_savings_per_turn_usd = recurring_cache_savings(
+                            old_pricing_tokens,
+                            new_pricing_tokens,
+                            old_rates,
+                            new_rates,
+                            input.resulting_suffix_cacheable,
+                            &mut assumptions,
                         );
+                        record_output_tier_assumption(old_rates, new_rates, &mut assumptions);
                     }
-                }
-                StoredContextCacheWarmth::Cold => {
-                    let old_rates = rates_for_tokens(pricing, analysis.old_total_tokens);
-                    let new_rates = rates_for_tokens(pricing, analysis.new_total_tokens);
-                    if let (Some(old_rebuild), Some(new_rebuild)) = (
-                        old_rates
-                            .cache_write_usd_per_million
-                            .or(old_rates.input_usd_per_million),
-                        new_rates
-                            .cache_write_usd_per_million
-                            .or(new_rates.input_usd_per_million),
-                    ) {
-                        let delta = token_cost(analysis.new_total_tokens, new_rebuild)
-                            - token_cost(analysis.old_total_tokens, old_rebuild);
-                        first_request_delta_usd = Some(delta);
-                        if input.resulting_suffix_cacheable
-                            && let Some(future_read) = new_rates.cache_read_usd_per_million
-                        {
-                            let recurring = token_cost(analysis.deleted_input_tokens, future_read);
-                            recurring_savings_per_turn_usd = Some(recurring);
-                            if recurring > 0.0 {
-                                break_even_turns = Some(if delta <= 0.0 {
-                                    0
-                                } else {
-                                    (delta / recurring).ceil() as u64
-                                });
-                            }
+                    StoredContextCacheWarmth::Cold => {
+                        let old_rates =
+                            context_token_rates_for_input_tokens(pricing, old_pricing_tokens);
+                        let new_rates =
+                            context_token_rates_for_input_tokens(pricing, new_pricing_tokens);
+                        if let (Some(old_rebuild), Some(new_rebuild)) = (
+                            old_rates
+                                .cache_write_usd_per_million
+                                .or(old_rates.input_usd_per_million),
+                            new_rates
+                                .cache_write_usd_per_million
+                                .or(new_rates.input_usd_per_million),
+                        ) {
+                            let delta = token_cost(new_pricing_tokens, new_rebuild)
+                                - token_cost(old_pricing_tokens, old_rebuild);
+                            first_request_delta_usd = Some(delta);
+                            assumptions.push(
+                                "the prior prefix is cold; the first-request comparison bills complete old and new prompts at rebuild rates"
+                                    .to_string(),
+                            );
+                        } else {
+                            assumptions.push(
+                                "the prior prefix is cold and rebuild pricing is unavailable; first-request dollar economics omitted"
+                                    .to_string(),
+                            );
                         }
-                        assumptions.push(
-                            "the prior prefix is cold; the first-request comparison bills complete old and new prompts at rebuild rates"
-                                .to_string(),
+                        recurring_savings_per_turn_usd = recurring_cache_savings(
+                            old_pricing_tokens,
+                            new_pricing_tokens,
+                            old_rates,
+                            new_rates,
+                            input.resulting_suffix_cacheable,
+                            &mut assumptions,
                         );
-                    } else {
-                        assumptions.push(
-                            "the prior prefix is cold and rebuild pricing is unavailable; dollar economics omitted"
-                                .to_string(),
-                        );
+                        record_output_tier_assumption(old_rates, new_rates, &mut assumptions);
                     }
+                    StoredContextCacheWarmth::Unknown => assumptions.push(
+                        "cache warmth is unknown; dollar cache-transition estimates were omitted"
+                            .to_string(),
+                    ),
                 }
-                StoredContextCacheWarmth::Unknown => assumptions.push(
-                    "cache warmth is unknown; dollar cache-transition estimates were omitted"
-                        .to_string(),
-                ),
             }
         } else {
             assumptions.push(format!(
@@ -158,10 +171,22 @@ pub fn calculate_context_economics(input: ContextEconomicsInput<'_>) -> StoredCo
                 .to_string(),
         );
     }
+    if let (Some(delta), Some(recurring)) =
+        (first_request_delta_usd, recurring_savings_per_turn_usd)
+        && recurring > 0.0
+    {
+        break_even_turns = Some(if delta <= 0.0 {
+            0
+        } else {
+            (delta / recurring).ceil() as u64
+        });
+    }
 
     StoredContextEconomics {
         projected_tokens_before: analysis.old_total_tokens,
         projected_tokens_after: analysis.new_total_tokens,
+        estimated_total_request_tokens_before: input.estimated_total_request_tokens_before,
+        estimated_total_request_tokens_after: input.estimated_total_request_tokens_after,
         unchanged_prefix_items: analysis.unchanged_prefix_items,
         earliest_changed_provider_item: analysis.earliest_changed_provider_item,
         old_affected_suffix_tokens: analysis.old_affected_suffix_tokens,
@@ -177,27 +202,128 @@ pub fn calculate_context_economics(input: ContextEconomicsInput<'_>) -> StoredCo
     }
 }
 
-#[derive(Clone, Copy)]
-struct EffectiveRates {
-    input_usd_per_million: Option<f64>,
-    cache_read_usd_per_million: Option<f64>,
-    cache_write_usd_per_million: Option<f64>,
+fn stable_request_prefix_tokens(
+    old_request_tokens: usize,
+    new_request_tokens: usize,
+    analysis: &CachePrefixAnalysis,
+    assumptions: &mut Vec<String>,
+) -> Option<usize> {
+    let old_prefix = old_request_tokens.checked_sub(analysis.old_affected_suffix_tokens);
+    let new_prefix = new_request_tokens.checked_sub(analysis.new_affected_suffix_tokens);
+    match (old_prefix, new_prefix) {
+        (Some(old_prefix), Some(new_prefix)) if old_prefix == new_prefix => Some(old_prefix),
+        _ => {
+            assumptions.push(
+                "whole-request estimates do not preserve the unchanged request prefix; first-request dollar economics omitted"
+                    .to_string(),
+            );
+            None
+        }
+    }
 }
 
-fn rates_for_tokens(pricing: &StoredContextPricingSnapshot, input_tokens: usize) -> EffectiveRates {
-    let mut rates = EffectiveRates {
+fn recurring_cache_savings(
+    old_request_tokens: usize,
+    new_request_tokens: usize,
+    old_rates: ContextTokenRates,
+    new_rates: ContextTokenRates,
+    resulting_suffix_cacheable: bool,
+    assumptions: &mut Vec<String>,
+) -> Option<f64> {
+    if !resulting_suffix_cacheable {
+        return None;
+    }
+    match (
+        old_rates.cache_read_usd_per_million,
+        new_rates.cache_read_usd_per_million,
+    ) {
+        (Some(old_read), Some(new_read)) => Some(
+            token_cost(old_request_tokens, old_read) - token_cost(new_request_tokens, new_read),
+        ),
+        _ => {
+            assumptions.push(
+                "old or new cache-read price is unavailable; recurring dollar economics omitted"
+                    .to_string(),
+            );
+            None
+        }
+    }
+}
+
+fn record_output_tier_assumption(
+    old_rates: ContextTokenRates,
+    new_rates: ContextTokenRates,
+    assumptions: &mut Vec<String>,
+) {
+    if old_rates.output_usd_per_million != new_rates.output_usd_per_million {
+        assumptions.push(
+            "the request-size tier changes output pricing; output-cost effects are omitted because future output tokens are unknown"
+                .to_string(),
+        );
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ContextTokenRates {
+    pub input_usd_per_million: Option<f64>,
+    pub output_usd_per_million: Option<f64>,
+    pub cache_read_usd_per_million: Option<f64>,
+    pub cache_write_usd_per_million: Option<f64>,
+}
+
+/// Resolve the effective rates for a whole-request input-token count.
+/// Thresholds are strict, output rates inherit when omitted, and missing cache
+/// rates remain unknown so callers cannot fabricate cache economics.
+pub fn context_token_rates_for_input_tokens(
+    pricing: &StoredContextPricingSnapshot,
+    input_tokens: usize,
+) -> ContextTokenRates {
+    let mut rates = ContextTokenRates {
         input_usd_per_million: pricing.input_usd_per_million,
+        output_usd_per_million: pricing.output_usd_per_million,
         cache_read_usd_per_million: pricing.cache_read_usd_per_million,
         cache_write_usd_per_million: pricing.cache_write_usd_per_million,
     };
     for tier in sorted_tiers(&pricing.input_price_tiers) {
         if input_tokens > tier.above_input_tokens {
             rates.input_usd_per_million = Some(tier.input_usd_per_million);
+            if let Some(output) = tier.output_usd_per_million {
+                rates.output_usd_per_million = Some(output);
+            }
             rates.cache_read_usd_per_million = tier.cache_read_usd_per_million;
             rates.cache_write_usd_per_million = tier.cache_write_usd_per_million;
         }
     }
     rates
+}
+
+fn pricing_request_token_totals(
+    pricing: &StoredContextPricingSnapshot,
+    input: &ContextEconomicsInput<'_>,
+    analysis: &CachePrefixAnalysis,
+    assumptions: &mut Vec<String>,
+) -> Option<(usize, usize)> {
+    if pricing.input_price_tiers.is_empty() {
+        return Some((analysis.old_total_tokens, analysis.new_total_tokens));
+    }
+
+    match (
+        input.estimated_total_request_tokens_before,
+        input.estimated_total_request_tokens_after,
+    ) {
+        (Some(before), Some(after))
+            if before >= analysis.old_total_tokens && after >= analysis.new_total_tokens =>
+        {
+            Some((before, after))
+        }
+        _ => {
+            assumptions.push(
+                "request-size pricing tiers are known, but valid whole-request token estimates are unavailable; dollar economics omitted"
+                    .to_string(),
+            );
+            None
+        }
+    }
 }
 
 fn sorted_tiers(tiers: &[StoredContextInputPriceTier]) -> Vec<&StoredContextInputPriceTier> {
@@ -263,6 +389,8 @@ mod tests {
         let pricing = pricing(StoredContextBillingMode::Subscription);
         let economics = calculate_context_economics(ContextEconomicsInput {
             analysis: &analysis,
+            estimated_total_request_tokens_before: None,
+            estimated_total_request_tokens_after: None,
             context_window: Some(372_000),
             safe_input_budget: Some(368_000),
             pricing: Some(&pricing),
@@ -286,6 +414,8 @@ mod tests {
         let pricing = pricing(StoredContextBillingMode::Metered);
         let economics = calculate_context_economics(ContextEconomicsInput {
             analysis: &analysis,
+            estimated_total_request_tokens_before: None,
+            estimated_total_request_tokens_after: None,
             context_window: Some(372_000),
             safe_input_budget: Some(368_000),
             pricing: Some(&pricing),
@@ -340,6 +470,8 @@ mod tests {
         );
         let economics = calculate_context_economics(ContextEconomicsInput {
             analysis: &immediate,
+            estimated_total_request_tokens_before: None,
+            estimated_total_request_tokens_after: None,
             context_window: None,
             safe_input_budget: None,
             pricing: Some(&pricing),
@@ -351,6 +483,8 @@ mod tests {
         let unchanged = analyze_cache_prefix(&[text_message("same")], &[text_message("same")]);
         let economics = calculate_context_economics(ContextEconomicsInput {
             analysis: &unchanged,
+            estimated_total_request_tokens_before: None,
+            estimated_total_request_tokens_after: None,
             context_window: None,
             safe_input_budget: None,
             pricing: Some(&pricing),
@@ -376,6 +510,8 @@ mod tests {
 
         let economics = calculate_context_economics(ContextEconomicsInput {
             analysis: &analysis,
+            estimated_total_request_tokens_before: None,
+            estimated_total_request_tokens_after: None,
             context_window: None,
             safe_input_budget: None,
             pricing: Some(&pricing),
@@ -391,31 +527,169 @@ mod tests {
         let analysis = CachePrefixAnalysis {
             unchanged_prefix_items: 0,
             earliest_changed_provider_item: Some(0),
-            old_total_tokens: 300_000,
-            new_total_tokens: 250_000,
-            old_affected_suffix_tokens: 300_000,
-            new_affected_suffix_tokens: 250_000,
+            old_total_tokens: 250_000,
+            new_total_tokens: 200_000,
+            old_affected_suffix_tokens: 250_000,
+            new_affected_suffix_tokens: 200_000,
             deleted_input_tokens: 50_000,
         };
         let mut pricing = pricing(StoredContextBillingMode::Metered);
         pricing.input_price_tiers = vec![StoredContextInputPriceTier {
             above_input_tokens: 272_000,
             input_usd_per_million: 10.0,
+            output_usd_per_million: Some(45.0),
             cache_read_usd_per_million: Some(1.0),
             cache_write_usd_per_million: Some(12.5),
         }];
 
         let economics = calculate_context_economics(ContextEconomicsInput {
             analysis: &analysis,
+            estimated_total_request_tokens_before: Some(300_000),
+            estimated_total_request_tokens_after: Some(250_000),
             context_window: Some(372_000),
             safe_input_budget: Some(368_000),
             pricing: Some(&pricing),
             resulting_suffix_cacheable: true,
         });
 
-        let expected = token_cost(250_000, 6.25) - token_cost(300_000, 1.0);
+        let expected =
+            token_cost(50_000, 0.5) + token_cost(200_000, 6.25) - token_cost(300_000, 1.0);
         assert!((economics.first_request_delta_usd.unwrap() - expected).abs() < f64::EPSILON);
-        assert_eq!(economics.recurring_savings_per_turn_usd, Some(0.025));
+        assert_eq!(economics.recurring_savings_per_turn_usd, Some(0.175));
+        assert_eq!(economics.break_even_turns, Some(6));
+        assert!(
+            economics
+                .assumptions
+                .iter()
+                .any(|assumption| assumption.contains("output pricing"))
+        );
+        assert_eq!(
+            economics.estimated_total_request_tokens_before,
+            Some(300_000)
+        );
+        assert_eq!(
+            economics.estimated_total_request_tokens_after,
+            Some(250_000)
+        );
+    }
+
+    #[test]
+    fn tier_crossing_reprices_the_unchanged_cached_prefix() {
+        let analysis = CachePrefixAnalysis {
+            unchanged_prefix_items: 1,
+            earliest_changed_provider_item: Some(1),
+            old_total_tokens: 250_000,
+            new_total_tokens: 200_000,
+            old_affected_suffix_tokens: 100_000,
+            new_affected_suffix_tokens: 50_000,
+            deleted_input_tokens: 50_000,
+        };
+        let mut pricing = pricing(StoredContextBillingMode::Metered);
+        pricing.input_price_tiers = vec![StoredContextInputPriceTier {
+            above_input_tokens: 272_000,
+            input_usd_per_million: 10.0,
+            output_usd_per_million: Some(45.0),
+            cache_read_usd_per_million: Some(1.0),
+            cache_write_usd_per_million: Some(12.5),
+        }];
+
+        let economics = calculate_context_economics(ContextEconomicsInput {
+            analysis: &analysis,
+            estimated_total_request_tokens_before: Some(300_000),
+            estimated_total_request_tokens_after: Some(250_000),
+            context_window: None,
+            safe_input_budget: None,
+            pricing: Some(&pricing),
+            resulting_suffix_cacheable: true,
+        });
+
+        let expected_first =
+            token_cost(200_000, 0.5) + token_cost(50_000, 6.25) - token_cost(300_000, 1.0);
+        assert!((economics.first_request_delta_usd.unwrap() - expected_first).abs() < f64::EPSILON);
+        assert_eq!(economics.recurring_savings_per_turn_usd, Some(0.175));
+        assert_eq!(economics.break_even_turns, Some(1));
+    }
+
+    #[test]
+    fn inconsistent_whole_request_prefix_evidence_omits_first_request_dollars() {
+        let analysis = CachePrefixAnalysis {
+            unchanged_prefix_items: 1,
+            earliest_changed_provider_item: Some(1),
+            old_total_tokens: 250_000,
+            new_total_tokens: 200_000,
+            old_affected_suffix_tokens: 100_000,
+            new_affected_suffix_tokens: 50_000,
+            deleted_input_tokens: 50_000,
+        };
+        let mut pricing = pricing(StoredContextBillingMode::Metered);
+        pricing.input_price_tiers = vec![StoredContextInputPriceTier {
+            above_input_tokens: 272_000,
+            input_usd_per_million: 10.0,
+            output_usd_per_million: Some(45.0),
+            cache_read_usd_per_million: Some(1.0),
+            cache_write_usd_per_million: Some(12.5),
+        }];
+
+        let economics = calculate_context_economics(ContextEconomicsInput {
+            analysis: &analysis,
+            estimated_total_request_tokens_before: Some(300_000),
+            estimated_total_request_tokens_after: Some(260_000),
+            context_window: None,
+            safe_input_budget: None,
+            pricing: Some(&pricing),
+            resulting_suffix_cacheable: true,
+        });
+
+        assert_eq!(economics.first_request_delta_usd, None);
+        assert!(economics.recurring_savings_per_turn_usd.is_some());
+        assert_eq!(economics.break_even_turns, None);
+        assert!(
+            economics
+                .assumptions
+                .iter()
+                .any(|assumption| assumption.contains("unchanged request prefix"))
+        );
+    }
+
+    #[test]
+    fn tiered_pricing_without_whole_request_evidence_omits_dollar_claims() {
+        let analysis = CachePrefixAnalysis {
+            unchanged_prefix_items: 0,
+            earliest_changed_provider_item: Some(0),
+            old_total_tokens: 250_000,
+            new_total_tokens: 200_000,
+            old_affected_suffix_tokens: 250_000,
+            new_affected_suffix_tokens: 200_000,
+            deleted_input_tokens: 50_000,
+        };
+        let mut pricing = pricing(StoredContextBillingMode::Metered);
+        pricing.input_price_tiers = vec![StoredContextInputPriceTier {
+            above_input_tokens: 272_000,
+            input_usd_per_million: 10.0,
+            output_usd_per_million: Some(45.0),
+            cache_read_usd_per_million: Some(1.0),
+            cache_write_usd_per_million: Some(12.5),
+        }];
+
+        let economics = calculate_context_economics(ContextEconomicsInput {
+            analysis: &analysis,
+            estimated_total_request_tokens_before: None,
+            estimated_total_request_tokens_after: None,
+            context_window: None,
+            safe_input_budget: None,
+            pricing: Some(&pricing),
+            resulting_suffix_cacheable: true,
+        });
+
+        assert_eq!(economics.first_request_delta_usd, None);
+        assert_eq!(economics.recurring_savings_per_turn_usd, None);
+        assert_eq!(economics.break_even_turns, None);
+        assert!(
+            economics
+                .assumptions
+                .iter()
+                .any(|assumption| assumption.contains("whole-request token estimates"))
+        );
     }
 
     #[test]
@@ -434,6 +708,8 @@ mod tests {
         cold.cache_warmth = StoredContextCacheWarmth::Cold;
         let cold_economics = calculate_context_economics(ContextEconomicsInput {
             analysis: &analysis,
+            estimated_total_request_tokens_before: None,
+            estimated_total_request_tokens_after: None,
             context_window: None,
             safe_input_budget: None,
             pricing: Some(&cold),
@@ -451,6 +727,8 @@ mod tests {
         unknown.cache_warmth = StoredContextCacheWarmth::Unknown;
         let unknown_economics = calculate_context_economics(ContextEconomicsInput {
             analysis: &analysis,
+            estimated_total_request_tokens_before: None,
+            estimated_total_request_tokens_after: None,
             context_window: None,
             safe_input_budget: None,
             pricing: Some(&unknown),
@@ -472,6 +750,8 @@ mod tests {
             let route = pricing(billing_mode);
             let economics = calculate_context_economics(ContextEconomicsInput {
                 analysis: &analysis,
+                estimated_total_request_tokens_before: None,
+                estimated_total_request_tokens_after: None,
                 context_window: None,
                 safe_input_budget: None,
                 pricing: Some(&route),

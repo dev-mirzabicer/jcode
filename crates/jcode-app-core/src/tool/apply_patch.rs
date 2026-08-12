@@ -671,6 +671,22 @@ fn parse_apply_patch(input: &str) -> Result<Vec<PatchHunk>> {
     Ok(hunks)
 }
 
+pub(super) fn parsed_file_paths(input: &str) -> Result<Vec<String>> {
+    let mut paths = Vec::new();
+    for hunk in parse_apply_patch(input)? {
+        match hunk {
+            PatchHunk::AddFile { path, .. } | PatchHunk::DeleteFile { path } => paths.push(path),
+            PatchHunk::UpdateFile { path, move_to, .. } => {
+                paths.push(path);
+                if let Some(move_to) = move_to {
+                    paths.push(move_to);
+                }
+            }
+        }
+    }
+    Ok(paths)
+}
+
 #[cfg(test)]
 #[path = "apply_patch_tests.rs"]
 mod apply_patch_tests;

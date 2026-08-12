@@ -2,7 +2,14 @@ use super::{ALL_OPENAI_MODELS, openrouter};
 use crate::auth;
 use crate::provider::models::provider_for_model;
 use jcode_provider_core::pricing as core_pricing;
-use jcode_provider_core::{RouteCheapnessEstimate, RouteCostConfidence, RouteCostSource};
+use jcode_provider_core::{
+    AuthRoute, DualAuthProvider, RouteBillingKind, RouteCheapnessEstimate, RouteCostConfidence,
+    RouteCostSource,
+};
+use jcode_session_types::{
+    StoredContextBillingMode, StoredContextCacheWarmth, StoredContextInputPriceTier,
+    StoredContextPricingSnapshot,
+};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -125,6 +132,7 @@ pub(crate) fn openrouter_pricing_from_model_pricing(
         pricing.prompt.as_deref(),
         pricing.completion.as_deref(),
         pricing.input_cache_read.as_deref(),
+        pricing.input_cache_write.as_deref(),
         source,
         confidence,
         note,
@@ -226,6 +234,7 @@ pub fn metered_pricing_for_source_with_tier(
         usd_to_micros(cost.input_usd_per_mtok),
         usd_to_micros(cost.output_usd_per_mtok),
         cost.cache_read_usd_per_mtok.map(usd_to_micros),
+        cost.cache_write_usd_per_mtok.map(usd_to_micros),
         Some("models.dev pricing catalog".to_string()),
     ))
 }
@@ -246,7 +255,12 @@ pub(crate) fn cheapness_for_route(
             (DualAuthProvider::Anthropic, AuthMode::ApiKey) => {
                 // Bare `api-key` only means Anthropic when the route's provider
                 // label says so; otherwise fall through to the non-dual arms.
-                if provider == "Anthropic" {
+                let bare_api_key = api_method.trim().eq_ignore_ascii_case("api-key");
+                let provider_is_anthropic = matches!(
+                    provider.trim().to_ascii_lowercase().as_str(),
+                    "anthropic" | "claude"
+                );
+                if !bare_api_key || provider_is_anthropic {
                     metered_pricing_for_source("claude:api-key", model)
                 } else {
                     None
@@ -291,6 +305,87 @@ pub(crate) fn cheapness_for_route(
                 .or_else(|| metered_pricing_for_source("openrouter", &model_id))
         }
         _ => None,
+    }
+}
+
+/// Resolve the existing route-pricing data into the persisted, provider-neutral
+/// snapshot used by context transaction economics.
+///
+/// Missing rates remain missing. In particular, this function never converts a
+/// subscription or included quota into invented per-token dollar pricing.
+pub fn context_pricing_snapshot(
+    model: &str,
+    provider: &str,
+    api_method: &str,
+    cache_warmth: StoredContextCacheWarmth,
+) -> StoredContextPricingSnapshot {
+    let estimate = cheapness_for_route(model, provider, api_method);
+    let billing_mode = match estimate.as_ref().map(|estimate| estimate.billing_kind) {
+        Some(RouteBillingKind::Metered) => StoredContextBillingMode::Metered,
+        Some(RouteBillingKind::Subscription) => StoredContextBillingMode::Subscription,
+        Some(RouteBillingKind::IncludedQuota) => StoredContextBillingMode::IncludedQuota,
+        Some(RouteBillingKind::Unknown) | None => StoredContextBillingMode::Unknown,
+    };
+
+    let micros_to_usd = |value: Option<u64>| value.map(|value| value as f64 / 1_000_000.0);
+    let mut cache_write = estimate
+        .as_ref()
+        .and_then(|estimate| estimate.cache_write_price_per_mtok_micros);
+    let input_price_tiers = estimate
+        .as_ref()
+        .map(|estimate| {
+            estimate
+                .input_price_tiers
+                .iter()
+                .map(|tier| StoredContextInputPriceTier {
+                    above_input_tokens: tier.above_input_tokens,
+                    input_usd_per_million: tier.input_price_per_mtok_micros as f64 / 1_000_000.0,
+                    output_usd_per_million: micros_to_usd(tier.output_price_per_mtok_micros),
+                    cache_read_usd_per_million: micros_to_usd(
+                        tier.cache_read_price_per_mtok_micros,
+                    ),
+                    cache_write_usd_per_million: micros_to_usd(
+                        tier.cache_write_price_per_mtok_micros,
+                    ),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Anthropic's persisted route estimate carries the normal five-minute write
+    // rate. The active one-hour TTL is a runtime choice and must be captured at
+    // transaction time rather than baked into a global static table.
+    let is_anthropic_route = matches!(
+        AuthRoute::parse(api_method),
+        Some(AuthRoute {
+            provider: DualAuthProvider::Anthropic,
+            ..
+        })
+    );
+    if billing_mode == StoredContextBillingMode::Metered
+        && is_anthropic_route
+        && crate::provider::anthropic::is_cache_ttl_1h()
+    {
+        cache_write = estimate
+            .as_ref()
+            .and_then(|estimate| estimate.input_price_per_mtok_micros)
+            .map(|input| input.saturating_mul(2));
+    }
+
+    StoredContextPricingSnapshot {
+        billing_mode,
+        input_usd_per_million: estimate
+            .as_ref()
+            .and_then(|estimate| micros_to_usd(estimate.input_price_per_mtok_micros)),
+        output_usd_per_million: estimate
+            .as_ref()
+            .and_then(|estimate| micros_to_usd(estimate.output_price_per_mtok_micros)),
+        cache_read_usd_per_million: estimate
+            .as_ref()
+            .and_then(|estimate| micros_to_usd(estimate.cache_read_price_per_mtok_micros)),
+        cache_write_usd_per_million: micros_to_usd(cache_write),
+        input_price_tiers,
+        cache_warmth,
     }
 }
 
@@ -352,7 +447,7 @@ mod tests {
             prompt: Some("0.0000025".to_string()),
             completion: Some("0.000015".to_string()),
             input_cache_read: Some("0.00000025".to_string()),
-            input_cache_write: None,
+            input_cache_write: Some("0.000003125".to_string()),
         };
         let estimate = openrouter_pricing_from_model_pricing(
             &pricing,
@@ -365,6 +460,7 @@ mod tests {
         assert_eq!(estimate.input_price_per_mtok_micros, Some(2_500_000));
         assert_eq!(estimate.output_price_per_mtok_micros, Some(15_000_000));
         assert_eq!(estimate.cache_read_price_per_mtok_micros, Some(250_000));
+        assert_eq!(estimate.cache_write_price_per_mtok_micros, Some(3_125_000));
     }
 
     #[test]
@@ -424,7 +520,7 @@ mod tests {
                         input_usd_per_mtok: 0.14,
                         output_usd_per_mtok: 0.28,
                         cache_read_usd_per_mtok: Some(0.0028),
-                        cache_write_usd_per_mtok: None,
+                        cache_write_usd_per_mtok: Some(0.175),
                     },
                 ),
             ]);
@@ -443,6 +539,7 @@ mod tests {
             assert_eq!(flash.input_price_per_mtok_micros, Some(140_000));
             assert_eq!(flash.output_price_per_mtok_micros, Some(280_000));
             assert_eq!(flash.cache_read_price_per_mtok_micros, Some(2_800));
+            assert_eq!(flash.cache_write_price_per_mtok_micros, Some(175_000));
 
             // Unknown models return None instead of a fabricated price.
             assert!(
@@ -450,6 +547,146 @@ mod tests {
             );
 
             crate::model_pricing::clear_memory_cache_for_tests();
+        });
+    }
+
+    #[test]
+    fn context_snapshot_uses_five_minute_and_one_hour_anthropic_cache_write_rates() {
+        with_clean_provider_test_env(|| {
+            struct CacheTtlRestore(bool);
+            impl Drop for CacheTtlRestore {
+                fn drop(&mut self) {
+                    crate::provider::anthropic::set_cache_ttl_1h(self.0);
+                }
+            }
+            let _restore = CacheTtlRestore(crate::provider::anthropic::is_cache_ttl_1h());
+
+            crate::provider::anthropic::set_cache_ttl_1h(false);
+            let five_minute = context_pricing_snapshot(
+                "claude-fable-5",
+                "Anthropic",
+                "claude-api",
+                StoredContextCacheWarmth::Warm,
+            );
+            assert_eq!(five_minute.billing_mode, StoredContextBillingMode::Metered);
+            assert_eq!(five_minute.input_usd_per_million, Some(10.0));
+            assert_eq!(five_minute.cache_read_usd_per_million, Some(1.0));
+            assert_eq!(five_minute.cache_write_usd_per_million, Some(12.5));
+            assert_eq!(five_minute.cache_warmth, StoredContextCacheWarmth::Warm);
+
+            crate::provider::anthropic::set_cache_ttl_1h(true);
+            let one_hour = context_pricing_snapshot(
+                "claude-fable-5",
+                "not-an-anthropic-label",
+                "anthropic-api-key",
+                StoredContextCacheWarmth::Cold,
+            );
+            assert_eq!(one_hour.billing_mode, StoredContextBillingMode::Metered);
+            assert_eq!(one_hour.cache_write_usd_per_million, Some(20.0));
+            assert_eq!(one_hour.cache_warmth, StoredContextCacheWarmth::Cold);
+        });
+    }
+
+    #[test]
+    fn pricing_route_detection_uses_auth_route_and_does_not_misclassify_provider_labels() {
+        with_clean_provider_test_env(|| {
+            struct CacheTtlRestore(bool);
+            impl Drop for CacheTtlRestore {
+                fn drop(&mut self) {
+                    crate::provider::anthropic::set_cache_ttl_1h(self.0);
+                }
+            }
+            let _restore = CacheTtlRestore(crate::provider::anthropic::is_cache_ttl_1h());
+            crate::provider::anthropic::set_cache_ttl_1h(true);
+
+            let bare_api_key = cheapness_for_route("claude-fable-5", "Anthropic", "api-key")
+                .expect("Anthropic provider label disambiguates the legacy bare API-key route");
+            assert_eq!(bare_api_key.billing_kind, RouteBillingKind::Metered);
+            assert!(cheapness_for_route("claude-fable-5", "Other", "api-key").is_none());
+
+            let openai = context_pricing_snapshot(
+                "gpt-5.4",
+                "Anthropic",
+                "openai-api",
+                StoredContextCacheWarmth::Unknown,
+            );
+            assert_eq!(openai.billing_mode, StoredContextBillingMode::Metered);
+            assert_eq!(openai.cache_write_usd_per_million, None);
+        });
+    }
+
+    #[test]
+    fn context_snapshot_preserves_gpt_5_6_sol_request_size_pricing_tiers() {
+        with_clean_provider_test_env(|| {
+            let snapshot = context_pricing_snapshot(
+                "gpt-5.6-sol",
+                "OpenAI",
+                "openai-api",
+                StoredContextCacheWarmth::Warm,
+            );
+
+            assert_eq!(snapshot.billing_mode, StoredContextBillingMode::Metered);
+            assert_eq!(snapshot.input_usd_per_million, Some(5.0));
+            assert_eq!(snapshot.output_usd_per_million, Some(30.0));
+            assert_eq!(snapshot.cache_read_usd_per_million, Some(0.5));
+            assert_eq!(snapshot.cache_write_usd_per_million, None);
+            assert_eq!(
+                snapshot.input_price_tiers,
+                vec![StoredContextInputPriceTier {
+                    above_input_tokens: 272_000,
+                    input_usd_per_million: 10.0,
+                    output_usd_per_million: Some(45.0),
+                    cache_read_usd_per_million: Some(1.0),
+                    cache_write_usd_per_million: None,
+                }]
+            );
+        });
+    }
+
+    #[test]
+    fn context_snapshot_preserves_non_metered_and_unknown_billing_without_fake_rates() {
+        with_clean_provider_test_env(|| {
+            let subscription = context_pricing_snapshot(
+                "claude-opus-5",
+                "Anthropic",
+                "claude-oauth",
+                StoredContextCacheWarmth::Unknown,
+            );
+            assert_eq!(
+                subscription.billing_mode,
+                StoredContextBillingMode::Subscription
+            );
+            assert_eq!(subscription.input_usd_per_million, None);
+            assert_eq!(subscription.output_usd_per_million, None);
+            assert_eq!(subscription.cache_read_usd_per_million, None);
+            assert_eq!(subscription.cache_write_usd_per_million, None);
+
+            env::set_var("JCODE_COPILOT_PREMIUM", "0");
+            let included = context_pricing_snapshot(
+                "claude-opus-4-6",
+                "Copilot",
+                "copilot",
+                StoredContextCacheWarmth::Unknown,
+            );
+            assert_eq!(
+                included.billing_mode,
+                StoredContextBillingMode::IncludedQuota
+            );
+            assert_eq!(included.input_usd_per_million, None);
+            assert_eq!(included.cache_write_usd_per_million, None);
+
+            let unknown = context_pricing_snapshot(
+                "anthropic.unknown-model",
+                "AWS Bedrock",
+                "bedrock",
+                StoredContextCacheWarmth::Warm,
+            );
+            assert_eq!(unknown.billing_mode, StoredContextBillingMode::Unknown);
+            assert_eq!(unknown.input_usd_per_million, None);
+            assert_eq!(unknown.output_usd_per_million, None);
+            assert_eq!(unknown.cache_read_usd_per_million, None);
+            assert_eq!(unknown.cache_write_usd_per_million, None);
+            assert_eq!(unknown.cache_warmth, StoredContextCacheWarmth::Warm);
         });
     }
 }

@@ -47,6 +47,7 @@ pub struct ContextBudgetStats {
 pub struct ContextBudgetTracker {
     token_budget: usize,
     observed_input_tokens: Option<u64>,
+    estimated_message_tokens_at_observation: Option<usize>,
     estimated_message_chars: usize,
     estimated_message_tokens: usize,
     message_count: usize,
@@ -57,6 +58,7 @@ impl ContextBudgetTracker {
         Self {
             token_budget: DEFAULT_CONTEXT_TOKEN_BUDGET,
             observed_input_tokens: None,
+            estimated_message_tokens_at_observation: None,
             estimated_message_chars: 0,
             estimated_message_tokens: 0,
             message_count: 0,
@@ -81,6 +83,7 @@ impl ContextBudgetTracker {
     /// configured model budget.
     pub fn reset(&mut self) {
         self.observed_input_tokens = None;
+        self.estimated_message_tokens_at_observation = None;
         self.estimated_message_chars = 0;
         self.estimated_message_tokens = 0;
         self.message_count = 0;
@@ -88,10 +91,12 @@ impl ContextBudgetTracker {
 
     pub fn clear_observed_input_tokens(&mut self) {
         self.observed_input_tokens = None;
+        self.estimated_message_tokens_at_observation = None;
     }
 
     pub fn update_observed_input_tokens(&mut self, tokens: u64) {
         self.observed_input_tokens = Some(tokens);
+        self.estimated_message_tokens_at_observation = Some(self.estimated_message_tokens);
     }
 
     pub fn observed_input_tokens(&self) -> Option<u64> {
@@ -105,6 +110,7 @@ impl ContextBudgetTracker {
         self.estimated_message_tokens = estimate_messages_tokens(messages);
         self.message_count = messages.len();
         self.observed_input_tokens = None;
+        self.estimated_message_tokens_at_observation = None;
     }
 
     /// Replace accounting from authoritative stored messages before projection.
@@ -121,6 +127,7 @@ impl ContextBudgetTracker {
         );
         self.message_count = messages.len();
         self.observed_input_tokens = None;
+        self.estimated_message_tokens_at_observation = None;
     }
 
     pub fn record_message(&mut self, message: &Message) {
@@ -172,6 +179,15 @@ impl ContextBudgetTracker {
         let observed = self
             .observed_input_tokens
             .map(|tokens| usize::try_from(tokens).unwrap_or(usize::MAX))
+            .map(|tokens| {
+                let appended_message_tokens = self
+                    .estimated_message_tokens_at_observation
+                    .map(|at_observation| {
+                        self.estimated_message_tokens.saturating_sub(at_observation)
+                    })
+                    .unwrap_or_default();
+                tokens.saturating_add(appended_message_tokens)
+            })
             .unwrap_or_default();
         self.token_estimate().max(observed)
     }
@@ -302,6 +318,28 @@ mod tests {
 
         tracker.clear_observed_input_tokens();
         assert_eq!(tracker.effective_token_count(), estimate);
+    }
+
+    #[test]
+    fn provider_observation_is_advanced_by_messages_appended_after_that_request() {
+        let mut tracker = ContextBudgetTracker::new().with_budget(372_000);
+        tracker.seed_messages(&[text_message(&"historical ".repeat(40_000))]);
+        let observed = tracker.token_estimate().saturating_add(20_000);
+        tracker.update_observed_input_tokens(observed as u64);
+
+        let appended = text_message(&"assistant continuation ".repeat(1_000));
+        let appended_tokens = estimate_message_tokens(&appended);
+        tracker.record_message(&appended);
+
+        assert_eq!(
+            tracker.effective_token_count(),
+            observed.saturating_add(appended_tokens)
+        );
+        assert_eq!(tracker.observed_input_tokens(), Some(observed as u64));
+
+        tracker.seed_messages(&[text_message("replacement")]);
+        assert_eq!(tracker.observed_input_tokens(), None);
+        assert_eq!(tracker.effective_token_count(), tracker.token_estimate());
     }
 
     #[test]

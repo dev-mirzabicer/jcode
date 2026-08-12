@@ -1268,6 +1268,24 @@ pub enum RouteCostConfidence {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RouteInputPriceTier {
+    /// This tier applies only when total request input is strictly greater than
+    /// the threshold. Exact-boundary requests retain the preceding rates.
+    pub above_input_tokens: usize,
+    pub input_price_per_mtok_micros: u64,
+    /// `None` means the preceding output rate remains in effect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_price_per_mtok_micros: Option<u64>,
+    /// Cache rates are complete tier values. `None` means the rate is unknown,
+    /// not that the preceding tier should be inherited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_price_per_mtok_micros: Option<u64>,
+    /// `None` means a separately authoritative cache-write rate is unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_price_per_mtok_micros: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RouteCheapnessEstimate {
     pub billing_kind: RouteBillingKind,
     pub source: RouteCostSource,
@@ -1280,6 +1298,10 @@ pub struct RouteCheapnessEstimate {
     pub output_price_per_mtok_micros: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_read_price_per_mtok_micros: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_price_per_mtok_micros: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_price_tiers: Vec<RouteInputPriceTier>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub included_requests_per_month: Option<u64>,
     pub reference_input_tokens: u64,
@@ -1297,6 +1319,7 @@ impl RouteCheapnessEstimate {
         input_price_per_mtok_micros: u64,
         output_price_per_mtok_micros: u64,
         cache_read_price_per_mtok_micros: Option<u64>,
+        cache_write_price_per_mtok_micros: Option<u64>,
         note: impl Into<Option<String>>,
     ) -> Self {
         Self {
@@ -1307,6 +1330,8 @@ impl RouteCheapnessEstimate {
             input_price_per_mtok_micros: Some(input_price_per_mtok_micros),
             output_price_per_mtok_micros: Some(output_price_per_mtok_micros),
             cache_read_price_per_mtok_micros,
+            cache_write_price_per_mtok_micros,
+            input_price_tiers: Vec::new(),
             included_requests_per_month: None,
             reference_input_tokens: CHEAPNESS_REFERENCE_INPUT_TOKENS,
             reference_output_tokens: CHEAPNESS_REFERENCE_OUTPUT_TOKENS,
@@ -1333,6 +1358,8 @@ impl RouteCheapnessEstimate {
             input_price_per_mtok_micros: None,
             output_price_per_mtok_micros: None,
             cache_read_price_per_mtok_micros: None,
+            cache_write_price_per_mtok_micros: None,
+            input_price_tiers: Vec::new(),
             included_requests_per_month,
             reference_input_tokens: CHEAPNESS_REFERENCE_INPUT_TOKENS,
             reference_output_tokens: CHEAPNESS_REFERENCE_OUTPUT_TOKENS,
@@ -1358,6 +1385,8 @@ impl RouteCheapnessEstimate {
             input_price_per_mtok_micros: None,
             output_price_per_mtok_micros: None,
             cache_read_price_per_mtok_micros: None,
+            cache_write_price_per_mtok_micros: None,
+            input_price_tiers: Vec::new(),
             included_requests_per_month,
             reference_input_tokens: CHEAPNESS_REFERENCE_INPUT_TOKENS,
             reference_output_tokens: CHEAPNESS_REFERENCE_OUTPUT_TOKENS,
@@ -1388,8 +1417,63 @@ mod tests {
             8_000_000,
             None,
             None,
+            None,
         );
         assert_eq!(estimate.estimated_reference_cost_micros, Some(90_000));
+    }
+
+    #[test]
+    fn route_cheapness_estimate_loads_legacy_json_without_cache_write_price() {
+        let estimate = RouteCheapnessEstimate::metered(
+            RouteCostSource::PublicApiPricing,
+            RouteCostConfidence::Exact,
+            5_000_000,
+            25_000_000,
+            Some(500_000),
+            Some(6_250_000),
+            Some("legacy compatibility fixture".to_string()),
+        );
+        let mut value = serde_json::to_value(&estimate).expect("serialize estimate");
+        value
+            .as_object_mut()
+            .expect("estimate object")
+            .remove("cache_write_price_per_mtok_micros");
+
+        let loaded: RouteCheapnessEstimate =
+            serde_json::from_value(value).expect("load legacy estimate");
+
+        assert_eq!(loaded.cache_write_price_per_mtok_micros, None);
+        assert!(loaded.input_price_tiers.is_empty());
+        assert_eq!(loaded.input_price_per_mtok_micros, Some(5_000_000));
+        assert_eq!(loaded.cache_read_price_per_mtok_micros, Some(500_000));
+    }
+
+    #[test]
+    fn route_cheapness_estimate_round_trips_cache_write_price() {
+        let mut estimate = RouteCheapnessEstimate::metered(
+            RouteCostSource::ModelsDevCatalog,
+            RouteCostConfidence::High,
+            10_000_000,
+            50_000_000,
+            Some(1_000_000),
+            Some(12_500_000),
+            Some("cache-write round trip".to_string()),
+        );
+        estimate.input_price_tiers = vec![RouteInputPriceTier {
+            above_input_tokens: 272_000,
+            input_price_per_mtok_micros: 20_000_000,
+            output_price_per_mtok_micros: Some(75_000_000),
+            cache_read_price_per_mtok_micros: Some(2_000_000),
+            cache_write_price_per_mtok_micros: Some(25_000_000),
+        }];
+
+        let encoded = serde_json::to_vec(&estimate).expect("serialize estimate");
+        let loaded: RouteCheapnessEstimate =
+            serde_json::from_slice(&encoded).expect("deserialize estimate");
+
+        assert_eq!(loaded, estimate);
+        assert_eq!(loaded.cache_write_price_per_mtok_micros, Some(12_500_000));
+        assert_eq!(loaded.input_price_tiers, estimate.input_price_tiers);
     }
 
     #[test]

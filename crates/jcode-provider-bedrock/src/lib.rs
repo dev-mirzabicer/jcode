@@ -1100,6 +1100,7 @@ impl BedrockProvider {
                 input,
                 output,
                 None,
+                None,
                 Some("AWS Bedrock public on-demand pricing heuristic; verify for your region/account".to_string()),
             )
         })

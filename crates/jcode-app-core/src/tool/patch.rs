@@ -160,6 +160,13 @@ fn parse_patch(text: &str) -> Result<Vec<FilePatch>> {
     Ok(patches)
 }
 
+pub(super) fn parsed_file_paths(text: &str) -> Result<Vec<String>> {
+    Ok(parse_patch(text)?
+        .into_iter()
+        .map(|patch| patch.path)
+        .collect())
+}
+
 fn parse_hunk(lines: &[&str], i: &mut usize) -> Option<Hunk> {
     // Parse @@ -start,count +start,count @@
     let header = lines[*i];

@@ -62,6 +62,14 @@ pub use jcode_tool_core::{StdinInputRequest, Tool, ToolContext, ToolExecutionMod
 pub use jcode_tool_types::{ToolImage, ToolOutput};
 pub(crate) use session_search::spawn_recent_index_warmup;
 
+pub(crate) fn parsed_patch_file_paths(tool_name: &str, patch_text: &str) -> Result<Vec<String>> {
+    match tool_name {
+        "patch" => patch::parsed_file_paths(patch_text),
+        "apply_patch" => apply_patch::parsed_file_paths(patch_text),
+        _ => Err(anyhow::anyhow!("unsupported patch tool: {tool_name}")),
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 struct SessionToolPolicy {
     allowed_tools: Option<HashSet<String>>,

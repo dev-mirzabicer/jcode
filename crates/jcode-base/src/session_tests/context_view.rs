@@ -805,6 +805,8 @@ fn context_export_redaction_is_exhaustive_and_does_not_mutate_or_persist_redacti
             economics: Some(StoredContextEconomics {
                 projected_tokens_before: 10_000,
                 projected_tokens_after: 2_000,
+                estimated_total_request_tokens_before: Some(28_000),
+                estimated_total_request_tokens_after: Some(20_000),
                 unchanged_prefix_items: 0,
                 earliest_changed_provider_item: Some(0),
                 old_affected_suffix_tokens: 10_000,

@@ -372,6 +372,10 @@ pub struct StoredContextApplication {
 pub struct StoredContextEconomics {
     pub projected_tokens_before: usize,
     pub projected_tokens_after: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_total_request_tokens_before: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_total_request_tokens_after: Option<usize>,
     pub unchanged_prefix_items: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub earliest_changed_provider_item: Option<usize>,
@@ -403,6 +407,7 @@ pub struct StoredContextPricingSnapshot {
     pub output_usd_per_million: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_read_usd_per_million: Option<f64>,
+    /// `None` means a separately authoritative cache-write rate is unavailable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write_usd_per_million: Option<f64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -413,10 +418,16 @@ pub struct StoredContextPricingSnapshot {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct StoredContextInputPriceTier {
+    /// Applies only when total request input is strictly greater than this value.
     pub above_input_tokens: usize,
     pub input_usd_per_million: f64,
+    /// `None` inherits the pricing snapshot's preceding output rate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_usd_per_million: Option<f64>,
+    /// Cache-rate absence means unknown for this tier rather than inherited.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_read_usd_per_million: Option<f64>,
+    /// `None` means a separately authoritative cache-write rate is unavailable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write_usd_per_million: Option<f64>,
 }
@@ -632,6 +643,8 @@ mod tests {
             economics: Some(StoredContextEconomics {
                 projected_tokens_before: 350_000,
                 projected_tokens_after: 200_000,
+                estimated_total_request_tokens_before: Some(368_000),
+                estimated_total_request_tokens_after: Some(218_000),
                 unchanged_prefix_items: 12,
                 earliest_changed_provider_item: Some(12),
                 old_affected_suffix_tokens: 180_000,
@@ -648,6 +661,7 @@ mod tests {
                     input_price_tiers: vec![StoredContextInputPriceTier {
                         above_input_tokens: 272_000,
                         input_usd_per_million: 10.0,
+                        output_usd_per_million: Some(45.0),
                         cache_read_usd_per_million: Some(1.0),
                         cache_write_usd_per_million: Some(12.5),
                     }],

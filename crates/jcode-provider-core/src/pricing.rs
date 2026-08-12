@@ -1,4 +1,4 @@
-use crate::{RouteCheapnessEstimate, RouteCostConfidence, RouteCostSource};
+use crate::{RouteCheapnessEstimate, RouteCostConfidence, RouteCostSource, RouteInputPriceTier};
 
 fn usd_to_micros(usd: f64) -> u64 {
     (usd * 1_000_000.0).round() as u64
@@ -51,6 +51,7 @@ pub fn anthropic_api_pricing_with_tier(
             usd_to_micros(input_usd),
             usd_to_micros(output_usd),
             Some(usd_to_micros(cache_read_usd)),
+            Some(usd_to_micros(input_usd * 1.25)),
             Some(note.to_string()),
         ))
     };
@@ -140,9 +141,9 @@ pub fn anthropic_oauth_pricing(model: &str, subscription: Option<&str>) -> Route
 
 /// Published OpenAI API pricing (platform.openai.com/docs/pricing).
 ///
-/// Standard tier, short-context prices. GPT-5.4+/5.5 bill a higher tier for
-/// requests over ~272k input tokens; per-call estimates here use the standard
-/// tier since jcode cannot see the per-request tier split.
+/// The top-level rates are the standard short-input prices. Request-size price
+/// discontinuities are retained in [`RouteCheapnessEstimate::input_price_tiers`]
+/// so callers with whole-request token evidence can select the correct band.
 pub fn openai_api_pricing(model: &str) -> Option<RouteCheapnessEstimate> {
     openai_api_pricing_with_tier(model, None)
 }
@@ -164,8 +165,28 @@ pub fn openai_api_pricing_with_tier(
             usd_to_micros(input_usd),
             usd_to_micros(output_usd),
             cache_read_usd.map(usd_to_micros),
+            None,
             Some(note.to_string()),
         ))
+    };
+    let exact_with_long_input_tier = |input_usd: f64,
+                                      output_usd: f64,
+                                      cache_read_usd: Option<f64>,
+                                      long_input_usd: f64,
+                                      long_output_usd: f64,
+                                      long_cache_read_usd: Option<f64>,
+                                      note: &str| {
+        let mut estimate = exact(input_usd, output_usd, cache_read_usd, note)?;
+        estimate.input_price_tiers = vec![RouteInputPriceTier {
+            above_input_tokens: 272_000,
+            input_price_per_mtok_micros: usd_to_micros(long_input_usd),
+            output_price_per_mtok_micros: Some(usd_to_micros(long_output_usd)),
+            cache_read_price_per_mtok_micros: long_cache_read_usd.map(usd_to_micros),
+            // OpenAI does not expose a separately authoritative cache-write
+            // rate here. Callers correctly fall back to uncached input price.
+            cache_write_price_per_mtok_micros: None,
+        }];
+        Some(estimate)
     };
 
     match service_tier
@@ -193,6 +214,15 @@ pub fn openai_api_pricing_with_tier(
     }
 
     match base {
+        "gpt-5.6-sol" => exact_with_long_input_tier(
+            5.0,
+            30.0,
+            Some(0.5),
+            10.0,
+            45.0,
+            Some(1.0),
+            "OpenAI API GPT-5.6 Sol pricing",
+        ),
         "gpt-5.5" => exact(5.0, 30.0, Some(0.5), "OpenAI API pricing"),
         "gpt-5.5-pro" | "gpt-5.4-pro" => exact(30.0, 180.0, None, "OpenAI API pricing"),
         "gpt-5.4" => exact(2.5, 15.0, Some(0.25), "OpenAI API pricing"),
@@ -275,6 +305,7 @@ pub fn openrouter_pricing_from_token_prices(
     prompt: Option<&str>,
     completion: Option<&str>,
     input_cache_read: Option<&str>,
+    input_cache_write: Option<&str>,
     source: RouteCostSource,
     confidence: RouteCostConfidence,
     note: Option<String>,
@@ -282,8 +313,15 @@ pub fn openrouter_pricing_from_token_prices(
     let input = prompt.and_then(usd_per_token_str_to_micros_per_mtok)?;
     let output = completion.and_then(usd_per_token_str_to_micros_per_mtok)?;
     let cache = input_cache_read.and_then(usd_per_token_str_to_micros_per_mtok);
+    let cache_write = input_cache_write.and_then(usd_per_token_str_to_micros_per_mtok);
     Some(RouteCheapnessEstimate::metered(
-        source, confidence, input, output, cache, note,
+        source,
+        confidence,
+        input,
+        output,
+        cache,
+        cache_write,
+        note,
     ))
 }
 
@@ -303,6 +341,7 @@ mod tests {
         assert_eq!(estimate.input_price_per_mtok_micros, Some(5_000_000));
         assert_eq!(estimate.output_price_per_mtok_micros, Some(25_000_000));
         assert_eq!(estimate.cache_read_price_per_mtok_micros, Some(500_000));
+        assert_eq!(estimate.cache_write_price_per_mtok_micros, Some(6_250_000));
         assert_eq!(
             anthropic_api_pricing("claude-opus-4-6"),
             anthropic_api_pricing("claude-opus-4-6[1m]")
@@ -319,6 +358,7 @@ mod tests {
         assert_eq!(fable.input_price_per_mtok_micros, Some(10_000_000));
         assert_eq!(fable.output_price_per_mtok_micros, Some(50_000_000));
         assert_eq!(fable.cache_read_price_per_mtok_micros, Some(1_000_000));
+        assert_eq!(fable.cache_write_price_per_mtok_micros, Some(12_500_000));
 
         let sonnet = anthropic_api_pricing("claude-sonnet-4-6").expect("priced model");
         assert_eq!(sonnet.input_price_per_mtok_micros, Some(3_000_000));
@@ -337,6 +377,7 @@ mod tests {
             Some("0.0000025"),
             Some("0.000015"),
             Some("0.00000025"),
+            Some("0.000003125"),
             RouteCostSource::OpenRouterCatalog,
             RouteCostConfidence::Medium,
             Some("test".to_string()),
@@ -346,6 +387,7 @@ mod tests {
         assert_eq!(estimate.input_price_per_mtok_micros, Some(2_500_000));
         assert_eq!(estimate.output_price_per_mtok_micros, Some(15_000_000));
         assert_eq!(estimate.cache_read_price_per_mtok_micros, Some(250_000));
+        assert_eq!(estimate.cache_write_price_per_mtok_micros, Some(3_125_000));
     }
 
     #[test]
@@ -395,6 +437,32 @@ mod tests {
         assert_eq!(
             openai_api_pricing_with_tier("gpt-5.4", None),
             openai_api_pricing("gpt-5.4")
+        );
+        assert_eq!(
+            openai_api_pricing("gpt-5.4")
+                .expect("priced model")
+                .cache_write_price_per_mtok_micros,
+            None,
+            "OpenAI does not publish a separate cache-write rate"
+        );
+    }
+
+    #[test]
+    fn gpt_5_6_sol_retains_the_long_input_price_discontinuity() {
+        let estimate = openai_api_pricing("gpt-5.6-sol").expect("priced model");
+        assert_eq!(estimate.input_price_per_mtok_micros, Some(5_000_000));
+        assert_eq!(estimate.output_price_per_mtok_micros, Some(30_000_000));
+        assert_eq!(estimate.cache_read_price_per_mtok_micros, Some(500_000));
+        assert_eq!(estimate.cache_write_price_per_mtok_micros, None);
+        assert_eq!(
+            estimate.input_price_tiers,
+            vec![RouteInputPriceTier {
+                above_input_tokens: 272_000,
+                input_price_per_mtok_micros: 10_000_000,
+                output_price_per_mtok_micros: Some(45_000_000),
+                cache_read_price_per_mtok_micros: Some(1_000_000),
+                cache_write_price_per_mtok_micros: None,
+            }]
         );
     }
 

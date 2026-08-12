@@ -5,14 +5,14 @@
 
 pub use jcode_config_types::{
     AgentsConfig, AmbientConfig, AuthConfig, AutoJudgeConfig, AutoReviewConfig, CompactionConfig,
-    CompactionMode, CrossProviderFailoverMode, DiagramDisplayMode, DiagramPanePosition,
-    DiffDisplayMode, DisplayConfig, FeatureConfig, GatewayConfig, HookCommands, HooksConfig,
-    KeybindingsConfig, LatexRenderingMode, LaunchHotkeyEntry, LaunchHotkeysConfig,
-    MarkdownSpacingMode, NamedProviderAuth, NamedProviderConfig, NamedProviderModelConfig,
-    NamedProviderType, NativeScrollbarConfig, NotificationsConfig, OverscrollStatusMode,
-    PowerConfig, ProviderConfig, ReasoningDisplayMode, SafetyConfig, SessionPickerResumeAction,
-    SponsorsConfig, SwarmSpawnMode, SwarmStripLayout, TerminalConfig, UpdateChannel,
-    WebSearchConfig, WebSearchEngine,
+    CompactionMode, ContextConfig, ContextCuratorConfig, CrossProviderFailoverMode,
+    DiagramDisplayMode, DiagramPanePosition, DiffDisplayMode, DisplayConfig, FeatureConfig,
+    GatewayConfig, HookCommands, HooksConfig, KeybindingsConfig, LatexRenderingMode,
+    LaunchHotkeyEntry, LaunchHotkeysConfig, MarkdownSpacingMode, NamedProviderAuth,
+    NamedProviderConfig, NamedProviderModelConfig, NamedProviderType, NativeScrollbarConfig,
+    NotificationsConfig, OverscrollStatusMode, PowerConfig, ProviderConfig, ReasoningDisplayMode,
+    SafetyConfig, SessionPickerResumeAction, SponsorsConfig, SwarmSpawnMode, SwarmStripLayout,
+    TerminalConfig, UpdateChannel, WebSearchConfig, WebSearchEngine,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -520,6 +520,9 @@ pub struct Config {
 
     /// Compaction configuration
     pub compaction: CompactionConfig,
+
+    /// User-controlled context-management configuration.
+    pub context: ContextConfig,
 
     /// Power-management configuration (prevent sleep while streaming)
     pub power: PowerConfig,

@@ -522,6 +522,25 @@ impl Agent {
         }
     }
 
+    pub(crate) fn current_context_request_token_estimate(&self) -> Option<usize> {
+        let context_budget = self.registry.context_budget();
+        let tracker = context_budget.try_read().ok()?;
+        Some(tracker.effective_token_count())
+    }
+
+    pub(crate) fn context_request_token_estimates_for_projection(
+        &self,
+        current_projected_tokens: usize,
+        proposed_projected_tokens: usize,
+    ) -> Option<(usize, usize)> {
+        let before = self.current_context_request_token_estimate()?;
+        let non_message_tokens = before.checked_sub(current_projected_tokens)?;
+        Some((
+            before,
+            non_message_tokens.saturating_add(proposed_projected_tokens),
+        ))
+    }
+
     pub(super) fn record_context_runtime_message_added(&self) {
         let Some(message) = self.session.messages.last() else {
             logging::warn("Context runtime append notification had no stored message");
@@ -664,7 +683,7 @@ impl Agent {
         })
     }
 
-    fn after_provider_context_changed(
+    pub(crate) fn after_provider_context_changed(
         &mut self,
         source: &'static str,
         detail: impl Into<String>,
@@ -952,6 +971,29 @@ impl Agent {
 
     pub fn session_id(&self) -> &str {
         &self.session.id
+    }
+
+    pub(crate) fn context_view_state(&self) -> &jcode_session_types::StoredContextViewState {
+        &self.session.context_view
+    }
+
+    pub(crate) fn replace_context_view_state(
+        &mut self,
+        state: jcode_session_types::StoredContextViewState,
+    ) {
+        self.session.context_view = state;
+    }
+
+    pub(crate) fn persist_context_session(&mut self) -> Result<()> {
+        self.session.save()
+    }
+
+    pub(crate) fn context_route_identity(&self) -> String {
+        self.session
+            .route_api_method
+            .clone()
+            .or_else(|| self.session.provider_key.clone())
+            .unwrap_or_else(|| self.provider.name().to_string())
     }
 
     pub(crate) fn set_working_dir_for_pending_context(&mut self, working_dir: Option<String>) {

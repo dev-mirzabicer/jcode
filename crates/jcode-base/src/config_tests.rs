@@ -1,7 +1,7 @@
 use super::{
-    AmbientConfig, Config, DiffDisplayMode, DisplayConfig, HookCommands, LatexRenderingMode,
-    ProviderConfig, SessionPickerResumeAction, SwarmSpawnMode, ToolConfig, config_env_fingerprint,
-    populate_context_limits_from_config_ref,
+    AmbientConfig, Config, ContextConfig, ContextCuratorConfig, DiffDisplayMode, DisplayConfig,
+    HookCommands, LatexRenderingMode, ProviderConfig, SessionPickerResumeAction, SwarmSpawnMode,
+    ToolConfig, config_env_fingerprint, populate_context_limits_from_config_ref,
 };
 use std::ffi::OsString;
 use std::path::Path;
@@ -28,6 +28,77 @@ fn test_openai_fast_mode_defaults_to_priority() {
         ProviderConfig::default().openai_service_tier.as_deref(),
         Some("priority")
     );
+}
+
+#[test]
+fn missing_and_empty_context_tables_load_default_curator_configuration() {
+    let missing: Config = toml::from_str("").expect("empty config");
+    assert_eq!(missing.context, ContextConfig::default());
+
+    let empty: Config = toml::from_str("[context]\n").expect("empty context table");
+    assert_eq!(empty.context, ContextConfig::default());
+}
+
+#[test]
+fn partial_context_curator_configuration_defaults_absent_fields() {
+    let config: Config = toml::from_str(
+        r#"
+[context.curator]
+model = "claude-fable-5"
+"#,
+    )
+    .expect("partial curator config");
+
+    assert_eq!(config.context.curator.provider, None);
+    assert_eq!(
+        config.context.curator.model.as_deref(),
+        Some("claude-fable-5")
+    );
+    assert_eq!(config.context.curator.effort, None);
+}
+
+#[test]
+fn complete_context_curator_configuration_round_trips() {
+    let context = ContextConfig {
+        curator: ContextCuratorConfig {
+            provider: Some("anthropic".to_string()),
+            model: Some("claude-fable-5".to_string()),
+            effort: Some("high".to_string()),
+        },
+    };
+
+    let encoded = toml::to_string(&context).expect("serialize context config");
+    let decoded: ContextConfig = toml::from_str(&encoded).expect("deserialize context config");
+
+    assert_eq!(decoded, context);
+}
+
+#[test]
+fn default_curator_serialization_omits_absent_route_fields() {
+    let encoded = toml::to_string(&ContextConfig::default()).expect("serialize default context");
+
+    assert!(!encoded.contains("provider ="));
+    assert!(!encoded.contains("model ="));
+    assert!(!encoded.contains("effort ="));
+}
+
+#[test]
+fn unknown_legacy_context_fields_follow_the_existing_permissive_serde_policy() {
+    let config: Config = toml::from_str(
+        r#"
+[context]
+legacy_mode = "manual"
+
+[context.curator]
+provider = "openai"
+legacy_route_hint = "ignored"
+"#,
+    )
+    .expect("legacy-compatible context config");
+
+    assert_eq!(config.context.curator.provider.as_deref(), Some("openai"));
+    assert_eq!(config.context.curator.model, None);
+    assert_eq!(config.context.curator.effort, None);
 }
 
 #[test]

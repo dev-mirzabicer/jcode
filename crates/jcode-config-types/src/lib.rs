@@ -399,6 +399,28 @@ impl Default for CompactionConfig {
     }
 }
 
+/// User-controlled context-management configuration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ContextConfig {
+    pub curator: ContextCuratorConfig,
+}
+
+/// Optional independent route used only to prepare context transaction artifacts.
+///
+/// When every field is absent, Jcode forks the active provider and model. These
+/// fields deliberately describe one route, not a general routing policy language.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ContextCuratorConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum NamedProviderType {

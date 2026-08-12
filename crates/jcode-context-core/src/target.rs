@@ -558,6 +558,18 @@ pub fn provider_relevant_message_digest(message: &StoredMessage) -> u64 {
     digest
 }
 
+/// Stable digest of the complete authoritative transcript representation.
+///
+/// Unlike [`message_range_digest`], this intentionally includes transcript-only
+/// reasoning, timestamps, token usage, and display metadata. Draft identity must
+/// become stale after *any* authoritative history change, even when that change
+/// would not alter provider cache semantics.
+pub fn authoritative_transcript_digest(messages: &[StoredMessage]) -> u64 {
+    serde_json::to_vec(messages)
+        .map(|bytes| stable_hash_bytes(&bytes))
+        .unwrap_or_else(|_| stable_hash_bytes(format!("{messages:?}").as_bytes()))
+}
+
 pub fn message_range_digest(
     messages: &[StoredMessage],
     start: usize,
@@ -935,5 +947,24 @@ mod tests {
             message_range_digest(&messages, 0, 1),
             Err(MessageRangeResolutionError::EndIndexOutOfBounds { .. })
         ));
+    }
+
+    #[test]
+    fn authoritative_digest_tracks_history_only_and_metadata_changes() {
+        let mut messages = vec![stored(
+            "m1",
+            vec![ContentBlock::ReasoningTrace {
+                text: "trace one".to_string(),
+            }],
+        )];
+        let original = authoritative_transcript_digest(&messages);
+
+        messages[0].content = vec![ContentBlock::ReasoningTrace {
+            text: "trace two".to_string(),
+        }];
+        assert_ne!(authoritative_transcript_digest(&messages), original);
+
+        let empty = authoritative_transcript_digest(&[]);
+        assert_eq!(empty, authoritative_transcript_digest(&[]));
     }
 }
