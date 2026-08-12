@@ -2,11 +2,13 @@
 async fn communicate_list_and_await_members_work_end_to_end() {
     let _env_lock = crate::storage::lock_test_env();
     let runtime_dir = tempfile::TempDir::new().expect("runtime tempdir");
+    let shared_swarm_id = runtime_dir.path().join("shared-swarm");
     let repo_dir = std::env::current_dir().expect("repo cwd");
     let socket_path = runtime_dir.path().join("jcode.sock");
     let _runtime = EnvGuard::set("JCODE_RUNTIME_DIR", runtime_dir.path());
     let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
     let _debug = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
+    let _swarm = EnvGuard::set("JCODE_SWARM_ID", &shared_swarm_id);
 
     let provider: Arc<dyn Provider> = Arc::new(DelayedTestProvider {
         delay: Duration::from_millis(300),
@@ -130,11 +132,13 @@ async fn communicate_list_and_await_members_work_end_to_end() {
 async fn communicate_await_members_background_returns_immediately_and_notifies() {
     let _env_lock = crate::storage::lock_test_env();
     let runtime_dir = tempfile::TempDir::new().expect("runtime tempdir");
+    let shared_swarm_id = runtime_dir.path().join("shared-swarm");
     let repo_dir = std::env::current_dir().expect("repo cwd");
     let socket_path = runtime_dir.path().join("jcode.sock");
     let _runtime = EnvGuard::set("JCODE_RUNTIME_DIR", runtime_dir.path());
     let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
     let _debug = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
+    let _swarm = EnvGuard::set("JCODE_SWARM_ID", &shared_swarm_id);
 
     let provider: Arc<dyn Provider> = Arc::new(DelayedTestProvider {
         delay: Duration::from_millis(300),
@@ -233,11 +237,13 @@ async fn communicate_await_members_background_returns_immediately_and_notifies()
 async fn communicate_run_plan_with_empty_plan_returns_inline_even_in_background_mode() {
     let _env_lock = crate::storage::lock_test_env();
     let runtime_dir = tempfile::TempDir::new().expect("runtime tempdir");
+    let shared_swarm_id = runtime_dir.path().join("shared-swarm");
     let repo_dir = std::env::current_dir().expect("repo cwd");
     let socket_path = runtime_dir.path().join("jcode.sock");
     let _runtime = EnvGuard::set("JCODE_RUNTIME_DIR", runtime_dir.path());
     let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
     let _debug = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
+    let _swarm = EnvGuard::set("JCODE_SWARM_ID", &shared_swarm_id);
 
     let provider: Arc<dyn Provider> = Arc::new(DelayedTestProvider {
         delay: Duration::from_millis(50),
@@ -288,11 +294,13 @@ async fn communicate_run_plan_with_empty_plan_returns_inline_even_in_background_
 async fn communicate_status_returns_busy_snapshot_for_running_member() {
     let _env_lock = crate::storage::lock_test_env();
     let runtime_dir = tempfile::TempDir::new().expect("runtime tempdir");
+    let shared_swarm_id = runtime_dir.path().join("shared-swarm");
     let repo_dir = std::env::current_dir().expect("repo cwd");
     let socket_path = runtime_dir.path().join("jcode.sock");
     let _runtime = EnvGuard::set("JCODE_RUNTIME_DIR", runtime_dir.path());
     let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
     let _debug = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
+    let _swarm = EnvGuard::set("JCODE_SWARM_ID", &shared_swarm_id);
 
     let provider: Arc<dyn Provider> = Arc::new(DelayedTestProvider {
         delay: Duration::from_millis(300),
@@ -370,11 +378,13 @@ async fn communicate_status_returns_busy_snapshot_for_running_member() {
 async fn communicate_spawn_reports_completion_back_to_spawner() {
     let _env_lock = crate::storage::lock_test_env();
     let runtime_dir = tempfile::TempDir::new().expect("runtime tempdir");
+    let shared_swarm_id = runtime_dir.path().join("shared-swarm");
     let repo_dir = std::env::current_dir().expect("repo cwd");
     let socket_path = runtime_dir.path().join("jcode.sock");
     let _runtime = EnvGuard::set("JCODE_RUNTIME_DIR", runtime_dir.path());
     let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
     let _debug = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
+    let _swarm = EnvGuard::set("JCODE_SWARM_ID", &shared_swarm_id);
 
     let provider: Arc<dyn Provider> = Arc::new(DelayedTestProvider {
         delay: Duration::from_millis(100),
@@ -448,11 +458,13 @@ async fn communicate_spawn_reports_completion_back_to_spawner() {
 async fn communicate_spawn_with_prompt_and_summary_work_end_to_end() {
     let _env_lock = crate::storage::lock_test_env();
     let runtime_dir = tempfile::TempDir::new().expect("runtime tempdir");
+    let shared_swarm_id = runtime_dir.path().join("shared-swarm");
     let repo_dir = std::env::current_dir().expect("repo cwd");
     let socket_path = runtime_dir.path().join("jcode.sock");
     let _runtime = EnvGuard::set("JCODE_RUNTIME_DIR", runtime_dir.path());
     let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
     let _debug = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
+    let _swarm = EnvGuard::set("JCODE_SWARM_ID", &shared_swarm_id);
 
     let provider: Arc<dyn Provider> = Arc::new(DelayedTestProvider {
         delay: Duration::from_millis(100),
@@ -550,11 +562,13 @@ async fn communicate_spawn_with_prompt_and_summary_work_end_to_end() {
 async fn communicate_message_routes_as_dm_while_broadcast_targets_swarm() {
     let _env_lock = crate::storage::lock_test_env();
     let runtime_dir = tempfile::TempDir::new().expect("runtime tempdir");
+    let shared_swarm_id = runtime_dir.path().join("shared-swarm");
     let repo_dir = std::env::current_dir().expect("repo cwd");
     let socket_path = runtime_dir.path().join("jcode.sock");
     let _runtime = EnvGuard::set("JCODE_RUNTIME_DIR", runtime_dir.path());
     let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
     let _debug = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
+    let _swarm = EnvGuard::set("JCODE_SWARM_ID", &shared_swarm_id);
 
     let provider: Arc<dyn Provider> = Arc::new(DelayedTestProvider {
         delay: Duration::from_millis(100),

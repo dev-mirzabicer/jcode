@@ -462,37 +462,184 @@ async fn print_tool_definition_token_report() {
     }
 }
 
-/// Tool descriptions are always-on prompt cost, so they are capped at ~20
-/// estimated tokens. Behavioral guidance belongs in parameter descriptions.
-/// Exemptions must be justified inline.
+#[derive(Clone, Copy)]
+struct DescriptionBudget {
+    tool: &'static str,
+    path: &'static str,
+    max_tokens: usize,
+    rationale: &'static str,
+}
+
+const TOOL_DESCRIPTION_BUDGETS: &[DescriptionBudget] = &[
+    DescriptionBudget {
+        tool: "bash",
+        path: "$description",
+        max_tokens: 22,
+        rationale: "the no-default-deadline contract and explicit timeout opt-in prevent accidental command termination",
+    },
+    DescriptionBudget {
+        tool: "batch",
+        path: "$description",
+        max_tokens: 130,
+        rationale: "the embedded heterogeneous-call example defines the otherwise non-obvious batch envelope",
+    },
+    DescriptionBudget {
+        tool: "integration_tools",
+        path: "$description",
+        max_tokens: 115,
+        rationale: "selection-before-use, seamless setup, off-catalog recording, and capability-gap behavior are one routing contract",
+    },
+    DescriptionBudget {
+        tool: "jcode_docs",
+        path: "$description",
+        max_tokens: 38,
+        rationale: "the version-matched and use-first directives prevent stale or speculative answers about Jcode internals",
+    },
+    DescriptionBudget {
+        tool: "macos_computer_use",
+        path: "$description",
+        max_tokens: 159,
+        rationale: "live-machine safety, background Accessibility preference, coordinate semantics, discovery, and permission setup must remain model-visible",
+    },
+];
+
+const PARAM_DESCRIPTION_BUDGETS: &[DescriptionBudget] = &[
+    DescriptionBudget {
+        tool: "bash",
+        path: "$.properties.timeout",
+        max_tokens: 52,
+        rationale: "deadline units and distinct foreground/background expiry behavior are execution-critical",
+    },
+    DescriptionBudget {
+        tool: "bg",
+        path: "$.properties.max_wait_seconds",
+        max_tokens: 27,
+        rationale: "omission and zero have intentionally different blocking semantics",
+    },
+    DescriptionBudget {
+        tool: "integration_tools",
+        path: "$.properties.action",
+        max_tokens: 66,
+        rationale: "the search/select/suggest state machine and mandatory selection recording prevent setup misuse",
+    },
+    DescriptionBudget {
+        tool: "integration_tools",
+        path: "$.properties.query",
+        max_tokens: 27,
+        rationale: "provider-visible capability summaries require explicit privacy guidance",
+    },
+    DescriptionBudget {
+        tool: "integration_tools",
+        path: "$.properties.tool",
+        max_tokens: 38,
+        rationale: "catalog and off-catalog selections have materially different setup behavior",
+    },
+    DescriptionBudget {
+        tool: "macos_computer_use",
+        path: "$.properties.action",
+        max_tokens: 93,
+        rationale: "the compact action map distinguishes visible input, background Accessibility, discovery, and setup",
+    },
+    DescriptionBudget {
+        tool: "macos_computer_use",
+        path: "$.properties.element",
+        max_tokens: 28,
+        rationale: "Accessibility handles have a precise shape and constrained consumers",
+    },
+    DescriptionBudget {
+        tool: "todo",
+        path: "$.properties.goals.items.properties.feedback_loop_coverage",
+        max_tokens: 30,
+        rationale: "coverage levels distinguish narrow checks from edge and integration paths",
+    },
+    DescriptionBudget {
+        tool: "todo",
+        path: "$.properties.goals.items.properties.feedback_loop_relevance",
+        max_tokens: 132,
+        rationale: "acceptance claims require the complete evidence taxonomy and the substitute-validation prohibition",
+    },
+    DescriptionBudget {
+        tool: "todo",
+        path: "$.properties.goals.items.properties.feedback_loop_traceability",
+        max_tokens: 94,
+        rationale: "traceability levels require explicit requirement-to-evidence semantics and reject aggregate-count shortcuts",
+    },
+];
+
+fn description_budget<'a>(
+    budgets: &'a [DescriptionBudget],
+    tool: &str,
+    path: &str,
+) -> Option<&'a DescriptionBudget> {
+    budgets
+        .iter()
+        .find(|budget| budget.tool == tool && budget.path == path)
+}
+
+fn assert_budget_policy_is_unique(budgets: &[DescriptionBudget]) {
+    let mut keys = std::collections::BTreeSet::new();
+    for budget in budgets {
+        assert!(
+            keys.insert((budget.tool, budget.path)),
+            "duplicate schema-description budget for {} {}",
+            budget.tool,
+            budget.path
+        );
+    }
+}
+
+/// Tool descriptions are always-on prompt cost, so ordinary descriptions stay
+/// within ~20 estimated tokens. Semantically dense contracts use exact audited
+/// budgets rather than unbounded exemptions. Any growth requires updating both
+/// the cap and its product-level rationale.
 #[tokio::test]
 async fn tool_descriptions_stay_under_token_cap() {
     const DESCRIPTION_TOKEN_CAP: usize = 20;
-    // integration_tools keeps a deliberate second sentence explaining that catalog
-    // entries integrate directly with the agent.
-    // swarm appends the user-tunable swarm-prompt.md by design.
-    const EXEMPT: &[&str] = &["integration_tools", "swarm"];
+    assert_budget_policy_is_unique(TOOL_DESCRIPTION_BUDGETS);
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;
-    let over_cap: Vec<String> = registry
-        .definitions(None)
-        .await
-        .into_iter()
-        .filter(|def| !EXEMPT.contains(&def.name.as_str()))
-        .filter(|def| def.description_token_estimate() > DESCRIPTION_TOKEN_CAP)
-        .map(|def| {
-            format!(
-                "{} (~{} tokens): {}",
+    let mut seen_budgets = std::collections::BTreeSet::new();
+    let mut over_cap = Vec::new();
+    for def in registry.definitions(None).await {
+        // Swarm deliberately appends the user-controlled swarm-prompt.md. Its
+        // dynamic content cannot have a repository-owned static token budget.
+        if def.name == "swarm" {
+            continue;
+        }
+        let tokens = def.description_token_estimate();
+        let budget = description_budget(TOOL_DESCRIPTION_BUDGETS, &def.name, "$description");
+        let cap = budget.map_or(DESCRIPTION_TOKEN_CAP, |budget| budget.max_tokens);
+        if let Some(budget) = budget {
+            seen_budgets.insert((budget.tool, budget.path));
+            assert!(
+                tokens > DESCRIPTION_TOKEN_CAP,
+                "stale extended budget for {}: description now fits the default cap",
+                def.name
+            );
+        }
+        if tokens > cap {
+            over_cap.push(format!(
+                "{} (~{} tokens, cap {}{}): {}",
                 def.name,
-                def.description_token_estimate(),
+                tokens,
+                cap,
+                budget.map_or(String::new(), |budget| format!(
+                    ", rationale: {}",
+                    budget.rationale
+                )),
                 def.description
-            )
-        })
-        .collect();
+            ));
+        }
+    }
+    assert_eq!(
+        seen_budgets.len(),
+        TOOL_DESCRIPTION_BUDGETS.len(),
+        "one or more audited tool-description budgets no longer match a registered tool"
+    );
     assert!(
         over_cap.is_empty(),
-        "tool descriptions over the {DESCRIPTION_TOKEN_CAP}-token cap:\n{}",
+        "tool descriptions over their audited token caps:\n{}",
         over_cap.join("\n")
     );
 }
@@ -521,33 +668,59 @@ fn collect_param_descriptions(schema: &Value, path: &str, out: &mut Vec<(String,
     }
 }
 
-/// Parameter descriptions inside tool schemas are also always-on prompt cost,
-/// so each is capped. Longer guidance belongs in runtime error messages, docs,
-/// or the system prompt (the todo calibration rubrics, for example, live in
-/// the gate continuation messages in jcode-base::todo).
+/// Parameter descriptions inside tool schemas are also always-on prompt cost.
+/// Ordinary fields retain the 25-token cap. Safety contracts, privacy rules,
+/// state-machine semantics, and acceptance-evidence rubrics use exact audited
+/// budgets so essential behavior is preserved without allowing silent growth.
 #[tokio::test]
 async fn tool_parameter_descriptions_stay_under_token_cap() {
     const PARAM_DESCRIPTION_TOKEN_CAP: usize = 25;
+    assert_budget_policy_is_unique(PARAM_DESCRIPTION_BUDGETS);
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;
+    let mut seen_budgets = std::collections::BTreeSet::new();
     let mut over_cap: Vec<String> = Vec::new();
     for def in registry.definitions(None).await {
         let mut descriptions = Vec::new();
         collect_param_descriptions(&def.input_schema, "$", &mut descriptions);
         for (path, description) in descriptions {
             let tokens = crate::util::estimate_tokens(&description);
-            if tokens > PARAM_DESCRIPTION_TOKEN_CAP {
+            let budget = description_budget(PARAM_DESCRIPTION_BUDGETS, &def.name, &path);
+            let cap = budget.map_or(PARAM_DESCRIPTION_TOKEN_CAP, |budget| budget.max_tokens);
+            if let Some(budget) = budget {
+                seen_budgets.insert((budget.tool, budget.path));
+                assert!(
+                    tokens > PARAM_DESCRIPTION_TOKEN_CAP,
+                    "stale extended budget for {} {}: description now fits the default cap",
+                    def.name,
+                    path
+                );
+            }
+            if tokens > cap {
                 over_cap.push(format!(
-                    "{} {} (~{} tokens): {}",
-                    def.name, path, tokens, description
+                    "{} {} (~{} tokens, cap {}{}): {}",
+                    def.name,
+                    path,
+                    tokens,
+                    cap,
+                    budget.map_or(String::new(), |budget| format!(
+                        ", rationale: {}",
+                        budget.rationale
+                    )),
+                    description
                 ));
             }
         }
     }
+    assert_eq!(
+        seen_budgets.len(),
+        PARAM_DESCRIPTION_BUDGETS.len(),
+        "one or more audited parameter-description budgets no longer match a registered schema field"
+    );
     assert!(
         over_cap.is_empty(),
-        "{} parameter descriptions over the {PARAM_DESCRIPTION_TOKEN_CAP}-token cap:\n{}",
+        "{} parameter descriptions over their audited token caps:\n{}",
         over_cap.len(),
         over_cap.join("\n")
     );
