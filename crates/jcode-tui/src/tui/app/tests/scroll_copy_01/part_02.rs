@@ -1,19 +1,25 @@
 #[test]
 fn test_prompt_jump_ctrl_digit_is_recency_rank_in_app() {
     let _render_lock = scroll_render_test_lock();
-    let (mut app, mut terminal) = create_scroll_test_app(100, 30, 1, 20);
+    let (mut app, mut terminal) = create_scroll_test_app(100, 30, 0, 0);
+    seed_prompt_rank_history(&mut app);
 
     // Seed max scroll estimates before key handling.
     render_and_snap(&app, &mut terminal);
+    let positions = crate::tui::ui::last_user_prompt_positions();
+    assert_eq!(positions.len(), 7);
+    let expected_rank_six = positions[positions.len() - 6];
+    assert!(expected_rank_six > 0);
 
     let (prompt_up_code, prompt_up_mods) = prompt_up_key(&app);
     app.handle_key(prompt_up_code, prompt_up_mods).unwrap();
     assert!(app.scroll_offset > 0);
 
-    // Ctrl+5 now means "5th most-recent prompt" (clamped to oldest).
-    app.handle_key(KeyCode::Char('5'), KeyModifiers::CONTROL)
+    // Ctrl+6 means "6th most-recent prompt". Ctrl+5 is intentionally avoided
+    // because macOS terminals use it as the legacy encoding for Ctrl+].
+    app.handle_key(KeyCode::Char('6'), KeyModifiers::CONTROL)
         .unwrap();
-    assert!(app.scroll_offset > 0);
+    assert_eq!(app.scroll_offset, expected_rank_six);
 }
 
 #[test]
@@ -337,23 +343,29 @@ fn test_remote_ctrl_digit_side_panel_preset() {
 #[test]
 fn test_remote_prompt_jump_ctrl_digit_is_recency_rank() {
     let _render_lock = scroll_render_test_lock();
-    let (mut app, mut terminal) = create_scroll_test_app(100, 30, 1, 20);
+    let (mut app, mut terminal) = create_scroll_test_app(100, 30, 0, 0);
+    seed_prompt_rank_history(&mut app);
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
 
     // Seed max scroll estimates before key handling.
     render_and_snap(&app, &mut terminal);
+    let positions = crate::tui::ui::last_user_prompt_positions();
+    assert_eq!(positions.len(), 7);
+    let expected_rank_six = positions[positions.len() - 6];
+    assert!(expected_rank_six > 0);
 
     let (prompt_up_code, prompt_up_mods) = prompt_up_key(&app);
     rt.block_on(app.handle_remote_key(prompt_up_code, prompt_up_mods, &mut remote))
         .unwrap();
     assert!(app.scroll_offset > 0);
 
-    // Ctrl+5 now means "5th most-recent prompt" (clamped to oldest).
-    rt.block_on(app.handle_remote_key(KeyCode::Char('5'), KeyModifiers::CONTROL, &mut remote))
+    // Ctrl+6 means "6th most-recent prompt". Ctrl+5 is intentionally avoided
+    // because macOS terminals use it as the legacy encoding for Ctrl+].
+    rt.block_on(app.handle_remote_key(KeyCode::Char('6'), KeyModifiers::CONTROL, &mut remote))
         .unwrap();
-    assert!(app.scroll_offset > 0);
+    assert_eq!(app.scroll_offset, expected_rank_six);
 }
 
 #[test]

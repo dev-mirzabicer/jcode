@@ -72,6 +72,21 @@ fn create_scroll_test_app(
     (app, terminal)
 }
 
+fn seed_prompt_rank_history(app: &mut App) {
+    app.display_messages.clear();
+    for index in 1..=7 {
+        app.display_messages
+            .push(DisplayMessage::user(format!("Prompt {index}")));
+        app.display_messages.push(DisplayMessage::assistant(format!(
+            "Response {index}\n{}",
+            "detail line\n".repeat(5)
+        )));
+    }
+    app.bump_display_messages_version();
+    app.scroll_offset = 0;
+    app.auto_scroll_paused = false;
+}
+
 fn create_copy_test_app() -> (App, ratatui::Terminal<ratatui::backend::TestBackend>) {
     let mut app = create_test_app();
     app.display_messages = vec![

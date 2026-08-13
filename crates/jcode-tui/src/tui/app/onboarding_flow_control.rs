@@ -246,15 +246,31 @@ impl App {
         }
         // Detect importable external logins and, if any, build a per-candidate
         // yes/no walkthrough rendered by the onboarding welcome screen.
-        let import = match crate::external_auth::pending_external_auth_review_candidates() {
-            Ok(candidates) => ImportReview::new(candidates),
+        let candidates = match crate::external_auth::pending_external_auth_review_candidates() {
+            Ok(candidates) => candidates,
             Err(err) => {
                 crate::logging::error(&format!(
                     "onboarding: failed to inspect external login sources: {err}"
                 ));
-                None
+                Vec::new()
             }
         };
+        self.begin_onboarding_flow_at_login_with_candidates(candidates);
+    }
+
+    /// Apply the login-entry decision to an already discovered candidate set.
+    ///
+    /// Keeping discovery outside this pure decision boundary lets tests cover the
+    /// no-candidate branch without depending on credentials installed elsewhere
+    /// on the host, while production still performs the complete discovery above.
+    pub(super) fn begin_onboarding_flow_at_login_with_candidates(
+        &mut self,
+        candidates: Vec<crate::external_auth::ExternalAuthReviewCandidate>,
+    ) {
+        if self.onboarding_flow.is_some() {
+            return;
+        }
+        let import = ImportReview::new(candidates);
         let had_imports = import.is_some();
         self.onboarding_flow = Some(OnboardingFlow::begin_at_login(import));
         // The login prompt is rendered by the onboarding welcome screen

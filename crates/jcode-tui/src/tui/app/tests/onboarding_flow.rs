@@ -78,6 +78,28 @@ fn quality_first_openai_test_app() -> App {
     App::new_for_test_harness(provider, registry)
 }
 
+struct InitialProviderExplicitGuard {
+    previous: Option<std::ffi::OsString>,
+}
+
+impl InitialProviderExplicitGuard {
+    fn unset() -> Self {
+        let previous = std::env::var_os("JCODE_INITIAL_PROVIDER_EXPLICIT");
+        crate::env::remove_var("JCODE_INITIAL_PROVIDER_EXPLICIT");
+        Self { previous }
+    }
+}
+
+impl Drop for InitialProviderExplicitGuard {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.take() {
+            crate::env::set_var("JCODE_INITIAL_PROVIDER_EXPLICIT", previous);
+        } else {
+            crate::env::remove_var("JCODE_INITIAL_PROVIDER_EXPLICIT");
+        }
+    }
+}
+
 fn onboarding_test_app() -> App {
     let mut app = create_test_app();
     // Force the flow on regardless of the on-disk new-user heuristic.
@@ -117,8 +139,7 @@ fn direct_api_key_login_does_not_advertise_a_static_model_default() {
 #[test]
 fn onboarding_strongest_model_only_runs_without_explicit_defaults() {
     with_temp_jcode_home(|| {
-        let previous_explicit = std::env::var_os("JCODE_INITIAL_PROVIDER_EXPLICIT");
-        crate::env::remove_var("JCODE_INITIAL_PROVIDER_EXPLICIT");
+        let _explicit_provider = InitialProviderExplicitGuard::unset();
 
         let mut app = onboarding_test_app();
         assert!(app.onboarding_should_prefer_strongest_model());
@@ -147,11 +168,6 @@ fn onboarding_strongest_model_only_runs_without_explicit_defaults() {
             "finishing onboarding must cancel a delayed catalog selection"
         );
 
-        if let Some(value) = previous_explicit {
-            crate::env::set_var("JCODE_INITIAL_PROVIDER_EXPLICIT", value);
-        } else {
-            crate::env::remove_var("JCODE_INITIAL_PROVIDER_EXPLICIT");
-        }
     });
 }
 
@@ -336,9 +352,10 @@ fn login_openai_phase_is_default_when_no_imports() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         app.onboarding_flow = None;
-        // Fresh temp home has no importable logins, so begin_at_login lands on
-        // the "Log in to OpenAI?" Yes/No prompt (not the bare provider picker).
-        app.begin_onboarding_flow_at_login();
+        // External login sources live outside JCODE_HOME. Exercise the actual
+        // no-candidate decision boundary directly so host credentials cannot
+        // turn this fixture into an import-review test.
+        app.begin_onboarding_flow_at_login_with_candidates(Vec::new());
         assert!(matches!(
             app.onboarding_phase(),
             Some(OnboardingPhase::LoginOpenAi {
@@ -1445,6 +1462,7 @@ fn import_continue_reaches_ready_quality_first_openai_model() {
     use crate::tui::app::onboarding_flow::ImportReview;
 
     with_temp_jcode_home(|| {
+        let _explicit_provider = InitialProviderExplicitGuard::unset();
         let legacy_auth = crate::auth::codex::legacy_auth_file_path().expect("legacy auth path");
         std::fs::create_dir_all(legacy_auth.parent().expect("legacy auth parent"))
             .expect("create legacy auth dir");
