@@ -1,6 +1,12 @@
 use super::*;
+#[cfg(target_os = "linux")]
 use std::process::{Command, Stdio};
 
+// The macOS implementation deliberately treats any waiting thread in an
+// interactive process as a possible stdin reader. Rust's parallel test harness
+// itself has waiting worker threads, so asserting against the current process is
+// not a valid macOS fixture.
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn test_own_process_not_reading_stdin() {
     let pid = std::process::id();
