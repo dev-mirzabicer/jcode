@@ -1,8 +1,8 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
 use super::{
-    NotifySessionContext, clone_split_session, handle_notify_session, handle_rename_session,
-    handle_resume_all_sessions, handle_set_feature,
+    NotifySessionContext, clone_split_session, create_transfer_child_session,
+    handle_notify_session, handle_rename_session, handle_resume_all_sessions, handle_set_feature,
 };
 use crate::agent::Agent;
 use crate::message::{ContentBlock, Message, Role, StreamEvent, ToolDefinition};
@@ -167,6 +167,60 @@ fn clone_split_session_uses_persisted_session_state() {
     assert_eq!(child.model, parent.model);
     assert_eq!(child.status, crate::session::SessionStatus::Closed);
     assert_ne!(child.id, parent.id);
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[test]
+fn transfer_child_uses_authoritative_handoff_instead_of_invalid_legacy_compaction() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    let mut parent = crate::session::Session::create_with_id(
+        "session_parent_transfer_test".to_string(),
+        None,
+        None,
+    );
+    parent.working_dir = Some("/tmp/jcode-transfer-test".to_string());
+    parent.model = Some("gpt-test".to_string());
+    parent.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "raw parent transcript must not be copied".to_string(),
+            cache_control: None,
+        }],
+    );
+    let transfer = crate::session::StoredCompactionState {
+        summary_text: "Readable transfer summary".to_string(),
+        openai_encrypted_content: None,
+        covers_up_to_turn: 1,
+        original_turn_count: 1,
+        compacted_count: 0,
+    };
+
+    let (child_id, _) = create_transfer_child_session(&parent.id, &parent, Some(transfer))
+        .expect("create transfer child");
+    let child = crate::session::Session::load(&child_id).expect("load transfer child");
+
+    assert_eq!(child.parent_id.as_deref(), Some(parent.id.as_str()));
+    assert_eq!(child.messages.len(), 1);
+    assert!(child.compaction.is_none());
+    assert_eq!(child.context_view, Default::default());
+    let handoff = child.messages.first().expect("authoritative handoff");
+    assert_eq!(
+        handoff.display_role,
+        Some(crate::session::StoredDisplayRole::System)
+    );
+    let handoff_text = handoff.content_preview();
+    assert!(handoff_text.contains("Readable transfer summary"));
+    assert!(handoff_text.contains(parent.id.as_str()));
+    assert!(!handoff_text.contains("raw parent transcript must not be copied"));
 
     if let Some(prev_home) = prev_home {
         crate::env::set_var("JCODE_HOME", prev_home);

@@ -1270,7 +1270,7 @@ fn test_transfer_command_queues_pause_while_processing_locally() {
 }
 
 #[test]
-fn test_create_transfer_session_from_parent_copies_todos_and_uses_compacted_context_only() {
+fn test_create_transfer_session_from_parent_copies_todos_and_uses_authoritative_handoff() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         app.session.working_dir = Some("/tmp".to_string());
@@ -1322,8 +1322,18 @@ fn test_create_transfer_session_from_parent_copies_todos_and_uses_compacted_cont
         let child_todos = crate::todo::load_todos(&child_id).expect("load child todos");
 
         assert_eq!(child.parent_id.as_deref(), Some(app.session.id.as_str()));
-        assert!(child.messages.is_empty());
-        assert_eq!(child.compaction, Some(transfer_compaction));
+        assert_eq!(child.messages.len(), 1);
+        assert!(child.compaction.is_none());
+        assert_eq!(child.context_view, Default::default());
+        let handoff = child.messages.first().expect("authoritative handoff");
+        assert_eq!(
+            handoff.display_role,
+            Some(crate::session::StoredDisplayRole::System)
+        );
+        let handoff_text = handoff.content_preview();
+        assert!(handoff_text.contains("Compacted handoff summary"));
+        assert!(handoff_text.contains(app.session.id.as_str()));
+        assert!(!handoff_text.contains("full transcript should not be copied"));
         assert_eq!(child.model.as_deref(), Some("test-model"));
         assert_eq!(child.provider_key.as_deref(), Some("test-provider"));
         assert_eq!(child.working_dir.as_deref(), Some("/tmp"));

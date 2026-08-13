@@ -1379,6 +1379,29 @@ request in this new forked session, using the inherited conversation only as con
         );
     }
 
+    /// Append a self-contained, model-visible handoff from a transferred parent
+    /// session without retaining the parent's raw transcript or legacy compaction
+    /// state. Returns false when no readable summary was supplied.
+    pub fn append_transfer_handoff(&mut self, parent_session_id: &str, summary: &str) -> bool {
+        if summary.trim().is_empty() {
+            return false;
+        }
+        let text = format!(
+            "## Transferred Session Handoff\n\nSource session: {parent_session_id}\n\n\
+             The parent transcript is intentionally not copied. Continue from this authoritative \
+             handoff summary:\n\n{summary}"
+        );
+        self.add_message_with_display_role(
+            Role::User,
+            vec![ContentBlock::Text {
+                text,
+                cache_control: None,
+            }],
+            Some(StoredDisplayRole::System),
+        );
+        true
+    }
+
     /// Mark this session as a canary tester
     pub fn set_canary(&mut self, build_hash: &str) {
         self.is_canary = true;

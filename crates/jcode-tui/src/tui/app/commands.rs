@@ -363,7 +363,19 @@ pub(super) fn create_transfer_session_from_parent(
     let todos = crate::todo::load_todos(parent_session_id).unwrap_or_default();
     let mut child = crate::session::Session::create(Some(parent_session_id.to_string()), None);
     child.messages.clear();
-    child.compaction = compaction;
+    child.compaction = None;
+    child.context_view = Default::default();
+    match compaction {
+        Some(compaction) => {
+            if !child.append_transfer_handoff(parent_session_id, &compaction.summary_text) {
+                anyhow::bail!("transfer summary was empty; refusing to create a contextless child");
+            }
+        }
+        None if !parent.messages.is_empty() => {
+            anyhow::bail!("transfer produced no readable summary for a non-empty parent session");
+        }
+        None => {}
+    }
     child.working_dir = parent.working_dir.clone();
     child.model = parent.model.clone();
     child.provider_key = parent.provider_key.clone();
