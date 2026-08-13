@@ -1048,39 +1048,6 @@ pub(super) async fn handle_resume_all_sessions(
     });
 }
 
-pub(super) fn handle_compact(
-    id: u64,
-    agent: &Arc<Mutex<Agent>>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
-) {
-    let agent = Arc::clone(agent);
-    let tx = client_event_tx.clone();
-    tokio::spawn(async move {
-        let mut agent_guard = agent.lock().await;
-        let session_id = agent_guard.session_id().to_string();
-        let (message, success) = agent_guard.request_manual_compaction();
-        drop(agent_guard);
-
-        if success {
-            crate::runtime_memory_log::emit_event(
-                crate::runtime_memory_log::RuntimeMemoryLogEvent::new(
-                    "manual_compaction_requested",
-                    "manual_compaction_started",
-                )
-                .with_session_id(session_id)
-                .force_attribution(),
-            );
-        }
-
-        let result = ServerEvent::CompactResult {
-            id,
-            message,
-            success,
-        };
-        let _ = tx.send(result);
-    });
-}
-
 pub(super) async fn handle_stdin_response(
     id: u64,
     request_id: String,

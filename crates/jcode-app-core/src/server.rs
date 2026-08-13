@@ -20,6 +20,7 @@ mod comm_graph;
 mod comm_plan;
 mod comm_session;
 mod comm_sync;
+mod context_control;
 mod debug;
 mod debug_ambient;
 mod debug_command_exec;
@@ -650,6 +651,9 @@ pub const EXIT_IDLE_TIMEOUT: i32 = 44;
 /// Server state
 pub struct Server {
     provider: Arc<dyn Provider>,
+    /// Process-wide bounded context draft store. Drafts survive client reconnects
+    /// for their TTL but are never persisted as active context state.
+    context_transactions: Arc<crate::context::ContextTransactionService>,
     socket_path: PathBuf,
     debug_socket_path: PathBuf,
     gateway_config_override: Option<crate::gateway::GatewayConfig>,
@@ -757,6 +761,7 @@ impl Server {
 
         Self {
             provider,
+            context_transactions: Arc::new(crate::context::ContextTransactionService::new()),
             socket_path: socket_path(),
             debug_socket_path: debug_socket_path(),
             gateway_config_override: None,

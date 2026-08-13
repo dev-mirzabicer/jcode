@@ -1,111 +1,27 @@
 use crate::context::provider_validation::validate_projected_messages;
-use crate::message::{ContentBlock, Role};
+use crate::message::ContentBlock;
+use crate::protocol::{
+    CONTEXT_MESSAGE_DETAIL_MAX_CHARS, CONTEXT_SNAPSHOT_MAX_PAGE_SIZE, ContextEditorBlock,
+    ContextEditorMessage, ContextEditorSnapshot, ContextMessageDetail, ContextMessageDetailFormat,
+    ContextOperationBadge, ContextOperationBadgeKind, ContextSummaryCoverage, ContextTextChunk,
+};
 use crate::provider::{
     ContextProjectionOperationKind, ContextProjectionValidationOperation,
     ContextProjectionValidationStatus, ContextReasoningBlockKind, Provider,
 };
-use chrono::{DateTime, Utc};
 use jcode_context_core::{
     ContextTargetIndex, ProjectedMessageSource, authoritative_transcript_digest,
     content_block_semantic_id, context_block_kind, estimate_content_block_tokens,
     estimate_message_tokens, project_context,
 };
 use jcode_session_types::{
-    StoredContextBlockKind, StoredContextEmergencyPolicy, StoredContextOperation,
-    StoredContextViewState, StoredDisplayRole, StoredMessage,
+    StoredContextBlockKind, StoredContextOperation, StoredContextViewState, StoredMessage,
 };
-use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 
 const MESSAGE_PREVIEW_MAX_CHARS: usize = 320;
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ContextOperationBadgeKind {
-    RangeSummary,
-    ReasoningSuppression,
-    ToolResultDistillation,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContextOperationBadge {
-    pub transaction_id: String,
-    pub operation_index: usize,
-    pub kind: ContextOperationBadgeKind,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContextSummaryCoverage {
-    pub transaction_id: String,
-    pub operation_index: usize,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContextEditorBlock {
-    pub ordinal: usize,
-    pub kind: StoredContextBlockKind,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub semantic_id: Option<String>,
-    pub estimated_provider_tokens: usize,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_use_id: Option<String>,
-    #[serde(default)]
-    pub tool_result_is_error: bool,
-    #[serde(default)]
-    pub has_image_payload: bool,
-    #[serde(default)]
-    pub has_tool_thought_signature: bool,
-    #[serde(default)]
-    pub provider_removable_reasoning: bool,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub active_operations: Vec<ContextOperationBadge>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ContextEditorMessage {
-    pub message_id: String,
-    pub stored_index: usize,
-    pub role: Role,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub display_role: Option<StoredDisplayRole>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timestamp: Option<DateTime<Utc>>,
-    pub raw_provider_tokens: usize,
-    pub projected_provider_tokens: usize,
-    pub preview: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub blocks: Vec<ContextEditorBlock>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tool_group_ids: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub summary_coverage: Option<ContextSummaryCoverage>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub active_operations: Vec<ContextOperationBadge>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub removable_reasoning_kinds: Vec<StoredContextBlockKind>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ContextEditorSnapshot {
-    pub session_id: String,
-    pub context_revision: u64,
-    pub raw_message_count: usize,
-    pub transcript_digest: u64,
-    pub processing: bool,
-    pub provider_name: String,
-    pub provider_display_name: String,
-    pub model: String,
-    pub route: String,
-    pub context_window: usize,
-    pub projected_request_tokens: usize,
-    pub messages: Vec<ContextEditorMessage>,
-    pub active_transactions: Vec<crate::context::ContextTransactionSummary>,
-    pub emergency_policy: StoredContextEmergencyPolicy,
-}
 
 pub struct ContextSnapshotInput<'a> {
     pub session_id: &'a str,
@@ -212,7 +128,7 @@ pub fn build_context_editor_snapshot(
         }
     }
 
-    let messages = input
+    let messages: Vec<ContextEditorMessage> = input
         .messages
         .iter()
         .enumerate()
@@ -310,6 +226,9 @@ pub fn build_context_editor_snapshot(
         route: input.route.to_string(),
         context_window: input.provider.context_window(),
         projected_request_tokens: projection.diagnostics.projected_provider_token_estimate,
+        message_page_start: 0,
+        message_page_end: messages.len(),
+        next_message_page_start: None,
         messages,
         active_transactions: input
             .context_view
@@ -317,6 +236,211 @@ pub fn build_context_editor_snapshot(
             .map(crate::context::summarize_context_transaction)
             .collect(),
         emergency_policy: input.context_view.emergency_policy.clone(),
+    })
+}
+
+pub fn paginate_context_editor_snapshot(
+    mut snapshot: ContextEditorSnapshot,
+    page_start: usize,
+    page_size: usize,
+) -> Result<ContextEditorSnapshot, ContextSnapshotError> {
+    if page_size == 0 || page_size > CONTEXT_SNAPSHOT_MAX_PAGE_SIZE {
+        return Err(ContextSnapshotError(format!(
+            "context snapshot page size must be between 1 and {CONTEXT_SNAPSHOT_MAX_PAGE_SIZE}"
+        )));
+    }
+    if page_start > snapshot.messages.len() {
+        return Err(ContextSnapshotError(format!(
+            "context snapshot page start {page_start} exceeds {} messages",
+            snapshot.messages.len()
+        )));
+    }
+    let page_end = page_start
+        .saturating_add(page_size)
+        .min(snapshot.messages.len());
+    let messages = snapshot.messages.drain(page_start..page_end).collect();
+    snapshot.messages = messages;
+    snapshot.message_page_start = page_start;
+    snapshot.message_page_end = page_end;
+    snapshot.next_message_page_start = (page_end < snapshot.raw_message_count).then_some(page_end);
+    Ok(snapshot)
+}
+
+pub struct ContextMessageDetailInput<'a> {
+    pub session_id: &'a str,
+    pub messages: &'a [StoredMessage],
+    pub context_view: &'a StoredContextViewState,
+    pub expected_context_revision: u64,
+    pub expected_transcript_digest: u64,
+    pub message_id: &'a str,
+    pub block_ordinal: usize,
+    pub start_char: usize,
+    pub max_chars: usize,
+}
+
+pub fn build_context_message_detail(
+    input: ContextMessageDetailInput<'_>,
+) -> Result<ContextMessageDetail, ContextSnapshotError> {
+    if input.max_chars == 0 || input.max_chars > CONTEXT_MESSAGE_DETAIL_MAX_CHARS {
+        return Err(ContextSnapshotError(format!(
+            "context detail chunk size must be between 1 and {CONTEXT_MESSAGE_DETAIL_MAX_CHARS}"
+        )));
+    }
+    if input.context_view.revision != input.expected_context_revision {
+        return Err(ContextSnapshotError(format!(
+            "context revision changed from {} to {}",
+            input.expected_context_revision, input.context_view.revision
+        )));
+    }
+    let transcript_digest = authoritative_transcript_digest(input.messages);
+    if transcript_digest != input.expected_transcript_digest {
+        return Err(ContextSnapshotError(format!(
+            "authoritative transcript digest changed from {} to {transcript_digest}",
+            input.expected_transcript_digest
+        )));
+    }
+    let mut matches = input
+        .messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| message.id == input.message_id);
+    let Some((stored_index, message)) = matches.next() else {
+        return Err(ContextSnapshotError(format!(
+            "stored message not found: {}",
+            input.message_id
+        )));
+    };
+    if matches.next().is_some() {
+        return Err(ContextSnapshotError(format!(
+            "stored message ID is ambiguous: {}",
+            input.message_id
+        )));
+    }
+    let block = message.content.get(input.block_ordinal).ok_or_else(|| {
+        ContextSnapshotError(format!(
+            "stored message {} has no block at ordinal {}",
+            input.message_id, input.block_ordinal
+        ))
+    })?;
+    let block_kind = context_block_kind(block);
+    let semantic_id = content_block_semantic_id(block).map(str::to_string);
+    let mut format = ContextMessageDetailFormat::Text;
+    let mut text = String::new();
+    let mut tool_name = None;
+    let mut tool_use_id = None;
+    let mut tool_result_is_error = None;
+    let mut provider_status = None;
+    let mut image_media_type = None;
+    let mut image_encoded_bytes = None;
+    let mut opaque_signature_present = false;
+    let mut encrypted_state_present = false;
+
+    match block {
+        ContentBlock::Text { text: value, .. }
+        | ContentBlock::Reasoning { text: value }
+        | ContentBlock::ReasoningTrace { text: value } => text = value.clone(),
+        ContentBlock::AnthropicThinking {
+            thinking,
+            signature,
+        } => {
+            text = thinking.clone();
+            opaque_signature_present = !signature.is_empty();
+        }
+        ContentBlock::OpenAIReasoning {
+            summary,
+            encrypted_content,
+            status,
+            ..
+        } => {
+            text = summary.join("\n");
+            provider_status = status.clone();
+            encrypted_state_present = encrypted_content
+                .as_deref()
+                .is_some_and(|content| !content.is_empty());
+        }
+        ContentBlock::ToolUse {
+            id,
+            name,
+            input,
+            thought_signature,
+        } => {
+            format = ContextMessageDetailFormat::Json;
+            text = serde_json::to_string_pretty(input).unwrap_or_else(|_| input.to_string());
+            tool_name = Some(name.clone());
+            tool_use_id = Some(id.clone());
+            opaque_signature_present = thought_signature
+                .as_deref()
+                .is_some_and(|signature| !signature.is_empty());
+        }
+        ContentBlock::ToolResult {
+            tool_use_id: id,
+            content,
+            is_error,
+        } => {
+            text = content.clone();
+            tool_use_id = Some(id.clone());
+            tool_result_is_error = Some(is_error.unwrap_or(false));
+        }
+        ContentBlock::Image { media_type, data } => {
+            format = ContextMessageDetailFormat::MetadataOnly;
+            image_media_type = Some(media_type.clone());
+            image_encoded_bytes = Some(data.len());
+        }
+        ContentBlock::OpenAICompaction { encrypted_content } => {
+            format = ContextMessageDetailFormat::MetadataOnly;
+            encrypted_state_present = !encrypted_content.is_empty();
+        }
+    }
+
+    let content = context_text_chunk(&text, input.start_char, input.max_chars)?;
+    Ok(ContextMessageDetail {
+        session_id: input.session_id.to_string(),
+        context_revision: input.context_view.revision,
+        transcript_digest,
+        message_id: message.id.clone(),
+        stored_index,
+        role: message.role.clone(),
+        display_role: message.display_role,
+        timestamp: message.timestamp,
+        block_ordinal: input.block_ordinal,
+        block_kind,
+        format,
+        content,
+        semantic_id,
+        tool_name,
+        tool_use_id,
+        tool_result_is_error,
+        provider_status,
+        image_media_type,
+        image_encoded_bytes,
+        opaque_signature_present,
+        encrypted_state_present,
+    })
+}
+
+fn context_text_chunk(
+    text: &str,
+    start_char: usize,
+    max_chars: usize,
+) -> Result<ContextTextChunk, ContextSnapshotError> {
+    let total_chars = text.chars().count();
+    if start_char > total_chars {
+        return Err(ContextSnapshotError(format!(
+            "context detail start {start_char} exceeds {total_chars} characters"
+        )));
+    }
+    let end_char = start_char.saturating_add(max_chars).min(total_chars);
+    let chunk = text
+        .chars()
+        .skip(start_char)
+        .take(end_char.saturating_sub(start_char))
+        .collect();
+    Ok(ContextTextChunk {
+        start_char,
+        end_char,
+        total_chars,
+        text: chunk,
+        next_start_char: (end_char < total_chars).then_some(end_char),
     })
 }
 
@@ -435,7 +559,7 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message::{Message, StreamEvent, ToolDefinition};
+    use crate::message::{Message, Role, StreamEvent, ToolDefinition};
     use crate::provider::EventStream;
     use crate::provider::{
         ContextProviderFamily, ContextProviderValidationIdentity, ContextRequestBuilderValidation,
@@ -443,6 +567,7 @@ mod tests {
     };
     use anyhow::Result;
     use async_trait::async_trait;
+    use chrono::Utc;
     use jcode_session_types::{
         StoredContextArtifactGenerator, StoredContextAuthorization, StoredContextStatusEvent,
         StoredContextTransaction, StoredContextTransactionStatusKind, StoredRangeSummary,
@@ -1073,5 +1198,245 @@ mod tests {
                 .iter()
                 .all(|block| !block.provider_removable_reasoning)
         );
+    }
+
+    #[test]
+    fn snapshot_pagination_preserves_global_identity_and_enforces_bounds() {
+        let messages = vec![
+            stored(
+                "message-1",
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "one".to_string(),
+                    cache_control: None,
+                }],
+            ),
+            stored(
+                "message-2",
+                Role::Assistant,
+                vec![ContentBlock::Text {
+                    text: "two".to_string(),
+                    cache_control: None,
+                }],
+            ),
+            stored(
+                "message-3",
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "three".to_string(),
+                    cache_control: None,
+                }],
+            ),
+        ];
+        let context_view = StoredContextViewState {
+            revision: 7,
+            ..StoredContextViewState::default()
+        };
+        let snapshot = build_context_editor_snapshot(ContextSnapshotInput {
+            session_id: "session-page",
+            messages: &messages,
+            context_view: &context_view,
+            processing: false,
+            provider: &SnapshotProvider,
+            route: "fixture-route",
+        })
+        .expect("build canonical snapshot");
+        let digest = snapshot.transcript_digest;
+
+        let first =
+            paginate_context_editor_snapshot(snapshot.clone(), 0, 2).expect("first bounded page");
+        assert_eq!(first.context_revision, 7);
+        assert_eq!(first.transcript_digest, digest);
+        assert_eq!(first.raw_message_count, 3);
+        assert_eq!(first.message_page_start, 0);
+        assert_eq!(first.message_page_end, 2);
+        assert_eq!(first.next_message_page_start, Some(2));
+        assert_eq!(
+            first
+                .messages
+                .iter()
+                .map(|message| message.message_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["message-1", "message-2"]
+        );
+
+        let final_page =
+            paginate_context_editor_snapshot(snapshot.clone(), 2, 1).expect("final bounded page");
+        assert_eq!(final_page.message_page_start, 2);
+        assert_eq!(final_page.message_page_end, 3);
+        assert_eq!(final_page.next_message_page_start, None);
+        assert_eq!(final_page.messages[0].message_id, "message-3");
+
+        let empty_tail = paginate_context_editor_snapshot(snapshot.clone(), 3, 1)
+            .expect("page start at raw length is a valid empty tail");
+        assert!(empty_tail.messages.is_empty());
+        assert_eq!(empty_tail.message_page_start, 3);
+        assert_eq!(empty_tail.message_page_end, 3);
+        assert_eq!(empty_tail.next_message_page_start, None);
+
+        assert!(paginate_context_editor_snapshot(snapshot.clone(), 4, 1).is_err());
+        assert!(paginate_context_editor_snapshot(snapshot.clone(), 0, 0).is_err());
+        assert!(
+            paginate_context_editor_snapshot(snapshot, 0, CONTEXT_SNAPSHOT_MAX_PAGE_SIZE + 1)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn lazy_detail_chunks_unicode_and_never_exposes_opaque_provider_state() {
+        let messages = vec![stored(
+            "message-detail",
+            Role::Assistant,
+            vec![
+                ContentBlock::Text {
+                    text: "A🙂éZ".to_string(),
+                    cache_control: None,
+                },
+                ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: "BASE64_SECRET".to_string(),
+                },
+                ContentBlock::ToolUse {
+                    id: "tool-1".to_string(),
+                    name: "read".to_string(),
+                    input: serde_json::json!({"file_path":"src/lib.rs"}),
+                    thought_signature: Some("THOUGHT_SIGNATURE_SECRET".to_string()),
+                },
+                ContentBlock::OpenAIReasoning {
+                    id: "reasoning-1".to_string(),
+                    summary: vec!["safe summary".to_string()],
+                    encrypted_content: Some("ENCRYPTED_REASONING_SECRET".to_string()),
+                    status: Some("completed".to_string()),
+                },
+                ContentBlock::OpenAICompaction {
+                    encrypted_content: "ENCRYPTED_COMPACTION_SECRET".to_string(),
+                },
+            ],
+        )];
+        let context_view = StoredContextViewState {
+            revision: 9,
+            ..StoredContextViewState::default()
+        };
+        let digest = authoritative_transcript_digest(&messages);
+        let detail = |block_ordinal, start_char, max_chars| {
+            build_context_message_detail(ContextMessageDetailInput {
+                session_id: "session-detail",
+                messages: &messages,
+                context_view: &context_view,
+                expected_context_revision: 9,
+                expected_transcript_digest: digest,
+                message_id: "message-detail",
+                block_ordinal,
+                start_char,
+                max_chars,
+            })
+        };
+
+        let unicode = detail(0, 1, 2).expect("Unicode detail chunk");
+        assert_eq!(unicode.content.text, "🙂é");
+        assert_eq!(unicode.content.start_char, 1);
+        assert_eq!(unicode.content.end_char, 3);
+        assert_eq!(unicode.content.total_chars, 4);
+        assert_eq!(unicode.content.next_start_char, Some(3));
+
+        let image = detail(1, 0, 16).expect("image metadata detail");
+        assert_eq!(image.format, ContextMessageDetailFormat::MetadataOnly);
+        assert_eq!(image.content.text, "");
+        assert_eq!(image.image_media_type.as_deref(), Some("image/png"));
+        assert_eq!(image.image_encoded_bytes, Some("BASE64_SECRET".len()));
+        assert!(
+            !serde_json::to_string(&image)
+                .expect("serialize image detail")
+                .contains("BASE64_SECRET")
+        );
+
+        let tool = detail(2, 0, 1_024).expect("tool detail");
+        assert_eq!(tool.format, ContextMessageDetailFormat::Json);
+        assert!(tool.opaque_signature_present);
+        assert!(tool.content.text.contains("src/lib.rs"));
+        assert!(!tool.content.text.contains("THOUGHT_SIGNATURE_SECRET"));
+
+        let reasoning = detail(3, 0, 1_024).expect("OpenAI reasoning detail");
+        assert_eq!(reasoning.content.text, "safe summary");
+        assert!(reasoning.encrypted_state_present);
+        assert!(
+            !serde_json::to_string(&reasoning)
+                .expect("serialize reasoning detail")
+                .contains("ENCRYPTED_REASONING_SECRET")
+        );
+
+        let compaction = detail(4, 0, 16).expect("legacy compaction metadata detail");
+        assert_eq!(compaction.format, ContextMessageDetailFormat::MetadataOnly);
+        assert!(compaction.encrypted_state_present);
+        assert!(
+            !serde_json::to_string(&compaction)
+                .expect("serialize compaction detail")
+                .contains("ENCRYPTED_COMPACTION_SECRET")
+        );
+
+        assert!(detail(0, 5, 1).is_err());
+        assert!(detail(0, 0, 0).is_err());
+        assert!(detail(0, 0, CONTEXT_MESSAGE_DETAIL_MAX_CHARS + 1).is_err());
+
+        let stale_revision = build_context_message_detail(ContextMessageDetailInput {
+            session_id: "session-detail",
+            messages: &messages,
+            context_view: &context_view,
+            expected_context_revision: 8,
+            expected_transcript_digest: digest,
+            message_id: "message-detail",
+            block_ordinal: 0,
+            start_char: 0,
+            max_chars: 16,
+        })
+        .expect_err("revision mismatch must be stale");
+        assert!(stale_revision.to_string().contains("revision changed"));
+
+        let stale_digest = build_context_message_detail(ContextMessageDetailInput {
+            session_id: "session-detail",
+            messages: &messages,
+            context_view: &context_view,
+            expected_context_revision: 9,
+            expected_transcript_digest: digest.wrapping_add(1),
+            message_id: "message-detail",
+            block_ordinal: 0,
+            start_char: 0,
+            max_chars: 16,
+        })
+        .expect_err("digest mismatch must be stale");
+        assert!(stale_digest.to_string().contains("digest changed"));
+
+        let missing_message = build_context_message_detail(ContextMessageDetailInput {
+            session_id: "session-detail",
+            messages: &messages,
+            context_view: &context_view,
+            expected_context_revision: 9,
+            expected_transcript_digest: digest,
+            message_id: "missing-message",
+            block_ordinal: 0,
+            start_char: 0,
+            max_chars: 16,
+        })
+        .expect_err("missing stable ID must fail");
+        assert!(missing_message.to_string().contains("not found"));
+
+        let missing_block = detail(99, 0, 16).expect_err("missing block must fail");
+        assert!(missing_block.to_string().contains("no block"));
+
+        let ambiguous_messages = vec![messages[0].clone(), messages[0].clone()];
+        let ambiguous_digest = authoritative_transcript_digest(&ambiguous_messages);
+        let ambiguous = build_context_message_detail(ContextMessageDetailInput {
+            session_id: "session-detail",
+            messages: &ambiguous_messages,
+            context_view: &context_view,
+            expected_context_revision: 9,
+            expected_transcript_digest: ambiguous_digest,
+            message_id: "message-detail",
+            block_ordinal: 0,
+            start_char: 0,
+            max_chars: 16,
+        })
+        .expect_err("ambiguous stable ID must fail");
+        assert!(ambiguous.to_string().contains("ambiguous"));
     }
 }

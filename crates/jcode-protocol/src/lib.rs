@@ -10,9 +10,11 @@
 use serde::{Deserialize, Serialize};
 
 mod comm_format;
+mod context;
 mod notifications;
 
 pub use comm_format::*;
+pub use context::*;
 pub use notifications::{FeatureToggle, NotificationType};
 
 use jcode_batch_types::BatchProgress;
@@ -578,6 +580,16 @@ impl Request {
             Request::GetHistory { id } => *id,
             Request::GetModelCatalog { id } => *id,
             Request::GetCompactedHistory { id, .. } => *id,
+            Request::GetContextEditorSnapshot { id, .. } => *id,
+            Request::GetContextMessageDetail { id, .. } => *id,
+            Request::PrepareContextDraft { id, .. } => *id,
+            Request::CancelContextDraft { id, .. } => *id,
+            Request::GetContextDraftStatus { id, .. } => *id,
+            Request::ApplyContextDraft { id, .. } => *id,
+            Request::ListContextTransactions { id, .. } => *id,
+            Request::RevertContextTransaction { id, .. } => *id,
+            Request::ReapplyContextTransaction { id, .. } => *id,
+            Request::SetContextEmergencyPolicy { id, .. } => *id,
             Request::Reload { id, .. } => *id,
             Request::ResumeSession { id, .. } => *id,
             Request::ResumeAllSessions { id } => *id,

@@ -32,6 +32,10 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+fn skip_legacy_compaction_mode(_: &jcode_config_types::CompactionMode) -> bool {
+    true
+}
+
 /// Client request to server
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -149,6 +153,81 @@ pub enum Request {
         id: u64,
         /// Number of leading compacted messages the client wants rendered before the live tail.
         visible_messages: usize,
+    },
+
+    /// Get one bounded page of the authoritative context-editor snapshot.
+    #[serde(rename = "get_context_editor_snapshot")]
+    GetContextEditorSnapshot {
+        id: u64,
+        #[serde(default)]
+        page_start: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        page_size: Option<usize>,
+    },
+
+    /// Lazily retrieve one bounded, image-safe content-block detail chunk.
+    #[serde(rename = "get_context_message_detail")]
+    GetContextMessageDetail {
+        id: u64,
+        expected_context_revision: u64,
+        expected_transcript_digest: u64,
+        message_id: String,
+        block_ordinal: usize,
+        #[serde(default)]
+        start_char: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_chars: Option<usize>,
+    },
+
+    /// Capture and prepare one atomic context transaction draft.
+    #[serde(rename = "prepare_context_draft")]
+    PrepareContextDraft {
+        id: u64,
+        request: ContextDraftRequest,
+    },
+
+    /// Cancel a preparing or ready draft.
+    #[serde(rename = "cancel_context_draft")]
+    CancelContextDraft { id: u64, draft_id: String },
+
+    /// Reconnect to a retained draft by ID and retrieve its current status.
+    #[serde(rename = "get_context_draft_status")]
+    GetContextDraftStatus { id: u64, draft_id: String },
+
+    /// Atomically apply a ready draft. `None` selects curator defaults; `Some`
+    /// applies exactly the supplied validated subset.
+    #[serde(rename = "apply_context_draft")]
+    ApplyContextDraft {
+        id: u64,
+        draft_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        selected_distillation_ids: Option<Vec<String>>,
+    },
+
+    /// List bounded context transaction provenance, newest first.
+    #[serde(rename = "list_context_transactions")]
+    ListContextTransactions {
+        id: u64,
+        #[serde(default)]
+        offset: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+    },
+
+    /// Revert one active context transaction.
+    #[serde(rename = "revert_context_transaction")]
+    RevertContextTransaction { id: u64, transaction_id: String },
+
+    /// Reapply one inactive context transaction after current target validation.
+    #[serde(rename = "reapply_context_transaction")]
+    ReapplyContextTransaction { id: u64, transaction_id: String },
+
+    /// Persist the explicit unattended emergency policy. Step 11 consumes the
+    /// authorization; Step 8 exposes and persists it without implicit enablement.
+    #[serde(rename = "set_context_emergency_policy")]
+    SetContextEmergencyPolicy {
+        id: u64,
+        policy: jcode_session_types::StoredContextEmergencyPolicy,
     },
 
     /// Trigger server hot reload (build new version, restart)
@@ -723,10 +802,6 @@ pub enum Request {
 /// Server event sent to client
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "wire protocol prioritizes straightforward serde payloads over boxing every larger event variant"
-)]
 pub enum ServerEvent {
     /// Acknowledgment of request
     #[serde(rename = "ack")]
@@ -1159,8 +1234,12 @@ pub enum ServerEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         autojudge_enabled: Option<bool>,
         /// Active compaction mode for this session
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "skip_legacy_compaction_mode")]
         compaction_mode: jcode_config_types::CompactionMode,
+        /// Persisted provider-context projection revision. New servers report
+        /// this instead of an active automatic-compaction mode.
+        #[serde(default)]
+        context_revision: u64,
         /// Current live processing state for this session, if known.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         activity: Option<SessionActivitySnapshot>,
@@ -1182,6 +1261,143 @@ pub enum ServerEvent {
         compacted_remaining: usize,
         #[serde(default)]
         compacted_hidden_prompts: usize,
+    },
+
+    /// Bounded authoritative snapshot for the context editor.
+    #[serde(rename = "context_editor_snapshot")]
+    ContextEditorSnapshot {
+        id: u64,
+        snapshot: ContextEditorSnapshot,
+    },
+
+    /// One image-safe lazy detail chunk for a stored content block.
+    #[serde(rename = "context_message_detail")]
+    ContextMessageDetail {
+        id: u64,
+        detail: ContextMessageDetail,
+    },
+
+    /// Context draft preparation progress. The request ID is retained across
+    /// every update emitted for the request that attached this monitor.
+    #[serde(rename = "context_draft_progress")]
+    ContextDraftProgress {
+        id: u64,
+        draft_id: String,
+        progress: ContextDraftProgress,
+    },
+
+    /// Complete ready draft for final review.
+    #[serde(rename = "context_draft_ready")]
+    ContextDraftReady { id: u64, draft: Box<ContextDraft> },
+
+    #[serde(rename = "context_draft_applying")]
+    ContextDraftApplying {
+        id: u64,
+        identity: ContextDraftIdentity,
+    },
+
+    /// Non-stale preparation or apply failure.
+    #[serde(rename = "context_draft_failed")]
+    ContextDraftFailed {
+        id: u64,
+        identity: ContextDraftIdentity,
+        error: ContextServiceError,
+    },
+
+    /// Draft identity no longer matches the authoritative transcript or route.
+    #[serde(rename = "context_draft_stale")]
+    ContextDraftStale {
+        id: u64,
+        identity: ContextDraftIdentity,
+        error: ContextServiceError,
+    },
+
+    #[serde(rename = "context_draft_canceled")]
+    ContextDraftCanceled {
+        id: u64,
+        identity: ContextDraftIdentity,
+    },
+
+    #[serde(rename = "context_draft_expired")]
+    ContextDraftExpired {
+        id: u64,
+        identity: ContextDraftIdentity,
+    },
+
+    /// Retained terminal draft status returned after reconnect.
+    #[serde(rename = "context_draft_applied")]
+    ContextDraftApplied {
+        id: u64,
+        identity: ContextDraftIdentity,
+        transaction_id: String,
+        revision: u64,
+    },
+
+    #[serde(rename = "context_transaction_history")]
+    ContextTransactionHistory {
+        id: u64,
+        context_revision: u64,
+        total_transactions: usize,
+        offset: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next_offset: Option<usize>,
+        transactions: Vec<ContextTransactionSummary>,
+    },
+
+    #[serde(rename = "context_transaction_applied")]
+    ContextTransactionApplied {
+        id: u64,
+        draft_id: String,
+        result: ContextTransactionResult,
+    },
+
+    #[serde(rename = "context_transaction_reverted")]
+    ContextTransactionReverted {
+        id: u64,
+        transaction_id: String,
+        result: ContextTransactionResult,
+    },
+
+    #[serde(rename = "context_transaction_reapplied")]
+    ContextTransactionReapplied {
+        id: u64,
+        transaction_id: String,
+        result: ContextTransactionResult,
+    },
+
+    /// Correlated rejection for context requests that could not safely execute.
+    #[serde(rename = "context_request_rejected")]
+    ContextRequestRejected {
+        id: u64,
+        request: ContextRequestKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        draft_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transaction_id: Option<String>,
+        error: ContextServiceError,
+    },
+
+    /// Prompt-safe signal used by Step 10 when a request must not be sent.
+    #[serde(rename = "context_action_required")]
+    ContextActionRequired {
+        id: u64,
+        session_id: String,
+        context_revision: u64,
+        reason: ContextActionRequiredReason,
+        required_reduction_tokens: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pending_input: Option<ContextPendingInputMetadata>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        details: Vec<String>,
+        #[serde(default)]
+        automatic_retry: bool,
+    },
+
+    #[serde(rename = "context_emergency_policy_changed")]
+    ContextEmergencyPolicyChanged {
+        id: u64,
+        session_id: String,
+        policy: jcode_session_types::StoredContextEmergencyPolicy,
     },
 
     /// Side panel state changed for the active session

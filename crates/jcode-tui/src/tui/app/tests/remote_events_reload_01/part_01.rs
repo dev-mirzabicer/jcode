@@ -182,6 +182,7 @@ fn test_handle_server_event_history_clears_connection_type_on_session_change_whe
             reasoning_effort: None,
             service_tier: None,
             compaction_mode: crate::config::CompactionMode::Reactive,
+            context_revision: 0,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
         },
@@ -235,6 +236,7 @@ fn test_handle_server_event_history_preserves_connection_type_for_same_session_w
             reasoning_effort: None,
             service_tier: None,
             compaction_mode: crate::config::CompactionMode::Reactive,
+            context_revision: 0,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
         },
@@ -316,6 +318,7 @@ fn test_handle_server_event_history_session_change_clears_streaming_preview_diag
             reasoning_effort: None,
             service_tier: None,
             compaction_mode: crate::config::CompactionMode::Reactive,
+            context_revision: 0,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
         },
@@ -354,6 +357,10 @@ fn test_handle_server_event_history_same_session_rewind_reapply_clears_streaming
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
 
     app.remote_session_id = Some("session_rewind_preview".to_string());
+    app.context_revision = 4;
+    app.context_protocol
+        .accept_history("session_rewind_preview", 4);
+    app.context_protocol.begin_snapshot_request(91);
     remote.set_session_id("session_rewind_preview".to_string());
     // A stale streaming preview is still registered (e.g. the turn ended via a
     // path that did not clear it, or the rewind raced the end of the stream).
@@ -418,6 +425,7 @@ fn test_handle_server_event_history_same_session_rewind_reapply_clears_streaming
             reasoning_effort: None,
             service_tier: None,
             compaction_mode: crate::config::CompactionMode::Reactive,
+            context_revision: 6,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
         },
@@ -440,6 +448,9 @@ fn test_handle_server_event_history_same_session_rewind_reapply_clears_streaming
         app.pending_remote_rewind_notice.is_none(),
         "pending rewind notice should be consumed by the History re-apply"
     );
+    assert!(app.context_revision > 4);
+    assert_eq!(app.context_protocol.accepted_context_revision, Some(6));
+    assert_eq!(app.context_protocol.snapshot_request_id, None);
     assert!(
         !crate::tui::mermaid::get_active_diagrams()
             .iter()
@@ -526,6 +537,7 @@ fn test_handle_server_event_history_same_session_midstream_duplicate_is_dropped_
             reasoning_effort: None,
             service_tier: None,
             compaction_mode: crate::config::CompactionMode::Reactive,
+            context_revision: 0,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
         },
@@ -607,6 +619,7 @@ fn test_handle_server_event_history_same_session_midstream_duplicate_is_dropped_
                 reasoning_effort: None,
                 service_tier: None,
                 compaction_mode: crate::config::CompactionMode::Reactive,
+                context_revision: 0,
                 activity: None,
                 side_panel: crate::side_panel::SidePanelSnapshot::default(),
             },
@@ -708,6 +721,7 @@ fn test_handle_server_event_history_same_session_rewind_then_late_done_does_not_
             reasoning_effort: None,
             service_tier: None,
             compaction_mode: crate::config::CompactionMode::Reactive,
+            context_revision: 0,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
         },
@@ -797,6 +811,7 @@ fn test_handle_server_event_history_session_change_clears_pending_interleaves() 
             reasoning_effort: None,
             service_tier: None,
             compaction_mode: crate::config::CompactionMode::Reactive,
+            context_revision: 0,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
         },
@@ -1911,6 +1926,7 @@ fn test_pending_startup_notice_survives_history_bootstrap_for_fresh_session() {
             reasoning_effort: None,
             service_tier: None,
             compaction_mode: crate::config::CompactionMode::Reactive,
+            context_revision: 0,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
         },

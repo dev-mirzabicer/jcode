@@ -1,40 +1,17 @@
 use crate::agent::Agent;
-use crate::context::commit::{ContextTransactionResult, prepare_context_transition};
-use crate::context::draft::{ContextServiceError, ContextTransactionService};
-use chrono::{DateTime, Utc};
+use crate::context::commit::prepare_context_transition;
+use crate::context::draft::ContextTransactionService;
+use crate::protocol::{
+    ContextOperationCounts, ContextServiceError, ContextTransactionResult,
+    ContextTransactionSummary,
+};
+use chrono::Utc;
 use jcode_session_types::{
-    StoredContextApplication, StoredContextAuthorization, StoredContextEconomics,
     StoredContextStatusEvent, StoredContextTransaction, StoredContextTransactionStatusKind,
     StoredContextViewState,
 };
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContextOperationCounts {
-    pub range_summaries: usize,
-    pub reasoning_suppressions: usize,
-    pub tool_result_distillations: usize,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ContextTransactionSummary {
-    pub id: String,
-    pub created_at: DateTime<Utc>,
-    pub base_revision: u64,
-    pub active: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub latest_status: Option<StoredContextTransactionStatusKind>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub latest_status_revision: Option<u64>,
-    pub authorization: StoredContextAuthorization,
-    pub operation_counts: ContextOperationCounts,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub application: Option<StoredContextApplication>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub economics: Option<StoredContextEconomics>,
-}
 
 pub fn summarize_context_transaction(
     transaction: &StoredContextTransaction,
@@ -180,7 +157,8 @@ fn transaction_index(
 mod tests {
     use super::*;
     use jcode_session_types::{
-        StoredContextStatusEvent, StoredContextTransaction, StoredContextTransactionStatusKind,
+        StoredContextAuthorization, StoredContextStatusEvent, StoredContextTransaction,
+        StoredContextTransactionStatusKind,
     };
 
     #[test]

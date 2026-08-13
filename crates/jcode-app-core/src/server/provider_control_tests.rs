@@ -1391,33 +1391,3 @@ async fn refresh_models_emits_available_models_updated_after_prefetch() {
             && route.api_method == "mock-auth"
     }));
 }
-
-#[tokio::test]
-async fn set_compaction_mode_updates_the_agents_live_legacy_manager() {
-    let provider: Arc<dyn Provider> = Arc::new(AuthChangeMockProvider::new());
-    let registry = Registry::empty();
-    let agent = Arc::new(Mutex::new(Agent::new(provider, registry)));
-    let live_registry = agent.lock().await.shared_runtime_registry();
-    let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
-
-    handle_set_compaction_mode(
-        41,
-        crate::config::CompactionMode::Proactive,
-        &agent,
-        &client_event_tx,
-    )
-    .await;
-
-    assert_eq!(
-        live_registry.legacy_compaction().read().await.mode(),
-        crate::config::CompactionMode::Proactive
-    );
-    assert!(matches!(
-        client_event_rx.recv().await,
-        Some(ServerEvent::CompactionModeChanged {
-            id: 41,
-            mode: crate::config::CompactionMode::Proactive,
-            error: None,
-        })
-    ));
-}

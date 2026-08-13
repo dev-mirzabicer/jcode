@@ -8,9 +8,18 @@ use crate::context::curator::{
 use crate::context::provider_validation::require_supported_projected_messages;
 use crate::context::{ContextPersistence, SessionContextPersistence};
 use crate::message::ContentBlock;
+use crate::protocol::{
+    ContextDistillationProposal, ContextDraft, ContextDraftIdentity, ContextDraftPhase,
+    ContextDraftPreview, ContextDraftProgress, ContextDraftRequest, ContextDraftStatus,
+    ContextIneligibleDistillation, ContextOperationPreview, ContextReasoningSelectionRequest,
+    ContextServiceError,
+};
+#[cfg(test)]
+use crate::protocol::{ContextMessageRangeSelection, ContextToolResultSelection};
+#[cfg(test)]
+use crate::provider::ContextProjectionValidationReport;
 use crate::provider::{
-    ContextProjectionOperationKind, ContextProjectionValidationOperation,
-    ContextProjectionValidationReport, ContextReasoningBlockKind,
+    ContextProjectionOperationKind, ContextProjectionValidationOperation, ContextReasoningBlockKind,
 };
 use chrono::{DateTime, Utc};
 use jcode_context_core::{
@@ -27,10 +36,8 @@ use jcode_session_types::{
     StoredMessage, StoredMessageRange, StoredRangeSummary, StoredReasoningSuppression,
     StoredToolResultDistillation,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::error::Error;
-use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{Mutex as AsyncMutex, Notify};
@@ -38,262 +45,6 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 const TERMINAL_DRAFT_RESERVATION_FLOOR_BYTES: usize = 512;
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContextMessageRangeSelection {
-    pub start_message_id: String,
-    pub end_message_id: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ContextReasoningSelectionRequest {
-    KeepLatestAssistantTurns {
-        protected_recent_assistant_turns: usize,
-    },
-    MessageRanges {
-        ranges: Vec<ContextMessageRangeSelection>,
-    },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContextToolResultSelection {
-    pub message_id: String,
-    pub block_ordinal: usize,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContextDraftRequest {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub summary_ranges: Vec<ContextMessageRangeSelection>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning: Option<ContextReasoningSelectionRequest>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tool_results: Vec<ContextToolResultSelection>,
-    #[serde(default)]
-    pub allow_shadowing_active_operations: bool,
-    pub authorization: StoredContextAuthorization,
-}
-
-impl ContextDraftRequest {
-    pub fn is_empty(&self) -> bool {
-        self.summary_ranges.is_empty() && self.reasoning.is_none() && self.tool_results.is_empty()
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ContextDraftPhase {
-    Capturing,
-    ClosingRanges,
-    ExtractingChangeEvidence,
-    PreparingArtifacts,
-    ValidatingProjection,
-    CalculatingEconomics,
-    Ready,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContextDraftProgress {
-    pub phase: ContextDraftPhase,
-    pub completed_items: usize,
-    pub total_items: usize,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContextDraftIdentity {
-    pub draft_id: String,
-    pub session_id: String,
-    pub base_context_revision: u64,
-    pub raw_message_count: usize,
-    pub transcript_digest: u64,
-    pub provider_name: String,
-    pub model: String,
-    pub route: String,
-    pub created_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ContextDraftPreview {
-    pub raw_stored_message_count: usize,
-    pub current_context_revision: u64,
-    pub proposed_context_revision: u64,
-    pub economics: StoredContextEconomics,
-    pub validation: ContextProjectionValidationReport,
-    pub formatter_placeholder_count: usize,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub operation_previews: Vec<ContextOperationPreview>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub notices: Vec<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ContextOperationPreview {
-    RangeSummary {
-        request_id: String,
-        source_range: StoredMessageRange,
-        source_tokens: usize,
-        replacement_tokens: usize,
-        changed_files: Vec<String>,
-        change_evidence_complete: bool,
-    },
-    ReasoningSuppression {
-        target_count: usize,
-        assistant_turns_affected: usize,
-        replay_block_kinds: Vec<StoredContextBlockKind>,
-        removed_tokens: usize,
-    },
-    ToolResultDistillation {
-        proposal_id: String,
-        tool_name: String,
-        tool_call_id: String,
-        original_tokens: usize,
-        replacement_tokens: usize,
-        selected_by_default: bool,
-    },
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ContextDistillationProposal {
-    pub proposal_id: String,
-    pub selected_by_default: bool,
-    pub operation: StoredToolResultDistillation,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContextIneligibleDistillation {
-    pub request_id: String,
-    pub tool_name: String,
-    pub tool_call_id: String,
-    pub reason: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub uncertainties: Vec<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ContextDraft {
-    pub identity: ContextDraftIdentity,
-    pub authorization: StoredContextAuthorization,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub required_operations: Vec<StoredContextOperation>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub distillation_proposals: Vec<ContextDistillationProposal>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ineligible_distillations: Vec<ContextIneligibleDistillation>,
-    pub preview: ContextDraftPreview,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub curator_usage: Vec<StoredContextCuratorUsage>,
-}
-
-impl ContextDraft {
-    pub fn default_selected_distillation_ids(&self) -> Vec<String> {
-        self.distillation_proposals
-            .iter()
-            .filter(|proposal| proposal.selected_by_default)
-            .map(|proposal| proposal.proposal_id.clone())
-            .collect()
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
-pub enum ContextDraftStatus {
-    Preparing {
-        identity: ContextDraftIdentity,
-        progress: ContextDraftProgress,
-    },
-    Ready {
-        draft: Box<ContextDraft>,
-    },
-    Applying {
-        identity: ContextDraftIdentity,
-    },
-    Applied {
-        identity: ContextDraftIdentity,
-        transaction_id: String,
-        revision: u64,
-    },
-    Failed {
-        identity: ContextDraftIdentity,
-        error: ContextServiceError,
-    },
-    Canceled {
-        identity: ContextDraftIdentity,
-    },
-    Expired {
-        identity: ContextDraftIdentity,
-    },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "detail", rename_all = "snake_case")]
-pub enum ContextServiceError {
-    SessionBusy,
-    EmptyRequest,
-    DraftNotFound(String),
-    DraftNotReady(String),
-    DraftAlreadyApplied(String),
-    DraftExpired(String),
-    DraftCanceled(String),
-    TransactionNotFound(String),
-    TransactionNotActive(String),
-    TransactionAlreadyActive(String),
-    Capacity(String),
-    InvalidSelection(String),
-    Conflict(String),
-    Stale(String),
-    Curator(String),
-    Projection(String),
-    ProviderValidation(String),
-    Persistence(String),
-    RevisionOverflow,
-    Runtime(String),
-}
-
-impl fmt::Display for ContextServiceError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::SessionBusy => {
-                formatter.write_str("session is processing or its Agent lock is busy")
-            }
-            Self::EmptyRequest => formatter.write_str("context draft contains no operations"),
-            Self::DraftNotFound(id) => write!(formatter, "context draft not found: {id}"),
-            Self::DraftNotReady(id) => write!(formatter, "context draft is not ready: {id}"),
-            Self::DraftAlreadyApplied(id) => {
-                write!(formatter, "context draft was already applied: {id}")
-            }
-            Self::DraftExpired(id) => write!(formatter, "context draft expired: {id}"),
-            Self::DraftCanceled(id) => write!(formatter, "context draft was canceled: {id}"),
-            Self::TransactionNotFound(id) => {
-                write!(formatter, "context transaction not found: {id}")
-            }
-            Self::TransactionNotActive(id) => {
-                write!(formatter, "context transaction is not active: {id}")
-            }
-            Self::TransactionAlreadyActive(id) => {
-                write!(formatter, "context transaction is already active: {id}")
-            }
-            Self::Capacity(reason) => write!(formatter, "context draft store is full: {reason}"),
-            Self::InvalidSelection(reason) => {
-                write!(formatter, "invalid context selection: {reason}")
-            }
-            Self::Conflict(reason) => write!(formatter, "context operation conflict: {reason}"),
-            Self::Stale(reason) => write!(formatter, "context draft is stale: {reason}"),
-            Self::Curator(reason) => write!(formatter, "context curator failed: {reason}"),
-            Self::Projection(reason) => write!(formatter, "context projection failed: {reason}"),
-            Self::ProviderValidation(reason) => {
-                write!(formatter, "provider validation failed: {reason}")
-            }
-            Self::Persistence(reason) => write!(formatter, "context persistence failed: {reason}"),
-            Self::RevisionOverflow => formatter.write_str("context revision overflow"),
-            Self::Runtime(reason) => write!(formatter, "context service runtime error: {reason}"),
-        }
-    }
-}
-
-impl Error for ContextServiceError {}
 
 #[derive(Clone, Copy, Debug)]
 pub struct ContextServiceLimits {
@@ -366,6 +117,53 @@ impl ContextTransactionService {
             snapshot.projected_request_tokens = projected_request_tokens;
         }
         Ok(snapshot)
+    }
+
+    pub fn context_editor_snapshot_page(
+        &self,
+        agent: &mut Agent,
+        processing: bool,
+        page_start: usize,
+        page_size: usize,
+    ) -> Result<crate::context::ContextEditorSnapshot, ContextServiceError> {
+        let snapshot = self.context_editor_snapshot(agent, processing)?;
+        crate::context::paginate_context_editor_snapshot(snapshot, page_start, page_size)
+            .map_err(|error| ContextServiceError::InvalidSelection(error.to_string()))
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "lazy detail identity and bounded chunk coordinates are independent protocol fields"
+    )]
+    pub fn context_message_detail(
+        &self,
+        agent: &Agent,
+        expected_context_revision: u64,
+        expected_transcript_digest: u64,
+        message_id: &str,
+        block_ordinal: usize,
+        start_char: usize,
+        max_chars: usize,
+    ) -> Result<crate::context::ContextMessageDetail, ContextServiceError> {
+        crate::context::build_context_message_detail(crate::context::ContextMessageDetailInput {
+            session_id: agent.session_id(),
+            messages: agent.messages(),
+            context_view: agent.context_view_state(),
+            expected_context_revision,
+            expected_transcript_digest,
+            message_id,
+            block_ordinal,
+            start_char,
+            max_chars,
+        })
+        .map_err(|error| {
+            let detail = error.to_string();
+            if detail.contains("revision changed") || detail.contains("digest changed") {
+                ContextServiceError::Stale(detail)
+            } else {
+                ContextServiceError::InvalidSelection(detail)
+            }
+        })
     }
 
     pub fn prepare_draft(
@@ -548,6 +346,32 @@ impl ContextTransactionService {
         tokio::time::timeout(timeout, wait).await.map_err(|_| {
             ContextServiceError::Runtime("waiting for context draft timed out".to_string())
         })?
+    }
+
+    pub async fn wait_for_draft_update(
+        &self,
+        draft_id: &str,
+        previous: &ContextDraftStatus,
+    ) -> Result<ContextDraftStatus, ContextServiceError> {
+        loop {
+            let notify = {
+                let mut store = self.lock_store();
+                store.expire_entries(Utc::now());
+                let entry = store
+                    .entries
+                    .get(draft_id)
+                    .ok_or_else(|| ContextServiceError::DraftNotFound(draft_id.to_string()))?;
+                Arc::clone(&entry.notify)
+            };
+            let notified = notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let status = self.draft_status(draft_id)?;
+            if &status != previous {
+                return Ok(status);
+            }
+            notified.await;
+        }
     }
 
     pub(crate) fn lock_store(&self) -> std::sync::MutexGuard<'_, ContextDraftStore> {

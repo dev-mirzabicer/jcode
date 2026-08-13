@@ -6,7 +6,7 @@
 //! Also provides debug socket events for exposing full TUI state.
 
 use crate::message::ToolCall;
-use crate::protocol::{AuthChanged, FeatureToggle, Request, ServerEvent};
+use crate::protocol::{AuthChanged, ContextDraftRequest, FeatureToggle, Request, ServerEvent};
 use crate::server;
 use crate::transport::{Stream, WriteHalf};
 use crate::tui::remote_diff::RemoteDiffTracker;
@@ -278,6 +278,23 @@ fn remote_protocol_frame_exceeds_limit(buffered: usize, incoming: usize) -> bool
     buffered
         .checked_add(incoming)
         .is_none_or(|total| total > MAX_REMOTE_PROTOCOL_FRAME_BYTES)
+}
+
+/// Describe a malformed or incomplete protocol frame without echoing any of
+/// its payload. Context-editor events can contain raw message detail, generated
+/// summaries, distilled tool output, curator rationale, or provider-opaque
+/// state, so even error-path previews must remain metadata-only.
+fn protocol_frame_diagnostic(bytes: &[u8]) -> String {
+    let event_type = serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "unavailable".to_string());
+    format!("bytes={} type={event_type}", bytes.len())
 }
 
 pub(crate) trait RemoteEventState {
@@ -650,6 +667,135 @@ impl RemoteConnection {
         };
         self.next_request_id += 1;
         self.send_request(request).await?;
+        Ok(id)
+    }
+
+    /// Request one bounded page of the authoritative context-editor snapshot.
+    pub async fn get_context_editor_snapshot(
+        &mut self,
+        page_start: usize,
+        page_size: Option<usize>,
+    ) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::GetContextEditorSnapshot {
+            id,
+            page_start,
+            page_size,
+        })
+        .await?;
+        Ok(id)
+    }
+
+    /// Request one bounded, image-safe Unicode chunk for a stable message block.
+    pub async fn get_context_message_detail(
+        &mut self,
+        expected_context_revision: u64,
+        expected_transcript_digest: u64,
+        message_id: String,
+        block_ordinal: usize,
+        start_char: usize,
+        max_chars: Option<usize>,
+    ) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::GetContextMessageDetail {
+            id,
+            expected_context_revision,
+            expected_transcript_digest,
+            message_id,
+            block_ordinal,
+            start_char,
+            max_chars,
+        })
+        .await?;
+        Ok(id)
+    }
+
+    /// Capture and prepare one atomic context transaction draft.
+    pub async fn prepare_context_draft(&mut self, request: ContextDraftRequest) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::PrepareContextDraft { id, request })
+            .await?;
+        Ok(id)
+    }
+
+    /// Cancel a retained preparing or ready context draft.
+    pub async fn cancel_context_draft(&mut self, draft_id: String) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::CancelContextDraft { id, draft_id })
+            .await?;
+        Ok(id)
+    }
+
+    /// Attach an event-driven status monitor to a retained draft after reconnect.
+    pub async fn get_context_draft_status(&mut self, draft_id: String) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::GetContextDraftStatus { id, draft_id })
+            .await?;
+        Ok(id)
+    }
+
+    /// Apply a ready draft with curator defaults or an exact selected subset.
+    pub async fn apply_context_draft(
+        &mut self,
+        draft_id: String,
+        selected_distillation_ids: Option<Vec<String>>,
+    ) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::ApplyContextDraft {
+            id,
+            draft_id,
+            selected_distillation_ids,
+        })
+        .await?;
+        Ok(id)
+    }
+
+    /// List a bounded page of context transaction provenance.
+    pub async fn list_context_transactions(
+        &mut self,
+        offset: usize,
+        limit: Option<usize>,
+    ) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::ListContextTransactions { id, offset, limit })
+            .await?;
+        Ok(id)
+    }
+
+    /// Revert one active context transaction.
+    pub async fn revert_context_transaction(&mut self, transaction_id: String) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::RevertContextTransaction { id, transaction_id })
+            .await?;
+        Ok(id)
+    }
+
+    /// Reapply one inactive context transaction after server-side validation.
+    pub async fn reapply_context_transaction(&mut self, transaction_id: String) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::ReapplyContextTransaction { id, transaction_id })
+            .await?;
+        Ok(id)
+    }
+
+    /// Persist an explicit block-default unattended emergency policy.
+    pub async fn set_context_emergency_policy(
+        &mut self,
+        policy: jcode_session_types::StoredContextEmergencyPolicy,
+    ) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::SetContextEmergencyPolicy { id, policy })
+            .await?;
         Ok(id)
     }
 
@@ -1089,16 +1235,10 @@ impl RemoteConnection {
                         self.session_id, self.client_instance_id
                     ));
                 } else {
-                    let preview: String = String::from_utf8_lossy(&self.read_buffer)
-                        .chars()
-                        .take(240)
-                        .collect();
+                    let diagnostic = protocol_frame_diagnostic(&self.read_buffer);
                     crate::logging::warn(&format!(
-                        "RemoteConnection::next_event: peer closed mid-line, discarding {} buffered bytes preview={:?} (session_id={:?}, client_instance_id={:?})",
-                        self.read_buffer.len(),
-                        preview,
-                        self.session_id,
-                        self.client_instance_id
+                        "RemoteConnection::next_event: peer closed mid-line, discarding buffered frame diagnostic={} (session_id={:?}, client_instance_id={:?})",
+                        diagnostic, self.session_id, self.client_instance_id
                     ));
                     self.read_buffer.clear();
                     self.read_buffer_scan_start = 0;
@@ -1165,15 +1305,12 @@ impl RemoteConnection {
             Ok(text) => text,
             Err(error) => {
                 *stray_lines += 1;
-                let preview: String = String::from_utf8_lossy(error.as_bytes())
-                    .chars()
-                    .take(240)
-                    .collect();
+                let diagnostic = protocol_frame_diagnostic(error.as_bytes());
                 crate::logging::warn(&format!(
-                    "RemoteConnection::next_event: skipping stray non-UTF-8 protocol line {}/{} preview={:?} (session_id={:?}, client_instance_id={:?})",
+                    "RemoteConnection::next_event: skipping stray non-UTF-8 protocol line {}/{} diagnostic={} (session_id={:?}, client_instance_id={:?})",
                     *stray_lines,
                     MAX_STRAY_REMOTE_PROTOCOL_LINES,
-                    preview,
+                    diagnostic,
                     self.session_id,
                     self.client_instance_id
                 ));
@@ -1195,12 +1332,12 @@ impl RemoteConnection {
         }
         if !trimmed.starts_with('{') {
             *stray_lines += 1;
-            let preview: String = text.chars().take(240).collect();
+            let diagnostic = protocol_frame_diagnostic(text.as_bytes());
             crate::logging::warn(&format!(
-                "RemoteConnection::next_event: skipping stray non-JSON protocol line {}/{} preview={:?} (session_id={:?}, client_instance_id={:?})",
+                "RemoteConnection::next_event: skipping stray non-JSON protocol line {}/{} diagnostic={} (session_id={:?}, client_instance_id={:?})",
                 *stray_lines,
                 MAX_STRAY_REMOTE_PROTOCOL_LINES,
-                preview,
+                diagnostic,
                 self.session_id,
                 self.client_instance_id
             ));
@@ -1222,13 +1359,13 @@ impl RemoteConnection {
                 // indicates a real protocol/version mismatch). See issue #422:
                 // huge sessions used to die permanently on one corrupt frame.
                 *stray_lines += 1;
-                let preview: String = text.chars().take(240).collect();
+                let diagnostic = protocol_frame_diagnostic(text.as_bytes());
                 crate::logging::warn(&format!(
-                    "RemoteConnection::next_event: skipping unparseable protocol line {}/{} error={} preview={:?} (session_id={:?}, client_instance_id={:?})",
+                    "RemoteConnection::next_event: skipping unparseable protocol line {}/{} error={} diagnostic={} (session_id={:?}, client_instance_id={:?})",
                     *stray_lines,
                     MAX_STRAY_REMOTE_PROTOCOL_LINES,
                     error,
-                    preview,
+                    diagnostic,
                     self.session_id,
                     self.client_instance_id
                 ));
@@ -1486,6 +1623,209 @@ mod tests {
             Request::ResumeSession { session_id, .. }
                 if session_id == "session_orphaned_after_reload"
         ));
+    }
+
+    #[tokio::test]
+    async fn context_request_methods_allocate_monotonic_ids_and_preserve_payloads() {
+        let mut remote = RemoteConnection::dummy();
+        let peer = remote
+            ._dummy_peer
+            .take()
+            .expect("dummy remote should retain peer stream");
+        let (reader, _writer) = peer.into_split();
+        let mut reader = BufReader::new(reader);
+
+        assert_eq!(
+            remote
+                .get_context_editor_snapshot(500, Some(250))
+                .await
+                .expect("send snapshot request"),
+            1
+        );
+        assert_eq!(
+            remote
+                .get_context_message_detail(4, 99, "message-1".to_string(), 3, 20, Some(1_024),)
+                .await
+                .expect("send detail request"),
+            2
+        );
+        assert_eq!(
+            remote
+                .prepare_context_draft(ContextDraftRequest {
+                    summary_ranges: Vec::new(),
+                    reasoning: Some(
+                        crate::protocol::ContextReasoningSelectionRequest::KeepLatestAssistantTurns {
+                            protected_recent_assistant_turns: 5,
+                        },
+                    ),
+                    tool_results: Vec::new(),
+                    allow_shadowing_active_operations: false,
+                    authorization: jcode_session_types::StoredContextAuthorization::Manual {
+                        initiated_by: None,
+                    },
+                })
+                .await
+                .expect("send draft request"),
+            3
+        );
+        assert_eq!(
+            remote
+                .cancel_context_draft("draft-1".to_string())
+                .await
+                .expect("send cancel request"),
+            4
+        );
+        assert_eq!(
+            remote
+                .get_context_draft_status("draft-1".to_string())
+                .await
+                .expect("send status request"),
+            5
+        );
+        assert_eq!(
+            remote
+                .apply_context_draft("draft-1".to_string(), Some(vec!["proposal-1".to_string()]),)
+                .await
+                .expect("send apply request"),
+            6
+        );
+        assert_eq!(
+            remote
+                .list_context_transactions(100, Some(50))
+                .await
+                .expect("send history request"),
+            7
+        );
+        assert_eq!(
+            remote
+                .revert_context_transaction("transaction-1".to_string())
+                .await
+                .expect("send revert request"),
+            8
+        );
+        assert_eq!(
+            remote
+                .reapply_context_transaction("transaction-1".to_string())
+                .await
+                .expect("send reapply request"),
+            9
+        );
+        assert_eq!(
+            remote
+                .set_context_emergency_policy(
+                    jcode_session_types::StoredContextEmergencyPolicy::Authorized {
+                        protected_recent_assistant_turns: 5,
+                        target_headroom_percent: 15,
+                        allow_reasoning_suppression: true,
+                        allow_tool_distillation: true,
+                        allow_oldest_range_summary: false,
+                        authorization_source: "scheduled-task-1".to_string(),
+                    },
+                )
+                .await
+                .expect("send policy request"),
+            10
+        );
+
+        let mut requests = Vec::new();
+        for _ in 0..10 {
+            let mut line = String::new();
+            reader
+                .read_line(&mut line)
+                .await
+                .expect("context request should be readable by peer");
+            requests.push(
+                serde_json::from_str::<Request>(&line)
+                    .expect("context request should deserialize exactly"),
+            );
+        }
+        assert_eq!(
+            requests.iter().map(Request::id).collect::<Vec<_>>(),
+            (1..=10).collect::<Vec<_>>()
+        );
+        assert!(matches!(
+            &requests[0],
+            Request::GetContextEditorSnapshot {
+                page_start: 500,
+                page_size: Some(250),
+                ..
+            }
+        ));
+        assert!(matches!(
+            &requests[1],
+            Request::GetContextMessageDetail {
+                expected_context_revision: 4,
+                expected_transcript_digest: 99,
+                message_id,
+                block_ordinal: 3,
+                start_char: 20,
+                max_chars: Some(1_024),
+                ..
+            } if message_id == "message-1"
+        ));
+        assert!(matches!(
+            &requests[2],
+            Request::PrepareContextDraft {
+                request: ContextDraftRequest {
+                    reasoning: Some(
+                        crate::protocol::ContextReasoningSelectionRequest::KeepLatestAssistantTurns {
+                            protected_recent_assistant_turns: 5
+                        }
+                    ),
+                    ..
+                },
+                ..
+            }
+        ));
+        assert!(matches!(
+            &requests[3],
+            Request::CancelContextDraft { draft_id, .. } if draft_id == "draft-1"
+        ));
+        assert!(matches!(
+            &requests[4],
+            Request::GetContextDraftStatus { draft_id, .. } if draft_id == "draft-1"
+        ));
+        assert!(matches!(
+            &requests[5],
+            Request::ApplyContextDraft {
+                draft_id,
+                selected_distillation_ids: Some(ids),
+                ..
+            } if draft_id == "draft-1" && ids == &["proposal-1".to_string()]
+        ));
+        assert!(matches!(
+            &requests[6],
+            Request::ListContextTransactions {
+                offset: 100,
+                limit: Some(50),
+                ..
+            }
+        ));
+        assert!(matches!(
+            &requests[7],
+            Request::RevertContextTransaction { transaction_id, .. }
+                if transaction_id == "transaction-1"
+        ));
+        assert!(matches!(
+            &requests[8],
+            Request::ReapplyContextTransaction { transaction_id, .. }
+                if transaction_id == "transaction-1"
+        ));
+        assert!(matches!(
+            &requests[9],
+            Request::SetContextEmergencyPolicy {
+                policy: jcode_session_types::StoredContextEmergencyPolicy::Authorized {
+                    protected_recent_assistant_turns: 5,
+                    target_headroom_percent: 15,
+                    allow_reasoning_suppression: true,
+                    allow_tool_distillation: true,
+                    allow_oldest_range_summary: false,
+                    authorization_source,
+                },
+                ..
+            } if authorization_source == "scheduled-task-1"
+        ));
+        assert_eq!(remote.next_request_id, 11);
     }
 
     #[tokio::test]
@@ -1859,5 +2199,32 @@ mod tests {
             1,
         ));
         assert!(remote_protocol_frame_exceeds_limit(usize::MAX, 1));
+    }
+
+    #[test]
+    fn protocol_frame_diagnostics_are_metadata_only_for_sensitive_context_events() {
+        let sensitive = br#"{"type":"context_message_detail","detail":{"content":{"text":"RAW_DETAIL_SECRET"},"replacement_content":"DISTILLED_SECRET","preservation_rationale":"CURATOR_SECRET","encrypted_content":"OPAQUE_SECRET"}}"#;
+        let diagnostic = protocol_frame_diagnostic(sensitive);
+
+        assert_eq!(
+            diagnostic,
+            format!("bytes={} type=context_message_detail", sensitive.len())
+        );
+        for secret in [
+            "RAW_DETAIL_SECRET",
+            "DISTILLED_SECRET",
+            "CURATOR_SECRET",
+            "OPAQUE_SECRET",
+        ] {
+            assert!(!diagnostic.contains(secret));
+        }
+
+        let truncated = br#"{"type":"context_draft_ready","summary":"SUMMARY_SECRET"#;
+        let truncated_diagnostic = protocol_frame_diagnostic(truncated);
+        assert_eq!(
+            truncated_diagnostic,
+            format!("bytes={} type=unavailable", truncated.len())
+        );
+        assert!(!truncated_diagnostic.contains("SUMMARY_SECRET"));
     }
 }

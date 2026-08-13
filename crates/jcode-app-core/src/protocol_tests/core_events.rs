@@ -183,6 +183,7 @@ fn test_history_event_decodes_without_compaction_mode_for_older_servers() -> Res
         available_models,
         connection_type,
         compaction_mode,
+        context_revision,
         side_panel,
         ..
     } = decoded
@@ -194,6 +195,7 @@ fn test_history_event_decodes_without_compaction_mode_for_older_servers() -> Res
     assert_eq!(available_models, vec!["gpt-5.4"]);
     assert_eq!(connection_type.as_deref(), Some("websocket"));
     assert_eq!(compaction_mode, crate::config::CompactionMode::Reactive);
+    assert_eq!(context_revision, 0);
     assert!(!side_panel.has_pages());
     Ok(())
 }
@@ -244,6 +246,7 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         autoreview_enabled: None,
         autojudge_enabled: None,
         compaction_mode: crate::config::CompactionMode::Reactive,
+        context_revision: 73,
         activity: None,
         side_panel: crate::side_panel::SidePanelSnapshot {
             focused_page_id: Some("page-1".to_string()),
@@ -259,6 +262,8 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         },
     };
     let json = encode_event(&event);
+    assert!(json.contains("\"context_revision\":73"));
+    assert!(!json.contains("\"compaction_mode\""));
     let decoded = parse_event_json(json.trim())?;
     let ServerEvent::History {
         id,
@@ -268,6 +273,7 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         provider_model,
         total_tokens,
         token_usage_totals,
+        context_revision,
         ..
     } = decoded
     else {
@@ -277,6 +283,7 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
     assert_eq!(provider_name.as_deref(), Some("openai"));
     assert_eq!(provider_model.as_deref(), Some("gpt-5.4"));
     assert_eq!(total_tokens, Some((123, 45)));
+    assert_eq!(context_revision, 73);
     assert_eq!(
         token_usage_totals.map(|totals| totals.cache_read_input_tokens),
         Some(80)

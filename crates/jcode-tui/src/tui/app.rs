@@ -60,6 +60,7 @@ mod commands_overnight;
 mod commands_plan;
 mod commands_remote;
 mod commands_review;
+mod context_protocol;
 mod conversation_state;
 mod copy_selection;
 mod debug;
@@ -886,6 +887,9 @@ pub struct App {
     // Monotonic revision for prompt/context-affecting state. Info widgets use this to avoid stale
     // cached context after compaction, prompt rebuilds, tool-definition refreshes, or message edits.
     context_revision: u64,
+    // Correlated, session-scoped context editor transport state. Step 8 owns only
+    // request/event reduction; the dedicated editor presentation arrives in Step 9.
+    context_protocol: context_protocol::ContextProtocolState,
     // Track last streaming activity for "stale" detection
     last_stream_activity: Option<Instant>,
     // When the user last pressed a key, mouse-scrolled, or pasted.

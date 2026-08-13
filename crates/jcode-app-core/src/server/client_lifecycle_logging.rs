@@ -35,7 +35,7 @@ pub(super) fn interrupt_request_log_fields(
     }
 }
 
-pub(super) fn request_type_from_line(line: &str) -> String {
+pub(super) fn protocol_type_from_line(line: &str) -> String {
     serde_json::from_str::<serde_json::Value>(line.trim())
         .ok()
         .and_then(|value| {
@@ -55,6 +55,10 @@ pub(super) fn request_type_is_read_only(kind: &str) -> bool {
             | "get_history"
             | "get_model_catalog"
             | "get_compacted_history"
+            | "get_context_editor_snapshot"
+            | "get_context_message_detail"
+            | "get_context_draft_status"
+            | "list_context_transactions"
             | "agent_capabilities"
             | "agent_context"
             | "comm_read"
@@ -172,4 +176,20 @@ pub(super) fn server_request_lifecycle_fields(
         fields.push(("log_context_session_id".to_string(), ctx_session));
     }
     fields
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn protocol_type_diagnostic_never_includes_sensitive_event_payload() {
+        let line = r#"{"type":"context_draft_ready","summary":"SUMMARY_SECRET","replacement_content":"DISTILLED_SECRET","preservation_rationale":"CURATOR_SECRET"}"#;
+        let kind = protocol_type_from_line(line);
+
+        assert_eq!(kind, "context_draft_ready");
+        for secret in ["SUMMARY_SECRET", "DISTILLED_SECRET", "CURATOR_SECRET"] {
+            assert!(!kind.contains(secret));
+        }
+    }
 }

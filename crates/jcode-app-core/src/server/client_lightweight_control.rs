@@ -114,12 +114,16 @@ pub(super) async fn handle_lightweight_control_request(
     let event_handle = tokio::spawn(async move {
         while let Some(event) = client_event_rx.recv().await {
             if let Err(error) = write_direct_event(&writer_clone, &event).await {
-                // Routine on client reload/disconnect; avoid dumping the full
-                // event (an await response can embed whole completion reports).
-                let event_desc = crate::logging::truncate_for_log(&format!("{:?}", event), 200);
+                // Routine on client reload/disconnect. Keep diagnostics
+                // metadata-only because await and context-bearing responses can
+                // contain complete reports or other sensitive payloads.
+                let encoded = crate::protocol::encode_event(&event);
+                let event_type = super::client_lifecycle_logging::protocol_type_from_line(&encoded);
                 crate::logging::warn(&format!(
-                    "lightweight control writer failed while sending {}: {}",
-                    event_desc, error
+                    "lightweight control writer failed while sending type={} bytes={}: {}",
+                    event_type,
+                    encoded.len(),
+                    error
                 ));
                 break;
             }

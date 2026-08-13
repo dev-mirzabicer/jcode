@@ -1,6 +1,6 @@
 use super::available_models_dedup::available_models_dedup_key;
 use super::client_actions::{
-    AgentTaskContext, NotifySessionContext, handle_agent_task, handle_compact, handle_input_shell,
+    AgentTaskContext, NotifySessionContext, handle_agent_task, handle_input_shell,
     handle_notify_session, handle_rename_session, handle_run_subagent, handle_set_feature,
     handle_set_subagent_model, handle_split, handle_stdin_response, handle_transfer,
     handle_trigger_memory_extraction,
@@ -12,8 +12,8 @@ use super::client_comm::{
 };
 use super::client_disconnect_cleanup::cleanup_client_connection;
 use super::client_lifecycle_logging::{
-    ServerRequestLifecycleFields, interrupt_request_log_fields, request_payload_summary,
-    request_type_from_line, request_type_is_read_only, server_request_lifecycle_fields,
+    ServerRequestLifecycleFields, interrupt_request_log_fields, protocol_type_from_line,
+    request_payload_summary, request_type_is_read_only, server_request_lifecycle_fields,
 };
 use super::client_lightweight_control::{
     LightweightControlContext, handle_lightweight_control_request, parse_swarm_spawn_mode,
@@ -38,12 +38,18 @@ use super::comm_sync::{
     CommResyncPlanContext, handle_comm_plan_status, handle_comm_read_context,
     handle_comm_resync_plan, handle_comm_status, handle_comm_summary,
 };
+use super::context_control::{
+    handle_apply_context_draft, handle_cancel_context_draft, handle_get_context_draft_status,
+    handle_get_context_editor_snapshot, handle_get_context_message_detail,
+    handle_list_context_transactions, handle_prepare_context_draft,
+    handle_reapply_context_transaction, handle_revert_context_transaction,
+    handle_set_context_emergency_policy, reject_legacy_context_request,
+};
 use super::provider_control::{
-    handle_cycle_model, handle_notify_auth_changed, handle_refresh_models,
-    handle_set_compaction_mode, handle_set_model, handle_set_premium_mode,
-    handle_set_reasoning_effort, handle_set_route, handle_set_service_tier, handle_set_transport,
-    handle_switch_anthropic_account, handle_switch_openai_account,
-    try_available_models_updated_event,
+    handle_cycle_model, handle_notify_auth_changed, handle_refresh_models, handle_set_model,
+    handle_set_premium_mode, handle_set_reasoning_effort, handle_set_route,
+    handle_set_service_tier, handle_set_transport, handle_switch_anthropic_account,
+    handle_switch_openai_account, try_available_models_updated_event,
 };
 use super::{
     AwaitMembersRuntime, ClientConnectionInfo, ClientDebugState, FileTouchService,
@@ -364,6 +370,7 @@ pub(super) async fn handle_client(
     sessions: SessionAgents,
     _global_event_tx: broadcast::Sender<ServerEvent>,
     provider_template: Arc<dyn Provider>,
+    context_transactions: Arc<crate::context::ContextTransactionService>,
     _global_is_processing: Arc<RwLock<bool>>,
     global_session_id: Arc<RwLock<String>>,
     client_count: Arc<RwLock<usize>>,
@@ -624,12 +631,16 @@ pub(super) async fn handle_client(
             let mut w = writer_clone.lock().await;
             if let Err(error) = w.write_all(json.as_bytes()).await {
                 // A broken pipe here is routine (client reload/disconnect mid
-                // broadcast), so keep the line short: a full Debug dump of e.g.
-                // a SwarmStatus event prints every member and floods the log.
-                let event_desc = crate::logging::truncate_for_log(&format!("{:?}", event), 200);
+                // broadcast). Log only type and size: context events may contain
+                // raw detail, generated summaries, distilled output, curator
+                // rationale, or provider-opaque state.
+                let event_type = protocol_type_from_line(&json);
                 crate::logging::warn(&format!(
-                    "event_forwarder write failed for connection {} while sending {}: {}",
-                    client_connection_id_for_events, event_desc, error
+                    "event_forwarder write failed for connection {} while sending type={} bytes={}: {}",
+                    client_connection_id_for_events,
+                    event_type,
+                    json.len(),
+                    error
                 ));
                 break;
             }
@@ -932,7 +943,7 @@ pub(super) async fn handle_client(
         };
         let request_decoded_at = Instant::now();
         let request_id = request.id();
-        let request_kind = request_type_from_line(&line);
+        let request_kind = protocol_type_from_line(&line);
         let request_lifecycle_logged = !request_type_is_read_only(&request_kind);
         let request_lifecycle_start = Instant::now();
         let _request_watchdog = RequestHandlerWatchdog::spawn(RequestHandlerWatchdogContext {
@@ -1638,6 +1649,118 @@ pub(super) async fn handle_client(
                 }
             }
 
+            Request::GetContextEditorSnapshot {
+                id,
+                page_start,
+                page_size,
+            } => handle_get_context_editor_snapshot(
+                id,
+                page_start,
+                page_size,
+                &agent,
+                &context_transactions,
+                client_is_processing,
+                &client_event_tx,
+            ),
+
+            Request::GetContextMessageDetail {
+                id,
+                expected_context_revision,
+                expected_transcript_digest,
+                message_id,
+                block_ordinal,
+                start_char,
+                max_chars,
+            } => handle_get_context_message_detail(
+                id,
+                expected_context_revision,
+                expected_transcript_digest,
+                message_id,
+                block_ordinal,
+                start_char,
+                max_chars,
+                &agent,
+                &context_transactions,
+                &client_event_tx,
+            ),
+
+            Request::PrepareContextDraft { id, request } => handle_prepare_context_draft(
+                id,
+                request,
+                &client_session_id,
+                &agent,
+                &context_transactions,
+                client_is_processing,
+                &client_event_tx,
+            ),
+
+            Request::CancelContextDraft { id, draft_id } => handle_cancel_context_draft(
+                id,
+                draft_id,
+                &client_session_id,
+                &context_transactions,
+                &client_event_tx,
+            ),
+
+            Request::GetContextDraftStatus { id, draft_id } => handle_get_context_draft_status(
+                id,
+                draft_id,
+                &client_session_id,
+                &context_transactions,
+                &client_event_tx,
+            ),
+
+            Request::ApplyContextDraft {
+                id,
+                draft_id,
+                selected_distillation_ids,
+            } => handle_apply_context_draft(
+                id,
+                draft_id,
+                selected_distillation_ids,
+                &agent,
+                &context_transactions,
+                client_is_processing,
+                &client_event_tx,
+            ),
+
+            Request::ListContextTransactions { id, offset, limit } => {
+                handle_list_context_transactions(id, offset, limit, &agent, &client_event_tx);
+            }
+
+            Request::RevertContextTransaction { id, transaction_id } => {
+                handle_revert_context_transaction(
+                    id,
+                    transaction_id,
+                    &agent,
+                    &context_transactions,
+                    client_is_processing,
+                    &client_event_tx,
+                );
+            }
+
+            Request::ReapplyContextTransaction { id, transaction_id } => {
+                handle_reapply_context_transaction(
+                    id,
+                    transaction_id,
+                    &agent,
+                    &context_transactions,
+                    client_is_processing,
+                    &client_event_tx,
+                );
+            }
+
+            Request::SetContextEmergencyPolicy { id, policy } => {
+                handle_set_context_emergency_policy(
+                    id,
+                    policy,
+                    &agent,
+                    &context_transactions,
+                    client_is_processing,
+                    &client_event_tx,
+                );
+            }
+
             Request::DebugCommand { id, .. } => {
                 let _ = client_event_tx.send(ServerEvent::Error {
                     id,
@@ -1824,7 +1947,12 @@ pub(super) async fn handle_client(
             }
 
             Request::SetCompactionMode { id, mode } => {
-                handle_set_compaction_mode(id, mode, &agent, &client_event_tx).await;
+                let _ = mode;
+                reject_legacy_context_request(
+                    id,
+                    crate::protocol::ContextRequestKind::LegacySetCompactionMode,
+                    &client_event_tx,
+                );
             }
 
             Request::RenameSession { id, title } => {
@@ -1931,7 +2059,11 @@ pub(super) async fn handle_client(
             }
 
             Request::Compact { id } => {
-                handle_compact(id, &agent, &client_event_tx);
+                reject_legacy_context_request(
+                    id,
+                    crate::protocol::ContextRequestKind::LegacyCompact,
+                    &client_event_tx,
+                );
             }
 
             Request::TriggerMemoryExtraction { id } => {

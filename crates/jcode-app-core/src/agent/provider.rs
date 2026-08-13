@@ -46,10 +46,6 @@ impl Agent {
         self.registry.clone()
     }
 
-    pub(crate) fn shared_runtime_registry(&self) -> Registry {
-        self.registry.clone_with_shared_context_runtime()
-    }
-
     pub async fn compaction_mode(&self) -> crate::config::CompactionMode {
         self.registry.legacy_compaction().read().await.mode()
     }

@@ -257,6 +257,7 @@ pub(super) async fn handle_get_model_catalog(
         autoreview_enabled: None,
         autojudge_enabled: None,
         compaction_mode: Default::default(),
+        context_revision: 0,
         activity: None,
         side_panel: Default::default(),
     };
@@ -494,6 +495,7 @@ async fn send_history_from_persisted_session(
     let autoreview_enabled = session.autoreview_enabled;
     let autojudge_enabled = session.autojudge_enabled;
     let is_canary = session.is_canary;
+    let context_revision = session.context_view.revision;
     let reasoning_effort = session
         .reasoning_effort
         .clone()
@@ -545,7 +547,8 @@ async fn send_history_from_persisted_session(
         resolved_credential: provider.active_resolved_credential(),
         reasoning_effort,
         service_tier: None,
-        compaction_mode: crate::config::config().compaction.mode.clone(),
+        compaction_mode: Default::default(),
+        context_revision,
         activity,
         side_panel,
     };
@@ -592,7 +595,7 @@ pub(super) async fn send_history(
         status_detail,
         reasoning_effort,
         service_tier,
-        compaction_mode,
+        context_revision,
         token_usage_totals,
         agent_lock_ms,
         history_snapshot_ms,
@@ -602,7 +605,7 @@ pub(super) async fn send_history(
         model_routes_ms,
         skills_ms,
         provider_meta_ms,
-        compaction_mode_ms,
+        context_view_state_ms,
     ) = {
         let agent_guard = agent.lock().await;
         let agent_lock_ms = agent_lock_start.elapsed().as_millis();
@@ -644,9 +647,9 @@ pub(super) async fn send_history(
         let service_tier = provider.service_tier();
         let provider_meta_ms = provider_meta_start.elapsed().as_millis();
 
-        let compaction_mode_start = Instant::now();
-        let compaction_mode = agent_guard.compaction_mode().await;
-        let compaction_mode_ms = compaction_mode_start.elapsed().as_millis();
+        let context_view_state_start = Instant::now();
+        let context_revision = agent_guard.context_view_state().revision;
+        let context_view_state_ms = context_view_state_start.elapsed().as_millis();
 
         (
             messages,
@@ -667,7 +670,7 @@ pub(super) async fn send_history(
             agent_guard.last_status_detail(),
             reasoning_effort,
             service_tier,
-            compaction_mode,
+            context_revision,
             agent_guard.token_usage_totals(),
             agent_lock_ms,
             history_snapshot_ms,
@@ -677,7 +680,7 @@ pub(super) async fn send_history(
             model_routes_ms,
             skills_ms,
             provider_meta_ms,
-            compaction_mode_ms,
+            context_view_state_ms,
         )
     };
 
@@ -705,12 +708,13 @@ pub(super) async fn send_history(
         let count = *client_count.read().await;
         let sessions_snapshot_ms = sessions_snapshot_start.elapsed().as_millis();
         crate::logging::info(&format!(
-            "[TIMING] send_history prep: session={}, mode={:?}, messages={}, images={}, mcp_servers={}, agent_lock={}ms, history={}ms, images={}ms, tool_names={}ms, models={}ms, routes={}ms, skills={}ms, provider_meta={}ms, compaction={}ms, side_panel={}ms, sessions={}ms, total={}ms",
+            "[TIMING] send_history prep: session={}, mode={:?}, messages={}, images={}, mcp_servers={}, context_revision={}, agent_lock={}ms, history={}ms, images={}ms, tool_names={}ms, models={}ms, routes={}ms, skills={}ms, provider_meta={}ms, context_view={}ms, side_panel={}ms, sessions={}ms, total={}ms",
             session_id,
             payload_mode,
             messages.len(),
             images.len(),
             mcp_servers.len(),
+            context_revision,
             agent_lock_ms,
             history_snapshot_ms,
             image_render_ms,
@@ -719,7 +723,7 @@ pub(super) async fn send_history(
             model_routes_ms,
             skills_ms,
             provider_meta_ms,
-            compaction_mode_ms,
+            context_view_state_ms,
             side_panel_ms,
             sessions_snapshot_ms,
             history_start.elapsed().as_millis(),
@@ -758,7 +762,8 @@ pub(super) async fn send_history(
         resolved_credential,
         reasoning_effort,
         service_tier,
-        compaction_mode,
+        compaction_mode: Default::default(),
+        context_revision,
         activity,
         side_panel,
     };

@@ -1,10 +1,13 @@
 use crate::agent::Agent;
 use crate::context::draft::{
-    ContextDraft, ContextServiceError, ContextTransactionService, DraftEntryState,
-    projection_validation_operations, state_with_transaction, validate_capture_identity,
+    ContextTransactionService, DraftEntryState, projection_validation_operations,
+    state_with_transaction, validate_capture_identity,
 };
-use crate::context::history::{ContextTransactionSummary, summarize_context_transaction};
+use crate::context::history::summarize_context_transaction;
 use crate::context::provider_validation::require_supported_projected_messages;
+use crate::protocol::{
+    ContextDraft, ContextServiceError, ContextTransactionResult, ContextTransactionSummary,
+};
 use crate::provider::ContextProjectionValidationReport;
 use anyhow::Result;
 use chrono::Utc;
@@ -13,11 +16,10 @@ use jcode_context_core::{
     validate_context_state,
 };
 use jcode_session_types::{
-    StoredContextApplication, StoredContextCacheWarmth, StoredContextOperation,
-    StoredContextTransactionStatusKind, StoredContextViewState, StoredProviderValidationEvidence,
-    StoredProviderValidationOutcome,
+    StoredContextApplication, StoredContextCacheWarmth, StoredContextEmergencyPolicy,
+    StoredContextOperation, StoredContextTransactionStatusKind, StoredContextViewState,
+    StoredProviderValidationEvidence, StoredProviderValidationOutcome,
 };
-use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
@@ -39,15 +41,6 @@ impl ContextPersistence for SessionContextPersistence {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ContextTransactionResult {
-    pub transaction: ContextTransactionSummary,
-    pub revision: u64,
-    pub status: StoredContextTransactionStatusKind,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub warnings: Vec<String>,
-}
-
 pub(crate) struct PreparedContextTransition {
     pub state: StoredContextViewState,
     pub result: ContextTransactionResult,
@@ -55,6 +48,34 @@ pub(crate) struct PreparedContextTransition {
 }
 
 impl ContextTransactionService {
+    pub fn set_emergency_policy(
+        &self,
+        agent: &Arc<AsyncMutex<Agent>>,
+        policy: StoredContextEmergencyPolicy,
+        processing: bool,
+    ) -> Result<(String, StoredContextEmergencyPolicy), ContextServiceError> {
+        if processing {
+            return Err(ContextServiceError::SessionBusy);
+        }
+        validate_emergency_policy(&policy)?;
+        let mut agent = agent
+            .try_lock()
+            .map_err(|_| ContextServiceError::SessionBusy)?;
+        let session_id = agent.session_id().to_string();
+        if agent.context_view_state().emergency_policy == policy {
+            return Ok((session_id, policy));
+        }
+        let previous_state = agent.context_view_state().clone();
+        let mut proposed_state = previous_state.clone();
+        proposed_state.emergency_policy = policy.clone();
+        agent.replace_context_view_state(proposed_state);
+        if let Err(error) = self.persistence.persist(&mut agent) {
+            agent.replace_context_view_state(previous_state);
+            return Err(ContextServiceError::Persistence(error.to_string()));
+        }
+        Ok((session_id, policy))
+    }
+
     /// Apply one ready draft as one persisted context revision.
     ///
     /// `selected_distillation_ids == None` applies every curator proposal selected by default.
@@ -72,7 +93,7 @@ impl ContextTransactionService {
         let mut agent = agent
             .try_lock()
             .map_err(|_| ContextServiceError::SessionBusy)?;
-        let draft = self.reserve_ready_draft(draft_id)?;
+        let draft = self.reserve_ready_draft(draft_id, agent.session_id())?;
 
         let selected_distillations =
             match selected_distillation_operations(&draft, selected_distillation_ids.as_deref()) {
@@ -157,13 +178,23 @@ impl ContextTransactionService {
         Ok(result)
     }
 
-    fn reserve_ready_draft(&self, draft_id: &str) -> Result<ContextDraft, ContextServiceError> {
+    fn reserve_ready_draft(
+        &self,
+        draft_id: &str,
+        expected_session_id: &str,
+    ) -> Result<ContextDraft, ContextServiceError> {
         let mut store = self.lock_store();
         store.expire_entries(Utc::now());
         let entry = store
             .entries
             .get_mut(draft_id)
             .ok_or_else(|| ContextServiceError::DraftNotFound(draft_id.to_string()))?;
+        if entry.identity.session_id != expected_session_id {
+            // Draft IDs are process-wide. Treat cross-session lookup as absent so
+            // one connected session cannot inspect or mutate another session's
+            // retained draft, even if an ID is disclosed accidentally.
+            return Err(ContextServiceError::DraftNotFound(draft_id.to_string()));
+        }
         let draft = match &entry.state {
             DraftEntryState::Ready(draft) => draft.clone(),
             DraftEntryState::Applying(_) => {
@@ -231,6 +262,44 @@ impl ContextTransactionService {
         }
         store.enforce_total_bytes(self.limits.max_total_bytes);
     }
+}
+
+fn validate_emergency_policy(
+    policy: &StoredContextEmergencyPolicy,
+) -> Result<(), ContextServiceError> {
+    let StoredContextEmergencyPolicy::Authorized {
+        protected_recent_assistant_turns,
+        target_headroom_percent,
+        allow_reasoning_suppression,
+        allow_tool_distillation,
+        allow_oldest_range_summary,
+        authorization_source,
+    } = policy
+    else {
+        return Ok(());
+    };
+    if *protected_recent_assistant_turns > 1_000 {
+        return Err(ContextServiceError::InvalidSelection(
+            "protected recent assistant turns cannot exceed 1000".to_string(),
+        ));
+    }
+    if !(1..=99).contains(target_headroom_percent) {
+        return Err(ContextServiceError::InvalidSelection(
+            "target headroom percent must be between 1 and 99".to_string(),
+        ));
+    }
+    if !(*allow_reasoning_suppression || *allow_tool_distillation || *allow_oldest_range_summary) {
+        return Err(ContextServiceError::InvalidSelection(
+            "an authorized emergency policy must allow at least one operation".to_string(),
+        ));
+    }
+    let authorization_source = authorization_source.trim();
+    if authorization_source.is_empty() || authorization_source.chars().count() > 512 {
+        return Err(ContextServiceError::InvalidSelection(
+            "authorization source must contain between 1 and 512 characters".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn prepare_context_transition(
@@ -435,10 +504,12 @@ fn context_invalidation_detail(
 mod tests {
     use super::*;
     use crate::context::draft::{
-        ContextDistillationProposal, ContextDraftEntry, ContextDraftIdentity, ContextDraftPhase,
-        ContextDraftPreviewInput, ContextDraftProgress, ContextServiceLimits, build_preview,
+        ContextDraftEntry, ContextDraftPreviewInput, ContextServiceLimits, build_preview,
     };
     use crate::message::{ContentBlock, Message, Role, StreamEvent, ToolDefinition};
+    use crate::protocol::{
+        ContextDistillationProposal, ContextDraftIdentity, ContextDraftPhase, ContextDraftProgress,
+    };
     use crate::provider::{
         ContextProjectionValidationOperation, ContextProviderFamily,
         ContextProviderValidationIdentity, ContextReasoningBlockKind,
@@ -1197,5 +1268,91 @@ mod tests {
         drop(guard);
         assert_eq!(provider.invalidation_count(), reset_count_before);
         assert_eq!(persistence.calls(), persistence_calls_before + 1);
+    }
+
+    #[test]
+    fn emergency_policy_persists_idempotently_and_rolls_back_without_context_reset() {
+        let _guard = crate::storage::lock_test_env();
+        crate::cache_invalidation::clear_for_tests();
+        let invalidation_baseline = Instant::now();
+        let CommitServiceFixture {
+            service,
+            agent,
+            provider,
+            persistence,
+            ..
+        } = service_fixture(true, false);
+        let session_id = agent
+            .try_lock()
+            .expect("idle agent")
+            .session_id()
+            .to_string();
+        let authorized = StoredContextEmergencyPolicy::Authorized {
+            protected_recent_assistant_turns: 5,
+            target_headroom_percent: 20,
+            allow_reasoning_suppression: true,
+            allow_tool_distillation: true,
+            allow_oldest_range_summary: true,
+            authorization_source: "explicit phase 8 test authorization".to_string(),
+        };
+
+        let (returned_session_id, returned_policy) = service
+            .set_emergency_policy(&agent, authorized.clone(), false)
+            .expect("authorized policy persists");
+        assert_eq!(returned_session_id, session_id);
+        assert_eq!(returned_policy, authorized);
+        assert_eq!(persistence.calls(), 1);
+        {
+            let guard = agent.try_lock().expect("idle agent");
+            assert_eq!(guard.context_view_state().revision, 0);
+            assert_eq!(guard.context_view_state().emergency_policy, returned_policy);
+        }
+        assert_eq!(provider.invalidation_count(), 0);
+        assert!(crate::cache_invalidation::most_recent_since(invalidation_baseline).is_none());
+
+        let (same_session_id, same_policy) = service
+            .set_emergency_policy(&agent, authorized.clone(), false)
+            .expect("same policy is an idempotent no-op");
+        assert_eq!(same_session_id, session_id);
+        assert_eq!(same_policy, authorized);
+        assert_eq!(persistence.calls(), 1);
+
+        persistence.set_failure(true);
+        let error = service
+            .set_emergency_policy(&agent, StoredContextEmergencyPolicy::Block, false)
+            .expect_err("persistence failure must reject policy mutation");
+        assert!(matches!(error, ContextServiceError::Persistence(_)));
+        assert_eq!(persistence.calls(), 2);
+        {
+            let guard = agent.try_lock().expect("idle agent");
+            assert_eq!(guard.context_view_state().revision, 0);
+            assert_eq!(guard.context_view_state().emergency_policy, authorized);
+        }
+        assert_eq!(provider.invalidation_count(), 0);
+        assert!(crate::cache_invalidation::most_recent_since(invalidation_baseline).is_none());
+
+        let invalid = StoredContextEmergencyPolicy::Authorized {
+            protected_recent_assistant_turns: 5,
+            target_headroom_percent: 0,
+            allow_reasoning_suppression: true,
+            allow_tool_distillation: false,
+            allow_oldest_range_summary: false,
+            authorization_source: "invalid headroom".to_string(),
+        };
+        let error = service
+            .set_emergency_policy(&agent, invalid, false)
+            .expect_err("invalid policy must fail before persistence");
+        assert!(matches!(error, ContextServiceError::InvalidSelection(_)));
+        assert_eq!(persistence.calls(), 2);
+        assert_eq!(
+            agent
+                .try_lock()
+                .expect("idle agent")
+                .context_view_state()
+                .emergency_policy,
+            authorized
+        );
+        assert_eq!(provider.invalidation_count(), 0);
+        assert!(crate::cache_invalidation::most_recent_since(invalidation_baseline).is_none());
     }
 }

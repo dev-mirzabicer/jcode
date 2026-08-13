@@ -1343,6 +1343,7 @@ async fn lightweight_comm_request_skips_full_session_initialization() {
         Arc::clone(&sessions),
         _global_event_tx,
         provider_template,
+        Arc::new(crate::context::ContextTransactionService::new()),
         global_is_processing,
         global_session_id,
         client_count,
@@ -1421,6 +1422,195 @@ async fn lightweight_comm_request_skips_full_session_initialization() {
         sessions.read().await.is_empty(),
         "lightweight control request should not allocate a live agent session"
     );
+}
+
+#[test]
+fn legacy_compaction_wire_requests_reject_without_mutating_live_session() {
+    let _guard = crate::storage::lock_test_env();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build legacy context wire test runtime");
+    runtime.block_on(legacy_compaction_wire_requests_reject_without_mutating_live_session_async());
+}
+
+async fn legacy_compaction_wire_requests_reject_without_mutating_live_session_async() {
+    let (server_stream, client_stream) = crate::transport::Stream::pair().expect("socket pair");
+    let provider_template: Arc<dyn Provider> = Arc::new(CompleteImmediatelyProvider);
+
+    let sessions: SessionAgents = Arc::new(RwLock::new(HashMap::new()));
+    let global_session_id = Arc::new(RwLock::new(String::new()));
+    let client_count = Arc::new(RwLock::new(0usize));
+    let client_connections = Arc::new(RwLock::new(HashMap::new()));
+    let swarm_members = Arc::new(RwLock::new(HashMap::new()));
+    let swarms_by_id = Arc::new(RwLock::new(HashMap::new()));
+    let shared_context = Arc::new(RwLock::new(HashMap::new()));
+    let swarm_plans = Arc::new(RwLock::new(HashMap::new()));
+    let swarm_coordinators = Arc::new(RwLock::new(HashMap::new()));
+    let file_touch = FileTouchService::new();
+    let channel_subscriptions = Arc::new(RwLock::new(HashMap::new()));
+    let channel_subscriptions_by_session = Arc::new(RwLock::new(HashMap::new()));
+    let client_debug_state = Arc::new(RwLock::new(ClientDebugState::default()));
+    let (debug_response_tx, _) = broadcast::channel(8);
+    let event_history = Arc::new(RwLock::new(std::collections::VecDeque::new()));
+    let event_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let (swarm_event_tx, _) = broadcast::channel(8);
+    let (global_event_tx, _) = broadcast::channel(8);
+    let global_is_processing = Arc::new(RwLock::new(false));
+    let shutdown_signals = Arc::new(RwLock::new(HashMap::new()));
+    let soft_interrupt_queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
+    let mcp_pool = Arc::new(crate::mcp::SharedMcpPool::from_default_config());
+
+    let server_task = tokio::spawn(handle_client(
+        server_stream,
+        Arc::clone(&sessions),
+        global_event_tx,
+        provider_template,
+        Arc::new(crate::context::ContextTransactionService::new()),
+        global_is_processing,
+        global_session_id,
+        client_count,
+        Arc::clone(&client_connections),
+        swarm_members,
+        swarms_by_id,
+        shared_context,
+        swarm_plans,
+        swarm_coordinators,
+        file_touch,
+        channel_subscriptions,
+        channel_subscriptions_by_session,
+        client_debug_state,
+        debug_response_tx,
+        event_history,
+        event_counter,
+        swarm_event_tx,
+        "jcode-test".to_string(),
+        "🧪".to_string(),
+        mcp_pool,
+        shutdown_signals,
+        soft_interrupt_queues,
+        AwaitMembersRuntime::default(),
+        SwarmMutationRuntime::default(),
+    ));
+
+    let (client_reader, mut client_writer) = client_stream.into_split();
+    let mut client_reader = BufReader::new(client_reader);
+    let working_dir = std::env::current_dir().expect("absolute current directory");
+    let subscribe = Request::Subscribe {
+        id: 1,
+        working_dir: Some(working_dir.to_string_lossy().into_owned()),
+        selfdev: Some(false),
+        target_session_id: None,
+        client_instance_id: Some("legacy-context-wire-test".to_string()),
+        client_has_local_history: false,
+        allow_session_takeover: false,
+        terminal_env: Vec::new(),
+    };
+    client_writer
+        .write_all(
+            (serde_json::to_string(&subscribe).expect("serialize subscribe") + "\n").as_bytes(),
+        )
+        .await
+        .expect("write subscribe");
+
+    let mut session_id = None;
+    loop {
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(2), client_reader.read_line(&mut line))
+            .await
+            .expect("subscribe response timeout")
+            .expect("read subscribe event");
+        match decode_request_or_event(&line) {
+            ServerEvent::SessionId {
+                session_id: event_session_id,
+            } => session_id = Some(event_session_id),
+            ServerEvent::Done { id: 1 } => break,
+            _ => {}
+        }
+    }
+    let session_id = session_id.expect("subscribe returns session identity");
+    let agent = sessions
+        .read()
+        .await
+        .get(&session_id)
+        .cloned()
+        .expect("live subscribed agent");
+    let state_before = agent.lock().await.context_view_state().clone();
+    let mode_before = agent.lock().await.compaction_mode().await;
+
+    async fn send_and_expect_legacy_rejection(
+        writer: &mut crate::transport::WriteHalf,
+        reader: &mut BufReader<crate::transport::ReadHalf>,
+        request: Request,
+        expected_kind: crate::protocol::ContextRequestKind,
+    ) {
+        let request_id = request.id();
+        writer
+            .write_all(
+                (serde_json::to_string(&request).expect("serialize legacy request") + "\n")
+                    .as_bytes(),
+            )
+            .await
+            .expect("write legacy request");
+        let mut ack_seen = false;
+        loop {
+            let mut line = String::new();
+            tokio::time::timeout(Duration::from_secs(2), reader.read_line(&mut line))
+                .await
+                .expect("legacy rejection timeout")
+                .expect("read legacy response");
+            match decode_request_or_event(&line) {
+                ServerEvent::Ack { id } if id == request_id => ack_seen = true,
+                ServerEvent::ContextRequestRejected {
+                    id,
+                    request,
+                    error: crate::protocol::ContextServiceError::InvalidSelection(message),
+                    ..
+                } if id == request_id => {
+                    assert!(ack_seen, "request must be acknowledged before rejection");
+                    assert_eq!(request, expected_kind);
+                    assert!(message.contains("/compact"));
+                    assert!(message.contains("/context edit"));
+                    break;
+                }
+                ServerEvent::CompactResult { .. } => {
+                    panic!("legacy Compact unexpectedly executed")
+                }
+                ServerEvent::CompactionModeChanged { .. } => {
+                    panic!("legacy SetCompactionMode unexpectedly executed")
+                }
+                _ => {}
+            }
+        }
+    }
+
+    send_and_expect_legacy_rejection(
+        &mut client_writer,
+        &mut client_reader,
+        Request::Compact { id: 2 },
+        crate::protocol::ContextRequestKind::LegacyCompact,
+    )
+    .await;
+    send_and_expect_legacy_rejection(
+        &mut client_writer,
+        &mut client_reader,
+        Request::SetCompactionMode {
+            id: 3,
+            mode: crate::config::CompactionMode::Semantic,
+        },
+        crate::protocol::ContextRequestKind::LegacySetCompactionMode,
+    )
+    .await;
+
+    assert_eq!(agent.lock().await.context_view_state(), &state_before);
+    assert_eq!(agent.lock().await.compaction_mode().await, mode_before);
+
+    drop(client_writer);
+    server_task
+        .await
+        .expect("server task join")
+        .expect("server task result");
+    assert!(client_connections.read().await.is_empty());
 }
 
 fn decode_request_or_event(line: &str) -> ServerEvent {
