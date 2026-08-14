@@ -1335,6 +1335,11 @@ impl App {
             }};
         }
 
+        if self.context_editor_overlay.is_some() {
+            self.handle_context_editor_mouse(mouse);
+            finish_mouse_event!(is_mouse_scroll_kind(mouse.kind), "context_editor_overlay");
+        }
+
         if self.changelog_scroll.is_some() {
             match mouse.kind {
                 MouseEventKind::ScrollUp => {

@@ -226,8 +226,33 @@ fn test_help_topic_shows_command_details() {
         .expect("missing help response");
     assert_eq!(msg.role, "system");
     assert!(msg.content.contains("/compact"));
-    assert!(msg.content.contains("background"));
-    assert!(msg.content.contains("/compact mode"));
+    assert!(msg.content.contains("Context Editor"));
+    assert!(msg.content.contains("explicitly applying"));
+    assert!(msg.content.contains("reversible transaction"));
+    assert!(msg.content.contains("Legacy /compact mode commands"));
+    assert!(!msg.content.contains("background"));
+}
+
+#[test]
+fn test_context_help_lists_all_transaction_controls() {
+    let mut app = create_test_app();
+    app.input = "/help context".to_string();
+    app.submit_input();
+
+    let msg = app
+        .display_messages()
+        .last()
+        .expect("missing context help response");
+    assert_eq!(msg.role, "system");
+    for command in [
+        "/context edit",
+        "/context history",
+        "/context restore",
+        "/context undo",
+    ] {
+        assert!(msg.content.contains(command), "missing {command}: {msg:?}");
+    }
+    assert!(msg.content.contains("require confirmation"));
 }
 
 #[test]
@@ -1617,36 +1642,138 @@ fn test_goals_show_command_focuses_goal_page() {
 }
 
 #[test]
-fn test_compact_mode_command_updates_local_session_mode() {
+fn test_compact_opens_context_editor_locally() {
     let mut app = create_test_app();
 
-    app.input = "/compact mode semantic".to_string();
+    app.input = "/compact".to_string();
     app.submit_input();
 
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let mode = rt.block_on(async { app.registry.legacy_compaction().read().await.mode() });
-    assert_eq!(mode, crate::config::CompactionMode::Semantic);
-
-    let last = app.display_messages().last().expect("missing response");
-    assert_eq!(last.role, "system");
-    assert_eq!(last.content, "✓ Compaction mode → semantic");
+    assert_eq!(
+        app.context_editor_debug_summary()["open_mode"],
+        serde_json::json!("edit")
+    );
+    assert_eq!(
+        app.context_editor_actions.front(),
+        Some(&crate::tui::context_editor::ContextEditorAction::LoadSnapshot {
+            page_start: 0,
+            page_size: 250,
+        })
+    );
+    assert!(app.input.is_empty());
 }
 
 #[test]
-fn test_compact_mode_status_shows_local_mode() {
-    let mut app = create_test_app();
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(async {
-        let compaction = app.registry.legacy_compaction();
-        let mut manager = compaction.write().await;
-        manager.set_mode(crate::config::CompactionMode::Proactive);
-    });
+fn test_context_editor_commands_open_exact_local_modes_and_initial_actions() {
+    use crate::tui::context_editor::ContextEditorAction;
 
-    app.input = "/compact mode".to_string();
+    let cases = [
+        (
+            "/context edit",
+            "edit",
+            ContextEditorAction::LoadSnapshot {
+                page_start: 0,
+                page_size: 250,
+            },
+        ),
+        (
+            "/context history",
+            "history",
+            ContextEditorAction::LoadHistory {
+                offset: 0,
+                limit: 250,
+            },
+        ),
+        (
+            "/context restore",
+            "restore",
+            ContextEditorAction::LoadHistory {
+                offset: 0,
+                limit: 250,
+            },
+        ),
+        (
+            "/context undo",
+            "undo_latest",
+            ContextEditorAction::LoadHistory {
+                offset: 0,
+                limit: 250,
+            },
+        ),
+    ];
+
+    for (command, expected_mode, expected_action) in cases {
+        let mut app = create_test_app();
+        app.input = command.to_string();
+        app.submit_input();
+
+        assert_eq!(
+            app.context_editor_debug_summary()["open_mode"],
+            serde_json::json!(expected_mode),
+            "wrong editor mode for {command}"
+        );
+        assert_eq!(
+            app.context_editor_actions.front(),
+            Some(&expected_action),
+            "wrong initial action for {command}"
+        );
+    }
+}
+
+#[test]
+fn test_context_undo_waits_for_authoritative_history_and_requires_confirmation() {
+    let mut app = create_test_app();
+    app.input = "/context undo".to_string();
     app.submit_input();
 
-    let last = app.display_messages().last().expect("missing response");
-    assert!(last.content.contains("Compaction mode: proactive"));
+    assert_eq!(app.context_editor_debug_summary()["modal"], serde_json::Value::Null);
+    app.context_protocol
+        .begin_history_request(41, "session-parity".to_string());
+    assert!(app.context_protocol.accept_transaction_history(
+        41,
+        5,
+        1,
+        0,
+        None,
+        vec![parity_transaction_summary()],
+    ));
+    app.sync_context_editor_from_protocol();
+
+    let summary = app.context_editor_debug_summary();
+    assert_eq!(summary["modal"], serde_json::json!("revert_confirmation"));
+    assert_eq!(summary["history_count"], serde_json::json!(1));
+    assert!(summary["selected_transaction_id"].as_str().is_some());
+    assert!(app
+        .context_editor_actions
+        .iter()
+        .all(|action| !matches!(action, crate::tui::context_editor::ContextEditorAction::RevertTransaction { .. })));
+}
+
+#[test]
+fn test_compact_mode_commands_are_obsolete_and_do_not_mutate_local_mode() {
+    for command in ["/compact mode semantic", "/compact mode"] {
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            app.registry
+                .legacy_compaction()
+                .write()
+                .await
+                .set_mode(crate::config::CompactionMode::Proactive);
+        });
+        app.input = command.to_string();
+        app.submit_input();
+
+        let mode = rt.block_on(async { app.registry.legacy_compaction().read().await.mode() });
+        assert_eq!(mode, crate::config::CompactionMode::Proactive);
+        let last = app.display_messages().last().expect("missing response");
+        assert_eq!(last.role, "system");
+        assert_eq!(
+            last.content,
+            "Compaction modes are obsolete. Use /compact or /context edit to review and apply one explicit context transaction."
+        );
+        assert!(app.context_editor_overlay.is_none());
+        assert!(app.context_editor_actions.is_empty());
+    }
 }
 
 #[test]

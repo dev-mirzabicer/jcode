@@ -528,19 +528,6 @@ impl Agent {
         Some(tracker.effective_token_count())
     }
 
-    pub(crate) fn context_request_token_estimates_for_projection(
-        &self,
-        current_projected_tokens: usize,
-        proposed_projected_tokens: usize,
-    ) -> Option<(usize, usize)> {
-        let before = self.current_context_request_token_estimate()?;
-        let non_message_tokens = before.checked_sub(current_projected_tokens)?;
-        Some((
-            before,
-            non_message_tokens.saturating_add(proposed_projected_tokens),
-        ))
-    }
-
     pub(super) fn record_context_runtime_message_added(&self) {
         let Some(message) = self.session.messages.last() else {
             logging::warn("Context runtime append notification had no stored message");

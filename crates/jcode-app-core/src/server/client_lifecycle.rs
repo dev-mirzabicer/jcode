@@ -41,9 +41,11 @@ use super::comm_sync::{
 use super::context_control::{
     handle_apply_context_draft, handle_cancel_context_draft, handle_get_context_draft_status,
     handle_get_context_editor_snapshot, handle_get_context_message_detail,
-    handle_list_context_transactions, handle_prepare_context_draft,
-    handle_reapply_context_transaction, handle_revert_context_transaction,
-    handle_set_context_emergency_policy, reject_legacy_context_request,
+    handle_get_context_transaction_detail, handle_list_context_transactions,
+    handle_prepare_context_draft, handle_preview_context_draft_selection,
+    handle_preview_context_ranges, handle_reapply_context_transaction,
+    handle_revert_context_transaction, handle_set_context_emergency_policy,
+    reject_legacy_context_request,
 };
 use super::provider_control::{
     handle_cycle_model, handle_notify_auth_changed, handle_refresh_models, handle_set_model,
@@ -1684,6 +1686,21 @@ pub(super) async fn handle_client(
                 &client_event_tx,
             ),
 
+            Request::PreviewContextRanges {
+                id,
+                expected_context_revision,
+                expected_transcript_digest,
+                ranges,
+            } => handle_preview_context_ranges(
+                id,
+                expected_context_revision,
+                expected_transcript_digest,
+                ranges,
+                &agent,
+                &context_transactions,
+                &client_event_tx,
+            ),
+
             Request::PrepareContextDraft { id, request } => handle_prepare_context_draft(
                 id,
                 request,
@@ -1710,6 +1727,19 @@ pub(super) async fn handle_client(
                 &client_event_tx,
             ),
 
+            Request::PreviewContextDraftSelection {
+                id,
+                draft_id,
+                selected_distillation_ids,
+            } => handle_preview_context_draft_selection(
+                id,
+                draft_id,
+                selected_distillation_ids,
+                &agent,
+                &context_transactions,
+                &client_event_tx,
+            ),
+
             Request::ApplyContextDraft {
                 id,
                 draft_id,
@@ -1727,6 +1757,18 @@ pub(super) async fn handle_client(
             Request::ListContextTransactions { id, offset, limit } => {
                 handle_list_context_transactions(id, offset, limit, &agent, &client_event_tx);
             }
+
+            Request::GetContextTransactionDetail {
+                id,
+                expected_context_revision,
+                transaction_id,
+            } => handle_get_context_transaction_detail(
+                id,
+                expected_context_revision,
+                transaction_id,
+                &agent,
+                &client_event_tx,
+            ),
 
             Request::RevertContextTransaction { id, transaction_id } => {
                 handle_revert_context_transaction(

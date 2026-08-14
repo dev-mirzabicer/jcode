@@ -1118,11 +1118,45 @@ fn test_nested_command_suggestions_filter_partial_suffixes() {
         Some("/alignment centered")
     );
 
-    let suggestions = app.get_suggestions_for("/compact mo se");
+    for (input, expected) in [
+        ("/context ed", "/context edit"),
+        ("/context hi", "/context history"),
+        ("/context re", "/context restore"),
+        ("/context un", "/context undo"),
+    ] {
+        let suggestions = app.get_suggestions_for(input);
+        assert_eq!(
+            suggestions.first().map(|(cmd, _)| cmd.as_str()),
+            Some(expected),
+            "wrong nested suggestion for {input}: {suggestions:?}"
+        );
+    }
+
+    let context_suggestions = app.get_suggestions_for("/context ");
     assert_eq!(
-        suggestions.first().map(|(cmd, _)| cmd.as_str()),
-        Some("/compact mode semantic")
+        context_suggestions
+            .iter()
+            .map(|(command, _)| command.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "/context edit",
+            "/context undo",
+            "/context history",
+            "/context restore",
+        ]
     );
+    for input in ["/compact mo", "/compact mode se"] {
+        let suggestions = app.get_suggestions_for(input);
+        assert!(
+            suggestions.iter().all(|(command, _)| {
+                !command.contains("mode")
+                    && !command.contains("reactive")
+                    && !command.contains("proactive")
+                    && !command.contains("semantic")
+            }),
+            "obsolete compaction suggestion returned for {input}: {suggestions:?}"
+        );
+    }
 
     let suggestions = app.get_suggestions_for("/memory st");
     assert_eq!(

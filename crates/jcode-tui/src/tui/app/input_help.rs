@@ -8,13 +8,13 @@ impl App {
                 "/help\nShow general command list and keyboard shortcuts.\n\n/help <command>\nShow detailed help for one command."
             }
             "compact" => {
-                "/compact\nForce context compaction now.\nStarts background summarization and applies it automatically when ready.\n\n/compact mode\nShow current compaction mode for this session.\n\n/compact mode <reactive|proactive|semantic>\nChange compaction mode for this session."
+                "/compact\nOpen the Context Editor. Review stable transcript ranges, replayed reasoning, and tool-result candidates before preparing and explicitly applying one reversible transaction.\n\nLegacy /compact mode commands no longer change state and point to the Context Editor."
             }
             "cache" => {
                 "/cache stats\nShow KV cache stats for this session: cache read/write totals, hit ratios, current baseline, and recent miss attributions.\n\n/cache\nToggle Anthropic cache TTL between 5 minutes and 1 hour.\n\n/cache 1h  or  /cache 5m\nSet Anthropic cache TTL explicitly."
             }
             "fix" => {
-                "/fix\nRun recovery actions when the model cannot continue.\nRepairs missing tool outputs, resets provider session state, and starts compaction when possible."
+                "/fix\nRun recovery actions when the model cannot continue.\nRepairs missing tool outputs and resets provider session state. Context reduction remains an explicit Context Editor transaction."
             }
             "rewind" => {
                 "/rewind\nShow numbered conversation history.\n\n/rewind N\nRewind to message N (drops everything after it and resets provider session).\n\n/rewind undo\nUndo the most recent rewind and restore the removed messages."
@@ -163,7 +163,7 @@ impl App {
             }
             "info" => "/info\nShow session metadata and token usage.",
             "context" => {
-                "/context\nShow the full session context snapshot: prompt/context composition, compaction state, model/provider/runtime details, queued work, todos, and side-panel state."
+                "/context\nShow the full session context snapshot, including authoritative context-view revision and transaction counts.\n\n/context edit\nOpen the Context Editor.\n\n/context history\nReview transaction provenance.\n\n/context restore\nReview active transformations in history.\n\n/context undo\nSelect the latest active transaction and require confirmation before reverting it."
             }
             "usage" => {
                 "/usage\nFetch and display usage limits for connected providers. This command only reports real connected-provider usage windows and reset times."

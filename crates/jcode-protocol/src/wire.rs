@@ -179,6 +179,15 @@ pub enum Request {
         max_chars: Option<usize>,
     },
 
+    /// Resolve and explain structurally closed summary ranges without invoking a curator.
+    #[serde(rename = "preview_context_ranges")]
+    PreviewContextRanges {
+        id: u64,
+        expected_context_revision: u64,
+        expected_transcript_digest: u64,
+        ranges: Vec<ContextMessageRangeSelection>,
+    },
+
     /// Capture and prepare one atomic context transaction draft.
     #[serde(rename = "prepare_context_draft")]
     PrepareContextDraft {
@@ -193,6 +202,15 @@ pub enum Request {
     /// Reconnect to a retained draft by ID and retrieve its current status.
     #[serde(rename = "get_context_draft_status")]
     GetContextDraftStatus { id: u64, draft_id: String },
+
+    /// Recalculate a ready draft for an exact distillation subset without rerunning the curator.
+    #[serde(rename = "preview_context_draft_selection")]
+    PreviewContextDraftSelection {
+        id: u64,
+        draft_id: String,
+        #[serde(default)]
+        selected_distillation_ids: Vec<String>,
+    },
 
     /// Atomically apply a ready draft. `None` selects curator defaults; `Some`
     /// applies exactly the supplied validated subset.
@@ -212,6 +230,14 @@ pub enum Request {
         offset: usize,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limit: Option<usize>,
+    },
+
+    /// Retrieve one complete persisted transaction for provenance inspection.
+    #[serde(rename = "get_context_transaction_detail")]
+    GetContextTransactionDetail {
+        id: u64,
+        expected_context_revision: u64,
+        transaction_id: String,
     },
 
     /// Revert one active context transaction.
@@ -1277,6 +1303,13 @@ pub enum ServerEvent {
         detail: ContextMessageDetail,
     },
 
+    /// Authoritative structural-closure preview for staged summary ranges.
+    #[serde(rename = "context_range_closure_preview")]
+    ContextRangeClosurePreview {
+        id: u64,
+        preview: ContextRangeClosurePreview,
+    },
+
     /// Context draft preparation progress. The request ID is retained across
     /// every update emitted for the request that attached this monitor.
     #[serde(rename = "context_draft_progress")]
@@ -1333,6 +1366,13 @@ pub enum ServerEvent {
         revision: u64,
     },
 
+    /// Exact ready-draft preview after changing the selected distillation subset.
+    #[serde(rename = "context_draft_selection_preview")]
+    ContextDraftSelectionPreview {
+        id: u64,
+        preview: ContextDraftSelectionPreview,
+    },
+
     #[serde(rename = "context_transaction_history")]
     ContextTransactionHistory {
         id: u64,
@@ -1342,6 +1382,13 @@ pub enum ServerEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         next_offset: Option<usize>,
         transactions: Vec<ContextTransactionSummary>,
+    },
+
+    /// Complete persisted transaction detail for provenance inspection.
+    #[serde(rename = "context_transaction_detail")]
+    ContextTransactionDetail {
+        id: u64,
+        detail: Box<ContextTransactionDetail>,
     },
 
     #[serde(rename = "context_transaction_applied")]

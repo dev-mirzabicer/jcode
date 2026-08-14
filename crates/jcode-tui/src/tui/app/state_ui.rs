@@ -2023,13 +2023,42 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
             }
         };
 
-        let context_projection_summary = format!(
-            "- revision: {}\n- transactions: {} total, {} active\n- authoritative stored messages: {}",
-            app.session.context_view.revision,
-            app.session.context_view.transactions.len(),
-            app.session.context_view.active_transaction_count(),
-            app.session.messages.len(),
-        );
+        let context_projection_summary = if app.is_remote {
+            let revision = app.context_protocol.accepted_context_revision;
+            let snapshot = app.context_protocol.snapshot.as_ref().filter(|snapshot| {
+                app.context_protocol.accepted_session_id.as_deref()
+                    == Some(snapshot.session_id.as_str())
+                    && revision == Some(snapshot.context_revision)
+            });
+            let history = app
+                .context_protocol
+                .history
+                .as_ref()
+                .filter(|history| revision == Some(history.context_revision));
+            format!(
+                "- revision: {}\n- transactions: {} total, {} active\n- authoritative stored messages: {}\n- source: authoritative remote context protocol metadata",
+                revision
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "not loaded".to_string()),
+                history
+                    .map(|value| value.total_transactions.to_string())
+                    .unwrap_or_else(|| "not loaded".to_string()),
+                snapshot
+                    .map(|value| value.active_transactions.len().to_string())
+                    .unwrap_or_else(|| "not loaded".to_string()),
+                snapshot
+                    .map(|value| value.raw_message_count.to_string())
+                    .unwrap_or_else(|| "not loaded".to_string()),
+            )
+        } else {
+            format!(
+                "- revision: {}\n- transactions: {} total, {} active\n- authoritative stored messages: {}",
+                app.session.context_view.revision,
+                app.session.context_view.transactions.len(),
+                app.session.context_view.active_transaction_count(),
+                app.session.messages.len(),
+            )
+        };
 
         let compaction_summary = if app.provider.supports_compaction() {
             let manager = app.registry.legacy_compaction();

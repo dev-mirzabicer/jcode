@@ -531,6 +531,8 @@ fn context_protocol_events_reduce_through_app_with_exact_correlation_and_no_step
             }],
             active_transactions: Vec::new(),
             emergency_policy: jcode_session_types::StoredContextEmergencyPolicy::Block,
+            curator_route: None,
+            curator_unavailable_reason: None,
         }
     }
 
@@ -706,7 +708,8 @@ fn context_protocol_events_reduce_through_app_with_exact_correlation_and_no_step
     assert!(app.context_protocol.draft.is_none());
     assert!(app.context_revision > app_context_revision_before);
 
-    app.context_protocol.begin_history_request(31);
+    app.context_protocol
+        .begin_history_request(31, "session-app-context".to_string());
     app.handle_server_event(
         crate::protocol::ServerEvent::ContextTransactionHistory {
             id: 31,
@@ -726,7 +729,6 @@ fn context_protocol_events_reduce_through_app_with_exact_correlation_and_no_step
         Some(1)
     );
 
-    app.context_protocol.begin_policy_request(32);
     app.handle_server_event(
         crate::protocol::ServerEvent::ContextEmergencyPolicyChanged {
             id: 32,
@@ -750,7 +752,8 @@ fn context_protocol_events_reduce_through_app_with_exact_correlation_and_no_step
         },
         &mut remote,
     );
-    app.context_protocol.begin_history_request(34);
+    app.context_protocol
+        .begin_history_request(34, "session-app-context".to_string());
     app.handle_server_event(
         crate::protocol::ServerEvent::ContextRequestRejected {
             id: 34,

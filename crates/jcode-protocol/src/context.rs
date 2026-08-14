@@ -4,8 +4,9 @@ use jcode_provider_core::ContextProjectionValidationReport;
 use jcode_session_types::{
     StoredContextApplication, StoredContextAuthorization, StoredContextBlockKind,
     StoredContextCuratorUsage, StoredContextEconomics, StoredContextEmergencyPolicy,
-    StoredContextOperation, StoredContextTransactionStatusKind, StoredDisplayRole,
-    StoredMessageRange, StoredToolResultDistillation,
+    StoredContextOperation, StoredContextTransaction, StoredContextTransactionStatusKind,
+    StoredDisplayRole, StoredMessageRange, StoredRangeBoundaryExpansion,
+    StoredToolResultDistillation,
 };
 use serde::{Deserialize, Serialize};
 use std::error::Error;
@@ -113,6 +114,20 @@ pub struct ContextEditorSnapshot {
     pub messages: Vec<ContextEditorMessage>,
     pub active_transactions: Vec<ContextTransactionSummary>,
     pub emergency_policy: StoredContextEmergencyPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub curator_route: Option<ContextCuratorRoutePreview>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub curator_unavailable_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextCuratorRoutePreview {
+    pub provider_name: String,
+    pub provider_display_name: String,
+    pub model: String,
+    pub route: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -173,6 +188,26 @@ pub struct ContextMessageDetail {
 pub struct ContextMessageRangeSelection {
     pub start_message_id: String,
     pub end_message_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextClosedRangePreview {
+    pub requested: ContextMessageRangeSelection,
+    pub source_range: StoredMessageRange,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub boundary_expansions: Vec<StoredRangeBoundaryExpansion>,
+    pub source_tokens: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextRangeClosurePreview {
+    pub session_id: String,
+    pub context_revision: u64,
+    pub transcript_digest: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ranges: Vec<ContextClosedRangePreview>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shadowed_active_operations: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -256,6 +291,14 @@ pub struct ContextDraftPreview {
     pub operation_previews: Vec<ContextOperationPreview>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notices: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ContextDraftSelectionPreview {
+    pub draft_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected_distillation_ids: Vec<String>,
+    pub preview: ContextDraftPreview,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -477,16 +520,26 @@ pub struct ContextTransactionResult {
     pub warnings: Vec<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ContextTransactionDetail {
+    pub session_id: String,
+    pub context_revision: u64,
+    pub transaction: StoredContextTransaction,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextRequestKind {
     Snapshot,
     MessageDetail,
+    RangeClosurePreview,
     PrepareDraft,
     CancelDraft,
     DraftStatus,
+    DraftSelectionPreview,
     ApplyDraft,
     TransactionHistory,
+    TransactionDetail,
     RevertTransaction,
     ReapplyTransaction,
     SetEmergencyPolicy,

@@ -128,7 +128,7 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/plan", "Create a plan-only response as a plan card"),
     RegisteredCommand::public("/improve", "Autonomously improve the repository"),
     RegisteredCommand::public("/refactor", "Run a safe refactor loop"),
-    RegisteredCommand::public("/compact", "Compact context"),
+    RegisteredCommand::public("/compact", "Open the Context Editor"),
     RegisteredCommand::public("/fix", "Recover when the model cannot continue"),
     RegisteredCommand::public("/dictate", "Run configured external dictation command"),
     RegisteredCommand::public("/dictation", "Alias for /dictate"),
@@ -141,7 +141,10 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/goals", "Legacy alias for /initiatives"),
     RegisteredCommand::public("/swarm", "Toggle swarm feature"),
     RegisteredCommand::public("/overnight", "Run a supervised overnight coordinator"),
-    RegisteredCommand::public("/context", "Show the full session context snapshot"),
+    RegisteredCommand::public(
+        "/context",
+        "Show context status or open transaction controls",
+    ),
     RegisteredCommand::public(
         "/skills",
         "Show loaded skills and jcode-endorsed recommendations",
@@ -790,32 +793,19 @@ impl App {
             );
         }
 
-        if prefix.starts_with("/compact ") {
-            let suggestions = vec![
-                ("/compact mode".into(), "Show/change compaction mode"),
-                (
-                    "/compact mode status".into(),
-                    "Show the current compaction mode",
-                ),
-                ("/compact mode reactive".into(), "Use reactive compaction"),
-                ("/compact mode proactive".into(), "Use proactive compaction"),
-                ("/compact mode semantic".into(), "Use semantic compaction"),
-            ];
-            return self.rank_suggestions(input, suggestions);
-        }
-
-        if prefix.starts_with("/compact mode ") {
-            let modes = ["reactive", "proactive", "semantic"];
-            let mut suggestions: Vec<(String, &'static str)> = vec![(
-                "/compact mode status".into(),
-                "Show the current compaction mode",
-            )];
-            suggestions.extend(
-                modes
-                    .iter()
-                    .map(|mode| (format!("/compact mode {}", mode), *mode)),
+        if prefix.starts_with("/context ") {
+            return self.rank_suggestions(
+                input,
+                vec![
+                    ("/context edit".into(), "Open the Context Editor"),
+                    ("/context history".into(), "Review transaction history"),
+                    ("/context restore".into(), "Review active transformations"),
+                    (
+                        "/context undo".into(),
+                        "Confirm reverting the latest active transaction",
+                    ),
+                ],
             );
-            return self.rank_suggestions(input, suggestions);
         }
 
         if prefix.starts_with("/cache ") {
@@ -1656,7 +1646,7 @@ impl App {
                 | "/refactor"
                 | "/rewind"
                 | "/compact"
-                | "/compact mode"
+                | "/context"
                 | "/alignment"
                 | "/compact-notifications"
                 | "/show-agentgrep-output"

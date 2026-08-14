@@ -236,6 +236,8 @@ pub fn build_context_editor_snapshot(
             .map(crate::context::summarize_context_transaction)
             .collect(),
         emergency_policy: input.context_view.emergency_policy.clone(),
+        curator_route: None,
+        curator_unavailable_reason: None,
     })
 }
 

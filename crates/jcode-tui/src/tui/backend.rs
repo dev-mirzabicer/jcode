@@ -6,7 +6,7 @@
 //! Also provides debug socket events for exposing full TUI state.
 
 use crate::message::ToolCall;
-use crate::protocol::{AuthChanged, ContextDraftRequest, FeatureToggle, Request, ServerEvent};
+use crate::protocol::{AuthChanged, FeatureToggle, Request, ServerEvent};
 use crate::server;
 use crate::transport::{Stream, WriteHalf};
 use crate::tui::remote_diff::RemoteDiffTracker;
@@ -670,133 +670,38 @@ impl RemoteConnection {
         Ok(id)
     }
 
-    /// Request one bounded page of the authoritative context-editor snapshot.
-    pub async fn get_context_editor_snapshot(
-        &mut self,
-        page_start: usize,
-        page_size: Option<usize>,
-    ) -> Result<u64> {
+    /// Reserve a request ID before reducer correlation is recorded.
+    ///
+    /// Context responses can arrive as soon as the transport write completes, so
+    /// callers must reserve an ID, install the exact pending reducer state, and
+    /// only then send the typed request with [`Self::send_reserved_context_request`].
+    pub fn reserve_context_request_id(&mut self) -> u64 {
         let id = self.next_request_id;
-        self.next_request_id += 1;
-        self.send_request(Request::GetContextEditorSnapshot {
-            id,
-            page_start,
-            page_size,
-        })
-        .await?;
-        Ok(id)
+        self.next_request_id = self.next_request_id.wrapping_add(1).max(1);
+        id
     }
 
-    /// Request one bounded, image-safe Unicode chunk for a stable message block.
-    pub async fn get_context_message_detail(
-        &mut self,
-        expected_context_revision: u64,
-        expected_transcript_digest: u64,
-        message_id: String,
-        block_ordinal: usize,
-        start_char: usize,
-        max_chars: Option<usize>,
-    ) -> Result<u64> {
-        let id = self.next_request_id;
-        self.next_request_id += 1;
-        self.send_request(Request::GetContextMessageDetail {
-            id,
-            expected_context_revision,
-            expected_transcript_digest,
-            message_id,
-            block_ordinal,
-            start_char,
-            max_chars,
-        })
-        .await?;
-        Ok(id)
-    }
-
-    /// Capture and prepare one atomic context transaction draft.
-    pub async fn prepare_context_draft(&mut self, request: ContextDraftRequest) -> Result<u64> {
-        let id = self.next_request_id;
-        self.next_request_id += 1;
-        self.send_request(Request::PrepareContextDraft { id, request })
-            .await?;
-        Ok(id)
-    }
-
-    /// Cancel a retained preparing or ready context draft.
-    pub async fn cancel_context_draft(&mut self, draft_id: String) -> Result<u64> {
-        let id = self.next_request_id;
-        self.next_request_id += 1;
-        self.send_request(Request::CancelContextDraft { id, draft_id })
-            .await?;
-        Ok(id)
-    }
-
-    /// Attach an event-driven status monitor to a retained draft after reconnect.
-    pub async fn get_context_draft_status(&mut self, draft_id: String) -> Result<u64> {
-        let id = self.next_request_id;
-        self.next_request_id += 1;
-        self.send_request(Request::GetContextDraftStatus { id, draft_id })
-            .await?;
-        Ok(id)
-    }
-
-    /// Apply a ready draft with curator defaults or an exact selected subset.
-    pub async fn apply_context_draft(
-        &mut self,
-        draft_id: String,
-        selected_distillation_ids: Option<Vec<String>>,
-    ) -> Result<u64> {
-        let id = self.next_request_id;
-        self.next_request_id += 1;
-        self.send_request(Request::ApplyContextDraft {
-            id,
-            draft_id,
-            selected_distillation_ids,
-        })
-        .await?;
-        Ok(id)
-    }
-
-    /// List a bounded page of context transaction provenance.
-    pub async fn list_context_transactions(
-        &mut self,
-        offset: usize,
-        limit: Option<usize>,
-    ) -> Result<u64> {
-        let id = self.next_request_id;
-        self.next_request_id += 1;
-        self.send_request(Request::ListContextTransactions { id, offset, limit })
-            .await?;
-        Ok(id)
-    }
-
-    /// Revert one active context transaction.
-    pub async fn revert_context_transaction(&mut self, transaction_id: String) -> Result<u64> {
-        let id = self.next_request_id;
-        self.next_request_id += 1;
-        self.send_request(Request::RevertContextTransaction { id, transaction_id })
-            .await?;
-        Ok(id)
-    }
-
-    /// Reapply one inactive context transaction after server-side validation.
-    pub async fn reapply_context_transaction(&mut self, transaction_id: String) -> Result<u64> {
-        let id = self.next_request_id;
-        self.next_request_id += 1;
-        self.send_request(Request::ReapplyContextTransaction { id, transaction_id })
-            .await?;
-        Ok(id)
-    }
-
-    /// Persist an explicit block-default unattended emergency policy.
-    pub async fn set_context_emergency_policy(
-        &mut self,
-        policy: jcode_session_types::StoredContextEmergencyPolicy,
-    ) -> Result<u64> {
-        let id = self.next_request_id;
-        self.next_request_id += 1;
-        self.send_request(Request::SetContextEmergencyPolicy { id, policy })
-            .await?;
-        Ok(id)
+    /// Send a context-control request whose ID was reserved and correlated first.
+    pub async fn send_reserved_context_request(&self, request: Request) -> Result<()> {
+        if !matches!(
+            &request,
+            Request::GetContextEditorSnapshot { .. }
+                | Request::GetContextMessageDetail { .. }
+                | Request::PreviewContextRanges { .. }
+                | Request::PrepareContextDraft { .. }
+                | Request::CancelContextDraft { .. }
+                | Request::GetContextDraftStatus { .. }
+                | Request::PreviewContextDraftSelection { .. }
+                | Request::ApplyContextDraft { .. }
+                | Request::ListContextTransactions { .. }
+                | Request::GetContextTransactionDetail { .. }
+                | Request::RevertContextTransaction { .. }
+                | Request::ReapplyContextTransaction { .. }
+                | Request::SetContextEmergencyPolicy { .. }
+        ) {
+            anyhow::bail!("reserved context transport rejected a non-context request");
+        }
+        self.send_request(request).await
     }
 
     /// Ask the server to truncate the active session to a 1-based message index.
@@ -1573,6 +1478,7 @@ impl RemoteEventState for ReplayRemoteState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::ContextDraftRequest;
     use std::time::Duration;
 
     #[tokio::test]
@@ -1635,23 +1541,58 @@ mod tests {
         let (reader, _writer) = peer.into_split();
         let mut reader = BufReader::new(reader);
 
-        assert_eq!(
-            remote
-                .get_context_editor_snapshot(500, Some(250))
-                .await
-                .expect("send snapshot request"),
-            1
+        macro_rules! send_reserved {
+            ($expected:literal, $request:expr, $label:literal) => {{
+                let id = remote.reserve_context_request_id();
+                assert_eq!(id, $expected);
+                remote
+                    .send_reserved_context_request(($request)(id))
+                    .await
+                    .expect($label);
+            }};
+        }
+
+        send_reserved!(
+            1,
+            |id| Request::GetContextEditorSnapshot {
+                id,
+                page_start: 500,
+                page_size: Some(250),
+            },
+            "send snapshot request"
         );
-        assert_eq!(
-            remote
-                .get_context_message_detail(4, 99, "message-1".to_string(), 3, 20, Some(1_024),)
-                .await
-                .expect("send detail request"),
-            2
+        send_reserved!(
+            2,
+            |id| Request::GetContextMessageDetail {
+                id,
+                expected_context_revision: 4,
+                expected_transcript_digest: 99,
+                message_id: "message-1".to_string(),
+                block_ordinal: 3,
+                start_char: 20,
+                max_chars: Some(1_024),
+            },
+            "send detail request"
         );
-        assert_eq!(
-            remote
-                .prepare_context_draft(ContextDraftRequest {
+        send_reserved!(
+            3,
+            |id| Request::PreviewContextRanges {
+                id,
+                expected_context_revision: 4,
+                expected_transcript_digest: 99,
+                ranges: vec![crate::protocol::ContextMessageRangeSelection {
+                    start_message_id: "message-1".to_string(),
+                    end_message_id: "message-2".to_string(),
+                }],
+            },
+            "send range preview request"
+        );
+        send_reserved!(
+            4,
+            |id| {
+                Request::PrepareContextDraft {
+                id,
+                request: ContextDraftRequest {
                     summary_ranges: Vec::new(),
                     reasoning: Some(
                         crate::protocol::ContextReasoningSelectionRequest::KeepLatestAssistantTurns {
@@ -1663,72 +1604,97 @@ mod tests {
                     authorization: jcode_session_types::StoredContextAuthorization::Manual {
                         initiated_by: None,
                     },
-                })
-                .await
-                .expect("send draft request"),
-            3
+                },
+            }
+            },
+            "send draft request"
         );
-        assert_eq!(
-            remote
-                .cancel_context_draft("draft-1".to_string())
-                .await
-                .expect("send cancel request"),
-            4
+        send_reserved!(
+            5,
+            |id| Request::CancelContextDraft {
+                id,
+                draft_id: "draft-1".to_string(),
+            },
+            "send cancel request"
         );
-        assert_eq!(
-            remote
-                .get_context_draft_status("draft-1".to_string())
-                .await
-                .expect("send status request"),
-            5
+        send_reserved!(
+            6,
+            |id| Request::GetContextDraftStatus {
+                id,
+                draft_id: "draft-1".to_string(),
+            },
+            "send status request"
         );
-        assert_eq!(
-            remote
-                .apply_context_draft("draft-1".to_string(), Some(vec!["proposal-1".to_string()]),)
-                .await
-                .expect("send apply request"),
-            6
+        send_reserved!(
+            7,
+            |id| Request::PreviewContextDraftSelection {
+                id,
+                draft_id: "draft-1".to_string(),
+                selected_distillation_ids: vec!["proposal-1".to_string()],
+            },
+            "send selection preview request"
         );
-        assert_eq!(
-            remote
-                .list_context_transactions(100, Some(50))
-                .await
-                .expect("send history request"),
-            7
+        send_reserved!(
+            8,
+            |id| Request::ApplyContextDraft {
+                id,
+                draft_id: "draft-1".to_string(),
+                selected_distillation_ids: Some(vec!["proposal-1".to_string()]),
+            },
+            "send apply request"
         );
-        assert_eq!(
-            remote
-                .revert_context_transaction("transaction-1".to_string())
-                .await
-                .expect("send revert request"),
-            8
+        send_reserved!(
+            9,
+            |id| Request::ListContextTransactions {
+                id,
+                offset: 100,
+                limit: Some(50),
+            },
+            "send history request"
         );
-        assert_eq!(
-            remote
-                .reapply_context_transaction("transaction-1".to_string())
-                .await
-                .expect("send reapply request"),
-            9
+        send_reserved!(
+            10,
+            |id| Request::GetContextTransactionDetail {
+                id,
+                expected_context_revision: 5,
+                transaction_id: "transaction-1".to_string(),
+            },
+            "send transaction detail request"
         );
-        assert_eq!(
-            remote
-                .set_context_emergency_policy(
-                    jcode_session_types::StoredContextEmergencyPolicy::Authorized {
-                        protected_recent_assistant_turns: 5,
-                        target_headroom_percent: 15,
-                        allow_reasoning_suppression: true,
-                        allow_tool_distillation: true,
-                        allow_oldest_range_summary: false,
-                        authorization_source: "scheduled-task-1".to_string(),
-                    },
-                )
-                .await
-                .expect("send policy request"),
-            10
+        send_reserved!(
+            11,
+            |id| Request::RevertContextTransaction {
+                id,
+                transaction_id: "transaction-1".to_string(),
+            },
+            "send revert request"
+        );
+        send_reserved!(
+            12,
+            |id| Request::ReapplyContextTransaction {
+                id,
+                transaction_id: "transaction-1".to_string(),
+            },
+            "send reapply request"
+        );
+        send_reserved!(
+            13,
+            |id| Request::SetContextEmergencyPolicy {
+                id,
+                policy: jcode_session_types::StoredContextEmergencyPolicy::Authorized {
+                    protected_recent_assistant_turns: 5,
+                    target_headroom_percent: 15,
+                    allow_reasoning_suppression: true,
+                    allow_tool_distillation: true,
+                    allow_oldest_range_summary: false,
+                    authorization_source: "scheduled-task-1".to_string(),
+                },
+            },
+            "send policy request"
         );
 
         let mut requests = Vec::new();
-        for _ in 0..10 {
+        for _ in 0..13 {
             let mut line = String::new();
             reader
                 .read_line(&mut line)
@@ -1741,7 +1707,7 @@ mod tests {
         }
         assert_eq!(
             requests.iter().map(Request::id).collect::<Vec<_>>(),
-            (1..=10).collect::<Vec<_>>()
+            (1..=13).collect::<Vec<_>>()
         );
         assert!(matches!(
             &requests[0],
@@ -1765,6 +1731,18 @@ mod tests {
         ));
         assert!(matches!(
             &requests[2],
+            Request::PreviewContextRanges {
+                expected_context_revision: 4,
+                expected_transcript_digest: 99,
+                ranges,
+                ..
+            } if ranges == &[crate::protocol::ContextMessageRangeSelection {
+                start_message_id: "message-1".to_string(),
+                end_message_id: "message-2".to_string(),
+            }]
+        ));
+        assert!(matches!(
+            &requests[3],
             Request::PrepareContextDraft {
                 request: ContextDraftRequest {
                     reasoning: Some(
@@ -1778,15 +1756,23 @@ mod tests {
             }
         ));
         assert!(matches!(
-            &requests[3],
+            &requests[4],
             Request::CancelContextDraft { draft_id, .. } if draft_id == "draft-1"
         ));
         assert!(matches!(
-            &requests[4],
+            &requests[5],
             Request::GetContextDraftStatus { draft_id, .. } if draft_id == "draft-1"
         ));
         assert!(matches!(
-            &requests[5],
+            &requests[6],
+            Request::PreviewContextDraftSelection {
+                draft_id,
+                selected_distillation_ids,
+                ..
+            } if draft_id == "draft-1" && selected_distillation_ids == &["proposal-1".to_string()]
+        ));
+        assert!(matches!(
+            &requests[7],
             Request::ApplyContextDraft {
                 draft_id,
                 selected_distillation_ids: Some(ids),
@@ -1794,7 +1780,7 @@ mod tests {
             } if draft_id == "draft-1" && ids == &["proposal-1".to_string()]
         ));
         assert!(matches!(
-            &requests[6],
+            &requests[8],
             Request::ListContextTransactions {
                 offset: 100,
                 limit: Some(50),
@@ -1802,17 +1788,25 @@ mod tests {
             }
         ));
         assert!(matches!(
-            &requests[7],
+            &requests[9],
+            Request::GetContextTransactionDetail {
+                expected_context_revision: 5,
+                transaction_id,
+                ..
+            } if transaction_id == "transaction-1"
+        ));
+        assert!(matches!(
+            &requests[10],
             Request::RevertContextTransaction { transaction_id, .. }
                 if transaction_id == "transaction-1"
         ));
         assert!(matches!(
-            &requests[8],
+            &requests[11],
             Request::ReapplyContextTransaction { transaction_id, .. }
                 if transaction_id == "transaction-1"
         ));
         assert!(matches!(
-            &requests[9],
+            &requests[12],
             Request::SetContextEmergencyPolicy {
                 policy: jcode_session_types::StoredContextEmergencyPolicy::Authorized {
                     protected_recent_assistant_turns: 5,
@@ -1825,7 +1819,7 @@ mod tests {
                 ..
             } if authorization_source == "scheduled-task-1"
         ));
-        assert_eq!(remote.next_request_id, 11);
+        assert_eq!(remote.next_request_id, 14);
     }
 
     #[tokio::test]

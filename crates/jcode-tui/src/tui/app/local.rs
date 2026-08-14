@@ -70,6 +70,8 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     // no paint at all, which drops the animation to whatever unrelated events
     // happen to trigger (~4fps in practice).
     let mut needs_redraw = crate::tui::periodic_redraw_required(app);
+    needs_redraw |= app.drain_local_context_events();
+    needs_redraw |= app.dispatch_local_context_editor_actions();
     needs_redraw |= app.flush_pending_resize_redraw();
     app.maybe_capture_runtime_memory_heartbeat();
     app.maybe_release_idle_heap();

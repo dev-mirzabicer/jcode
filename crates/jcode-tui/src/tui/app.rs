@@ -30,7 +30,7 @@ use helpers::*;
 use jcode_tui_messages::DisplayMessage;
 use ratatui::DefaultTerminal;
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -60,7 +60,8 @@ mod commands_overnight;
 mod commands_plan;
 mod commands_remote;
 mod commands_review;
-mod context_protocol;
+mod context_editor_runtime;
+pub(crate) mod context_protocol;
 mod conversation_state;
 mod copy_selection;
 mod debug;
@@ -826,6 +827,17 @@ struct CostState {
     cached_price_model: Option<String>,
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ContextResetCounters {
+    hook_calls: usize,
+    invalidation_records: usize,
+    cache_generation_advances: usize,
+    continuation_invalidations: usize,
+    projected_rebuild_attempts: usize,
+    budget_reseeds: usize,
+}
+
 /// State for an in-progress OAuth/API-key login flow triggered by `/login`.
 /// TUI Application state
 pub struct App {
@@ -890,6 +902,22 @@ pub struct App {
     // Correlated, session-scoped context editor transport state. Step 8 owns only
     // request/event reduction; the dedicated editor presentation arrives in Step 9.
     context_protocol: context_protocol::ContextProtocolState,
+    /// Full-screen, stable-ID context editor. The component owns presentation
+    /// state only; authoritative operations remain in app core.
+    context_editor_overlay: Option<RefCell<super::context_editor::ContextEditor>>,
+    /// Per-App retained draft service for local mode. Remote mode uses the
+    /// server-owned process-wide service and keeps this instance idle.
+    context_transactions: Arc<crate::context::ContextTransactionService>,
+    /// Local mode feeds typed context events through the same reducer used by
+    /// remote ServerEvent values.
+    local_context_event_tx: tokio::sync::mpsc::UnboundedSender<crate::protocol::ServerEvent>,
+    local_context_event_rx: tokio::sync::mpsc::UnboundedReceiver<crate::protocol::ServerEvent>,
+    /// Transport-neutral actions emitted by keyboard, mouse, paging, and
+    /// lifecycle synchronization.
+    context_editor_actions: VecDeque<super::context_editor::ContextEditorAction>,
+    next_local_context_request_id: u64,
+    #[cfg(test)]
+    context_reset_counters: ContextResetCounters,
     // Track last streaming activity for "stale" detection
     last_stream_activity: Option<Instant>,
     // When the user last pressed a key, mouse-scrolled, or pasted.

@@ -2484,6 +2484,10 @@ pub(super) fn handle_modal_key(
     code: KeyCode,
     modifiers: KeyModifiers,
 ) -> Result<bool> {
+    if app.handle_context_editor_key(code, modifiers) {
+        return Ok(true);
+    }
+
     if app.prompt_history_search.is_some() {
         app.handle_prompt_history_search_key(code, modifiers);
         return Ok(true);

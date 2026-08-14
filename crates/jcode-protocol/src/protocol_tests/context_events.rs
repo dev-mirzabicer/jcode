@@ -78,6 +78,58 @@ fn context_transaction_summary() -> ContextTransactionSummary {
     }
 }
 
+fn context_transaction() -> jcode_session_types::StoredContextTransaction {
+    jcode_session_types::StoredContextTransaction {
+        id: "transaction-1".to_string(),
+        base_revision: 4,
+        created_at: context_timestamp(),
+        authorization: jcode_session_types::StoredContextAuthorization::Manual {
+            initiated_by: Some("mirza".to_string()),
+        },
+        operations: Vec::new(),
+        status_events: vec![jcode_session_types::StoredContextStatusEvent {
+            revision: 5,
+            timestamp: context_timestamp(),
+            kind: jcode_session_types::StoredContextTransactionStatusKind::Applied,
+            reason: Some("manual context edit".to_string()),
+        }],
+        application: None,
+        economics: Some(context_economics()),
+        curator_usage: Vec::new(),
+    }
+}
+
+fn context_range_preview() -> ContextRangeClosurePreview {
+    ContextRangeClosurePreview {
+        session_id: "session-1".to_string(),
+        context_revision: 4,
+        transcript_digest: 99,
+        ranges: vec![ContextClosedRangePreview {
+            requested: ContextMessageRangeSelection {
+                start_message_id: "message-1".to_string(),
+                end_message_id: "message-2".to_string(),
+            },
+            source_range: jcode_session_types::StoredMessageRange {
+                start_message_id: "message-1".to_string(),
+                end_message_id: "message-3".to_string(),
+                start_index_hint: 0,
+                end_index_hint: 2,
+                source_digest: 123,
+                message_count: 3,
+            },
+            boundary_expansions: vec![jcode_session_types::StoredRangeBoundaryExpansion {
+                message_id: "message-3".to_string(),
+                stored_index_hint: 2,
+                reason: jcode_session_types::StoredRangeBoundaryExpansionReason::ToolPair {
+                    tool_use_id: "tool-1".to_string(),
+                },
+            }],
+            source_tokens: 512,
+        }],
+        shadowed_active_operations: vec!["transaction-0:operation-1".to_string()],
+    }
+}
+
 fn context_transaction_result(
     status: jcode_session_types::StoredContextTransactionStatusKind,
 ) -> ContextTransactionResult {
@@ -145,6 +197,8 @@ fn context_snapshot() -> ContextEditorSnapshot {
         }],
         active_transactions: vec![context_transaction_summary()],
         emergency_policy: jcode_session_types::StoredContextEmergencyPolicy::Block,
+        curator_route: None,
+        curator_unavailable_reason: None,
     }
 }
 
@@ -197,8 +251,17 @@ fn context_requests_roundtrip_preserve_ids_and_payloads() -> Result<()> {
             start_char: 20,
             max_chars: Some(1_024),
         },
-        Request::PrepareContextDraft {
+        Request::PreviewContextRanges {
             id: 3,
+            expected_context_revision: 4,
+            expected_transcript_digest: 99,
+            ranges: vec![ContextMessageRangeSelection {
+                start_message_id: "message-1".to_string(),
+                end_message_id: "message-2".to_string(),
+            }],
+        },
+        Request::PrepareContextDraft {
+            id: 4,
             request: ContextDraftRequest {
                 summary_ranges: vec![ContextMessageRangeSelection {
                     start_message_id: "message-1".to_string(),
@@ -218,33 +281,43 @@ fn context_requests_roundtrip_preserve_ids_and_payloads() -> Result<()> {
             },
         },
         Request::CancelContextDraft {
-            id: 4,
-            draft_id: "draft-1".to_string(),
-        },
-        Request::GetContextDraftStatus {
             id: 5,
             draft_id: "draft-1".to_string(),
         },
-        Request::ApplyContextDraft {
+        Request::GetContextDraftStatus {
             id: 6,
+            draft_id: "draft-1".to_string(),
+        },
+        Request::PreviewContextDraftSelection {
+            id: 7,
+            draft_id: "draft-1".to_string(),
+            selected_distillation_ids: vec!["proposal-1".to_string()],
+        },
+        Request::ApplyContextDraft {
+            id: 8,
             draft_id: "draft-1".to_string(),
             selected_distillation_ids: Some(vec!["proposal-1".to_string()]),
         },
         Request::ListContextTransactions {
-            id: 7,
+            id: 9,
             offset: 100,
             limit: Some(50),
         },
+        Request::GetContextTransactionDetail {
+            id: 10,
+            expected_context_revision: 5,
+            transaction_id: "transaction-1".to_string(),
+        },
         Request::RevertContextTransaction {
-            id: 8,
+            id: 11,
             transaction_id: "transaction-1".to_string(),
         },
         Request::ReapplyContextTransaction {
-            id: 9,
+            id: 12,
             transaction_id: "transaction-1".to_string(),
         },
         Request::SetContextEmergencyPolicy {
-            id: 10,
+            id: 13,
             policy: jcode_session_types::StoredContextEmergencyPolicy::Authorized {
                 protected_recent_assistant_turns: 5,
                 target_headroom_percent: 15,
@@ -312,6 +385,18 @@ fn context_request_defaults_are_backward_compatible() -> Result<()> {
             ..
         }
     ));
+
+    let selection = parse_request_json(
+        r#"{"type":"preview_context_draft_selection","id":5,"draft_id":"draft-1"}"#,
+    )?;
+    assert!(matches!(
+        selection,
+        Request::PreviewContextDraftSelection {
+            id: 5,
+            selected_distillation_ids,
+            ..
+        } if selected_distillation_ids.is_empty()
+    ));
     Ok(())
 }
 
@@ -319,6 +404,7 @@ fn context_event_id(event: &ServerEvent) -> u64 {
     match event {
         ServerEvent::ContextEditorSnapshot { id, .. }
         | ServerEvent::ContextMessageDetail { id, .. }
+        | ServerEvent::ContextRangeClosurePreview { id, .. }
         | ServerEvent::ContextDraftProgress { id, .. }
         | ServerEvent::ContextDraftReady { id, .. }
         | ServerEvent::ContextDraftApplying { id, .. }
@@ -327,7 +413,9 @@ fn context_event_id(event: &ServerEvent) -> u64 {
         | ServerEvent::ContextDraftCanceled { id, .. }
         | ServerEvent::ContextDraftExpired { id, .. }
         | ServerEvent::ContextDraftApplied { id, .. }
+        | ServerEvent::ContextDraftSelectionPreview { id, .. }
         | ServerEvent::ContextTransactionHistory { id, .. }
+        | ServerEvent::ContextTransactionDetail { id, .. }
         | ServerEvent::ContextTransactionApplied { id, .. }
         | ServerEvent::ContextTransactionReverted { id, .. }
         | ServerEvent::ContextTransactionReapplied { id, .. }
@@ -350,8 +438,12 @@ fn context_events_roundtrip_preserve_request_and_draft_correlation() -> Result<(
             id: 2,
             detail: context_detail(),
         },
-        ServerEvent::ContextDraftProgress {
+        ServerEvent::ContextRangeClosurePreview {
             id: 3,
+            preview: context_range_preview(),
+        },
+        ServerEvent::ContextDraftProgress {
+            id: 4,
             draft_id: "draft-1".to_string(),
             progress: ContextDraftProgress {
                 phase: ContextDraftPhase::PreparingArtifacts,
@@ -360,75 +452,91 @@ fn context_events_roundtrip_preserve_request_and_draft_correlation() -> Result<(
             },
         },
         ServerEvent::ContextDraftReady {
-            id: 4,
+            id: 5,
             draft: Box::new(context_draft()),
         },
         ServerEvent::ContextDraftApplying {
-            id: 5,
+            id: 6,
             identity: identity.clone(),
         },
         ServerEvent::ContextDraftFailed {
-            id: 6,
+            id: 7,
             identity: identity.clone(),
             error: ContextServiceError::Curator("provider unavailable".to_string()),
         },
         ServerEvent::ContextDraftStale {
-            id: 7,
+            id: 8,
             identity: identity.clone(),
             error: ContextServiceError::Stale("revision changed".to_string()),
         },
         ServerEvent::ContextDraftCanceled {
-            id: 8,
-            identity: identity.clone(),
-        },
-        ServerEvent::ContextDraftExpired {
             id: 9,
             identity: identity.clone(),
         },
-        ServerEvent::ContextDraftApplied {
+        ServerEvent::ContextDraftExpired {
             id: 10,
+            identity: identity.clone(),
+        },
+        ServerEvent::ContextDraftApplied {
+            id: 11,
             identity,
             transaction_id: "transaction-1".to_string(),
             revision: 5,
         },
+        ServerEvent::ContextDraftSelectionPreview {
+            id: 12,
+            preview: ContextDraftSelectionPreview {
+                draft_id: "draft-1".to_string(),
+                selected_distillation_ids: vec!["proposal-1".to_string()],
+                preview: context_draft().preview,
+            },
+        },
         ServerEvent::ContextTransactionHistory {
-            id: 11,
+            id: 13,
             context_revision: 5,
             total_transactions: 1,
             offset: 0,
             next_offset: None,
             transactions: vec![context_transaction_summary()],
         },
+        ServerEvent::ContextTransactionDetail {
+            id: 14,
+            detail: Box::new(ContextTransactionDetail {
+                session_id: "session-1".to_string(),
+                context_revision: 5,
+                transaction: context_transaction(),
+            }),
+        },
         ServerEvent::ContextTransactionApplied {
-            id: 12,
+            id: 15,
             draft_id: "draft-1".to_string(),
             result: context_transaction_result(
                 jcode_session_types::StoredContextTransactionStatusKind::Applied,
             ),
         },
         ServerEvent::ContextTransactionReverted {
-            id: 13,
+            id: 16,
             transaction_id: "transaction-1".to_string(),
             result: context_transaction_result(
                 jcode_session_types::StoredContextTransactionStatusKind::Reverted,
             ),
         },
         ServerEvent::ContextTransactionReapplied {
-            id: 14,
+            id: 17,
             transaction_id: "transaction-1".to_string(),
             result: context_transaction_result(
                 jcode_session_types::StoredContextTransactionStatusKind::Reapplied,
             ),
         },
         ServerEvent::ContextRequestRejected {
-            id: 15,
+            id: 18,
             request: ContextRequestKind::LegacyCompact,
             draft_id: None,
             transaction_id: None,
             error: ContextServiceError::InvalidSelection("use /context edit".to_string()),
         },
         ServerEvent::ContextActionRequired {
-            id: 16,
+            id: 19,
             session_id: "session-1".to_string(),
             context_revision: 5,
             reason: ContextActionRequiredReason::PreflightLimit,
@@ -443,7 +551,7 @@ fn context_events_roundtrip_preserve_request_and_draft_correlation() -> Result<(
             automatic_retry: false,
         },
         ServerEvent::ContextEmergencyPolicyChanged {
-            id: 17,
+            id: 20,
             session_id: "session-1".to_string(),
             policy: jcode_session_types::StoredContextEmergencyPolicy::Block,
         },
@@ -456,6 +564,55 @@ fn context_events_roundtrip_preserve_request_and_draft_correlation() -> Result<(
         assert_eq!(context_event_id(&decoded), expected_id);
         assert_eq!(serde_json::to_value(decoded)?, serde_json::to_value(event)?);
     }
+    Ok(())
+}
+
+#[test]
+fn context_snapshot_curator_route_fields_roundtrip_and_old_payloads_default() -> Result<()> {
+    let mut snapshot = context_snapshot();
+    snapshot.curator_route = Some(ContextCuratorRoutePreview {
+        provider_name: "openrouter".to_string(),
+        provider_display_name: "OpenRouter".to_string(),
+        model: "curator-model".to_string(),
+        route: "openrouter".to_string(),
+        effort: Some("high".to_string()),
+    });
+
+    let encoded = serde_json::to_value(&snapshot)?;
+    let decoded: ContextEditorSnapshot = serde_json::from_value(encoded.clone())?;
+    assert_eq!(decoded, snapshot);
+    assert_eq!(
+        decoded.curator_route.as_ref().map(|route| (
+            route.provider_name.as_str(),
+            route.model.as_str(),
+            route.route.as_str(),
+            route.effort.as_deref(),
+        )),
+        Some((
+            "openrouter",
+            "curator-model",
+            "openrouter",
+            Some("high")
+        ))
+    );
+
+    let mut old_payload = encoded;
+    let object = old_payload
+        .as_object_mut()
+        .expect("snapshot serialization is an object");
+    object.remove("curator_route");
+    object.remove("curator_unavailable_reason");
+    let decoded_old: ContextEditorSnapshot = serde_json::from_value(old_payload)?;
+    assert_eq!(decoded_old.curator_route, None);
+    assert_eq!(decoded_old.curator_unavailable_reason, None);
+
+    snapshot.curator_route = None;
+    snapshot.curator_unavailable_reason = Some(
+        "No independent curator route is available; configure [context.curator].".to_string(),
+    );
+    let decoded_unavailable: ContextEditorSnapshot =
+        serde_json::from_value(serde_json::to_value(&snapshot)?)?;
+    assert_eq!(decoded_unavailable, snapshot);
     Ok(())
 }
 

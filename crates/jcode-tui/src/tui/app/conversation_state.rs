@@ -18,6 +18,25 @@ impl App {
         }
     }
 
+    /// Materialize the exact provider view for a normal request.
+    ///
+    /// Raw provider-shaped history remains available to editor, migration, export,
+    /// transfer, and diagnostics paths. A live local provider request must instead
+    /// fail closed if the persisted context projection is invalid.
+    pub(super) fn projected_messages_for_provider_send(&mut self) -> Result<Vec<Message>, String> {
+        self.ensure_provider_messages_hydrated();
+        if self.is_remote {
+            return Ok(self.messages.clone());
+        }
+        self.session
+            .projected_messages_for_provider()
+            .map_err(|error| {
+                format!(
+                    "The provider request was not sent because the active context view could not be projected: {error}. Open /context history to inspect or revert the invalid transaction."
+                )
+            })
+    }
+
     pub(super) fn local_transcript_message_count(&self) -> usize {
         if self.is_remote {
             self.messages.len()
@@ -36,14 +55,6 @@ impl App {
             "hard_compact" => "emergency",
             _ => "automatic",
         }
-    }
-
-    pub(super) fn format_compaction_started_message(trigger: &str) -> String {
-        let strategy = Self::format_compaction_strategy_label(trigger);
-        format!(
-            "📦 Compacting context ({}) - summarizing older messages in the background to stay within the context window.",
-            strategy
-        )
     }
 
     pub(super) fn format_compaction_progress_notice(elapsed: std::time::Duration) -> String {
@@ -352,53 +363,6 @@ impl App {
         self.invalidate_kv_cache_after_compaction();
         self.session.save()?;
         Ok(())
-    }
-
-    pub(super) fn messages_for_provider(&mut self) -> (Vec<Message>, Option<CompactionEvent>) {
-        self.ensure_provider_messages_hydrated();
-
-        if self.is_remote {
-            return (self.messages.clone(), None);
-        }
-        let base_messages = self.materialized_provider_messages();
-        if !self.provider.supports_compaction() && self.session.compaction.is_none() {
-            return (base_messages, None);
-        }
-        let compaction = self.registry.legacy_compaction();
-        match compaction.try_write() {
-            Ok(mut manager) => {
-                let discarded_oversized_native =
-                    manager.discard_oversized_openai_native_compaction();
-                if self.provider.uses_jcode_compaction() {
-                    let action = manager.ensure_context_fits(&base_messages, self.provider.clone());
-                    match action {
-                        crate::compaction::CompactionAction::BackgroundStarted { trigger } => {
-                            self.push_display_message(DisplayMessage::system(
-                                Self::format_compaction_started_message(&trigger),
-                            ));
-                            self.set_status_notice("Compacting context");
-                        }
-                        crate::compaction::CompactionAction::HardCompacted(_) => {}
-                        crate::compaction::CompactionAction::None => {}
-                    }
-                }
-                let messages = manager.messages_for_api_with(&base_messages);
-                let event = manager.take_compaction_event();
-                let context_changed = event.is_some() || discarded_oversized_native;
-                if context_changed {
-                    self.sync_session_compaction_state_from_manager(&manager);
-                }
-                drop(manager);
-                if context_changed {
-                    self.reseed_context_budget_from_messages(
-                        &messages,
-                        "TUI legacy compaction transition",
-                    );
-                }
-                (messages, event)
-            }
-            Err(_) => (base_messages, None),
-        }
     }
 
     pub(super) fn poll_compaction_completion(&mut self) -> bool {

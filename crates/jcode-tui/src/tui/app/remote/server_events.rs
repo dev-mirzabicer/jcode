@@ -541,6 +541,11 @@ pub(in crate::tui::app) fn handle_server_event(
     event: ServerEvent,
     remote: &mut impl RemoteEventState,
 ) -> bool {
+    let event = match app.reduce_context_server_event(event) {
+        Ok(accepted) => return accepted,
+        Err(event) => *event,
+    };
+
     let eager_stream_redraw = !crate::perf::tui_policy().enable_decorative_animations;
     if app.is_processing {
         app.last_stream_activity = Some(Instant::now());
@@ -2079,159 +2084,6 @@ pub(in crate::tui::app) fn handle_server_event(
             );
             true
         }
-        ServerEvent::ContextEditorSnapshot { id, snapshot } => {
-            app.context_protocol.accept_snapshot(id, snapshot)
-        }
-        ServerEvent::ContextMessageDetail { id, detail } => {
-            app.context_protocol.accept_detail(id, detail)
-        }
-        ServerEvent::ContextDraftProgress {
-            id,
-            draft_id,
-            progress,
-        } => app
-            .context_protocol
-            .accept_draft_progress(id, draft_id, progress),
-        ServerEvent::ContextDraftReady { id, draft } => {
-            app.context_protocol.accept_draft_ready(id, draft)
-        }
-        ServerEvent::ContextDraftApplying { id, identity } => {
-            app.context_protocol.accept_draft_applying(id, identity)
-        }
-        ServerEvent::ContextDraftFailed {
-            id,
-            identity,
-            error,
-        } => app
-            .context_protocol
-            .accept_draft_failed(id, identity, error, false),
-        ServerEvent::ContextDraftStale {
-            id,
-            identity,
-            error,
-        } => app
-            .context_protocol
-            .accept_draft_failed(id, identity, error, true),
-        ServerEvent::ContextDraftCanceled { id, identity } => {
-            app.context_protocol.accept_draft_canceled(id, identity)
-        }
-        ServerEvent::ContextDraftExpired { id, identity } => {
-            app.context_protocol.accept_draft_expired(id, identity)
-        }
-        ServerEvent::ContextDraftApplied {
-            id,
-            identity,
-            transaction_id,
-            revision,
-        } => app
-            .context_protocol
-            .accept_draft_applied(id, identity, transaction_id, revision),
-        ServerEvent::ContextTransactionHistory {
-            id,
-            context_revision,
-            total_transactions,
-            offset,
-            next_offset,
-            transactions,
-        } => app.context_protocol.accept_transaction_history(
-            id,
-            context_revision,
-            total_transactions,
-            offset,
-            next_offset,
-            transactions,
-        ),
-        ServerEvent::ContextTransactionApplied {
-            id,
-            draft_id,
-            result,
-        } => {
-            let accepted = app.context_protocol.accept_transaction_result(
-                id,
-                crate::protocol::ContextRequestKind::ApplyDraft,
-                draft_id,
-                result,
-            );
-            if accepted {
-                // `App::context_revision` invalidates prompt/context UI caches and
-                // is intentionally distinct from the persisted provider-view
-                // revision retained by `ContextProtocolState`.
-                app.bump_context_revision();
-            }
-            accepted
-        }
-        ServerEvent::ContextTransactionReverted {
-            id,
-            transaction_id,
-            result,
-        } => {
-            let accepted = app.context_protocol.accept_transaction_result(
-                id,
-                crate::protocol::ContextRequestKind::RevertTransaction,
-                transaction_id,
-                result,
-            );
-            if accepted {
-                app.bump_context_revision();
-            }
-            accepted
-        }
-        ServerEvent::ContextTransactionReapplied {
-            id,
-            transaction_id,
-            result,
-        } => {
-            let accepted = app.context_protocol.accept_transaction_result(
-                id,
-                crate::protocol::ContextRequestKind::ReapplyTransaction,
-                transaction_id,
-                result,
-            );
-            if accepted {
-                app.bump_context_revision();
-            }
-            accepted
-        }
-        ServerEvent::ContextRequestRejected {
-            id,
-            request,
-            draft_id,
-            transaction_id,
-            error,
-        } => {
-            let message = error.to_string();
-            let accepted =
-                app.context_protocol
-                    .accept_rejection(id, request, draft_id, transaction_id, error);
-            if accepted {
-                app.set_status_notice(format!("Context request rejected: {message}"));
-            }
-            accepted
-        }
-        ServerEvent::ContextActionRequired {
-            id,
-            session_id,
-            context_revision,
-            reason,
-            required_reduction_tokens,
-            pending_input,
-            details,
-            automatic_retry,
-        } => app.context_protocol.accept_action_required(
-            id,
-            session_id,
-            context_revision,
-            reason,
-            required_reduction_tokens,
-            pending_input,
-            details,
-            automatic_retry,
-        ),
-        ServerEvent::ContextEmergencyPolicyChanged {
-            id,
-            session_id,
-            policy,
-        } => app.context_protocol.accept_policy(id, session_id, policy),
         ServerEvent::SidePaneImages { session_id, images } => {
             if app.remote_session_id.as_deref() != Some(session_id.as_str()) {
                 crate::logging::info(&format!(

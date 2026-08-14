@@ -397,6 +397,8 @@ impl App {
             false,
         );
 
+        let (local_context_event_tx, local_context_event_rx) =
+            tokio::sync::mpsc::unbounded_channel();
         let mut app = Self {
             provider,
             registry,
@@ -436,6 +438,14 @@ impl App {
             context_info: crate::prompt::ContextInfo::default(),
             context_revision: 0,
             context_protocol: context_protocol::ContextProtocolState::default(),
+            context_editor_overlay: None,
+            context_transactions: Arc::new(crate::context::ContextTransactionService::new()),
+            local_context_event_tx,
+            local_context_event_rx,
+            context_editor_actions: VecDeque::new(),
+            next_local_context_request_id: 1,
+            #[cfg(test)]
+            context_reset_counters: ContextResetCounters::default(),
             last_stream_activity: None,
             last_user_interaction: None,
             stream_message_ended: false,
@@ -840,6 +850,8 @@ impl App {
             false,
         );
 
+        let (local_context_event_tx, local_context_event_rx) =
+            tokio::sync::mpsc::unbounded_channel();
         let mut app = Self {
             provider,
             registry,
@@ -879,6 +891,14 @@ impl App {
             context_info,
             context_revision: 0,
             context_protocol: context_protocol::ContextProtocolState::default(),
+            context_editor_overlay: None,
+            context_transactions: Arc::new(crate::context::ContextTransactionService::new()),
+            local_context_event_tx,
+            local_context_event_rx,
+            context_editor_actions: VecDeque::new(),
+            next_local_context_request_id: 1,
+            #[cfg(test)]
+            context_reset_counters: ContextResetCounters::default(),
             last_stream_activity: None,
             last_user_interaction: None,
             stream_message_ended: false,

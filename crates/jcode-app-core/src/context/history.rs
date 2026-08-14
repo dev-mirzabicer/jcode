@@ -1,10 +1,14 @@
 use crate::agent::Agent;
-use crate::context::commit::prepare_context_transition;
+use crate::context::commit::{
+    ContextSessionTransition, prepare_context_transition, prepare_context_transition_for_session,
+};
 use crate::context::draft::ContextTransactionService;
 use crate::protocol::{
     ContextOperationCounts, ContextServiceError, ContextTransactionResult,
     ContextTransactionSummary,
 };
+use crate::provider::Provider;
+use crate::session::Session;
 use chrono::Utc;
 use jcode_session_types::{
     StoredContextStatusEvent, StoredContextTransaction, StoredContextTransactionStatusKind,
@@ -139,6 +143,122 @@ impl ContextTransactionService {
             true,
         )?;
         self.persist_prepared_transition(&mut agent, previous_state, prepared)
+    }
+
+    pub fn revert_transaction_in_session(
+        &self,
+        session: &mut Session,
+        provider: &dyn Provider,
+        route: &str,
+        estimated_total_request_tokens_before: Option<usize>,
+        transaction_id: &str,
+        processing: bool,
+    ) -> Result<ContextSessionTransition, ContextServiceError> {
+        self.transition_transaction_in_session(
+            session,
+            provider,
+            route,
+            estimated_total_request_tokens_before,
+            transaction_id,
+            processing,
+            false,
+        )
+    }
+
+    pub fn reapply_transaction_in_session(
+        &self,
+        session: &mut Session,
+        provider: &dyn Provider,
+        route: &str,
+        estimated_total_request_tokens_before: Option<usize>,
+        transaction_id: &str,
+        processing: bool,
+    ) -> Result<ContextSessionTransition, ContextServiceError> {
+        self.transition_transaction_in_session(
+            session,
+            provider,
+            route,
+            estimated_total_request_tokens_before,
+            transaction_id,
+            processing,
+            true,
+        )
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "shared local transition helper keeps apply semantics exact without duplication"
+    )]
+    fn transition_transaction_in_session(
+        &self,
+        session: &mut Session,
+        provider: &dyn Provider,
+        route: &str,
+        estimated_total_request_tokens_before: Option<usize>,
+        transaction_id: &str,
+        processing: bool,
+        reapply: bool,
+    ) -> Result<ContextSessionTransition, ContextServiceError> {
+        if processing {
+            return Err(ContextServiceError::SessionBusy);
+        }
+        let previous_state = session.context_view.clone();
+        let previous_provider_session_id = session.provider_session_id.clone();
+        let transaction_index = transaction_index(&previous_state, transaction_id)?;
+        let active = previous_state.transactions[transaction_index].is_active();
+        if reapply && active {
+            return Err(ContextServiceError::TransactionAlreadyActive(
+                transaction_id.to_string(),
+            ));
+        }
+        if !reapply && !active {
+            return Err(ContextServiceError::TransactionNotActive(
+                transaction_id.to_string(),
+            ));
+        }
+        let revision = previous_state
+            .revision
+            .checked_add(1)
+            .ok_or(ContextServiceError::RevisionOverflow)?;
+        let mut proposed_state = previous_state.clone();
+        proposed_state.revision = revision;
+        proposed_state.transactions[transaction_index]
+            .status_events
+            .push(StoredContextStatusEvent {
+                revision,
+                timestamp: Utc::now(),
+                kind: if reapply {
+                    StoredContextTransactionStatusKind::Reapplied
+                } else {
+                    StoredContextTransactionStatusKind::Reverted
+                },
+                reason: Some(if reapply {
+                    "Reapplied through the context transaction service.".to_string()
+                } else {
+                    "Reverted through the context transaction service.".to_string()
+                }),
+            });
+        let prepared = prepare_context_transition_for_session(
+            provider,
+            &session.messages,
+            &previous_state,
+            proposed_state,
+            transaction_index,
+            reapply,
+            route,
+            estimated_total_request_tokens_before,
+        )?;
+        session.context_view = prepared.state;
+        session.provider_session_id = None;
+        if let Err(error) = self.direct_session_persistence.persist(session) {
+            session.context_view = previous_state;
+            session.provider_session_id = previous_provider_session_id;
+            return Err(ContextServiceError::Persistence(error.to_string()));
+        }
+        Ok(ContextSessionTransition {
+            result: prepared.result,
+            invalidation_detail: prepared.invalidation_detail,
+        })
     }
 }
 

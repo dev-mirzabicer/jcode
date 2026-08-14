@@ -1,7 +1,75 @@
 use super::*;
 use crate::message::ToolDefinition;
 
+pub(super) struct PreparedLocalProviderInvocation {
+    provider: Arc<dyn Provider>,
+    request_messages: Vec<Message>,
+    tools: Vec<ToolDefinition>,
+    static_part: String,
+    dynamic_part: String,
+    session_id: Option<String>,
+}
+
+impl PreparedLocalProviderInvocation {
+    pub(super) async fn invoke(self) -> Result<crate::provider::EventStream> {
+        self.provider
+            .complete_split(
+                &self.request_messages,
+                &self.tools,
+                &self.static_part,
+                &self.dynamic_part,
+                self.session_id.as_deref(),
+            )
+            .await
+    }
+}
+
 impl App {
+    pub(super) async fn prepare_local_provider_invocation(
+        &mut self,
+    ) -> std::result::Result<PreparedLocalProviderInvocation, String> {
+        let provider_messages = self.projected_messages_for_provider_send()?;
+        let tools = self.registry.definitions(None).await;
+        let memory_pending = self.build_memory_prompt_nonblocking(&provider_messages);
+        let split_prompt = self.build_system_prompt_split(
+            memory_pending
+                .as_ref()
+                .map(|pending| pending.prompt.as_str()),
+        );
+        self.context_info.tool_defs_count = tools.len();
+        self.context_info.tool_defs_chars = ToolDefinition::aggregate_prompt_chars(&tools);
+        if let Some(pending) = &memory_pending {
+            let age_ms = pending.computed_at.elapsed().as_millis() as u64;
+            self.show_injected_memory_context(
+                &pending.prompt,
+                pending.display_prompt.as_deref(),
+                pending.count,
+                age_ms,
+                pending.memory_ids.clone(),
+            );
+        }
+
+        let request_messages = if crate::config::config().features.message_timestamps {
+            Message::with_timestamps(&provider_messages)
+        } else {
+            provider_messages
+        };
+        self.begin_kv_cache_request(
+            &request_messages,
+            &tools,
+            &split_prompt.static_part,
+            &split_prompt.dynamic_part,
+        );
+        Ok(PreparedLocalProviderInvocation {
+            provider: self.provider.clone(),
+            request_messages,
+            tools,
+            static_part: split_prompt.static_part,
+            dynamic_part: split_prompt.dynamic_part,
+            session_id: self.provider_session_id.clone(),
+        })
+    }
+
     pub(super) fn append_current_turn_system_reminder(
         &self,
         split: &mut crate::prompt::SplitSystemPrompt,
@@ -70,57 +138,27 @@ impl App {
                 return Ok(());
             }
 
-            let (provider_messages, compaction_event) = self.messages_for_provider();
-            if let Some(event) = compaction_event {
-                self.handle_compaction_event(event);
-            }
-
-            let tools = self.registry.definitions(None).await;
-            // Non-blocking memory: uses pending result from last turn, spawns check for next turn
-            let memory_pending = self.build_memory_prompt_nonblocking(&provider_messages);
-            // Use split prompt for better caching - static content cached, dynamic not
-            let split_prompt =
-                self.build_system_prompt_split(memory_pending.as_ref().map(|p| p.prompt.as_str()));
-            self.context_info.tool_defs_count = tools.len();
-            self.context_info.tool_defs_chars = ToolDefinition::aggregate_prompt_chars(&tools);
-            if let Some(pending) = &memory_pending {
-                let age_ms = pending.computed_at.elapsed().as_millis() as u64;
-                self.show_injected_memory_context(
-                    &pending.prompt,
-                    pending.display_prompt.as_deref(),
-                    pending.count,
-                    age_ms,
-                    pending.memory_ids.clone(),
-                );
-            }
+            let invocation = match self.prepare_local_provider_invocation().await {
+                Ok(invocation) => invocation,
+                Err(error) => {
+                    crate::logging::warn(
+                        "Local provider request blocked by invalid context projection",
+                    );
+                    self.push_display_message(DisplayMessage::error(error.clone()));
+                    self.set_status_notice("Provider request blocked by invalid context view");
+                    return Ok(());
+                }
+            };
 
             crate::logging::info(&format!(
                 "TUI: API call starting ({} messages)",
-                provider_messages.len()
+                invocation.request_messages.len()
             ));
             let api_start = std::time::Instant::now();
-
-            // Clone data needed for the API call to avoid borrow issues
-            // The future would hold references across the select! which conflicts with handle_key
             let provider = self.provider.clone();
-            let request_messages = if crate::config::config().features.message_timestamps {
-                Message::with_timestamps(&provider_messages)
-            } else {
-                provider_messages
-            };
-            let session_id_clone = self.provider_session_id.clone();
-            let static_part = split_prompt.static_part.clone();
-            let dynamic_part = split_prompt.dynamic_part.clone();
-            self.begin_kv_cache_request(&request_messages, &tools, &static_part, &dynamic_part);
 
             // Make API call non-blocking - poll it in select! so we can handle input while waiting
-            let mut api_future = std::pin::pin!(provider.complete_split(
-                &request_messages,
-                &tools,
-                &static_part,
-                &dynamic_part,
-                session_id_clone.as_deref()
-            ));
+            let mut api_future = std::pin::pin!(invocation.invoke());
 
             let mut stream = loop {
                 tokio::select! {

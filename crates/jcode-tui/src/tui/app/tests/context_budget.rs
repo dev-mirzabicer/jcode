@@ -325,13 +325,834 @@ fn context_budget_legacy_summary_reseed_uses_summary_plus_tail() {
         original_turn_count: 4,
         compacted_count: 2,
     });
-    app.messages.clear();
-    app.reseed_context_runtime_from_provider_messages();
-
-    let effective_messages = app.messages_for_provider().0;
+    let migration = app.session.migrate_legacy_compaction_state();
+    assert!(migration.changed_state());
+    let effective_messages = app
+        .session
+        .projected_messages_for_provider()
+        .expect("migrated legacy summary should project");
+    app.reseed_context_budget_from_messages(&effective_messages, "legacy summary migration test");
     let stats = context_budget_stats_for_app(&app);
     let effective_tokens = estimated_app_message_tokens(&effective_messages);
     assert_eq!(stats.message_count, effective_messages.len());
     assert_eq!(stats.estimated_message_tokens, effective_tokens);
     assert!(effective_tokens < raw_tokens);
+}
+
+#[test]
+fn local_provider_send_projection_failure_is_actionable_and_preserves_raw_transcript() {
+    let mut app = create_test_app();
+    app.session.replace_messages(Vec::new());
+    app.session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "authoritative prompt must survive".to_string(),
+            cache_control: None,
+        }],
+    );
+    let raw_before = serde_json::to_vec(&app.session.messages).expect("raw transcript");
+    let transaction = |revision: u64| jcode_session_types::StoredContextTransaction {
+        id: "duplicate-transaction-id".to_string(),
+        base_revision: revision.saturating_sub(1),
+        created_at: chrono::Utc::now(),
+        authorization: jcode_session_types::StoredContextAuthorization::Manual {
+            initiated_by: None,
+        },
+        operations: Vec::new(),
+        status_events: vec![jcode_session_types::StoredContextStatusEvent {
+            revision,
+            timestamp: chrono::Utc::now(),
+            kind: jcode_session_types::StoredContextTransactionStatusKind::Applied,
+            reason: None,
+        }],
+        application: None,
+        economics: None,
+        curator_usage: Vec::new(),
+    };
+    app.session.context_view = jcode_session_types::StoredContextViewState {
+        revision: 2,
+        transactions: vec![transaction(1), transaction(2)],
+        ..jcode_session_types::StoredContextViewState::default()
+    };
+
+    let error = app
+        .projected_messages_for_provider_send()
+        .expect_err("invalid projection must block the provider request");
+
+    assert!(error.contains("provider request was not sent"));
+    assert!(error.contains("/context history"));
+    assert_eq!(
+        serde_json::to_vec(&app.session.messages).expect("raw transcript"),
+        raw_before
+    );
+}
+
+#[derive(Clone, Default)]
+struct LocalInvocationRecordingProvider {
+    requests: StdArc<StdMutex<Vec<Vec<Message>>>>,
+    invalidations: StdArc<AtomicUsize>,
+    reject_context_validation: StdArc<AtomicBool>,
+}
+
+impl LocalInvocationRecordingProvider {
+    fn requests(&self) -> Vec<Vec<Message>> {
+        self.requests.lock().unwrap().clone()
+    }
+
+    fn invalidations(&self) -> usize {
+        self.invalidations.load(Ordering::SeqCst)
+    }
+
+    fn set_context_validation_rejected(&self, rejected: bool) {
+        self.reject_context_validation
+            .store(rejected, Ordering::SeqCst);
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider for LocalInvocationRecordingProvider {
+    async fn complete(
+        &self,
+        messages: &[Message],
+        _tools: &[crate::message::ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<crate::provider::EventStream> {
+        self.requests.lock().unwrap().push(messages.to_vec());
+        Ok(Box::pin(futures::stream::empty::<
+            Result<crate::message::StreamEvent>,
+        >()))
+    }
+
+    fn name(&self) -> &str {
+        "local-invocation-recording"
+    }
+
+    fn display_name(&self) -> String {
+        "Local Invocation Recording".to_string()
+    }
+
+    fn model(&self) -> String {
+        "local-invocation-model".to_string()
+    }
+
+    fn context_window(&self) -> usize {
+        100_000
+    }
+
+    fn validate_projected_context(
+        &self,
+        messages: &[Message],
+        operations: &[crate::provider::ContextProjectionValidationOperation],
+    ) -> crate::provider::ContextProjectionValidationReport {
+        let builder = if self.reject_context_validation.load(Ordering::SeqCst) {
+            Err("injected local Context Editor provider validation failure".to_string())
+        } else {
+            Ok(crate::provider::ContextRequestBuilderValidation::new(
+                messages.len(),
+            ))
+        };
+        crate::provider::context_projection_validation_report(
+            crate::provider::ContextProviderValidationIdentity {
+                family: crate::provider::ContextProviderFamily::OpenRouterCompatible,
+                provider_name: self.name().to_string(),
+                provider_display_name: self.display_name(),
+                model: self.model(),
+                evidence_tag: "local_context_editor_reset_fixture_v1".to_string(),
+            },
+            operations,
+            Some(crate::provider::ContextReasoningBlockKind::GenericReasoning),
+            builder,
+        )
+    }
+
+    fn invalidate_context_continuation(&self, _reason: &str) {
+        self.invalidations.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+fn create_local_invocation_recording_app(
+    provider: LocalInvocationRecordingProvider,
+) -> App {
+    ensure_test_jcode_home_if_unset();
+    clear_persisted_test_ui_state();
+    crate::tui::ui::clear_test_render_state_for_tests();
+    let provider: Arc<dyn Provider> = Arc::new(provider);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
+    let mut app = App::new_for_test_harness(provider, registry);
+    app.queue_mode = false;
+    app
+}
+
+fn provider_text(messages: &[Message]) -> String {
+    messages
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .filter_map(|block| match block {
+            ContentBlock::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn prepare_local_reasoning_only_draft(
+    runtime: &tokio::runtime::Runtime,
+    app: &mut App,
+    reasoning_message_id: String,
+) -> String {
+    runtime.block_on(async {
+        app.context_editor_actions.push_back(
+            crate::tui::context_editor::ContextEditorAction::PrepareDraft(
+                crate::protocol::ContextDraftRequest {
+                    summary_ranges: Vec::new(),
+                    reasoning: Some(
+                        crate::protocol::ContextReasoningSelectionRequest::MessageRanges {
+                            ranges: vec![crate::protocol::ContextMessageRangeSelection {
+                                start_message_id: reasoning_message_id.clone(),
+                                end_message_id: reasoning_message_id,
+                            }],
+                        },
+                    ),
+                    tool_results: Vec::new(),
+                    allow_shadowing_active_operations: false,
+                    authorization: jcode_session_types::StoredContextAuthorization::Manual {
+                        initiated_by: None,
+                    },
+                },
+            ),
+        );
+        assert!(app.dispatch_local_context_editor_actions());
+
+        loop {
+            let event = tokio::time::timeout(
+                Duration::from_secs(2),
+                app.local_context_event_rx.recv(),
+            )
+            .await
+            .expect("reasoning-only draft monitor timed out")
+            .expect("reasoning-only draft monitor channel closed");
+            let ready_draft_id = match &event {
+                crate::protocol::ServerEvent::ContextDraftReady { draft, .. } => {
+                    Some(draft.identity.draft_id.clone())
+                }
+                crate::protocol::ServerEvent::ContextDraftFailed { error, .. }
+                | crate::protocol::ServerEvent::ContextDraftStale { error, .. } => {
+                    panic!("reasoning-only draft unexpectedly failed: {error}")
+                }
+                crate::protocol::ServerEvent::ContextRequestRejected { error, .. } => {
+                    panic!("reasoning-only draft was unexpectedly rejected: {error}")
+                }
+                _ => None,
+            };
+            assert!(
+                app.reduce_context_server_event(event)
+                    .expect("local draft monitor emitted a context event"),
+                "local draft monitor event was rejected"
+            );
+            if let Some(draft_id) = ready_draft_id {
+                return draft_id;
+            }
+        }
+    })
+}
+
+fn append_local_replayable_reasoning_message(app: &mut App, suffix: &str) -> String {
+    app.session.add_message(
+        Role::Assistant,
+        vec![
+            ContentBlock::Reasoning {
+                text: format!("replayed reasoning {suffix}"),
+            },
+            ContentBlock::Text {
+                text: format!("visible answer {suffix}"),
+                cache_control: None,
+            },
+        ],
+    );
+    app.session
+        .messages
+        .last()
+        .expect("replayable reasoning message")
+        .id
+        .clone()
+}
+
+fn assert_context_reset_totals(
+    app: &App,
+    expected: usize,
+    label: &str,
+) {
+    assert_eq!(
+        app.context_reset_counters,
+        ContextResetCounters {
+            hook_calls: expected,
+            invalidation_records: expected,
+            cache_generation_advances: expected,
+            continuation_invalidations: expected,
+            projected_rebuild_attempts: expected,
+            budget_reseeds: expected,
+        },
+        "unexpected App reset multiplicity after {label}"
+    );
+}
+
+fn assert_projected_reasoning_presence(app: &mut App, expected: bool, label: &str) {
+    let projected = app
+        .session
+        .projected_messages_for_provider()
+        .expect("valid projected provider messages");
+    let has_reasoning = projected.iter().any(|message| {
+        message
+            .content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::Reasoning { .. }))
+    });
+    assert_eq!(has_reasoning, expected, "projected reasoning mismatch after {label}");
+    let budget = context_budget_stats_for_app(app);
+    assert_eq!(
+        budget.message_count,
+        projected.len(),
+        "context budget was not reseeded from the projected view after {label}"
+    );
+}
+
+fn dispatch_local_transaction_action(
+    app: &mut App,
+    action: crate::tui::context_editor::ContextEditorAction,
+    label: &str,
+) {
+    app.context_editor_actions.push_back(action);
+    assert!(
+        app.dispatch_local_context_editor_actions(),
+        "{label} action was not dispatched"
+    );
+    assert!(
+        app.drain_local_context_events(),
+        "{label} transaction outcome was not accepted"
+    );
+    let revision = app.context_revision;
+    assert!(
+        !app.drain_local_context_events(),
+        "{label} produced a duplicate accepted transaction outcome"
+    );
+    assert_eq!(
+        app.context_revision, revision,
+        "{label} duplicate drain changed the UI revision"
+    );
+    assert!(
+        app.context_editor_actions.is_empty(),
+        "{label} queued an unexpected Context Editor follow-up action"
+    );
+}
+
+#[test]
+fn local_provider_invocation_uses_applied_reverted_and_reapplied_projection() {
+    let provider = LocalInvocationRecordingProvider::default();
+    let mut app = create_local_invocation_recording_app(provider.clone());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("local provider invocation runtime");
+    app.session.replace_messages(Vec::new());
+    for (role, text) in [
+        (Role::User, "raw prompt before summary"),
+        (Role::Assistant, "raw answer before summary"),
+        (Role::User, "raw prompt after summary"),
+    ] {
+        app.session.add_message(
+            role,
+            vec![ContentBlock::Text {
+                text: text.to_string(),
+                cache_control: None,
+            }],
+        );
+    }
+    let raw_before = serde_json::to_vec(&app.session.messages).expect("raw transcript");
+    app.session.compaction = Some(crate::session::StoredCompactionState {
+        summary_text: "authoritative migrated context summary".to_string(),
+        openai_encrypted_content: None,
+        covers_up_to_turn: 2,
+        original_turn_count: 3,
+        compacted_count: 2,
+    });
+    assert!(app.session.migrate_legacy_compaction_state().changed_state());
+
+    let applied_invocation = runtime
+        .block_on(app.prepare_local_provider_invocation())
+        .expect("applied projection should prepare");
+    let _applied_stream = runtime
+        .block_on(applied_invocation.invoke())
+        .expect("applied projection should reach provider");
+
+    app.session.context_view.revision = 2;
+    app.session.context_view.transactions[0]
+        .status_events
+        .push(jcode_session_types::StoredContextStatusEvent {
+            revision: 2,
+            timestamp: chrono::Utc::now(),
+            kind: jcode_session_types::StoredContextTransactionStatusKind::Reverted,
+            reason: Some("local provider invocation revert".to_string()),
+        });
+    let reverted_invocation = runtime
+        .block_on(app.prepare_local_provider_invocation())
+        .expect("reverted projection should prepare");
+    let _reverted_stream = runtime
+        .block_on(reverted_invocation.invoke())
+        .expect("reverted projection should reach provider");
+
+    app.session.context_view.revision = 3;
+    app.session.context_view.transactions[0]
+        .status_events
+        .push(jcode_session_types::StoredContextStatusEvent {
+            revision: 3,
+            timestamp: chrono::Utc::now(),
+            kind: jcode_session_types::StoredContextTransactionStatusKind::Reapplied,
+            reason: Some("local provider invocation reapply".to_string()),
+        });
+    let reapplied_invocation = runtime
+        .block_on(app.prepare_local_provider_invocation())
+        .expect("reapplied projection should prepare");
+    let _reapplied_stream = runtime
+        .block_on(reapplied_invocation.invoke())
+        .expect("reapplied projection should reach provider");
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 3);
+    let applied = provider_text(&requests[0]);
+    let reverted = provider_text(&requests[1]);
+    let reapplied = provider_text(&requests[2]);
+    assert!(applied.contains("authoritative migrated context summary"));
+    assert!(!applied.contains("raw prompt before summary"));
+    assert!(applied.contains("raw prompt after summary"));
+    assert!(reverted.contains("raw prompt before summary"));
+    assert!(reverted.contains("raw answer before summary"));
+    assert!(!reverted.contains("authoritative migrated context summary"));
+    assert_eq!(reapplied, applied);
+    for request in &requests {
+        let text = provider_text(request);
+        assert!(!text.contains("context curator"));
+        assert!(!text.contains("distill_output"));
+        assert!(!text.contains("strict target ratio"));
+    }
+    assert_eq!(
+        serde_json::to_vec(&app.session.messages).expect("raw transcript"),
+        raw_before
+    );
+
+    let duplicate = app.session.context_view.transactions[0].clone();
+    app.session.context_view.revision = 4;
+    app.session.context_view.transactions.push(duplicate);
+    let request_count_before = provider.requests().len();
+    let error = match runtime.block_on(app.prepare_local_provider_invocation()) {
+        Ok(_) => panic!("invalid projection unexpectedly prepared a provider invocation"),
+        Err(error) => error,
+    };
+    assert!(error.contains("provider request was not sent"));
+    assert_eq!(provider.requests().len(), request_count_before);
+    assert_eq!(
+        serde_json::to_vec(&app.session.messages).expect("raw transcript"),
+        raw_before
+    );
+}
+
+#[test]
+fn local_context_apply_revert_and_reapply_reset_every_app_boundary_exactly_once() {
+    let provider = LocalInvocationRecordingProvider::default();
+    let mut app = create_local_invocation_recording_app(provider.clone());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("local context reset runtime");
+    app.session.replace_messages(Vec::new());
+    app.session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "retain this authoritative prompt".to_string(),
+            cache_control: None,
+        }],
+    );
+    let reasoning_message_id = append_local_replayable_reasoning_message(&mut app, "for reset proof");
+    let raw_before = serde_json::to_vec(&app.session.messages).expect("raw transcript");
+    let cache_generation_before = app.kv_cache.cache_generation;
+    let ui_revision_before = app.context_revision;
+
+    let draft_id =
+        prepare_local_reasoning_only_draft(&runtime, &mut app, reasoning_message_id.clone());
+    assert_context_reset_totals(&app, 0, "reasoning-only draft preparation");
+    assert_eq!(provider.invalidations(), 0);
+    assert_eq!(app.kv_cache.cache_generation, cache_generation_before);
+    assert_eq!(app.context_revision, ui_revision_before);
+    assert_eq!(app.session.context_view.revision, 0);
+
+    app.context_editor_actions.push_back(
+        crate::tui::context_editor::ContextEditorAction::PreviewDraftSelection {
+            draft_id: draft_id.clone(),
+            selected_distillation_ids: Vec::new(),
+        },
+    );
+    assert!(app.dispatch_local_context_editor_actions());
+    assert!(app.drain_local_context_events());
+    assert_context_reset_totals(&app, 0, "selected-proposal preview");
+    assert_eq!(provider.invalidations(), 0);
+    assert_eq!(app.kv_cache.cache_generation, cache_generation_before);
+    assert_eq!(app.context_revision, ui_revision_before);
+    assert_eq!(app.session.context_view.revision, 0);
+
+    app.provider_session_id = Some("app-provider-session-before-apply".to_string());
+    app.session.provider_session_id = Some("stored-provider-session-before-apply".to_string());
+    dispatch_local_transaction_action(
+        &mut app,
+        crate::tui::context_editor::ContextEditorAction::ApplyDraft {
+            draft_id: draft_id.clone(),
+            selected_distillation_ids: Vec::new(),
+        },
+        "apply",
+    );
+    assert_context_reset_totals(&app, 1, "apply");
+    assert_eq!(provider.invalidations(), 1);
+    assert_eq!(
+        app.kv_cache.cache_generation,
+        cache_generation_before.wrapping_add(1)
+    );
+    assert_eq!(app.context_revision, ui_revision_before.wrapping_add(1));
+    assert_eq!(app.session.context_view.revision, 1);
+    assert_eq!(app.session.context_view.transactions.len(), 1);
+    assert_eq!(app.provider_session_id, None);
+    assert_eq!(app.session.provider_session_id, None);
+    assert_eq!(
+        serde_json::to_vec(&app.session.messages).expect("raw transcript after apply"),
+        raw_before
+    );
+    assert_projected_reasoning_presence(&mut app, false, "apply");
+    let transaction_id = app.session.context_view.transactions[0].id.clone();
+    let outcome = app
+        .context_protocol
+        .transaction_result
+        .as_ref()
+        .expect("accepted apply outcome");
+    assert_eq!(outcome.request, crate::protocol::ContextRequestKind::ApplyDraft);
+    assert_eq!(outcome.correlation_id, draft_id);
+    assert_eq!(outcome.result.revision, 1);
+
+    app.provider_session_id = Some("app-provider-session-before-revert".to_string());
+    app.session.provider_session_id = Some("stored-provider-session-before-revert".to_string());
+    dispatch_local_transaction_action(
+        &mut app,
+        crate::tui::context_editor::ContextEditorAction::RevertTransaction {
+            transaction_id: transaction_id.clone(),
+        },
+        "revert",
+    );
+    assert_context_reset_totals(&app, 2, "revert");
+    assert_eq!(provider.invalidations(), 2);
+    assert_eq!(
+        app.kv_cache.cache_generation,
+        cache_generation_before.wrapping_add(2)
+    );
+    assert_eq!(app.context_revision, ui_revision_before.wrapping_add(2));
+    assert_eq!(app.session.context_view.revision, 2);
+    assert_eq!(app.session.context_view.transactions.len(), 1);
+    assert_eq!(app.provider_session_id, None);
+    assert_eq!(app.session.provider_session_id, None);
+    assert_eq!(
+        serde_json::to_vec(&app.session.messages).expect("raw transcript after revert"),
+        raw_before
+    );
+    assert_projected_reasoning_presence(&mut app, true, "revert");
+    let outcome = app
+        .context_protocol
+        .transaction_result
+        .as_ref()
+        .expect("accepted revert outcome");
+    assert_eq!(
+        outcome.request,
+        crate::protocol::ContextRequestKind::RevertTransaction
+    );
+    assert_eq!(outcome.correlation_id, transaction_id);
+    assert_eq!(outcome.result.revision, 2);
+
+    app.provider_session_id = Some("app-provider-session-before-reapply".to_string());
+    app.session.provider_session_id = Some("stored-provider-session-before-reapply".to_string());
+    dispatch_local_transaction_action(
+        &mut app,
+        crate::tui::context_editor::ContextEditorAction::ReapplyTransaction {
+            transaction_id: transaction_id.clone(),
+        },
+        "reapply",
+    );
+    assert_context_reset_totals(&app, 3, "reapply");
+    assert_eq!(provider.invalidations(), 3);
+    assert_eq!(
+        app.kv_cache.cache_generation,
+        cache_generation_before.wrapping_add(3)
+    );
+    assert_eq!(app.context_revision, ui_revision_before.wrapping_add(3));
+    assert_eq!(app.session.context_view.revision, 3);
+    assert_eq!(app.session.context_view.transactions.len(), 1);
+    assert_eq!(app.provider_session_id, None);
+    assert_eq!(app.session.provider_session_id, None);
+    assert_eq!(
+        serde_json::to_vec(&app.session.messages).expect("raw transcript after reapply"),
+        raw_before
+    );
+    assert_projected_reasoning_presence(&mut app, false, "reapply");
+    let outcome = app
+        .context_protocol
+        .transaction_result
+        .as_ref()
+        .expect("accepted reapply outcome");
+    assert_eq!(
+        outcome.request,
+        crate::protocol::ContextRequestKind::ReapplyTransaction
+    );
+    assert_eq!(outcome.correlation_id, transaction_id);
+    assert_eq!(outcome.result.revision, 3);
+
+    let status_events = &app.session.context_view.transactions[0].status_events;
+    assert_eq!(status_events.len(), 3);
+    assert_eq!(status_events[0].revision, 1);
+    assert_eq!(status_events[1].revision, 2);
+    assert_eq!(status_events[2].revision, 3);
+    assert_eq!(
+        status_events[0].kind,
+        jcode_session_types::StoredContextTransactionStatusKind::Applied
+    );
+    assert_eq!(
+        status_events[1].kind,
+        jcode_session_types::StoredContextTransactionStatusKind::Reverted
+    );
+    assert_eq!(
+        status_events[2].kind,
+        jcode_session_types::StoredContextTransactionStatusKind::Reapplied
+    );
+}
+
+#[derive(Default)]
+struct LocalContextNoopAgentPersistence;
+
+impl crate::context::ContextPersistence for LocalContextNoopAgentPersistence {
+    fn persist(&self, _agent: &mut crate::agent::Agent) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct LocalContextFailingDirectPersistence {
+    calls: AtomicUsize,
+}
+
+impl crate::context::DirectContextSessionPersistence for LocalContextFailingDirectPersistence {
+    fn persist(&self, _session: &mut Session) -> anyhow::Result<()> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        anyhow::bail!("injected TUI direct Session persistence failure")
+    }
+}
+
+fn dispatch_local_rejected_transaction_action(
+    app: &mut App,
+    action: crate::tui::context_editor::ContextEditorAction,
+    expected_error: &str,
+) {
+    app.context_editor_actions.push_back(action);
+    assert!(app.dispatch_local_context_editor_actions());
+    assert!(app.drain_local_context_events());
+    assert!(!app.drain_local_context_events());
+    let rejection = app
+        .context_protocol
+        .last_rejection
+        .as_ref()
+        .expect("accepted local transaction rejection");
+    assert!(
+        rejection.error.to_string().contains(expected_error),
+        "unexpected rejection: {}",
+        rejection.error
+    );
+}
+
+#[test]
+fn local_noncommitting_context_paths_perform_zero_app_resets() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("local zero-reset runtime");
+
+    let provider = LocalInvocationRecordingProvider::default();
+    let mut stale_app = create_local_invocation_recording_app(provider.clone());
+    stale_app.session.replace_messages(Vec::new());
+    let reasoning_id = append_local_replayable_reasoning_message(&mut stale_app, "for stale proof");
+    let stale_draft =
+        prepare_local_reasoning_only_draft(&runtime, &mut stale_app, reasoning_id);
+    stale_app.session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "append after draft capture".to_string(),
+            cache_control: None,
+        }],
+    );
+    let stale_raw_before =
+        serde_json::to_vec(&stale_app.session.messages).expect("stale raw transcript");
+    let stale_cache_generation = stale_app.kv_cache.cache_generation;
+    let stale_ui_revision = stale_app.context_revision;
+    dispatch_local_rejected_transaction_action(
+        &mut stale_app,
+        crate::tui::context_editor::ContextEditorAction::ApplyDraft {
+            draft_id: stale_draft,
+            selected_distillation_ids: Vec::new(),
+        },
+        "raw message count changed",
+    );
+    assert_context_reset_totals(&stale_app, 0, "stale draft rejection");
+    assert_eq!(provider.invalidations(), 0);
+    assert_eq!(stale_app.kv_cache.cache_generation, stale_cache_generation);
+    assert_eq!(stale_app.context_revision, stale_ui_revision);
+    assert_eq!(stale_app.session.context_view.revision, 0);
+    assert_eq!(
+        serde_json::to_vec(&stale_app.session.messages).expect("stale raw transcript after reject"),
+        stale_raw_before
+    );
+
+    let provider = LocalInvocationRecordingProvider::default();
+    let mut validation_app = create_local_invocation_recording_app(provider.clone());
+    validation_app.session.replace_messages(Vec::new());
+    let reasoning_id =
+        append_local_replayable_reasoning_message(&mut validation_app, "for validation proof");
+    let validation_draft =
+        prepare_local_reasoning_only_draft(&runtime, &mut validation_app, reasoning_id);
+    let validation_raw_before = serde_json::to_vec(&validation_app.session.messages)
+        .expect("validation raw transcript");
+    let validation_cache_generation = validation_app.kv_cache.cache_generation;
+    let validation_ui_revision = validation_app.context_revision;
+    provider.set_context_validation_rejected(true);
+    dispatch_local_rejected_transaction_action(
+        &mut validation_app,
+        crate::tui::context_editor::ContextEditorAction::ApplyDraft {
+            draft_id: validation_draft,
+            selected_distillation_ids: Vec::new(),
+        },
+        "provider validation",
+    );
+    assert_context_reset_totals(&validation_app, 0, "provider validation rejection");
+    assert_eq!(provider.invalidations(), 0);
+    assert_eq!(
+        validation_app.kv_cache.cache_generation,
+        validation_cache_generation
+    );
+    assert_eq!(validation_app.context_revision, validation_ui_revision);
+    assert_eq!(validation_app.session.context_view.revision, 0);
+    assert_eq!(
+        serde_json::to_vec(&validation_app.session.messages)
+            .expect("validation raw transcript after reject"),
+        validation_raw_before
+    );
+
+    let provider = LocalInvocationRecordingProvider::default();
+    let mut persistence_app = create_local_invocation_recording_app(provider.clone());
+    persistence_app.session.replace_messages(Vec::new());
+    let direct_persistence = StdArc::new(LocalContextFailingDirectPersistence::default());
+    persistence_app.context_transactions = Arc::new(
+        crate::context::ContextTransactionService::with_persistence_boundaries(
+            crate::context::ContextServiceLimits::default(),
+            Arc::new(LocalContextNoopAgentPersistence),
+            direct_persistence.clone(),
+        ),
+    );
+    let reasoning_id =
+        append_local_replayable_reasoning_message(&mut persistence_app, "for persistence proof");
+    let persistence_draft =
+        prepare_local_reasoning_only_draft(&runtime, &mut persistence_app, reasoning_id);
+    persistence_app.provider_session_id = Some("app-provider-session-preserved".to_string());
+    persistence_app.session.provider_session_id =
+        Some("stored-provider-session-preserved".to_string());
+    let persistence_raw_before = serde_json::to_vec(&persistence_app.session.messages)
+        .expect("persistence raw transcript");
+    let persistence_state_before = persistence_app.session.context_view.clone();
+    let persistence_cache_generation = persistence_app.kv_cache.cache_generation;
+    let persistence_ui_revision = persistence_app.context_revision;
+    dispatch_local_rejected_transaction_action(
+        &mut persistence_app,
+        crate::tui::context_editor::ContextEditorAction::ApplyDraft {
+            draft_id: persistence_draft,
+            selected_distillation_ids: Vec::new(),
+        },
+        "persistence",
+    );
+    assert_eq!(direct_persistence.calls.load(Ordering::SeqCst), 1);
+    assert_context_reset_totals(&persistence_app, 0, "persistence rollback");
+    assert_eq!(provider.invalidations(), 0);
+    assert_eq!(
+        persistence_app.kv_cache.cache_generation,
+        persistence_cache_generation
+    );
+    assert_eq!(persistence_app.context_revision, persistence_ui_revision);
+    assert_eq!(persistence_app.session.context_view, persistence_state_before);
+    assert_eq!(
+        persistence_app.provider_session_id.as_deref(),
+        Some("app-provider-session-preserved")
+    );
+    assert_eq!(
+        persistence_app.session.provider_session_id.as_deref(),
+        Some("stored-provider-session-preserved")
+    );
+    assert_eq!(
+        serde_json::to_vec(&persistence_app.session.messages)
+            .expect("persistence raw transcript after reject"),
+        persistence_raw_before
+    );
+}
+
+#[test]
+fn context_editor_debug_socket_command_returns_only_metadata_safe_summary() {
+    let mut app = create_test_app();
+    app.open_context_editor(crate::tui::context_editor::ContextEditorOpenMode::Edit);
+    app.context_editor_actions.clear();
+    let expected = app.context_editor_debug_summary();
+
+    let output = app.handle_debug_command("context-editor-state");
+    let actual: serde_json::Value =
+        serde_json::from_str(&output).expect("Context Editor debug command JSON");
+
+    assert_eq!(actual, expected);
+    assert_eq!(actual["open"], serde_json::json!(true));
+    assert_eq!(actual["phase"], serde_json::json!("loading"));
+    assert!(!output.contains("\"input\""));
+    assert!(!output.contains("authorization_source"));
+    assert!(!output.contains("summary_text"));
+    assert!(!output.contains("replacement_content"));
+
+    let fixture_list: serde_json::Value = serde_json::from_str(
+        &app.handle_debug_command("context-editor-fixtures"),
+    )
+    .expect("Context Editor fixture list JSON");
+    assert!(
+        fixture_list["fixtures"]
+            .as_array()
+            .is_some_and(|fixtures| fixtures.len() >= 35)
+    );
+
+    let fixture: serde_json::Value = serde_json::from_str(
+        &app.handle_debug_command("context-editor-fixture:long-final-review"),
+    )
+    .expect("Context Editor fixture response JSON");
+    assert_eq!(fixture["ok"], serde_json::json!(true));
+    assert_eq!(fixture["fixture"], serde_json::json!("long-final-review"));
+    assert_eq!(fixture["state"]["phase"], serde_json::json!("review_draft"));
+    assert_eq!(fixture["state"]["proposal_selections"], serde_json::json!(9));
+    let fixture_json = fixture.to_string();
+    assert!(!fixture_json.contains("synthetic-debug-source-not-rendered"));
+    assert!(!fixture_json.contains("replacement_content"));
+
+    let unknown: serde_json::Value = serde_json::from_str(
+        &app.handle_debug_command("context-editor-fixture:not-a-real-fixture"),
+    )
+    .expect("unknown Context Editor fixture response JSON");
+    assert_eq!(unknown["ok"], serde_json::json!(false));
+    assert!(unknown["error"].as_str().is_some_and(|error| {
+        error.contains("unknown Context Editor fixture")
+    }));
 }

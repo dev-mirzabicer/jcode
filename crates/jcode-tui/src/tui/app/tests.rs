@@ -2,6 +2,7 @@
 include!("tests/support_failover/part_01.rs");
 include!("tests/support_failover/part_02.rs");
 include!("tests/context_budget.rs");
+include!("tests/context_reducer_parity.rs");
 include!("tests/commands_accounts_01/part_01.rs");
 include!("tests/commands_accounts_01/part_02.rs");
 include!("tests/commands_accounts_02/part_01.rs");

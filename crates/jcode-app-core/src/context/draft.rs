@@ -1,25 +1,31 @@
 use crate::agent::Agent;
 use crate::context::change_digest::extract_context_change_evidence;
+use crate::context::commit::selected_distillation_operations;
 use crate::context::curator::{
     ContextCuratorArtifacts, ContextCuratorLimits, ContextCuratorRangeWork, ContextCuratorRoute,
     ContextCuratorToolArtifact, ContextCuratorToolWork, resolve_context_curator_route,
     run_context_curator,
 };
 use crate::context::provider_validation::require_supported_projected_messages;
-use crate::context::{ContextPersistence, SessionContextPersistence};
-use crate::message::ContentBlock;
-use crate::protocol::{
-    ContextDistillationProposal, ContextDraft, ContextDraftIdentity, ContextDraftPhase,
-    ContextDraftPreview, ContextDraftProgress, ContextDraftRequest, ContextDraftStatus,
-    ContextIneligibleDistillation, ContextOperationPreview, ContextReasoningSelectionRequest,
-    ContextServiceError,
+use crate::context::{
+    ContextPersistence, DirectContextSessionPersistence, DirectSessionContextPersistence,
+    SessionContextPersistence,
 };
+use crate::message::ContentBlock;
 #[cfg(test)]
-use crate::protocol::{ContextMessageRangeSelection, ContextToolResultSelection};
+use crate::protocol::ContextToolResultSelection;
+use crate::protocol::{
+    CONTEXT_IDENTIFIER_MAX_CHARS, ContextClosedRangePreview, ContextDistillationProposal,
+    ContextDraft, ContextDraftIdentity, ContextDraftPhase, ContextDraftPreview,
+    ContextDraftProgress, ContextDraftRequest, ContextDraftSelectionPreview, ContextDraftStatus,
+    ContextIneligibleDistillation, ContextMessageRangeSelection, ContextOperationPreview,
+    ContextRangeClosurePreview, ContextReasoningSelectionRequest, ContextServiceError,
+};
 #[cfg(test)]
 use crate::provider::ContextProjectionValidationReport;
 use crate::provider::{
-    ContextProjectionOperationKind, ContextProjectionValidationOperation, ContextReasoningBlockKind,
+    ContextProjectionOperationKind, ContextProjectionValidationOperation,
+    ContextReasoningBlockKind, ModelRoute, Provider,
 };
 use chrono::{DateTime, Utc};
 use jcode_context_core::{
@@ -46,6 +52,23 @@ use uuid::Uuid;
 
 const TERMINAL_DRAFT_RESERVATION_FLOOR_BYTES: usize = 512;
 
+fn bounded_context_metadata(value: &str, max_chars: usize) -> String {
+    let char_count = value.chars().count();
+    if char_count <= max_chars {
+        return value.to_string();
+    }
+    if max_chars == 0 {
+        return String::new();
+    }
+
+    let mut bounded = value
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
+    bounded.push('…');
+    bounded
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct ContextServiceLimits {
     pub max_drafts: usize,
@@ -68,7 +91,23 @@ impl Default for ContextServiceLimits {
 pub struct ContextTransactionService {
     pub(crate) drafts: Mutex<ContextDraftStore>,
     pub(crate) persistence: Arc<dyn ContextPersistence>,
+    pub(crate) direct_session_persistence: Arc<dyn DirectContextSessionPersistence>,
     pub(crate) limits: ContextServiceLimits,
+}
+
+/// Owned, immutable inputs for preparing a draft outside an Agent lock.
+///
+/// Local TUI mode and server mode use the same capture, curator, projection,
+/// provider-validation, and economics pipeline. Current session identity is
+/// revalidated again before application.
+pub struct ContextDraftRuntimeInput {
+    pub session_id: String,
+    pub messages: Vec<StoredMessage>,
+    pub context_view: StoredContextViewState,
+    pub provider: Arc<dyn Provider>,
+    pub route: String,
+    pub model_routes: Vec<ModelRoute>,
+    pub estimated_total_request_tokens_before: Option<usize>,
 }
 
 impl Default for ContextTransactionService {
@@ -92,6 +131,24 @@ impl ContextTransactionService {
         Self {
             drafts: Mutex::new(ContextDraftStore::default()),
             persistence,
+            direct_session_persistence: Arc::new(DirectSessionContextPersistence),
+            limits,
+        }
+    }
+
+    /// Construct the service with explicit persistence boundaries.
+    ///
+    /// This supports integration tests at owning application boundaries while
+    /// keeping persistence failure injection out of transaction semantics.
+    pub fn with_persistence_boundaries(
+        limits: ContextServiceLimits,
+        persistence: Arc<dyn ContextPersistence>,
+        direct_session_persistence: Arc<dyn DirectContextSessionPersistence>,
+    ) -> Self {
+        Self {
+            drafts: Mutex::new(ContextDraftStore::default()),
+            persistence,
+            direct_session_persistence,
             limits,
         }
     }
@@ -102,19 +159,94 @@ impl ContextTransactionService {
         processing: bool,
     ) -> Result<crate::context::ContextEditorSnapshot, ContextServiceError> {
         let provider = agent.provider_handle();
-        let projected_request_tokens = agent.current_context_request_token_estimate();
+        self.context_editor_snapshot_for_session(
+            agent.session_id(),
+            agent.messages(),
+            agent.context_view_state(),
+            processing,
+            provider.as_ref(),
+            &agent.context_route_identity(),
+            agent.current_context_request_token_estimate(),
+        )
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "snapshot construction keeps exact session, provider, route, and request-estimate identity"
+    )]
+    pub fn context_editor_snapshot_for_session(
+        &self,
+        session_id: &str,
+        messages: &[StoredMessage],
+        context_view: &StoredContextViewState,
+        processing: bool,
+        provider: &dyn Provider,
+        route: &str,
+        projected_request_tokens: Option<usize>,
+    ) -> Result<crate::context::ContextEditorSnapshot, ContextServiceError> {
+        self.context_editor_snapshot_for_session_with_curator_config(
+            session_id,
+            messages,
+            context_view,
+            processing,
+            provider,
+            route,
+            projected_request_tokens,
+            &crate::config::config().context.curator,
+        )
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "snapshot construction keeps exact session, provider, route, request-estimate, and curator-selection identity"
+    )]
+    fn context_editor_snapshot_for_session_with_curator_config(
+        &self,
+        session_id: &str,
+        messages: &[StoredMessage],
+        context_view: &StoredContextViewState,
+        processing: bool,
+        provider: &dyn Provider,
+        route: &str,
+        projected_request_tokens: Option<usize>,
+        curator_config: &crate::config::ContextCuratorConfig,
+    ) -> Result<crate::context::ContextEditorSnapshot, ContextServiceError> {
         let mut snapshot =
             crate::context::build_context_editor_snapshot(crate::context::ContextSnapshotInput {
-                session_id: agent.session_id(),
-                messages: agent.messages(),
-                context_view: agent.context_view_state(),
+                session_id,
+                messages,
+                context_view,
                 processing,
-                provider: provider.as_ref(),
-                route: &agent.context_route_identity(),
+                provider,
+                route,
             })
             .map_err(|error| ContextServiceError::Projection(error.to_string()))?;
         if let Some(projected_request_tokens) = projected_request_tokens {
             snapshot.projected_request_tokens = projected_request_tokens;
+        }
+        match resolve_context_curator_route(
+            provider.fork(),
+            &provider.model_routes(),
+            route,
+            curator_config,
+        ) {
+            Ok(curator_route) => {
+                snapshot.curator_route = Some(crate::protocol::ContextCuratorRoutePreview {
+                    provider_name: curator_route.provider_name,
+                    provider_display_name: curator_route.provider_display_name,
+                    model: curator_route.model,
+                    route: curator_route.route,
+                    effort: curator_route.effort,
+                });
+                snapshot.curator_unavailable_reason = None;
+            }
+            Err(error) => {
+                snapshot.curator_route = None;
+                snapshot.curator_unavailable_reason = Some(bounded_context_metadata(
+                    &error.to_string(),
+                    CONTEXT_IDENTIFIER_MAX_CHARS,
+                ));
+            }
         }
         Ok(snapshot)
     }
@@ -127,6 +259,35 @@ impl ContextTransactionService {
         page_size: usize,
     ) -> Result<crate::context::ContextEditorSnapshot, ContextServiceError> {
         let snapshot = self.context_editor_snapshot(agent, processing)?;
+        crate::context::paginate_context_editor_snapshot(snapshot, page_start, page_size)
+            .map_err(|error| ContextServiceError::InvalidSelection(error.to_string()))
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "paged snapshots preserve every authoritative identity dimension"
+    )]
+    pub fn context_editor_snapshot_page_for_session(
+        &self,
+        session_id: &str,
+        messages: &[StoredMessage],
+        context_view: &StoredContextViewState,
+        processing: bool,
+        provider: &dyn Provider,
+        route: &str,
+        projected_request_tokens: Option<usize>,
+        page_start: usize,
+        page_size: usize,
+    ) -> Result<crate::context::ContextEditorSnapshot, ContextServiceError> {
+        let snapshot = self.context_editor_snapshot_for_session(
+            session_id,
+            messages,
+            context_view,
+            processing,
+            provider,
+            route,
+            projected_request_tokens,
+        )?;
         crate::context::paginate_context_editor_snapshot(snapshot, page_start, page_size)
             .map_err(|error| ContextServiceError::InvalidSelection(error.to_string()))
     }
@@ -163,6 +324,112 @@ impl ContextTransactionService {
             } else {
                 ContextServiceError::InvalidSelection(detail)
             }
+        })
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "lazy detail identity and bounded chunk coordinates are independent protocol fields"
+    )]
+    pub fn context_message_detail_for_session(
+        &self,
+        session_id: &str,
+        messages: &[StoredMessage],
+        context_view: &StoredContextViewState,
+        expected_context_revision: u64,
+        expected_transcript_digest: u64,
+        message_id: &str,
+        block_ordinal: usize,
+        start_char: usize,
+        max_chars: usize,
+    ) -> Result<crate::context::ContextMessageDetail, ContextServiceError> {
+        crate::context::build_context_message_detail(crate::context::ContextMessageDetailInput {
+            session_id,
+            messages,
+            context_view,
+            expected_context_revision,
+            expected_transcript_digest,
+            message_id,
+            block_ordinal,
+            start_char,
+            max_chars,
+        })
+        .map_err(|error| {
+            let detail = error.to_string();
+            if detail.contains("revision changed") || detail.contains("digest changed") {
+                ContextServiceError::Stale(detail)
+            } else {
+                ContextServiceError::InvalidSelection(detail)
+            }
+        })
+    }
+
+    pub fn preview_context_ranges(
+        &self,
+        session_id: &str,
+        messages: &[StoredMessage],
+        context_view: &StoredContextViewState,
+        expected_context_revision: u64,
+        expected_transcript_digest: u64,
+        ranges: &[ContextMessageRangeSelection],
+    ) -> Result<ContextRangeClosurePreview, ContextServiceError> {
+        if context_view.revision != expected_context_revision {
+            return Err(ContextServiceError::Stale(format!(
+                "context revision changed from {expected_context_revision} to {}",
+                context_view.revision
+            )));
+        }
+        let transcript_digest = authoritative_transcript_digest(messages);
+        if transcript_digest != expected_transcript_digest {
+            return Err(ContextServiceError::Stale(format!(
+                "transcript digest changed from {expected_transcript_digest} to {transcript_digest}"
+            )));
+        }
+        if ranges.is_empty() {
+            return Err(ContextServiceError::InvalidSelection(
+                "at least one summary range is required".to_string(),
+            ));
+        }
+
+        let resolved = resolve_summary_ranges(messages, context_view, ranges)?;
+        let previews = resolved
+            .closed_ranges
+            .iter()
+            .map(|closed| {
+                let requested = resolved
+                    .requested_ranges
+                    .iter()
+                    .find(|requested| {
+                        requested.start == closed.requested_start
+                            && requested.end == closed.requested_end
+                    })
+                    .ok_or_else(|| {
+                        ContextServiceError::Runtime(format!(
+                            "closed range {}..={} lost its requested stable-message identity",
+                            closed.requested_start, closed.requested_end
+                        ))
+                    })?;
+                let source_range = closed
+                    .to_stored_range(messages)
+                    .map_err(|error| ContextServiceError::InvalidSelection(error.to_string()))?;
+                let source_tokens = messages[closed.start..=closed.end]
+                    .iter()
+                    .map(|message| estimate_message_tokens(&message.to_message()))
+                    .fold(0usize, usize::saturating_add);
+                Ok(ContextClosedRangePreview {
+                    requested: requested.selection.clone(),
+                    source_range,
+                    boundary_expansions: closed.expansions.clone(),
+                    source_tokens,
+                })
+            })
+            .collect::<Result<Vec<_>, ContextServiceError>>()?;
+        Ok(ContextRangeClosurePreview {
+            session_id: session_id.to_string(),
+            context_revision: context_view.revision,
+            transcript_digest,
+            ranges: previews,
+            shadowed_active_operations: resolved.shadowed_active_operations,
         })
     }
 
@@ -213,7 +480,12 @@ impl ContextTransactionService {
             created_at,
             expires_at,
         };
-        let capture = capture_context_draft(&guard, identity.clone(), request)?;
+        let capture = capture_context_draft(
+            guard.messages(),
+            guard.context_view_state(),
+            identity.clone(),
+            request,
+        )?;
         let route = if capture.ranges.is_empty() && capture.tools.is_empty() {
             None
         } else {
@@ -268,6 +540,96 @@ impl ContextTransactionService {
         Ok(draft_id)
     }
 
+    pub fn prepare_draft_for_session(
+        self: &Arc<Self>,
+        input: ContextDraftRuntimeInput,
+        request: ContextDraftRequest,
+        processing: bool,
+    ) -> Result<String, ContextServiceError> {
+        if processing {
+            return Err(ContextServiceError::SessionBusy);
+        }
+        if request.is_empty() {
+            return Err(ContextServiceError::EmptyRequest);
+        }
+        let draft_id = Uuid::new_v4().to_string();
+        let created_at = Utc::now();
+        let expires_at = created_at
+            + chrono::Duration::from_std(self.limits.ttl)
+                .unwrap_or_else(|_| chrono::Duration::minutes(30));
+        let identity = ContextDraftIdentity {
+            draft_id: draft_id.clone(),
+            session_id: input.session_id,
+            base_context_revision: input.context_view.revision,
+            raw_message_count: input.messages.len(),
+            transcript_digest: authoritative_transcript_digest(&input.messages),
+            provider_name: input.provider.name().to_string(),
+            model: input.provider.model(),
+            route: input.route,
+            created_at,
+            expires_at,
+        };
+        let capture = capture_context_draft(
+            &input.messages,
+            &input.context_view,
+            identity.clone(),
+            request,
+        )?;
+        let route = if capture.ranges.is_empty() && capture.tools.is_empty() {
+            None
+        } else {
+            Some(
+                resolve_context_curator_route(
+                    input.provider.fork(),
+                    &input.model_routes,
+                    &identity.route,
+                    &crate::config::config().context.curator,
+                )
+                .map_err(|error| ContextServiceError::Curator(error.to_string()))?,
+            )
+        };
+        let reserved_bytes = serde_json::to_vec(&capture)
+            .map(|bytes| bytes.len())
+            .unwrap_or(self.limits.max_total_bytes);
+        let cancellation = CancellationToken::new();
+        let notify = Arc::new(Notify::new());
+        let runtime = tokio::runtime::Handle::try_current().map_err(|error| {
+            ContextServiceError::Runtime(format!("no Tokio runtime is available: {error}"))
+        })?;
+        {
+            let mut store = self.lock_store();
+            store.insert_preparing(
+                ContextDraftEntry {
+                    identity: identity.clone(),
+                    progress: ContextDraftProgress {
+                        phase: ContextDraftPhase::Capturing,
+                        completed_items: 0,
+                        total_items: capture.ranges.len().saturating_add(capture.tools.len()),
+                    },
+                    state: DraftEntryState::Preparing,
+                    cancellation: cancellation.clone(),
+                    notify: Arc::clone(&notify),
+                    reserved_bytes,
+                    generation_in_flight: true,
+                },
+                self.limits,
+            )?;
+        }
+        let service = Arc::clone(self);
+        runtime.spawn(async move {
+            service
+                .prepare_draft_task_for_session(
+                    capture,
+                    route,
+                    input.provider,
+                    input.estimated_total_request_tokens_before,
+                    cancellation,
+                )
+                .await;
+        });
+        Ok(draft_id)
+    }
+
     pub fn draft_status(&self, draft_id: &str) -> Result<ContextDraftStatus, ContextServiceError> {
         let mut store = self.lock_store();
         store.expire_entries(Utc::now());
@@ -276,6 +638,90 @@ impl ContextTransactionService {
             .get(draft_id)
             .map(ContextDraftEntry::public_status)
             .ok_or_else(|| ContextServiceError::DraftNotFound(draft_id.to_string()))
+    }
+
+    pub fn preview_draft_selection(
+        &self,
+        agent: &Arc<AsyncMutex<Agent>>,
+        draft_id: &str,
+        selected_distillation_ids: Vec<String>,
+    ) -> Result<ContextDraftSelectionPreview, ContextServiceError> {
+        let agent = agent
+            .try_lock()
+            .map_err(|_| ContextServiceError::SessionBusy)?;
+        let draft = self.ready_draft_for_session(draft_id, agent.session_id())?;
+        validate_capture_identity(&agent, &draft.identity)?;
+        build_draft_selection_preview(
+            agent.provider_handle().as_ref(),
+            agent.messages(),
+            agent.context_view_state(),
+            agent.current_context_request_token_estimate(),
+            &draft,
+            selected_distillation_ids,
+        )
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "local preview revalidates every independent provider-context identity dimension"
+    )]
+    pub fn preview_draft_selection_for_session(
+        &self,
+        session_id: &str,
+        messages: &[StoredMessage],
+        context_view: &StoredContextViewState,
+        provider: &dyn Provider,
+        route: &str,
+        estimated_total_request_tokens_before: Option<usize>,
+        draft_id: &str,
+        selected_distillation_ids: Vec<String>,
+    ) -> Result<ContextDraftSelectionPreview, ContextServiceError> {
+        let draft = self.ready_draft_for_session(draft_id, session_id)?;
+        validate_capture_identity_parts(
+            session_id,
+            messages,
+            context_view,
+            provider,
+            route,
+            &draft.identity,
+        )?;
+        build_draft_selection_preview(
+            provider,
+            messages,
+            context_view,
+            estimated_total_request_tokens_before,
+            &draft,
+            selected_distillation_ids,
+        )
+    }
+
+    fn ready_draft_for_session(
+        &self,
+        draft_id: &str,
+        expected_session_id: &str,
+    ) -> Result<ContextDraft, ContextServiceError> {
+        let mut store = self.lock_store();
+        store.expire_entries(Utc::now());
+        let entry = store
+            .entries
+            .get(draft_id)
+            .ok_or_else(|| ContextServiceError::DraftNotFound(draft_id.to_string()))?;
+        if entry.identity.session_id != expected_session_id {
+            return Err(ContextServiceError::DraftNotFound(draft_id.to_string()));
+        }
+        match &entry.state {
+            DraftEntryState::Ready(draft) => Ok(draft.clone()),
+            DraftEntryState::Applied { .. } => Err(ContextServiceError::DraftAlreadyApplied(
+                draft_id.to_string(),
+            )),
+            DraftEntryState::Canceled => {
+                Err(ContextServiceError::DraftCanceled(draft_id.to_string()))
+            }
+            DraftEntryState::Expired => {
+                Err(ContextServiceError::DraftExpired(draft_id.to_string()))
+            }
+            _ => Err(ContextServiceError::DraftNotReady(draft_id.to_string())),
+        }
     }
 
     pub fn cancel_draft(&self, draft_id: &str) -> Result<(), ContextServiceError> {
@@ -446,8 +892,79 @@ impl ContextTransactionService {
             self.finish_failed(&draft_id, error);
             return;
         }
-        let draft = build_ready_draft(&guard, capture, route, artifacts);
+        let provider = guard.provider_handle();
+        let estimated_total_request_tokens_before = guard.current_context_request_token_estimate();
+        let draft = build_ready_draft(
+            provider.as_ref(),
+            estimated_total_request_tokens_before,
+            capture,
+            route,
+            artifacts,
+        );
         drop(guard);
+        match draft {
+            Ok(draft) => self.finish_ready(draft),
+            Err(error) => self.finish_failed(&error.draft_id, error.error),
+        }
+    }
+
+    async fn prepare_draft_task_for_session(
+        self: Arc<Self>,
+        capture: CapturedContextDraft,
+        route: Option<ContextCuratorRoute>,
+        provider: Arc<dyn Provider>,
+        estimated_total_request_tokens_before: Option<usize>,
+        cancellation: CancellationToken,
+    ) {
+        let draft_id = capture.identity.draft_id.clone();
+        self.update_progress(
+            &draft_id,
+            ContextDraftPhase::PreparingArtifacts,
+            0,
+            capture.ranges.len().saturating_add(capture.tools.len()),
+        );
+        let artifacts = match route.as_ref() {
+            Some(route) => {
+                run_context_curator(
+                    route,
+                    &capture.messages,
+                    &capture.ranges,
+                    &capture.tools,
+                    &capture.active_summary_texts,
+                    &cancellation,
+                    self.limits.curator,
+                )
+                .await
+            }
+            None => Ok(ContextCuratorArtifacts::default()),
+        };
+        let artifacts = match artifacts {
+            Ok(artifacts) => artifacts,
+            Err(error) => {
+                drop(capture);
+                self.finish_failed(&draft_id, ContextServiceError::Curator(error.to_string()));
+                return;
+            }
+        };
+        if cancellation.is_cancelled() {
+            drop(artifacts);
+            drop(capture);
+            self.finish_canceled(&draft_id);
+            return;
+        }
+        self.update_progress(
+            &draft_id,
+            ContextDraftPhase::ValidatingProjection,
+            capture.ranges.len().saturating_add(capture.tools.len()),
+            capture.ranges.len().saturating_add(capture.tools.len()),
+        );
+        let draft = build_ready_draft(
+            provider.as_ref(),
+            estimated_total_request_tokens_before,
+            capture,
+            route,
+            artifacts,
+        );
         match draft {
             Ok(draft) => self.finish_ready(draft),
             Err(error) => self.finish_failed(&error.draft_id, error.error),
@@ -573,6 +1090,18 @@ pub(crate) struct CapturedRange {
     source_token_estimate: usize,
 }
 
+struct ResolvedSummaryRanges {
+    requested_ranges: Vec<ResolvedRequestedSummaryRange>,
+    closed_ranges: Vec<jcode_context_core::ClosedMessageRange>,
+    shadowed_active_operations: Vec<String>,
+}
+
+struct ResolvedRequestedSummaryRange {
+    selection: ContextMessageRangeSelection,
+    start: usize,
+    end: usize,
+}
+
 #[derive(Serialize)]
 struct CapturedContextDraft {
     identity: ContextDraftIdentity,
@@ -588,45 +1117,19 @@ struct CapturedContextDraft {
 }
 
 fn capture_context_draft(
-    agent: &Agent,
+    messages: &[StoredMessage],
+    context_view: &StoredContextViewState,
     identity: ContextDraftIdentity,
     request: ContextDraftRequest,
 ) -> Result<CapturedContextDraft, ContextServiceError> {
-    let messages = agent.messages().to_vec();
-    let base_context_view = agent.context_view_state().clone();
+    let messages = messages.to_vec();
+    let base_context_view = context_view.clone();
     validate_context_state(&base_context_view)
         .map_err(|error| ContextServiceError::Projection(error.to_string()))?;
     let message_indices = unique_message_indices(&messages)?;
-    let requested_ranges = request
-        .summary_ranges
-        .iter()
-        .map(|range| {
-            Ok((
-                *message_indices
-                    .get(&range.start_message_id)
-                    .ok_or_else(|| {
-                        ContextServiceError::InvalidSelection(format!(
-                            "range start message not found: {}",
-                            range.start_message_id
-                        ))
-                    })?,
-                *message_indices.get(&range.end_message_id).ok_or_else(|| {
-                    ContextServiceError::InvalidSelection(format!(
-                        "range end message not found: {}",
-                        range.end_message_id
-                    ))
-                })?,
-            ))
-        })
-        .collect::<Result<Vec<_>, ContextServiceError>>()?;
-    let closed_ranges = if requested_ranges.is_empty() {
-        Vec::new()
-    } else {
-        close_message_ranges(&messages, &base_context_view, &requested_ranges)
-            .map_err(|error| ContextServiceError::Conflict(error.to_string()))?
-    };
-    reject_active_summary_overlap(&messages, &base_context_view, &closed_ranges)?;
-    let shadowed = active_block_operations_shadowed(&messages, &base_context_view, &closed_ranges)?;
+    let resolved = resolve_summary_ranges(&messages, &base_context_view, &request.summary_ranges)?;
+    let closed_ranges = resolved.closed_ranges;
+    let shadowed = resolved.shadowed_active_operations;
     if !shadowed.is_empty() && !request.allow_shadowing_active_operations {
         return Err(ContextServiceError::Conflict(format!(
             "selected summaries would shadow active operations: {}",
@@ -807,6 +1310,54 @@ fn capture_context_draft(
     })
 }
 
+fn resolve_summary_ranges(
+    messages: &[StoredMessage],
+    state: &StoredContextViewState,
+    ranges: &[ContextMessageRangeSelection],
+) -> Result<ResolvedSummaryRanges, ContextServiceError> {
+    let message_indices = unique_message_indices(messages)?;
+    let requested_ranges = ranges
+        .iter()
+        .map(|range| {
+            Ok(ResolvedRequestedSummaryRange {
+                start: *message_indices
+                    .get(&range.start_message_id)
+                    .ok_or_else(|| {
+                        ContextServiceError::InvalidSelection(format!(
+                            "range start message not found: {}",
+                            range.start_message_id
+                        ))
+                    })?,
+                end: *message_indices.get(&range.end_message_id).ok_or_else(|| {
+                    ContextServiceError::InvalidSelection(format!(
+                        "range end message not found: {}",
+                        range.end_message_id
+                    ))
+                })?,
+                selection: range.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, ContextServiceError>>()?;
+    let closed_ranges = if requested_ranges.is_empty() {
+        Vec::new()
+    } else {
+        let requested_indices = requested_ranges
+            .iter()
+            .map(|range| (range.start, range.end))
+            .collect::<Vec<_>>();
+        close_message_ranges(messages, state, &requested_indices)
+            .map_err(|error| ContextServiceError::Conflict(error.to_string()))?
+    };
+    reject_active_summary_overlap(messages, state, &closed_ranges)?;
+    let shadowed_active_operations =
+        active_block_operations_shadowed(messages, state, &closed_ranges)?;
+    Ok(ResolvedSummaryRanges {
+        requested_ranges,
+        closed_ranges,
+        shadowed_active_operations,
+    })
+}
+
 fn unique_message_indices(
     messages: &[StoredMessage],
 ) -> Result<HashMap<String, usize>, ContextServiceError> {
@@ -953,18 +1504,26 @@ struct DraftBuildFailure {
 }
 
 fn build_ready_draft(
-    agent: &Agent,
+    provider: &dyn Provider,
+    estimated_total_request_tokens_before: Option<usize>,
     capture: CapturedContextDraft,
     route: Option<ContextCuratorRoute>,
     artifacts: ContextCuratorArtifacts,
 ) -> Result<ContextDraft, DraftBuildFailure> {
     let draft_id = capture.identity.draft_id.clone();
-    build_ready_draft_inner(agent, capture, route, artifacts)
-        .map_err(|error| DraftBuildFailure { draft_id, error })
+    build_ready_draft_inner(
+        provider,
+        estimated_total_request_tokens_before,
+        capture,
+        route,
+        artifacts,
+    )
+    .map_err(|error| DraftBuildFailure { draft_id, error })
 }
 
 fn build_ready_draft_inner(
-    agent: &Agent,
+    provider: &dyn Provider,
+    estimated_total_request_tokens_before: Option<usize>,
     capture: CapturedContextDraft,
     route: Option<ContextCuratorRoute>,
     artifacts: ContextCuratorArtifacts,
@@ -1094,7 +1653,6 @@ fn build_ready_draft_inner(
         &mut operations,
     )?;
     copy_filled_range_estimates(&operations, &mut required_operations);
-    let provider = agent.provider_handle();
     let pricing = crate::provider::pricing::context_pricing_snapshot(
         &provider.model(),
         &provider.display_name(),
@@ -1102,7 +1660,7 @@ fn build_ready_draft_inner(
         jcode_session_types::StoredContextCacheWarmth::Unknown,
     );
     let preview = build_preview(ContextDraftPreviewInput {
-        provider: provider.as_ref(),
+        provider,
         messages: &capture.messages,
         base_state: &capture.base_context_view,
         transaction_id: &capture.identity.draft_id,
@@ -1110,7 +1668,7 @@ fn build_ready_draft_inner(
         authorization: capture.authorization.clone(),
         operations: &operations,
         pricing: Some(&pricing),
-        estimated_total_request_tokens_before: agent.current_context_request_token_estimate(),
+        estimated_total_request_tokens_before,
         notices: capture.notices,
         ranges: &capture.range_metadata,
         proposals: &proposals,
@@ -1316,6 +1874,73 @@ pub(crate) fn build_preview(
     })
 }
 
+fn build_draft_selection_preview(
+    provider: &dyn crate::provider::Provider,
+    messages: &[StoredMessage],
+    base_state: &StoredContextViewState,
+    estimated_total_request_tokens_before: Option<usize>,
+    draft: &ContextDraft,
+    selected_distillation_ids: Vec<String>,
+) -> Result<ContextDraftSelectionPreview, ContextServiceError> {
+    let selected_operations =
+        selected_distillation_operations(draft, Some(&selected_distillation_ids))?;
+    let mut operations = draft.required_operations.clone();
+    operations.extend(selected_operations);
+    let proposed_revision = base_state
+        .revision
+        .checked_add(1)
+        .ok_or(ContextServiceError::RevisionOverflow)?;
+    let before = project_context(messages, base_state)
+        .map_err(|error| ContextServiceError::Projection(error.to_string()))?;
+    let proposed_state = state_with_transaction(
+        base_state,
+        &draft.identity.draft_id,
+        proposed_revision,
+        draft.authorization.clone(),
+        operations,
+        None,
+        Vec::new(),
+    );
+    validate_context_state(&proposed_state)
+        .map_err(|error| ContextServiceError::Projection(error.to_string()))?;
+    let after = project_context(messages, &proposed_state)
+        .map_err(|error| ContextServiceError::Projection(error.to_string()))?;
+    let validation_operations = projection_validation_operations(&proposed_state);
+    let validation =
+        require_supported_projected_messages(provider, &after.messages, &validation_operations)
+            .map_err(|error| ContextServiceError::ProviderValidation(error.to_string()))?;
+    let analysis = analyze_cache_prefix(&before.messages, &after.messages);
+    let estimated_total_request_tokens_after = estimated_total_request_tokens_before
+        .and_then(|total| total.checked_sub(analysis.old_total_tokens))
+        .map(|non_message_tokens| non_message_tokens.saturating_add(analysis.new_total_tokens));
+    let pricing = crate::provider::pricing::context_pricing_snapshot(
+        &provider.model(),
+        &provider.display_name(),
+        &draft.identity.route,
+        jcode_session_types::StoredContextCacheWarmth::Unknown,
+    );
+    let economics = calculate_context_economics(ContextEconomicsInput {
+        analysis: &analysis,
+        estimated_total_request_tokens_before,
+        estimated_total_request_tokens_after,
+        context_window: Some(provider.context_window()),
+        safe_input_budget: None,
+        pricing: Some(&pricing),
+        resulting_suffix_cacheable: after.diagnostics.projected_provider_token_estimate >= 1_024,
+    });
+    let mut preview = draft.preview.clone();
+    preview.current_context_revision = base_state.revision;
+    preview.proposed_context_revision = proposed_revision;
+    preview.economics = economics;
+    preview.formatter_placeholder_count = validation.formatter_placeholder_count;
+    preview.validation = validation;
+    Ok(ContextDraftSelectionPreview {
+        draft_id: draft.identity.draft_id.clone(),
+        selected_distillation_ids,
+        preview,
+    })
+}
+
 pub(crate) fn state_with_transaction(
     base_state: &StoredContextViewState,
     transaction_id: &str,
@@ -1403,29 +2028,46 @@ pub(crate) fn validate_capture_identity(
     agent: &Agent,
     identity: &ContextDraftIdentity,
 ) -> Result<(), ContextServiceError> {
-    if agent.session_id() != identity.session_id {
+    let provider = agent.provider_handle();
+    validate_capture_identity_parts(
+        agent.session_id(),
+        agent.messages(),
+        agent.context_view_state(),
+        provider.as_ref(),
+        &agent.context_route_identity(),
+        identity,
+    )
+}
+
+pub(crate) fn validate_capture_identity_parts(
+    session_id: &str,
+    messages: &[StoredMessage],
+    context_view: &StoredContextViewState,
+    provider: &dyn Provider,
+    route: &str,
+    identity: &ContextDraftIdentity,
+) -> Result<(), ContextServiceError> {
+    if session_id != identity.session_id {
         return Err(ContextServiceError::Stale("session ID changed".to_string()));
     }
-    if agent.context_view_state().revision != identity.base_context_revision {
+    if context_view.revision != identity.base_context_revision {
         return Err(ContextServiceError::Stale(format!(
             "context revision changed from {} to {}",
-            identity.base_context_revision,
-            agent.context_view_state().revision
+            identity.base_context_revision, context_view.revision
         )));
     }
-    if agent.messages().len() != identity.raw_message_count {
+    if messages.len() != identity.raw_message_count {
         return Err(ContextServiceError::Stale(format!(
             "raw message count changed from {} to {}",
             identity.raw_message_count,
-            agent.messages().len()
+            messages.len()
         )));
     }
-    if authoritative_transcript_digest(agent.messages()) != identity.transcript_digest {
+    if authoritative_transcript_digest(messages) != identity.transcript_digest {
         return Err(ContextServiceError::Stale(
             "authoritative transcript digest changed".to_string(),
         ));
     }
-    let provider = agent.provider_handle();
     if provider.name() != identity.provider_name {
         return Err(ContextServiceError::Stale(format!(
             "provider changed from {} to {}",
@@ -1440,11 +2082,10 @@ pub(crate) fn validate_capture_identity(
             provider.model()
         )));
     }
-    if agent.context_route_identity() != identity.route {
+    if route != identity.route {
         return Err(ContextServiceError::Stale(format!(
             "route changed from {} to {}",
-            identity.route,
-            agent.context_route_identity()
+            identity.route, route
         )));
     }
     Ok(())
@@ -2217,7 +2858,7 @@ mod orchestration_tests {
     use crate::provider::{
         ContextProjectionValidationOperation, ContextProjectionValidationReport,
         ContextProviderFamily, ContextProviderValidationIdentity, ContextReasoningBlockKind,
-        ContextRequestBuilderValidation, EventStream, Provider,
+        ContextRequestBuilderValidation, EventStream, Provider, RouteSelection,
         context_projection_validation_report,
     };
     use crate::session::Session;
@@ -2247,7 +2888,6 @@ mod orchestration_tests {
     struct DraftProviderState {
         live_calls: Mutex<Vec<RecordedProviderCall>>,
         curator_calls: Mutex<Vec<RecordedProviderCall>>,
-        model: Mutex<String>,
         changed_name: AtomicBool,
         gate_curator: AtomicBool,
         curator_started: Semaphore,
@@ -2261,7 +2901,6 @@ mod orchestration_tests {
             Self {
                 live_calls: Mutex::new(Vec::new()),
                 curator_calls: Mutex::new(Vec::new()),
-                model: Mutex::new("draft-model".to_string()),
                 changed_name: AtomicBool::new(false),
                 gate_curator: AtomicBool::new(false),
                 curator_started: Semaphore::new(0),
@@ -2276,6 +2915,10 @@ mod orchestration_tests {
     struct DraftProvider {
         state: Arc<DraftProviderState>,
         instance: ProviderInstance,
+        model: Arc<Mutex<String>>,
+        model_routes: Arc<Mutex<Vec<ModelRoute>>>,
+        effort: Arc<Mutex<Option<String>>>,
+        empty_identity: Arc<AtomicBool>,
     }
 
     impl DraftProvider {
@@ -2283,6 +2926,10 @@ mod orchestration_tests {
             Self {
                 state: Arc::new(DraftProviderState::new()),
                 instance: ProviderInstance::Live,
+                model: Arc::new(Mutex::new("draft-model".to_string())),
+                model_routes: Arc::new(Mutex::new(Vec::new())),
+                effort: Arc::new(Mutex::new(None)),
+                empty_identity: Arc::new(AtomicBool::new(false)),
             }
         }
 
@@ -2309,10 +2956,20 @@ mod orchestration_tests {
 
         fn set_test_model(&self, model: &str) {
             *self
-                .state
                 .model
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = model.to_string();
+        }
+
+        fn set_model_routes(&self, routes: Vec<ModelRoute>) {
+            *self
+                .model_routes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = routes;
+        }
+
+        fn set_empty_identity(&self, empty: bool) {
+            self.empty_identity.store(empty, Ordering::SeqCst);
         }
 
         fn cancel_after_generation_before_ready(
@@ -2412,7 +3069,9 @@ mod orchestration_tests {
         }
 
         fn name(&self) -> &str {
-            if self.state.changed_name.load(Ordering::SeqCst) {
+            if self.empty_identity.load(Ordering::SeqCst) {
+                ""
+            } else if self.state.changed_name.load(Ordering::SeqCst) {
                 "draft-provider-changed"
             } else {
                 "draft-provider"
@@ -2424,8 +3083,10 @@ mod orchestration_tests {
         }
 
         fn model(&self) -> String {
-            self.state
-                .model
+            if self.empty_identity.load(Ordering::SeqCst) {
+                return String::new();
+            }
+            self.model
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .clone()
@@ -2433,6 +3094,26 @@ mod orchestration_tests {
 
         fn set_model(&self, model: &str) -> Result<()> {
             self.set_test_model(model);
+            Ok(())
+        }
+
+        fn set_route_selection(&self, selection: &RouteSelection) -> Result<()> {
+            self.set_test_model(&selection.model);
+            Ok(())
+        }
+
+        fn model_routes(&self) -> Vec<ModelRoute> {
+            self.model_routes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        }
+
+        fn set_reasoning_effort(&self, effort: &str) -> Result<()> {
+            *self
+                .effort
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(effort.to_string());
             Ok(())
         }
 
@@ -2479,6 +3160,17 @@ mod orchestration_tests {
             Arc::new(Self {
                 state: Arc::clone(&self.state),
                 instance: ProviderInstance::CuratorFork,
+                model: Arc::new(Mutex::new(self.model())),
+                model_routes: Arc::new(Mutex::new(self.model_routes())),
+                effort: Arc::new(Mutex::new(
+                    self.effort
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .clone(),
+                )),
+                empty_identity: Arc::new(AtomicBool::new(
+                    self.empty_identity.load(Ordering::SeqCst),
+                )),
             })
         }
     }
@@ -2645,6 +3337,194 @@ mod orchestration_tests {
         .expect("draft generation reservation released");
     }
 
+    fn curator_model_route(model: &str, provider: &str, api_method: &str) -> ModelRoute {
+        ModelRoute {
+            model: model.to_string(),
+            provider: provider.to_string(),
+            api_method: api_method.to_string(),
+            available: true,
+            detail: "curator preview test route".to_string(),
+            cheapness: None,
+        }
+    }
+
+    #[test]
+    fn context_editor_snapshot_resolves_default_and_explicit_curator_routes_independently() {
+        let service = ContextTransactionService::new();
+        let provider = DraftProvider::new();
+        let session = test_session();
+
+        let default_snapshot = service
+            .context_editor_snapshot_for_session_with_curator_config(
+                &session.id,
+                &session.messages,
+                &session.context_view,
+                false,
+                &provider,
+                "active-route",
+                Some(12_345),
+                &crate::config::ContextCuratorConfig::default(),
+            )
+            .expect("default curator preview");
+        let default_route = default_snapshot
+            .curator_route
+            .expect("default independent fork route");
+        assert_eq!(default_route.provider_name, "draft-provider");
+        assert_eq!(default_route.provider_display_name, "Draft Provider");
+        assert_eq!(default_route.model, "draft-model");
+        assert_eq!(default_route.route, "active-route");
+        assert_eq!(default_route.effort, None);
+        assert_eq!(default_snapshot.projected_request_tokens, 12_345);
+        assert_eq!(default_snapshot.curator_unavailable_reason, None);
+
+        provider.set_model_routes(vec![curator_model_route(
+            "selected-curator-model",
+            "curator-upstream",
+            "curator-api",
+        )]);
+        let live_model_before = provider.model();
+        let explicit_snapshot = service
+            .context_editor_snapshot_for_session_with_curator_config(
+                &session.id,
+                &session.messages,
+                &session.context_view,
+                false,
+                &provider,
+                "active-route",
+                None,
+                &crate::config::ContextCuratorConfig {
+                    provider: Some("curator-upstream".to_string()),
+                    model: Some("selected-curator-model".to_string()),
+                    effort: Some("high".to_string()),
+                },
+            )
+            .expect("explicit curator preview");
+        let explicit_route = explicit_snapshot
+            .curator_route
+            .expect("explicit independent route");
+        assert_eq!(explicit_route.provider_name, "draft-provider");
+        assert_eq!(explicit_route.model, "selected-curator-model");
+        assert_eq!(explicit_route.route, "curator-api");
+        assert_eq!(explicit_route.effort.as_deref(), Some("high"));
+        assert_eq!(explicit_snapshot.curator_unavailable_reason, None);
+        assert_eq!(provider.model(), live_model_before);
+        assert_eq!(
+            provider
+                .effort
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_deref(),
+            None,
+            "curator selection must not mutate the live provider"
+        );
+    }
+
+    #[test]
+    fn context_editor_snapshot_reports_bounded_unavailable_ambiguous_and_unstable_routes() {
+        let service = ContextTransactionService::new();
+        let provider = DraftProvider::new();
+        let session = test_session();
+
+        let unavailable = service
+            .context_editor_snapshot_for_session_with_curator_config(
+                &session.id,
+                &session.messages,
+                &session.context_view,
+                false,
+                &provider,
+                "active-route",
+                None,
+                &crate::config::ContextCuratorConfig {
+                    provider: Some("missing-provider".to_string()),
+                    model: Some("missing-model".to_string()),
+                    effort: None,
+                },
+            )
+            .expect("unavailable route remains a usable snapshot");
+        assert_eq!(unavailable.curator_route, None);
+        assert!(
+            unavailable
+                .curator_unavailable_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("no available route matches"))
+        );
+
+        provider.set_model_routes(vec![
+            curator_model_route("same-model", "same-provider", "route-a"),
+            curator_model_route("same-model", "same-provider", "route-b"),
+        ]);
+        let ambiguous = service
+            .context_editor_snapshot_for_session_with_curator_config(
+                &session.id,
+                &session.messages,
+                &session.context_view,
+                false,
+                &provider,
+                "active-route",
+                None,
+                &crate::config::ContextCuratorConfig {
+                    provider: Some("same-provider".to_string()),
+                    model: Some("same-model".to_string()),
+                    effort: None,
+                },
+            )
+            .expect("ambiguous route remains a usable snapshot");
+        assert_eq!(ambiguous.curator_route, None);
+        assert!(
+            ambiguous
+                .curator_unavailable_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("ambiguous"))
+        );
+
+        provider.set_empty_identity(true);
+        let unstable = service
+            .context_editor_snapshot_for_session_with_curator_config(
+                &session.id,
+                &session.messages,
+                &session.context_view,
+                false,
+                &provider,
+                "active-route",
+                None,
+                &crate::config::ContextCuratorConfig::default(),
+            )
+            .expect("unstable route identity remains a usable snapshot");
+        assert_eq!(unstable.curator_route, None);
+        assert!(
+            unstable
+                .curator_unavailable_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("stable provider and model identity"))
+        );
+
+        provider.set_empty_identity(false);
+        provider.set_model_routes(Vec::new());
+        let long_selector = "🙂".repeat(CONTEXT_IDENTIFIER_MAX_CHARS * 2);
+        let bounded = service
+            .context_editor_snapshot_for_session_with_curator_config(
+                &session.id,
+                &session.messages,
+                &session.context_view,
+                false,
+                &provider,
+                "active-route",
+                None,
+                &crate::config::ContextCuratorConfig {
+                    provider: Some(long_selector),
+                    model: Some("missing-model".to_string()),
+                    effort: None,
+                },
+            )
+            .expect("long resolver error remains bounded");
+        let reason = bounded
+            .curator_unavailable_reason
+            .expect("bounded unavailable reason");
+        assert_eq!(reason.chars().count(), CONTEXT_IDENTIFIER_MAX_CHARS);
+        assert!(reason.ends_with('…'));
+        assert!(!reason.contains(RAW_RESULT_SENTINEL));
+    }
+
     #[tokio::test]
     async fn preparing_entry_reserves_only_the_owned_capture_bytes() {
         let provider = DraftProvider::new();
@@ -2669,8 +3549,13 @@ mod orchestration_tests {
         };
         let expected_capture_bytes = {
             let guard = agent.lock().await;
-            let capture = capture_context_draft(&guard, identity, draft_request)
-                .expect("rebuild deterministic captured task state");
+            let capture = capture_context_draft(
+                guard.messages(),
+                guard.context_view_state(),
+                identity,
+                draft_request,
+            )
+            .expect("rebuild deterministic captured task state");
             serde_json::to_vec(&capture)
                 .expect("serialize captured task state")
                 .len()
@@ -2964,7 +3849,8 @@ mod orchestration_tests {
             end_message_id: "reasoning-message".to_string(),
         };
         let capture = capture_context_draft(
-            &agent,
+            agent.messages(),
+            agent.context_view_state(),
             identity,
             ContextDraftRequest {
                 summary_ranges: vec![range.clone()],

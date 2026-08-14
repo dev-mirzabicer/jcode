@@ -2629,6 +2629,18 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     // natively in all terminal emulators.
     clear_area(frame, area);
 
+    if let Some(editor_cell) = app.context_editor_overlay() {
+        editor_cell.borrow_mut().render(frame);
+        finalize_frame_metrics(
+            app,
+            total_start,
+            Duration::ZERO,
+            total_start.elapsed(),
+            None,
+        );
+        return;
+    }
+
     if let Some(scroll) = app.changelog_scroll() {
         overlays::draw_changelog_overlay(frame, area, scroll, app);
         finalize_frame_metrics(

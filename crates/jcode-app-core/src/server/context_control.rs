@@ -6,8 +6,8 @@ use crate::protocol::{
     CONTEXT_MAX_TOOL_RESULT_SELECTIONS, CONTEXT_MESSAGE_DETAIL_DEFAULT_MAX_CHARS,
     CONTEXT_MESSAGE_DETAIL_MAX_CHARS, CONTEXT_PROTOCOL_MAX_EVENT_BYTES,
     CONTEXT_SNAPSHOT_DEFAULT_PAGE_SIZE, CONTEXT_SNAPSHOT_MAX_PAGE_SIZE, ContextDraftRequest,
-    ContextDraftStatus, ContextReasoningSelectionRequest, ContextRequestKind, ContextServiceError,
-    ServerEvent,
+    ContextDraftStatus, ContextMessageRangeSelection, ContextReasoningSelectionRequest,
+    ContextRequestKind, ContextServiceError, ContextTransactionDetail, ServerEvent,
 };
 use jcode_session_types::{StoredContextAuthorization, StoredContextEmergencyPolicy};
 use std::sync::Arc;
@@ -88,6 +88,49 @@ pub(super) fn handle_get_context_message_detail(
         result,
         id,
         ContextRequestKind::MessageDetail,
+        None,
+        None,
+    );
+}
+
+pub(super) fn handle_preview_context_ranges(
+    id: u64,
+    expected_context_revision: u64,
+    expected_transcript_digest: u64,
+    ranges: Vec<ContextMessageRangeSelection>,
+    agent: &Arc<Mutex<Agent>>,
+    service: &Arc<ContextTransactionService>,
+    event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    let result = (|| {
+        if ranges.is_empty() || ranges.len() > CONTEXT_MAX_SUMMARY_RANGES {
+            return Err(ContextServiceError::InvalidSelection(format!(
+                "summary range count must be between 1 and {CONTEXT_MAX_SUMMARY_RANGES}"
+            )));
+        }
+        for range in &ranges {
+            validate_identifier(&range.start_message_id, "range start message ID")?;
+            validate_identifier(&range.end_message_id, "range end message ID")?;
+        }
+        let agent = agent
+            .try_lock()
+            .map_err(|_| ContextServiceError::SessionBusy)?;
+        service
+            .preview_context_ranges(
+                agent.session_id(),
+                agent.messages(),
+                agent.context_view_state(),
+                expected_context_revision,
+                expected_transcript_digest,
+                &ranges,
+            )
+            .map(|preview| ServerEvent::ContextRangeClosurePreview { id, preview })
+    })();
+    emit_result(
+        event_tx,
+        result,
+        id,
+        ContextRequestKind::RangeClosurePreview,
         None,
         None,
     );
@@ -176,6 +219,28 @@ pub(super) fn handle_get_context_draft_status(
     );
 }
 
+pub(super) fn handle_preview_context_draft_selection(
+    id: u64,
+    draft_id: String,
+    selected_distillation_ids: Vec<String>,
+    agent: &Arc<Mutex<Agent>>,
+    service: &Arc<ContextTransactionService>,
+    event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    let result = validate_identifier(&draft_id, "draft ID")
+        .and_then(|()| validate_distillation_ids(Some(&selected_distillation_ids)))
+        .and_then(|()| service.preview_draft_selection(agent, &draft_id, selected_distillation_ids))
+        .map(|preview| ServerEvent::ContextDraftSelectionPreview { id, preview });
+    emit_result(
+        event_tx,
+        result,
+        id,
+        ContextRequestKind::DraftSelectionPreview,
+        Some(draft_id),
+        None,
+    );
+}
+
 pub(super) fn handle_apply_context_draft(
     id: u64,
     draft_id: String,
@@ -256,6 +321,50 @@ pub(super) fn handle_list_context_transactions(
         ContextRequestKind::TransactionHistory,
         None,
         None,
+    );
+}
+
+pub(super) fn handle_get_context_transaction_detail(
+    id: u64,
+    expected_context_revision: u64,
+    transaction_id: String,
+    agent: &Arc<Mutex<Agent>>,
+    event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    let result = (|| {
+        validate_identifier(&transaction_id, "transaction ID")?;
+        let agent = agent
+            .try_lock()
+            .map_err(|_| ContextServiceError::SessionBusy)?;
+        let state = agent.context_view_state();
+        if state.revision != expected_context_revision {
+            return Err(ContextServiceError::Stale(format!(
+                "context revision changed from {expected_context_revision} to {}",
+                state.revision
+            )));
+        }
+        let transaction = state
+            .transactions
+            .iter()
+            .find(|transaction| transaction.id == transaction_id)
+            .cloned()
+            .ok_or_else(|| ContextServiceError::TransactionNotFound(transaction_id.clone()))?;
+        Ok(ServerEvent::ContextTransactionDetail {
+            id,
+            detail: Box::new(ContextTransactionDetail {
+                session_id: agent.session_id().to_string(),
+                context_revision: state.revision,
+                transaction,
+            }),
+        })
+    })();
+    emit_result(
+        event_tx,
+        result,
+        id,
+        ContextRequestKind::TransactionDetail,
+        None,
+        Some(transaction_id),
     );
 }
 

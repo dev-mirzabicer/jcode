@@ -289,6 +289,11 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
 
+    if app.handle_context_editor_key(code, modifiers) {
+        app.dispatch_remote_context_editor_actions(remote).await;
+        return Ok(());
+    }
+
     if app.prompt_history_search.is_some() {
         app.handle_prompt_history_search_key(code, modifiers);
         return Ok(());
@@ -2042,35 +2047,12 @@ async fn handle_remote_key_internal(
                     return Ok(());
                 }
 
-                if trimmed == "/compact" {
-                    app.push_display_message(DisplayMessage::system(
-                        "Requesting compaction...".to_string(),
-                    ));
-                    remote.compact().await?;
+                if trimmed == "/context" {
+                    let _ = app_mod::state_ui::handle_info_command(app, trimmed);
                     return Ok(());
                 }
 
-                if trimmed == "/compact mode" || trimmed == "/compact mode status" {
-                    let mode = app
-                        .remote_compaction_mode
-                        .clone()
-                        .unwrap_or(crate::config::CompactionMode::Reactive);
-                    app.push_display_message(DisplayMessage::system(format!(
-                        "Compaction mode: {}\nAvailable: reactive, proactive, semantic\nUse /compact mode <mode> to change it for this session.",
-                        mode.as_str()
-                    )));
-                    return Ok(());
-                }
-
-                if let Some(mode_str) = trimmed.strip_prefix("/compact mode ") {
-                    let mode_str = mode_str.trim();
-                    let Some(mode) = crate::config::CompactionMode::parse(mode_str) else {
-                        app.push_display_message(DisplayMessage::error(
-                            "Usage: /compact mode <reactive|proactive|semantic>".to_string(),
-                        ));
-                        return Ok(());
-                    };
-                    remote.set_compaction_mode(mode).await?;
+                if app.handle_context_editor_command(trimmed) {
                     return Ok(());
                 }
 

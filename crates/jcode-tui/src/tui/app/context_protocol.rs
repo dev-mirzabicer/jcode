@@ -1,25 +1,32 @@
 use crate::protocol::{
     ContextActionRequiredReason, ContextDraft, ContextDraftIdentity, ContextDraftProgress,
-    ContextEditorSnapshot, ContextMessageDetail, ContextPendingInputMetadata, ContextRequestKind,
-    ContextServiceError, ContextTransactionResult, ContextTransactionSummary,
+    ContextDraftSelectionPreview, ContextEditorSnapshot, ContextMessageDetail,
+    ContextMessageRangeSelection, ContextPendingInputMetadata, ContextRangeClosurePreview,
+    ContextRequestKind, ContextServiceError, ContextTransactionDetail, ContextTransactionResult,
+    ContextTransactionSummary,
 };
 use jcode_session_types::StoredContextEmergencyPolicy;
 
-#[derive(Default)]
-pub(in crate::tui::app) struct ContextProtocolState {
+#[derive(Clone, Default)]
+pub(crate) struct ContextProtocolState {
     pub snapshot_request_id: Option<u64>,
     pub snapshot: Option<ContextEditorSnapshot>,
     detail_request: Option<ContextDetailRequest>,
     pub detail: Option<ContextMessageDetail>,
+    range_preview_request: Option<ContextRangePreviewRequest>,
+    pub range_preview: Option<ContextRangeClosurePreview>,
     pub draft_monitor_request_id: Option<u64>,
     draft_monitor_request_kind: Option<ContextRequestKind>,
     pub tracked_draft_id: Option<String>,
     pub draft: Option<ContextClientDraftState>,
-    pub history_request_id: Option<u64>,
+    selection_preview_request: Option<ContextSelectionPreviewRequest>,
+    pub selection_preview: Option<ContextDraftSelectionPreview>,
+    history_request: Option<ContextHistoryRequest>,
     pub history: Option<ContextTransactionHistoryPage>,
+    transaction_detail_request: Option<ContextTransactionDetailRequest>,
+    pub transaction_detail: Option<ContextTransactionDetail>,
     transaction_request: Option<ContextTransactionRequest>,
     pub transaction_result: Option<ContextTransactionOutcome>,
-    pub policy_request_id: Option<u64>,
     pub emergency_policy: Option<StoredContextEmergencyPolicy>,
     pub last_rejection: Option<ContextRequestRejection>,
     pub action_required: Option<ContextActionRequiredState>,
@@ -28,6 +35,7 @@ pub(in crate::tui::app) struct ContextProtocolState {
     pub accepted_transcript_digest: Option<u64>,
 }
 
+#[derive(Clone)]
 pub(in crate::tui::app) struct ContextDetailRequest {
     id: u64,
     session_id: String,
@@ -37,14 +45,38 @@ pub(in crate::tui::app) struct ContextDetailRequest {
     block_ordinal: usize,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Step 8 reduces every draft event into this complete review state; Step 9 renders the retained fields"
-    )
-)]
-pub(in crate::tui::app) enum ContextClientDraftState {
+#[derive(Clone)]
+struct ContextRangePreviewRequest {
+    id: u64,
+    session_id: String,
+    context_revision: u64,
+    transcript_digest: u64,
+    canonical_ranges: Vec<ContextMessageRangeSelection>,
+}
+
+#[derive(Clone)]
+struct ContextSelectionPreviewRequest {
+    id: u64,
+    draft_id: String,
+    selected_distillation_ids: Vec<String>,
+}
+
+#[derive(Clone)]
+struct ContextTransactionDetailRequest {
+    id: u64,
+    session_id: String,
+    context_revision: u64,
+    transaction_id: String,
+}
+
+#[derive(Clone)]
+struct ContextHistoryRequest {
+    id: u64,
+    session_id: String,
+}
+
+#[derive(Clone)]
+pub(crate) enum ContextClientDraftState {
     Progress {
         draft_id: String,
         progress: ContextDraftProgress,
@@ -71,14 +103,8 @@ impl ContextClientDraftState {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Step 8 retains the bounded history page; Step 9 renders and navigates its fields"
-    )
-)]
-pub(in crate::tui::app) struct ContextTransactionHistoryPage {
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ContextTransactionHistoryPage {
     pub context_revision: u64,
     pub total_transactions: usize,
     pub offset: usize,
@@ -86,20 +112,15 @@ pub(in crate::tui::app) struct ContextTransactionHistoryPage {
     pub transactions: Vec<ContextTransactionSummary>,
 }
 
+#[derive(Clone)]
 struct ContextTransactionRequest {
     id: u64,
     kind: ContextRequestKind,
     correlation_id: String,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Step 8 retains the correlated transaction outcome; Step 9 renders its review feedback"
-    )
-)]
-pub(in crate::tui::app) struct ContextTransactionOutcome {
+#[derive(Clone)]
+pub(crate) struct ContextTransactionOutcome {
     pub request_id: u64,
     pub request: ContextRequestKind,
     pub correlation_id: String,
@@ -113,7 +134,8 @@ pub(in crate::tui::app) struct ContextTransactionOutcome {
         reason = "Step 8 retains typed rejection metadata; Step 9 renders request-specific recovery copy"
     )
 )]
-pub(in crate::tui::app) struct ContextRequestRejection {
+#[derive(Clone)]
+pub(crate) struct ContextRequestRejection {
     pub request_id: u64,
     pub request: ContextRequestKind,
     pub draft_id: Option<String>,
@@ -128,7 +150,8 @@ pub(in crate::tui::app) struct ContextRequestRejection {
         reason = "Step 8 retains prompt-safe blocked metadata; Step 10 consumes it for composer restoration"
     )
 )]
-pub(in crate::tui::app) struct ContextActionRequiredState {
+#[derive(Clone)]
+pub(crate) struct ContextActionRequiredState {
     pub request_id: u64,
     pub session_id: String,
     pub context_revision: u64,
@@ -140,6 +163,152 @@ pub(in crate::tui::app) struct ContextActionRequiredState {
 }
 
 impl ContextProtocolState {
+    #[cfg(test)]
+    pub(crate) fn test_signature(&self) -> serde_json::Value {
+        let draft = self.draft.as_ref().map(|draft| match draft {
+            ContextClientDraftState::Progress { draft_id, progress } => serde_json::json!({
+                "state": "progress",
+                "draft_id": draft_id,
+                "phase": progress.phase,
+                "completed": progress.completed_items,
+                "total": progress.total_items,
+            }),
+            ContextClientDraftState::Ready(draft) => serde_json::json!({
+                "state": "ready",
+                "draft_id": draft.identity.draft_id,
+                "revision": draft.preview.proposed_context_revision,
+                "required_operations": draft.required_operations.len(),
+                "proposals": draft.distillation_proposals.len(),
+            }),
+            ContextClientDraftState::Applying(identity) => serde_json::json!({
+                "state": "applying",
+                "draft_id": identity.draft_id,
+            }),
+            ContextClientDraftState::Applied {
+                identity,
+                transaction_id,
+                revision,
+            } => serde_json::json!({
+                "state": "applied",
+                "draft_id": identity.draft_id,
+                "transaction_id": transaction_id,
+                "revision": revision,
+            }),
+            ContextClientDraftState::Failed {
+                identity,
+                error,
+                stale,
+            } => serde_json::json!({
+                "state": if *stale { "stale" } else { "failed" },
+                "draft_id": identity.draft_id,
+                "error_kind": format!("{:?}", std::mem::discriminant(error)),
+            }),
+            ContextClientDraftState::Canceled(identity) => serde_json::json!({
+                "state": "canceled",
+                "draft_id": identity.draft_id,
+            }),
+            ContextClientDraftState::Expired(identity) => serde_json::json!({
+                "state": "expired",
+                "draft_id": identity.draft_id,
+            }),
+        });
+        let policy = self.emergency_policy.as_ref().map(|policy| match policy {
+            StoredContextEmergencyPolicy::Block => serde_json::json!({ "mode": "block" }),
+            StoredContextEmergencyPolicy::Authorized {
+                protected_recent_assistant_turns,
+                target_headroom_percent,
+                allow_reasoning_suppression,
+                allow_tool_distillation,
+                allow_oldest_range_summary,
+                ..
+            } => serde_json::json!({
+                "mode": "authorized",
+                "protected_recent_assistant_turns": protected_recent_assistant_turns,
+                "target_headroom_percent": target_headroom_percent,
+                "allow_reasoning_suppression": allow_reasoning_suppression,
+                "allow_tool_distillation": allow_tool_distillation,
+                "allow_oldest_range_summary": allow_oldest_range_summary,
+            }),
+        });
+        serde_json::json!({
+            "snapshot_request_id": self.snapshot_request_id,
+            "snapshot": self.snapshot.as_ref().map(|snapshot| serde_json::json!({
+                "session_id": snapshot.session_id,
+                "context_revision": snapshot.context_revision,
+                "transcript_digest": snapshot.transcript_digest,
+                "page_start": snapshot.message_page_start,
+                "page_end": snapshot.message_page_end,
+                "next_page": snapshot.next_message_page_start,
+                "message_ids": snapshot.messages.iter().map(|message| message.message_id.as_str()).collect::<Vec<_>>(),
+            })),
+            "detail_request_id": self.detail_request.as_ref().map(|request| request.id),
+            "detail": self.detail.as_ref().map(|detail| serde_json::json!({
+                "message_id": detail.message_id,
+                "block_ordinal": detail.block_ordinal,
+                "start": detail.content.start_char,
+                "end": detail.content.end_char,
+                "total": detail.content.total_chars,
+            })),
+            "range_request_id": self.range_preview_request.as_ref().map(|request| request.id),
+            "range_preview": self.range_preview.as_ref().map(|preview| serde_json::json!({
+                "session_id": preview.session_id,
+                "context_revision": preview.context_revision,
+                "ranges": preview.ranges.len(),
+                "shadowed": preview.shadowed_active_operations.len(),
+            })),
+            "draft_monitor_request_id": self.draft_monitor_request_id,
+            "draft_monitor_request_kind": self.draft_monitor_request_kind,
+            "tracked_draft_id": self.tracked_draft_id,
+            "draft": draft,
+            "selection_request_id": self.selection_preview_request.as_ref().map(|request| request.id),
+            "selection_preview": self.selection_preview.as_ref().map(|preview| serde_json::json!({
+                "draft_id": preview.draft_id,
+                "selected": preview.selected_distillation_ids,
+                "revision": preview.preview.proposed_context_revision,
+            })),
+            "history_request_id": self.history_request.as_ref().map(|request| request.id),
+            "history": self.history.as_ref().map(|history| serde_json::json!({
+                "revision": history.context_revision,
+                "total": history.total_transactions,
+                "offset": history.offset,
+                "next": history.next_offset,
+                "ids": history.transactions.iter().map(|transaction| transaction.id.as_str()).collect::<Vec<_>>(),
+            })),
+            "transaction_detail_request_id": self.transaction_detail_request.as_ref().map(|request| request.id),
+            "transaction_detail": self.transaction_detail.as_ref().map(|detail| serde_json::json!({
+                "revision": detail.context_revision,
+                "transaction_id": detail.transaction.id,
+            })),
+            "transaction_request_id": self.transaction_request.as_ref().map(|request| request.id),
+            "transaction_result": self.transaction_result.as_ref().map(|outcome| serde_json::json!({
+                "request_id": outcome.request_id,
+                "request": outcome.request,
+                "correlation_id": outcome.correlation_id,
+                "revision": outcome.result.revision,
+                "transaction_id": outcome.result.transaction.id,
+            })),
+            "policy": policy,
+            "rejection": self.last_rejection.as_ref().map(|rejection| serde_json::json!({
+                "request_id": rejection.request_id,
+                "request": rejection.request,
+                "draft_id": rejection.draft_id,
+                "transaction_id": rejection.transaction_id,
+            })),
+            "action_required": self.action_required.as_ref().map(|required| serde_json::json!({
+                "request_id": required.request_id,
+                "session_id": required.session_id,
+                "context_revision": required.context_revision,
+                "reason": required.reason,
+                "required_reduction_tokens": required.required_reduction_tokens,
+                "detail_count": required.details.len(),
+                "automatic_retry": required.automatic_retry,
+            })),
+            "accepted_session_id": self.accepted_session_id,
+            "accepted_context_revision": self.accepted_context_revision,
+            "accepted_transcript_digest": self.accepted_transcript_digest,
+        })
+    }
+
     pub fn accept_history(&mut self, session_id: &str, context_revision: u64) {
         let session_changed = self.accepted_session_id.as_deref() != Some(session_id);
         if session_changed {
@@ -157,13 +326,6 @@ impl ContextProtocolState {
         self.accepted_transcript_digest = None;
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Step 9 editor transport records snapshot request correlation before dispatch"
-        )
-    )]
     pub fn begin_snapshot_request(&mut self, id: u64) {
         self.last_rejection = None;
         self.snapshot_request_id = Some(id);
@@ -191,13 +353,6 @@ impl ContextProtocolState {
         true
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Step 9 editor transport records exact lazy-detail identity before dispatch"
-        )
-    )]
     pub fn begin_detail_request(
         &mut self,
         id: u64,
@@ -239,13 +394,52 @@ impl ContextProtocolState {
         true
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Step 9 editor transport binds prepare progress to the initiating request"
-        )
-    )]
+    pub fn begin_range_preview_request(
+        &mut self,
+        id: u64,
+        session_id: String,
+        context_revision: u64,
+        transcript_digest: u64,
+        ranges: Vec<ContextMessageRangeSelection>,
+    ) {
+        self.last_rejection = None;
+        self.range_preview_request = Some(ContextRangePreviewRequest {
+            id,
+            session_id,
+            context_revision,
+            transcript_digest,
+            canonical_ranges: canonical_range_selections(ranges),
+        });
+        self.range_preview = None;
+    }
+
+    pub fn accept_range_preview(&mut self, id: u64, preview: ContextRangeClosurePreview) -> bool {
+        let Some(expected) = self.range_preview_request.as_ref() else {
+            return false;
+        };
+        let actual_ranges = canonical_range_selections(
+            preview
+                .ranges
+                .iter()
+                .map(|range| range.requested.clone())
+                .collect(),
+        );
+        if expected.id != id
+            || expected.session_id != preview.session_id
+            || expected.context_revision != preview.context_revision
+            || expected.transcript_digest != preview.transcript_digest
+            || expected.canonical_ranges != actual_ranges
+            || self.accepted_session_id.as_deref() != Some(preview.session_id.as_str())
+            || self.accepted_context_revision != Some(preview.context_revision)
+            || self.accepted_transcript_digest != Some(preview.transcript_digest)
+        {
+            return false;
+        }
+        self.range_preview_request = None;
+        self.range_preview = Some(preview);
+        true
+    }
+
     pub fn begin_prepare_draft(&mut self, id: u64) {
         self.last_rejection = None;
         self.draft_monitor_request_id = Some(id);
@@ -254,13 +448,6 @@ impl ContextProtocolState {
         self.draft = None;
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Step 9 reconnect flow binds retained draft monitoring before status dispatch"
-        )
-    )]
     pub fn begin_draft_monitor(&mut self, id: u64, draft_id: String) {
         self.last_rejection = None;
         self.draft_monitor_request_id = Some(id);
@@ -269,13 +456,6 @@ impl ContextProtocolState {
         self.draft = None;
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Step 9 cancel flow binds the retained draft before dispatch"
-        )
-    )]
     pub fn begin_cancel_draft(&mut self, id: u64, draft_id: String) {
         self.last_rejection = None;
         self.draft_monitor_request_id = Some(id);
@@ -371,16 +551,44 @@ impl ContextProtocolState {
         true
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Step 9 history view records page request correlation before dispatch"
-        )
-    )]
-    pub fn begin_history_request(&mut self, id: u64) {
+    pub fn begin_selection_preview_request(
+        &mut self,
+        id: u64,
+        draft_id: String,
+        selected_distillation_ids: Vec<String>,
+    ) {
         self.last_rejection = None;
-        self.history_request_id = Some(id);
+        self.selection_preview_request = Some(ContextSelectionPreviewRequest {
+            id,
+            draft_id,
+            selected_distillation_ids,
+        });
+        self.selection_preview = None;
+    }
+
+    pub fn accept_selection_preview(
+        &mut self,
+        id: u64,
+        preview: ContextDraftSelectionPreview,
+    ) -> bool {
+        let Some(expected) = self.selection_preview_request.as_ref() else {
+            return false;
+        };
+        if expected.id != id
+            || expected.draft_id != preview.draft_id
+            || expected.selected_distillation_ids != preview.selected_distillation_ids
+            || self.tracked_draft_id.as_deref() != Some(preview.draft_id.as_str())
+        {
+            return false;
+        }
+        self.selection_preview_request = None;
+        self.selection_preview = Some(preview);
+        true
+    }
+
+    pub fn begin_history_request(&mut self, id: u64, session_id: String) {
+        self.last_rejection = None;
+        self.history_request = Some(ContextHistoryRequest { id, session_id });
     }
 
     pub fn accept_transaction_history(
@@ -392,14 +600,19 @@ impl ContextProtocolState {
         next_offset: Option<usize>,
         transactions: Vec<ContextTransactionSummary>,
     ) -> bool {
-        if self.history_request_id != Some(id) {
+        let Some(expected) = self.history_request.as_ref() else {
+            return false;
+        };
+        if expected.id != id {
             return false;
         }
+        let session_id = expected.session_id.clone();
         if self.accepted_context_revision != Some(context_revision) {
             self.invalidate_revision_scoped();
             self.accepted_context_revision = Some(context_revision);
         }
-        self.history_request_id = None;
+        self.accepted_session_id = Some(session_id);
+        self.history_request = None;
         self.history = Some(ContextTransactionHistoryPage {
             context_revision,
             total_transactions,
@@ -410,13 +623,41 @@ impl ContextProtocolState {
         true
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Step 9 apply, revert, and reapply actions record exact correlation before dispatch"
-        )
-    )]
+    pub fn begin_transaction_detail_request(
+        &mut self,
+        id: u64,
+        session_id: String,
+        context_revision: u64,
+        transaction_id: String,
+    ) {
+        self.last_rejection = None;
+        self.transaction_detail_request = Some(ContextTransactionDetailRequest {
+            id,
+            session_id,
+            context_revision,
+            transaction_id,
+        });
+        self.transaction_detail = None;
+    }
+
+    pub fn accept_transaction_detail(&mut self, id: u64, detail: ContextTransactionDetail) -> bool {
+        let Some(expected) = self.transaction_detail_request.as_ref() else {
+            return false;
+        };
+        if expected.id != id
+            || expected.session_id != detail.session_id
+            || expected.context_revision != detail.context_revision
+            || expected.transaction_id != detail.transaction.id
+            || self.accepted_session_id.as_deref() != Some(detail.session_id.as_str())
+            || self.accepted_context_revision != Some(detail.context_revision)
+        {
+            return false;
+        }
+        self.transaction_detail_request = None;
+        self.transaction_detail = Some(detail);
+        true
+    }
+
     pub fn begin_transaction_request(
         &mut self,
         id: u64,
@@ -456,33 +697,23 @@ impl ContextProtocolState {
         true
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Step 9 policy controls record request correlation before dispatch"
-        )
-    )]
-    pub fn begin_policy_request(&mut self, id: u64) {
-        self.last_rejection = None;
-        self.policy_request_id = Some(id);
-    }
-
     pub fn accept_policy(
         &mut self,
-        id: u64,
+        _id: u64,
         session_id: String,
         policy: StoredContextEmergencyPolicy,
     ) -> bool {
-        if self.policy_request_id != Some(id)
-            || self
-                .accepted_session_id
-                .as_deref()
-                .is_some_and(|accepted| accepted != session_id)
+        // Phase 9 deliberately exposes no TUI mutation control for emergency
+        // authorization. The typed server event remains observable so a policy
+        // changed by another client is reflected for this session. Phase 11 owns
+        // the explicit control and execution workflow.
+        if self
+            .accepted_session_id
+            .as_deref()
+            .is_some_and(|accepted| accepted != session_id)
         {
             return false;
         }
-        self.policy_request_id = None;
         self.accepted_session_id.get_or_insert(session_id);
         self.emergency_policy = Some(policy);
         true
@@ -503,6 +734,10 @@ impl ContextProtocolState {
             ContextRequestKind::Snapshot => self.snapshot_request_id == Some(id),
             ContextRequestKind::MessageDetail => self
                 .detail_request
+                .as_ref()
+                .is_some_and(|expected| expected.id == id),
+            ContextRequestKind::RangeClosurePreview => self
+                .range_preview_request
                 .as_ref()
                 .is_some_and(|expected| expected.id == id),
             ContextRequestKind::PrepareDraft => {
@@ -528,6 +763,14 @@ impl ContextProtocolState {
                     && (self.tracked_draft_id.as_deref() == draft_id.as_deref()
                         || uncorrelated_capacity_fallback)
             }
+            ContextRequestKind::DraftSelectionPreview => self
+                .selection_preview_request
+                .as_ref()
+                .is_some_and(|expected| {
+                    expected.id == id
+                        && (draft_id.as_deref() == Some(expected.draft_id.as_str())
+                            || uncorrelated_capacity_fallback)
+                }),
             ContextRequestKind::ApplyDraft
             | ContextRequestKind::RevertTransaction
             | ContextRequestKind::ReapplyTransaction => {
@@ -543,8 +786,19 @@ impl ContextProtocolState {
                             || uncorrelated_capacity_fallback)
                 })
             }
-            ContextRequestKind::TransactionHistory => self.history_request_id == Some(id),
-            ContextRequestKind::SetEmergencyPolicy => self.policy_request_id == Some(id),
+            ContextRequestKind::TransactionHistory => self
+                .history_request
+                .as_ref()
+                .is_some_and(|expected| expected.id == id),
+            ContextRequestKind::TransactionDetail => self
+                .transaction_detail_request
+                .as_ref()
+                .is_some_and(|expected| {
+                    expected.id == id
+                        && (transaction_id.as_deref() == Some(expected.transaction_id.as_str())
+                            || uncorrelated_capacity_fallback)
+                }),
+            ContextRequestKind::SetEmergencyPolicy => false,
             ContextRequestKind::LegacyCompact | ContextRequestKind::LegacySetCompactionMode => true,
         };
         if !matches_pending {
@@ -554,6 +808,7 @@ impl ContextProtocolState {
         match request {
             ContextRequestKind::Snapshot => self.snapshot_request_id = None,
             ContextRequestKind::MessageDetail => self.detail_request = None,
+            ContextRequestKind::RangeClosurePreview => self.range_preview_request = None,
             ContextRequestKind::PrepareDraft
             | ContextRequestKind::CancelDraft
             | ContextRequestKind::DraftStatus => {
@@ -561,11 +816,13 @@ impl ContextProtocolState {
                 self.draft_monitor_request_kind = None;
                 self.tracked_draft_id = None;
             }
+            ContextRequestKind::DraftSelectionPreview => self.selection_preview_request = None,
             ContextRequestKind::ApplyDraft
             | ContextRequestKind::RevertTransaction
             | ContextRequestKind::ReapplyTransaction => self.transaction_request = None,
-            ContextRequestKind::TransactionHistory => self.history_request_id = None,
-            ContextRequestKind::SetEmergencyPolicy => self.policy_request_id = None,
+            ContextRequestKind::TransactionHistory => self.history_request = None,
+            ContextRequestKind::TransactionDetail => self.transaction_detail_request = None,
+            ContextRequestKind::SetEmergencyPolicy => {}
             ContextRequestKind::LegacyCompact | ContextRequestKind::LegacySetCompactionMode => {}
         }
         self.last_rejection = Some(ContextRequestRejection {
@@ -631,12 +888,18 @@ impl ContextProtocolState {
         self.snapshot = None;
         self.detail_request = None;
         self.detail = None;
+        self.range_preview_request = None;
+        self.range_preview = None;
         self.draft_monitor_request_id = None;
         self.draft_monitor_request_kind = None;
         self.tracked_draft_id = None;
         self.draft = None;
-        self.history_request_id = None;
+        self.selection_preview_request = None;
+        self.selection_preview = None;
+        self.history_request = None;
         self.history = None;
+        self.transaction_detail_request = None;
+        self.transaction_detail = None;
         self.accepted_transcript_digest = None;
     }
 
@@ -644,13 +907,23 @@ impl ContextProtocolState {
         self.invalidate_revision_scoped();
         self.transaction_request = None;
         self.transaction_result = None;
-        self.policy_request_id = None;
         self.emergency_policy = None;
         self.last_rejection = None;
         self.action_required = None;
         self.accepted_session_id = None;
         self.accepted_context_revision = None;
     }
+}
+
+fn canonical_range_selections(
+    mut ranges: Vec<ContextMessageRangeSelection>,
+) -> Vec<ContextMessageRangeSelection> {
+    ranges.sort_by(|left, right| {
+        left.start_message_id
+            .cmp(&right.start_message_id)
+            .then_with(|| left.end_message_id.cmp(&right.end_message_id))
+    });
+    ranges
 }
 
 #[cfg(test)]
@@ -801,6 +1074,8 @@ mod tests {
             }],
             active_transactions: Vec::new(),
             emergency_policy: StoredContextEmergencyPolicy::Block,
+            curator_route: None,
+            curator_unavailable_reason: None,
         }
     }
 
@@ -988,7 +1263,7 @@ mod tests {
         assert_eq!(outcome.correlation_id, "draft-1");
         assert_eq!(outcome.result.revision, 5);
 
-        state.begin_history_request(34);
+        state.begin_history_request(34, "session-1".to_string());
         assert!(state.accept_transaction_history(34, 5, 1, 0, None, vec![transaction_summary()],));
         let history = state.history.as_ref().expect("history page retained");
         assert_eq!(history.context_revision, 5);
@@ -1002,7 +1277,6 @@ mod tests {
     fn history_policy_rejection_and_action_required_are_session_scoped() {
         let mut state = ContextProtocolState::default();
         state.accept_history("session-1", 4);
-        state.begin_policy_request(40);
         assert!(!state.accept_policy(
             40,
             "session-2".to_string(),
@@ -1013,12 +1287,20 @@ mod tests {
             "session-1".to_string(),
             StoredContextEmergencyPolicy::Block,
         ));
+        assert!(!state.accept_rejection(
+            40,
+            ContextRequestKind::SetEmergencyPolicy,
+            None,
+            None,
+            ContextServiceError::Runtime("no TUI policy request exists".to_string()),
+        ));
+        assert!(state.last_rejection.is_none());
         assert!(matches!(
             state.emergency_policy,
             Some(StoredContextEmergencyPolicy::Block)
         ));
 
-        state.begin_history_request(41);
+        state.begin_history_request(41, "session-1".to_string());
         assert!(!state.accept_rejection(
             40,
             ContextRequestKind::TransactionHistory,
@@ -1034,7 +1316,7 @@ mod tests {
             None,
             ContextServiceError::Runtime("current history failure".to_string()),
         ));
-        assert_eq!(state.history_request_id, None);
+        assert!(state.history_request.is_none());
 
         state.begin_transaction_request(
             42,

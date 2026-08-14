@@ -115,6 +115,46 @@ impl App {
             })
             .to_string();
         }
+        if cmd == "context-editor-state" {
+            return serde_json::to_string_pretty(&self.context_editor_debug_summary())
+                .unwrap_or_else(|_| "{}".to_string());
+        }
+        if cmd == "context-editor-fixtures" {
+            return serde_json::to_string_pretty(&serde_json::json!({
+                "fixtures": crate::tui::context_editor::ContextEditor::debug_fixture_names(),
+            }))
+            .unwrap_or_else(|_| "{}".to_string());
+        }
+        if let Some(fixture) = cmd
+            .strip_prefix("context-editor-fixture:")
+            .or_else(|| cmd.strip_prefix("context-editor-fixture "))
+            .map(str::trim)
+        {
+            if self.context_editor_overlay.is_none() {
+                self.open_context_editor(crate::tui::context_editor::ContextEditorOpenMode::Edit);
+                self.context_editor_actions.clear();
+            }
+            let result = self
+                .context_editor_overlay
+                .as_ref()
+                .expect("Context Editor fixture opens the overlay")
+                .borrow_mut()
+                .apply_debug_fixture(fixture);
+            return match result {
+                Ok(()) => serde_json::to_string_pretty(&serde_json::json!({
+                    "ok": true,
+                    "fixture": fixture,
+                    "state": self.context_editor_debug_summary(),
+                }))
+                .unwrap_or_else(|_| "{}".to_string()),
+                Err(error) => serde_json::to_string_pretty(&serde_json::json!({
+                    "ok": false,
+                    "error": error,
+                    "fixtures": crate::tui::context_editor::ContextEditor::debug_fixture_names(),
+                }))
+                .unwrap_or_else(|_| "{}".to_string()),
+            };
+        }
         if cmd == "stream-jitter" {
             // Arrival-vs-reveal smoothness report for the paced stream buffer.
             // `reveals.bucket_100ms_cv` well below `arrivals.bucket_100ms_cv`

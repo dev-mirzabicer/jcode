@@ -1,7 +1,7 @@
 use crate::agent::Agent;
 use crate::context::draft::{
     ContextTransactionService, DraftEntryState, projection_validation_operations,
-    state_with_transaction, validate_capture_identity,
+    state_with_transaction, validate_capture_identity, validate_capture_identity_parts,
 };
 use crate::context::history::summarize_context_transaction;
 use crate::context::provider_validation::require_supported_projected_messages;
@@ -9,6 +9,8 @@ use crate::protocol::{
     ContextDraft, ContextServiceError, ContextTransactionResult, ContextTransactionSummary,
 };
 use crate::provider::ContextProjectionValidationReport;
+use crate::provider::Provider;
+use crate::session::Session;
 use anyhow::Result;
 use chrono::Utc;
 use jcode_context_core::{
@@ -32,6 +34,12 @@ pub trait ContextPersistence: Send + Sync {
     fn persist(&self, agent: &mut Agent) -> Result<()>;
 }
 
+/// Narrow persistence boundary for local TUI transitions that own `Session`
+/// directly rather than through an `Agent` lock.
+pub trait DirectContextSessionPersistence: Send + Sync {
+    fn persist(&self, session: &mut Session) -> Result<()>;
+}
+
 #[derive(Debug, Default)]
 pub struct SessionContextPersistence;
 
@@ -41,8 +49,23 @@ impl ContextPersistence for SessionContextPersistence {
     }
 }
 
+#[derive(Debug, Default)]
+pub struct DirectSessionContextPersistence;
+
+impl DirectContextSessionPersistence for DirectSessionContextPersistence {
+    fn persist(&self, session: &mut Session) -> Result<()> {
+        session.save()
+    }
+}
+
 pub(crate) struct PreparedContextTransition {
     pub state: StoredContextViewState,
+    pub result: ContextTransactionResult,
+    pub invalidation_detail: String,
+}
+
+#[derive(Debug)]
+pub struct ContextSessionTransition {
     pub result: ContextTransactionResult,
     pub invalidation_detail: String,
 }
@@ -151,6 +174,96 @@ impl ContextTransactionService {
         };
         self.mark_draft_applied(draft_id, &result);
         Ok(result)
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "local apply revalidates every independent provider-context identity dimension"
+    )]
+    pub fn apply_draft_to_session(
+        &self,
+        session: &mut Session,
+        provider: &dyn Provider,
+        route: &str,
+        estimated_total_request_tokens_before: Option<usize>,
+        draft_id: &str,
+        selected_distillation_ids: Option<Vec<String>>,
+        processing: bool,
+    ) -> Result<ContextSessionTransition, ContextServiceError> {
+        if processing {
+            return Err(ContextServiceError::SessionBusy);
+        }
+        let draft = self.reserve_ready_draft(draft_id, &session.id)?;
+        let selected_distillations =
+            match selected_distillation_operations(&draft, selected_distillation_ids.as_deref()) {
+                Ok(operations) => operations,
+                Err(error) => {
+                    self.restore_applying_draft(draft_id);
+                    return Err(error);
+                }
+            };
+        if let Err(error) = validate_capture_identity_parts(
+            &session.id,
+            &session.messages,
+            &session.context_view,
+            provider,
+            route,
+            &draft.identity,
+        ) {
+            self.fail_applying_draft(draft_id, error.clone());
+            return Err(error);
+        }
+        let revision = session
+            .context_view
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| {
+                self.fail_applying_draft(draft_id, ContextServiceError::RevisionOverflow);
+                ContextServiceError::RevisionOverflow
+            })?;
+        let mut operations = draft.required_operations.clone();
+        operations.extend(selected_distillations);
+        let proposed_state = state_with_transaction(
+            &session.context_view,
+            &draft.identity.draft_id,
+            revision,
+            draft.authorization.clone(),
+            operations,
+            None,
+            draft.curator_usage.clone(),
+        );
+        let transaction_index = proposed_state.transactions.len().saturating_sub(1);
+        let previous_state = session.context_view.clone();
+        let previous_provider_session_id = session.provider_session_id.clone();
+        let prepared = match prepare_context_transition_for_session(
+            provider,
+            &session.messages,
+            &previous_state,
+            proposed_state,
+            transaction_index,
+            true,
+            route,
+            estimated_total_request_tokens_before,
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.fail_applying_draft(draft_id, error.clone());
+                return Err(error);
+            }
+        };
+        session.context_view = prepared.state;
+        session.provider_session_id = None;
+        if let Err(error) = self.direct_session_persistence.persist(session) {
+            session.context_view = previous_state;
+            session.provider_session_id = previous_provider_session_id;
+            self.restore_applying_draft(draft_id);
+            return Err(ContextServiceError::Persistence(error.to_string()));
+        }
+        self.mark_draft_applied(draft_id, &prepared.result);
+        Ok(ContextSessionTransition {
+            result: prepared.result,
+            invalidation_detail: prepared.invalidation_detail,
+        })
     }
 
     pub(crate) fn persist_prepared_transition(
@@ -305,37 +418,57 @@ fn validate_emergency_policy(
 pub(crate) fn prepare_context_transition(
     agent: &Agent,
     previous_state: &StoredContextViewState,
-    mut proposed_state: StoredContextViewState,
+    proposed_state: StoredContextViewState,
     economics_transaction_index: usize,
     update_application_identity: bool,
 ) -> Result<PreparedContextTransition, ContextServiceError> {
+    let provider = agent.provider_handle();
+    prepare_context_transition_for_session(
+        provider.as_ref(),
+        agent.messages(),
+        previous_state,
+        proposed_state,
+        economics_transaction_index,
+        update_application_identity,
+        &agent.context_route_identity(),
+        agent.current_context_request_token_estimate(),
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "transition validation and economics require exact provider, transcript, route, and request estimate inputs"
+)]
+pub(crate) fn prepare_context_transition_for_session(
+    provider: &dyn Provider,
+    messages: &[jcode_session_types::StoredMessage],
+    previous_state: &StoredContextViewState,
+    mut proposed_state: StoredContextViewState,
+    economics_transaction_index: usize,
+    update_application_identity: bool,
+    route: &str,
+    estimated_total_request_tokens_before: Option<usize>,
+) -> Result<PreparedContextTransition, ContextServiceError> {
     validate_context_state(&proposed_state)
         .map_err(|error| ContextServiceError::Projection(error.to_string()))?;
-    let before = project_context(agent.messages(), previous_state)
+    let before = project_context(messages, previous_state)
         .map_err(|error| ContextServiceError::Projection(error.to_string()))?;
-    let after = project_context(agent.messages(), &proposed_state)
+    let after = project_context(messages, &proposed_state)
         .map_err(|error| ContextServiceError::Projection(error.to_string()))?;
     let validation_operations = projection_validation_operations(&proposed_state);
-    let provider = agent.provider_handle();
-    let validation = require_supported_projected_messages(
-        provider.as_ref(),
-        &after.messages,
-        &validation_operations,
-    )
-    .map_err(|error| ContextServiceError::ProviderValidation(error.to_string()))?;
+    let validation =
+        require_supported_projected_messages(provider, &after.messages, &validation_operations)
+            .map_err(|error| ContextServiceError::ProviderValidation(error.to_string()))?;
     let pricing = crate::provider::pricing::context_pricing_snapshot(
         &provider.model(),
         &provider.display_name(),
-        &agent.context_route_identity(),
+        route,
         StoredContextCacheWarmth::Unknown,
     );
     let analysis = analyze_cache_prefix(&before.messages, &after.messages);
-    let (estimated_total_request_tokens_before, estimated_total_request_tokens_after) = agent
-        .context_request_token_estimates_for_projection(
-            analysis.old_total_tokens,
-            analysis.new_total_tokens,
-        )
-        .map_or((None, None), |(before, after)| (Some(before), Some(after)));
+    let estimated_total_request_tokens_after = estimated_total_request_tokens_before
+        .and_then(|before| before.checked_sub(analysis.old_total_tokens))
+        .map(|non_message_tokens| non_message_tokens.saturating_add(analysis.new_total_tokens));
     let economics = calculate_context_economics(ContextEconomicsInput {
         analysis: &analysis,
         estimated_total_request_tokens_before,
@@ -349,7 +482,7 @@ pub(crate) fn prepare_context_transition(
     let application = StoredContextApplication {
         provider: provider.name().to_string(),
         model: provider.model(),
-        route: agent.context_route_identity(),
+        route: route.to_string(),
         context_window: Some(provider.context_window()),
     };
     let transaction = proposed_state
@@ -398,7 +531,7 @@ pub(crate) fn prepare_context_transition(
     })
 }
 
-fn selected_distillation_operations(
+pub(crate) fn selected_distillation_operations(
     draft: &ContextDraft,
     selected_ids: Option<&[String]>,
 ) -> Result<Vec<StoredContextOperation>, ContextServiceError> {
@@ -529,7 +662,7 @@ mod tests {
         StoredContextOperation, StoredRangeSummary, StoredToolResultDistillation,
     };
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::{Arc, Barrier};
+    use std::sync::{Arc, Barrier, Mutex as StdMutex};
     use std::time::Instant;
     use tokio::sync::Notify;
     use tokio_util::sync::CancellationToken;
@@ -657,6 +790,48 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             if self.fail.load(Ordering::SeqCst) {
                 bail!("injected context persistence failure");
+            }
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct TestDirectSessionPersistence {
+        calls: AtomicUsize,
+        fail: AtomicBool,
+        observed_provider_session_ids: StdMutex<Vec<Option<String>>>,
+    }
+
+    impl TestDirectSessionPersistence {
+        fn with_failure(fail: bool) -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                fail: AtomicBool::new(fail),
+                observed_provider_session_ids: StdMutex::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+
+        fn observed_provider_session_ids(&self) -> Vec<Option<String>> {
+            self.observed_provider_session_ids
+                .lock()
+                .expect("direct persistence observations")
+                .clone()
+        }
+    }
+
+    impl DirectContextSessionPersistence for TestDirectSessionPersistence {
+        fn persist(&self, session: &mut Session) -> Result<()> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.observed_provider_session_ids
+                .lock()
+                .expect("direct persistence observations")
+                .push(session.provider_session_id.clone());
+            if self.fail.load(Ordering::SeqCst) {
+                bail!("injected direct Session persistence failure");
             }
             Ok(())
         }
@@ -887,6 +1062,180 @@ mod tests {
             persistence,
             raw_before,
         }
+    }
+
+    fn direct_session_fixture(
+        persistence_fails: bool,
+    ) -> (
+        ContextTransactionService,
+        Session,
+        TestProvider,
+        Arc<TestDirectSessionPersistence>,
+        Vec<u8>,
+    ) {
+        let provider = TestProvider::new(true);
+        let agent = populated_agent(Arc::new(provider.clone()));
+        let draft = ready_draft(&agent, &provider, "draft-local-1");
+        let mut session = Session::create(None, None);
+        session.id = agent.session_id().to_string();
+        session.replace_messages(agent.messages().to_vec());
+        session.context_view = agent.context_view_state().clone();
+        session.provider_key = Some(draft.identity.route.clone());
+        session.model = Some(provider.model());
+        session.provider_session_id = Some("stored-provider-continuation".to_string());
+        let raw_before = serde_json::to_vec(&session.messages).expect("raw transcript");
+        let direct_persistence = Arc::new(TestDirectSessionPersistence::with_failure(
+            persistence_fails,
+        ));
+        let service = ContextTransactionService::with_persistence_boundaries(
+            ContextServiceLimits::default(),
+            Arc::new(TestPersistence::default()),
+            direct_persistence.clone(),
+        );
+        let reserved_bytes = serde_json::to_vec(&draft).expect("draft bytes").len();
+        service.lock_store().entries.insert(
+            draft.identity.draft_id.clone(),
+            ContextDraftEntry {
+                identity: draft.identity.clone(),
+                progress: ContextDraftProgress {
+                    phase: ContextDraftPhase::Ready,
+                    completed_items: 3,
+                    total_items: 3,
+                },
+                state: DraftEntryState::Ready(draft),
+                cancellation: CancellationToken::new(),
+                notify: Arc::new(Notify::new()),
+                reserved_bytes,
+                generation_in_flight: false,
+            },
+        );
+        (service, session, provider, direct_persistence, raw_before)
+    }
+
+    #[test]
+    fn direct_session_apply_revert_reapply_change_projection_without_mutating_raw_transcript() {
+        let (service, mut session, provider, persistence, raw_before) =
+            direct_session_fixture(false);
+        let route = session
+            .provider_key
+            .clone()
+            .expect("direct fixture route identity");
+        let original_projection = session
+            .projected_messages_for_provider()
+            .expect("original provider view");
+
+        let applied = service
+            .apply_draft_to_session(
+                &mut session,
+                &provider,
+                &route,
+                None,
+                "draft-local-1",
+                None,
+                false,
+            )
+            .expect("direct apply");
+        let applied_projection = session
+            .projected_messages_for_provider()
+            .expect("applied provider view");
+        assert_ne!(
+            serde_json::to_vec(&applied_projection).expect("applied projection bytes"),
+            serde_json::to_vec(&original_projection).expect("original projection bytes")
+        );
+        assert_eq!(session.provider_session_id, None);
+
+        session.provider_session_id = Some("continuation-before-revert".to_string());
+        service
+            .revert_transaction_in_session(
+                &mut session,
+                &provider,
+                &route,
+                None,
+                &applied.result.transaction.id,
+                false,
+            )
+            .expect("direct revert");
+        assert_eq!(
+            serde_json::to_vec(
+                &session
+                    .projected_messages_for_provider()
+                    .expect("reverted provider view")
+            )
+            .expect("reverted projection bytes"),
+            serde_json::to_vec(&original_projection).expect("original projection bytes")
+        );
+        assert_eq!(session.provider_session_id, None);
+
+        session.provider_session_id = Some("continuation-before-reapply".to_string());
+        service
+            .reapply_transaction_in_session(
+                &mut session,
+                &provider,
+                &route,
+                None,
+                &applied.result.transaction.id,
+                false,
+            )
+            .expect("direct reapply");
+        assert_eq!(
+            serde_json::to_vec(
+                &session
+                    .projected_messages_for_provider()
+                    .expect("reapplied provider view")
+            )
+            .expect("reapplied projection bytes"),
+            serde_json::to_vec(&applied_projection).expect("applied projection bytes")
+        );
+        assert_eq!(session.provider_session_id, None);
+        assert_eq!(
+            serde_json::to_vec(&session.messages).expect("raw transcript"),
+            raw_before
+        );
+        assert_eq!(persistence.calls(), 3);
+        assert_eq!(
+            persistence.observed_provider_session_ids(),
+            vec![None, None, None]
+        );
+    }
+
+    #[test]
+    fn direct_session_persistence_failure_restores_context_and_provider_continuation() {
+        let (service, mut session, provider, persistence, raw_before) =
+            direct_session_fixture(true);
+        let route = session
+            .provider_key
+            .clone()
+            .expect("direct fixture route identity");
+        let state_before = session.context_view.clone();
+        let provider_session_id_before = session.provider_session_id.clone();
+
+        let error = service
+            .apply_draft_to_session(
+                &mut session,
+                &provider,
+                &route,
+                None,
+                "draft-local-1",
+                None,
+                false,
+            )
+            .expect_err("direct persistence must fail");
+
+        assert!(matches!(error, ContextServiceError::Persistence(_)));
+        assert_eq!(session.context_view, state_before);
+        assert_eq!(session.provider_session_id, provider_session_id_before);
+        assert_eq!(
+            serde_json::to_vec(&session.messages).expect("raw transcript"),
+            raw_before
+        );
+        assert_eq!(persistence.calls(), 1);
+        assert_eq!(persistence.observed_provider_session_ids(), vec![None]);
+        assert!(matches!(
+            service
+                .draft_status("draft-local-1")
+                .expect("draft restored"),
+            crate::context::ContextDraftStatus::Ready { .. }
+        ));
     }
 
     #[test]
