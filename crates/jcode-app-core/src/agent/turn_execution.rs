@@ -4,19 +4,27 @@ use crate::{terminal_eprintln as eprintln, terminal_println as println};
 impl Agent {
     /// Run a single turn with the given user message
     pub async fn run_once(&mut self, user_message: &str) -> Result<()> {
-        self.add_message(
-            Role::User,
-            vec![ContentBlock::Text {
-                text: user_message.to_string(),
-                cache_control: None,
-            }],
+        let blocks = Self::user_context_blocks(user_message, Vec::new());
+        let pending_input_tokens = jcode_context_core::estimate_content_blocks_tokens(&blocks);
+        self.begin_pending_turn(
+            None,
+            user_message,
+            0,
+            pending_input_tokens,
+            self.message_count(),
+            Vec::new(),
         );
-        self.session.save()?;
+        self.add_message(Role::User, blocks);
+        if let Err(error) = self.session.save() {
+            self.abort_pending_turn_setup();
+            return Err(error);
+        }
         if trace_enabled() {
             eprintln!("[trace] session_id {}", self.session.id);
         }
-        let _ = self.run_turn(true).await?;
-        Ok(())
+        let result = self.run_turn(true).await.map(|_| ());
+        self.finish_pending_turn();
+        result
     }
 
     pub async fn run_once_capture(&mut self, user_message: &str) -> Result<String> {
@@ -29,19 +37,27 @@ impl Agent {
         user_message: &str,
         display_role: Option<crate::session::StoredDisplayRole>,
     ) -> Result<String> {
-        self.add_message_with_display_role(
-            Role::User,
-            vec![ContentBlock::Text {
-                text: user_message.to_string(),
-                cache_control: None,
-            }],
-            display_role,
+        let blocks = Self::user_context_blocks(user_message, Vec::new());
+        let pending_input_tokens = jcode_context_core::estimate_content_blocks_tokens(&blocks);
+        self.begin_pending_turn(
+            None,
+            user_message,
+            0,
+            pending_input_tokens,
+            self.message_count(),
+            Vec::new(),
         );
-        self.session.save()?;
+        self.add_message_with_display_role(Role::User, blocks, display_role);
+        if let Err(error) = self.session.save() {
+            self.abort_pending_turn_setup();
+            return Err(error);
+        }
         if trace_enabled() {
             eprintln!("[trace] session_id {}", self.session.id);
         }
-        self.run_turn(false).await
+        let result = self.run_turn(false).await;
+        self.finish_pending_turn();
+        result
     }
 
     /// Run one conversation turn with streaming events via mpsc channel (per-client)
@@ -52,7 +68,27 @@ impl Agent {
         system_reminder: Option<String>,
         event_tx: mpsc::UnboundedSender<ServerEvent>,
     ) -> Result<()> {
-        self.run_once_streaming_mpsc_with_display_role(
+        self.run_once_streaming_mpsc_with_request_context(
+            None,
+            user_message,
+            images,
+            system_reminder,
+            event_tx,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn run_once_streaming_mpsc_correlated(
+        &mut self,
+        request_id: u64,
+        user_message: &str,
+        images: Vec<(String, String)>,
+        system_reminder: Option<String>,
+        event_tx: mpsc::UnboundedSender<ServerEvent>,
+    ) -> Result<()> {
+        self.run_once_streaming_mpsc_with_request_context(
+            Some(request_id),
             user_message,
             images,
             system_reminder,
@@ -70,8 +106,40 @@ impl Agent {
         event_tx: mpsc::UnboundedSender<ServerEvent>,
         display_role: Option<crate::session::StoredDisplayRole>,
     ) -> Result<()> {
+        self.run_once_streaming_mpsc_with_request_context(
+            None,
+            user_message,
+            images,
+            system_reminder,
+            event_tx,
+            display_role,
+        )
+        .await
+    }
+
+    async fn run_once_streaming_mpsc_with_request_context(
+        &mut self,
+        request_id: Option<u64>,
+        user_message: &str,
+        images: Vec<(String, String)>,
+        system_reminder: Option<String>,
+        event_tx: mpsc::UnboundedSender<ServerEvent>,
+        display_role: Option<crate::session::StoredDisplayRole>,
+    ) -> Result<()> {
+        let transcript_len_before_pending = self.message_count();
+        let image_count = images.len();
+        let blocks = Self::user_context_blocks(user_message, images);
+        let pending_input_tokens = jcode_context_core::estimate_content_blocks_tokens(&blocks);
         // Inject any pending notifications before the user message
         let alerts = self.take_alerts();
+        self.begin_pending_turn(
+            request_id,
+            user_message,
+            image_count,
+            pending_input_tokens,
+            transcript_len_before_pending,
+            alerts.clone(),
+        );
         if !alerts.is_empty() {
             let alert_text = format!(
                 "[NOTIFICATION]\nYou received {} notification(s) from other agents working in this codebase:\n\n{}\n\nUse the communicate tool to coordinate with other agents (prefer dm; broadcast reaches only your spawned subtree).",
@@ -90,7 +158,12 @@ impl Agent {
         self.current_turn_system_reminder =
             system_reminder.filter(|value| !value.trim().is_empty());
 
-        self.append_user_context_message_with_display_role(user_message, images, display_role)?;
+        if let Err(error) = self.append_user_context_blocks_with_display_role(blocks, display_role)
+        {
+            self.abort_pending_turn_setup();
+            self.current_turn_system_reminder = None;
+            return Err(error);
+        }
         crate::telemetry::record_turn();
         let turn_started_at = Instant::now();
         let start_message_index = self.message_count();
@@ -98,6 +171,7 @@ impl Agent {
         let result = self.run_turn_streaming_mpsc(event_tx).await;
         self.current_turn_system_reminder = None;
         self.fire_turn_end_hook(&result, turn_started_at, start_message_index);
+        self.finish_pending_turn();
         result
     }
 
@@ -116,6 +190,11 @@ impl Agent {
         images: Vec<(String, String)>,
         display_role: Option<crate::session::StoredDisplayRole>,
     ) -> Result<()> {
+        let blocks = Self::user_context_blocks(user_message, images);
+        self.append_user_context_blocks_with_display_role(blocks, display_role)
+    }
+
+    fn user_context_blocks(user_message: &str, images: Vec<(String, String)>) -> Vec<ContentBlock> {
         let mut blocks: Vec<ContentBlock> = images
             .into_iter()
             .map(|(media_type, data)| ContentBlock::Image { media_type, data })
@@ -125,6 +204,14 @@ impl Agent {
             cache_control: None,
         });
 
+        blocks
+    }
+
+    fn append_user_context_blocks_with_display_role(
+        &mut self,
+        blocks: Vec<ContentBlock>,
+        display_role: Option<crate::session::StoredDisplayRole>,
+    ) -> Result<()> {
         if blocks.len() > 1 {
             crate::logging::info(&format!(
                 "Agent received message with {} image(s)",

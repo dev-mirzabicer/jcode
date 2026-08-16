@@ -1,6 +1,34 @@
 use super::*;
 use crate::message::ToolDefinition;
 
+fn stream_event_confirms_request_acceptance(event: &StreamEvent) -> bool {
+    matches!(
+        event,
+        StreamEvent::ThinkingStart
+            | StreamEvent::ThinkingDelta(_)
+            | StreamEvent::TextDelta(_)
+            | StreamEvent::ToolUseStart { .. }
+            | StreamEvent::ToolResult { .. }
+            | StreamEvent::GeneratedImage { .. }
+            | StreamEvent::MessageEnd { .. }
+            | StreamEvent::OpenAIReasoning { .. }
+            | StreamEvent::NativeToolCall { .. }
+            | StreamEvent::Compaction { .. }
+    )
+}
+
+fn stream_event_is_provider_output(event: &StreamEvent) -> bool {
+    match event {
+        StreamEvent::ThinkingStart | StreamEvent::ToolUseStart { .. } => true,
+        StreamEvent::ThinkingDelta(text) | StreamEvent::TextDelta(text) => !text.is_empty(),
+        StreamEvent::ToolResult { .. }
+        | StreamEvent::GeneratedImage { .. }
+        | StreamEvent::OpenAIReasoning { .. }
+        | StreamEvent::NativeToolCall { .. } => true,
+        _ => false,
+    }
+}
+
 pub(super) struct PreparedLocalProviderInvocation {
     provider: Arc<dyn Provider>,
     request_messages: Vec<Message>,
@@ -8,10 +36,11 @@ pub(super) struct PreparedLocalProviderInvocation {
     static_part: String,
     dynamic_part: String,
     session_id: Option<String>,
+    memory_pending: Option<crate::memory::PendingMemoryReservation>,
 }
 
 impl PreparedLocalProviderInvocation {
-    pub(super) async fn invoke(self) -> Result<crate::provider::EventStream> {
+    pub(super) async fn invoke(&self) -> Result<crate::provider::EventStream> {
         self.provider
             .complete_split(
                 &self.request_messages,
@@ -28,9 +57,18 @@ impl App {
     pub(super) async fn prepare_local_provider_invocation(
         &mut self,
     ) -> std::result::Result<PreparedLocalProviderInvocation, String> {
+        self.partial_output_checkpointed = false;
+        self.partial_output_persistence_error = None;
         let provider_messages = self.projected_messages_for_provider_send()?;
+        if let Some(pending) = self.pending_composer_input.as_mut() {
+            pending.request_payload_pressure =
+                Some(crate::context::request_payload_pressure(&provider_messages));
+        }
         let tools = self.registry.definitions(None).await;
-        let memory_pending = self.build_memory_prompt_nonblocking(&provider_messages);
+        let pending_memory = self.build_memory_prompt_nonblocking(&provider_messages);
+        let memory_pending =
+            crate::memory::PendingMemoryReservation::new(self.session.id.clone(), pending_memory);
+        let base_split_prompt = self.build_system_prompt_split(None);
         let split_prompt = self.build_system_prompt_split(
             memory_pending
                 .as_ref()
@@ -38,14 +76,61 @@ impl App {
         );
         self.context_info.tool_defs_count = tools.len();
         self.context_info.tool_defs_chars = ToolDefinition::aggregate_prompt_chars(&tools);
-        if let Some(pending) = &memory_pending {
-            let age_ms = pending.computed_at.elapsed().as_millis() as u64;
-            self.show_injected_memory_context(
-                &pending.prompt,
-                pending.display_prompt.as_deref(),
-                pending.count,
-                age_ms,
-                pending.memory_ids.clone(),
+
+        let pending_input_tokens = self
+            .pending_composer_input
+            .as_ref()
+            .filter(|pending| pending.local_session_len_before.is_some())
+            .map(|pending| pending.pending_input_tokens)
+            .unwrap_or_default();
+        let memory_tokens = split_prompt
+            .estimated_tokens()
+            .saturating_sub(base_split_prompt.estimated_tokens());
+        let mut breakdown = crate::context::request_token_breakdown(
+            &provider_messages,
+            pending_input_tokens,
+            0,
+            &base_split_prompt,
+            &tools,
+        );
+        breakdown.memory_tokens = memory_tokens;
+        let report = crate::context::evaluate_context_preflight(
+            self.session.context_view.revision,
+            self.provider.context_request_budget(),
+            breakdown,
+        );
+        self.set_local_context_pressure(report.clone());
+        if report.pressure == crate::protocol::ContextPressureLevel::Blocked {
+            let pending_metadata = self.pending_context_input_metadata();
+            let request_id = pending_metadata
+                .as_ref()
+                .map(|metadata| metadata.request_id)
+                .ok_or_else(|| "Blocked request has no pending-input correlation".to_string())?;
+            let restored = self.rollback_pending_local_turn_before_output();
+            if !restored {
+                self.pending_composer_input = None;
+                self.last_submitted_input = None;
+            }
+            self.set_local_action_required(
+                request_id,
+                restored.then_some(pending_metadata).flatten(),
+                crate::protocol::ContextActionRequiredReason::PreflightLimit,
+                Some(report.clone()),
+                None,
+                vec![format!(
+                    "Projected input exceeds the safe provider budget by {} token(s)",
+                    report.required_reduction_tokens
+                )],
+            );
+            if restored {
+                return Err(format!(
+                    "Request not sent: projected input exceeds the safe provider budget by {} token(s); edit context and submit manually",
+                    report.required_reduction_tokens
+                ));
+            }
+            return Err(
+                "Request not sent, but durable prompt restoration failed; the pending turn remains in authoritative history and must not be resubmitted"
+                    .to_string(),
             );
         }
 
@@ -67,6 +152,7 @@ impl App {
             static_part: split_prompt.static_part,
             dynamic_part: split_prompt.dynamic_part,
             session_id: self.provider_session_id.clone(),
+            memory_pending: Some(memory_pending),
         })
     }
 
@@ -138,7 +224,7 @@ impl App {
                 return Ok(());
             }
 
-            let invocation = match self.prepare_local_provider_invocation().await {
+            let mut invocation = match self.prepare_local_provider_invocation().await {
                 Ok(invocation) => invocation,
                 Err(error) => {
                     crate::logging::warn(
@@ -156,6 +242,10 @@ impl App {
             ));
             let api_start = std::time::Instant::now();
             let provider = self.provider.clone();
+            let mut memory_pending = invocation
+                .memory_pending
+                .take()
+                .expect("prepared local invocation owns a memory reservation guard");
 
             // Make API call non-blocking - poll it in select! so we can handle input while waiting
             let mut api_future = std::pin::pin!(invocation.invoke());
@@ -240,6 +330,7 @@ impl App {
                         match result {
                             Ok(stream) => break stream,
                             Err(err) => {
+                                memory_pending.restore_now();
                                 if let Some(reason) = crate::network_retry::classify_network_interruption(err.as_ref()) {
                                     let plan = crate::network_retry::wait_plan();
                                     self.push_display_message(DisplayMessage::system(format!(
@@ -519,6 +610,22 @@ impl App {
                                 if first_event {
                                     first_event = false;
                                 }
+                                if stream_event_confirms_request_acceptance(&event)
+                                    && let Some(memory) = memory_pending.take_for_commit()
+                                {
+                                    crate::memory::commit_reserved_memory(&self.session.id, &memory);
+                                    let age_ms = memory.computed_at.elapsed().as_millis() as u64;
+                                    self.show_injected_memory_context(
+                                        &memory.prompt,
+                                        memory.display_prompt.as_deref(),
+                                        memory.count,
+                                        age_ms,
+                                        memory.memory_ids,
+                                    );
+                                }
+                                if stream_event_is_provider_output(&event) {
+                                    self.mark_pending_provider_output_started();
+                                }
                                 match event {
                                     StreamEvent::TextDelta(text) => {
                                         self.status = ProcessingStatus::Streaming;
@@ -677,9 +784,6 @@ impl App {
                                         }
                                         if usage_changed {
                                             self.update_context_usage_from_stream();
-                                            if let Some(context_tokens) = self.current_stream_context_tokens() {
-                                                self.check_context_warning(context_tokens);
-                                            }
                                         }
                                         self.broadcast_debug(crate::tui::backend::DebugEvent::TokenUsage {
                                             input_tokens: self.streaming.streaming_input_tokens,
@@ -779,6 +883,7 @@ impl App {
                                         if no_partial_output
                                             && let Some(reason) = crate::network_retry::classify_message(&message)
                                         {
+                                            memory_pending.restore_now();
                                             let plan = crate::network_retry::wait_plan();
                                             self.push_display_message(DisplayMessage::system(format!(
                                                 "Stream interrupted, likely because {reason}. Waiting to retry: {}.",
@@ -794,6 +899,22 @@ impl App {
                                             ));
                                             continue 'turn_loop;
                                         }
+                                        if !no_partial_output
+                                            && (is_request_payload_too_large_error(&message)
+                                                || is_context_limit_error(&message))
+                                        {
+                                            self.checkpoint_partial_local_provider_output(
+                                                &text_content,
+                                                &reasoning_content,
+                                                &reasoning_signature,
+                                                &openai_reasoning_items,
+                                                &tool_calls,
+                                                &sdk_tool_results,
+                                                &generated_image_contexts,
+                                                store_reasoning_content,
+                                            )?;
+                                        }
+                                        memory_pending.restore_now();
                                         return Err(anyhow::anyhow!("Stream error: {}", message));
                                     }
                                     StreamEvent::ThinkingStart => {
@@ -902,7 +1023,6 @@ impl App {
                                             trigger, tokens_str
                                         );
                                         self.append_streaming_text(&compact_msg);
-                                        self.context_warning_shown = false;
                                     }
                                     StreamEvent::UpstreamProvider { provider } => {
                                         // Store the upstream provider (e.g., Fireworks, Together)
@@ -1048,6 +1168,7 @@ impl App {
                                 if no_partial_output
                                     && let Some(reason) = crate::network_retry::classify_network_interruption(e.as_ref())
                                 {
+                                    memory_pending.restore_now();
                                     let plan = crate::network_retry::wait_plan();
                                     self.push_display_message(DisplayMessage::system(format!(
                                         "Stream interrupted, likely because {reason}. Waiting to retry: {}.",
@@ -1063,6 +1184,23 @@ impl App {
                                     ));
                                     continue 'turn_loop;
                                 }
+                                let error_text = e.to_string();
+                                if !no_partial_output
+                                    && (is_request_payload_too_large_error(&error_text)
+                                        || is_context_limit_error(&error_text))
+                                {
+                                    self.checkpoint_partial_local_provider_output(
+                                        &text_content,
+                                        &reasoning_content,
+                                        &reasoning_signature,
+                                        &openai_reasoning_items,
+                                        &tool_calls,
+                                        &sdk_tool_results,
+                                        &generated_image_contexts,
+                                        store_reasoning_content,
+                                    )?;
+                                }
+                                memory_pending.restore_now();
                                 return Err(e);
                             }
                             None => {
@@ -1072,6 +1210,7 @@ impl App {
                                     && self.streaming.streaming_text.is_empty()
                                     && !saw_message_end;
                                 if no_partial_output {
+                                    memory_pending.restore_now();
                                     let plan = crate::network_retry::wait_plan();
                                     self.push_display_message(DisplayMessage::system(format!(
                                         "Stream ended before the model response completed; this may be a network disconnect. Waiting to retry: {}.",
@@ -1096,8 +1235,11 @@ impl App {
 
             // If we interleaved a message, skip post-processing and go straight to new API call
             if interleaved {
+                memory_pending.restore_now();
                 continue;
             }
+
+            memory_pending.restore_now();
 
             // Add assistant message to history
             let mut content_blocks = Vec::new();

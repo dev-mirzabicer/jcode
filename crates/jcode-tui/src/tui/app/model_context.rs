@@ -636,7 +636,7 @@ impl App {
             self.provider.context_window()
         };
         self.context_limit = limit as u64;
-        self.context_warning_shown = false;
+        self.recalculate_local_context_pressure();
 
         let context_budget = self.registry.context_budget();
         if let Ok(mut tracker) = context_budget.try_write() {
@@ -794,6 +794,9 @@ impl App {
     pub(super) fn handle_turn_error(&mut self, error: impl Into<String>) {
         let error = error.into();
         self.last_stream_error = Some(error.clone());
+        if self.handle_local_provider_size_error(&error) {
+            return;
+        }
         self.restore_failed_input_to_box();
 
         if let Some(prompt) = crate::provider::parse_failover_prompt_message(&error) {
@@ -801,44 +804,7 @@ impl App {
             return;
         }
 
-        if is_request_payload_too_large_error(&error) {
-            // 413 is a request body-size rejection driven by inline images.
-            // Strip oversized images now so a manual resubmit (or auto-poke
-            // retry) goes through, and keep auto-poke alive.
-            let stripped = self
-                .session
-                .strip_oversized_images(crate::compaction::PAYLOAD_IMAGE_CHAR_BUDGET);
-            if stripped > 0 {
-                self.messages.clear();
-                self.reseed_context_runtime_from_provider_messages();
-                self.push_display_message(DisplayMessage::error(format!(
-                    "Error: {} Dropped {} oversized image(s); you can retry.",
-                    error, stripped
-                )));
-            } else {
-                self.push_display_message(DisplayMessage::error(format!(
-                    "Error: {} Request body was too large but no inline images could be dropped. Run /fix to try manual recovery.",
-                    error
-                )));
-                super::commands::stop_auto_poke_for_non_retryable_error(self, &error);
-                self.stop_overnight_auto_poke_for_non_retryable_error(&error);
-            }
-            return;
-        }
-
-        if is_context_limit_error(&error) {
-            let recovery = self.auto_recover_context_limit();
-            let should_stop_auto_poke = recovery.is_none();
-            let hint = match recovery {
-                Some(msg) => format!(" {}", msg),
-                None => " Context limit exceeded but auto-recovery failed. Run /fix to try manual recovery.".to_string(),
-            };
-            self.push_display_message(DisplayMessage::error(format!("Error: {}{}", error, hint)));
-            if should_stop_auto_poke {
-                super::commands::stop_auto_poke_for_non_retryable_error(self, &error);
-                self.stop_overnight_auto_poke_for_non_retryable_error(&error);
-            }
-        } else {
+        {
             // Offer a one-keypress switch to the next best model/auth-method
             // (e.g. broken API key -> working OAuth login) before giving up. The
             // offer is informational; auto-poke still stops so an unattended loop
@@ -855,307 +821,6 @@ impl App {
             super::commands::stop_auto_poke_for_non_retryable_error(self, &error);
             self.stop_overnight_auto_poke_for_non_retryable_error(&error);
         }
-    }
-
-    pub(super) fn auto_recover_context_limit(&mut self) -> Option<String> {
-        if self.is_remote || !self.provider.supports_compaction() {
-            return None;
-        }
-        let compaction = self.registry.legacy_compaction();
-        let mut manager = compaction.try_write().ok()?;
-        let mut provider_messages = self.materialized_provider_messages();
-
-        let usage = manager.context_usage_with(&provider_messages);
-        if usage > 1.5 {
-            let recovery = manager.recover_within_budget(&mut provider_messages);
-            if recovery.did_anything() {
-                self.messages = provider_messages.clone();
-                self.sync_session_compaction_state_from_manager(&manager);
-                drop(manager);
-                self.reseed_context_budget_from_messages(
-                    &provider_messages,
-                    "TUI emergency context recovery",
-                );
-                return Some(format!(
-                    "{} You can continue.",
-                    recovery.summary_line(usage)
-                ));
-            }
-        }
-
-        let observed_tokens = self
-            .current_stream_context_tokens()
-            .unwrap_or(self.context_limit);
-        manager.update_observed_input_tokens(observed_tokens);
-
-        match manager.force_compact_with(&provider_messages, self.provider.clone()) {
-            Ok(()) => Some(
-                "⚡ Auto-compaction started - summarizing old messages in background. Retry in a moment."
-                    .to_string(),
-            ),
-            Err(reason) => {
-                crate::logging::error(&format!(
-                    "[auto_recover] force_compact failed: {}",
-                    reason
-                ));
-                match manager.hard_compact_with(&provider_messages) {
-                    Ok(dropped) => {
-                        self.sync_session_compaction_state_from_manager(&manager);
-                        let messages = manager.messages_for_api_with(&provider_messages);
-                        drop(manager);
-                        self.reseed_context_budget_from_messages(
-                            &messages,
-                            "TUI emergency hard compaction",
-                        );
-                        Some(format!(
-                            "⚡ Emergency compaction: dropped {} old messages. You can continue.",
-                            dropped
-                        ))
-                    }
-                    Err(_) => {
-                        let truncated = manager.emergency_truncate_with(&mut provider_messages);
-                        if truncated > 0 {
-                            self.messages = provider_messages.clone();
-                            drop(manager);
-                            self.reseed_context_budget_from_messages(
-                                &provider_messages,
-                                "TUI emergency tool-result truncation",
-                            );
-                            Some(format!(
-                                "⚡ Emergency truncation: shortened {} large tool result(s) to fit context. You can continue.",
-                                truncated
-                            ))
-                        } else {
-                            None
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// Attempt recovery after a provider HTTP 413 "request too large" error by
-    /// stripping oversized inline images (oldest-first) from the persisted
-    /// transcript, then retrying the turn. Returns true if the retry succeeded.
-    ///
-    /// This is the byte-size counterpart to `try_auto_compact_and_retry`: 413 is
-    /// driven by base64 image payload size, which token-budget compaction
-    /// deliberately undercounts, so ordinary compaction would not shrink the
-    /// request and the retry would 413 again.
-    pub(super) async fn try_recover_payload_too_large_and_retry(
-        &mut self,
-        terminal: &mut DefaultTerminal,
-        event_stream: &mut EventStream,
-    ) -> bool {
-        if self.is_remote {
-            return false;
-        }
-
-        let stripped = self
-            .session
-            .strip_oversized_images(crate::compaction::PAYLOAD_IMAGE_CHAR_BUDGET);
-        if stripped == 0 {
-            return false;
-        }
-
-        // Transcript changed: drop the local materialized scratch copy so the
-        // next API call rebuilds from the reduced session, and reseed compaction
-        // bookkeeping from the new provider view.
-        self.messages.clear();
-        self.reseed_context_runtime_from_provider_messages();
-
-        self.push_display_message(DisplayMessage::system(format!(
-            "⚡ Request was too large; dropped {} oversized image(s) and retrying...",
-            stripped
-        )));
-
-        self.reset_state_for_compaction_retry();
-        self.run_compaction_retry_turn(terminal, event_stream).await
-    }
-
-    /// Reset session and streaming state so a turn can be safely retried after
-    /// an emergency compaction or truncation changed the context.
-    ///
-    /// Every auto-recovery path used to inline this same ~15-line block; keeping
-    /// it in one place means they can no longer drift apart (e.g. one path
-    /// forgetting to clear `streaming_cache_creation_tokens`). Callers that hold
-    /// the compaction manager lock must `drop` it before calling this.
-    fn reset_state_for_compaction_retry(&mut self) {
-        self.provider_session_id = None;
-        self.session.provider_session_id = None;
-        self.context_warning_shown = false;
-        self.clear_streaming_render_state();
-        self.stream_buffer.clear();
-        self.streaming_tool_calls.clear();
-        self.streaming.streaming_input_tokens = 0;
-        self.streaming.streaming_output_tokens = 0;
-        self.streaming.streaming_cache_read_tokens = None;
-        self.streaming.streaming_cache_creation_tokens = None;
-        self.kv_cache.current_api_usage_recorded = false;
-        self.thought_line_inserted = false;
-        self.thinking_prefix_emitted = false;
-        self.thinking_buffer.clear();
-        self.status = ProcessingStatus::Sending;
-    }
-
-    /// Run a retry turn after compaction and report whether it succeeded,
-    /// clearing the materialized message scratch buffer and recording/handling
-    /// any turn error. Shared by every compaction auto-retry path.
-    async fn run_compaction_retry_turn(
-        &mut self,
-        terminal: &mut DefaultTerminal,
-        event_stream: &mut EventStream,
-    ) -> bool {
-        let retry_result = self
-            .run_turn_interactive(terminal, event_stream, None)
-            .await;
-        self.messages.clear();
-        match retry_result {
-            Ok(()) => {
-                self.last_stream_error = None;
-                true
-            }
-            Err(e) => {
-                self.handle_turn_error(crate::util::format_error_chain(&e));
-                false
-            }
-        }
-    }
-
-    /// Attempt automatic compaction and retry when context limit is exceeded.
-    /// Returns true if the retry succeeded.
-    pub(super) async fn try_auto_compact_and_retry(
-        &mut self,
-        terminal: &mut DefaultTerminal,
-        event_stream: &mut EventStream,
-    ) -> bool {
-        if self.is_remote || !self.provider.supports_compaction() {
-            return false;
-        }
-
-        self.push_display_message(DisplayMessage::system(
-            "⚠️ Context limit exceeded - auto-compacting and retrying...".to_string(),
-        ));
-
-        // Force the compaction manager to think we're at the limit
-        let compaction = self.registry.legacy_compaction();
-        let compact_started = match compaction.try_write() {
-            Ok(mut manager) => {
-                let mut provider_messages = self.materialized_provider_messages();
-                manager.update_observed_input_tokens(self.context_limit);
-                let usage = manager.context_usage_with(&provider_messages);
-                if usage > 1.5 {
-                    let recovery = manager.recover_within_budget(&mut provider_messages);
-                    if recovery.did_anything() {
-                        self.messages = provider_messages.clone();
-                        self.sync_session_compaction_state_from_manager(&manager);
-                        drop(manager);
-                        self.reseed_context_budget_from_messages(
-                            &provider_messages,
-                            "TUI context-limit recovery",
-                        );
-                        self.reset_state_for_compaction_retry();
-
-                        self.push_display_message(DisplayMessage::system(format!(
-                            "{} Retrying...",
-                            recovery.summary_line(usage)
-                        )));
-                        return self.run_compaction_retry_turn(terminal, event_stream).await;
-                    }
-                    false
-                } else {
-                    match manager.force_compact_with(&provider_messages, self.provider.clone()) {
-                        Ok(()) => true,
-                        Err(_) => match manager.hard_compact_with(&provider_messages) {
-                            Ok(_) => {
-                                self.sync_session_compaction_state_from_manager(&manager);
-                                let messages = manager.messages_for_api_with(&provider_messages);
-                                drop(manager);
-                                self.reseed_context_budget_from_messages(
-                                    &messages,
-                                    "TUI context-limit hard compaction",
-                                );
-                                self.reset_state_for_compaction_retry();
-
-                                self.push_display_message(DisplayMessage::system(
-                                    "✓ Context compacted (emergency). Retrying...".to_string(),
-                                ));
-                                return self
-                                    .run_compaction_retry_turn(terminal, event_stream)
-                                    .await;
-                            }
-                            Err(_) => false,
-                        },
-                    }
-                }
-            }
-            Err(_) => false,
-        };
-
-        if !compact_started {
-            return false;
-        }
-
-        // Wait for compaction to finish (up to 60s), reacting to Bus event
-        let deadline = std::time::Instant::now() + Duration::from_secs(60);
-        self.status = ProcessingStatus::RunningTool("compacting context...".to_string());
-        let mut bus_rx = Bus::global().subscribe();
-
-        loop {
-            if std::time::Instant::now() >= deadline {
-                self.push_display_message(DisplayMessage::error(
-                    "Auto-compaction timed out.".to_string(),
-                ));
-                return false;
-            }
-
-            // Redraw UI while we wait
-            let _ = terminal.draw(|frame| crate::tui::ui::draw(frame, self));
-
-            let compaction = self.registry.legacy_compaction();
-            let completion = if let Ok(mut manager) = compaction.try_write() {
-                let provider_messages = self.materialized_provider_messages();
-                if let Some(event) = manager.poll_compaction_event_with(&provider_messages) {
-                    self.sync_session_compaction_state_from_manager(&manager);
-                    let messages = manager.messages_for_api_with(&provider_messages);
-                    Some((event, messages))
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            let done = if let Some((event, messages)) = completion {
-                self.reseed_context_budget_from_messages(
-                    &messages,
-                    "TUI awaited compaction completion",
-                );
-                self.handle_compaction_event(event);
-                true
-            } else {
-                false
-            };
-
-            if done {
-                break;
-            }
-
-            // Wait for Bus notification or timeout (instead of sleep-polling)
-            let timeout = tokio::time::sleep(Duration::from_secs(1));
-            tokio::select! {
-                _ = bus_rx.recv() => {}
-                _ = timeout => {}
-            }
-        }
-
-        self.push_display_message(DisplayMessage::system(
-            "✓ Context compacted. Retrying...".to_string(),
-        ));
-
-        self.reset_state_for_compaction_retry();
-
-        // Retry the turn
-        self.run_compaction_retry_turn(terminal, event_stream).await
     }
 
     pub(super) fn handle_usage_report(&mut self, results: Vec<crate::usage::ProviderUsage>) {
@@ -1438,7 +1103,6 @@ impl App {
             notes.push("Compaction is unavailable for this provider.".to_string());
         }
 
-        self.context_warning_shown = false;
         self.last_stream_error = None;
         self.set_status_notice("Fix applied");
 

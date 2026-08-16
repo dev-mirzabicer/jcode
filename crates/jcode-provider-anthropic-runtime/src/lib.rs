@@ -1379,6 +1379,18 @@ impl Provider for AnthropicProvider {
         context_window::resolve(&self.model())
     }
 
+    fn context_request_budget(&self) -> jcode_provider_core::ContextRequestBudget {
+        let context_window = self.context_window();
+        jcode_provider_core::ContextRequestBudget {
+            context_window,
+            semantics: jcode_provider_core::ContextWindowSemantics::InputPlusOutput,
+            requested_max_output_tokens: Some(self.max_tokens_for(&self.model()) as usize),
+            estimator_margin_tokens: jcode_provider_core::default_context_estimator_margin(
+                context_window,
+            ),
+        }
+    }
+
     fn supports_image_input(&self) -> bool {
         true
     }

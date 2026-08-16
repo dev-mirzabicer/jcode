@@ -843,6 +843,21 @@ impl Provider for OpenRouterProvider {
             .unwrap_or(jcode_provider_core::DEFAULT_CONTEXT_LIMIT)
     }
 
+    fn context_request_budget(&self) -> jcode_provider_core::ContextRequestBudget {
+        let context_window = self.context_window();
+        jcode_provider_core::ContextRequestBudget {
+            context_window,
+            // OpenRouter and arbitrary OpenAI-compatible endpoints expose
+            // heterogeneous context semantics. Preserve that uncertainty even
+            // when this runtime happens to send a max_tokens field.
+            semantics: jcode_provider_core::ContextWindowSemantics::Unknown,
+            requested_max_output_tokens: self.max_tokens.map(|value| value as usize),
+            estimator_margin_tokens: jcode_provider_core::default_context_estimator_margin(
+                context_window,
+            ),
+        }
+    }
+
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(Self {
             client: self.client.clone(),

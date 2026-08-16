@@ -1096,6 +1096,19 @@ impl Provider for CopilotApiProvider {
             .unwrap_or(128_000)
     }
 
+    fn context_request_budget(&self) -> jcode_provider_core::ContextRequestBudget {
+        let context_window = self.context_window();
+        jcode_provider_core::ContextRequestBudget {
+            context_window,
+            semantics: jcode_provider_core::ContextWindowSemantics::InputPlusOutput,
+            // Keep this synchronized with stream_request's production body.
+            requested_max_output_tokens: Some(32_768),
+            estimator_margin_tokens: jcode_provider_core::default_context_estimator_margin(
+                context_window,
+            ),
+        }
+    }
+
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(CopilotApiProvider {
             client: self.client.clone(),

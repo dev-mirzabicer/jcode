@@ -3089,7 +3089,14 @@ async fn start_processing_message(
         let event_tx = tx.clone();
         let result = match std::panic::AssertUnwindSafe(crate::hooks::with_client_terminal_env(
             client_terminal_env,
-            process_message_streaming_mpsc(agent, &content, images, system_reminder, event_tx),
+            process_message_streaming_mpsc_with_request_id(
+                agent,
+                id,
+                &content,
+                images,
+                system_reminder,
+                event_tx,
+            ),
         ))
         .catch_unwind()
         .await
@@ -3433,6 +3440,36 @@ pub(super) async fn process_message_streaming_mpsc(
     let session_id = agent.session_id().to_string();
     let result = agent
         .run_once_streaming_mpsc(content, images, system_reminder, event_tx)
+        .await;
+    if result.is_ok() {
+        crate::runtime_memory_log::emit_event(
+            crate::runtime_memory_log::RuntimeMemoryLogEvent::new(
+                "turn_completed",
+                "message_turn_finished",
+            )
+            .with_session_id(session_id)
+            .force_attribution(),
+        );
+        crate::process_memory::release_retained_heap_debounced(
+            "server_turn_completed",
+            std::time::Duration::from_secs(30),
+        );
+    }
+    result
+}
+
+async fn process_message_streaming_mpsc_with_request_id(
+    agent: Arc<Mutex<Agent>>,
+    request_id: u64,
+    content: &str,
+    images: Vec<(String, String)>,
+    system_reminder: Option<String>,
+    event_tx: tokio::sync::mpsc::UnboundedSender<ServerEvent>,
+) -> Result<()> {
+    let mut agent = agent.lock().await;
+    let session_id = agent.session_id().to_string();
+    let result = agent
+        .run_once_streaming_mpsc_correlated(request_id, content, images, system_reminder, event_tx)
         .await;
     if result.is_ok() {
         crate::runtime_memory_log::emit_event(

@@ -217,6 +217,19 @@ pub trait TuiState {
     fn interleave_message(&self) -> Option<&str>;
     /// Messages sent as soft interrupt but not yet injected (shown in queue preview)
     fn pending_soft_interrupts(&self) -> &[String];
+    /// Complete-request pressure calculated before provider invocation. This is
+    /// presentation-only state and never enters the transcript.
+    fn context_preflight_report(&self) -> Option<&crate::protocol::ContextPreflightReport> {
+        None
+    }
+    fn context_action_required_reason(
+        &self,
+    ) -> Option<crate::protocol::ContextActionRequiredReason> {
+        None
+    }
+    fn context_payload_pressure(&self) -> Option<&crate::protocol::ContextPayloadPressure> {
+        None
+    }
 
     // ---- Scroll ----
     fn scroll_offset(&self) -> usize;

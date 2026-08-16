@@ -391,7 +391,7 @@ fn test_remote_error_with_retry_after_keeps_pending_for_auto_retry() {
 }
 
 #[test]
-fn context_protocol_events_reduce_through_app_with_exact_correlation_and_no_step10_side_effects() {
+fn context_protocol_events_reduce_with_exact_correlation_and_prompt_safe_action_handling() {
     use chrono::{Duration, TimeZone, Utc};
     use jcode_provider_core::{
         ContextProjectionValidationReport, ContextProjectionValidationStatus, ContextProviderFamily,
@@ -782,8 +782,11 @@ fn context_protocol_events_reduce_through_app_with_exact_correlation_and_no_step
                 request_id: 900,
                 content_chars: input_before.chars().count(),
                 content_digest: 123,
+                content_sha256: String::new(),
                 image_count: 0,
             }),
+            preflight: None,
+            payload: None,
             details: vec!["metadata only".to_string()],
             automatic_retry: false,
         },
@@ -792,7 +795,7 @@ fn context_protocol_events_reduce_through_app_with_exact_correlation_and_no_step
     assert_eq!(app.input, input_before);
     assert_eq!(app.display_messages().len(), display_count_before);
     assert_eq!(app.queued_messages().len(), queued_count_before);
-    assert!(app.context_protocol.action_required.is_some());
+    assert!(app.context_protocol.action_required.is_none());
 
     let session_change = crate::protocol::ServerEvent::History {
         id: 36,

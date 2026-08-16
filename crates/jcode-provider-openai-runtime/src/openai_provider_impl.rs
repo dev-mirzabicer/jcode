@@ -1182,6 +1182,32 @@ impl Provider for OpenAIProvider {
             .unwrap_or(jcode_provider_core::DEFAULT_CONTEXT_LIMIT)
     }
 
+    fn context_request_budget(&self) -> jcode_provider_core::ContextRequestBudget {
+        let context_window = self.context_window();
+        let model = self.model();
+        let uses_input_only_subscription_budget = is_chatgpt_web_model(&model)
+            || self
+                .credentials
+                .try_read()
+                .map(|credentials| Self::is_chatgpt_mode(&credentials))
+                .unwrap_or(false);
+        jcode_provider_core::ContextRequestBudget {
+            context_window,
+            semantics: if uses_input_only_subscription_budget {
+                jcode_provider_core::ContextWindowSemantics::InputOnly
+            } else {
+                jcode_provider_core::ContextWindowSemantics::InputPlusOutput
+            },
+            requested_max_output_tokens: (!uses_input_only_subscription_budget)
+                .then_some(self.max_output_tokens)
+                .flatten()
+                .map(|value| value as usize),
+            estimator_margin_tokens: jcode_provider_core::default_context_estimator_margin(
+                context_window,
+            ),
+        }
+    }
+
     fn invalidate_context_continuation(&self, reason: &str) {
         self.clear_persistent_ws_try(reason);
     }

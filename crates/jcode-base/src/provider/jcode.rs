@@ -282,6 +282,10 @@ impl Provider for JcodeProvider {
         self.inner.context_window()
     }
 
+    fn context_request_budget(&self) -> jcode_provider_core::ContextRequestBudget {
+        self.inner.context_request_budget()
+    }
+
     fn fork(&self) -> Arc<dyn Provider> {
         self.ensure_runtime_mode();
         let forked = Self::new();

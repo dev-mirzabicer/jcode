@@ -1,9 +1,8 @@
 #![cfg_attr(test, allow(clippy::items_after_test_module))]
 
 use super::{
-    App, ContentBlock, DisplayMessage, Message, ProcessingStatus, Role, SendAction, commands,
-    ctrl_bracket_fallback_to_esc, is_context_limit_error, is_request_payload_too_large_error,
-    remote,
+    App, ContentBlock, DisplayMessage, Message, PendingComposerInput, ProcessingStatus, Role,
+    SendAction, commands, ctrl_bracket_fallback_to_esc, remote,
 };
 use crate::bus::{
     Bus, BusEvent, ClipboardPasteCompleted, ClipboardPasteContent, ClipboardPasteKind,
@@ -183,6 +182,7 @@ pub(super) struct PreparedInput {
     pub raw_input: String,
     pub expanded: String,
     pub images: Vec<(String, String)>,
+    pub pasted_contents: Vec<String>,
 }
 
 // Roughly 500k English words at ~6 bytes/word including spaces. This is still
@@ -2748,7 +2748,7 @@ pub(super) fn take_prepared_input(app: &mut App) -> PreparedInput {
     let raw_input = std::mem::take(&mut app.input);
     app.record_prompt_history(&raw_input);
     let expanded = expand_paste_placeholders(app, &raw_input);
-    app.pasted_contents.clear();
+    let pasted_contents = std::mem::take(&mut app.pasted_contents);
     let images = std::mem::take(&mut app.pending_images);
     app.cursor_pos = 0;
     app.clear_input_undo_history();
@@ -2756,6 +2756,7 @@ pub(super) fn take_prepared_input(app: &mut App) -> PreparedInput {
         raw_input,
         expanded,
         images,
+        pasted_contents,
     }
 }
 
@@ -3581,6 +3582,15 @@ impl App {
         if self.activate_picker_from_preview() {
             return;
         }
+        if self.blocked_composer_restore_pending {
+            let restored = self.maybe_restore_blocked_composer_input();
+            if !restored {
+                self.set_status_notice(
+                    "A blocked prompt is retained · clear the current composer to restore it",
+                );
+            }
+            return;
+        }
 
         let raw_input = std::mem::take(&mut self.input);
         // Persist to cross-session prompt history (no-op for slash/shell
@@ -3594,7 +3604,7 @@ impl App {
             self.push_display_message(DisplayMessage::system(notice));
             return;
         }
-        self.pasted_contents.clear();
+        let submitted_pasted_contents = std::mem::take(&mut self.pasted_contents);
         self.cursor_pos = 0;
         self.clear_input_undo_history();
         self.follow_chat_bottom(); // Reset to bottom and resume auto-scroll on new input
@@ -3736,6 +3746,25 @@ impl App {
         // Remember the typed prompt so we can restore it to the input box if this
         // turn fails (e.g. "token refresh needed"), instead of dropping it.
         self.last_submitted_input = Some(raw_input.clone());
+        let pending_image_count = self.pending_images.len();
+        let pending_request_id = (!self.is_remote).then(|| self.next_local_context_request_id());
+        self.pending_composer_input = Some(super::PendingComposerInput {
+            request_id: pending_request_id,
+            raw_input: raw_input.clone(),
+            expanded: input.clone(),
+            pasted_contents: submitted_pasted_contents,
+            pending_input_tokens: crate::context::estimate_pending_input_tokens(
+                &input,
+                pending_image_count,
+            ),
+            image_count: pending_image_count,
+            local_session_len_before: (!self.is_remote).then_some(self.session.messages.len()),
+            local_display_len_before: (!self.is_remote).then_some(self.display_messages.len()),
+            local_provider_len_before: (!self.is_remote).then_some(self.messages.len()),
+            restoration_images: None,
+            request_payload_pressure: None,
+            output_started: false,
+        });
 
         // See `stage_turn_for_remote_tick_loop`: a remote client must never
         // park on the local-only `pending_turn` flag.
@@ -3845,6 +3874,20 @@ impl App {
             let preserve_visible_turn = super::commands::queued_messages_are_only_pokes(&messages);
 
             self.commit_pending_streaming_assistant_message();
+            self.pending_composer_input = Some(PendingComposerInput {
+                request_id: Some(self.next_local_context_request_id()),
+                raw_input: combined.clone(),
+                expanded: combined.clone(),
+                pasted_contents: Vec::new(),
+                pending_input_tokens: crate::context::estimate_pending_input_tokens(&combined, 0),
+                image_count: 0,
+                local_session_len_before: Some(self.session.messages.len()),
+                local_display_len_before: Some(self.display_messages.len()),
+                local_provider_len_before: Some(self.messages.len()),
+                restoration_images: None,
+                request_payload_pressure: None,
+                output_started: false,
+            });
 
             for msg in display_system_messages {
                 self.push_display_message(DisplayMessage::system(msg));
@@ -3906,32 +3949,17 @@ impl App {
             {
                 Ok(()) => {
                     self.last_stream_error = None;
-                    self.last_submitted_input = None;
+                    self.finish_pending_composer_turn();
                 }
                 Err(e) => {
                     let err_str = crate::util::format_error_chain(&e);
-                    if is_request_payload_too_large_error(&err_str) {
-                        if !self
-                            .try_recover_payload_too_large_and_retry(terminal, event_stream)
-                            .await
-                        {
-                            self.handle_turn_error(err_str);
-                        }
-                    } else if is_context_limit_error(&err_str) {
-                        if self
-                            .try_auto_compact_and_retry(terminal, event_stream)
-                            .await
-                        {
-                            // Successfully recovered
-                        } else {
-                            self.handle_turn_error(err_str);
-                        }
-                    } else {
-                        self.handle_turn_error(err_str);
-                    }
+                    self.handle_turn_error(err_str);
                 }
             }
             self.current_turn_system_reminder = None;
+            if self.context_protocol.action_required.is_some() {
+                break;
+            }
             // Loop will check if more messages were queued during this turn
         }
     }

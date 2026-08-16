@@ -79,6 +79,76 @@ use std::time::Duration;
 /// Stream of events from a provider.
 pub type EventStream = Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>;
 
+/// Provider-declared semantics for a model's advertised context window.
+///
+/// This is deliberately explicit because providers disagree about whether the
+/// advertised limit applies only to request input or to input plus generated
+/// output. `Unknown` must remain visible to callers rather than being converted
+/// into a guessed output reserve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextWindowSemantics {
+    InputOnly,
+    InputPlusOutput,
+    Unknown,
+}
+
+/// Request-budget facts used by authoritative context preflight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextRequestBudget {
+    pub context_window: usize,
+    pub semantics: ContextWindowSemantics,
+    /// The output cap that the provider runtime will place on this request.
+    /// This is not the model's theoretical maximum.
+    pub requested_max_output_tokens: Option<usize>,
+    /// Safety allowance for approximate tokenization and provider wrappers.
+    pub estimator_margin_tokens: usize,
+}
+
+impl ContextRequestBudget {
+    pub fn unknown(context_window: usize) -> Self {
+        Self {
+            context_window,
+            semantics: ContextWindowSemantics::Unknown,
+            requested_max_output_tokens: None,
+            estimator_margin_tokens: default_context_estimator_margin(context_window),
+        }
+    }
+
+    pub fn output_reserve_tokens(self) -> usize {
+        if self.semantics == ContextWindowSemantics::InputPlusOutput {
+            self.requested_max_output_tokens.unwrap_or_default()
+        } else {
+            0
+        }
+    }
+
+    pub fn safe_input_budget(self) -> usize {
+        self.context_window
+            .saturating_sub(self.output_reserve_tokens())
+            .saturating_sub(self.estimator_margin_tokens)
+    }
+
+    pub fn exact_output_reserve_known(self) -> bool {
+        match self.semantics {
+            ContextWindowSemantics::InputOnly => true,
+            ContextWindowSemantics::InputPlusOutput => self.requested_max_output_tokens.is_some(),
+            ContextWindowSemantics::Unknown => false,
+        }
+    }
+}
+
+/// Margin used when a provider does not supply a route-specific tokenizer.
+///
+/// Five percent protects small windows while the 4K ceiling preserves useful
+/// capacity on very large windows and matches the approved 372K UX boundary.
+pub fn default_context_estimator_margin(context_window: usize) -> usize {
+    context_window
+        .saturating_div(20)
+        .clamp(256, 4_096)
+        .min(context_window)
+}
+
 /// Provider trait for LLM backends.
 #[async_trait]
 pub trait Provider: Send + Sync {
@@ -467,6 +537,16 @@ pub trait Provider: Send + Sync {
     fn context_window(&self) -> usize {
         context_limit_for_model_with_provider(&self.model(), Some(self.name()))
             .unwrap_or(DEFAULT_CONTEXT_LIMIT)
+    }
+
+    /// Return authoritative request-budget semantics for the request this
+    /// provider runtime would construct now.
+    ///
+    /// The conservative default exposes the context window but leaves output
+    /// semantics unknown. Concrete providers override only when their production
+    /// request builder proves the exact behavior.
+    fn context_request_budget(&self) -> ContextRequestBudget {
+        ContextRequestBudget::unknown(self.context_window())
     }
 
     /// Create a new provider instance with independent mutable state.
@@ -1407,6 +1487,41 @@ fn reference_request_cost_micros(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn request_budget_reserves_only_actual_combined_output_cap() {
+        let combined = ContextRequestBudget {
+            context_window: 100_000,
+            semantics: ContextWindowSemantics::InputPlusOutput,
+            requested_max_output_tokens: Some(8_000),
+            estimator_margin_tokens: 4_000,
+        };
+        assert_eq!(combined.output_reserve_tokens(), 8_000);
+        assert_eq!(combined.safe_input_budget(), 88_000);
+        assert!(combined.exact_output_reserve_known());
+
+        let input_only = ContextRequestBudget {
+            semantics: ContextWindowSemantics::InputOnly,
+            ..combined
+        };
+        assert_eq!(input_only.output_reserve_tokens(), 0);
+        assert_eq!(input_only.safe_input_budget(), 96_000);
+        assert!(input_only.exact_output_reserve_known());
+
+        let unknown = ContextRequestBudget::unknown(100_000);
+        assert_eq!(unknown.output_reserve_tokens(), 0);
+        assert_eq!(unknown.safe_input_budget(), 95_904);
+        assert!(!unknown.exact_output_reserve_known());
+    }
+
+    #[test]
+    fn estimator_margin_is_bounded_for_small_and_large_windows() {
+        assert_eq!(default_context_estimator_margin(100), 100);
+        assert_eq!(default_context_estimator_margin(1_000), 256);
+        assert_eq!(default_context_estimator_margin(20_000), 1_000);
+        assert_eq!(default_context_estimator_margin(372_000), 4_096);
+        assert_eq!(default_context_estimator_margin(1_000_000), 4_096);
+    }
 
     #[test]
     fn metered_estimate_computes_reference_cost() {

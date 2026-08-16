@@ -349,17 +349,18 @@ fn parity_events() -> Vec<(&'static str, crate::protocol::ServerEvent)> {
         (
             "action_required",
             ServerEvent::ContextActionRequired {
-                id: 19,
+                id: 91,
                 session_id: "session-parity".to_string(),
                 context_revision: 4,
                 reason: crate::protocol::ContextActionRequiredReason::PreflightLimit,
                 required_reduction_tokens: 1_024,
-                pending_input: Some(crate::protocol::ContextPendingInputMetadata {
-                    request_id: 91,
-                    content_chars: 12,
-                    content_digest: 123,
-                    image_count: 1,
-                }),
+                pending_input: Some(crate::protocol::ContextPendingInputMetadata::new(
+                    91,
+                    "parity input",
+                    1,
+                )),
+                preflight: None,
+                payload: None,
                 details: vec!["safe pressure metadata".to_string()],
                 automatic_retry: false,
             },
@@ -493,7 +494,33 @@ fn prepare_context_parity_app(app: &mut App, event: &crate::protocol::ServerEven
             }
             _ => panic!("unsupported parity rejection fixture: {request:?}"),
         },
-        ServerEvent::ContextActionRequired { .. } => {}
+        ServerEvent::ContextActionRequired { id, .. } => {
+            app.current_message_id = Some(*id);
+            app.pending_composer_input = Some(PendingComposerInput {
+                request_id: Some(*id),
+                raw_input: "parity input".to_string(),
+                expanded: "parity input".to_string(),
+                pasted_contents: Vec::new(),
+                pending_input_tokens: 3,
+                image_count: 1,
+                local_session_len_before: None,
+                local_display_len_before: None,
+                local_provider_len_before: None,
+                restoration_images: None,
+                request_payload_pressure: None,
+                output_started: false,
+            });
+            app.rate_limit_pending_message = Some(PendingRemoteMessage {
+                content: "parity input".to_string(),
+                images: vec![("image/png".to_string(), "parity-image".to_string())],
+                is_system: false,
+                system_reminder: None,
+                auto_retry: false,
+                retry_attempts: 0,
+                retry_at: None,
+            });
+            app.push_display_message(DisplayMessage::user("parity input"));
+        }
         ServerEvent::ContextEmergencyPolicyChanged { .. } => {}
         _ => panic!("unexpected non-context parity event"),
     }
@@ -807,6 +834,8 @@ fn mismatched_context_events_are_ignored_identically_without_side_effects() {
         reason: crate::protocol::ContextActionRequiredReason::PreflightLimit,
         required_reduction_tokens: 1_024,
         pending_input: None,
+        preflight: None,
+        payload: None,
         details: Vec::new(),
         automatic_retry: false,
     };
@@ -820,6 +849,8 @@ fn mismatched_context_events_are_ignored_identically_without_side_effects() {
             reason: crate::protocol::ContextActionRequiredReason::PreflightLimit,
             required_reduction_tokens: 1_024,
             pending_input: None,
+            preflight: None,
+            payload: None,
             details: Vec::new(),
             automatic_retry: false,
         },

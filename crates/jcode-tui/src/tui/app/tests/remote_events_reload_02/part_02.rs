@@ -268,7 +268,6 @@ fn test_handle_server_event_compaction_shows_completion_message_in_remote_mode()
 
     app.provider_session_id = Some("provider-session".to_string());
     app.session.provider_session_id = Some("provider-session".to_string());
-    app.context_warning_shown = true;
 
     app.handle_server_event(
         crate::protocol::ServerEvent::Compaction {
@@ -287,7 +286,6 @@ fn test_handle_server_event_compaction_shows_completion_message_in_remote_mode()
 
     assert!(app.provider_session_id.is_none());
     assert!(app.session.provider_session_id.is_none());
-    assert!(!app.context_warning_shown);
     assert_eq!(app.status_notice(), Some("Context compacted".to_string()));
 
     let last = app

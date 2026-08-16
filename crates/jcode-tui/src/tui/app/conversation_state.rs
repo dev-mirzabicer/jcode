@@ -422,7 +422,6 @@ impl App {
         self.kv_cache.cold_cache_warned_baseline_completed_at = None;
         self.provider_session_id = None;
         self.session.provider_session_id = None;
-        self.context_warning_shown = false;
         // The sidebar/status context figure is derived from the last
         // provider-reported stream usage, which described the *pre-compaction*
         // message list. Mark it stale so the display falls back to the local

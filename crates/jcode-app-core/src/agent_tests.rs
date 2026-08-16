@@ -39,6 +39,88 @@ struct ProjectedRequestProviderState {
     summary_requests: AtomicUsize,
 }
 
+#[derive(Clone)]
+struct ScriptedSizeProvider {
+    context_window: usize,
+    open_error: Option<String>,
+    stream_events: Arc<Vec<ScriptedSizeEvent>>,
+    requests: Arc<AtomicUsize>,
+}
+
+#[derive(Clone)]
+enum ScriptedSizeEvent {
+    Event(StreamEvent),
+}
+
+impl ScriptedSizeProvider {
+    fn open_error(context_window: usize, error: &str) -> Self {
+        Self {
+            context_window,
+            open_error: Some(error.to_string()),
+            stream_events: Arc::new(Vec::new()),
+            requests: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn stream(context_window: usize, stream_events: Vec<ScriptedSizeEvent>) -> Self {
+        Self {
+            context_window,
+            open_error: None,
+            stream_events: Arc::new(stream_events),
+            requests: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn request_count(&self) -> usize {
+        self.requests.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl Provider for ScriptedSizeProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        self.requests.fetch_add(1, Ordering::SeqCst);
+        if let Some(error) = self.open_error.as_ref() {
+            anyhow::bail!(error.clone());
+        }
+        let (tx, rx) = tokio_mpsc::channel(16);
+        let events = self.stream_events.clone();
+        tokio::spawn(async move {
+            for event in events.iter().cloned() {
+                let result = match event {
+                    ScriptedSizeEvent::Event(event) => Ok(event),
+                };
+                if tx.send(result).await.is_err() {
+                    break;
+                }
+            }
+        });
+        Ok(Box::pin(ReceiverStream::new(rx)))
+    }
+
+    fn name(&self) -> &str {
+        "scripted-size-test"
+    }
+
+    fn model(&self) -> String {
+        "scripted-size-model".to_string()
+    }
+
+    fn context_window(&self) -> usize {
+        self.context_window
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
 impl ProjectedRequestProvider {
     fn new(context_window: usize) -> Self {
         Self {
@@ -1234,7 +1316,7 @@ async fn historical_context_change_resets_provider_runtime_exactly_once() {
 }
 
 #[test]
-fn projected_agent_rejects_ineffective_legacy_manual_and_hard_compaction() {
+fn projected_agent_rejects_legacy_manual_compaction_without_mutating_context() {
     let provider = Arc::new(ProjectedRequestProvider::new(1_000));
     let provider_dyn: Arc<dyn Provider> = provider.clone();
     let mut agent = Agent::new(provider_dyn, Registry::empty());
@@ -1253,8 +1335,6 @@ fn projected_agent_rejects_ineffective_legacy_manual_and_hard_compaction() {
     let (message, started) = agent.request_manual_compaction();
     assert!(!started);
     assert!(message.contains("provider projection were not changed"));
-    assert!(!agent.try_auto_compact_after_context_limit("maximum context length exceeded"));
-
     assert_eq!(provider.summary_request_count(), 0);
     assert!(agent.session.compaction.is_none());
     assert_eq!(
@@ -1265,6 +1345,263 @@ fn projected_agent_rejects_ineffective_legacy_manual_and_hard_compaction() {
         serde_json::to_vec(&agent.messages_for_provider().expect("unchanged projection")).unwrap(),
         serde_json::to_vec(&projected_before).unwrap()
     );
+}
+
+fn drain_server_events(
+    receiver: &mut tokio_mpsc::UnboundedReceiver<ServerEvent>,
+) -> Vec<ServerEvent> {
+    let mut events = Vec::new();
+    while let Ok(event) = receiver.try_recv() {
+        events.push(event);
+    }
+    events
+}
+
+#[tokio::test]
+async fn phase10_correlated_preflight_blocks_before_provider_call_and_rolls_back_pending_turn() {
+    let provider = Arc::new(ScriptedSizeProvider::stream(128, Vec::new()));
+    let mut agent = Agent::new(provider.clone(), Registry::empty());
+    let raw_before = serde_json::to_vec(&agent.session.messages).unwrap();
+    let (event_tx, mut event_rx) = tokio_mpsc::unbounded_channel();
+    let prompt = "oversized Unicode prompt 🦀\nwith pasted code";
+
+    let error = agent
+        .run_once_streaming_mpsc_correlated(
+            501,
+            prompt,
+            vec![("image/png".to_string(), "pending-image-data".to_string())],
+            None,
+            event_tx,
+        )
+        .await
+        .expect_err("preflight must block");
+
+    assert!(error.to_string().contains("Request not sent"));
+    assert_eq!(provider.request_count(), 0);
+    assert_eq!(
+        serde_json::to_vec(&agent.session.messages).unwrap(),
+        raw_before
+    );
+    let events = drain_server_events(&mut event_rx);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ServerEvent::ContextPressureUpdated { id: 501, report, .. }
+            if report.pressure == crate::protocol::ContextPressureLevel::Blocked
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ServerEvent::ContextActionRequired {
+            id: 501,
+            reason: crate::protocol::ContextActionRequiredReason::PreflightLimit,
+            pending_input: Some(metadata),
+            automatic_retry: false,
+            ..
+        } if metadata.matches(501, prompt, 1)
+    )));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, ServerEvent::Compaction { .. }))
+    );
+}
+
+#[tokio::test]
+async fn phase10_provider_payload_rejection_preserves_historical_images_and_never_retries() {
+    let provider = Arc::new(ScriptedSizeProvider::open_error(
+        1_000_000,
+        "HTTP 413 payload too large",
+    ));
+    let mut agent = Agent::new(provider.clone(), Registry::empty());
+    let historical_image = "historical-image-bytes".to_string();
+    agent.add_message(
+        Role::User,
+        vec![
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: historical_image.clone(),
+            },
+            ContentBlock::Text {
+                text: "historical image".to_string(),
+                cache_control: None,
+            },
+        ],
+    );
+    let baseline_provider_messages = agent.session.messages_for_provider();
+    agent
+        .cache_tracker
+        .record_request(&baseline_provider_messages);
+    let cache_turns_before = agent.cache_tracker.turn_count();
+    agent.mcp_late_register_resolved = true;
+    agent.tool_output_scan_index = agent.session.messages.len();
+    let raw_before = serde_json::to_vec(&agent.session.messages).unwrap();
+    let (event_tx, mut event_rx) = tokio_mpsc::unbounded_channel();
+
+    let error = agent
+        .run_once_streaming_mpsc_correlated(
+            502,
+            "pending payload",
+            vec![("image/png".to_string(), "pending-image-bytes".to_string())],
+            None,
+            event_tx,
+        )
+        .await
+        .expect_err("provider must reject payload");
+
+    assert!(error.to_string().contains("images were preserved"));
+    assert_eq!(provider.request_count(), 1);
+    assert_eq!(agent.cache_tracker.turn_count(), cache_turns_before);
+    assert!(agent.locked_tools.is_none());
+    assert!(agent.mcp_late_register_resolved);
+    assert_eq!(agent.tool_output_scan_index, agent.session.messages.len());
+    assert_eq!(
+        serde_json::to_vec(&agent.session.messages).unwrap(),
+        raw_before
+    );
+    assert!(agent.session.messages.iter().any(|message| {
+        message.content.iter().any(
+            |block| matches!(block, ContentBlock::Image { data, .. } if data == &historical_image),
+        )
+    }));
+    let events = drain_server_events(&mut event_rx);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ServerEvent::ContextActionRequired {
+            id: 502,
+            reason: crate::protocol::ContextActionRequiredReason::PayloadTooLarge,
+            pending_input: Some(metadata),
+            payload: Some(payload),
+            automatic_retry: false,
+            ..
+        } if metadata.matches(502, "pending payload", 1)
+            && payload.image_count == 2
+            && payload.estimated_base64_bytes
+                >= historical_image.len() + "pending-image-bytes".len()
+    )));
+}
+
+#[tokio::test]
+async fn phase10_post_output_context_rejection_preserves_partial_authoritative_output() {
+    let provider = Arc::new(ScriptedSizeProvider::stream(
+        1_000_000,
+        vec![
+            ScriptedSizeEvent::Event(StreamEvent::TextDelta("partial answer".to_string())),
+            ScriptedSizeEvent::Event(StreamEvent::Error {
+                message: "maximum context length exceeded".to_string(),
+                retry_after_secs: None,
+            }),
+        ],
+    ));
+    let mut agent = Agent::new(provider.clone(), Registry::empty());
+    let raw_len_before = agent.session.messages.len();
+    let (event_tx, mut event_rx) = tokio_mpsc::unbounded_channel();
+
+    agent
+        .run_once_streaming_mpsc_correlated(503, "keep this turn", Vec::new(), None, event_tx)
+        .await
+        .expect_err("provider must reject continuation");
+
+    assert_eq!(provider.request_count(), 1);
+    assert!(agent.session.messages.len() >= raw_len_before + 2);
+    assert!(agent.session.messages.iter().any(|message| {
+        message.role == Role::Assistant
+            && message.content.iter().any(
+                |block| matches!(block, ContentBlock::Text { text, .. } if text == "partial answer"),
+            )
+    }));
+    let events = drain_server_events(&mut event_rx);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ServerEvent::ContextActionRequired {
+            id: 503,
+            reason: crate::protocol::ContextActionRequiredReason::ProviderContextLimit,
+            pending_input: None,
+            preflight: Some(report),
+            automatic_retry: false,
+            ..
+        } if report.pressure == crate::protocol::ContextPressureLevel::Blocked
+            && report.required_reduction_tokens >= 1
+    )));
+}
+
+#[test]
+fn phase10_partial_output_persistence_failure_is_reported_without_prompt_rollback() {
+    let provider = Arc::new(ScriptedSizeProvider::stream(1_000_000, Vec::new()));
+    let mut agent = Agent::new(provider, Registry::empty());
+    agent.begin_pending_turn(Some(504), "authoritative prompt", 0, 8, 0, Vec::new());
+    agent.mark_provider_output_started();
+    agent
+        .active_turn_context
+        .as_mut()
+        .expect("active turn")
+        .partial_output_checkpointed = true;
+    agent
+        .active_turn_context
+        .as_mut()
+        .expect("active turn")
+        .partial_output_persistence_error = Some("injected persistence failure".to_string());
+    let (event_tx, mut event_rx) = tokio_mpsc::unbounded_channel();
+
+    let error = agent
+        .handle_provider_size_rejection(
+            "maximum context length exceeded",
+            crate::protocol::ContextPayloadPressure {
+                image_count: 0,
+                estimated_base64_bytes: 0,
+            },
+            Some(&event_tx),
+        )
+        .expect("size rejection classified")
+        .expect("actionable terminal error");
+
+    assert!(error.to_string().contains("persistence failed"));
+    assert!(agent.active_turn_context.is_some());
+    let events = drain_server_events(&mut event_rx);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ServerEvent::ContextActionRequired {
+            id: 504,
+            pending_input: None,
+            details,
+            automatic_retry: false,
+            ..
+        } if details.iter().any(|detail|
+            detail == crate::protocol::CONTEXT_PARTIAL_OUTPUT_NOT_DURABLE)
+    )));
+}
+
+#[test]
+fn phase10_incomplete_provider_output_retains_turn_without_claiming_replayable_history() {
+    let provider = Arc::new(ScriptedSizeProvider::stream(1_000_000, Vec::new()));
+    let mut agent = Agent::new(provider, Registry::empty());
+    agent.begin_pending_turn(Some(505), "authoritative prompt", 0, 8, 0, Vec::new());
+    agent.mark_provider_output_started();
+    let (event_tx, mut event_rx) = tokio_mpsc::unbounded_channel();
+
+    agent
+        .handle_provider_size_rejection(
+            "maximum context length exceeded",
+            crate::protocol::ContextPayloadPressure {
+                image_count: 0,
+                estimated_base64_bytes: 0,
+            },
+            Some(&event_tx),
+        )
+        .expect("size rejection classified")
+        .expect("actionable terminal error");
+
+    assert!(agent.active_turn_context.is_some());
+    let events = drain_server_events(&mut event_rx);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ServerEvent::ContextActionRequired {
+            id: 505,
+            pending_input: None,
+            details,
+            automatic_retry: false,
+            ..
+        } if details.iter().any(|detail|
+            detail == crate::protocol::CONTEXT_PARTIAL_OUTPUT_NOT_REPLAYABLE)
+    )));
 }
 
 #[tokio::test]

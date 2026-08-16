@@ -1708,6 +1708,7 @@ async fn handle_remote_key_internal(
                         raw_input: prompt.to_string(),
                         expanded: prompt.to_string(),
                         images: vec![],
+                        pasted_contents: vec![],
                     };
                     route_prepared_input_to_new_remote_session(app, remote, prepared).await?;
                     return Ok(());

@@ -61,6 +61,7 @@ mod commands_plan;
 mod commands_remote;
 mod commands_review;
 mod context_editor_runtime;
+mod context_pressure;
 pub(crate) mod context_protocol;
 mod conversation_state;
 mod copy_selection;
@@ -142,9 +143,26 @@ struct PendingRemoteMessage {
 }
 
 #[derive(Debug, Clone)]
+struct PendingComposerInput {
+    request_id: Option<u64>,
+    raw_input: String,
+    expanded: String,
+    pasted_contents: Vec<String>,
+    pending_input_tokens: usize,
+    image_count: usize,
+    local_session_len_before: Option<usize>,
+    local_display_len_before: Option<usize>,
+    local_provider_len_before: Option<usize>,
+    restoration_images: Option<Vec<(String, String)>>,
+    request_payload_pressure: Option<crate::protocol::ContextPayloadPressure>,
+    output_started: bool,
+}
+
+#[derive(Debug, Clone)]
 struct PendingSplitPrompt {
     content: String,
     images: Vec<(String, String)>,
+    pasted_contents: Vec<String>,
 }
 
 struct PendingLocalTransfer {
@@ -891,9 +909,11 @@ pub struct App {
     kv_cache: KvCacheState,
     // Accumulated session cost + cached per-model pricing.
     cost: CostState,
-    // Context limit tracking (for compaction warning)
+    // Context limit and authoritative request-pressure state.
     context_limit: u64,
-    context_warning_shown: bool,
+    context_pressure: Option<crate::protocol::ContextPreflightReport>,
+    context_pressure_session_id: Option<String>,
+    context_action_request_id: Option<u64>,
     // Context info (what's loaded in system prompt)
     context_info: crate::prompt::ContextInfo,
     // Monotonic revision for prompt/context-affecting state. Info widgets use this to avoid stale
@@ -1593,6 +1613,12 @@ pub struct App {
     // input box if the turn fails (e.g. "token refresh needed") so the user does not
     // lose what they typed and can resend after recovering.
     last_submitted_input: Option<String>,
+    // Exact composer metadata retained until success or a safe blocked-turn
+    // restoration. Raw prompt content is never sent in context-control events.
+    pending_composer_input: Option<PendingComposerInput>,
+    blocked_composer_restore_pending: bool,
+    partial_output_checkpointed: bool,
+    partial_output_persistence_error: Option<String>,
     // Store reload info to pass to agent after reconnection (remote mode)
     reload_info: Vec<String>,
     // Debug trace for scripted testing

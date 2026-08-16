@@ -1434,10 +1434,23 @@ pub enum ServerEvent {
         required_reduction_tokens: usize,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pending_input: Option<ContextPendingInputMetadata>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preflight: Option<ContextPreflightReport>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        payload: Option<ContextPayloadPressure>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         details: Vec<String>,
         #[serde(default)]
         automatic_retry: bool,
+    },
+
+    /// Session-scoped, non-transcript pressure state calculated from the full
+    /// request shape before provider invocation.
+    #[serde(rename = "context_pressure_updated")]
+    ContextPressureUpdated {
+        id: u64,
+        session_id: String,
+        report: ContextPreflightReport,
     },
 
     #[serde(rename = "context_emergency_policy_changed")]

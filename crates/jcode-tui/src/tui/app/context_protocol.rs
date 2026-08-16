@@ -1,9 +1,9 @@
 use crate::protocol::{
     ContextActionRequiredReason, ContextDraft, ContextDraftIdentity, ContextDraftProgress,
     ContextDraftSelectionPreview, ContextEditorSnapshot, ContextMessageDetail,
-    ContextMessageRangeSelection, ContextPendingInputMetadata, ContextRangeClosurePreview,
-    ContextRequestKind, ContextServiceError, ContextTransactionDetail, ContextTransactionResult,
-    ContextTransactionSummary,
+    ContextMessageRangeSelection, ContextPayloadPressure, ContextPendingInputMetadata,
+    ContextPreflightReport, ContextRangeClosurePreview, ContextRequestKind, ContextServiceError,
+    ContextTransactionDetail, ContextTransactionResult, ContextTransactionSummary,
 };
 use jcode_session_types::StoredContextEmergencyPolicy;
 
@@ -158,6 +158,7 @@ pub(crate) struct ContextActionRequiredState {
     pub reason: ContextActionRequiredReason,
     pub required_reduction_tokens: usize,
     pub pending_input: Option<ContextPendingInputMetadata>,
+    pub payload: Option<ContextPayloadPressure>,
     pub details: Vec<String>,
     pub automatic_retry: bool,
 }
@@ -847,6 +848,8 @@ impl ContextProtocolState {
         reason: ContextActionRequiredReason,
         required_reduction_tokens: usize,
         pending_input: Option<ContextPendingInputMetadata>,
+        _preflight: Option<ContextPreflightReport>,
+        payload: Option<ContextPayloadPressure>,
         details: Vec<String>,
         automatic_retry: bool,
     ) -> bool {
@@ -864,6 +867,7 @@ impl ContextProtocolState {
             reason,
             required_reduction_tokens,
             pending_input,
+            payload,
             details,
             automatic_retry,
         });
@@ -1370,6 +1374,7 @@ mod tests {
             request_id: 77,
             content_chars: 25,
             content_digest: 123,
+            content_sha256: String::new(),
             image_count: 1,
         };
         assert!(!state.accept_action_required(
@@ -1379,6 +1384,8 @@ mod tests {
             ContextActionRequiredReason::PreflightLimit,
             512,
             Some(pending.clone()),
+            None,
+            None,
             vec!["too large".to_string()],
             false,
         ));
@@ -1389,6 +1396,8 @@ mod tests {
             ContextActionRequiredReason::PreflightLimit,
             512,
             Some(pending),
+            None,
+            None,
             vec!["too large".to_string()],
             false,
         ));

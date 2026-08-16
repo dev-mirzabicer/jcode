@@ -67,6 +67,7 @@ pub(in crate::tui::app) fn restore_prepared_remote_input(
     app.input = prepared.raw_input;
     app.cursor_pos = app.input.len();
     app.pending_images = prepared.images;
+    app.pasted_contents = prepared.pasted_contents;
 }
 
 pub(in crate::tui::app) fn history_matches_pending_startup_prompt(app: &App) -> bool {
@@ -124,19 +125,68 @@ pub(in crate::tui::app) async fn submit_prepared_remote_input(
     app.clear_pending_fallback_offer();
     // Remember the typed prompt so we can restore it to the input box if this turn
     // fails (e.g. "token refresh needed"), instead of dropping it.
-    app.last_submitted_input = Some(prepared.raw_input.clone());
+    let input::PreparedInput {
+        raw_input,
+        expanded,
+        images,
+        pasted_contents,
+    } = prepared;
+    app.last_submitted_input = Some(raw_input.clone());
+    app.pending_composer_input = Some(super::super::PendingComposerInput {
+        request_id: None,
+        raw_input: raw_input.clone(),
+        expanded: expanded.clone(),
+        pasted_contents: pasted_contents.clone(),
+        pending_input_tokens: crate::context::estimate_pending_input_tokens(
+            &expanded,
+            images.len(),
+        ),
+        image_count: images.len(),
+        local_session_len_before: None,
+        local_display_len_before: None,
+        local_provider_len_before: None,
+        restoration_images: None,
+        request_payload_pressure: None,
+        output_started: false,
+    });
+    let display_len_before = app.display_messages.len();
     app.push_display_message(DisplayMessage {
         role: "user".to_string(),
-        content: prepared.raw_input,
+        content: raw_input.clone(),
         tool_calls: vec![],
         duration_secs: None,
         title: None,
         tool_data: None,
     });
-    let _ = app
-        .begin_remote_send(remote, prepared.expanded, prepared.images, false)
-        .await;
-    Ok(())
+    match app
+        .begin_remote_send(remote, expanded.clone(), images.clone(), false)
+        .await
+    {
+        Ok(request_id) => {
+            if let Some(pending) = app.pending_composer_input.as_mut() {
+                pending.request_id = Some(request_id);
+            }
+            Ok(())
+        }
+        Err(error) => {
+            while app.display_messages.len() > display_len_before {
+                let last = app.display_messages.len() - 1;
+                app.remove_display_message(last);
+            }
+            app.pending_composer_input = None;
+            app.last_submitted_input = None;
+            restore_prepared_remote_input(
+                app,
+                input::PreparedInput {
+                    raw_input,
+                    expanded,
+                    images,
+                    pasted_contents,
+                },
+            );
+            Err(error)
+        }
+    }
 }
 
 /// Route a slash input through the remote client instead of the local
@@ -222,6 +272,7 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
             raw_input: prepared.raw_input,
             expanded: expanded_prompt,
             images: prepared.images,
+            pasted_contents: prepared.pasted_contents,
         },
     )
     .await
@@ -237,6 +288,7 @@ pub(in crate::tui::app) async fn route_prepared_input_to_new_remote_session(
     app.pending_split_prompt = Some(PendingSplitPrompt {
         content: prepared.expanded,
         images: prepared.images,
+        pasted_contents: prepared.pasted_contents,
     });
     app.pending_split_model_override = None;
     app.pending_split_provider_key_override = None;
@@ -254,6 +306,7 @@ pub(in crate::tui::app) async fn route_prepared_input_to_new_remote_session(
                     raw_input: prepared.raw_input,
                     expanded: prompt.content,
                     images: prompt.images,
+                    pasted_contents: prompt.pasted_contents,
                 });
             app.pending_split_model_override = None;
             app.pending_split_provider_key_override = None;
@@ -276,6 +329,7 @@ pub(in crate::tui::app) async fn route_prepared_input_to_new_remote_session(
                 raw_input: prepared.raw_input,
                 expanded: prompt.content,
                 images: prompt.images,
+                pasted_contents: prompt.pasted_contents,
             });
         app.pending_split_model_override = None;
         app.pending_split_provider_key_override = None;

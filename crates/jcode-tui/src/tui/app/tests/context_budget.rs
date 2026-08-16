@@ -232,6 +232,718 @@ fn context_budget_model_switch_updates_budget_clears_observation_and_preserves_m
     );
 }
 
+fn phase10_pressure_report(
+    context_revision: u64,
+    context_window: usize,
+    projected_input_tokens: usize,
+) -> crate::protocol::ContextPreflightReport {
+    crate::context::evaluate_context_preflight(
+        context_revision,
+        jcode_provider_core::ContextRequestBudget::unknown(context_window),
+        crate::protocol::ContextRequestTokenBreakdown {
+            system_tokens: 0,
+            tool_definition_tokens: 0,
+            historical_message_tokens: projected_input_tokens,
+            pending_input_tokens: 0,
+            memory_tokens: 0,
+        },
+    )
+}
+
+fn phase10_render_text(app: &App, width: u16, height: u16) -> String {
+    let backend = ratatui::backend::TestBackend::new(width, height);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| crate::tui::ui::draw(frame, app))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let mut text = String::new();
+    for y in 0..height {
+        for x in 0..width {
+            text.push_str(buffer[(x, y)].symbol());
+        }
+        text.push('\n');
+    }
+    text
+}
+
+fn phase10_display_snapshot(app: &App) -> Vec<(String, String)> {
+    app.display_messages
+        .iter()
+        .map(|message| (message.role.clone(), message.content.clone()))
+        .collect()
+}
+
+#[test]
+fn phase10_model_switch_recalculates_pressure_without_mutating_messages() {
+    let window = StdArc::new(AtomicUsize::new(10_000));
+    let mut app = create_context_budget_test_app(window.clone());
+    let raw_before = serde_json::to_vec(&app.session.messages).unwrap();
+    let display_before = phase10_display_snapshot(&app);
+    let report = phase10_pressure_report(app.session.context_view.revision, 10_000, 9_400);
+    assert_eq!(report.pressure, crate::protocol::ContextPressureLevel::Urgent);
+    app.set_local_context_pressure(report);
+
+    window.store(50_000, Ordering::SeqCst);
+    app.update_context_limit_for_model("larger");
+
+    let recalculated = app.context_pressure.as_ref().expect("pressure report");
+    assert_eq!(recalculated.context_window, 50_000);
+    assert_eq!(recalculated.pressure, crate::protocol::ContextPressureLevel::Normal);
+    assert_eq!(serde_json::to_vec(&app.session.messages).unwrap(), raw_before);
+    assert_eq!(phase10_display_snapshot(&app), display_before);
+}
+
+#[test]
+fn phase10_pressure_banner_is_non_transcript_and_mouse_opens_editor_without_touching_composer() {
+    let mut app = create_test_app();
+    app.input = "composer draft".to_string();
+    app.cursor_pos = app.input.len();
+    app.pasted_contents = vec!["pasted backing value".to_string()];
+    app.pending_images = vec![("image/png".to_string(), "image-data".to_string())];
+    let raw_before = serde_json::to_vec(&app.session.messages).unwrap();
+    let display_before = phase10_display_snapshot(&app);
+    let input_before = app.input.clone();
+    let pasted_before = app.pasted_contents.clone();
+    let images_before = app.pending_images.clone();
+    app.set_local_context_pressure(phase10_pressure_report(
+        app.session.context_view.revision,
+        100_000,
+        80_000,
+    ));
+
+    let rendered = phase10_render_text(&app, 120, 30);
+    assert!(rendered.contains("Context notice"));
+    assert!(rendered.contains("Open Context Editor"));
+    assert_eq!(serde_json::to_vec(&app.session.messages).unwrap(), raw_before);
+    assert_eq!(phase10_display_snapshot(&app), display_before);
+    assert!(app.streaming.streaming_text.is_empty());
+
+    let area = crate::tui::ui::last_context_pressure_area().expect("pressure hit area");
+    app.handle_mouse_event(crossterm::event::MouseEvent {
+        kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        column: area.x,
+        row: area.y,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    });
+    assert!(app.context_editor_overlay.is_some());
+    assert_eq!(app.input, input_before);
+    assert_eq!(app.pasted_contents, pasted_before);
+    assert_eq!(app.pending_images, images_before);
+}
+
+#[test]
+fn phase10_pressure_debug_fixtures_are_sensitive_safe_and_render_all_states() {
+    let cases = [
+        ("normal", None),
+        ("notice", Some("Context notice")),
+        ("urgent", Some("Context urgent")),
+        ("blocked", Some("Request not sent: safe context budget exceeded")),
+        ("payload", Some("Request not sent: payload too large")),
+    ];
+    for (fixture, expected_banner) in cases {
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.remote_session_id = Some("fixture-remote-session".to_string());
+        app.context_protocol.accepted_session_id = Some("fixture-remote-session".to_string());
+        let response = app.handle_debug_command(&format!("context-pressure-fixture:{fixture}"));
+        assert!(response.contains("\"ok\": true"));
+        assert!(!response.contains("Synthetic preserved composer draft"));
+        assert!(!response.contains("synthetic paste backing"));
+        assert!(!response.contains("synthetic-image-data"));
+        let state = app.handle_debug_command("context-pressure-state");
+        assert!(!state.contains("Synthetic preserved composer draft"));
+        let rendered = phase10_render_text(&app, 120, 30);
+        match expected_banner {
+            Some(expected) => assert!(rendered.contains(expected), "fixture {fixture}"),
+            None => assert!(!rendered.contains("Open Context Editor"), "fixture {fixture}"),
+        }
+        assert!(rendered.contains("Synthetic preserved composer draft"));
+        let narrow = phase10_render_text(&app, 52, 30);
+        if expected_banner.is_some() {
+            assert!(narrow.contains("/context edit"), "narrow fixture {fixture}");
+        } else {
+            assert!(!narrow.contains("/context edit"), "narrow fixture {fixture}");
+        }
+        assert!(narrow.contains("Synthetic preserved composer draft"));
+    }
+}
+
+#[test]
+fn phase10_remote_action_restores_exact_prompt_pastes_and_images_only_for_matching_request() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    let session_id = app.session.id.clone();
+    let revision = app.session.context_view.revision;
+    app.context_protocol.accepted_session_id = Some(session_id.clone());
+    app.context_protocol.accepted_context_revision = Some(revision);
+    app.current_message_id = Some(700);
+    let raw = "review [paste 1]".to_string();
+    let expanded = "review exact pasted body 🦀".to_string();
+    let images = vec![("image/png".to_string(), "exact-image-data".to_string())];
+    app.pending_composer_input = Some(PendingComposerInput {
+        request_id: Some(700),
+        raw_input: raw.clone(),
+        expanded: expanded.clone(),
+        pasted_contents: vec!["exact pasted body 🦀".to_string()],
+        pending_input_tokens: 42,
+        image_count: images.len(),
+        local_session_len_before: None,
+        local_display_len_before: None,
+        local_provider_len_before: None,
+        restoration_images: None,
+        request_payload_pressure: None,
+        output_started: false,
+    });
+    app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        content: expanded.clone(),
+        images: images.clone(),
+        is_system: false,
+        system_reminder: None,
+        auto_retry: true,
+        retry_attempts: 0,
+        retry_at: None,
+    });
+    app.push_display_message(DisplayMessage::user(raw.clone()));
+    let metadata = crate::protocol::ContextPendingInputMetadata::new(700, &expanded, images.len());
+    let stale = crate::protocol::ServerEvent::ContextActionRequired {
+        id: 701,
+        session_id: session_id.clone(),
+        context_revision: revision,
+        reason: crate::protocol::ContextActionRequiredReason::PreflightLimit,
+        required_reduction_tokens: 1,
+        pending_input: Some(metadata.clone()),
+        preflight: None,
+        payload: None,
+        details: Vec::new(),
+        automatic_retry: false,
+    };
+    assert!(!app.reduce_context_server_event(stale).unwrap());
+    assert!(app.input.is_empty());
+
+    let event = crate::protocol::ServerEvent::ContextActionRequired {
+        id: 700,
+        session_id,
+        context_revision: revision,
+        reason: crate::protocol::ContextActionRequiredReason::PreflightLimit,
+        required_reduction_tokens: 1,
+        pending_input: Some(metadata),
+        preflight: None,
+        payload: None,
+        details: Vec::new(),
+        automatic_retry: false,
+    };
+    assert!(app.reduce_context_server_event(event).unwrap());
+    assert_eq!(app.input, raw);
+    assert_eq!(app.pasted_contents, vec!["exact pasted body 🦀"]);
+    assert_eq!(app.pending_images, images);
+    assert!(app.rate_limit_pending_message.is_none());
+    assert!(app.pending_composer_input.is_none());
+    assert!(app
+        .display_messages()
+        .iter()
+        .all(|message| !(message.role == "user" && message.content == "review [paste 1]")));
+}
+
+#[test]
+fn phase10_blocked_prompt_waits_for_an_occupied_composer_and_cannot_be_bypassed() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    let session_id = app.session.id.clone();
+    let revision = app.session.context_view.revision;
+    app.context_protocol.accepted_session_id = Some(session_id.clone());
+    app.context_protocol.accepted_context_revision = Some(revision);
+    app.current_message_id = Some(707);
+    app.input = "newer unsent draft".to_string();
+    app.pending_composer_input = Some(PendingComposerInput {
+        request_id: Some(707),
+        raw_input: "blocked [paste 1]".to_string(),
+        expanded: "blocked exact paste".to_string(),
+        pasted_contents: vec!["exact paste".to_string()],
+        pending_input_tokens: 8,
+        image_count: 1,
+        local_session_len_before: None,
+        local_display_len_before: None,
+        local_provider_len_before: None,
+        restoration_images: None,
+        request_payload_pressure: None,
+        output_started: false,
+    });
+    app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        content: "blocked exact paste".to_string(),
+        images: vec![("image/png".to_string(), "blocked-image".to_string())],
+        is_system: false,
+        system_reminder: None,
+        auto_retry: false,
+        retry_attempts: 0,
+        retry_at: None,
+    });
+    app.push_display_message(DisplayMessage::user("blocked [paste 1]"));
+
+    assert!(app
+        .reduce_context_server_event(crate::protocol::ServerEvent::ContextActionRequired {
+            id: 707,
+            session_id,
+            context_revision: revision,
+            reason: crate::protocol::ContextActionRequiredReason::PreflightLimit,
+            required_reduction_tokens: 1,
+            pending_input: Some(crate::protocol::ContextPendingInputMetadata::new(
+                707,
+                "blocked exact paste",
+                1,
+            )),
+            preflight: None,
+            payload: None,
+            details: Vec::new(),
+            automatic_retry: false,
+        })
+        .unwrap());
+    assert_eq!(app.input, "newer unsent draft");
+    assert!(app.blocked_composer_restore_pending);
+
+    app.submit_input();
+    assert_eq!(app.input, "newer unsent draft");
+    assert!(app.pending_composer_input.is_some());
+
+    app.input.clear();
+    app.submit_input();
+    assert_eq!(app.input, "blocked [paste 1]");
+    assert_eq!(app.pasted_contents, vec!["exact paste"]);
+    assert_eq!(app.pending_images.len(), 1);
+    assert!(!app.blocked_composer_restore_pending);
+    assert!(app.pending_composer_input.is_none());
+}
+
+#[test]
+fn phase10_post_output_remote_action_preserves_turn_and_suppresses_terminal_error_retry() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    let session_id = app.session.id.clone();
+    let revision = app.session.context_view.revision;
+    app.context_protocol.accepted_session_id = Some(session_id.clone());
+    app.context_protocol.accepted_context_revision = Some(revision);
+    app.current_message_id = Some(702);
+    app.is_processing = true;
+    app.pending_composer_input = Some(PendingComposerInput {
+        request_id: Some(702),
+        raw_input: "authoritative prompt".to_string(),
+        expanded: "authoritative prompt".to_string(),
+        pasted_contents: Vec::new(),
+        pending_input_tokens: 12,
+        image_count: 0,
+        local_session_len_before: None,
+        local_display_len_before: None,
+        local_provider_len_before: None,
+        restoration_images: None,
+        request_payload_pressure: None,
+        output_started: true,
+    });
+    app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        content: "authoritative prompt".to_string(),
+        images: Vec::new(),
+        is_system: false,
+        system_reminder: None,
+        auto_retry: true,
+        retry_attempts: 0,
+        retry_at: None,
+    });
+    app.push_display_message(DisplayMessage::user("authoritative prompt"));
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let _guard = runtime.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.handle_server_event(
+        crate::protocol::ServerEvent::TextDelta {
+            text: "partial answer".to_string(),
+        },
+        &mut remote,
+    );
+    assert!(
+        app.pending_composer_input
+            .as_ref()
+            .is_some_and(|pending| pending.output_started),
+        "real remote output must cross the no-rollback boundary"
+    );
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ContextActionRequired {
+            id: 702,
+            session_id,
+            context_revision: revision,
+            reason: crate::protocol::ContextActionRequiredReason::ProviderContextLimit,
+            required_reduction_tokens: 1,
+            pending_input: None,
+            preflight: None,
+            payload: None,
+            details: vec!["partial output retained".to_string()],
+            automatic_retry: false,
+        },
+        &mut remote,
+    );
+    let display_after_action = phase10_display_snapshot(&app);
+    assert!(display_after_action.iter().any(|(role, content)| {
+        role == "assistant" && content.contains("partial answer")
+    }));
+    assert!(app.pending_composer_input.is_none());
+    assert_eq!(app.context_action_request_id, Some(702));
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: 702,
+            message: "maximum context length exceeded".to_string(),
+            retry_after_secs: None,
+        },
+        &mut remote,
+    );
+    assert_eq!(phase10_display_snapshot(&app), display_after_action);
+    assert!(app.rate_limit_pending_message.is_none());
+    assert!(app.pending_fallback_resend.is_none());
+    assert_eq!(
+        app.status_notice(),
+        Some("Context action required · partial output preserved".to_string())
+    );
+}
+
+#[test]
+fn phase10_missing_pending_metadata_retains_authoritative_turn_without_composer_restore() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    let session_id = app.session.id.clone();
+    let revision = app.session.context_view.revision;
+    app.context_protocol.accepted_session_id = Some(session_id.clone());
+    app.context_protocol.accepted_context_revision = Some(revision);
+    app.current_message_id = Some(703);
+    app.pending_composer_input = Some(PendingComposerInput {
+        request_id: Some(703),
+        raw_input: "retained authoritative prompt".to_string(),
+        expanded: "retained authoritative prompt".to_string(),
+        pasted_contents: Vec::new(),
+        pending_input_tokens: 16,
+        image_count: 0,
+        local_session_len_before: None,
+        local_display_len_before: None,
+        local_provider_len_before: None,
+        restoration_images: None,
+        request_payload_pressure: None,
+        output_started: false,
+    });
+    app.push_display_message(DisplayMessage::user("retained authoritative prompt"));
+    let display_before = phase10_display_snapshot(&app);
+
+    assert!(app
+        .reduce_context_server_event(crate::protocol::ServerEvent::ContextActionRequired {
+            id: 703,
+            session_id,
+            context_revision: revision,
+            reason: crate::protocol::ContextActionRequiredReason::PreflightLimit,
+            required_reduction_tokens: 1,
+            pending_input: None,
+            preflight: None,
+            payload: None,
+            details: vec!["durable rollback failed".to_string()],
+            automatic_retry: false,
+        })
+        .unwrap());
+    assert!(app.input.is_empty());
+    assert!(app.pending_composer_input.is_none());
+    assert_eq!(phase10_display_snapshot(&app), display_before);
+    assert_eq!(
+        app.status_notice(),
+        Some("Context action required · authoritative turn retained".to_string())
+    );
+}
+
+#[test]
+fn phase10_system_remote_block_is_terminal_without_composer_restoration() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    let session_id = app.session.id.clone();
+    let revision = app.session.context_view.revision;
+    app.context_protocol.accepted_session_id = Some(session_id.clone());
+    app.context_protocol.accepted_context_revision = Some(revision);
+    app.current_message_id = Some(704);
+    app.is_processing = true;
+    app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        content: "system follow-up".to_string(),
+        images: Vec::new(),
+        is_system: true,
+        system_reminder: None,
+        auto_retry: true,
+        retry_attempts: 2,
+        retry_at: None,
+    });
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let _guard = runtime.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ContextActionRequired {
+            id: 704,
+            session_id,
+            context_revision: revision,
+            reason: crate::protocol::ContextActionRequiredReason::PreflightLimit,
+            required_reduction_tokens: 128,
+            pending_input: Some(crate::protocol::ContextPendingInputMetadata::new(
+                704,
+                "system follow-up",
+                0,
+            )),
+            preflight: None,
+            payload: None,
+            details: vec!["system request blocked".to_string()],
+            automatic_retry: false,
+        },
+        &mut remote,
+    );
+    assert!(app.rate_limit_pending_message.is_none());
+    assert!(app.pending_composer_input.is_none());
+    assert_eq!(app.context_action_request_id, Some(704));
+    assert_eq!(
+        app.status_notice(),
+        Some("Context action required · request blocked".to_string())
+    );
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: 704,
+            message: "maximum context length exceeded".to_string(),
+            retry_after_secs: None,
+        },
+        &mut remote,
+    );
+    assert!(app.pending_fallback_resend.is_none());
+    assert!(app.rate_limit_pending_message.is_none());
+    assert_eq!(
+        app.status_notice(),
+        Some("Context action required · request blocked".to_string())
+    );
+}
+
+#[test]
+fn phase10_legacy_pending_fingerprint_fails_closed_without_inexact_restoration() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    let session_id = app.session.id.clone();
+    let revision = app.session.context_view.revision;
+    app.context_protocol.accepted_session_id = Some(session_id.clone());
+    app.context_protocol.accepted_context_revision = Some(revision);
+    app.current_message_id = Some(706);
+    app.is_processing = true;
+    app.pending_composer_input = Some(PendingComposerInput {
+        request_id: Some(706),
+        raw_input: "legacy correlated prompt".to_string(),
+        expanded: "legacy correlated prompt".to_string(),
+        pasted_contents: Vec::new(),
+        pending_input_tokens: 8,
+        image_count: 0,
+        local_session_len_before: None,
+        local_display_len_before: None,
+        local_provider_len_before: None,
+        restoration_images: None,
+        request_payload_pressure: None,
+        output_started: false,
+    });
+    app.push_display_message(DisplayMessage::user("legacy correlated prompt"));
+    let display_before = phase10_display_snapshot(&app);
+    let mut metadata = crate::protocol::ContextPendingInputMetadata::new(
+        706,
+        "legacy correlated prompt",
+        0,
+    );
+    metadata.content_sha256.clear();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let _guard = runtime.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ContextActionRequired {
+            id: 706,
+            session_id,
+            context_revision: revision,
+            reason: crate::protocol::ContextActionRequiredReason::PreflightLimit,
+            required_reduction_tokens: 1,
+            pending_input: Some(metadata),
+            preflight: None,
+            payload: None,
+            details: vec!["legacy metadata".to_string()],
+            automatic_retry: false,
+        },
+        &mut remote,
+    );
+
+    assert!(app.input.is_empty());
+    assert!(app.pending_composer_input.is_none());
+    assert_eq!(phase10_display_snapshot(&app), display_before);
+    assert_eq!(
+        app.status_notice(),
+        Some("Context action required · exact prompt restoration unavailable".to_string())
+    );
+}
+
+#[test]
+fn phase10_local_partial_output_persistence_failure_is_explicit_and_terminal() {
+    let mut app = create_test_app();
+    app.pending_composer_input = Some(PendingComposerInput {
+        request_id: Some(705),
+        raw_input: "authoritative local prompt".to_string(),
+        expanded: "authoritative local prompt".to_string(),
+        pasted_contents: Vec::new(),
+        pending_input_tokens: 8,
+        image_count: 0,
+        local_session_len_before: Some(app.session.messages.len()),
+        local_display_len_before: Some(app.display_messages.len()),
+        local_provider_len_before: Some(app.messages.len()),
+        restoration_images: None,
+        request_payload_pressure: None,
+        output_started: true,
+    });
+    app.partial_output_checkpointed = true;
+    app.partial_output_persistence_error = Some("injected persistence failure".to_string());
+
+    assert!(app.handle_local_provider_size_error("maximum context length exceeded"));
+    assert!(app.pending_composer_input.is_none());
+    assert!(app.pending_fallback_resend.is_none());
+    assert!(app
+        .context_protocol
+        .action_required
+        .as_ref()
+        .is_some_and(|action| action.details.iter().any(|detail|
+            detail == crate::protocol::CONTEXT_PARTIAL_OUTPUT_NOT_DURABLE)));
+    assert!(app.display_messages().iter().any(|message| {
+        message.role == "error" && message.content.contains("could not be saved durably")
+    }));
+}
+
+#[test]
+fn phase10_incomplete_remote_output_retains_authoritative_turn_without_false_preservation_copy() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    let session_id = app.session.id.clone();
+    let revision = app.session.context_view.revision;
+    app.context_protocol.accepted_session_id = Some(session_id.clone());
+    app.context_protocol.accepted_context_revision = Some(revision);
+    app.current_message_id = Some(708);
+    app.pending_composer_input = Some(PendingComposerInput {
+        request_id: Some(708),
+        raw_input: "authoritative prompt".to_string(),
+        expanded: "authoritative prompt".to_string(),
+        pasted_contents: Vec::new(),
+        pending_input_tokens: 8,
+        image_count: 0,
+        local_session_len_before: None,
+        local_display_len_before: None,
+        local_provider_len_before: None,
+        restoration_images: None,
+        request_payload_pressure: None,
+        output_started: true,
+    });
+
+    assert!(app
+        .reduce_context_server_event(crate::protocol::ServerEvent::ContextActionRequired {
+            id: 708,
+            session_id,
+            context_revision: revision,
+            reason: crate::protocol::ContextActionRequiredReason::ProviderContextLimit,
+            required_reduction_tokens: 1,
+            pending_input: None,
+            preflight: None,
+            payload: None,
+            details: vec![
+                crate::protocol::CONTEXT_PARTIAL_OUTPUT_NOT_REPLAYABLE.to_string(),
+            ],
+            automatic_retry: false,
+        })
+        .unwrap());
+    assert!(app.pending_composer_input.is_none());
+    assert_eq!(
+        app.status_notice(),
+        Some(
+            "Provider output began, but no complete partial response could be retained".to_string()
+        )
+    );
+}
+
+#[test]
+fn phase10_local_payload_rejection_restores_exact_turn_and_manual_resend_appends_once() {
+    let mut app = create_test_app();
+    app.session.replace_messages(Vec::new());
+    app.replace_provider_messages(Vec::new());
+    app.display_messages.clear();
+    let raw = "inspect [paste 1]".to_string();
+    let expanded = "inspect exact local paste".to_string();
+    let pasted = vec!["exact local paste".to_string()];
+    let images = vec![("image/png".to_string(), "local-image-data".to_string())];
+    let session_before = app.session.messages.len();
+    let display_before = app.display_messages.len();
+    let provider_before = app.messages.len();
+    let blocks = vec![
+        ContentBlock::Image {
+            media_type: images[0].0.clone(),
+            data: images[0].1.clone(),
+        },
+        ContentBlock::Text {
+            text: expanded.clone(),
+            cache_control: None,
+        },
+    ];
+    app.session.add_message(Role::User, blocks.clone());
+    app.add_provider_message(Message {
+        role: Role::User,
+        content: blocks,
+        timestamp: Some(chrono::Utc::now()),
+        tool_duration_ms: None,
+    });
+    app.push_display_message(DisplayMessage::user(raw.clone()));
+    app.pending_composer_input = Some(PendingComposerInput {
+        request_id: Some(704),
+        raw_input: raw.clone(),
+        expanded: expanded.clone(),
+        pasted_contents: pasted.clone(),
+        pending_input_tokens: crate::context::estimate_pending_input_tokens(&expanded, 1),
+        image_count: 1,
+        local_session_len_before: Some(session_before),
+        local_display_len_before: Some(display_before),
+        local_provider_len_before: Some(provider_before),
+        restoration_images: None,
+        request_payload_pressure: Some(crate::protocol::ContextPayloadPressure {
+            image_count: 2,
+            estimated_base64_bytes: 123,
+        }),
+        output_started: false,
+    });
+    app.set_local_context_pressure(phase10_pressure_report(
+        app.session.context_view.revision,
+        100_000,
+        90_000,
+    ));
+
+    assert!(app.handle_local_provider_size_error("HTTP 413 payload too large"));
+    assert_eq!(app.session.messages.len(), session_before);
+    assert_eq!(app.messages.len(), provider_before);
+    assert_eq!(app.input, raw);
+    assert_eq!(app.pasted_contents, pasted);
+    assert_eq!(app.pending_images, images);
+    assert!(app.pending_composer_input.is_none());
+    assert!(app.context_protocol.action_required.is_some());
+    let payload = app
+        .context_protocol
+        .action_required
+        .as_ref()
+        .and_then(|action| action.payload.as_ref())
+        .expect("payload pressure retained");
+    assert_eq!(payload.image_count, 2);
+    assert_eq!(payload.estimated_base64_bytes, 123);
+
+    super::local::finish_turn(&mut app);
+    app.submit_input();
+    let matching_users = app
+        .session
+        .messages
+        .iter()
+        .filter(|message| message.role == Role::User)
+        .count();
+    assert_eq!(matching_users, 1);
+}
+
 #[test]
 fn context_budget_rewind_undo_and_repair_reseed_exactly() {
     let mut app = create_test_app();

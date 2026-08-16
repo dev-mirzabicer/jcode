@@ -541,8 +541,15 @@ pub(in crate::tui::app) fn handle_server_event(
     event: ServerEvent,
     remote: &mut impl RemoteEventState,
 ) -> bool {
+    let context_action_required = matches!(&event, ServerEvent::ContextActionRequired { .. });
     let event = match app.reduce_context_server_event(event) {
-        Ok(accepted) => return accepted,
+        Ok(accepted) => {
+            if accepted && context_action_required {
+                remote.clear_pending();
+                remote.reset_call_output_tokens_seen();
+            }
+            return accepted;
+        }
         Err(event) => *event,
     };
 
@@ -612,6 +619,21 @@ pub(in crate::tui::app) fn handle_server_event(
             | ServerEvent::Error { .. }
     ) {
         app.remote_resume_activity = None;
+    }
+
+    let provider_output_started = match &event {
+        ServerEvent::TextDelta { text }
+        | ServerEvent::TextReplace { text }
+        | ServerEvent::ReasoningDelta { text } => !text.is_empty(),
+        ServerEvent::ToolStart { .. }
+        | ServerEvent::ToolInput { .. }
+        | ServerEvent::ToolExec { .. }
+        | ServerEvent::ToolDone { .. }
+        | ServerEvent::GeneratedImage { .. } => true,
+        _ => false,
+    };
+    if provider_output_started {
+        app.mark_pending_provider_output_started();
     }
 
     let call_output_tokens_seen = remote.call_output_tokens_seen();
@@ -1171,7 +1193,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.stream_message_ended = false;
                 // Turn completed successfully; drop the saved prompt so a later
                 // unrelated failure cannot restore stale text into the input box.
-                app.last_submitted_input = None;
+                app.finish_pending_composer_turn();
                 app.processing_started = None;
                 app.replay_processing_started_ms = None;
                 app.replay_elapsed_override = None;
@@ -1213,10 +1235,21 @@ pub(in crate::tui::app) fn handle_server_event(
             completed_current_message || auto_poked
         }
         ServerEvent::Error {
+            id,
             message,
             retry_after_secs,
-            ..
         } => {
+            if app.context_action_request_id == Some(id) {
+                app.context_action_request_id = None;
+                app.is_processing = false;
+                app.status = ProcessingStatus::Idle;
+                app.stream_message_ended = false;
+                app.processing_started = None;
+                app.current_message_id = None;
+                remote.clear_pending();
+                remote.reset_call_output_tokens_seen();
+                return true;
+            }
             // The server rejects a Message request with this error while its
             // previous turn is still running. This typically happens when a
             // reload/reconnect raced the turn-end dispatch: the history
@@ -1794,6 +1827,9 @@ pub(in crate::tui::app) fn handle_server_event(
 
             let should_apply_history_payload = session_changed || !remote.has_loaded_history();
             if should_apply_history_payload {
+                if session_changed {
+                    app.clear_context_turn_state_for_session_change();
+                }
                 app.context_protocol
                     .accept_history(&session_id, context_revision);
                 if let Some(activity) = activity.filter(|activity| activity.is_processing) {

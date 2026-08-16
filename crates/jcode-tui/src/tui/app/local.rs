@@ -1,4 +1,4 @@
-use super::{App, DisplayMessage, ProcessingStatus, is_context_limit_error};
+use super::{App, DisplayMessage, ProcessingStatus};
 use crate::bus::{
     BackgroundTaskCompleted, BackgroundTaskProgressEvent, BusEvent, InputShellCompleted,
     ManualToolCompleted, UiActivity, UiActivityKind,
@@ -30,28 +30,19 @@ pub(super) async fn process_turn_with_input(
     {
         Ok(()) => {
             app.last_stream_error = None;
-            app.last_submitted_input = None;
+            app.finish_pending_composer_turn();
         }
         Err(error) => {
             let err_str = crate::util::format_error_chain(&error);
-            if super::is_request_payload_too_large_error(&err_str) {
-                if !app
-                    .try_recover_payload_too_large_and_retry(terminal, event_stream)
-                    .await
-                {
-                    app.handle_turn_error(err_str);
-                }
-            } else if is_context_limit_error(&err_str) {
-                if !app.try_auto_compact_and_retry(terminal, event_stream).await {
-                    app.handle_turn_error(err_str);
-                }
-            } else {
-                app.handle_turn_error(err_str);
-            }
+            app.handle_turn_error(err_str);
         }
     }
 
     if app.pending_queued_dispatch {
+        finish_turn(app);
+        return;
+    }
+    if app.context_protocol.action_required.is_some() {
         finish_turn(app);
         return;
     }
@@ -72,6 +63,7 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     let mut needs_redraw = crate::tui::periodic_redraw_required(app);
     needs_redraw |= app.drain_local_context_events();
     needs_redraw |= app.dispatch_local_context_editor_actions();
+    needs_redraw |= app.maybe_restore_blocked_composer_input();
     needs_redraw |= app.flush_pending_resize_redraw();
     app.maybe_capture_runtime_memory_heartbeat();
     app.maybe_release_idle_heap();

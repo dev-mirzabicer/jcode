@@ -5,6 +5,7 @@ mod environment;
 mod inline_tail;
 mod interrupts;
 mod messages;
+mod preflight;
 mod prompting;
 mod provider;
 mod response_recovery;
@@ -30,7 +31,9 @@ use crate::logging;
 use crate::message::{
     ContentBlock, Message, Role, StreamEvent, TOOL_OUTPUT_MISSING_TEXT, ToolCall, ToolDefinition,
 };
-use crate::protocol::{HistoryMessage, ServerEvent};
+use crate::protocol::{
+    ContextPendingInputMetadata, ContextPreflightReport, HistoryMessage, ServerEvent,
+};
 use crate::provider::{NativeToolResult, Provider, ProviderRuntimeState};
 use crate::session::{GitState, Session, SessionStatus, StoredDisplayRole, StoredMessage};
 use crate::skill::SkillRegistry;
@@ -175,6 +178,23 @@ struct RewindUndoSnapshot {
     visible_message_count: usize,
 }
 
+#[derive(Debug, Clone)]
+struct ActiveTurnContext {
+    request_id: Option<u64>,
+    pending_input: Option<ContextPendingInputMetadata>,
+    pending_input_tokens: usize,
+    transcript_len_before_pending: usize,
+    reserved_alerts: Vec<String>,
+    provider_output_started: bool,
+    partial_output_checkpointed: bool,
+    partial_output_persistence_error: Option<String>,
+    last_preflight: Option<ContextPreflightReport>,
+    cache_tracker_before_pending: CacheTracker,
+    locked_tools_before_pending: Option<Vec<ToolDefinition>>,
+    mcp_late_register_resolved_before_pending: bool,
+    tool_output_scan_index_before_pending: usize,
+}
+
 pub struct Agent {
     provider: Arc<dyn Provider>,
     registry: Registry,
@@ -196,6 +216,9 @@ pub struct Agent {
     /// Transient reminder injected into provider requests for the current turn only.
     /// Not persisted to session history.
     current_turn_system_reminder: Option<String>,
+    /// Exact pending-turn boundary used only for prompt-safe preflight and
+    /// pre-output provider rejection rollback.
+    active_turn_context: Option<ActiveTurnContext>,
     /// Tool call ids observed in the current session transcript.
     tool_call_ids: HashSet<String>,
     /// Tool result ids observed in the current session transcript.
@@ -282,6 +305,7 @@ impl Agent {
             last_status_detail: None,
             pending_alerts: Vec::new(),
             current_turn_system_reminder: None,
+            active_turn_context: None,
             tool_call_ids: HashSet::new(),
             tool_result_ids: HashSet::new(),
             tool_output_scan_index: 0,

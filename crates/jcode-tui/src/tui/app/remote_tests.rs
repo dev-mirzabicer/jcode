@@ -433,6 +433,7 @@ fn submit_prepared_remote_input_defers_until_history_loads() {
         raw_input: "hi".to_string(),
         expanded: "hi".to_string(),
         images: vec![],
+        pasted_contents: Vec::new(),
     };
     rt.block_on(crate::tui::app::remote::submit_prepared_remote_input(
         &mut app,
@@ -502,6 +503,7 @@ fn remote_skill_invocation_with_prompt_sends_remote_turn() {
             raw_input: "/remote-skill explain the change".to_string(),
             expanded: "/remote-skill explain the change".to_string(),
             images: vec![],
+            pasted_contents: Vec::new(),
         },
     ))
     .expect("remote skill prompt should send");
@@ -1106,6 +1108,7 @@ fn remote_dropped_file_path_is_sent_as_a_prompt_not_a_slash_command() {
             raw_input: dropped.clone(),
             expanded: dropped.clone(),
             images: vec![],
+            pasted_contents: Vec::new(),
         },
     ))
     .expect("dropped path should send as a normal remote turn");

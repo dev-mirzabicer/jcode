@@ -215,6 +215,7 @@ impl App {
                 );
                 if accepted {
                     self.bump_context_revision();
+                    self.clear_context_action_after_context_change();
                 }
                 accepted
             }
@@ -231,6 +232,7 @@ impl App {
                 );
                 if accepted {
                     self.bump_context_revision();
+                    self.clear_context_action_after_context_change();
                 }
                 accepted
             }
@@ -247,6 +249,7 @@ impl App {
                 );
                 if accepted {
                     self.bump_context_revision();
+                    self.clear_context_action_after_context_change();
                 }
                 accepted
             }
@@ -277,18 +280,55 @@ impl App {
                 reason,
                 required_reduction_tokens,
                 pending_input,
+                preflight,
+                payload,
                 details,
                 automatic_retry,
-            } => self.context_protocol.accept_action_required(
+            } => {
+                let partial_output_not_durable = details
+                    .iter()
+                    .any(|detail| detail == crate::protocol::CONTEXT_PARTIAL_OUTPUT_NOT_DURABLE);
+                let partial_output_not_replayable = details
+                    .iter()
+                    .any(|detail| detail == crate::protocol::CONTEXT_PARTIAL_OUTPUT_NOT_REPLAYABLE);
+                let accepted = self.accept_context_action_required_event(
+                    id,
+                    &session_id,
+                    context_revision,
+                    pending_input.as_ref(),
+                    preflight.as_ref(),
+                    payload.as_ref(),
+                    automatic_retry,
+                );
+                let accepted = accepted
+                    && self.context_protocol.accept_action_required(
+                        id,
+                        session_id,
+                        context_revision,
+                        reason,
+                        required_reduction_tokens,
+                        pending_input,
+                        preflight,
+                        payload,
+                        details,
+                        automatic_retry,
+                    );
+                if accepted && partial_output_not_durable {
+                    self.set_status_notice(
+                        "Partial output is visible but could not be saved · keep session open",
+                    );
+                } else if accepted && partial_output_not_replayable {
+                    self.set_status_notice(
+                        "Provider output began, but no complete partial response could be retained",
+                    );
+                }
+                accepted
+            }
+            ServerEvent::ContextPressureUpdated {
                 id,
                 session_id,
-                context_revision,
-                reason,
-                required_reduction_tokens,
-                pending_input,
-                details,
-                automatic_retry,
-            ),
+                report,
+            } => self.accept_context_pressure_update(id, &session_id, report),
             ServerEvent::ContextEmergencyPolicyChanged {
                 id,
                 session_id,
@@ -1113,7 +1153,6 @@ impl App {
             self.context_reset_counters.continuation_invalidations += 1;
         }
         self.provider.invalidate_context_continuation(detail);
-        self.context_warning_shown = false;
         self.streaming.streaming_context_stale = true;
         self.streaming.streaming_usage_call_reset_pending = true;
 

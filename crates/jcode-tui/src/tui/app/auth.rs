@@ -1024,7 +1024,7 @@ impl App {
                 // Keep account-sensitive UI state in sync immediately.
                 crate::auth::AuthStatus::invalidate_cache();
                 self.context_limit = self.provider.context_window() as u64;
-                self.context_warning_shown = false;
+                self.recalculate_local_context_pressure();
             }
             Err(e) => {
                 self.push_display_message(DisplayMessage::error(format!(
@@ -1096,7 +1096,7 @@ impl App {
                 )));
                 crate::auth::AuthStatus::invalidate_cache();
                 self.context_limit = self.provider.context_window() as u64;
-                self.context_warning_shown = false;
+                self.recalculate_local_context_pressure();
             }
             Err(e) => {
                 self.push_display_message(DisplayMessage::error(format!(

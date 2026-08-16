@@ -110,7 +110,7 @@ impl App {
         // Take pending memory if available (computed in background during last turn)
         let fresh_user_turn = crate::message::ends_with_fresh_user_turn(messages);
         let pending = if fresh_user_turn {
-            crate::memory::take_pending_memory(&self.session.id)
+            crate::memory::reserve_pending_memory(&self.session.id)
         } else {
             None
         };

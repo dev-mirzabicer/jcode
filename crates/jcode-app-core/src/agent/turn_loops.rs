@@ -2,9 +2,7 @@ use super::*;
 use crate::{terminal_eprintln as eprintln, terminal_print as print, terminal_println as println};
 
 impl Agent {
-    /// Run turns until no more tool calls
-    /// Maximum number of context-limit compaction retries before giving up.
-    pub(super) const MAX_CONTEXT_LIMIT_RETRIES: u32 = 5;
+    /// Run turns until no more tool calls.
     pub(super) const MAX_INCOMPLETE_CONTINUATION_ATTEMPTS: u32 = 3;
     /// Retries allowed when the provider returns an empty response right after
     /// tool results. This is a transient provider hiccup, not a signal that the
@@ -42,7 +40,6 @@ impl Agent {
         );
         let mut final_text = String::new();
         let trace = trace_enabled();
-        let mut context_limit_retries = 0u32;
         let mut incomplete_continuations = 0u32;
         let mut empty_post_tool_continuations = 0u32;
         let mut fable_guardrail_reconsiderations = 0u32;
@@ -69,11 +66,46 @@ impl Agent {
             let tools = self.tool_definitions().await;
             let messages: std::sync::Arc<[Message]> = messages.into();
             // Non-blocking memory: uses pending result from last turn, spawns check for next turn
-            let memory_pending =
+            let pending_memory =
                 self.build_memory_prompt_nonblocking_shared(std::sync::Arc::clone(&messages), None);
+            let mut memory_pending = crate::memory::PendingMemoryReservation::new(
+                self.session.id.clone(),
+                pending_memory,
+            );
             // Use split prompt for better caching - static content cached, dynamic not
             let split_prompt = self.build_system_prompt_split(None);
             self.log_prompt_prefix_accounting(&split_prompt, &tools);
+
+            // Build the complete ephemeral request before recording cache state,
+            // consuming memory, mutating history, or opening the provider.
+            let mut messages_with_memory: Vec<Message> = messages.iter().cloned().collect();
+            let memory_tokens = memory_pending
+                .as_ref()
+                .map(|memory| {
+                    let message = Self::memory_injection_message(memory);
+                    let tokens = jcode_context_core::estimate_message_tokens(&message);
+                    messages_with_memory.push(message);
+                    tokens
+                })
+                .unwrap_or_default();
+            if Self::should_inject_batch_nudge(
+                batch_nudge_pending,
+                tools.iter().any(|tool| tool.name == "batch"),
+            ) {
+                messages_with_memory.push(Message::user(Self::BATCH_NUDGE));
+                batch_nudge_pending = false;
+                sequential_single_tool_rounds = 0;
+            }
+            let preflight = self.evaluate_provider_request_preflight(
+                &messages_with_memory,
+                memory_tokens,
+                &split_prompt,
+                &tools,
+                None,
+            );
+            if preflight.pressure == crate::protocol::ContextPressureLevel::Blocked {
+                return Err(self.block_for_preflight(preflight, None)?);
+            }
 
             // Check for client-side cache violations before memory injection.
             // Memory is an ephemeral suffix that changes each turn; tracking it would cause
@@ -83,29 +115,6 @@ impl Agent {
             // The request snapshot now owns everything the provider needs. Drop
             // the session's derived transcript copy before the network wait.
             self.session.release_provider_messages_cache();
-
-            // Inject memory as a user message at the end (preserves cache prefix)
-            let mut messages_with_memory: Vec<Message> = messages.iter().cloned().collect();
-            if let Some(memory) = memory_pending.as_ref() {
-                let memory_count = memory.count.max(1);
-                let age_ms = memory.computed_at.elapsed().as_millis() as u64;
-                crate::memory::record_injected_prompt(&memory.prompt, memory_count, age_ms);
-                self.record_memory_injection_in_session(memory);
-                logging::info(&format!(
-                    "Memory injected as message ({} chars)",
-                    memory.prompt.len()
-                ));
-                let (memory_msg, _persisted) = self.prepare_memory_injection_message(memory);
-                messages_with_memory.push(memory_msg);
-            }
-            if Self::should_inject_batch_nudge(
-                batch_nudge_pending,
-                tools.iter().any(|tool| tool.name == "batch"),
-            ) {
-                messages_with_memory.push(Message::user(Self::BATCH_NUDGE));
-                batch_nudge_pending = false;
-                sequential_single_tool_rounds = 0;
-            }
 
             logging::info(&format!(
                 "API call starting: {} messages, {} tools",
@@ -126,6 +135,7 @@ impl Agent {
                 .message_timestamps
                 .then(|| Message::with_timestamps(&messages_with_memory));
             let send_messages = stamped.as_deref().unwrap_or(&messages_with_memory);
+            let request_payload = crate::context::request_payload_pressure(send_messages);
             let prompt_has_recent_tool_result = Self::messages_end_with_tool_result(send_messages);
             self.last_status_detail = None;
             let mut stream = match self
@@ -141,18 +151,11 @@ impl Agent {
             {
                 Ok(stream) => stream,
                 Err(e) => {
-                    if self.try_auto_compact_after_context_limit(&e.to_string()) {
-                        context_limit_retries += 1;
-                        if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
-                            logging::warn(
-                                "Context-limit compaction retry limit reached; giving up",
-                            );
-                            return Err(anyhow::anyhow!(
-                                "Context limit exceeded after {} compaction retries",
-                                Self::MAX_CONTEXT_LIMIT_RETRIES
-                            ));
-                        }
-                        continue;
+                    memory_pending.restore_now();
+                    if let Some(action_error) =
+                        self.handle_provider_size_rejection(&e.to_string(), request_payload, None)?
+                    {
+                        return Err(action_error);
                     }
                     return Err(e);
                 }
@@ -162,12 +165,8 @@ impl Agent {
             // copies are no longer needed while the response is consumed.
             drop(stamped);
             drop(messages_with_memory);
-            drop(memory_pending);
             drop(messages);
             drop(split_prompt);
-
-            // Successful API call - reset retry counter
-            context_limit_retries = 0;
 
             logging::info(&format!(
                 "API stream opened in {:.2}s",
@@ -210,39 +209,34 @@ impl Agent {
                 std::collections::HashMap::new();
             let mut openai_native_compaction: Option<(String, usize)> = None;
 
-            let mut retry_after_compaction = false;
             while let Some(event) = stream.next().await {
                 let event = match event {
                     Ok(event) => event,
                     Err(e) => {
                         let err_str = e.to_string();
-                        if self.try_auto_compact_after_context_limit(&err_str) {
-                            log_agent_provider_stream_lifecycle(
-                                logging::LogLevel::Warn,
-                                self,
-                                "stream_error_retry_after_compaction",
-                                api_start,
-                                vec![
-                                    ("mode", "blocking".to_string()),
-                                    ("error", err_str.clone()),
-                                    (
-                                        "context_limit_retries",
-                                        (context_limit_retries + 1).to_string(),
-                                    ),
-                                ],
-                            );
-                            context_limit_retries += 1;
-                            if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
-                                logging::warn(
-                                    "Context-limit compaction retry limit reached; giving up",
-                                );
-                                return Err(anyhow::anyhow!(
-                                    "Context limit exceeded after {} compaction retries",
-                                    Self::MAX_CONTEXT_LIMIT_RETRIES
-                                ));
-                            }
-                            retry_after_compaction = true;
-                            break;
+                        memory_pending.restore_now();
+                        if self.provider_output_started()
+                            && (crate::compaction::is_request_payload_too_large_error(&err_str)
+                                || Self::is_context_limit_error(&err_str))
+                        {
+                            self.checkpoint_partial_provider_output(
+                                &text_content,
+                                &reasoning_content,
+                                &reasoning_signature,
+                                &openai_reasoning_items,
+                                &tool_calls,
+                                &sdk_tool_results,
+                                &generated_image_contexts,
+                                store_reasoning_content,
+                                None,
+                            )?;
+                        }
+                        if let Some(action_error) = self.handle_provider_size_rejection(
+                            &err_str,
+                            request_payload.clone(),
+                            None,
+                        )? {
+                            return Err(action_error);
                         }
                         log_agent_provider_stream_lifecycle(
                             logging::LogLevel::Error,
@@ -254,6 +248,15 @@ impl Agent {
                         return Err(e);
                     }
                 };
+
+                if super::preflight::stream_event_confirms_request_acceptance(&event)
+                    && let Some(memory) = memory_pending.take_for_commit()
+                {
+                    self.commit_reserved_memory_for_request(memory, None);
+                }
+                if super::preflight::stream_event_is_provider_output(&event) {
+                    self.mark_provider_output_started();
+                }
 
                 match event {
                     StreamEvent::ThinkingStart => {
@@ -606,33 +609,29 @@ impl Agent {
                         if trace {
                             eprintln!("[trace] stream_error {}", message);
                         }
-                        if self.try_auto_compact_after_context_limit(&message) {
-                            log_agent_provider_stream_lifecycle(
-                                logging::LogLevel::Warn,
-                                self,
-                                "stream_event_retry_after_compaction",
-                                api_start,
-                                vec![
-                                    ("mode", "blocking".to_string()),
-                                    ("error", message.clone()),
-                                    (
-                                        "context_limit_retries",
-                                        (context_limit_retries + 1).to_string(),
-                                    ),
-                                ],
-                            );
-                            context_limit_retries += 1;
-                            if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
-                                logging::warn(
-                                    "Context-limit compaction retry limit reached; giving up",
-                                );
-                                return Err(anyhow::anyhow!(
-                                    "Context limit exceeded after {} compaction retries",
-                                    Self::MAX_CONTEXT_LIMIT_RETRIES
-                                ));
-                            }
-                            retry_after_compaction = true;
-                            break;
+                        memory_pending.restore_now();
+                        if self.provider_output_started()
+                            && (crate::compaction::is_request_payload_too_large_error(&message)
+                                || Self::is_context_limit_error(&message))
+                        {
+                            self.checkpoint_partial_provider_output(
+                                &text_content,
+                                &reasoning_content,
+                                &reasoning_signature,
+                                &openai_reasoning_items,
+                                &tool_calls,
+                                &sdk_tool_results,
+                                &generated_image_contexts,
+                                store_reasoning_content,
+                                None,
+                            )?;
+                        }
+                        if let Some(action_error) = self.handle_provider_size_rejection(
+                            &message,
+                            request_payload.clone(),
+                            None,
+                        )? {
+                            return Err(action_error);
                         }
                         log_agent_provider_stream_lifecycle(
                             logging::LogLevel::Error,
@@ -655,16 +654,9 @@ impl Agent {
                 }
             }
 
-            if retry_after_compaction {
-                log_agent_provider_stream_lifecycle(
-                    logging::LogLevel::Info,
-                    self,
-                    "retry_after_compaction",
-                    api_start,
-                    vec![("mode", "blocking".to_string())],
-                );
-                continue;
-            }
+            // A stream that closed without acceptance evidence restores its
+            // reservation now; Drop remains the fail-safe for every other exit.
+            memory_pending.restore_now();
 
             let api_elapsed = api_start.elapsed();
             logging::info(&format!(

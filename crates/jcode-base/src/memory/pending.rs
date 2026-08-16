@@ -76,6 +76,44 @@ impl PendingMemory {
     }
 }
 
+/// Request-scoped reservation that restores uncommitted memory on every exit
+/// path, including cancellation and propagated I/O/UI errors.
+#[derive(Debug)]
+#[must_use = "reserved memory must remain guarded until committed or restored"]
+pub struct PendingMemoryReservation {
+    session_id: String,
+    pending: Option<PendingMemory>,
+}
+
+impl PendingMemoryReservation {
+    pub fn new(session_id: impl Into<String>, pending: Option<PendingMemory>) -> Self {
+        Self {
+            session_id: session_id.into(),
+            pending,
+        }
+    }
+
+    pub fn as_ref(&self) -> Option<&PendingMemory> {
+        self.pending.as_ref()
+    }
+
+    pub fn take_for_commit(&mut self) -> Option<PendingMemory> {
+        self.pending.take()
+    }
+
+    pub fn restore_now(&mut self) {
+        if let Some(pending) = self.pending.take() {
+            restore_reserved_memory(&self.session_id, pending);
+        }
+    }
+}
+
+impl Drop for PendingMemoryReservation {
+    fn drop(&mut self) {
+        self.restore_now();
+    }
+}
+
 fn prompt_signature(prompt: &str) -> String {
     prompt
         .lines()
@@ -100,8 +138,13 @@ fn memory_overlap_ratio(left: &HashSet<String>, right: &HashSet<String>) -> f32 
     intersection / baseline
 }
 
-/// Take pending memory if available and fresh for the given session.
-pub fn take_pending_memory(session_id: &str) -> Option<PendingMemory> {
+/// Reserve pending memory for one request without recording it as injected.
+///
+/// Callers must either [`commit_reserved_memory`] after the request preflight
+/// succeeds or [`restore_reserved_memory`] when the request is blocked. This
+/// keeps a prompt-safe preflight from consuming memory that never reached the
+/// provider.
+pub fn reserve_pending_memory(session_id: &str) -> Option<PendingMemory> {
     if let Ok(mut guard) = PENDING_MEMORY.lock() {
         let map = guard.get_or_insert_with(HashMap::new);
         if let Some(pending) = map.remove(session_id) {
@@ -136,7 +179,6 @@ pub fn take_pending_memory(session_id: &str) -> Option<PendingMemory> {
                     crate::memory_log::log_pending_discarded(session_id, "duplicate suppressed");
                     return None;
                 }
-                sig_map.insert(session_id.to_string(), (sig, Instant::now()));
             }
 
             if !pending.memory_ids.is_empty() {
@@ -155,25 +197,59 @@ pub fn take_pending_memory(session_id: &str) -> Option<PendingMemory> {
                             return None;
                         }
                     }
-                    set_map.insert(session_id.to_string(), (pending_set, Instant::now()));
                 }
             }
-
-            if !pending.memory_ids.is_empty() {
-                mark_memories_injected(session_id, &pending.memory_ids);
-            }
-
-            crate::memory_log::log_pending_consumed(
-                session_id,
-                pending.count,
-                pending.computed_at.elapsed().as_millis() as u64,
-                pending.prompt.chars().count(),
-            );
 
             return Some(pending);
         }
     }
     None
+}
+
+/// Commit a reserved memory after authoritative request preflight succeeds.
+pub fn commit_reserved_memory(session_id: &str, pending: &PendingMemory) {
+    let signature = prompt_signature(&pending.prompt);
+    if let Ok(mut last_guard) = LAST_INJECTED_PROMPT_SIGNATURE.lock() {
+        last_guard
+            .get_or_insert_with(HashMap::new)
+            .insert(session_id.to_string(), (signature, Instant::now()));
+    }
+    if !pending.memory_ids.is_empty() {
+        let pending_set = memory_set(&pending.memory_ids);
+        if let Ok(mut last_guard) = LAST_INJECTED_MEMORY_SET.lock() {
+            last_guard
+                .get_or_insert_with(HashMap::new)
+                .insert(session_id.to_string(), (pending_set, Instant::now()));
+        }
+        mark_memories_injected(session_id, &pending.memory_ids);
+    }
+    crate::memory_log::log_pending_consumed(
+        session_id,
+        pending.count,
+        pending.computed_at.elapsed().as_millis() as u64,
+        pending.prompt.chars().count(),
+    );
+}
+
+/// Put a reserved memory back when preflight blocks before provider invocation.
+pub fn restore_reserved_memory(session_id: &str, pending: PendingMemory) {
+    if !pending.is_fresh() {
+        crate::memory_log::log_pending_discarded(session_id, "stale before restoration");
+        return;
+    }
+    if let Ok(mut guard) = PENDING_MEMORY.lock() {
+        guard
+            .get_or_insert_with(HashMap::new)
+            .entry(session_id.to_string())
+            .or_insert(pending);
+    }
+}
+
+/// Take pending memory using the historical immediate-commit behavior.
+pub fn take_pending_memory(session_id: &str) -> Option<PendingMemory> {
+    let pending = reserve_pending_memory(session_id)?;
+    commit_reserved_memory(session_id, &pending);
+    Some(pending)
 }
 
 /// Store a pending memory result for the given session.
@@ -454,5 +530,50 @@ pub(super) fn backdate_injected_memory_for_test(
         && let Some(at) = set.get_mut(id)
     {
         *at = Instant::now() - age;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn phase10_reserved_memory_restores_before_send_and_commits_only_after_acceptance() {
+        let session_id = "phase10-reserved-memory-lifecycle";
+        clear_pending_memory(session_id);
+        set_pending_memory(session_id, "critical memory context".to_string(), 1);
+
+        let reserved = reserve_pending_memory(session_id).expect("memory reserved");
+        assert!(reserve_pending_memory(session_id).is_none());
+        restore_reserved_memory(session_id, reserved.clone());
+        let restored = reserve_pending_memory(session_id).expect("memory restored");
+        assert_eq!(restored.prompt, reserved.prompt);
+
+        commit_reserved_memory(session_id, &restored);
+        restore_reserved_memory(session_id, restored);
+        assert!(
+            reserve_pending_memory(session_id).is_none(),
+            "committed memory must be deduplicated rather than injected twice"
+        );
+        clear_pending_memory(session_id);
+
+        let dropped_session_id = "phase10-reserved-memory-drop-guard";
+        clear_pending_memory(dropped_session_id);
+        set_pending_memory(
+            dropped_session_id,
+            "memory surviving an early return".to_string(),
+            1,
+        );
+        let pending = reserve_pending_memory(dropped_session_id).expect("memory reserved");
+        {
+            let _reservation = PendingMemoryReservation::new(dropped_session_id, Some(pending));
+        }
+        assert_eq!(
+            reserve_pending_memory(dropped_session_id)
+                .expect("drop guard restored memory")
+                .prompt,
+            "memory surviving an early return"
+        );
+        clear_pending_memory(dropped_session_id);
     }
 }

@@ -119,6 +119,46 @@ impl App {
             return serde_json::to_string_pretty(&self.context_editor_debug_summary())
                 .unwrap_or_else(|_| "{}".to_string());
         }
+        if cmd == "context-pressure-state" {
+            return serde_json::to_string_pretty(&serde_json::json!({
+                "pressure": self.context_pressure.as_ref().map(|report| report.pressure),
+                "action": self.context_protocol.action_required.as_ref().map(|action| action.reason),
+                "payload_images": self.context_protocol.action_required.as_ref().and_then(|action| action.payload.as_ref()).map(|payload| payload.image_count),
+                "composer_chars": self.input.chars().count(),
+                "pending_images": self.pending_images.len(),
+                "editor_open": self.context_editor_overlay.is_some(),
+            }))
+            .unwrap_or_else(|_| "{}".to_string());
+        }
+        if cmd == "context-pressure-fixtures" {
+            return serde_json::to_string_pretty(&serde_json::json!({
+                "fixtures": Self::context_pressure_debug_fixture_names(),
+            }))
+            .unwrap_or_else(|_| "{}".to_string());
+        }
+        if let Some(fixture) = cmd
+            .strip_prefix("context-pressure-fixture:")
+            .or_else(|| cmd.strip_prefix("context-pressure-fixture "))
+            .map(str::trim)
+        {
+            return match self.apply_context_pressure_debug_fixture(fixture) {
+                Ok(()) => serde_json::to_string_pretty(&serde_json::json!({
+                    "ok": true,
+                    "fixture": fixture,
+                    "pressure": self.context_pressure.as_ref().map(|report| report.pressure),
+                    "action": self.context_protocol.action_required.as_ref().map(|action| action.reason),
+                    "composer_chars": self.input.chars().count(),
+                    "pending_images": self.pending_images.len(),
+                }))
+                .unwrap_or_else(|_| "{}".to_string()),
+                Err(error) => serde_json::to_string_pretty(&serde_json::json!({
+                    "ok": false,
+                    "error": error,
+                    "fixtures": Self::context_pressure_debug_fixture_names(),
+                }))
+                .unwrap_or_else(|_| "{}".to_string()),
+            };
+        }
         if cmd == "context-editor-fixtures" {
             return serde_json::to_string_pretty(&serde_json::json!({
                 "fixtures": crate::tui::context_editor::ContextEditor::debug_fixture_names(),

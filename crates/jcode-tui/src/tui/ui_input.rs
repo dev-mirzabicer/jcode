@@ -1092,6 +1092,132 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
     frame.render_widget(Paragraph::new(line), area);
 }
 
+pub(super) fn context_pressure_visible(app: &dyn TuiState) -> bool {
+    app.context_action_required_reason().is_some()
+        || app
+            .context_preflight_report()
+            .is_some_and(|report| report.pressure != crate::protocol::ContextPressureLevel::Normal)
+}
+
+pub(super) fn draw_context_pressure(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
+    use crate::protocol::{ContextActionRequiredReason, ContextPressureLevel};
+    let compact = area.width < 80;
+
+    let (text, color) = match app.context_action_required_reason() {
+        Some(ContextActionRequiredReason::PayloadTooLarge) => {
+            let payload = app.context_payload_pressure();
+            if compact {
+                let preserved = payload
+                    .map(|payload| match payload.image_count {
+                        0 => "".to_string(),
+                        1 => " · image preserved".to_string(),
+                        count => format!(" · {count} images preserved"),
+                    })
+                    .unwrap_or_default();
+                (
+                    format!("Payload blocked{preserved} · /context edit"),
+                    rgb(244, 67, 54),
+                )
+            } else {
+                let suffix = payload
+                    .map(|payload| {
+                        format!(
+                            " · {} image(s), {} preserved",
+                            payload.image_count,
+                            format_context_units(payload.estimated_base64_bytes)
+                        )
+                    })
+                    .unwrap_or_default();
+                (
+                    format!(
+                        "Request not sent: payload too large{suffix} · Open Context Editor (/context edit)"
+                    ),
+                    rgb(244, 67, 54),
+                )
+            }
+        }
+        Some(ContextActionRequiredReason::PreflightLimit)
+        | Some(ContextActionRequiredReason::ProviderContextLimit) => {
+            let report = app.context_preflight_report();
+            let suffix = report
+                .map(|report| {
+                    format!(
+                        " · reduce by {}",
+                        format_context_tokens(report.required_reduction_tokens)
+                    )
+                })
+                .unwrap_or_default();
+            let text = if compact {
+                format!("Context blocked{suffix} · /context edit")
+            } else {
+                format!(
+                    "Request not sent: safe context budget exceeded{suffix} · Open Context Editor (/context edit)"
+                )
+            };
+            (text, rgb(244, 67, 54))
+        }
+        None => {
+            let Some(report) = app.context_preflight_report() else {
+                return;
+            };
+            let label = match report.pressure {
+                ContextPressureLevel::Normal => return,
+                ContextPressureLevel::Notice => "Context notice",
+                ContextPressureLevel::Urgent => "Context urgent",
+                ContextPressureLevel::Blocked => "Context blocked",
+            };
+            let color = match report.pressure {
+                ContextPressureLevel::Notice => rgb(255, 193, 7),
+                ContextPressureLevel::Urgent => rgb(255, 152, 0),
+                ContextPressureLevel::Blocked => rgb(244, 67, 54),
+                ContextPressureLevel::Normal => unreachable!(),
+            };
+            let text = if compact {
+                format!(
+                    "{label} · {} safe · /context edit",
+                    format_context_tokens(report.remaining_safe_input_tokens),
+                )
+            } else {
+                format!(
+                    "{label}: {} / {} · {} safe input remaining · Open Context Editor (/context edit)",
+                    format_context_tokens(report.projected_input_tokens),
+                    format_context_tokens(report.context_window),
+                    format_context_tokens(report.remaining_safe_input_tokens),
+                )
+            };
+            (text, color)
+        }
+    };
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            text,
+            Style::default().fg(color).bold(),
+        ))),
+        area,
+    );
+}
+
+fn format_context_tokens(tokens: usize) -> String {
+    if tokens >= 1_000_000 {
+        format!("{:.1}M", tokens as f64 / 1_000_000.0)
+    } else if tokens >= 1_000 {
+        format!("{:.1}K", tokens as f64 / 1_000.0)
+    } else {
+        tokens.to_string()
+    }
+}
+
+fn format_context_units(bytes: usize) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.1} KiB", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
 /// Append the "+N queued" suffix span (in the queued accent color) when there
 /// are queued follow-up messages. Centralizes the repeated check/styling shared
 /// by every processing-status branch in `draw_status`.

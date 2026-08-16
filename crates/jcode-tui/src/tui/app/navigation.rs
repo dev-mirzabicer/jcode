@@ -1427,6 +1427,14 @@ impl App {
             picker_cell.borrow_mut().handle_overlay_mouse(mouse);
             finish_mouse_event!(false, "account_picker_overlay");
         }
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && super::super::ui::last_context_pressure_area().is_some_and(|area| {
+                super::super::layout_utils::point_in_rect(mouse.column, mouse.row, area)
+            })
+        {
+            self.open_context_editor(crate::tui::context_editor::ContextEditorOpenMode::Edit);
+            finish_mouse_event!(false, "context_pressure_open_editor");
+        }
         self.normalize_diagram_state();
         let diagram_available = self.diagram_available();
         let layout = super::super::ui::last_layout_snapshot();

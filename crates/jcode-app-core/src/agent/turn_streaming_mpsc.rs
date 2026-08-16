@@ -93,7 +93,6 @@ impl Agent {
             self.graceful_shutdown.clone(),
         );
         let trace = trace_enabled();
-        let mut context_limit_retries = 0u32;
         let mut incomplete_continuations = 0u32;
         let mut empty_post_tool_continuations = 0u32;
         let mut fable_guardrail_reconsiderations = 0u32;
@@ -121,7 +120,7 @@ impl Agent {
             let tools = self.tool_definitions().await;
             let messages: std::sync::Arc<[Message]> = messages.into();
             // Non-blocking memory: uses pending result from last turn, spawns check for next turn
-            let memory_pending = self.build_memory_prompt_nonblocking_shared(
+            let pending_memory = self.build_memory_prompt_nonblocking_shared(
                 std::sync::Arc::clone(&messages),
                 Some(std::sync::Arc::new({
                     let event_tx = event_tx.clone();
@@ -130,19 +129,13 @@ impl Agent {
                     }
                 })),
             );
+            let mut memory_pending = crate::memory::PendingMemoryReservation::new(
+                self.session.id.clone(),
+                pending_memory,
+            );
             // Use split prompt for better caching - static content cached, dynamic not
             let split_prompt = self.build_system_prompt_split(None);
             self.log_prompt_prefix_accounting(&split_prompt, &tools);
-
-            // Check for client-side cache violations before memory injection.
-            // Memory is an ephemeral suffix that changes each turn; tracking it would cause
-            // false-positive violations every turn (prior turn's memory ≠ current history prefix).
-            self.record_client_cache_request(&messages);
-
-            // `messages` now owns the provider-facing request snapshot. Do not
-            // retain the session's second, derived copy for the entire network
-            // wait and response stream.
-            self.session.release_provider_messages_cache();
 
             let mut cache_signature_messages =
                 if crate::config::config().features.message_timestamps {
@@ -152,32 +145,36 @@ impl Agent {
                 };
             let mut ephemeral_signature_messages = Vec::new();
 
-            // Inject memory as a user message at the end (preserves cache prefix)
             let mut messages_with_memory: Vec<Message> = messages.iter().cloned().collect();
-            if let Some(memory) = memory_pending.as_ref() {
-                let memory_count = memory.count.max(1);
-                let computed_age_ms = memory.computed_at.elapsed().as_millis() as u64;
-                crate::memory::record_injected_prompt(
-                    &memory.prompt,
-                    memory_count,
-                    computed_age_ms,
-                );
-                self.record_memory_injection_in_session(memory);
-                let _ = event_tx.send(ServerEvent::MemoryInjected {
-                    count: memory_count,
-                    prompt: memory.prompt.clone(),
-                    display_prompt: memory.display_prompt.clone(),
-                    prompt_chars: memory.prompt.chars().count(),
-                    computed_age_ms,
-                });
-                let (memory_msg, persisted) = self.prepare_memory_injection_message(memory);
-                if !persisted {
-                    ephemeral_signature_messages.push(memory_msg.clone());
-                } else {
-                    cache_signature_messages.push(memory_msg.clone());
-                }
-                messages_with_memory.push(memory_msg);
+            let memory_tokens = memory_pending
+                .as_ref()
+                .map(|memory| {
+                    let memory_msg = Self::memory_injection_message(memory);
+                    let tokens = jcode_context_core::estimate_message_tokens(&memory_msg);
+                    if crate::config::config().features.persist_memory_injections {
+                        cache_signature_messages.push(memory_msg.clone());
+                    } else {
+                        ephemeral_signature_messages.push(memory_msg.clone());
+                    }
+                    messages_with_memory.push(memory_msg);
+                    tokens
+                })
+                .unwrap_or_default();
+
+            let preflight = self.evaluate_provider_request_preflight(
+                &messages_with_memory,
+                memory_tokens,
+                &split_prompt,
+                &tools,
+                Some(&event_tx),
+            );
+            if preflight.pressure == crate::protocol::ContextPressureLevel::Blocked {
+                return Err(self.block_for_preflight(preflight, Some(&event_tx))?);
             }
+
+            // No side effect above this boundary survives a blocked request.
+            self.record_client_cache_request(&messages);
+            self.session.release_provider_messages_cache();
 
             logging::info(&format!(
                 "API call starting: {} messages, {} tools",
@@ -191,6 +188,7 @@ impl Agent {
                 .message_timestamps
                 .then(|| Message::with_timestamps(&messages_with_memory));
             let send_messages = stamped.as_deref().unwrap_or(&messages_with_memory);
+            let request_payload = crate::context::request_payload_pressure(send_messages);
             let prompt_has_recent_tool_result = Self::messages_end_with_tool_result(send_messages);
             let provider = Arc::clone(&self.provider);
             // Capture the model id the request was issued with. A provider may
@@ -232,35 +230,22 @@ impl Agent {
                             logging::info(
                                 "Graceful shutdown/cancel before API stream opened - stopping turn",
                             );
+                            memory_pending.restore_now();
                             return Ok(());
                         }
                         result = &mut complete_future => {
                             match result {
                                 Ok(stream) => break stream,
                                 Err(e) => {
-                                    if self.try_auto_compact_after_context_limit(&e.to_string()) {
-                                        context_limit_retries += 1;
-                                        if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
-                                            logging::warn(
-                                                "Context-limit compaction retry limit reached; giving up",
-                                            );
-                                            return Err(anyhow::anyhow!(
-                                                "Context limit exceeded after {} compaction retries",
-                                                Self::MAX_CONTEXT_LIMIT_RETRIES
-                                            ));
-                                        }
-                                        let _ = event_tx.send(ServerEvent::Compaction {
-                                            trigger: "auto_recovery".to_string(),
-                                            pre_tokens: None,
-                                            post_tokens: None,
-                                            tokens_saved: None,
-                                            duration_ms: None,
-                                            messages_dropped: None,
-                                            messages_compacted: None,
-                                            summary_chars: None,
-                                            active_messages: None,
-                                        });
-                                        continue;
+                                    memory_pending.restore_now();
+                                    if let Some(action_error) = self
+                                        .handle_provider_size_rejection(
+                                            &e.to_string(),
+                                            request_payload.clone(),
+                                            Some(&event_tx),
+                                        )?
+                                    {
+                                        return Err(action_error);
                                     }
                                     return Err(e);
                                 }
@@ -275,12 +260,8 @@ impl Agent {
             // while tokens arrive needlessly multiplies active-session memory.
             drop(stamped);
             drop(messages_with_memory);
-            drop(memory_pending);
             drop(messages);
             drop(split_prompt);
-
-            // Successful API call - reset retry counter
-            context_limit_retries = 0;
 
             logging::info(&format!(
                 "API stream opened in {:.2}s",
@@ -339,7 +320,6 @@ impl Agent {
             let mut tool_id_to_name: std::collections::HashMap<String, String> =
                 std::collections::HashMap::new();
 
-            let mut retry_after_compaction = false;
             let mut keepalive = stream_keepalive_ticker();
             loop {
                 let next_event = std::pin::pin!(stream.next());
@@ -392,44 +372,39 @@ impl Agent {
                     Ok(event) => event,
                     Err(e) => {
                         let err_str = e.to_string();
-                        if self.try_auto_compact_after_context_limit(&err_str) {
-                            log_agent_provider_stream_lifecycle(
-                                logging::LogLevel::Warn,
-                                self,
-                                "stream_error_retry_after_compaction",
-                                api_start,
-                                vec![
-                                    ("mode", "mpsc".to_string()),
-                                    ("error", err_str.clone()),
-                                    (
-                                        "context_limit_retries",
-                                        (context_limit_retries + 1).to_string(),
-                                    ),
-                                ],
-                            );
-                            context_limit_retries += 1;
-                            if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
-                                logging::warn(
-                                    "Context-limit compaction retry limit reached; giving up",
-                                );
-                                return Err(anyhow::anyhow!(
-                                    "Context limit exceeded after {} compaction retries",
-                                    Self::MAX_CONTEXT_LIMIT_RETRIES
-                                ));
-                            }
-                            retry_after_compaction = true;
-                            let _ = event_tx.send(ServerEvent::Compaction {
-                                trigger: "auto_recovery".to_string(),
-                                pre_tokens: None,
-                                post_tokens: None,
-                                tokens_saved: None,
-                                duration_ms: None,
-                                messages_dropped: None,
-                                messages_compacted: None,
-                                summary_chars: None,
-                                active_messages: None,
+                        memory_pending.restore_now();
+                        if self.provider_output_started()
+                            && (crate::compaction::is_request_payload_too_large_error(&err_str)
+                                || Self::is_context_limit_error(&err_str))
+                        {
+                            let token_usage = (usage_input.is_some()
+                                || usage_output.is_some()
+                                || usage_cache_read.is_some()
+                                || usage_cache_creation.is_some())
+                            .then_some(crate::session::StoredTokenUsage {
+                                input_tokens: usage_input.unwrap_or_default(),
+                                output_tokens: usage_output.unwrap_or_default(),
+                                cache_read_input_tokens: usage_cache_read,
+                                cache_creation_input_tokens: usage_cache_creation,
                             });
-                            break;
+                            self.checkpoint_partial_provider_output(
+                                &text_content,
+                                &reasoning_content,
+                                &reasoning_signature,
+                                &openai_reasoning_items,
+                                &tool_calls,
+                                &sdk_tool_results,
+                                &generated_image_contexts,
+                                store_reasoning_content,
+                                token_usage,
+                            )?;
+                        }
+                        if let Some(action_error) = self.handle_provider_size_rejection(
+                            &err_str,
+                            request_payload.clone(),
+                            Some(&event_tx),
+                        )? {
+                            return Err(action_error);
                         }
                         log_agent_provider_stream_lifecycle(
                             logging::LogLevel::Error,
@@ -441,6 +416,15 @@ impl Agent {
                         return Err(e);
                     }
                 };
+
+                if super::preflight::stream_event_confirms_request_acceptance(&event)
+                    && let Some(memory) = memory_pending.take_for_commit()
+                {
+                    self.commit_reserved_memory_for_request(memory, Some(&event_tx));
+                }
+                if super::preflight::stream_event_is_provider_output(&event) {
+                    self.mark_provider_output_started();
+                }
 
                 match event {
                     StreamEvent::ThinkingStart => {
@@ -836,44 +820,39 @@ impl Agent {
                         message,
                         retry_after_secs,
                     } => {
-                        if self.try_auto_compact_after_context_limit(&message) {
-                            log_agent_provider_stream_lifecycle(
-                                logging::LogLevel::Warn,
-                                self,
-                                "stream_event_retry_after_compaction",
-                                api_start,
-                                vec![
-                                    ("mode", "mpsc".to_string()),
-                                    ("error", message.clone()),
-                                    (
-                                        "context_limit_retries",
-                                        (context_limit_retries + 1).to_string(),
-                                    ),
-                                ],
-                            );
-                            context_limit_retries += 1;
-                            if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
-                                logging::warn(
-                                    "Context-limit compaction retry limit reached; giving up",
-                                );
-                                return Err(anyhow::anyhow!(
-                                    "Context limit exceeded after {} compaction retries",
-                                    Self::MAX_CONTEXT_LIMIT_RETRIES
-                                ));
-                            }
-                            retry_after_compaction = true;
-                            let _ = event_tx.send(ServerEvent::Compaction {
-                                trigger: "auto_recovery".to_string(),
-                                pre_tokens: None,
-                                post_tokens: None,
-                                tokens_saved: None,
-                                duration_ms: None,
-                                messages_dropped: None,
-                                messages_compacted: None,
-                                summary_chars: None,
-                                active_messages: None,
+                        memory_pending.restore_now();
+                        if self.provider_output_started()
+                            && (crate::compaction::is_request_payload_too_large_error(&message)
+                                || Self::is_context_limit_error(&message))
+                        {
+                            let token_usage = (usage_input.is_some()
+                                || usage_output.is_some()
+                                || usage_cache_read.is_some()
+                                || usage_cache_creation.is_some())
+                            .then_some(crate::session::StoredTokenUsage {
+                                input_tokens: usage_input.unwrap_or_default(),
+                                output_tokens: usage_output.unwrap_or_default(),
+                                cache_read_input_tokens: usage_cache_read,
+                                cache_creation_input_tokens: usage_cache_creation,
                             });
-                            break;
+                            self.checkpoint_partial_provider_output(
+                                &text_content,
+                                &reasoning_content,
+                                &reasoning_signature,
+                                &openai_reasoning_items,
+                                &tool_calls,
+                                &sdk_tool_results,
+                                &generated_image_contexts,
+                                store_reasoning_content,
+                                token_usage,
+                            )?;
+                        }
+                        if let Some(action_error) = self.handle_provider_size_rejection(
+                            &message,
+                            request_payload.clone(),
+                            Some(&event_tx),
+                        )? {
+                            return Err(action_error);
                         }
                         log_agent_provider_stream_lifecycle(
                             logging::LogLevel::Error,
@@ -896,16 +875,7 @@ impl Agent {
                 }
             }
 
-            if retry_after_compaction {
-                log_agent_provider_stream_lifecycle(
-                    logging::LogLevel::Info,
-                    self,
-                    "retry_after_compaction",
-                    api_start,
-                    vec![("mode", "mpsc".to_string())],
-                );
-                continue;
-            }
+            memory_pending.restore_now();
 
             let api_elapsed = api_start.elapsed();
             logging::info(&format!(

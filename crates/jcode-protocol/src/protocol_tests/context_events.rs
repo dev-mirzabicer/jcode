@@ -545,8 +545,11 @@ fn context_events_roundtrip_preserve_request_and_draft_correlation() -> Result<(
                 request_id: 77,
                 content_chars: 12,
                 content_digest: 123,
+                content_sha256: String::new(),
                 image_count: 1,
             }),
+            preflight: None,
+            payload: None,
             details: vec!["input exceeds safe budget".to_string()],
             automatic_retry: false,
         },
@@ -628,8 +631,11 @@ fn context_action_required_contains_metadata_not_raw_prompt_content() {
             request_id: 41,
             content_chars: 25,
             content_digest: 0xfeed,
+            content_sha256: String::new(),
             image_count: 0,
         }),
+        preflight: None,
+        payload: None,
         details: Vec::new(),
         automatic_retry: false,
     };
@@ -638,4 +644,33 @@ fn context_action_required_contains_metadata_not_raw_prompt_content() {
     assert!(json.contains("\"content_digest\":65261"));
     assert!(!json.contains("raw prompt must stay private"));
     assert!(!json.contains("\"content\":"));
+}
+
+#[test]
+fn pending_input_metadata_matches_exact_unicode_content_and_images() {
+    let content = "fn café() {\n    println!(\"🦀\");\n}";
+    let metadata = ContextPendingInputMetadata::new(73, content, 2);
+
+    assert_eq!(metadata.content_chars, content.chars().count());
+    assert_eq!(metadata.content_sha256.len(), 64);
+    assert!(metadata.matches(73, content, 2));
+    assert!(!metadata.matches(74, content, 2));
+    assert!(!metadata.matches(73, "fn cafe() {}", 2));
+    assert!(!metadata.matches(73, content, 1));
+
+    let encoded = serde_json::to_vec(&metadata).expect("serialize pending metadata");
+    assert!(!String::from_utf8_lossy(&encoded).contains(content));
+    let decoded: ContextPendingInputMetadata =
+        serde_json::from_slice(&encoded).expect("deserialize pending metadata");
+    assert_eq!(decoded, metadata);
+
+    let mut legacy = serde_json::to_value(&metadata).expect("encode legacy fixture");
+    legacy
+        .as_object_mut()
+        .expect("metadata object")
+        .remove("content_sha256");
+    let legacy: ContextPendingInputMetadata =
+        serde_json::from_value(legacy).expect("legacy metadata remains decodable");
+    assert!(legacy.content_sha256.is_empty());
+    assert!(!legacy.matches(73, content, 2));
 }

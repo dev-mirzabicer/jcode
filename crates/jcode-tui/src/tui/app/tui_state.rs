@@ -523,6 +523,48 @@ impl App {
 }
 
 impl crate::tui::TuiState for App {
+    fn context_preflight_report(&self) -> Option<&crate::protocol::ContextPreflightReport> {
+        let active_session = self
+            .remote_session_id
+            .as_deref()
+            .unwrap_or(self.session.id.as_str());
+        (self.context_pressure_session_id.as_deref() == Some(active_session))
+            .then_some(self.context_pressure.as_ref())
+            .flatten()
+    }
+
+    fn context_action_required_reason(
+        &self,
+    ) -> Option<crate::protocol::ContextActionRequiredReason> {
+        let active_session = self
+            .remote_session_id
+            .as_deref()
+            .unwrap_or(self.session.id.as_str());
+        self.context_protocol
+            .action_required
+            .as_ref()
+            .filter(|action| {
+                action.session_id == active_session
+                    && self.context_pressure_session_id.as_deref() == Some(active_session)
+            })
+            .map(|action| action.reason)
+    }
+
+    fn context_payload_pressure(&self) -> Option<&crate::protocol::ContextPayloadPressure> {
+        let active_session = self
+            .remote_session_id
+            .as_deref()
+            .unwrap_or(self.session.id.as_str());
+        self.context_protocol
+            .action_required
+            .as_ref()
+            .filter(|action| {
+                action.session_id == active_session
+                    && self.context_pressure_session_id.as_deref() == Some(active_session)
+            })
+            .and_then(|action| action.payload.as_ref())
+    }
+
     fn display_messages(&self) -> &[DisplayMessage] {
         &self.display_messages
     }

@@ -30,7 +30,7 @@ impl Agent {
 
         let fresh_user_turn = crate::message::ends_with_fresh_user_turn(&messages);
         let pending = if fresh_user_turn {
-            crate::memory::take_pending_memory(session_id)
+            crate::memory::reserve_pending_memory(session_id)
         } else {
             None
         };

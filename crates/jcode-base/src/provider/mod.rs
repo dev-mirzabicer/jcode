@@ -2777,6 +2777,62 @@ impl Provider for MultiProvider {
         }
     }
 
+    fn context_request_budget(&self) -> jcode_provider_core::ContextRequestBudget {
+        match self.active_provider() {
+            ActiveProvider::Claude => {
+                if let Some(anthropic) = self.anthropic_provider() {
+                    anthropic.context_request_budget()
+                } else if let Some(claude) = self.claude_provider() {
+                    claude.context_request_budget()
+                } else {
+                    jcode_provider_core::ContextRequestBudget::unknown(self.context_window())
+                }
+            }
+            ActiveProvider::OpenAI => self
+                .openai_provider()
+                .map(|provider| provider.context_request_budget())
+                .unwrap_or_else(|| {
+                    jcode_provider_core::ContextRequestBudget::unknown(self.context_window())
+                }),
+            ActiveProvider::Copilot => self
+                .copilot_provider()
+                .map(|provider| provider.context_request_budget())
+                .unwrap_or_else(|| {
+                    jcode_provider_core::ContextRequestBudget::unknown(self.context_window())
+                }),
+            ActiveProvider::Antigravity => self
+                .antigravity_provider()
+                .map(|provider| provider.context_request_budget())
+                .unwrap_or_else(|| {
+                    jcode_provider_core::ContextRequestBudget::unknown(self.context_window())
+                }),
+            ActiveProvider::Gemini => self
+                .gemini_provider()
+                .map(|provider| provider.context_request_budget())
+                .unwrap_or_else(|| {
+                    jcode_provider_core::ContextRequestBudget::unknown(self.context_window())
+                }),
+            ActiveProvider::Cursor => self
+                .cursor_provider()
+                .map(|provider| provider.context_request_budget())
+                .unwrap_or_else(|| {
+                    jcode_provider_core::ContextRequestBudget::unknown(self.context_window())
+                }),
+            ActiveProvider::Bedrock => self
+                .bedrock_provider()
+                .map(|provider| provider.context_request_budget())
+                .unwrap_or_else(|| {
+                    jcode_provider_core::ContextRequestBudget::unknown(self.context_window())
+                }),
+            ActiveProvider::OpenRouter => self
+                .active_openrouter_execution_provider()
+                .map(|provider| provider.context_request_budget())
+                .unwrap_or_else(|| {
+                    jcode_provider_core::ContextRequestBudget::unknown(self.context_window())
+                }),
+        }
+    }
+
     fn fork(&self) -> Arc<dyn Provider> {
         let current_model = self.model();
         let active = self.active_provider();

@@ -555,10 +555,106 @@ pub enum ContextActionRequiredReason {
     PayloadTooLarge,
 }
 
+pub const CONTEXT_PARTIAL_OUTPUT_NOT_DURABLE: &str =
+    "Partial provider output remains visible in memory but could not be persisted durably.";
+pub const CONTEXT_PARTIAL_OUTPUT_NOT_REPLAYABLE: &str = "Provider output began, but no structurally complete partial response was available to persist.";
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextPendingInputMetadata {
     pub request_id: u64,
     pub content_chars: usize,
     pub content_digest: u64,
+    #[serde(default)]
+    pub content_sha256: String,
     pub image_count: usize,
+}
+
+impl ContextPendingInputMetadata {
+    pub fn new(request_id: u64, content: &str, image_count: usize) -> Self {
+        Self {
+            request_id,
+            content_chars: content.chars().count(),
+            content_digest: pending_input_digest(content),
+            content_sha256: pending_input_sha256(content),
+            image_count,
+        }
+    }
+
+    pub fn matches(&self, request_id: u64, content: &str, image_count: usize) -> bool {
+        self.request_id == request_id
+            && self.content_chars == content.chars().count()
+            && self.content_digest == pending_input_digest(content)
+            && !self.content_sha256.is_empty()
+            && self.content_sha256 == pending_input_sha256(content)
+            && self.image_count == image_count
+    }
+}
+
+/// Compact compatibility digest. Exact restoration additionally requires the
+/// SHA-256 fingerprint below. Raw pending input is never sent or logged.
+pub fn pending_input_digest(content: &str) -> u64 {
+    const OFFSET: u64 = 0xcbf29ce484222325;
+    const PRIME: u64 = 0x100000001b3;
+    content.as_bytes().iter().fold(OFFSET, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(PRIME)
+    })
+}
+
+fn pending_input_sha256(content: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    format!("{:x}", Sha256::digest(content.as_bytes()))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextPressureLevel {
+    Normal,
+    Notice,
+    Urgent,
+    Blocked,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextRequestTokenBreakdown {
+    pub system_tokens: usize,
+    pub tool_definition_tokens: usize,
+    pub historical_message_tokens: usize,
+    pub pending_input_tokens: usize,
+    pub memory_tokens: usize,
+}
+
+impl ContextRequestTokenBreakdown {
+    pub fn projected_input_tokens(&self) -> usize {
+        self.system_tokens
+            .saturating_add(self.tool_definition_tokens)
+            .saturating_add(self.historical_message_tokens)
+            .saturating_add(self.pending_input_tokens)
+            .saturating_add(self.memory_tokens)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextPreflightReport {
+    pub context_revision: u64,
+    pub pressure: ContextPressureLevel,
+    pub context_window: usize,
+    pub safe_input_budget: usize,
+    pub projected_input_tokens: usize,
+    pub required_reduction_tokens: usize,
+    pub remaining_context_tokens: usize,
+    pub remaining_safe_input_tokens: usize,
+    pub semantics: jcode_provider_core::ContextWindowSemantics,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_max_output_tokens: Option<usize>,
+    pub output_reserve_tokens: usize,
+    pub estimator_margin_tokens: usize,
+    pub exact_output_reserve_known: bool,
+    pub breakdown: ContextRequestTokenBreakdown,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextPayloadPressure {
+    pub image_count: usize,
+    pub estimated_base64_bytes: usize,
 }
