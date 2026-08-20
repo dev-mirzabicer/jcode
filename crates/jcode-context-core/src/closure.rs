@@ -559,6 +559,7 @@ mod tests {
                 application: None,
                 economics: None,
                 curator_usage: Vec::new(),
+                emergency_audit: None,
             }],
             ..StoredContextViewState::default()
         };
@@ -584,6 +585,7 @@ mod tests {
                 application: None,
                 economics: None,
                 curator_usage: Vec::new(),
+                emergency_audit: None,
             }],
             ..StoredContextViewState::default()
         };

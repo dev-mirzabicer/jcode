@@ -400,6 +400,7 @@ mod tests {
             application: None,
             economics: None,
             curator_usage: Vec::new(),
+            emergency_audit: None,
         };
         let state = StoredContextViewState {
             revision: 1,
@@ -436,6 +437,7 @@ mod tests {
                 application: None,
                 economics: None,
                 curator_usage: Vec::new(),
+                emergency_audit: None,
             }],
             ..StoredContextViewState::default()
         };
@@ -482,6 +484,7 @@ mod tests {
             application: None,
             economics: None,
             curator_usage: Vec::new(),
+            emergency_audit: None,
         };
         let state = StoredContextViewState {
             revision: 4,
@@ -511,6 +514,7 @@ mod tests {
             application: None,
             economics: None,
             curator_usage: Vec::new(),
+            emergency_audit: None,
         };
 
         let missing = StoredContextViewState {

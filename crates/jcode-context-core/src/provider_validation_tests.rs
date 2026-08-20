@@ -60,6 +60,7 @@ fn applied_state(operations: Vec<StoredContextOperation>) -> StoredContextViewSt
             application: None,
             economics: None,
             curator_usage: Vec::new(),
+            emergency_audit: None,
         }],
         ..StoredContextViewState::default()
     }
