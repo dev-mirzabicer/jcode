@@ -437,6 +437,7 @@ mod tests {
                 application: None,
                 economics: None,
                 curator_usage: Vec::new(),
+                emergency_audit: None,
             });
         session.save().expect("save context state");
         let input = json!({"stats": true});

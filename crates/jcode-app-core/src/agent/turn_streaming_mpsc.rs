@@ -97,7 +97,7 @@ impl Agent {
         let mut empty_post_tool_continuations = 0u32;
         let mut fable_guardrail_reconsiderations = 0u32;
 
-        loop {
+        'provider_turn: loop {
             // Never open a new provider request after a cancel. Several paths
             // `continue` this loop (compaction retry, incomplete/stranded
             // continuation, empty-response recovery, soft-interrupt injection),
@@ -169,6 +169,24 @@ impl Agent {
                 Some(&event_tx),
             );
             if preflight.pressure == crate::protocol::ContextPressureLevel::Blocked {
+                match self
+                    .try_unattended_emergency_preflight_recovery(&preflight, Some(&event_tx))
+                    .await
+                {
+                    Ok(true) => continue,
+                    Ok(false) if self.has_unattended_context() => {
+                        return Err(self.block_unattended_preflight(preflight, Some(&event_tx)));
+                    }
+                    Err(error) if self.has_unattended_context() => {
+                        return Err(self.block_unattended_preflight_with_detail(
+                            preflight,
+                            Some(&event_tx),
+                            error.to_string(),
+                        ));
+                    }
+                    Err(error) => return Err(error),
+                    Ok(false) => {}
+                }
                 return Err(self.block_for_preflight(preflight, Some(&event_tx))?);
             }
 
@@ -238,9 +256,23 @@ impl Agent {
                                 Ok(stream) => break stream,
                                 Err(e) => {
                                     memory_pending.restore_now();
+                                    let provider_error = e.to_string();
+                                    match self
+                                        .try_unattended_emergency_provider_recovery(
+                                            &provider_error,
+                                            Some(&event_tx),
+                                        )
+                                        .await
+                                    {
+                                        Ok(true) => continue 'provider_turn,
+                                        Ok(false) => {}
+                                        Err(_) => logging::warn(
+                                            "Authorized provider-limit context recovery failed safely",
+                                        ),
+                                    }
                                     if let Some(action_error) = self
                                         .handle_provider_size_rejection(
-                                            &e.to_string(),
+                                            &provider_error,
                                             request_payload.clone(),
                                             Some(&event_tx),
                                         )?
@@ -398,6 +430,16 @@ impl Agent {
                                 store_reasoning_content,
                                 token_usage,
                             )?;
+                        }
+                        match self
+                            .try_unattended_emergency_provider_recovery(&err_str, Some(&event_tx))
+                            .await
+                        {
+                            Ok(true) => continue 'provider_turn,
+                            Ok(false) => {}
+                            Err(_) => logging::warn(
+                                "Authorized provider-limit context recovery failed safely",
+                            ),
                         }
                         if let Some(action_error) = self.handle_provider_size_rejection(
                             &err_str,
@@ -846,6 +888,16 @@ impl Agent {
                                 store_reasoning_content,
                                 token_usage,
                             )?;
+                        }
+                        match self
+                            .try_unattended_emergency_provider_recovery(&message, Some(&event_tx))
+                            .await
+                        {
+                            Ok(true) => continue 'provider_turn,
+                            Ok(false) => {}
+                            Err(_) => logging::warn(
+                                "Authorized provider-limit context recovery failed safely",
+                            ),
                         }
                         if let Some(action_error) = self.handle_provider_size_rejection(
                             &message,

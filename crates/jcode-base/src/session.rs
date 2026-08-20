@@ -1039,6 +1039,7 @@ impl Session {
             application: None,
             economics: None,
             curator_usage: Vec::new(),
+            emergency_audit: None,
         };
         let mut migrated = self.context_view.clone();
         migrated.revision = next_revision;
@@ -2040,6 +2041,7 @@ fn redact_context_view(context_view: &mut StoredContextViewState) {
             jcode_session_types::StoredContextAuthorization::UnattendedEmergency {
                 authorization_source,
                 trigger,
+                ..
             } => {
                 *authorization_source = crate::message::redact_secrets(authorization_source);
                 if let Some(value) = trigger.as_mut() {
@@ -2089,6 +2091,25 @@ fn redact_context_view(context_view: &mut StoredContextViewState) {
         if let Some(economics) = transaction.economics.as_mut() {
             for assumption in &mut economics.assumptions {
                 *assumption = crate::message::redact_secrets(assumption);
+            }
+        }
+        if let Some(audit) = transaction.emergency_audit.as_mut() {
+            audit.authorization_source =
+                crate::message::redact_secrets(&audit.authorization_source);
+            if let Some(provider_error) = audit.provider_error.as_mut() {
+                *provider_error = crate::message::redact_secrets(provider_error);
+            }
+            if let jcode_session_types::StoredContextEmergencyPolicy::Authorized {
+                authorization_source,
+                ..
+            } = &mut audit.policy
+            {
+                *authorization_source = crate::message::redact_secrets(authorization_source);
+            }
+            if let jcode_session_types::StoredContextEmergencyRetryOutcome::Failed { detail } =
+                &mut audit.retry_outcome
+            {
+                *detail = crate::message::redact_secrets(detail);
             }
         }
     }

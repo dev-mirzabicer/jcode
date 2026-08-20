@@ -1080,6 +1080,7 @@ fn local_provider_send_projection_failure_is_actionable_and_preserves_raw_transc
         application: None,
         economics: None,
         curator_usage: Vec::new(),
+        emergency_audit: None,
     };
     app.session.context_view = jcode_session_types::StoredContextViewState {
         revision: 2,

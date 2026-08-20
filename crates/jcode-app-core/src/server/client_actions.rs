@@ -4,8 +4,8 @@ use super::client_lifecycle::process_message_streaming_mpsc;
 use super::{
     ClientConnectionInfo, SessionInterruptQueues, SwarmEvent, SwarmMember, SwarmState,
     VersionedPlan, broadcast_swarm_status, fanout_session_event, persist_swarm_state_for,
-    queue_soft_interrupt_for_session, remove_session_channel_subscriptions,
-    remove_session_from_swarm, swarm_id_for_session, truncate_detail, update_member_status,
+    remove_session_channel_subscriptions, remove_session_from_swarm, swarm_id_for_session,
+    truncate_detail, update_member_status,
 };
 use crate::agent::Agent;
 use crate::protocol::{FeatureToggle, NotificationType, ServerEvent};
@@ -95,6 +95,7 @@ pub(super) async fn handle_notify_session(
     id: u64,
     session_id: String,
     message: String,
+    unattended_context: Option<jcode_session_types::StoredUnattendedContextAuthorization>,
     ctx: NotifySessionContext<'_>,
 ) {
     let target_has_client = {
@@ -108,6 +109,7 @@ pub(super) async fn handle_notify_session(
         super::live_turn::run_live_system_turn_if_idle(
             &session_id,
             &message,
+            unattended_context.clone(),
             ctx.sessions,
             super::live_turn::LiveTurnSwarmContext::new(
                 ctx.swarm_members,
@@ -152,11 +154,12 @@ pub(super) async fn handle_notify_session(
     let queued_interrupt = if ran_immediately {
         false
     } else {
-        queue_soft_interrupt_for_session(
+        super::state::queue_soft_interrupt_for_session_with_unattended(
             &session_id,
             message.clone(),
             false,
             SoftInterruptSource::System,
+            unattended_context,
             ctx.soft_interrupt_queues,
             ctx.sessions,
         )
@@ -1003,10 +1006,13 @@ pub(super) async fn handle_resume_all_sessions(
         super::live_turn::spawn_tracked_live_turn(
             &session_id,
             Arc::clone(&agent),
-            String::new(),
-            Some(reminder),
-            None,
-            Some("resuming interrupted session".to_string()),
+            super::live_turn::TrackedLiveTurn {
+                message: String::new(),
+                system_reminder: Some(reminder),
+                display_role: None,
+                unattended_context: None,
+                status_detail: Some("resuming interrupted session".to_string()),
+            },
             super::live_turn::LiveTurnSwarmContext::new(
                 swarm_members,
                 swarms_by_id,

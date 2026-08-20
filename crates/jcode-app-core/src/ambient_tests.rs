@@ -14,11 +14,116 @@ fn test_priority_ordering() {
 }
 
 #[test]
-fn test_scheduled_queue_push_and_pop() {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let path = tmp.path().to_path_buf();
+fn scheduled_contracts_missing_policy_default_to_block_and_omit_it_on_write() {
+    let request: ScheduleRequest = serde_json::from_value(serde_json::json!({
+        "wake_in_minutes": 5,
+        "wake_at": null,
+        "context": "legacy request",
+        "priority": "Normal"
+    }))
+    .expect("legacy schedule request must load");
+    assert_eq!(
+        request.context_emergency_policy,
+        StoredContextEmergencyPolicy::Block
+    );
+    assert!(
+        serde_json::to_value(&request)
+            .expect("serialize request")
+            .get("context_emergency_policy")
+            .is_none()
+    );
 
-    let mut queue = ScheduledQueue::load(path);
+    let item: ScheduledItem = serde_json::from_value(serde_json::json!({
+        "id": "legacy-item",
+        "scheduled_for": "2026-08-19T12:00:00Z",
+        "context": "legacy item",
+        "priority": "Normal",
+        "created_by_session": "session-1",
+        "created_at": "2026-08-19T11:00:00Z"
+    }))
+    .expect("legacy scheduled item must load");
+    assert_eq!(
+        item.context_emergency_policy,
+        StoredContextEmergencyPolicy::Block
+    );
+    assert!(
+        serde_json::to_value(&item)
+            .expect("serialize item")
+            .get("context_emergency_policy")
+            .is_none()
+    );
+}
+
+#[test]
+fn scheduled_queue_restart_and_cancel_preserve_exact_isolated_policies() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("queue.json");
+    let future = Utc::now() + Duration::hours(1);
+    let authorized = StoredContextEmergencyPolicy::Authorized {
+        protected_recent_assistant_turns: 7,
+        target_headroom_percent: 19,
+        allow_reasoning_suppression: true,
+        allow_tool_distillation: false,
+        allow_oldest_range_summary: true,
+        authorization_source: "scheduled-item-a-source".to_string(),
+    };
+    let mut queue = ScheduledQueue::load(path.clone()).unwrap();
+    queue.push(ScheduledItem {
+        id: "authorized-a".into(),
+        scheduled_for: future,
+        context: "authorized".into(),
+        priority: Priority::High,
+        target: ScheduleTarget::Ambient,
+        created_by_session: "parent".into(),
+        created_at: Utc::now(),
+        working_dir: None,
+        task_description: None,
+        relevant_files: Vec::new(),
+        git_branch: None,
+        additional_context: None,
+        context_emergency_policy: authorized.clone(),
+    });
+    queue.push(ScheduledItem {
+        id: "blocked-b".into(),
+        scheduled_for: future,
+        context: "blocked".into(),
+        priority: Priority::Normal,
+        target: ScheduleTarget::Ambient,
+        created_by_session: "parent".into(),
+        created_at: Utc::now(),
+        working_dir: None,
+        task_description: None,
+        relevant_files: Vec::new(),
+        git_branch: None,
+        additional_context: None,
+        context_emergency_policy: StoredContextEmergencyPolicy::Block,
+    });
+
+    let mut reloaded = ScheduledQueue::load(path.clone()).unwrap();
+    assert_eq!(reloaded.items()[0].context_emergency_policy, authorized);
+    assert_eq!(
+        reloaded.items()[1].context_emergency_policy,
+        StoredContextEmergencyPolicy::Block
+    );
+    reloaded
+        .remove_by_id("authorized-a")
+        .expect("cancel persists")
+        .expect("authorized item exists");
+    let reloaded = ScheduledQueue::load(path).unwrap();
+    assert_eq!(reloaded.len(), 1);
+    assert_eq!(reloaded.items()[0].id, "blocked-b");
+    assert_eq!(
+        reloaded.items()[0].context_emergency_policy,
+        StoredContextEmergencyPolicy::Block
+    );
+}
+
+#[test]
+fn test_scheduled_queue_push_and_pop() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("queue.json");
+
+    let mut queue = ScheduledQueue::load(path).unwrap();
     assert!(queue.is_empty());
 
     let past = Utc::now() - Duration::minutes(5);
@@ -37,6 +142,7 @@ fn test_scheduled_queue_push_and_pop() {
         relevant_files: Vec::new(),
         git_branch: None,
         additional_context: None,
+        context_emergency_policy: StoredContextEmergencyPolicy::Block,
     });
 
     queue.push(ScheduledItem {
@@ -52,11 +158,12 @@ fn test_scheduled_queue_push_and_pop() {
         relevant_files: Vec::new(),
         git_branch: None,
         additional_context: None,
+        context_emergency_policy: StoredContextEmergencyPolicy::Block,
     });
 
     assert_eq!(queue.len(), 2);
 
-    let ready = queue.pop_ready();
+    let ready = queue.pop_ready().unwrap();
     assert_eq!(ready.len(), 1);
     assert_eq!(ready[0].id, "s1");
 
@@ -67,10 +174,10 @@ fn test_scheduled_queue_push_and_pop() {
 
 #[test]
 fn test_scheduled_queue_remove_by_id_persists_remaining_items() {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let path = tmp.path().to_path_buf();
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("queue.json");
 
-    let mut queue = ScheduledQueue::load(path.clone());
+    let mut queue = ScheduledQueue::load(path.clone()).unwrap();
     let future = Utc::now() + Duration::hours(1);
 
     queue.push(ScheduledItem {
@@ -86,6 +193,7 @@ fn test_scheduled_queue_remove_by_id_persists_remaining_items() {
         relevant_files: Vec::new(),
         git_branch: None,
         additional_context: None,
+        context_emergency_policy: StoredContextEmergencyPolicy::Block,
     });
     queue.push(ScheduledItem {
         id: "cancel".into(),
@@ -100,23 +208,152 @@ fn test_scheduled_queue_remove_by_id_persists_remaining_items() {
         relevant_files: Vec::new(),
         git_branch: None,
         additional_context: None,
+        context_emergency_policy: StoredContextEmergencyPolicy::Block,
     });
 
     let removed = queue.remove_by_id("cancel").unwrap().unwrap();
     assert_eq!(removed.id, "cancel");
     assert!(queue.remove_by_id("missing").unwrap().is_none());
 
-    let reloaded = ScheduledQueue::load(path);
+    let reloaded = ScheduledQueue::load(path).unwrap();
     assert_eq!(reloaded.len(), 1);
     assert_eq!(reloaded.items()[0].id, "keep");
 }
 
 #[test]
-fn test_pop_ready_sorts_by_priority_then_time() {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let path = tmp.path().to_path_buf();
+fn scheduled_queue_creation_failure_rolls_back_in_memory_item() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("queue.json");
+    let mut queue = ScheduledQueue::load(path.clone()).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    let result = queue.try_push(ScheduledItem {
+        id: "cannot-persist".into(),
+        scheduled_for: Utc::now() + Duration::hours(1),
+        context: "must not remain queued".into(),
+        priority: Priority::Normal,
+        target: ScheduleTarget::Ambient,
+        created_by_session: "test".into(),
+        created_at: Utc::now(),
+        working_dir: None,
+        task_description: None,
+        relevant_files: Vec::new(),
+        git_branch: None,
+        additional_context: None,
+        context_emergency_policy: StoredContextEmergencyPolicy::Block,
+    });
+    assert!(result.is_err());
+    assert!(queue.is_empty());
+}
 
-    let mut queue = ScheduledQueue::load(path);
+#[test]
+fn scheduled_queue_corruption_fails_closed_without_dropping_tasks_silently() {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    assert!(ScheduledQueue::load(file.path().to_path_buf()).is_err());
+    std::fs::write(file.path(), b"{not valid scheduled queue json").unwrap();
+    assert!(ScheduledQueue::load(file.path().to_path_buf()).is_err());
+}
+
+fn sabotage_queue_file(path: &std::path::Path) {
+    std::fs::remove_file(path).unwrap();
+    std::fs::create_dir(path).unwrap();
+}
+
+#[test]
+fn scheduled_queue_due_dequeue_failure_restores_ambient_item() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("queue.json");
+    let mut queue = ScheduledQueue::load(path.clone()).unwrap();
+    queue.push(ScheduledItem {
+        id: "ambient-due".into(),
+        scheduled_for: Utc::now() - Duration::minutes(1),
+        context: "ambient item must remain".into(),
+        priority: Priority::Normal,
+        target: ScheduleTarget::Ambient,
+        created_by_session: "test".into(),
+        created_at: Utc::now(),
+        working_dir: None,
+        task_description: None,
+        relevant_files: Vec::new(),
+        git_branch: None,
+        additional_context: None,
+        context_emergency_policy: StoredContextEmergencyPolicy::Block,
+    });
+    sabotage_queue_file(&path);
+
+    assert!(queue.pop_ready().is_err());
+    assert_eq!(queue.items().len(), 1);
+    assert_eq!(queue.items()[0].id, "ambient-due");
+}
+
+#[test]
+fn scheduled_queue_due_dequeue_failure_restores_direct_item() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("queue.json");
+    let mut queue = ScheduledQueue::load(path.clone()).unwrap();
+    queue.push(ScheduledItem {
+        id: "direct-due".into(),
+        scheduled_for: Utc::now() - Duration::minutes(1),
+        context: "direct item must remain".into(),
+        priority: Priority::High,
+        target: ScheduleTarget::Session {
+            session_id: "session-1".into(),
+        },
+        created_by_session: "session-1".into(),
+        created_at: Utc::now(),
+        working_dir: None,
+        task_description: None,
+        relevant_files: Vec::new(),
+        git_branch: None,
+        additional_context: None,
+        context_emergency_policy: StoredContextEmergencyPolicy::Authorized {
+            protected_recent_assistant_turns: 5,
+            target_headroom_percent: 10,
+            allow_reasoning_suppression: true,
+            allow_tool_distillation: true,
+            allow_oldest_range_summary: true,
+            authorization_source: "scheduled-dequeue-test".into(),
+        },
+    });
+    sabotage_queue_file(&path);
+
+    assert!(queue.take_ready_direct_items().is_err());
+    assert_eq!(queue.items().len(), 1);
+    assert_eq!(queue.items()[0].id, "direct-due");
+}
+
+#[test]
+fn scheduled_queue_cancel_failure_restores_item() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("queue.json");
+    let mut queue = ScheduledQueue::load(path.clone()).unwrap();
+    queue.push(ScheduledItem {
+        id: "cancel-must-persist".into(),
+        scheduled_for: Utc::now() + Duration::hours(1),
+        context: "retain on cancellation failure".into(),
+        priority: Priority::Normal,
+        target: ScheduleTarget::Ambient,
+        created_by_session: "test".into(),
+        created_at: Utc::now(),
+        working_dir: None,
+        task_description: None,
+        relevant_files: Vec::new(),
+        git_branch: None,
+        additional_context: None,
+        context_emergency_policy: StoredContextEmergencyPolicy::Block,
+    });
+    sabotage_queue_file(&path);
+
+    assert!(queue.remove_by_id("cancel-must-persist").is_err());
+    assert_eq!(queue.items().len(), 1);
+    assert_eq!(queue.items()[0].id, "cancel-must-persist");
+}
+
+#[test]
+fn test_pop_ready_sorts_by_priority_then_time() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("queue.json");
+
+    let mut queue = ScheduledQueue::load(path).unwrap();
     let past1 = Utc::now() - Duration::minutes(10);
     let past2 = Utc::now() - Duration::minutes(5);
 
@@ -133,6 +370,7 @@ fn test_pop_ready_sorts_by_priority_then_time() {
         relevant_files: Vec::new(),
         git_branch: None,
         additional_context: None,
+        context_emergency_policy: StoredContextEmergencyPolicy::Block,
     });
 
     queue.push(ScheduledItem {
@@ -148,9 +386,10 @@ fn test_pop_ready_sorts_by_priority_then_time() {
         relevant_files: Vec::new(),
         git_branch: None,
         additional_context: None,
+        context_emergency_policy: StoredContextEmergencyPolicy::Block,
     });
 
-    let ready = queue.pop_ready();
+    let ready = queue.pop_ready().unwrap();
     assert_eq!(ready.len(), 2);
     // High priority should come first
     assert_eq!(ready[0].id, "high_late");
@@ -159,10 +398,10 @@ fn test_pop_ready_sorts_by_priority_then_time() {
 
 #[test]
 fn test_take_ready_direct_items_only_removes_direct_targets() {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let path = tmp.path().to_path_buf();
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("queue.json");
 
-    let mut queue = ScheduledQueue::load(path);
+    let mut queue = ScheduledQueue::load(path).unwrap();
     let past = Utc::now() - Duration::minutes(5);
 
     queue.push(ScheduledItem {
@@ -180,6 +419,7 @@ fn test_take_ready_direct_items_only_removes_direct_targets() {
         relevant_files: Vec::new(),
         git_branch: None,
         additional_context: None,
+        context_emergency_policy: StoredContextEmergencyPolicy::Block,
     });
 
     queue.push(ScheduledItem {
@@ -197,6 +437,7 @@ fn test_take_ready_direct_items_only_removes_direct_targets() {
         relevant_files: Vec::new(),
         git_branch: None,
         additional_context: None,
+        context_emergency_policy: StoredContextEmergencyPolicy::Block,
     });
 
     queue.push(ScheduledItem {
@@ -212,9 +453,10 @@ fn test_take_ready_direct_items_only_removes_direct_targets() {
         relevant_files: Vec::new(),
         git_branch: None,
         additional_context: None,
+        context_emergency_policy: StoredContextEmergencyPolicy::Block,
     });
 
-    let ready_direct = queue.take_ready_direct_items();
+    let ready_direct = queue.take_ready_direct_items().unwrap();
     assert_eq!(ready_direct.len(), 2);
     assert_eq!(ready_direct[0].id, "spawn_due");
     assert_eq!(ready_direct[1].id, "session_due");
@@ -268,6 +510,7 @@ fn test_ambient_state_record_cycle_with_schedule() {
             relevant_files: Vec::new(),
             git_branch: None,
             additional_context: None,
+            context_emergency_policy: StoredContextEmergencyPolicy::Block,
         }),
         started_at: Utc::now() - Duration::seconds(10),
         ended_at: Utc::now(),
@@ -371,6 +614,7 @@ fn test_build_ambient_system_prompt_with_data() {
         relevant_files: vec!["src/main.rs".into()],
         git_branch: Some("main".into()),
         additional_context: Some("Background: Tests were flaky yesterday".into()),
+        context_emergency_policy: StoredContextEmergencyPolicy::Block,
     }];
 
     let health = MemoryGraphHealth {
@@ -432,9 +676,9 @@ fn test_build_ambient_system_prompt_with_data() {
 
 #[test]
 fn test_scheduled_queue_items_accessor() {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let path = tmp.path().to_path_buf();
-    let mut queue = ScheduledQueue::load(path);
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("queue.json");
+    let mut queue = ScheduledQueue::load(path).unwrap();
 
     queue.push(ScheduledItem {
         id: "s1".into(),
@@ -449,6 +693,7 @@ fn test_scheduled_queue_items_accessor() {
         relevant_files: Vec::new(),
         git_branch: None,
         additional_context: None,
+        context_emergency_policy: StoredContextEmergencyPolicy::Block,
     });
 
     let items = queue.items();

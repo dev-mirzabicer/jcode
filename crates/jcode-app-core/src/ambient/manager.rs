@@ -23,7 +23,7 @@ impl AmbientManager {
         let _ = transcripts_dir()?;
 
         let state = AmbientState::load()?;
-        let queue = ScheduledQueue::load(queue_path()?);
+        let queue = ScheduledQueue::load(queue_path()?)?;
 
         Ok(Self { state, queue })
     }
@@ -59,13 +59,13 @@ impl AmbientManager {
     }
 
     /// Remove and return all ready scheduled items.
-    pub fn take_ready_items(&mut self) -> Vec<ScheduledItem> {
+    pub fn take_ready_items(&mut self) -> Result<Vec<ScheduledItem>> {
         self.queue.pop_ready()
     }
 
     /// Remove and return only ready items targeted at direct delivery into a
     /// specific resumed or spawned session.
-    pub fn take_ready_direct_items(&mut self) -> Vec<ScheduledItem> {
+    pub fn take_ready_direct_items(&mut self) -> Result<Vec<ScheduledItem>> {
         self.queue.take_ready_direct_items()
     }
 
@@ -89,9 +89,10 @@ impl AmbientManager {
             relevant_files: request.relevant_files,
             git_branch: request.git_branch,
             additional_context: request.additional_context,
+            context_emergency_policy: request.context_emergency_policy,
         };
 
-        self.queue.push(item);
+        self.queue.try_push(item)?;
         Ok(id)
     }
 

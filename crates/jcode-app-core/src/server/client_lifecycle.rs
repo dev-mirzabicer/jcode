@@ -2166,11 +2166,13 @@ pub(super) async fn handle_client(
                 id,
                 session_id,
                 message,
+                unattended_context,
             } => {
                 handle_notify_session(
                     id,
                     session_id,
                     message,
+                    unattended_context,
                     NotifySessionContext {
                         sessions: &sessions,
                         soft_interrupt_queues: &soft_interrupt_queues,

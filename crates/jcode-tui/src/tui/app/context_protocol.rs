@@ -28,6 +28,7 @@ pub(crate) struct ContextProtocolState {
     transaction_request: Option<ContextTransactionRequest>,
     pub transaction_result: Option<ContextTransactionOutcome>,
     pub emergency_policy: Option<StoredContextEmergencyPolicy>,
+    policy_request_id: Option<u64>,
     pub last_rejection: Option<ContextRequestRejection>,
     pub action_required: Option<ContextActionRequiredState>,
     pub accepted_session_id: Option<String>,
@@ -700,14 +701,16 @@ impl ContextProtocolState {
 
     pub fn accept_policy(
         &mut self,
-        _id: u64,
+        id: u64,
         session_id: String,
         policy: StoredContextEmergencyPolicy,
     ) -> bool {
-        // Phase 9 deliberately exposes no TUI mutation control for emergency
-        // authorization. The typed server event remains observable so a policy
-        // changed by another client is reflected for this session. Phase 11 owns
-        // the explicit control and execution workflow.
+        if self
+            .policy_request_id
+            .is_some_and(|expected_id| expected_id != id)
+        {
+            return false;
+        }
         if self
             .accepted_session_id
             .as_deref()
@@ -717,7 +720,14 @@ impl ContextProtocolState {
         }
         self.accepted_session_id.get_or_insert(session_id);
         self.emergency_policy = Some(policy);
+        if self.policy_request_id == Some(id) {
+            self.policy_request_id = None;
+        }
         true
+    }
+
+    pub fn begin_policy_request(&mut self, id: u64) {
+        self.policy_request_id = Some(id);
     }
 
     pub fn accept_rejection(
@@ -799,7 +809,7 @@ impl ContextProtocolState {
                         && (transaction_id.as_deref() == Some(expected.transaction_id.as_str())
                             || uncorrelated_capacity_fallback)
                 }),
-            ContextRequestKind::SetEmergencyPolicy => false,
+            ContextRequestKind::SetEmergencyPolicy => self.policy_request_id == Some(id),
             ContextRequestKind::LegacyCompact | ContextRequestKind::LegacySetCompactionMode => true,
         };
         if !matches_pending {
@@ -823,7 +833,7 @@ impl ContextProtocolState {
             | ContextRequestKind::ReapplyTransaction => self.transaction_request = None,
             ContextRequestKind::TransactionHistory => self.history_request = None,
             ContextRequestKind::TransactionDetail => self.transaction_detail_request = None,
-            ContextRequestKind::SetEmergencyPolicy => {}
+            ContextRequestKind::SetEmergencyPolicy => self.policy_request_id = None,
             ContextRequestKind::LegacyCompact | ContextRequestKind::LegacySetCompactionMode => {}
         }
         self.last_rejection = Some(ContextRequestRejection {
@@ -911,6 +921,7 @@ impl ContextProtocolState {
         self.invalidate_revision_scoped();
         self.transaction_request = None;
         self.transaction_result = None;
+        self.policy_request_id = None;
         self.emergency_policy = None;
         self.last_rejection = None;
         self.action_required = None;
@@ -1421,5 +1432,50 @@ mod tests {
         assert!(state.transaction_result.is_none());
         assert_eq!(state.accepted_session_id.as_deref(), Some("session-2"));
         assert_eq!(state.accepted_context_revision, Some(0));
+    }
+
+    #[test]
+    fn policy_mutation_accepts_only_its_exact_request_and_session() {
+        let mut state = ContextProtocolState::default();
+        state.accept_history("session-1", 4);
+        state.begin_policy_request(50);
+        assert!(!state.accept_policy(
+            49,
+            "session-1".to_string(),
+            StoredContextEmergencyPolicy::Block,
+        ));
+        assert!(!state.accept_policy(
+            50,
+            "session-2".to_string(),
+            StoredContextEmergencyPolicy::Block,
+        ));
+        assert!(!state.accept_rejection(
+            49,
+            ContextRequestKind::SetEmergencyPolicy,
+            None,
+            None,
+            ContextServiceError::Runtime("stale".to_string()),
+        ));
+        let authorized = StoredContextEmergencyPolicy::Authorized {
+            protected_recent_assistant_turns: 5,
+            target_headroom_percent: 10,
+            allow_reasoning_suppression: true,
+            allow_tool_distillation: true,
+            allow_oldest_range_summary: true,
+            authorization_source: "hidden-source".to_string(),
+        };
+        assert!(state.accept_policy(50, "session-1".to_string(), authorized.clone()));
+        assert_eq!(state.policy_request_id, None);
+        assert_eq!(state.emergency_policy, Some(authorized));
+
+        state.begin_policy_request(51);
+        assert!(state.accept_rejection(
+            51,
+            ContextRequestKind::SetEmergencyPolicy,
+            None,
+            None,
+            ContextServiceError::Persistence("disk full".to_string()),
+        ));
+        assert_eq!(state.policy_request_id, None);
     }
 }

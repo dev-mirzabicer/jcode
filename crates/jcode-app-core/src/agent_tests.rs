@@ -6,11 +6,18 @@ use crate::tool::Registry;
 use crate::tool::ToolOutput;
 use async_trait::async_trait;
 use jcode_context_core::{build_content_target, build_message_range};
+use jcode_provider_core::{
+    ContextProjectionValidationOperation, ContextProjectionValidationReport, ContextProviderFamily,
+    ContextProviderValidationIdentity, ContextReasoningBlockKind, ContextRequestBuilderValidation,
+    context_projection_validation_report,
+};
 use jcode_session_types::{
-    StoredContextArtifactGenerator, StoredContextAuthorization, StoredContextOperation,
+    StoredContextArtifactGenerator, StoredContextAuthorization, StoredContextEmergencyAudit,
+    StoredContextEmergencyOperationKind, StoredContextEmergencyPolicy,
+    StoredContextEmergencyRetryOutcome, StoredContextEmergencyTriggerKind, StoredContextOperation,
     StoredContextStatusEvent, StoredContextTransaction, StoredContextTransactionStatusKind,
     StoredContextViewState, StoredRangeSummary, StoredReasoningSelection,
-    StoredReasoningSuppression, StoredToolResultDistillation,
+    StoredReasoningSuppression, StoredToolResultDistillation, StoredUnattendedContextAuthorization,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::mpsc as tokio_mpsc;
@@ -26,6 +33,29 @@ struct NativeAutoCompactionProvider;
 struct NativeCompactionStreamProvider;
 
 #[derive(Clone)]
+struct HiddenLimitEmergencyProvider {
+    calls: Arc<AtomicUsize>,
+    invalidations: Arc<AtomicUsize>,
+    context_window: usize,
+    fail_first_call: bool,
+    reject_retry: bool,
+    fail_retry_after_output: bool,
+}
+
+impl Default for HiddenLimitEmergencyProvider {
+    fn default() -> Self {
+        Self {
+            calls: Arc::new(AtomicUsize::new(0)),
+            invalidations: Arc::new(AtomicUsize::new(0)),
+            context_window: 100_000,
+            fail_first_call: true,
+            reject_retry: false,
+            fail_retry_after_output: false,
+        }
+    }
+}
+
+#[derive(Clone)]
 struct ProjectedRequestProvider {
     state: Arc<ProjectedRequestProviderState>,
     context_window: usize,
@@ -37,6 +67,82 @@ struct ProjectedRequestProviderState {
     invalidation_reasons: std::sync::Mutex<Vec<String>>,
     invalidations: AtomicUsize,
     summary_requests: AtomicUsize,
+}
+
+#[async_trait]
+impl Provider for HiddenLimitEmergencyProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        if (call == 0 && self.fail_first_call) || self.reject_retry {
+            anyhow::bail!("maximum context length exceeded");
+        }
+        let (tx, rx) = tokio_mpsc::channel::<Result<StreamEvent>>(4);
+        let fail_after_output = self.fail_retry_after_output;
+        tokio::spawn(async move {
+            let _ = tx
+                .send(Ok(StreamEvent::TextDelta(
+                    "recovered after one emergency transaction".to_string(),
+                )))
+                .await;
+            if fail_after_output {
+                let _ = tx
+                    .send(Err(anyhow::anyhow!("retry stream failed after output")))
+                    .await;
+                return;
+            }
+            let _ = tx
+                .send(Ok(StreamEvent::MessageEnd {
+                    stop_reason: Some("end_turn".to_string()),
+                }))
+                .await;
+        });
+        Ok(Box::pin(ReceiverStream::new(rx)))
+    }
+
+    fn name(&self) -> &str {
+        "openrouter"
+    }
+
+    fn model(&self) -> String {
+        "hidden-limit-test".to_string()
+    }
+
+    fn context_window(&self) -> usize {
+        self.context_window
+    }
+
+    fn validate_projected_context(
+        &self,
+        messages: &[Message],
+        operations: &[ContextProjectionValidationOperation],
+    ) -> ContextProjectionValidationReport {
+        context_projection_validation_report(
+            ContextProviderValidationIdentity {
+                family: ContextProviderFamily::OpenRouterCompatible,
+                provider_name: self.name().to_string(),
+                provider_display_name: self.display_name(),
+                model: self.model(),
+                evidence_tag: "hidden_limit_emergency_test_v1".to_string(),
+            },
+            operations,
+            Some(ContextReasoningBlockKind::GenericReasoning),
+            Ok(ContextRequestBuilderValidation::new(messages.len())),
+        )
+    }
+
+    fn invalidate_context_continuation(&self, _reason: &str) {
+        self.invalidations.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
 }
 
 #[derive(Clone)]
@@ -279,6 +385,7 @@ fn applied_context_state(operations: Vec<StoredContextOperation>) -> StoredConte
             application: None,
             economics: None,
             curator_usage: Vec::new(),
+            emergency_audit: None,
         }],
         ..StoredContextViewState::default()
     }
@@ -1527,7 +1634,14 @@ async fn phase10_post_output_context_rejection_preserves_partial_authoritative_o
 fn phase10_partial_output_persistence_failure_is_reported_without_prompt_rollback() {
     let provider = Arc::new(ScriptedSizeProvider::stream(1_000_000, Vec::new()));
     let mut agent = Agent::new(provider, Registry::empty());
-    agent.begin_pending_turn(Some(504), "authoritative prompt", 0, 8, 0, Vec::new());
+    agent.begin_pending_turn(
+        Some(504),
+        "authoritative prompt",
+        0,
+        8,
+        0,
+        crate::agent::PendingTurnOptions::default(),
+    );
     agent.mark_provider_output_started();
     agent
         .active_turn_context
@@ -1573,7 +1687,14 @@ fn phase10_partial_output_persistence_failure_is_reported_without_prompt_rollbac
 fn phase10_incomplete_provider_output_retains_turn_without_claiming_replayable_history() {
     let provider = Arc::new(ScriptedSizeProvider::stream(1_000_000, Vec::new()));
     let mut agent = Agent::new(provider, Registry::empty());
-    agent.begin_pending_turn(Some(505), "authoritative prompt", 0, 8, 0, Vec::new());
+    agent.begin_pending_turn(
+        Some(505),
+        "authoritative prompt",
+        0,
+        8,
+        0,
+        crate::agent::PendingTurnOptions::default(),
+    );
     agent.mark_provider_output_started();
     let (event_tx, mut event_rx) = tokio_mpsc::unbounded_channel();
 
@@ -1602,6 +1723,370 @@ fn phase10_incomplete_provider_output_retains_turn_without_claiming_replayable_h
         } if details.iter().any(|detail|
             detail == crate::protocol::CONTEXT_PARTIAL_OUTPUT_NOT_REPLAYABLE)
     )));
+}
+
+#[tokio::test]
+async fn phase11_hidden_provider_limit_uses_one_authorized_transaction_and_one_retry() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    let provider = HiddenLimitEmergencyProvider::default();
+    let provider_handle = provider.clone();
+    let provider: Arc<dyn Provider> = Arc::new(provider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    agent.add_message(
+        Role::Assistant,
+        vec![ContentBlock::ToolUse {
+            id: "call-old".to_string(),
+            name: "bash".to_string(),
+            input: serde_json::json!({"command": "old"}),
+            thought_signature: None,
+        }],
+    );
+    agent.add_message(
+        Role::User,
+        vec![ContentBlock::ToolResult {
+            tool_use_id: "call-old".to_string(),
+            content: "eligible older tool output ".repeat(600),
+            is_error: Some(false),
+        }],
+    );
+    agent.add_message(
+        Role::Assistant,
+        vec![ContentBlock::ToolUse {
+            id: "call-active".to_string(),
+            name: "read".to_string(),
+            input: serde_json::json!({"path": "active"}),
+            thought_signature: None,
+        }],
+    );
+    agent.add_message(
+        Role::User,
+        vec![ContentBlock::ToolResult {
+            tool_use_id: "call-active".to_string(),
+            content: "protected active result".to_string(),
+            is_error: Some(false),
+        }],
+    );
+    let historical_reasoning = "historical replay reasoning ".repeat(600);
+    agent.add_message(
+        Role::Assistant,
+        vec![
+            ContentBlock::Reasoning {
+                text: historical_reasoning.clone(),
+            },
+            ContentBlock::Text {
+                text: "historical visible answer".to_string(),
+                cache_control: None,
+            },
+        ],
+    );
+    let authorization = StoredUnattendedContextAuthorization {
+        policy: StoredContextEmergencyPolicy::Authorized {
+            protected_recent_assistant_turns: 0,
+            target_headroom_percent: 1,
+            allow_reasoning_suppression: true,
+            allow_tool_distillation: true,
+            allow_oldest_range_summary: false,
+            authorization_source: "scheduled-item-policy".to_string(),
+        },
+        authorization_source: "scheduled_item:sched-hidden-limit".to_string(),
+        scheduled_item_id: Some("sched-hidden-limit".to_string()),
+    };
+
+    let output = agent
+        .run_once_capture_with_display_role_and_unattended(
+            "continue scheduled work",
+            Some(crate::session::StoredDisplayRole::System),
+            Some(authorization),
+        )
+        .await
+        .expect("authorized hidden-limit recovery succeeds");
+    assert!(output.contains("recovered after one emergency transaction"));
+    assert_eq!(provider_handle.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(provider_handle.invalidations.load(Ordering::SeqCst), 1);
+    assert_eq!(agent.context_view_state().revision, 1);
+    assert_eq!(agent.context_view_state().transactions.len(), 1);
+    let transaction = &agent.context_view_state().transactions[0];
+    assert_eq!(transaction.operations.len(), 1);
+    assert!(matches!(
+        transaction.operations[0],
+        StoredContextOperation::ReasoningSuppression(_)
+    ));
+    let audit = transaction
+        .emergency_audit
+        .as_ref()
+        .expect("audit retained");
+    assert_eq!(
+        audit.trigger_kind,
+        jcode_session_types::StoredContextEmergencyTriggerKind::ProviderContextLimit
+    );
+    assert!(
+        audit
+            .provider_error
+            .as_deref()
+            .is_some_and(|error| error.contains("maximum context length exceeded"))
+    );
+    assert_eq!(
+        audit.retry_outcome,
+        jcode_session_types::StoredContextEmergencyRetryOutcome::Succeeded
+    );
+    assert!(agent.messages().iter().any(|message| {
+        message.content.iter().any(|block| {
+            matches!(block, ContentBlock::Reasoning { text } if text == &historical_reasoning)
+        })
+    }));
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[tokio::test]
+async fn phase11_blocked_preflight_recovers_before_the_first_provider_call() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    let provider = HiddenLimitEmergencyProvider {
+        context_window: 50_000,
+        fail_first_call: false,
+        ..HiddenLimitEmergencyProvider::default()
+    };
+    let provider_handle = provider.clone();
+    let provider: Arc<dyn Provider> = Arc::new(provider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    agent.add_message(
+        Role::Assistant,
+        vec![
+            ContentBlock::Reasoning {
+                text: "historical replay reasoning ".repeat(10_000),
+            },
+            ContentBlock::Text {
+                text: "retain visible historical answer".to_string(),
+                cache_control: None,
+            },
+        ],
+    );
+    let authorization = StoredUnattendedContextAuthorization {
+        policy: StoredContextEmergencyPolicy::Authorized {
+            protected_recent_assistant_turns: 0,
+            target_headroom_percent: 1,
+            allow_reasoning_suppression: true,
+            allow_tool_distillation: false,
+            allow_oldest_range_summary: false,
+            authorization_source: "scheduled-item-policy".to_string(),
+        },
+        authorization_source: "scheduled_item:sched-preflight".to_string(),
+        scheduled_item_id: Some("sched-preflight".to_string()),
+    };
+
+    let output = agent
+        .run_once_capture_with_display_role_and_unattended(
+            "continue scheduled work",
+            Some(crate::session::StoredDisplayRole::System),
+            Some(authorization),
+        )
+        .await
+        .expect("authorized preflight recovery succeeds");
+    assert!(output.contains("recovered after one emergency transaction"));
+    assert_eq!(provider_handle.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(provider_handle.invalidations.load(Ordering::SeqCst), 1);
+    assert_eq!(agent.context_view_state().transactions.len(), 1);
+    let audit = agent.context_view_state().transactions[0]
+        .emergency_audit
+        .as_ref()
+        .expect("audit retained");
+    assert_eq!(
+        audit.trigger_kind,
+        jcode_session_types::StoredContextEmergencyTriggerKind::PreflightLimit
+    );
+    assert_eq!(
+        audit.retry_outcome,
+        jcode_session_types::StoredContextEmergencyRetryOutcome::Succeeded
+    );
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[tokio::test]
+async fn phase11_interactive_submit_blocks_even_when_session_policy_is_authorized() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    let provider = HiddenLimitEmergencyProvider::default();
+    let provider_handle = provider.clone();
+    let provider: Arc<dyn Provider> = Arc::new(provider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    agent.session.context_view.emergency_policy = StoredContextEmergencyPolicy::Authorized {
+        protected_recent_assistant_turns: 0,
+        target_headroom_percent: 1,
+        allow_reasoning_suppression: true,
+        allow_tool_distillation: false,
+        allow_oldest_range_summary: false,
+        authorization_source: "session-policy-must-not-authorize-interactive".to_string(),
+    };
+    agent.add_message(
+        Role::Assistant,
+        vec![ContentBlock::Reasoning {
+            text: "historical replay reasoning ".repeat(600),
+        }],
+    );
+
+    let error = agent
+        .run_once_capture("ordinary interactive request")
+        .await
+        .expect_err("interactive request must retain Phase 10 blocking");
+    assert!(!format!("{error:#}").is_empty());
+    assert_eq!(provider_handle.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(provider_handle.invalidations.load(Ordering::SeqCst), 0);
+    assert_eq!(agent.context_view_state().revision, 0);
+    assert!(agent.context_view_state().transactions.is_empty());
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[tokio::test]
+async fn phase11_failed_retry_never_creates_a_second_emergency_transaction() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    let provider = HiddenLimitEmergencyProvider {
+        reject_retry: true,
+        ..HiddenLimitEmergencyProvider::default()
+    };
+    let provider_handle = provider.clone();
+    let provider: Arc<dyn Provider> = Arc::new(provider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    agent.add_message(
+        Role::Assistant,
+        vec![ContentBlock::Reasoning {
+            text: "historical replay reasoning ".repeat(600),
+        }],
+    );
+    let authorization = StoredUnattendedContextAuthorization {
+        policy: StoredContextEmergencyPolicy::Authorized {
+            protected_recent_assistant_turns: 0,
+            target_headroom_percent: 1,
+            allow_reasoning_suppression: true,
+            allow_tool_distillation: false,
+            allow_oldest_range_summary: false,
+            authorization_source: "scheduled-item-policy".to_string(),
+        },
+        authorization_source: "scheduled_item:sched-retry-fails".to_string(),
+        scheduled_item_id: Some("sched-retry-fails".to_string()),
+    };
+
+    let error = agent
+        .run_once_capture_with_display_role_and_unattended(
+            "continue scheduled work",
+            Some(crate::session::StoredDisplayRole::System),
+            Some(authorization),
+        )
+        .await
+        .expect_err("the single retry remains rejected");
+    assert!(!format!("{error:#}").is_empty());
+    assert_eq!(provider_handle.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(provider_handle.invalidations.load(Ordering::SeqCst), 1);
+    assert_eq!(agent.context_view_state().revision, 1);
+    assert_eq!(agent.context_view_state().transactions.len(), 1);
+    assert_eq!(
+        agent.context_view_state().transactions[0]
+            .emergency_audit
+            .as_ref()
+            .expect("audit retained")
+            .retry_outcome,
+        jcode_session_types::StoredContextEmergencyRetryOutcome::ProviderRejected
+    );
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[tokio::test]
+async fn phase11_retry_that_fails_after_output_is_audited_as_failed_not_succeeded() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    let provider = HiddenLimitEmergencyProvider {
+        fail_retry_after_output: true,
+        ..HiddenLimitEmergencyProvider::default()
+    };
+    let provider_handle = provider.clone();
+    let provider: Arc<dyn Provider> = Arc::new(provider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    agent.add_message(
+        Role::Assistant,
+        vec![ContentBlock::Reasoning {
+            text: "historical replay reasoning ".repeat(600),
+        }],
+    );
+    let authorization = StoredUnattendedContextAuthorization {
+        policy: StoredContextEmergencyPolicy::Authorized {
+            protected_recent_assistant_turns: 0,
+            target_headroom_percent: 1,
+            allow_reasoning_suppression: true,
+            allow_tool_distillation: false,
+            allow_oldest_range_summary: false,
+            authorization_source: "scheduled-item-policy".to_string(),
+        },
+        authorization_source: "scheduled_item:sched-output-fails".to_string(),
+        scheduled_item_id: Some("sched-output-fails".to_string()),
+    };
+
+    let error = agent
+        .run_once_capture_with_display_role_and_unattended(
+            "continue scheduled work",
+            Some(crate::session::StoredDisplayRole::System),
+            Some(authorization),
+        )
+        .await
+        .expect_err("retried stream fails after output starts");
+    assert!(!format!("{error:#}").is_empty());
+    assert_eq!(provider_handle.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(agent.context_view_state().transactions.len(), 1);
+    assert!(matches!(
+        agent.context_view_state().transactions[0]
+            .emergency_audit
+            .as_ref()
+            .expect("audit retained")
+            .retry_outcome,
+        jcode_session_types::StoredContextEmergencyRetryOutcome::Failed { ref detail }
+            if detail.contains("retry stream failed after output")
+    ));
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
 }
 
 #[tokio::test]
@@ -2375,6 +2860,175 @@ async fn mark_closed_persists_soft_interrupts_for_restore_after_reload() {
     assert!(
         crate::soft_interrupt_store::load(&session_id)
             .expect("store should be readable after restore")
+            .is_empty()
+    );
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[tokio::test]
+async fn soft_interrupt_injection_preserves_exact_authorization_scope_and_persists_remainder() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    agent.session.save().expect("save session");
+    agent.begin_pending_turn(
+        None,
+        "interactive prompt",
+        0,
+        4,
+        0,
+        crate::agent::PendingTurnOptions::default(),
+    );
+    agent.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "interactive prompt".to_string(),
+            cache_control: None,
+        }],
+    );
+    let authorization = |id: &str| StoredUnattendedContextAuthorization {
+        policy: StoredContextEmergencyPolicy::Authorized {
+            protected_recent_assistant_turns: 5,
+            target_headroom_percent: 10,
+            allow_reasoning_suppression: true,
+            allow_tool_distillation: true,
+            allow_oldest_range_summary: true,
+            authorization_source: format!("schedule_tool_session:{id}"),
+        },
+        authorization_source: format!("scheduled_item:{id}"),
+        scheduled_item_id: Some(id.to_string()),
+    };
+    let first = authorization("sched-a");
+    let first_policy = first.policy.clone();
+    let second = authorization("sched-b");
+    {
+        let queue = agent.soft_interrupt_queue();
+        let mut queue = queue.lock().unwrap();
+        for content in ["a-1", "a-2"] {
+            queue.push(SoftInterruptMessage {
+                content: content.to_string(),
+                images: Vec::new(),
+                urgent: false,
+                source: SoftInterruptSource::System,
+                unattended_context: Some(first.clone()),
+            });
+        }
+        queue.push(SoftInterruptMessage {
+            content: "b-1".to_string(),
+            images: Vec::new(),
+            urgent: false,
+            source: SoftInterruptSource::System,
+            unattended_context: Some(second.clone()),
+        });
+    }
+
+    let injected = agent.inject_soft_interrupts();
+    assert_eq!(injected.len(), 1);
+    assert!(injected[0].content.contains("a-1"));
+    assert!(injected[0].content.contains("a-2"));
+    assert!(!injected[0].content.contains("b-1"));
+    assert_eq!(
+        agent
+            .active_turn_context
+            .as_ref()
+            .and_then(|context| context.unattended_context.clone()),
+        Some(first)
+    );
+    assert_eq!(
+        agent
+            .active_turn_context
+            .as_ref()
+            .map(|context| context.transcript_len_before_pending),
+        Some(0),
+        "the original interactive prompt and scheduled prompt share one protected boundary"
+    );
+    assert_eq!(agent.soft_interrupt_count(), 1);
+    let persisted = crate::soft_interrupt_store::load(agent.session_id()).unwrap();
+    assert_eq!(persisted.len(), 1);
+    assert_eq!(persisted[0].unattended_context, Some(second.clone()));
+
+    let audit_transaction_id = "context-emergency-scope-a".to_string();
+    agent.session.context_view.revision = 1;
+    agent
+        .session
+        .context_view
+        .transactions
+        .push(StoredContextTransaction {
+            id: audit_transaction_id.clone(),
+            base_revision: 0,
+            created_at: chrono::Utc::now(),
+            authorization: StoredContextAuthorization::UnattendedEmergency {
+                authorization_source: "scheduled_item:sched-a".to_string(),
+                trigger: Some("preflight_limit".to_string()),
+                scheduled_item_id: Some("sched-a".to_string()),
+            },
+            operations: Vec::new(),
+            status_events: vec![StoredContextStatusEvent {
+                revision: 1,
+                timestamp: chrono::Utc::now(),
+                kind: StoredContextTransactionStatusKind::Applied,
+                reason: None,
+            }],
+            application: None,
+            economics: None,
+            curator_usage: Vec::new(),
+            emergency_audit: Some(StoredContextEmergencyAudit {
+                authorization_source: "scheduled_item:sched-a".to_string(),
+                scheduled_item_id: Some("sched-a".to_string()),
+                policy: first_policy,
+                trigger_kind: StoredContextEmergencyTriggerKind::PreflightLimit,
+                provider_error: None,
+                context_window: 100_000,
+                safe_input_budget: 95_000,
+                projected_input_tokens: 96_000,
+                required_reduction_to_fit_tokens: 1_000,
+                required_reduction_to_target_tokens: 10_500,
+                achieved_reduction_tokens: 11_000,
+                protected_recent_assistant_turns: 5,
+                protected_message_count: 3,
+                operation_order: vec![StoredContextEmergencyOperationKind::ReasoningSuppression],
+                retry_outcome: StoredContextEmergencyRetryOutcome::Pending,
+            }),
+        });
+    agent
+        .active_turn_context
+        .as_mut()
+        .expect("active turn")
+        .emergency_transaction_id = Some(audit_transaction_id);
+
+    let injected = agent.inject_soft_interrupts();
+    assert_eq!(injected.len(), 1);
+    assert!(injected[0].content.contains("b-1"));
+    assert_eq!(
+        agent
+            .active_turn_context
+            .as_ref()
+            .and_then(|context| context.unattended_context.clone()),
+        Some(second)
+    );
+    assert_eq!(
+        agent.session.context_view.transactions[0]
+            .emergency_audit
+            .as_ref()
+            .expect("audit")
+            .retry_outcome,
+        StoredContextEmergencyRetryOutcome::Succeeded,
+        "scope A must finalize before scope B replaces turn-local authorization"
+    );
+    assert_eq!(agent.soft_interrupt_count(), 0);
+    assert!(
+        crate::soft_interrupt_store::load(agent.session_id())
+            .unwrap()
             .is_empty()
     );
 

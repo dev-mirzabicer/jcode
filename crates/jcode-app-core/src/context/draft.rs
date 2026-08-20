@@ -1950,6 +1950,32 @@ pub(crate) fn state_with_transaction(
     economics: Option<StoredContextEconomics>,
     curator_usage: Vec<StoredContextCuratorUsage>,
 ) -> StoredContextViewState {
+    state_with_transaction_and_audit(
+        base_state,
+        transaction_id,
+        revision,
+        authorization,
+        operations,
+        economics,
+        curator_usage,
+        None,
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "transaction state owns complete persisted provenance"
+)]
+pub(crate) fn state_with_transaction_and_audit(
+    base_state: &StoredContextViewState,
+    transaction_id: &str,
+    revision: u64,
+    authorization: StoredContextAuthorization,
+    operations: Vec<StoredContextOperation>,
+    economics: Option<StoredContextEconomics>,
+    curator_usage: Vec<StoredContextCuratorUsage>,
+    emergency_audit: Option<jcode_session_types::StoredContextEmergencyAudit>,
+) -> StoredContextViewState {
     let mut state = base_state.clone();
     state.revision = revision;
     state.transactions.push(StoredContextTransaction {
@@ -1967,6 +1993,7 @@ pub(crate) fn state_with_transaction(
         application: None,
         economics,
         curator_usage,
+        emergency_audit,
     });
     state
 }

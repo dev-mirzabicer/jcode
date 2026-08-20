@@ -848,6 +848,7 @@ fn debug_transaction_detail() -> ContextTransactionDetail {
             }),
             economics: Some(debug_economics(PricingFixture::Metered)),
             curator_usage: draft.curator_usage,
+            emergency_audit: None,
         },
     }
 }

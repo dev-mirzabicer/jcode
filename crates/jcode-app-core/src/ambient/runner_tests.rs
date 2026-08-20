@@ -6,6 +6,7 @@ use crate::session::Session;
 use anyhow::Result;
 use async_stream::stream;
 use async_trait::async_trait;
+use jcode_session_types::StoredContextEmergencyPolicy;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
@@ -147,6 +148,14 @@ async fn spawn_target_creates_one_child_session_and_runs_task() {
             cache_control: None,
         }],
     );
+    parent.context_view.emergency_policy = StoredContextEmergencyPolicy::Authorized {
+        protected_recent_assistant_turns: 9,
+        target_headroom_percent: 17,
+        allow_reasoning_suppression: true,
+        allow_tool_distillation: false,
+        allow_oldest_range_summary: true,
+        authorization_source: "parent-session-policy-must-not-transfer".to_string(),
+    };
     parent.compaction = Some(crate::session::StoredCompactionState {
         summary_text: "scheduled-task context summary".to_string(),
         openai_encrypted_content: None,
@@ -174,6 +183,14 @@ async fn spawn_target_creates_one_child_session_and_runs_task() {
         relevant_files: vec!["src/lib.rs".to_string()],
         git_branch: None,
         additional_context: Some("Background: spawned schedule test".to_string()),
+        context_emergency_policy: StoredContextEmergencyPolicy::Authorized {
+            protected_recent_assistant_turns: 4,
+            target_headroom_percent: 12,
+            allow_reasoning_suppression: true,
+            allow_tool_distillation: true,
+            allow_oldest_range_summary: true,
+            authorization_source: "scheduled-item-test-policy".to_string(),
+        },
     };
 
     let runner = AmbientRunnerHandle::new(Arc::new(crate::safety::SafetySystem::new()));
@@ -188,7 +205,18 @@ async fn spawn_target_creates_one_child_session_and_runs_task() {
     assert_eq!(child.parent_id.as_deref(), Some(parent.id.as_str()));
     assert_eq!(child.working_dir, parent.working_dir);
     assert!(child.compaction.is_none());
-    assert_eq!(child.context_view, migrated_parent.context_view);
+    assert_eq!(
+        child.context_view.transactions,
+        migrated_parent.context_view.transactions
+    );
+    assert_eq!(
+        child.context_view.emergency_policy,
+        StoredContextEmergencyPolicy::Block
+    );
+    assert_eq!(
+        migrated_parent.context_view.emergency_policy,
+        parent.context_view.emergency_policy
+    );
     assert!(child.messages.iter().any(|message| {
         message.role == Role::User
             && message.content_preview().contains("[Scheduled task]")

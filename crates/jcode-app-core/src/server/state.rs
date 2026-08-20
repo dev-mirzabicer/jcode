@@ -494,6 +494,7 @@ pub(super) fn enqueue_soft_interrupt(
             images,
             urgent,
             source,
+            unattended_context: None,
         });
         crate::logging::info(&format!(
             "SOFT_INTERRUPT_QUEUE_PUSH source={:?} urgent={} content_bytes={} content_chars={} pending_before={} pending_after={}",
@@ -714,8 +715,33 @@ pub(super) async fn queue_soft_interrupt_for_session(
     queues: &SessionInterruptQueues,
     sessions: &super::SessionAgents,
 ) -> bool {
+    queue_soft_interrupt_for_session_with_unattended(
+        session_id, content, urgent, source, None, queues, sessions,
+    )
+    .await
+}
+
+pub(super) async fn queue_soft_interrupt_for_session_with_unattended(
+    session_id: &str,
+    content: String,
+    urgent: bool,
+    source: SoftInterruptSource,
+    unattended_context: Option<jcode_session_types::StoredUnattendedContextAuthorization>,
+    queues: &SessionInterruptQueues,
+    sessions: &super::SessionAgents,
+) -> bool {
     if let Some(queue) = queues.read().await.get(session_id).cloned() {
-        return enqueue_soft_interrupt(&queue, content, Vec::new(), urgent, source);
+        if let Ok(mut pending) = queue.lock() {
+            pending.push(SoftInterruptMessage {
+                content,
+                images: Vec::new(),
+                urgent,
+                source,
+                unattended_context,
+            });
+            return true;
+        }
+        return false;
     }
 
     let queue = {
@@ -730,7 +756,18 @@ pub(super) async fn queue_soft_interrupt_for_session(
 
     if let Some(queue) = queue {
         register_session_interrupt_queue(queues, session_id, queue.clone()).await;
-        enqueue_soft_interrupt(&queue, content, Vec::new(), urgent, source)
+        if let Ok(mut pending) = queue.lock() {
+            pending.push(SoftInterruptMessage {
+                content,
+                images: Vec::new(),
+                urgent,
+                source,
+                unattended_context,
+            });
+            true
+        } else {
+            false
+        }
     } else {
         let session_exists = {
             let guard = sessions.read().await;
@@ -748,6 +785,7 @@ pub(super) async fn queue_soft_interrupt_for_session(
                 images: Vec::new(),
                 urgent,
                 source,
+                unattended_context,
             },
         )
         .map(|_| true)

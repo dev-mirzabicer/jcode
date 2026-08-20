@@ -472,6 +472,88 @@ fn test_schedule_tool_schema_avoids_top_level_combinators() {
     assert!(schema.get("anyOf").is_none());
     assert!(schema.get("oneOf").is_none());
     assert!(schema.get("allOf").is_none());
+    let policy_description = schema
+        .pointer("/properties/context_emergency_policy/description")
+        .and_then(serde_json::Value::as_str)
+        .expect("schedule emergency policy description");
+    assert!(policy_description.contains("Omitted or Block stops"));
+    assert!(policy_description.contains("one view edit and retry"));
+    assert!(policy_description.contains("raw history remains"));
+}
+
+#[test]
+fn test_schedule_emergency_policy_is_explicit_block_by_default() {
+    assert_eq!(
+        parse_schedule_emergency_policy(None, "session-1").unwrap(),
+        jcode_session_types::StoredContextEmergencyPolicy::Block
+    );
+    let explicit_block: ScheduleToolInput = serde_json::from_value(json!({
+        "context_emergency_policy": { "mode": "block" }
+    }))
+    .unwrap();
+    assert_eq!(
+        parse_schedule_emergency_policy(explicit_block.context_emergency_policy, "session-1")
+            .unwrap(),
+        jcode_session_types::StoredContextEmergencyPolicy::Block
+    );
+}
+
+#[test]
+fn test_schedule_authorized_policy_uses_exact_snapshot_and_safe_defaults() {
+    let params: ScheduleToolInput = serde_json::from_value(json!({
+        "context_emergency_policy": {
+            "mode": "authorized",
+            "allow_tool_distillation": false
+        }
+    }))
+    .unwrap();
+    let policy =
+        parse_schedule_emergency_policy(params.context_emergency_policy, "session-private")
+            .expect("authorized policy");
+    assert_eq!(
+        policy,
+        jcode_session_types::StoredContextEmergencyPolicy::Authorized {
+            protected_recent_assistant_turns: 5,
+            target_headroom_percent: 10,
+            allow_reasoning_suppression: true,
+            allow_tool_distillation: false,
+            allow_oldest_range_summary: true,
+            authorization_source: "schedule_tool_session:session-private".to_string(),
+        }
+    );
+    crate::context::validate_emergency_policy(&policy).expect("defaults are valid");
+    let rendered = format_context_emergency_policy(&policy);
+    assert!(rendered.contains("authorized(protect=5, headroom=10%"));
+    assert!(rendered.contains("tools=false"));
+    assert!(!rendered.contains("session-private"));
+}
+
+#[test]
+fn test_schedule_emergency_policy_rejects_unknown_mode_and_invalid_parameters() {
+    let unknown: ScheduleToolInput = serde_json::from_value(json!({
+        "context_emergency_policy": { "mode": "automatic" }
+    }))
+    .unwrap();
+    assert!(
+        parse_schedule_emergency_policy(unknown.context_emergency_policy, "session-1")
+            .unwrap_err()
+            .to_string()
+            .contains("block or authorized")
+    );
+
+    let invalid: ScheduleToolInput = serde_json::from_value(json!({
+        "context_emergency_policy": {
+            "mode": "authorized",
+            "target_headroom_percent": 0,
+            "allow_reasoning_suppression": false,
+            "allow_tool_distillation": false,
+            "allow_oldest_range_summary": false
+        }
+    }))
+    .unwrap();
+    let invalid = parse_schedule_emergency_policy(invalid.context_emergency_policy, "session-1")
+        .expect("shape parses before shared validation");
+    assert!(crate::context::validate_emergency_policy(&invalid).is_err());
 }
 
 #[tokio::test]

@@ -1,5 +1,6 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use jcode_session_types::StoredContextEmergencyPolicy;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -130,6 +131,11 @@ pub struct ScheduledItem {
     pub git_branch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_context: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "StoredContextEmergencyPolicy::is_block"
+    )]
+    pub context_emergency_policy: StoredContextEmergencyPolicy,
 }
 
 /// Persistent ambient state
@@ -186,6 +192,11 @@ pub struct ScheduleRequest {
     pub git_branch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_context: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "StoredContextEmergencyPolicy::is_block"
+    )]
+    pub context_emergency_policy: StoredContextEmergencyPolicy,
 }
 
 // ---------------------------------------------------------------------------

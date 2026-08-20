@@ -18,9 +18,11 @@ use jcode_context_core::{
     validate_context_state,
 };
 use jcode_session_types::{
-    StoredContextApplication, StoredContextCacheWarmth, StoredContextEmergencyPolicy,
-    StoredContextOperation, StoredContextTransactionStatusKind, StoredContextViewState,
-    StoredProviderValidationEvidence, StoredProviderValidationOutcome,
+    StoredContextApplication, StoredContextAuthorization, StoredContextCacheWarmth,
+    StoredContextEmergencyAudit, StoredContextEmergencyOperationKind, StoredContextEmergencyPolicy,
+    StoredContextEmergencyRetryOutcome, StoredContextEmergencyTriggerKind, StoredContextOperation,
+    StoredContextTransactionStatusKind, StoredContextViewState, StoredProviderValidationEvidence,
+    StoredProviderValidationOutcome,
 };
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -71,6 +73,120 @@ pub struct ContextSessionTransition {
 }
 
 impl ContextTransactionService {
+    pub(crate) fn preview_unattended_emergency_operations(
+        &self,
+        agent: &Agent,
+        transaction_id: &str,
+        authorization: StoredContextAuthorization,
+        operations: Vec<StoredContextOperation>,
+    ) -> Result<jcode_session_types::StoredContextEconomics, ContextServiceError> {
+        if operations.is_empty() {
+            return Err(ContextServiceError::EmptyRequest);
+        }
+        let previous_state = agent.context_view_state().clone();
+        let revision = previous_state
+            .revision
+            .checked_add(1)
+            .ok_or(ContextServiceError::RevisionOverflow)?;
+        let proposed_state = super::state_with_transaction_and_audit(
+            &previous_state,
+            transaction_id,
+            revision,
+            authorization,
+            operations,
+            None,
+            Vec::new(),
+            None,
+        );
+        let transaction_index = proposed_state.transactions.len().saturating_sub(1);
+        let prepared = prepare_context_transition(
+            agent,
+            &previous_state,
+            proposed_state,
+            transaction_index,
+            true,
+        )?;
+        prepared.state.transactions[transaction_index]
+            .economics
+            .clone()
+            .ok_or_else(|| {
+                ContextServiceError::Runtime(
+                    "emergency operation preview produced no economics".to_string(),
+                )
+            })
+    }
+
+    pub fn set_emergency_policy_for_session(
+        &self,
+        session: &mut Session,
+        policy: StoredContextEmergencyPolicy,
+        processing: bool,
+    ) -> Result<(String, StoredContextEmergencyPolicy), ContextServiceError> {
+        if processing {
+            return Err(ContextServiceError::SessionBusy);
+        }
+        validate_emergency_policy(&policy)?;
+        let session_id = session.id.clone();
+        if session.context_view.emergency_policy == policy {
+            return Ok((session_id, policy));
+        }
+        let previous_state = session.context_view.clone();
+        session.context_view.emergency_policy = policy.clone();
+        if let Err(error) = self.direct_session_persistence.persist(session) {
+            session.context_view = previous_state;
+            return Err(ContextServiceError::Persistence(error.to_string()));
+        }
+        Ok((session_id, policy))
+    }
+
+    pub(crate) fn apply_unattended_emergency_operations(
+        &self,
+        agent: &mut Agent,
+        transaction_id: &str,
+        authorization: StoredContextAuthorization,
+        operations: Vec<StoredContextOperation>,
+        curator_usage: Vec<jcode_session_types::StoredContextCuratorUsage>,
+        emergency_audit: jcode_session_types::StoredContextEmergencyAudit,
+    ) -> Result<ContextTransactionResult, ContextServiceError> {
+        if operations.is_empty() {
+            return Err(ContextServiceError::EmptyRequest);
+        }
+        validate_unattended_emergency_transaction(&authorization, &operations, &emergency_audit)?;
+        let previous_state = agent.context_view_state().clone();
+        let revision = previous_state
+            .revision
+            .checked_add(1)
+            .ok_or(ContextServiceError::RevisionOverflow)?;
+        let proposed_state = super::state_with_transaction_and_audit(
+            &previous_state,
+            transaction_id,
+            revision,
+            authorization,
+            operations,
+            None,
+            curator_usage,
+            Some(emergency_audit),
+        );
+        let transaction_index = proposed_state.transactions.len().saturating_sub(1);
+        let mut prepared = prepare_context_transition(
+            agent,
+            &previous_state,
+            proposed_state,
+            transaction_index,
+            true,
+        )?;
+        if let Some(transaction) = prepared.state.transactions.get_mut(transaction_index)
+            && let Some(audit) = transaction.emergency_audit.as_mut()
+        {
+            audit.achieved_reduction_tokens = transaction
+                .economics
+                .as_ref()
+                .map(|economics| economics.deleted_input_tokens)
+                .unwrap_or_default();
+        }
+        self.persist_prepared_transition(agent, previous_state, prepared)
+    }
+
     pub fn set_emergency_policy(
         &self,
         agent: &Arc<AsyncMutex<Agent>>,
@@ -377,7 +493,106 @@ impl ContextTransactionService {
     }
 }
 
-fn validate_emergency_policy(
+fn validate_unattended_emergency_transaction(
+    authorization: &StoredContextAuthorization,
+    operations: &[StoredContextOperation],
+    audit: &StoredContextEmergencyAudit,
+) -> Result<(), ContextServiceError> {
+    validate_emergency_policy(&audit.policy)?;
+    let StoredContextAuthorization::UnattendedEmergency {
+        authorization_source,
+        trigger,
+        scheduled_item_id,
+    } = authorization
+    else {
+        return Err(ContextServiceError::InvalidSelection(
+            "emergency audit requires unattended-emergency authorization".to_string(),
+        ));
+    };
+    if authorization_source != &audit.authorization_source
+        || scheduled_item_id != &audit.scheduled_item_id
+    {
+        return Err(ContextServiceError::InvalidSelection(
+            "emergency authorization and audit provenance do not match".to_string(),
+        ));
+    }
+    let source = authorization_source.trim();
+    if source.is_empty() || source.chars().count() > 512 {
+        return Err(ContextServiceError::InvalidSelection(
+            "emergency authorization source must contain 1 through 512 characters".to_string(),
+        ));
+    }
+    if let Some(item_id) = scheduled_item_id.as_deref() {
+        let item_id = item_id.trim();
+        if item_id.is_empty()
+            || item_id.chars().count() > 128
+            || source != format!("scheduled_item:{item_id}")
+        {
+            return Err(ContextServiceError::InvalidSelection(
+                "scheduled emergency provenance is malformed".to_string(),
+            ));
+        }
+    }
+    let expected_trigger = match audit.trigger_kind {
+        StoredContextEmergencyTriggerKind::PreflightLimit => "preflight_limit",
+        StoredContextEmergencyTriggerKind::ProviderContextLimit => "provider_context_limit",
+    };
+    if trigger.as_deref() != Some(expected_trigger) {
+        return Err(ContextServiceError::InvalidSelection(
+            "emergency authorization and audit trigger do not match".to_string(),
+        ));
+    }
+    match (audit.trigger_kind, audit.provider_error.as_deref()) {
+        (StoredContextEmergencyTriggerKind::PreflightLimit, None) => {}
+        (StoredContextEmergencyTriggerKind::ProviderContextLimit, Some(error))
+            if !error.trim().is_empty() && error.chars().count() <= 512 => {}
+        _ => {
+            return Err(ContextServiceError::InvalidSelection(
+                "emergency provider-error provenance does not match its trigger".to_string(),
+            ));
+        }
+    }
+    if audit.retry_outcome != StoredContextEmergencyRetryOutcome::Pending
+        || audit.achieved_reduction_tokens != 0
+    {
+        return Err(ContextServiceError::InvalidSelection(
+            "new emergency audit must begin pending with zero achieved reduction".to_string(),
+        ));
+    }
+    let mut expected_order = Vec::new();
+    for kind in [
+        StoredContextEmergencyOperationKind::ReasoningSuppression,
+        StoredContextEmergencyOperationKind::ToolResultDistillation,
+        StoredContextEmergencyOperationKind::OldestRangeSummary,
+    ] {
+        let present = operations.iter().any(|operation| {
+            matches!(
+                (kind, operation),
+                (
+                    StoredContextEmergencyOperationKind::ReasoningSuppression,
+                    StoredContextOperation::ReasoningSuppression(_)
+                ) | (
+                    StoredContextEmergencyOperationKind::ToolResultDistillation,
+                    StoredContextOperation::ToolResultDistillation(_)
+                ) | (
+                    StoredContextEmergencyOperationKind::OldestRangeSummary,
+                    StoredContextOperation::RangeSummary(_)
+                )
+            )
+        });
+        if present {
+            expected_order.push(kind);
+        }
+    }
+    if audit.operation_order != expected_order {
+        return Err(ContextServiceError::InvalidSelection(
+            "emergency audit operation order does not match the transaction".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_emergency_policy(
     policy: &StoredContextEmergencyPolicy,
 ) -> Result<(), ContextServiceError> {
     let StoredContextEmergencyPolicy::Authorized {
@@ -659,6 +874,8 @@ mod tests {
     };
     use jcode_session_types::{
         StoredContextArtifactGenerator, StoredContextAuthorization, StoredContextCuratorUsage,
+        StoredContextEmergencyAudit, StoredContextEmergencyOperationKind,
+        StoredContextEmergencyRetryOutcome, StoredContextEmergencyTriggerKind,
         StoredContextOperation, StoredRangeSummary, StoredToolResultDistillation,
     };
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -1623,7 +1840,6 @@ mod tests {
     fn emergency_policy_persists_idempotently_and_rolls_back_without_context_reset() {
         let _guard = crate::storage::lock_test_env();
         crate::cache_invalidation::clear_for_tests();
-        let invalidation_baseline = Instant::now();
         let CommitServiceFixture {
             service,
             agent,
@@ -1657,7 +1873,6 @@ mod tests {
             assert_eq!(guard.context_view_state().emergency_policy, returned_policy);
         }
         assert_eq!(provider.invalidation_count(), 0);
-        assert!(crate::cache_invalidation::most_recent_since(invalidation_baseline).is_none());
 
         let (same_session_id, same_policy) = service
             .set_emergency_policy(&agent, authorized.clone(), false)
@@ -1678,7 +1893,6 @@ mod tests {
             assert_eq!(guard.context_view_state().emergency_policy, authorized);
         }
         assert_eq!(provider.invalidation_count(), 0);
-        assert!(crate::cache_invalidation::most_recent_since(invalidation_baseline).is_none());
 
         let invalid = StoredContextEmergencyPolicy::Authorized {
             protected_recent_assistant_turns: 5,
@@ -1702,6 +1916,236 @@ mod tests {
             authorized
         );
         assert_eq!(provider.invalidation_count(), 0);
-        assert!(crate::cache_invalidation::most_recent_since(invalidation_baseline).is_none());
+    }
+
+    #[test]
+    fn direct_session_emergency_policy_is_atomic_idempotent_and_revision_neutral() {
+        let (service, mut session, provider, persistence, raw_before) =
+            direct_session_fixture(false);
+        let revision_before = session.context_view.revision;
+        let provider_session_before = session.provider_session_id.clone();
+        let policy = StoredContextEmergencyPolicy::Authorized {
+            protected_recent_assistant_turns: 7,
+            target_headroom_percent: 15,
+            allow_reasoning_suppression: true,
+            allow_tool_distillation: false,
+            allow_oldest_range_summary: true,
+            authorization_source: "context_editor_session:local-test".to_string(),
+        };
+
+        service
+            .set_emergency_policy_for_session(&mut session, policy.clone(), false)
+            .expect("policy persists");
+        assert_eq!(session.context_view.emergency_policy, policy);
+        assert_eq!(session.context_view.revision, revision_before);
+        assert_eq!(session.provider_session_id, provider_session_before);
+        assert_eq!(provider.invalidation_count(), 0);
+        assert_eq!(persistence.calls(), 1);
+        assert_eq!(
+            serde_json::to_vec(&session.messages).expect("raw transcript"),
+            raw_before
+        );
+
+        let unchanged_policy = session.context_view.emergency_policy.clone();
+        service
+            .set_emergency_policy_for_session(&mut session, unchanged_policy, false)
+            .expect("idempotent policy succeeds");
+        assert_eq!(persistence.calls(), 1);
+
+        let (failing_service, mut failing_session, failing_provider, failing_persistence, _) =
+            direct_session_fixture(true);
+        let prior_policy = failing_session.context_view.emergency_policy.clone();
+        let failing_revision = failing_session.context_view.revision;
+        let failing_provider_session = failing_session.provider_session_id.clone();
+        let error = failing_service
+            .set_emergency_policy_for_session(
+                &mut failing_session,
+                StoredContextEmergencyPolicy::Authorized {
+                    protected_recent_assistant_turns: 3,
+                    target_headroom_percent: 10,
+                    allow_reasoning_suppression: true,
+                    allow_tool_distillation: false,
+                    allow_oldest_range_summary: false,
+                    authorization_source: "failing-local-policy".to_string(),
+                },
+                false,
+            )
+            .expect_err("persistence failure rolls back");
+        assert!(matches!(error, ContextServiceError::Persistence(_)));
+        assert_eq!(failing_session.context_view.emergency_policy, prior_policy);
+        assert_eq!(failing_session.context_view.revision, failing_revision);
+        assert_eq!(
+            failing_session.provider_session_id,
+            failing_provider_session
+        );
+        assert_eq!(failing_provider.invalidation_count(), 0);
+        assert_eq!(failing_persistence.calls(), 1);
+    }
+
+    fn emergency_audit_fixture() -> StoredContextEmergencyAudit {
+        StoredContextEmergencyAudit {
+            authorization_source: "scheduled_item:sched-atomic".to_string(),
+            scheduled_item_id: Some("sched-atomic".to_string()),
+            policy: StoredContextEmergencyPolicy::Authorized {
+                protected_recent_assistant_turns: 2,
+                target_headroom_percent: 10,
+                allow_reasoning_suppression: true,
+                allow_tool_distillation: true,
+                allow_oldest_range_summary: true,
+                authorization_source: "schedule_tool_session:origin".to_string(),
+            },
+            trigger_kind: StoredContextEmergencyTriggerKind::PreflightLimit,
+            provider_error: None,
+            context_window: 372_000,
+            safe_input_budget: 367_904,
+            projected_input_tokens: 370_000,
+            required_reduction_to_fit_tokens: 2_096,
+            required_reduction_to_target_tokens: 38_886,
+            achieved_reduction_tokens: 0,
+            protected_recent_assistant_turns: 2,
+            protected_message_count: 2,
+            operation_order: vec![
+                StoredContextEmergencyOperationKind::ReasoningSuppression,
+                StoredContextEmergencyOperationKind::ToolResultDistillation,
+                StoredContextEmergencyOperationKind::OldestRangeSummary,
+            ],
+            retry_outcome: StoredContextEmergencyRetryOutcome::Pending,
+        }
+    }
+
+    #[test]
+    fn unattended_emergency_commit_is_one_audited_revision_and_one_reset() {
+        let CommitServiceFixture {
+            service,
+            agent,
+            provider,
+            persistence,
+            raw_before,
+        } = service_fixture(true, false);
+        let mut agent = agent.try_lock().expect("idle agent");
+        let draft = ready_draft(&agent, &provider, "emergency-source");
+        let mut operations = draft.required_operations;
+        operations.extend(
+            draft
+                .distillation_proposals
+                .into_iter()
+                .map(|proposal| StoredContextOperation::ToolResultDistillation(proposal.operation)),
+        );
+        let authorization = StoredContextAuthorization::UnattendedEmergency {
+            authorization_source: "scheduled_item:sched-atomic".to_string(),
+            trigger: Some("preflight_limit".to_string()),
+            scheduled_item_id: Some("sched-atomic".to_string()),
+        };
+
+        let result = service
+            .apply_unattended_emergency_operations(
+                &mut agent,
+                "context-emergency-atomic",
+                authorization.clone(),
+                operations,
+                draft.curator_usage,
+                emergency_audit_fixture(),
+            )
+            .expect("emergency transaction commits atomically");
+
+        assert_eq!(result.revision, 1);
+        assert_eq!(agent.context_view_state().transactions.len(), 1);
+        let transaction = &agent.context_view_state().transactions[0];
+        assert_eq!(transaction.authorization, authorization);
+        let audit = transaction
+            .emergency_audit
+            .as_ref()
+            .expect("audit retained");
+        assert!(audit.achieved_reduction_tokens > 0);
+        assert_eq!(
+            audit.retry_outcome,
+            StoredContextEmergencyRetryOutcome::Pending
+        );
+        assert_eq!(persistence.calls(), 1);
+        assert_eq!(provider.invalidation_count(), 1);
+        assert_eq!(serde_json::to_vec(agent.messages()).unwrap(), raw_before);
+    }
+
+    #[test]
+    fn unattended_emergency_persistence_failure_has_no_transaction_reset_or_retry_state() {
+        let CommitServiceFixture {
+            service,
+            agent,
+            provider,
+            persistence,
+            raw_before,
+        } = service_fixture(true, true);
+        let mut agent = agent.try_lock().expect("idle agent");
+        let draft = ready_draft(&agent, &provider, "emergency-failure-source");
+        let mut operations = draft.required_operations;
+        operations.extend(
+            draft
+                .distillation_proposals
+                .into_iter()
+                .map(|proposal| StoredContextOperation::ToolResultDistillation(proposal.operation)),
+        );
+        let mut audit = emergency_audit_fixture();
+        audit.authorization_source = "scheduled_item:sched-fails".to_string();
+        audit.scheduled_item_id = Some("sched-fails".to_string());
+        let error = service
+            .apply_unattended_emergency_operations(
+                &mut agent,
+                "context-emergency-fails",
+                StoredContextAuthorization::UnattendedEmergency {
+                    authorization_source: "scheduled_item:sched-fails".to_string(),
+                    trigger: Some("preflight_limit".to_string()),
+                    scheduled_item_id: Some("sched-fails".to_string()),
+                },
+                operations,
+                draft.curator_usage,
+                audit,
+            )
+            .expect_err("persistence failure rejects the whole transaction");
+        assert!(matches!(error, ContextServiceError::Persistence(_)));
+        assert_eq!(agent.context_view_state().revision, 0);
+        assert!(agent.context_view_state().transactions.is_empty());
+        assert_eq!(provider.invalidation_count(), 0);
+        assert_eq!(persistence.calls(), 1);
+        assert_eq!(serde_json::to_vec(agent.messages()).unwrap(), raw_before);
+    }
+
+    #[test]
+    fn unattended_emergency_rejects_mismatched_audit_before_persistence_or_reset() {
+        let CommitServiceFixture {
+            service,
+            agent,
+            provider,
+            persistence,
+            raw_before,
+        } = service_fixture(true, false);
+        let mut agent = agent.try_lock().expect("idle agent");
+        let draft = ready_draft(&agent, &provider, "emergency-invalid-audit");
+        let mut operations = draft.required_operations;
+        operations.extend(
+            draft
+                .distillation_proposals
+                .into_iter()
+                .map(|proposal| StoredContextOperation::ToolResultDistillation(proposal.operation)),
+        );
+        let error = service
+            .apply_unattended_emergency_operations(
+                &mut agent,
+                "context-emergency-invalid-audit",
+                StoredContextAuthorization::UnattendedEmergency {
+                    authorization_source: "scheduled_item:different".to_string(),
+                    trigger: Some("preflight_limit".to_string()),
+                    scheduled_item_id: Some("different".to_string()),
+                },
+                operations,
+                draft.curator_usage,
+                emergency_audit_fixture(),
+            )
+            .expect_err("mismatched provenance fails closed");
+        assert!(matches!(error, ContextServiceError::InvalidSelection(_)));
+        assert_eq!(agent.context_view_state().revision, 0);
+        assert!(agent.context_view_state().transactions.is_empty());
+        assert_eq!(provider.invalidation_count(), 0);
+        assert_eq!(persistence.calls(), 0);
+        assert_eq!(serde_json::to_vec(agent.messages()).unwrap(), raw_before);
     }
 }

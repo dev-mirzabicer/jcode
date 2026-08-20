@@ -5,12 +5,13 @@ use jcode_context_core::{build_content_target, build_message_range};
 use jcode_session_types::{
     StoredCompactionState, StoredContextApplication, StoredContextArtifactGenerator,
     StoredContextAuthorization, StoredContextBillingMode, StoredContextCacheWarmth,
-    StoredContextEconomics, StoredContextEmergencyPolicy, StoredContextOperation,
-    StoredContextPricingSnapshot, StoredContextStatusEvent, StoredContextTransaction,
-    StoredContextTransactionStatusKind, StoredContextViewState, StoredLegacyCompactionCoverage,
-    StoredLegacyContextSource, StoredProviderValidationEvidence, StoredProviderValidationOutcome,
-    StoredRangeSummary, StoredReasoningSelection, StoredReasoningSuppression,
-    StoredToolResultDistillation,
+    StoredContextEconomics, StoredContextEmergencyAudit, StoredContextEmergencyOperationKind,
+    StoredContextEmergencyPolicy, StoredContextEmergencyRetryOutcome,
+    StoredContextEmergencyTriggerKind, StoredContextOperation, StoredContextPricingSnapshot,
+    StoredContextStatusEvent, StoredContextTransaction, StoredContextTransactionStatusKind,
+    StoredContextViewState, StoredLegacyCompactionCoverage, StoredLegacyContextSource,
+    StoredProviderValidationEvidence, StoredProviderValidationOutcome, StoredRangeSummary,
+    StoredReasoningSelection, StoredReasoningSuppression, StoredToolResultDistillation,
 };
 
 struct IsolatedHome {
@@ -144,6 +145,7 @@ fn applied_state_with_id(
             application: None,
             economics: None,
             curator_usage: Vec::new(),
+            emergency_audit: None,
         }],
         ..StoredContextViewState::default()
     }
@@ -784,6 +786,7 @@ fn context_export_redaction_is_exhaustive_and_does_not_mutate_or_persist_redacti
             authorization: StoredContextAuthorization::UnattendedEmergency {
                 authorization_source: SECRET.to_string(),
                 trigger: Some(SECRET.to_string()),
+                scheduled_item_id: Some("sched-public-id".to_string()),
             },
             operations: vec![
                 StoredContextOperation::RangeSummary(summary),
@@ -829,6 +832,36 @@ fn context_export_redaction_is_exhaustive_and_does_not_mutate_or_persist_redacti
                 assumptions: vec![SECRET.to_string()],
             }),
             curator_usage: Vec::new(),
+            emergency_audit: Some(StoredContextEmergencyAudit {
+                authorization_source: SECRET.to_string(),
+                scheduled_item_id: Some("sched-public-id".to_string()),
+                policy: StoredContextEmergencyPolicy::Authorized {
+                    protected_recent_assistant_turns: 5,
+                    target_headroom_percent: 10,
+                    allow_reasoning_suppression: true,
+                    allow_tool_distillation: true,
+                    allow_oldest_range_summary: true,
+                    authorization_source: SECRET.to_string(),
+                },
+                trigger_kind: StoredContextEmergencyTriggerKind::ProviderContextLimit,
+                provider_error: Some(SECRET.to_string()),
+                context_window: 372_000,
+                safe_input_budget: 367_904,
+                projected_input_tokens: 370_000,
+                required_reduction_to_fit_tokens: 2_096,
+                required_reduction_to_target_tokens: 75_683,
+                achieved_reduction_tokens: 80_000,
+                protected_recent_assistant_turns: 5,
+                protected_message_count: 8,
+                operation_order: vec![
+                    StoredContextEmergencyOperationKind::ReasoningSuppression,
+                    StoredContextEmergencyOperationKind::ToolResultDistillation,
+                    StoredContextEmergencyOperationKind::OldestRangeSummary,
+                ],
+                retry_outcome: StoredContextEmergencyRetryOutcome::Failed {
+                    detail: SECRET.to_string(),
+                },
+            }),
         }],
         emergency_policy: StoredContextEmergencyPolicy::Authorized {
             protected_recent_assistant_turns: 5,

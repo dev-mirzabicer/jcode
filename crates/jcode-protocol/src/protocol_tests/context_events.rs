@@ -96,6 +96,7 @@ fn context_transaction() -> jcode_session_types::StoredContextTransaction {
         application: None,
         economics: Some(context_economics()),
         curator_usage: Vec::new(),
+        emergency_audit: None,
     }
 }
 
@@ -327,6 +328,25 @@ fn context_requests_roundtrip_preserve_ids_and_payloads() -> Result<()> {
                 authorization_source: "scheduled-task-1".to_string(),
             },
         },
+        Request::NotifySession {
+            id: 14,
+            session_id: "session-scheduled".to_string(),
+            message: "Run the scheduled task".to_string(),
+            unattended_context: Some(
+                jcode_session_types::StoredUnattendedContextAuthorization {
+                    policy: jcode_session_types::StoredContextEmergencyPolicy::Authorized {
+                        protected_recent_assistant_turns: 5,
+                        target_headroom_percent: 10,
+                        allow_reasoning_suppression: true,
+                        allow_tool_distillation: true,
+                        allow_oldest_range_summary: true,
+                        authorization_source: "schedule_tool_session:origin".to_string(),
+                    },
+                    authorization_source: "scheduled_item:sched-1".to_string(),
+                    scheduled_item_id: Some("sched-1".to_string()),
+                },
+            ),
+        },
     ];
 
     for request in requests {
@@ -341,6 +361,18 @@ fn context_requests_roundtrip_preserve_ids_and_payloads() -> Result<()> {
 
 #[test]
 fn context_request_defaults_are_backward_compatible() -> Result<()> {
+    let legacy_notification = parse_request_json(
+        r#"{"type":"notify_session","id":90,"session_id":"session-1","message":"legacy"}"#,
+    )?;
+    assert!(matches!(
+        legacy_notification,
+        Request::NotifySession {
+            id: 90,
+            unattended_context: None,
+            ..
+        }
+    ));
+
     let snapshot = parse_request_json(r#"{"type":"get_context_editor_snapshot","id":1}"#)?;
     assert!(matches!(
         snapshot,

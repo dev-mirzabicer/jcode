@@ -1063,6 +1063,7 @@ fn test_context_command_reports_session_context_snapshot() {
                 application: None,
                 economics: None,
                 curator_usage: Vec::new(),
+                emergency_audit: None,
             },
         );
         let rt = tokio::runtime::Runtime::new().unwrap();

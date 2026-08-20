@@ -8,6 +8,7 @@ name = "jcode_agent_runtime"
 path = "src/lib.rs"
 
 [dependencies]
+jcode-session-types = { path = "../jcode-session-types" }
 thiserror = "1"
 tokio = { version = "1", features = ["sync"] }
 

@@ -46,7 +46,7 @@ impl Agent {
         let mut sequential_single_tool_rounds = 0u32;
         let mut batch_nudge_pending = false;
 
-        loop {
+        'provider_turn: loop {
             // Do not start another provider request once a cancel has been
             // observed; the loop is re-entered by several recovery paths
             // (issue #732, regression of #428).
@@ -104,6 +104,24 @@ impl Agent {
                 None,
             );
             if preflight.pressure == crate::protocol::ContextPressureLevel::Blocked {
+                match self
+                    .try_unattended_emergency_preflight_recovery(&preflight, None)
+                    .await
+                {
+                    Ok(true) => continue,
+                    Ok(false) if self.has_unattended_context() => {
+                        return Err(self.block_unattended_preflight(preflight, None));
+                    }
+                    Err(error) if self.has_unattended_context() => {
+                        return Err(self.block_unattended_preflight_with_detail(
+                            preflight,
+                            None,
+                            error.to_string(),
+                        ));
+                    }
+                    Err(error) => return Err(error),
+                    Ok(false) => {}
+                }
                 return Err(self.block_for_preflight(preflight, None)?);
             }
 
@@ -152,8 +170,19 @@ impl Agent {
                 Ok(stream) => stream,
                 Err(e) => {
                     memory_pending.restore_now();
+                    let provider_error = e.to_string();
+                    match self
+                        .try_unattended_emergency_provider_recovery(&provider_error, None)
+                        .await
+                    {
+                        Ok(true) => continue 'provider_turn,
+                        Ok(false) => {}
+                        Err(_) => logging::warn(
+                            "Authorized provider-limit context recovery failed safely",
+                        ),
+                    }
                     if let Some(action_error) =
-                        self.handle_provider_size_rejection(&e.to_string(), request_payload, None)?
+                        self.handle_provider_size_rejection(&provider_error, request_payload, None)?
                     {
                         return Err(action_error);
                     }
@@ -230,6 +259,16 @@ impl Agent {
                                 store_reasoning_content,
                                 None,
                             )?;
+                        }
+                        match self
+                            .try_unattended_emergency_provider_recovery(&err_str, None)
+                            .await
+                        {
+                            Ok(true) => continue 'provider_turn,
+                            Ok(false) => {}
+                            Err(_) => logging::warn(
+                                "Authorized provider-limit context recovery failed safely",
+                            ),
                         }
                         if let Some(action_error) = self.handle_provider_size_rejection(
                             &err_str,
@@ -625,6 +664,16 @@ impl Agent {
                                 store_reasoning_content,
                                 None,
                             )?;
+                        }
+                        match self
+                            .try_unattended_emergency_provider_recovery(&message, None)
+                            .await
+                        {
+                            Ok(true) => continue 'provider_turn,
+                            Ok(false) => {}
+                            Err(_) => logging::warn(
+                                "Authorized provider-limit context recovery failed safely",
+                            ),
                         }
                         if let Some(action_error) = self.handle_provider_size_rejection(
                             &message,

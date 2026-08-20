@@ -632,6 +632,15 @@ impl App {
                     Some(transaction_id),
                 )
             }
+            ContextEditorAction::SetEmergencyPolicy(policy) => {
+                self.context_protocol.begin_policy_request(id);
+                (
+                    Request::SetContextEmergencyPolicy { id, policy },
+                    ContextRequestKind::SetEmergencyPolicy,
+                    None,
+                    None,
+                )
+            }
             ContextEditorAction::CopySafeMetadata(_) => {
                 unreachable!("copy actions are handled before reserving a remote request ID")
             }
@@ -1028,6 +1037,31 @@ impl App {
                         ContextRequestKind::ReapplyTransaction,
                         None,
                         Some(transaction_id),
+                        error,
+                    ),
+                }
+            }
+            ContextEditorAction::SetEmergencyPolicy(policy) => {
+                self.context_protocol.begin_policy_request(id);
+                match self.context_transactions.set_emergency_policy_for_session(
+                    &mut self.session,
+                    policy,
+                    self.is_processing,
+                ) {
+                    Ok((session_id, policy)) => {
+                        let _ = self.local_context_event_tx.send(
+                            ServerEvent::ContextEmergencyPolicyChanged {
+                                id,
+                                session_id,
+                                policy,
+                            },
+                        );
+                    }
+                    Err(error) => self.send_local_context_rejection(
+                        id,
+                        ContextRequestKind::SetEmergencyPolicy,
+                        None,
+                        None,
                         error,
                     ),
                 }

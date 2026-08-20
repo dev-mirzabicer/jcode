@@ -1,6 +1,7 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
 mod compaction;
+mod emergency;
 mod environment;
 mod inline_tail;
 mod interrupts;
@@ -193,6 +194,16 @@ struct ActiveTurnContext {
     locked_tools_before_pending: Option<Vec<ToolDefinition>>,
     mcp_late_register_resolved_before_pending: bool,
     tool_output_scan_index_before_pending: usize,
+    unattended_context: Option<jcode_session_types::StoredUnattendedContextAuthorization>,
+    emergency_attempted: bool,
+    emergency_transaction_id: Option<String>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct PendingTurnOptions {
+    pub(crate) reserved_alerts: Vec<String>,
+    pub(crate) unattended_context:
+        Option<jcode_session_types::StoredUnattendedContextAuthorization>,
 }
 
 pub struct Agent {

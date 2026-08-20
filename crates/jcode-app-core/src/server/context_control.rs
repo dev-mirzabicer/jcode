@@ -1899,6 +1899,7 @@ mod tests {
                 authorization: StoredContextAuthorization::UnattendedEmergency {
                     authorization_source: "forged-client-authorization".to_string(),
                     trigger: None,
+                    scheduled_item_id: None,
                 },
             },
             ContextDraftRequest {

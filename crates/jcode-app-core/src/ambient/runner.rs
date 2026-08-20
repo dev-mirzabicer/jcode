@@ -57,6 +57,72 @@ struct AmbientRunnerInner {
 }
 
 impl AmbientRunnerHandle {
+    fn log_scheduled_emergency_outcome(item: &ScheduledItem, agent: &Agent) {
+        let transaction =
+            agent
+                .context_view_state()
+                .transactions
+                .iter()
+                .rev()
+                .find(|transaction| {
+                    matches!(
+                        &transaction.authorization,
+                        jcode_session_types::StoredContextAuthorization::UnattendedEmergency {
+                            scheduled_item_id: Some(id),
+                            ..
+                        } if id == &item.id
+                    )
+                });
+        let Some(transaction) = transaction else {
+            return;
+        };
+        let counts = transaction.operation_counts();
+        let (reduction, retry) = transaction
+            .emergency_audit
+            .as_ref()
+            .map(|audit| {
+                let retry = match audit.retry_outcome {
+                    jcode_session_types::StoredContextEmergencyRetryOutcome::Pending => "pending",
+                    jcode_session_types::StoredContextEmergencyRetryOutcome::Succeeded => {
+                        "succeeded"
+                    }
+                    jcode_session_types::StoredContextEmergencyRetryOutcome::Blocked { .. } => {
+                        "blocked"
+                    }
+                    jcode_session_types::StoredContextEmergencyRetryOutcome::ProviderRejected => {
+                        "provider_rejected"
+                    }
+                    jcode_session_types::StoredContextEmergencyRetryOutcome::Failed { .. } => {
+                        "failed"
+                    }
+                };
+                (audit.achieved_reduction_tokens, retry)
+            })
+            .unwrap_or((0, "unknown"));
+        logging::info(&format!(
+            "Ambient runner: scheduled task {} applied emergency context transaction {} (summaries={}, reasoning={}, distillations={}, reduction_tokens={}, retry={})",
+            item.id,
+            transaction.id,
+            counts.range_summaries,
+            counts.reasoning_suppressions,
+            counts.tool_result_distillations,
+            reduction,
+            retry
+        ));
+    }
+
+    fn scheduled_unattended_context(
+        item: &ScheduledItem,
+    ) -> Option<jcode_session_types::StoredUnattendedContextAuthorization> {
+        item.context_emergency_policy.is_authorized().then(|| {
+            jcode_session_types::StoredUnattendedContextAuthorization {
+                policy: item.context_emergency_policy.clone(),
+                authorization_source: format!("scheduled_item:{}", item.id),
+                scheduled_item_id: Some(item.id.clone()),
+            }
+        })
+    }
+
     pub fn new(safety: Arc<SafetySystem>) -> Self {
         let state = AmbientState::load().unwrap_or_default();
         Self {
@@ -109,6 +175,7 @@ impl AmbientRunnerHandle {
                 images: Vec::new(),
                 urgent: false,
                 source: SoftInterruptSource::User,
+                unattended_context: None,
             });
             logging::info(&format!(
                 "{} message injected into active ambient cycle: {}",
@@ -372,9 +439,16 @@ impl AmbientRunnerHandle {
         }
     }
 
-    async fn notify_live_session(&self, session_id: &str, message: &str) -> anyhow::Result<()> {
+    async fn notify_live_session(
+        &self,
+        session_id: &str,
+        message: &str,
+        unattended_context: Option<jcode_session_types::StoredUnattendedContextAuthorization>,
+    ) -> anyhow::Result<()> {
         let mut client = crate::server::Client::connect().await?;
-        let request_id = client.notify_session(session_id, message).await?;
+        let request_id = client
+            .notify_session_with_unattended(session_id, message, unattended_context)
+            .await?;
         Self::wait_for_request_done(&mut client, request_id).await
     }
 
@@ -396,13 +470,17 @@ impl AmbientRunnerHandle {
         agent.restore_session(session_id)?;
 
         let reminder = ambient::format_scheduled_session_message(item);
-        let _ = agent
-            .run_once_capture_with_display_role(
+        let unattended_context = Self::scheduled_unattended_context(item);
+        let turn_result = agent
+            .run_once_capture_with_display_role_and_unattended(
                 &reminder,
                 Some(crate::session::StoredDisplayRole::System),
+                unattended_context,
             )
-            .await?;
+            .await;
+        Self::log_scheduled_emergency_outcome(item, &agent);
         agent.mark_closed();
+        turn_result?;
         Ok(())
     }
 
@@ -425,6 +503,8 @@ impl AmbientRunnerHandle {
                 child.replace_messages(parent.messages.clone());
                 child.compaction = parent.compaction.clone();
                 child.context_view = parent.context_view.clone();
+                child.context_view.emergency_policy =
+                    jcode_session_types::StoredContextEmergencyPolicy::Block;
                 child.provider_key = parent.provider_key.clone();
                 child.route_api_method = parent.route_api_method.clone();
                 child.model = parent.model.clone();
@@ -476,13 +556,17 @@ impl AmbientRunnerHandle {
         }
 
         let reminder = ambient::format_scheduled_session_message(item);
-        let _ = agent
-            .run_once_capture_with_display_role(
+        let unattended_context = Self::scheduled_unattended_context(item);
+        let turn_result = agent
+            .run_once_capture_with_display_role_and_unattended(
                 &reminder,
                 Some(crate::session::StoredDisplayRole::System),
+                unattended_context,
             )
-            .await?;
+            .await;
+        Self::log_scheduled_emergency_outcome(item, &agent);
         agent.mark_closed();
+        turn_result?;
         Ok(child_session_id)
     }
 
@@ -495,7 +579,14 @@ impl AmbientRunnerHandle {
             ScheduleTarget::Ambient => Ok(()),
             ScheduleTarget::Session { session_id } => {
                 let reminder = ambient::format_scheduled_session_message(item);
-                match self.notify_live_session(session_id, &reminder).await {
+                match self
+                    .notify_live_session(
+                        session_id,
+                        &reminder,
+                        Self::scheduled_unattended_context(item),
+                    )
+                    .await
+                {
                     Ok(()) => {
                         logging::info(&format!(
                             "Ambient runner: delivered scheduled task {} to live session {}",
@@ -526,16 +617,63 @@ impl AmbientRunnerHandle {
         }
     }
 
+    async fn deliver_scheduled_ambient_item(
+        &self,
+        provider: &Arc<dyn Provider>,
+        item: &ScheduledItem,
+    ) -> anyhow::Result<()> {
+        let cycle_provider = provider.fork();
+        let registry = tool::Registry::new(cycle_provider.clone()).await;
+        registry.register_ambient_tools().await;
+        let mut agent = Agent::new(cycle_provider, registry);
+        agent.set_debug(true);
+        let reminder = ambient::format_scheduled_session_message(item);
+        let turn_result = agent
+            .run_once_capture_with_display_role_and_unattended(
+                &reminder,
+                Some(crate::session::StoredDisplayRole::System),
+                Self::scheduled_unattended_context(item),
+            )
+            .await;
+        Self::log_scheduled_emergency_outcome(item, &agent);
+        agent.mark_closed();
+        turn_result?;
+        Ok(())
+    }
+
+    async fn deliver_ready_ambient_items(
+        &self,
+        provider: &Arc<dyn Provider>,
+        items: Vec<ScheduledItem>,
+    ) {
+        for item in items {
+            if self
+                .deliver_scheduled_ambient_item(provider, &item)
+                .await
+                .is_err()
+            {
+                logging::warn(&format!(
+                    "Ambient runner: scheduled ambient task {} failed safely",
+                    item.id
+                ));
+            }
+        }
+    }
+
     async fn deliver_ready_direct_items(
         &self,
         provider: &Arc<dyn Provider>,
         items: Vec<ScheduledItem>,
     ) {
         for item in items {
-            if let Err(e) = self.deliver_scheduled_direct_item(provider, &item).await {
+            if self
+                .deliver_scheduled_direct_item(provider, &item)
+                .await
+                .is_err()
+            {
                 logging::error(&format!(
-                    "Ambient runner: failed to deliver scheduled direct item {}: {}",
-                    item.id, e
+                    "Ambient runner: scheduled direct item {} failed safely",
+                    item.id
                 ));
             }
         }
@@ -636,40 +774,68 @@ impl AmbientRunnerHandle {
             }
 
             // Load manager to check should_run and update queue info
-            let (should_run, ready_direct_items, next_direct_due) = match AmbientManager::new() {
-                Ok(mut mgr) => {
-                    let ready_direct_items = mgr.take_ready_direct_items();
-                    let next_direct_due = mgr
-                        .queue()
-                        .items()
-                        .iter()
-                        .filter(|item| item.target.is_direct_delivery())
-                        .map(|item| item.scheduled_for)
-                        .min();
-                    // Update queue info for widget
-                    {
-                        let mut qc = self.inner.queue_count.write().await;
-                        *qc = mgr.queue().len();
+            let (should_run, ready_direct_items, ready_ambient_items, next_direct_due) =
+                match AmbientManager::new() {
+                    Ok(mut mgr) => {
+                        let ready_direct_items = match mgr.take_ready_direct_items() {
+                            Ok(items) => items,
+                            Err(_) => {
+                                logging::warn(
+                                    "Ambient runner: failed to persist direct scheduled dequeue; delivery deferred safely",
+                                );
+                                Vec::new()
+                            }
+                        };
+                        let ready_ambient_items = if ambient_allowed {
+                            match mgr.take_ready_items() {
+                                Ok(items) => items,
+                                Err(_) => {
+                                    logging::warn(
+                                        "Ambient runner: failed to persist ambient scheduled dequeue; delivery deferred safely",
+                                    );
+                                    Vec::new()
+                                }
+                            }
+                        } else {
+                            Vec::new()
+                        };
+                        let next_direct_due = mgr
+                            .queue()
+                            .items()
+                            .iter()
+                            .filter(|item| item.target.is_direct_delivery())
+                            .map(|item| item.scheduled_for)
+                            .min();
+                        // Update queue info for widget
+                        {
+                            let mut qc = self.inner.queue_count.write().await;
+                            *qc = mgr.queue().len();
+                        }
+                        {
+                            let mut qp = self.inner.next_queue_preview.write().await;
+                            *qp = mgr.queue().peek_next().map(|i| i.context.clone());
+                        }
+                        // Also run if there are pending email reply directives
+                        (
+                            ambient_allowed
+                                && (mgr.should_run() || ambient::has_pending_directives()),
+                            ready_direct_items,
+                            ready_ambient_items,
+                            next_direct_due,
+                        )
                     }
-                    {
-                        let mut qp = self.inner.next_queue_preview.write().await;
-                        *qp = mgr.queue().peek_next().map(|i| i.context.clone());
+                    Err(e) => {
+                        logging::error(&format!("Ambient runner: failed to load manager: {}", e));
+                        (false, Vec::new(), Vec::new(), None)
                     }
-                    // Also run if there are pending email reply directives
-                    (
-                        ambient_allowed && (mgr.should_run() || ambient::has_pending_directives()),
-                        ready_direct_items,
-                        next_direct_due,
-                    )
-                }
-                Err(e) => {
-                    logging::error(&format!("Ambient runner: failed to load manager: {}", e));
-                    (false, Vec::new(), None)
-                }
-            };
+                };
 
             if !ready_direct_items.is_empty() {
                 self.deliver_ready_direct_items(&provider, ready_direct_items)
+                    .await;
+            }
+            if !ready_ambient_items.is_empty() {
+                self.deliver_ready_ambient_items(&provider, ready_ambient_items)
                     .await;
             }
 

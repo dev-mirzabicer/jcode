@@ -8,6 +8,7 @@ pub struct SoftInterruptMessage {
     /// If true, can skip remaining tools when injected at point C.
     pub urgent: bool,
     pub source: SoftInterruptSource,
+    pub unattended_context: Option<jcode_session_types::StoredUnattendedContextAuthorization>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

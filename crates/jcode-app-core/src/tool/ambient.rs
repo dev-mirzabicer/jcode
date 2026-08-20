@@ -215,6 +215,7 @@ impl Tool for EndAmbientCycleTool {
             relevant_files: Vec::new(),
             git_branch: None,
             additional_context: None,
+            context_emergency_policy: jcode_session_types::StoredContextEmergencyPolicy::Block,
         });
 
         let now = Utc::now();
@@ -358,6 +359,7 @@ impl Tool for ScheduleAmbientTool {
             relevant_files: Vec::new(),
             git_branch: None,
             additional_context: None,
+            context_emergency_policy: jcode_session_types::StoredContextEmergencyPolicy::Block,
         };
 
         let mut manager = AmbientManager::new()?;
@@ -750,6 +752,23 @@ struct ScheduleToolInput {
     success_criteria: Option<String>,
     #[serde(default)]
     target: Option<String>,
+    #[serde(default)]
+    context_emergency_policy: Option<ScheduleEmergencyPolicyInput>,
+}
+
+#[derive(Deserialize)]
+struct ScheduleEmergencyPolicyInput {
+    mode: String,
+    #[serde(default)]
+    protected_recent_assistant_turns: Option<usize>,
+    #[serde(default)]
+    target_headroom_percent: Option<u8>,
+    #[serde(default)]
+    allow_reasoning_suppression: Option<bool>,
+    #[serde(default)]
+    allow_tool_distillation: Option<bool>,
+    #[serde(default)]
+    allow_oldest_range_summary: Option<bool>,
 }
 
 #[async_trait]
@@ -799,6 +818,28 @@ impl Tool for ScheduleTool {
                     "type": "string",
                     "enum": ["resume", "spawn", "ambient"],
                     "description": "Delivery target. Defaults to resuming this session; 'spawn' runs one new child session."
+                },
+                "context_emergency_policy": {
+                    "type": "object",
+                    "description": "Task only. Omitted or Block stops. Authorized permits one view edit and retry; raw history remains.",
+                    "required": ["mode"],
+                    "properties": {
+                        "mode": {
+                            "type": "string",
+                            "enum": ["block", "authorized"]
+                        },
+                        "protected_recent_assistant_turns": {
+                            "type": "integer",
+                            "description": "Authorized mode only. Defaults to 5; maximum 1000."
+                        },
+                        "target_headroom_percent": {
+                            "type": "integer",
+                            "description": "Authorized mode only. Target free context after surgery; defaults to 10 and must be 1..99."
+                        },
+                        "allow_reasoning_suppression": { "type": "boolean" },
+                        "allow_tool_distillation": { "type": "boolean" },
+                        "allow_oldest_range_summary": { "type": "boolean" }
+                    }
                 }
             }
         })
@@ -870,6 +911,9 @@ impl ScheduleTool {
 
         let target = parse_schedule_target(params.target.as_deref(), &ctx.session_id)?;
         let target_summary = format_schedule_target(&target);
+        let context_emergency_policy =
+            parse_schedule_emergency_policy(params.context_emergency_policy, &ctx.session_id)?;
+        crate::context::validate_emergency_policy(&context_emergency_policy)?;
 
         let request = ScheduleRequest {
             wake_in_minutes: params.wake_in_minutes,
@@ -893,6 +937,7 @@ impl ScheduleTool {
                 parts.push(format!("Scheduled by session: {}", ctx.session_id));
                 Some(parts.join("\n"))
             },
+            context_emergency_policy: context_emergency_policy.clone(),
         };
 
         let mut manager = AmbientManager::new()?;
@@ -918,6 +963,10 @@ impl ScheduleTool {
             ));
         }
         summary.push_str(&format!("\nTarget: {}", target_summary));
+        summary.push_str(&format!(
+            "\nContext emergency policy: {}",
+            format_context_emergency_policy(&context_emergency_policy)
+        ));
 
         Ok(ToolOutput::new(summary).with_title(format!("scheduled: {}", task)))
     }
@@ -1002,13 +1051,65 @@ fn format_schedule_target(target: &ScheduleTarget) -> String {
 
 fn format_scheduled_item(item: &ScheduledItem) -> String {
     format!(
-        "- {} | {} | {:?} | {} | {}",
+        "- {} | {} | {:?} | {} | context {} | {}",
         item.id,
         item.scheduled_for,
         item.priority,
         format_schedule_target(&item.target),
+        format_context_emergency_policy(&item.context_emergency_policy),
         item.task_description.as_deref().unwrap_or(&item.context)
     )
+}
+
+fn parse_schedule_emergency_policy(
+    input: Option<ScheduleEmergencyPolicyInput>,
+    originating_session_id: &str,
+) -> Result<jcode_session_types::StoredContextEmergencyPolicy> {
+    let Some(input) = input else {
+        return Ok(jcode_session_types::StoredContextEmergencyPolicy::Block);
+    };
+    match input.mode.as_str() {
+        "block" => Ok(jcode_session_types::StoredContextEmergencyPolicy::Block),
+        "authorized" => Ok(
+            jcode_session_types::StoredContextEmergencyPolicy::Authorized {
+                protected_recent_assistant_turns: input
+                    .protected_recent_assistant_turns
+                    .unwrap_or(5),
+                target_headroom_percent: input.target_headroom_percent.unwrap_or(10),
+                allow_reasoning_suppression: input.allow_reasoning_suppression.unwrap_or(true),
+                allow_tool_distillation: input.allow_tool_distillation.unwrap_or(true),
+                allow_oldest_range_summary: input.allow_oldest_range_summary.unwrap_or(true),
+                authorization_source: format!("schedule_tool_session:{originating_session_id}"),
+            },
+        ),
+        other => anyhow::bail!(
+            "Invalid context emergency policy mode '{}'. Expected block or authorized",
+            other
+        ),
+    }
+}
+
+fn format_context_emergency_policy(
+    policy: &jcode_session_types::StoredContextEmergencyPolicy,
+) -> String {
+    match policy {
+        jcode_session_types::StoredContextEmergencyPolicy::Block => "block".to_string(),
+        jcode_session_types::StoredContextEmergencyPolicy::Authorized {
+            protected_recent_assistant_turns,
+            target_headroom_percent,
+            allow_reasoning_suppression,
+            allow_tool_distillation,
+            allow_oldest_range_summary,
+            ..
+        } => format!(
+            "authorized(protect={}, headroom={}%, reasoning={}, tools={}, summary={})",
+            protected_recent_assistant_turns,
+            target_headroom_percent,
+            allow_reasoning_suppression,
+            allow_tool_distillation,
+            allow_oldest_range_summary
+        ),
+    }
 }
 
 fn nudge_schedule_runner() {

@@ -12,8 +12,8 @@ use crate::tui::app::context_protocol::{
 };
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use jcode_session_types::{
-    StoredContextAuthorization, StoredContextBlockKind, StoredContextOperation,
-    StoredContextTransactionStatusKind, StoredRangeBoundaryExpansionReason,
+    StoredContextAuthorization, StoredContextBlockKind, StoredContextEmergencyPolicy,
+    StoredContextOperation, StoredContextTransactionStatusKind, StoredRangeBoundaryExpansionReason,
 };
 use ratatui::{
     prelude::*,
@@ -57,6 +57,8 @@ pub enum ContextEditorModal {
     ReasoningMenu,
     ReasoningKeepLatestInput,
     ToolScan,
+    EmergencyPolicyMenu,
+    EmergencyPolicyInput,
     ApplyConfirmation,
     RevertConfirmation,
     ReapplyConfirmation,
@@ -119,6 +121,7 @@ pub enum ContextEditorAction {
     ReapplyTransaction {
         transaction_id: String,
     },
+    SetEmergencyPolicy(StoredContextEmergencyPolicy),
     CopySafeMetadata(String),
 }
 
@@ -138,6 +141,7 @@ enum ContextEditorToolbarAction {
     ScanOutputs,
     Prepare,
     History,
+    Policy,
     Detail,
     ConfirmRange,
     RejectRange,
@@ -250,6 +254,7 @@ pub struct ContextEditor {
     reasoning_input: String,
     tool_targets: BTreeSet<(String, usize)>,
     tool_scan_input: String,
+    emergency_policy_input: String,
     draft_id: Option<String>,
     draft_progress: Option<ContextDraftProgress>,
     draft: Option<ContextDraft>,
@@ -278,6 +283,7 @@ pub struct ContextEditor {
     last_transaction_outcome_signature: Option<(u64, u64, String)>,
     last_history_refresh_transaction_signature: Option<(String, u64)>,
     last_rejection_id: Option<u64>,
+    last_emergency_policy: Option<StoredContextEmergencyPolicy>,
     hit_regions: HitRegions,
     rendered_message_start: usize,
     rendered_history_start: usize,
@@ -316,6 +322,7 @@ impl ContextEditor {
             reasoning_input: "5".to_string(),
             tool_targets: BTreeSet::new(),
             tool_scan_input: "2000 5".to_string(),
+            emergency_policy_input: "5 10 1 1 1".to_string(),
             draft_id: None,
             draft_progress: None,
             draft: None,
@@ -344,6 +351,7 @@ impl ContextEditor {
             last_transaction_outcome_signature: None,
             last_history_refresh_transaction_signature: None,
             last_rejection_id: None,
+            last_emergency_policy: None,
             hit_regions: HitRegions::default(),
             rendered_message_start: 0,
             rendered_history_start: 0,
@@ -654,6 +662,38 @@ impl ContextEditor {
                 self.phase = ContextEditorPhase::InspectTransaction;
                 self.preview_scroll = 0;
             }
+        }
+
+        if let Some(policy) = state.emergency_policy.as_ref()
+            && self.last_emergency_policy.as_ref() != Some(policy)
+        {
+            self.last_emergency_policy = Some(policy.clone());
+            if let Some(snapshot) = self.snapshot.as_mut() {
+                snapshot.emergency_policy = policy.clone();
+            }
+            if let Some(snapshot) = self.last_snapshot_identity.as_mut() {
+                snapshot.emergency_policy = policy.clone();
+            }
+            self.status = Some(match policy {
+                StoredContextEmergencyPolicy::Block => {
+                    "Unattended context policy set to Block. Interactive and unattended turns will not mutate context automatically."
+                        .to_string()
+                }
+                StoredContextEmergencyPolicy::Authorized {
+                    protected_recent_assistant_turns,
+                    target_headroom_percent,
+                    allow_reasoning_suppression,
+                    allow_tool_distillation,
+                    allow_oldest_range_summary,
+                    ..
+                } => format!(
+                    "Authorized explicitly unattended recovery: protect {protected_recent_assistant_turns} recent assistant turns, target {target_headroom_percent}% headroom, reasoning {}, tools {}, oldest summary {}.",
+                    enabled_label(*allow_reasoning_suppression),
+                    enabled_label(*allow_tool_distillation),
+                    enabled_label(*allow_oldest_range_summary),
+                ),
+            });
+            self.error = None;
         }
 
         if let Some(rejection) = state.last_rejection.as_ref()
@@ -1139,6 +1179,21 @@ impl ContextEditor {
                 self.modal = Some(ContextEditorModal::ToolScan);
                 (false, None)
             }
+            KeyCode::Char('P') => {
+                if self
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.processing)
+                {
+                    self.error = Some(
+                        "Wait for the session to become idle before changing unattended authorization."
+                            .to_string(),
+                    );
+                } else {
+                    self.modal = Some(ContextEditorModal::EmergencyPolicyMenu);
+                }
+                (false, None)
+            }
             KeyCode::Char('g') => self.prepare_action(),
             KeyCode::Char('H') => {
                 self.phase = ContextEditorPhase::History;
@@ -1509,6 +1564,54 @@ impl ContextEditor {
                 }
                 _ => (false, None),
             },
+            ContextEditorModal::EmergencyPolicyMenu => match code {
+                KeyCode::Char('1') => {
+                    self.modal = None;
+                    self.error = None;
+                    (
+                        false,
+                        Some(ContextEditorAction::SetEmergencyPolicy(
+                            StoredContextEmergencyPolicy::Block,
+                        )),
+                    )
+                }
+                KeyCode::Char('2') => {
+                    self.modal = Some(ContextEditorModal::EmergencyPolicyInput);
+                    (false, None)
+                }
+                _ => (false, None),
+            },
+            ContextEditorModal::EmergencyPolicyInput => match code {
+                KeyCode::Enter => {
+                    let session_id = self
+                        .snapshot
+                        .as_ref()
+                        .map(|snapshot| snapshot.session_id.as_str())
+                        .unwrap_or("unknown");
+                    match parse_emergency_policy_input(&self.emergency_policy_input, session_id) {
+                        Ok(policy) => {
+                            self.modal = None;
+                            self.error = None;
+                            (false, Some(ContextEditorAction::SetEmergencyPolicy(policy)))
+                        }
+                        Err(error) => {
+                            self.error = Some(error);
+                            (false, None)
+                        }
+                    }
+                }
+                KeyCode::Backspace => {
+                    self.emergency_policy_input.pop();
+                    (false, None)
+                }
+                KeyCode::Char(character)
+                    if character.is_ascii_digit() || character.is_ascii_whitespace() =>
+                {
+                    self.emergency_policy_input.push(character);
+                    (false, None)
+                }
+                _ => (false, None),
+            },
             ContextEditorModal::ApplyConfirmation => match code {
                 KeyCode::Enter | KeyCode::Char('y') => {
                     if let Some(reason) = self.apply_disabled_reason() {
@@ -1631,6 +1734,7 @@ impl ContextEditor {
                 ("Detail", ContextEditorToolbarAction::Detail),
                 ("Prepare", ContextEditorToolbarAction::Prepare),
                 ("History", ContextEditorToolbarAction::History),
+                ("Policy", ContextEditorToolbarAction::Policy),
             ],
             ContextEditorPhase::ConfirmRangeClosure => vec![
                 ("Confirm range", ContextEditorToolbarAction::ConfirmRange),
@@ -1682,6 +1786,7 @@ impl ContextEditor {
             ContextEditorToolbarAction::ScanOutputs => Some(KeyCode::Char('D')),
             ContextEditorToolbarAction::Prepare => Some(KeyCode::Char('g')),
             ContextEditorToolbarAction::History => Some(KeyCode::Char('H')),
+            ContextEditorToolbarAction::Policy => Some(KeyCode::Char('P')),
             ContextEditorToolbarAction::Detail => return self.current_detail_action(),
             ContextEditorToolbarAction::ConfirmRange => Some(KeyCode::Enter),
             ContextEditorToolbarAction::RejectRange => Some(KeyCode::Char('n')),
@@ -1714,6 +1819,10 @@ impl ContextEditor {
         match action {
             ContextEditorToolbarAction::Range => self.current_message().is_some(),
             ContextEditorToolbarAction::Reasoning | ContextEditorToolbarAction::History => true,
+            ContextEditorToolbarAction::Policy => !self
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.processing),
             ContextEditorToolbarAction::ToggleOutput => {
                 self.current_message().is_some_and(|message| {
                     message
@@ -2107,7 +2216,7 @@ impl ContextEditor {
     fn render_footer(&mut self, frame: &mut Frame, area: Rect) {
         let help = match self.phase {
             ContextEditorPhase::Editing => {
-                "s range · Space select · R reasoning · d/D outputs · g review · H history · / search · ? help · Esc"
+                "s range · Space select · R reasoning · d/D outputs · P policy · g review · H history · / search · ? help · Esc"
             }
             ContextEditorPhase::ConfirmRangeClosure => "Enter confirm closure · Esc reject",
             ContextEditorPhase::PreparingDraft => {
@@ -2344,6 +2453,20 @@ impl ContextEditor {
         let height = match modal {
             ContextEditorModal::Help => 18,
             ContextEditorModal::ReasoningMenu => 9,
+            ContextEditorModal::EmergencyPolicyMenu => {
+                if width < 60 {
+                    16
+                } else {
+                    12
+                }
+            }
+            ContextEditorModal::EmergencyPolicyInput => {
+                if width < 60 {
+                    16
+                } else {
+                    14
+                }
+            }
             _ => 7,
         }
         .min(area.height.saturating_sub(4).max(3));
@@ -2370,6 +2493,18 @@ impl ContextEditor {
                     self.tool_scan_input
                 ),
             ),
+            ContextEditorModal::EmergencyPolicyMenu => (
+                "Unattended context authorization",
+                "1 Block unattended context surgery (safe default)\n2 Authorize one curator-backed provider-view transaction and one retry when an explicitly unattended turn cannot fit\n\nInteractive submits always remain manual. Raw transcript content, pending attachments, active tool pairs, and protected recent turns are never removed."
+                    .to_string(),
+            ),
+            ContextEditorModal::EmergencyPolicyInput => (
+                "Authorize unattended context surgery",
+                format!(
+                    "protected_turns headroom_percent reasoning tools oldest_summary\n{}\n\nFlags are 0 or 1. The policy permits at most one atomic transaction and one retry for explicitly unattended execution only. Enter authorize · Esc cancel",
+                    self.emergency_policy_input
+                ),
+            ),
             ContextEditorModal::ApplyConfirmation => (
                 "Apply transaction?",
                 self.apply_confirmation_text(),
@@ -2386,7 +2521,7 @@ impl ContextEditor {
             ),
             ContextEditorModal::Help => (
                 "Context editor help",
-                "Stable IDs, never wrapped rows, own every selection.\n\ns anchors structurally closed summary ranges.\nSpace selects stable messages or toggles a reviewed proposal.\nR stages replayed-reasoning suppression.\nd marks the selected ToolResult block. D scans mechanically.\ng prepares one curator-backed atomic review.\nTab changes pane focus. Arrow/vim keys navigate.\nOriginal Session.messages is never changed by these operations.\n\n? or Enter closes help."
+                "Stable IDs, never wrapped rows, own every selection.\n\ns anchors structurally closed summary ranges.\nSpace selects stable messages or toggles a reviewed proposal.\nR stages replayed-reasoning suppression.\nd marks the selected ToolResult block. D scans mechanically.\nP configures explicit unattended emergency authorization.\ng prepares one curator-backed atomic review.\nTab changes pane focus. Arrow/vim keys navigate.\nOriginal Session.messages is never changed by these operations.\n\n? or Enter closes help."
                     .to_string(),
             ),
         };
@@ -2848,6 +2983,10 @@ impl ContextEditor {
             Line::from(format!("Created: {}", transaction.created_at)),
             Line::from(format!("Base revision: {}", transaction.base_revision)),
             Line::from(format!(
+                "Authorization: {}",
+                context_authorization_label(&transaction.authorization)
+            )),
+            Line::from(format!(
                 "Operations: {} summaries · {} reasoning · {} distillations",
                 transaction.operation_counts.range_summaries,
                 transaction.operation_counts.reasoning_suppressions,
@@ -2884,7 +3023,10 @@ impl ContextEditor {
                 "Transaction {} · revision {}",
                 transaction.id, detail.context_revision
             )),
-            Line::from(format!("Authorization: {:?}", transaction.authorization)),
+            Line::from(format!(
+                "Authorization: {}",
+                context_authorization_label(&transaction.authorization)
+            )),
             Line::from(format!("Created: {}", transaction.created_at)),
             Line::from(format!("Base revision: {}", transaction.base_revision)),
             Line::from(format!(
@@ -2899,6 +3041,9 @@ impl ContextEditor {
                 event.kind,
                 event.reason.as_deref().unwrap_or("no reason")
             )));
+        }
+        if let Some(audit) = transaction.emergency_audit.as_ref() {
+            lines.extend(emergency_audit_lines(audit));
         }
         if let Some(application) = transaction.application.as_ref() {
             lines.push(Line::from(format!(
@@ -3436,6 +3581,50 @@ fn parse_tool_scan_input(input: &str) -> Result<(usize, usize), String> {
     Ok((minimum_tokens, protected_recent_turns))
 }
 
+fn parse_emergency_policy_input(
+    input: &str,
+    session_id: &str,
+) -> Result<StoredContextEmergencyPolicy, String> {
+    let parts = input.split_whitespace().collect::<Vec<_>>();
+    if parts.len() != 5 {
+        return Err(
+            "Enter exactly: protected_turns headroom_percent reasoning tools oldest_summary"
+                .to_string(),
+        );
+    }
+    let protected_recent_assistant_turns = parts[0]
+        .parse::<usize>()
+        .map_err(|_| "Protected turns must be an integer from 0 to 1000.".to_string())?;
+    if protected_recent_assistant_turns > 1_000 {
+        return Err("Protected turns must be an integer from 0 to 1000.".to_string());
+    }
+    let target_headroom_percent = parts[1]
+        .parse::<u8>()
+        .map_err(|_| "Target headroom must be an integer from 1 to 99.".to_string())?;
+    if !(1..=99).contains(&target_headroom_percent) {
+        return Err("Target headroom must be an integer from 1 to 99.".to_string());
+    }
+    let parse_flag = |value: &str, label: &str| match value {
+        "0" => Ok(false),
+        "1" => Ok(true),
+        _ => Err(format!("{label} must be 0 or 1.")),
+    };
+    let allow_reasoning_suppression = parse_flag(parts[2], "Reasoning")?;
+    let allow_tool_distillation = parse_flag(parts[3], "Tools")?;
+    let allow_oldest_range_summary = parse_flag(parts[4], "Oldest summary")?;
+    if !allow_reasoning_suppression && !allow_tool_distillation && !allow_oldest_range_summary {
+        return Err("Authorized policy must enable at least one operation category.".to_string());
+    }
+    Ok(StoredContextEmergencyPolicy::Authorized {
+        protected_recent_assistant_turns,
+        target_headroom_percent,
+        allow_reasoning_suppression,
+        allow_tool_distillation,
+        allow_oldest_range_summary,
+        authorization_source: format!("context_editor_session:{session_id}"),
+    })
+}
+
 fn metadata_only_chunk(total_chars: usize) -> ContextTextChunk {
     ContextTextChunk {
         start_char: 0,
@@ -3767,6 +3956,97 @@ fn transaction_status(transaction: &ContextTransactionSummary) -> &'static str {
         Some(StoredContextTransactionStatusKind::InvalidatedByTranscriptEdit) => "invalidated",
         None => "unknown",
     }
+}
+
+fn context_authorization_label(
+    authorization: &jcode_session_types::StoredContextAuthorization,
+) -> String {
+    match authorization {
+        jcode_session_types::StoredContextAuthorization::Manual { .. } => "manual".to_string(),
+        jcode_session_types::StoredContextAuthorization::UnattendedEmergency {
+            scheduled_item_id,
+            ..
+        } => scheduled_item_id
+            .as_ref()
+            .map(|id| format!("unattended emergency · scheduled item {id}"))
+            .unwrap_or_else(|| "unattended emergency · session authorization".to_string()),
+        jcode_session_types::StoredContextAuthorization::LegacyMigration { source } => {
+            format!("legacy migration · {source:?}")
+        }
+    }
+}
+
+fn emergency_audit_lines(
+    audit: &jcode_session_types::StoredContextEmergencyAudit,
+) -> Vec<Line<'static>> {
+    let (protected_turns, target_headroom, reasoning, tools, summary) = match &audit.policy {
+        StoredContextEmergencyPolicy::Authorized {
+            protected_recent_assistant_turns,
+            target_headroom_percent,
+            allow_reasoning_suppression,
+            allow_tool_distillation,
+            allow_oldest_range_summary,
+            ..
+        } => (
+            *protected_recent_assistant_turns,
+            *target_headroom_percent,
+            *allow_reasoning_suppression,
+            *allow_tool_distillation,
+            *allow_oldest_range_summary,
+        ),
+        StoredContextEmergencyPolicy::Block => (0, 0, false, false, false),
+    };
+    let retry = match &audit.retry_outcome {
+        jcode_session_types::StoredContextEmergencyRetryOutcome::Pending => "pending".to_string(),
+        jcode_session_types::StoredContextEmergencyRetryOutcome::Succeeded => {
+            "succeeded".to_string()
+        }
+        jcode_session_types::StoredContextEmergencyRetryOutcome::Blocked {
+            required_reduction_tokens,
+        } => format!(
+            "blocked · reduce by {}",
+            format_tokens(*required_reduction_tokens)
+        ),
+        jcode_session_types::StoredContextEmergencyRetryOutcome::ProviderRejected => {
+            "provider rejected".to_string()
+        }
+        jcode_session_types::StoredContextEmergencyRetryOutcome::Failed { .. } => {
+            "failed · detail retained in persisted audit".to_string()
+        }
+    };
+    vec![
+        Line::from("Emergency context surgery audit:"),
+        Line::from(format!(
+            "  Trigger: {:?} · scheduled item: {} · retry: {retry}",
+            audit.trigger_kind,
+            audit.scheduled_item_id.as_deref().unwrap_or("none")
+        )),
+        Line::from(format!(
+            "  Policy: protect {protected_turns} recent assistant turn(s) · target {target_headroom}% headroom · reasoning {} · tools {} · oldest summary {}",
+            enabled_label(reasoning),
+            enabled_label(tools),
+            enabled_label(summary)
+        )),
+        Line::from(format!(
+            "  Budget: projected {} · safe {} · fit reduction {} · target reduction {} · achieved {}",
+            format_tokens(audit.projected_input_tokens),
+            format_tokens(audit.safe_input_budget),
+            format_tokens(audit.required_reduction_to_fit_tokens),
+            format_tokens(audit.required_reduction_to_target_tokens),
+            format_tokens(audit.achieved_reduction_tokens)
+        )),
+        Line::from(format!(
+            "  Protected messages: {} · operation order: {} · provider error recorded: {}",
+            audit.protected_message_count,
+            audit
+                .operation_order
+                .iter()
+                .map(|operation| format!("{operation:?}"))
+                .collect::<Vec<_>>()
+                .join(" → "),
+            audit.provider_error.is_some()
+        )),
+    ]
 }
 
 fn expansion_reason(reason: &StoredRangeBoundaryExpansionReason) -> String {
@@ -4141,6 +4421,7 @@ mod tests {
                 application: None,
                 economics: Some(draft.preview.economics.clone()),
                 curator_usage: draft.curator_usage.clone(),
+                emergency_audit: None,
             },
         }
     }
@@ -4903,7 +5184,7 @@ mod tests {
     }
 
     #[test]
-    fn emergency_policy_is_visible_without_exposing_a_phase_nine_control() {
+    fn emergency_policy_is_visible_and_explicitly_controllable_without_exposing_provenance() {
         let mut editor = ContextEditor::new(ContextEditorOpenMode::Edit);
         let mut blocked = snapshot();
         blocked.emergency_policy = jcode_session_types::StoredContextEmergencyPolicy::Block;
@@ -4915,7 +5196,35 @@ mod tests {
             editor
                 .toolbar_items()
                 .iter()
-                .all(|(_, action)| !matches!(action, ContextEditorToolbarAction::Apply))
+                .any(|(_, action)| matches!(action, ContextEditorToolbarAction::Policy))
+        );
+        let (_, action) = editor.handle_key(KeyCode::Char('P'), KeyModifiers::NONE);
+        assert!(action.is_none());
+        assert_eq!(editor.modal, Some(ContextEditorModal::EmergencyPolicyMenu));
+        let (_, action) = editor.handle_key(KeyCode::Char('1'), KeyModifiers::NONE);
+        assert_eq!(
+            action,
+            Some(ContextEditorAction::SetEmergencyPolicy(
+                StoredContextEmergencyPolicy::Block
+            ))
+        );
+
+        editor.handle_key(KeyCode::Char('P'), KeyModifiers::NONE);
+        editor.handle_key(KeyCode::Char('2'), KeyModifiers::NONE);
+        editor.emergency_policy_input = "7 15 1 0 1".to_string();
+        let (_, action) = editor.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(
+            action,
+            Some(ContextEditorAction::SetEmergencyPolicy(
+                StoredContextEmergencyPolicy::Authorized {
+                    protected_recent_assistant_turns: 7,
+                    target_headroom_percent: 15,
+                    allow_reasoning_suppression: true,
+                    allow_tool_distillation: false,
+                    allow_oldest_range_summary: true,
+                    authorization_source: "context_editor_session:session-1".to_string(),
+                }
+            ))
         );
 
         let mut authorized = snapshot();
@@ -4937,6 +5246,110 @@ mod tests {
         assert!(rendered.contains("tool distillation blocked"));
         assert!(rendered.contains("oldest-range summary allowed"));
         assert!(!rendered.contains("sensitive source remains hidden"));
+    }
+
+    #[test]
+    fn emergency_policy_control_is_processing_gated_and_validates_every_parameter() {
+        let mut editor = ContextEditor::new(ContextEditorOpenMode::Edit);
+        let mut processing = snapshot();
+        processing.processing = true;
+        editor.apply_snapshot(processing);
+        assert!(!editor.toolbar_action_enabled(ContextEditorToolbarAction::Policy));
+
+        assert!(parse_emergency_policy_input("5 0 1 1 1", "session-1").is_err());
+        assert!(parse_emergency_policy_input("1001 10 1 1 1", "session-1").is_err());
+        assert!(parse_emergency_policy_input("5 10 0 0 0", "session-1").is_err());
+        assert!(parse_emergency_policy_input("5 10 2 1 1", "session-1").is_err());
+        assert!(parse_emergency_policy_input("5 10 1 1", "session-1").is_err());
+    }
+
+    #[test]
+    fn emergency_policy_modals_preserve_complete_safety_copy_at_narrow_width() {
+        let mut editor = ContextEditor::new(ContextEditorOpenMode::Edit);
+        editor.apply_snapshot(snapshot());
+
+        editor.handle_key(KeyCode::Char('P'), KeyModifiers::NONE);
+        let menu = render_editor_text(&mut editor, 52, 40);
+        let menu = menu
+            .chars()
+            .map(|character| {
+                if ('\u{2500}'..='\u{257f}').contains(&character) {
+                    ' '
+                } else {
+                    character
+                }
+            })
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(menu.contains("Interactive submits always remain manual."));
+        assert!(
+            menu.contains("Raw transcript content, pending attachments, active tool pairs, and")
+        );
+        assert!(menu.contains("protected recent turns are never removed."));
+
+        editor.handle_key(KeyCode::Char('2'), KeyModifiers::NONE);
+        let input = render_editor_text(&mut editor, 52, 40);
+        let input = input
+            .chars()
+            .map(|character| {
+                if ('\u{2500}'..='\u{257f}').contains(&character) {
+                    ' '
+                } else {
+                    character
+                }
+            })
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(input.contains("one atomic transaction"));
+        assert!(input.contains("and one retry"));
+        assert!(input.contains("explicitly unattended execution only"));
+    }
+
+    #[test]
+    fn emergency_audit_presentation_discloses_effects_without_sensitive_free_text() {
+        let audit = jcode_session_types::StoredContextEmergencyAudit {
+            authorization_source: "secret-audit-source".to_string(),
+            scheduled_item_id: Some("sched-public".to_string()),
+            policy: StoredContextEmergencyPolicy::Authorized {
+                protected_recent_assistant_turns: 5,
+                target_headroom_percent: 10,
+                allow_reasoning_suppression: true,
+                allow_tool_distillation: true,
+                allow_oldest_range_summary: false,
+                authorization_source: "secret-policy-source".to_string(),
+            },
+            trigger_kind:
+                jcode_session_types::StoredContextEmergencyTriggerKind::ProviderContextLimit,
+            provider_error: Some("secret provider payload".to_string()),
+            context_window: 100_000,
+            safe_input_budget: 95_000,
+            projected_input_tokens: 98_000,
+            required_reduction_to_fit_tokens: 3_000,
+            required_reduction_to_target_tokens: 12_500,
+            achieved_reduction_tokens: 14_000,
+            protected_recent_assistant_turns: 5,
+            protected_message_count: 8,
+            operation_order: vec![
+                jcode_session_types::StoredContextEmergencyOperationKind::ReasoningSuppression,
+                jcode_session_types::StoredContextEmergencyOperationKind::ToolResultDistillation,
+            ],
+            retry_outcome: jcode_session_types::StoredContextEmergencyRetryOutcome::Failed {
+                detail: "secret retry detail".to_string(),
+            },
+        };
+        let rendered = rendered_text(emergency_audit_lines(&audit));
+        assert!(rendered.contains("sched-public"));
+        assert!(rendered.contains("ProviderContextLimit"));
+        assert!(rendered.contains("14.0K"));
+        assert!(rendered.contains("provider error recorded: true"));
+        assert!(!rendered.contains("secret-audit-source"));
+        assert!(!rendered.contains("secret-policy-source"));
+        assert!(!rendered.contains("secret provider payload"));
+        assert!(!rendered.contains("secret retry detail"));
     }
 
     #[test]
@@ -6159,8 +6572,11 @@ mod tests {
 
         editor.transaction_detail = Some(transaction_detail_from_draft("LONG_FIELD", &draft));
         let detail = rendered_text(editor.transaction_detail_lines(80));
+        assert!(
+            !detail.contains("LONG_FIELD AUTHORIZATION_TAIL"),
+            "authorization provenance must not be rendered as free text"
+        );
         for expected in [
-            "LONG_FIELD AUTHORIZATION_TAIL",
             "LONG_FIELD STATUS_REASON_TAIL",
             "LONG_FIELD SUMMARY_TAIL",
             "LONG_FIELD FILE_DIGEST_TAIL",

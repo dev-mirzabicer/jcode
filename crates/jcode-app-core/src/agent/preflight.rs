@@ -9,7 +9,7 @@ impl Agent {
         image_count: usize,
         pending_input_tokens: usize,
         transcript_len_before_pending: usize,
-        reserved_alerts: Vec<String>,
+        options: PendingTurnOptions,
     ) {
         self.active_turn_context = Some(ActiveTurnContext {
             request_id,
@@ -17,7 +17,7 @@ impl Agent {
                 .map(|id| ContextPendingInputMetadata::new(id, user_message, image_count)),
             pending_input_tokens,
             transcript_len_before_pending,
-            reserved_alerts,
+            reserved_alerts: options.reserved_alerts,
             provider_output_started: false,
             partial_output_checkpointed: false,
             partial_output_persistence_error: None,
@@ -26,6 +26,9 @@ impl Agent {
             locked_tools_before_pending: self.locked_tools.clone(),
             mcp_late_register_resolved_before_pending: self.mcp_late_register_resolved,
             tool_output_scan_index_before_pending: self.tool_output_scan_index,
+            unattended_context: options.unattended_context,
+            emergency_attempted: false,
+            emergency_transaction_id: None,
         });
     }
 
@@ -266,6 +269,58 @@ impl Agent {
         ))
     }
 
+    pub(super) fn has_unattended_context(&self) -> bool {
+        self.active_turn_context
+            .as_ref()
+            .and_then(|context| context.unattended_context.as_ref())
+            .is_some_and(jcode_session_types::StoredUnattendedContextAuthorization::is_authorized)
+    }
+
+    pub(super) fn block_unattended_preflight(
+        &mut self,
+        report: ContextPreflightReport,
+        event_tx: Option<&mpsc::UnboundedSender<ServerEvent>>,
+    ) -> anyhow::Error {
+        self.block_unattended_preflight_with_detail(
+            report,
+            event_tx,
+            "safe authorized reduction was unavailable or the single emergency retry still did not fit"
+                .to_string(),
+        )
+    }
+
+    pub(super) fn block_unattended_preflight_with_detail(
+        &mut self,
+        report: ContextPreflightReport,
+        event_tx: Option<&mpsc::UnboundedSender<ServerEvent>>,
+        detail: String,
+    ) -> anyhow::Error {
+        self.finish_emergency_retry_audit(
+            jcode_session_types::StoredContextEmergencyRetryOutcome::Blocked {
+                required_reduction_tokens: report.required_reduction_tokens,
+            },
+        );
+        self.emit_context_action_required(
+            ContextActionRequiredReason::PreflightLimit,
+            Some(report.clone()),
+            None,
+            None,
+            vec![
+                "The explicitly unattended request remains protected in authoritative history."
+                    .to_string(),
+                crate::util::truncate_str(&detail, 512).to_string(),
+                "No second emergency transaction or automatic raw-context mutation was attempted."
+                    .to_string(),
+            ],
+            event_tx,
+        );
+        anyhow::anyhow!(
+            "Unattended request blocked after authorized context recovery: {} token(s) still required; {}",
+            report.required_reduction_tokens,
+            crate::util::truncate_str(&detail, 512)
+        )
+    }
+
     pub(super) fn handle_provider_size_rejection(
         &mut self,
         error: &str,
@@ -279,6 +334,14 @@ impl Agent {
         } else {
             return Ok(None);
         };
+
+        if reason == ContextActionRequiredReason::ProviderContextLimit
+            && !self.provider_output_started()
+        {
+            self.finish_emergency_retry_audit(
+                jcode_session_types::StoredContextEmergencyRetryOutcome::ProviderRejected,
+            );
+        }
 
         let output_started = self.provider_output_started();
         let partial_output_persistence_error = self

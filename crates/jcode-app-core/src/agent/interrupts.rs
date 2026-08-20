@@ -136,6 +136,7 @@ impl Agent {
                 images,
                 urgent,
                 source,
+                unattended_context: None,
             });
             logging::info(&format!(
                 "AGENT_SOFT_INTERRUPT_QUEUE_PUSH session={} source={:?} urgent={} content_bytes={} content_chars={} image_count={} pending_before={} pending_after={}",
@@ -325,9 +326,16 @@ impl Agent {
             .unwrap_or_default()
     }
 
-    /// Inject all pending soft interrupt messages into the conversation.
-    /// Returns the combined message content and clears the queue.
+    /// Inject one contiguous authorization scope from the pending soft interrupt queue.
+    /// Differently authorized tasks remain queued for a later provider request so
+    /// authority can neither leak across tasks nor be lost by mixed batching.
     pub(super) fn inject_soft_interrupts(&mut self) -> Vec<InjectedSoftInterrupt> {
+        if !self.finish_emergency_retry_audit(
+            jcode_session_types::StoredContextEmergencyRetryOutcome::Succeeded,
+        ) {
+            logging::warn("Soft interrupt injection deferred until emergency retry audit persists");
+            return Vec::new();
+        }
         let messages: Vec<SoftInterruptMessage> = {
             let mut queue = match self.soft_interrupt_queue.lock() {
                 Ok(queue) => queue,
@@ -342,18 +350,38 @@ impl Agent {
             if queue.is_empty() {
                 return Vec::new();
             }
+            let scope = queue[0].unattended_context.clone();
+            let scope_end = queue
+                .iter()
+                .position(|message| message.unattended_context != scope)
+                .unwrap_or(queue.len());
             logging::info(&format!(
-                "AGENT_SOFT_INTERRUPT_INJECT_DRAIN session={} pending_count={} urgent_count={} total_content_bytes={}",
+                "AGENT_SOFT_INTERRUPT_INJECT_DRAIN session={} pending_count={} selected_count={} urgent_count={} total_content_bytes={}",
                 self.session_id(),
                 queue.len(),
-                queue.iter().filter(|message| message.urgent).count(),
+                scope_end,
+                queue[..scope_end]
+                    .iter()
+                    .filter(|message| message.urgent)
+                    .count(),
                 queue
                     .iter()
+                    .take(scope_end)
                     .map(|message| message.content.len())
                     .sum::<usize>()
             ));
-            queue.drain(..).collect()
+            queue.drain(..scope_end).collect()
         };
+
+        let common_unattended_context = messages
+            .first()
+            .and_then(|message| message.unattended_context.clone())
+            .filter(|first| {
+                messages
+                    .iter()
+                    .all(|message| message.unattended_context.as_ref() == Some(first))
+            });
+        let injected_start = self.message_count();
 
         let mut injected = Vec::new();
         let mut current_source: Option<SoftInterruptSource> = None;
@@ -417,6 +445,24 @@ impl Agent {
             );
         }
 
+        let injected_tokens = self.session.messages[injected_start..]
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .map(jcode_context_core::estimate_content_block_tokens)
+            .sum::<usize>();
+        if let Some(context) = self.active_turn_context.as_mut() {
+            context.unattended_context = common_unattended_context;
+            context.emergency_attempted = false;
+            context.emergency_transaction_id = None;
+            context.provider_output_started = false;
+            context.pending_input = None;
+            context.transcript_len_before_pending =
+                context.transcript_len_before_pending.min(injected_start);
+            context.pending_input_tokens =
+                context.pending_input_tokens.saturating_add(injected_tokens);
+        }
+
+        self.persist_soft_interrupt_snapshot();
         self.persist_session_best_effort("soft interrupt injection");
         logging::info(&format!(
             "AGENT_SOFT_INTERRUPT_INJECT_COMMIT session={} groups={} total_content_bytes={}",

@@ -77,6 +77,8 @@ pub struct StoredContextTransaction {
     pub economics: Option<StoredContextEconomics>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub curator_usage: Vec<StoredContextCuratorUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emergency_audit: Option<StoredContextEmergencyAudit>,
 }
 
 impl StoredContextTransaction {
@@ -125,6 +127,8 @@ pub enum StoredContextAuthorization {
         authorization_source: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         trigger: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scheduled_item_id: Option<String>,
     },
     LegacyMigration {
         source: StoredLegacyContextSource,
@@ -491,6 +495,79 @@ impl StoredContextEmergencyPolicy {
     }
 }
 
+/// Exact authorization attached to one explicitly unattended turn.
+///
+/// The policy is copied rather than referenced so scheduler restart, later
+/// session-policy changes, and child creation cannot silently alter the
+/// authority used by an already-dispatched task.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredUnattendedContextAuthorization {
+    pub policy: StoredContextEmergencyPolicy,
+    pub authorization_source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduled_item_id: Option<String>,
+}
+
+impl StoredUnattendedContextAuthorization {
+    pub fn is_authorized(&self) -> bool {
+        self.policy.is_authorized()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StoredContextEmergencyTriggerKind {
+    PreflightLimit,
+    ProviderContextLimit,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StoredContextEmergencyOperationKind {
+    ReasoningSuppression,
+    ToolResultDistillation,
+    OldestRangeSummary,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum StoredContextEmergencyRetryOutcome {
+    Pending,
+    Succeeded,
+    Blocked { required_reduction_tokens: usize },
+    ProviderRejected,
+    Failed { detail: String },
+}
+
+/// Bounded provenance for one emergency context transaction.
+///
+/// Provider errors and authorization-source text may contain sensitive source
+/// material. Export redaction must scrub them, and logs/debug summaries must
+/// expose only IDs, counts, booleans, and bounded outcome categories. Generated
+/// summaries and replacements remain inspectable through ordinary transaction
+/// operations and are deliberately not duplicated here.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredContextEmergencyAudit {
+    pub authorization_source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduled_item_id: Option<String>,
+    pub policy: StoredContextEmergencyPolicy,
+    pub trigger_kind: StoredContextEmergencyTriggerKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_error: Option<String>,
+    pub context_window: usize,
+    pub safe_input_budget: usize,
+    pub projected_input_tokens: usize,
+    pub required_reduction_to_fit_tokens: usize,
+    pub required_reduction_to_target_tokens: usize,
+    pub achieved_reduction_tokens: usize,
+    pub protected_recent_assistant_turns: usize,
+    pub protected_message_count: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operation_order: Vec<StoredContextEmergencyOperationKind>,
+    pub retry_outcome: StoredContextEmergencyRetryOutcome,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -561,8 +638,10 @@ mod tests {
             id: "context-transaction-1".to_string(),
             base_revision: 3,
             created_at: timestamp(),
-            authorization: StoredContextAuthorization::Manual {
-                initiated_by: Some("local_tui".to_string()),
+            authorization: StoredContextAuthorization::UnattendedEmergency {
+                authorization_source: "scheduled_item:sched-7".to_string(),
+                trigger: Some("provider_context_limit".to_string()),
+                scheduled_item_id: Some("sched-7".to_string()),
             },
             operations: vec![
                 StoredContextOperation::RangeSummary(StoredRangeSummary {
@@ -682,6 +761,34 @@ mod tests {
                 cache_creation_input_tokens: Some(5_000),
                 cost_usd: Some(0.25),
             }],
+            emergency_audit: Some(StoredContextEmergencyAudit {
+                authorization_source: "scheduled_item:sched-7".to_string(),
+                scheduled_item_id: Some("sched-7".to_string()),
+                policy: StoredContextEmergencyPolicy::Authorized {
+                    protected_recent_assistant_turns: 5,
+                    target_headroom_percent: 20,
+                    allow_reasoning_suppression: true,
+                    allow_tool_distillation: true,
+                    allow_oldest_range_summary: true,
+                    authorization_source: "schedule_tool_session:session-1".to_string(),
+                },
+                trigger_kind: StoredContextEmergencyTriggerKind::ProviderContextLimit,
+                provider_error: Some("provider context length exceeded".to_string()),
+                context_window: 372_000,
+                safe_input_budget: 367_904,
+                projected_input_tokens: 370_000,
+                required_reduction_to_fit_tokens: 2_096,
+                required_reduction_to_target_tokens: 75_683,
+                achieved_reduction_tokens: 80_000,
+                protected_recent_assistant_turns: 5,
+                protected_message_count: 12,
+                operation_order: vec![
+                    StoredContextEmergencyOperationKind::ReasoningSuppression,
+                    StoredContextEmergencyOperationKind::ToolResultDistillation,
+                    StoredContextEmergencyOperationKind::OldestRangeSummary,
+                ],
+                retry_outcome: StoredContextEmergencyRetryOutcome::Succeeded,
+            }),
         };
         let state = StoredContextViewState {
             schema_version: STORED_CONTEXT_VIEW_SCHEMA_VERSION,
@@ -725,6 +832,7 @@ mod tests {
             application: None,
             economics: None,
             curator_usage: Vec::new(),
+            emergency_audit: None,
         };
         assert!(!transaction.is_active());
 

@@ -13,11 +13,27 @@ use crate::tool::Registry;
 use anyhow::Result;
 use async_stream::stream;
 use async_trait::async_trait;
+use jcode_session_types::{StoredContextEmergencyPolicy, StoredUnattendedContextAuthorization};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
 use tokio::sync::{Mutex, RwLock, mpsc};
+
+fn scheduled_authorization(item_id: &str) -> StoredUnattendedContextAuthorization {
+    StoredUnattendedContextAuthorization {
+        policy: StoredContextEmergencyPolicy::Authorized {
+            protected_recent_assistant_turns: 5,
+            target_headroom_percent: 10,
+            allow_reasoning_suppression: true,
+            allow_tool_distillation: true,
+            allow_oldest_range_summary: true,
+            authorization_source: "schedule_tool_session:origin".to_string(),
+        },
+        authorization_source: format!("scheduled_item:{item_id}"),
+        scheduled_item_id: Some(item_id.to_string()),
+    }
+}
 use tokio::time::{Duration, timeout};
 
 #[allow(clippy::type_complexity)]
@@ -478,6 +494,7 @@ async fn notify_session_runs_scheduled_task_immediately_for_idle_live_session() 
         77,
         session_id.clone(),
         "[Scheduled task]\nTask: Follow up".to_string(),
+        Some(scheduled_authorization("sched-live")),
         NotifySessionContext {
             sessions: &sessions,
             soft_interrupt_queues: &soft_interrupt_queues,
@@ -598,6 +615,7 @@ async fn notify_session_queues_soft_interrupt_when_live_session_is_busy() {
         88,
         session_id.clone(),
         "[Scheduled task]\nTask: Follow up while busy".to_string(),
+        Some(scheduled_authorization("sched-busy")),
         NotifySessionContext {
             sessions: &sessions,
             soft_interrupt_queues: &soft_interrupt_queues,
@@ -637,6 +655,10 @@ async fn notify_session_queues_soft_interrupt_when_live_session_is_busy() {
         "scheduled task should queue as soft interrupt"
     );
     assert!(queued[0].content.contains("Task: Follow up while busy"));
+    assert_eq!(
+        queued[0].unattended_context,
+        Some(scheduled_authorization("sched-busy"))
+    );
     drop(queued);
 
     let client_events: Vec<_> = std::iter::from_fn(|| client_event_rx.try_recv().ok()).collect();

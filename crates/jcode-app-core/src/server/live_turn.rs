@@ -27,6 +27,15 @@ use tokio::sync::{Mutex, RwLock, broadcast};
 
 type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
 
+pub(super) struct TrackedLiveTurn {
+    pub(super) message: String,
+    pub(super) system_reminder: Option<String>,
+    pub(super) display_role: Option<crate::session::StoredDisplayRole>,
+    pub(super) unattended_context:
+        Option<jcode_session_types::StoredUnattendedContextAuthorization>,
+    pub(super) status_detail: Option<String>,
+}
+
 /// Swarm bookkeeping handles needed to keep member status accurate around a
 /// server-initiated turn.
 #[derive(Clone)]
@@ -93,16 +102,13 @@ pub(super) async fn idle_live_agent(
 pub(super) async fn spawn_tracked_live_turn(
     session_id: &str,
     agent: Arc<Mutex<Agent>>,
-    message: String,
-    system_reminder: Option<String>,
-    display_role: Option<crate::session::StoredDisplayRole>,
-    status_detail: Option<String>,
+    turn: TrackedLiveTurn,
     swarm: LiveTurnSwarmContext,
 ) {
     update_member_status(
         session_id,
         "running",
-        status_detail,
+        turn.status_detail,
         &swarm.members,
         &swarm.swarms_by_id,
         Some(&swarm.event_history),
@@ -114,27 +120,29 @@ pub(super) async fn spawn_tracked_live_turn(
     let event_tx = session_event_fanout_sender(session_id.to_string(), Arc::clone(&swarm.members));
     let session_id = session_id.to_string();
     tokio::spawn(async move {
+        let unattended = turn.unattended_context.is_some();
         let start_message_index = {
             let agent_guard = agent.lock().await;
             agent_guard.message_count()
         };
-        let result = if let Some(display_role) = display_role {
+        let result = if let Some(display_role) = turn.display_role {
             let mut agent = agent.lock().await;
             agent
-                .run_once_streaming_mpsc_with_display_role(
-                    &message,
+                .run_once_streaming_mpsc_with_display_role_and_unattended(
+                    &turn.message,
                     vec![],
-                    system_reminder,
+                    turn.system_reminder,
                     event_tx.clone(),
                     Some(display_role),
+                    turn.unattended_context,
                 )
                 .await
         } else {
             process_message_streaming_mpsc(
                 Arc::clone(&agent),
-                &message,
+                &turn.message,
                 vec![],
-                system_reminder,
+                turn.system_reminder,
                 event_tx.clone(),
             )
             .await
@@ -160,14 +168,25 @@ pub(super) async fn spawn_tracked_live_turn(
                 let _ = event_tx.send(ServerEvent::Done { id: 0 });
             }
             Err(error) => {
-                crate::logging::error(&format!(
-                    "Server-initiated turn failed for live session {}: {}",
-                    session_id, error
-                ));
+                if unattended {
+                    crate::logging::error(&format!(
+                        "Server-initiated unattended turn failed safely for live session {}",
+                        session_id
+                    ));
+                } else {
+                    crate::logging::error(&format!(
+                        "Server-initiated turn failed for live session {}: {}",
+                        session_id, error
+                    ));
+                }
                 update_member_status(
                     &session_id,
                     "failed",
-                    Some(truncate_detail(&error.to_string(), 120)),
+                    Some(if unattended {
+                        "unattended turn failed safely".to_string()
+                    } else {
+                        truncate_detail(&error.to_string(), 120)
+                    }),
                     &swarm.members,
                     &swarm.swarms_by_id,
                     Some(&swarm.event_history),
@@ -201,10 +220,13 @@ pub(super) async fn run_live_turn_if_idle(
     spawn_tracked_live_turn(
         session_id,
         agent,
-        message.to_string(),
-        system_reminder,
-        None,
-        detail,
+        TrackedLiveTurn {
+            message: message.to_string(),
+            system_reminder,
+            display_role: None,
+            unattended_context: None,
+            status_detail: detail,
+        },
         swarm,
     )
     .await;
@@ -214,6 +236,7 @@ pub(super) async fn run_live_turn_if_idle(
 pub(super) async fn run_live_system_turn_if_idle(
     session_id: &str,
     message: &str,
+    unattended_context: Option<jcode_session_types::StoredUnattendedContextAuthorization>,
     sessions: &SessionAgents,
     swarm: LiveTurnSwarmContext,
 ) -> bool {
@@ -224,10 +247,13 @@ pub(super) async fn run_live_system_turn_if_idle(
     spawn_tracked_live_turn(
         session_id,
         agent,
-        message.to_string(),
-        None,
-        Some(crate::session::StoredDisplayRole::System),
-        detail,
+        TrackedLiveTurn {
+            message: message.to_string(),
+            system_reminder: None,
+            display_role: Some(crate::session::StoredDisplayRole::System),
+            unattended_context,
+            status_detail: detail,
+        },
         swarm,
     )
     .await;

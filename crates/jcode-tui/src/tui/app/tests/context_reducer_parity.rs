@@ -131,6 +131,7 @@ fn parity_transaction() -> jcode_session_types::StoredContextTransaction {
         application: None,
         economics: Some(parity_economics()),
         curator_usage: Vec::new(),
+        emergency_audit: None,
     }
 }
 

@@ -1,6 +1,12 @@
 use super::*;
 use crate::{terminal_eprintln as eprintln, terminal_println as println};
 
+struct StreamingTurnContext {
+    request_id: Option<u64>,
+    display_role: Option<crate::session::StoredDisplayRole>,
+    unattended_context: Option<jcode_session_types::StoredUnattendedContextAuthorization>,
+}
+
 impl Agent {
     /// Run a single turn with the given user message
     pub async fn run_once(&mut self, user_message: &str) -> Result<()> {
@@ -12,7 +18,7 @@ impl Agent {
             0,
             pending_input_tokens,
             self.message_count(),
-            Vec::new(),
+            PendingTurnOptions::default(),
         );
         self.add_message(Role::User, blocks);
         if let Err(error) = self.session.save() {
@@ -23,6 +29,17 @@ impl Agent {
             eprintln!("[trace] session_id {}", self.session.id);
         }
         let result = self.run_turn(true).await.map(|_| ());
+        if result.is_ok() {
+            self.finish_emergency_retry_audit(
+                jcode_session_types::StoredContextEmergencyRetryOutcome::Succeeded,
+            );
+        } else if let Err(error) = &result {
+            self.finish_emergency_retry_audit(
+                jcode_session_types::StoredContextEmergencyRetryOutcome::Failed {
+                    detail: crate::util::truncate_str(&error.to_string(), 512).to_string(),
+                },
+            );
+        }
         self.finish_pending_turn();
         result
     }
@@ -32,10 +49,45 @@ impl Agent {
             .await
     }
 
+    pub(crate) async fn run_once_capture_with_session_unattended_policy(
+        &mut self,
+        user_message: &str,
+        authorization_source: &str,
+    ) -> Result<String> {
+        let unattended_context = self
+            .session
+            .context_view
+            .emergency_policy
+            .is_authorized()
+            .then(
+                || jcode_session_types::StoredUnattendedContextAuthorization {
+                    policy: self.session.context_view.emergency_policy.clone(),
+                    authorization_source: authorization_source.to_string(),
+                    scheduled_item_id: None,
+                },
+            );
+        self.run_once_capture_with_display_role_and_unattended(
+            user_message,
+            None,
+            unattended_context,
+        )
+        .await
+    }
+
     pub(crate) async fn run_once_capture_with_display_role(
         &mut self,
         user_message: &str,
         display_role: Option<crate::session::StoredDisplayRole>,
+    ) -> Result<String> {
+        self.run_once_capture_with_display_role_and_unattended(user_message, display_role, None)
+            .await
+    }
+
+    pub(crate) async fn run_once_capture_with_display_role_and_unattended(
+        &mut self,
+        user_message: &str,
+        display_role: Option<crate::session::StoredDisplayRole>,
+        unattended_context: Option<jcode_session_types::StoredUnattendedContextAuthorization>,
     ) -> Result<String> {
         let blocks = Self::user_context_blocks(user_message, Vec::new());
         let pending_input_tokens = jcode_context_core::estimate_content_blocks_tokens(&blocks);
@@ -45,7 +97,10 @@ impl Agent {
             0,
             pending_input_tokens,
             self.message_count(),
-            Vec::new(),
+            PendingTurnOptions {
+                reserved_alerts: Vec::new(),
+                unattended_context,
+            },
         );
         self.add_message_with_display_role(Role::User, blocks, display_role);
         if let Err(error) = self.session.save() {
@@ -56,6 +111,17 @@ impl Agent {
             eprintln!("[trace] session_id {}", self.session.id);
         }
         let result = self.run_turn(false).await;
+        if result.is_ok() {
+            self.finish_emergency_retry_audit(
+                jcode_session_types::StoredContextEmergencyRetryOutcome::Succeeded,
+            );
+        } else if let Err(error) = &result {
+            self.finish_emergency_retry_audit(
+                jcode_session_types::StoredContextEmergencyRetryOutcome::Failed {
+                    detail: crate::util::truncate_str(&error.to_string(), 512).to_string(),
+                },
+            );
+        }
         self.finish_pending_turn();
         result
     }
@@ -69,12 +135,15 @@ impl Agent {
         event_tx: mpsc::UnboundedSender<ServerEvent>,
     ) -> Result<()> {
         self.run_once_streaming_mpsc_with_request_context(
-            None,
             user_message,
             images,
             system_reminder,
             event_tx,
-            None,
+            StreamingTurnContext {
+                request_id: None,
+                display_role: None,
+                unattended_context: None,
+            },
         )
         .await
     }
@@ -88,43 +157,49 @@ impl Agent {
         event_tx: mpsc::UnboundedSender<ServerEvent>,
     ) -> Result<()> {
         self.run_once_streaming_mpsc_with_request_context(
-            Some(request_id),
             user_message,
             images,
             system_reminder,
             event_tx,
-            None,
+            StreamingTurnContext {
+                request_id: Some(request_id),
+                display_role: None,
+                unattended_context: None,
+            },
         )
         .await
     }
 
-    pub(crate) async fn run_once_streaming_mpsc_with_display_role(
+    pub(crate) async fn run_once_streaming_mpsc_with_display_role_and_unattended(
         &mut self,
         user_message: &str,
         images: Vec<(String, String)>,
         system_reminder: Option<String>,
         event_tx: mpsc::UnboundedSender<ServerEvent>,
         display_role: Option<crate::session::StoredDisplayRole>,
+        unattended_context: Option<jcode_session_types::StoredUnattendedContextAuthorization>,
     ) -> Result<()> {
         self.run_once_streaming_mpsc_with_request_context(
-            None,
             user_message,
             images,
             system_reminder,
             event_tx,
-            display_role,
+            StreamingTurnContext {
+                request_id: None,
+                display_role,
+                unattended_context,
+            },
         )
         .await
     }
 
     async fn run_once_streaming_mpsc_with_request_context(
         &mut self,
-        request_id: Option<u64>,
         user_message: &str,
         images: Vec<(String, String)>,
         system_reminder: Option<String>,
         event_tx: mpsc::UnboundedSender<ServerEvent>,
-        display_role: Option<crate::session::StoredDisplayRole>,
+        context: StreamingTurnContext,
     ) -> Result<()> {
         let transcript_len_before_pending = self.message_count();
         let image_count = images.len();
@@ -133,12 +208,15 @@ impl Agent {
         // Inject any pending notifications before the user message
         let alerts = self.take_alerts();
         self.begin_pending_turn(
-            request_id,
+            context.request_id,
             user_message,
             image_count,
             pending_input_tokens,
             transcript_len_before_pending,
-            alerts.clone(),
+            PendingTurnOptions {
+                reserved_alerts: alerts.clone(),
+                unattended_context: context.unattended_context,
+            },
         );
         if !alerts.is_empty() {
             let alert_text = format!(
@@ -158,7 +236,8 @@ impl Agent {
         self.current_turn_system_reminder =
             system_reminder.filter(|value| !value.trim().is_empty());
 
-        if let Err(error) = self.append_user_context_blocks_with_display_role(blocks, display_role)
+        if let Err(error) =
+            self.append_user_context_blocks_with_display_role(blocks, context.display_role)
         {
             self.abort_pending_turn_setup();
             self.current_turn_system_reminder = None;
@@ -169,6 +248,17 @@ impl Agent {
         let start_message_index = self.message_count();
         self.fire_turn_start_hook("chat");
         let result = self.run_turn_streaming_mpsc(event_tx).await;
+        if result.is_ok() {
+            self.finish_emergency_retry_audit(
+                jcode_session_types::StoredContextEmergencyRetryOutcome::Succeeded,
+            );
+        } else if let Err(error) = &result {
+            self.finish_emergency_retry_audit(
+                jcode_session_types::StoredContextEmergencyRetryOutcome::Failed {
+                    detail: crate::util::truncate_str(&error.to_string(), 512).to_string(),
+                },
+            );
+        }
         self.current_turn_system_reminder = None;
         self.fire_turn_end_hook(&result, turn_started_at, start_message_index);
         self.finish_pending_turn();

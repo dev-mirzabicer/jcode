@@ -219,6 +219,16 @@ impl Client {
     }
 
     pub async fn notify_session(&mut self, session_id: &str, message: &str) -> Result<u64> {
+        self.notify_session_with_unattended(session_id, message, None)
+            .await
+    }
+
+    pub async fn notify_session_with_unattended(
+        &mut self,
+        session_id: &str,
+        message: &str,
+        unattended_context: Option<jcode_session_types::StoredUnattendedContextAuthorization>,
+    ) -> Result<u64> {
         let id = self.next_id;
         self.next_id += 1;
 
@@ -226,6 +236,7 @@ impl Client {
             id,
             session_id: session_id.to_string(),
             message: message.to_string(),
+            unattended_context,
         };
         let json = serde_json::to_string(&request)? + "\n";
         self.writer.write_all(json.as_bytes()).await?;

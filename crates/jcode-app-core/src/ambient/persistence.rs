@@ -60,22 +60,31 @@ pub struct ScheduledQueue {
 }
 
 impl ScheduledQueue {
-    pub fn load(path: PathBuf) -> Self {
+    pub fn load(path: PathBuf) -> Result<Self> {
         let items: Vec<ScheduledItem> = if path.exists() {
-            storage::read_json(&path).unwrap_or_default()
+            storage::read_json(&path)?
         } else {
             Vec::new()
         };
-        Self { items, path }
+        Ok(Self { items, path })
     }
 
     pub fn save(&self) -> Result<()> {
         storage::write_json(&self.path, &self.items)
     }
 
-    pub fn push(&mut self, item: ScheduledItem) {
+    pub fn try_push(&mut self, item: ScheduledItem) -> Result<()> {
         self.items.push(item);
-        let _ = self.save();
+        if let Err(error) = self.save() {
+            self.items.pop();
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn push(&mut self, item: ScheduledItem) {
+        self.try_push(item).expect("persist scheduled test item");
     }
 
     /// Remove a scheduled item by ID, persisting the queue when found.
@@ -85,14 +94,21 @@ impl ScheduledQueue {
         };
 
         let item = self.items.remove(index);
-        self.save()?;
+        if let Err(error) = self.save() {
+            self.items.insert(index, item);
+            return Err(error);
+        }
         Ok(Some(item))
     }
 
     /// Pop items whose `scheduled_for` is in the past, sorted by priority
     /// (highest first) then by time (earliest first).
-    pub fn pop_ready(&mut self) -> Vec<ScheduledItem> {
+    pub fn pop_ready(&mut self) -> Result<Vec<ScheduledItem>> {
         let now = Utc::now();
+        if !self.items.iter().any(|item| item.scheduled_for <= now) {
+            return Ok(Vec::new());
+        }
+        let original = self.items.clone();
         let (ready, remaining): (Vec<_>, Vec<_>) =
             self.items.drain(..).partition(|i| i.scheduled_for <= now);
 
@@ -106,17 +122,28 @@ impl ScheduledQueue {
                 .then_with(|| a.scheduled_for.cmp(&b.scheduled_for))
         });
 
-        if !ready.is_empty() {
-            let _ = self.save();
+        if !ready.is_empty()
+            && let Err(error) = self.save()
+        {
+            self.items = original;
+            return Err(error);
         }
 
-        ready
+        Ok(ready)
     }
 
     /// Remove and return ready items targeted at a specific direct-delivery session,
     /// leaving ambient-targeted queue items intact for the ambient agent to process.
-    pub fn take_ready_direct_items(&mut self) -> Vec<ScheduledItem> {
+    pub fn take_ready_direct_items(&mut self) -> Result<Vec<ScheduledItem>> {
         let now = Utc::now();
+        if !self
+            .items
+            .iter()
+            .any(|item| item.scheduled_for <= now && item.target.is_direct_delivery())
+        {
+            return Ok(Vec::new());
+        }
+        let original = self.items.clone();
         let mut ready_direct = Vec::new();
         let mut remaining = Vec::with_capacity(self.items.len());
 
@@ -132,8 +159,11 @@ impl ScheduledQueue {
 
         self.items = remaining;
 
-        if !ready_direct.is_empty() {
-            let _ = self.save();
+        if !ready_direct.is_empty()
+            && let Err(error) = self.save()
+        {
+            self.items = original;
+            return Err(error);
         }
 
         ready_direct.sort_by(|a, b| {
@@ -142,7 +172,7 @@ impl ScheduledQueue {
                 .then_with(|| a.scheduled_for.cmp(&b.scheduled_for))
         });
 
-        ready_direct
+        Ok(ready_direct)
     }
 
     pub fn peek_next(&self) -> Option<&ScheduledItem> {

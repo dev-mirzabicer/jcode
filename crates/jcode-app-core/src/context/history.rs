@@ -298,6 +298,7 @@ mod tests {
             application: None,
             economics: None,
             curator_usage: Vec::new(),
+            emergency_audit: None,
         };
         let state = StoredContextViewState {
             revision: 2,
