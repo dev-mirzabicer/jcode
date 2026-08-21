@@ -124,6 +124,42 @@ impl Tool for ConversationSearchTool {
                 .as_ref()
                 .map(|session| session.context_view.active_transaction_count())
                 .unwrap_or_default();
+            let total_context_transactions = session
+                .as_ref()
+                .map(|session| session.context_view.transactions.len())
+                .unwrap_or_default();
+            let reverted_context_transactions = session
+                .as_ref()
+                .map(|session| {
+                    session
+                        .context_view
+                        .transactions
+                        .iter()
+                        .filter(|transaction| {
+                            transaction.latest_status().is_some_and(|status| {
+                                status.kind
+                                    == jcode_session_types::StoredContextTransactionStatusKind::Reverted
+                            })
+                        })
+                        .count()
+                })
+                .unwrap_or_default();
+            let invalidated_context_transactions = session
+                .as_ref()
+                .map(|session| {
+                    session
+                        .context_view
+                        .transactions
+                        .iter()
+                        .filter(|transaction| {
+                            transaction.latest_status().is_some_and(|status| {
+                                status.kind
+                                    == jcode_session_types::StoredContextTransactionStatusKind::InvalidatedByTranscriptEdit
+                            })
+                        })
+                        .count()
+                })
+                .unwrap_or_default();
             let legacy_summary_present = session
                 .as_ref()
                 .and_then(|session| session.compaction.as_ref())
@@ -132,7 +168,10 @@ impl Tool for ConversationSearchTool {
                 "## Conversation Stats\n\n\
                  - Total stored messages: {}\n\
                  - Context-view revision: {}\n\
+                 - Total context transactions: {}\n\
                  - Active context transactions: {}\n\
+                 - Reverted context transactions: {}\n\
+                 - Transcript-invalidated context transactions: {}\n\
                  - Legacy summary present: {}\n\
                  - Accounted provider messages: {}\n\
                  - Estimated message tokens: {}\n\
@@ -143,7 +182,10 @@ impl Tool for ConversationSearchTool {
                  - Context usage: {:.1}%\n",
                 total_stored_messages,
                 context_revision,
+                total_context_transactions,
                 active_context_transactions,
+                reverted_context_transactions,
+                invalidated_context_transactions,
                 legacy_summary_present,
                 stats.message_count,
                 stats.estimated_message_tokens,
@@ -323,10 +365,42 @@ fn message_to_text(msg: &Message) -> String {
 }
 
 fn extract_snippet(text: &str, query: &str) -> String {
-    let lower = text.to_lowercase();
-    if let Some(pos) = lower.find(query) {
-        let start = pos.saturating_sub(50);
-        let end = (pos + query.len() + 50).min(text.len());
+    if query.is_empty() {
+        return text.chars().take(100).collect();
+    }
+
+    let mut lower = String::new();
+    let mut source_byte_for_lower_byte = Vec::new();
+    for (source_byte, character) in text.char_indices() {
+        for lowercase_character in character.to_lowercase() {
+            let mut encoded = [0u8; 4];
+            let lowercase = lowercase_character.encode_utf8(&mut encoded);
+            lower.push_str(lowercase);
+            source_byte_for_lower_byte.extend(std::iter::repeat_n(source_byte, lowercase.len()));
+        }
+    }
+
+    if let Some(lower_start) = lower.find(query) {
+        let lower_end = lower_start.saturating_add(query.len());
+        let match_start = source_byte_for_lower_byte[lower_start];
+        let final_character_start = source_byte_for_lower_byte[lower_end - 1];
+        let match_end = final_character_start
+            + text[final_character_start..]
+                .chars()
+                .next()
+                .map(char::len_utf8)
+                .unwrap_or_default();
+        let start = text[..match_start]
+            .char_indices()
+            .rev()
+            .nth(49)
+            .map(|(offset, _)| offset)
+            .unwrap_or(0);
+        let end = text[match_end..]
+            .char_indices()
+            .nth(50)
+            .map(|(offset, _)| match_end + offset)
+            .unwrap_or(text.len());
         let mut snippet = text[start..end].to_string();
         if start > 0 {
             snippet = format!("...{}", snippet);
@@ -446,7 +520,14 @@ mod tests {
         assert!(result.output.contains("Conversation Stats"));
         assert!(result.output.contains("Total stored messages: 1"));
         assert!(result.output.contains("Context-view revision: 1"));
+        assert!(result.output.contains("Total context transactions: 1"));
         assert!(result.output.contains("Active context transactions: 1"));
+        assert!(result.output.contains("Reverted context transactions: 0"));
+        assert!(
+            result
+                .output
+                .contains("Transcript-invalidated context transactions: 0")
+        );
         assert!(result.output.contains("Observed provider tokens: 7000"));
         assert!(result.output.contains("Effective context tokens: 7000"));
         assert!(result.output.contains("Token budget: 10000"));
@@ -507,6 +588,19 @@ mod tests {
         assert!(result.output.contains("Found 1 matches"));
         assert!(result.output.contains("raw-only-search-needle"));
         restore_env(base, previous_home);
+    }
+
+    #[test]
+    fn snippet_extraction_is_unicode_boundary_safe_and_handles_case_expansion() {
+        let box_drawing = "─".repeat(80);
+        let text = format!("{box_drawing} Needle {box_drawing}");
+        let result = search_messages(&[Message::user(&text)], "needle");
+        assert_eq!(result.len(), 1);
+        assert!(result[0].snippet.contains("Needle"));
+
+        let expanded_case = search_messages(&[Message::user("İstanbul café")], "i̇stanbul");
+        assert_eq!(expanded_case.len(), 1);
+        assert!(expanded_case[0].snippet.contains("İstanbul"));
     }
 
     #[tokio::test]

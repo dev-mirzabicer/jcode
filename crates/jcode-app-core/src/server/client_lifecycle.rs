@@ -1245,6 +1245,7 @@ pub(super) async fn handle_client(
                         &agent,
                         &provider,
                         &registry,
+                        &context_transactions,
                         &sessions,
                         &shutdown_signals,
                         &soft_interrupt_queues,
@@ -1288,6 +1289,10 @@ pub(super) async fn handle_client(
 
                 match rewind_result {
                     Ok(removed) => {
+                        context_transactions.invalidate_session_drafts(
+                            &client_session_id,
+                            "conversation rewind replaced authoritative history",
+                        );
                         crate::logging::info(&format!(
                             "Rewound session {} to message {} (removed {})",
                             client_session_id, message_index, removed
@@ -1348,6 +1353,10 @@ pub(super) async fn handle_client(
 
                 match undo_result {
                     Ok(restored) => {
+                        context_transactions.invalidate_session_drafts(
+                            &client_session_id,
+                            "conversation rewind undo replaced authoritative history",
+                        );
                         crate::logging::info(&format!(
                             "Undid rewind for session {} (restored {})",
                             client_session_id, restored
@@ -1907,7 +1916,14 @@ pub(super) async fn handle_client(
             }
 
             Request::CycleModel { id, direction } => {
-                handle_cycle_model(id, direction, &agent, &client_event_tx).await;
+                handle_cycle_model(
+                    id,
+                    direction,
+                    &agent,
+                    &context_transactions,
+                    &client_event_tx,
+                )
+                .await;
             }
 
             Request::RefreshModels { id } => {
@@ -1919,11 +1935,18 @@ pub(super) async fn handle_client(
             }
 
             Request::SetModel { id, model } => {
-                handle_set_model(id, model, &agent, &client_event_tx).await;
+                handle_set_model(id, model, &agent, &context_transactions, &client_event_tx).await;
             }
 
             Request::SetRoute { id, selection } => {
-                handle_set_route(id, selection, &agent, &client_event_tx).await;
+                handle_set_route(
+                    id,
+                    selection,
+                    &agent,
+                    &context_transactions,
+                    &client_event_tx,
+                )
+                .await;
             }
 
             Request::SetSubagentModel { id, model } => {

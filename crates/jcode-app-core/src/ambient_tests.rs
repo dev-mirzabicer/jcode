@@ -472,7 +472,7 @@ fn test_ambient_state_record_cycle() {
     let result = AmbientCycleResult {
         summary: "Merged 2 duplicates".into(),
         memories_modified: 3,
-        compactions: 1,
+        active_context_transactions: 1,
         proactive_work: None,
         next_schedule: None,
         started_at: Utc::now() - Duration::seconds(30),
@@ -484,7 +484,7 @@ fn test_ambient_state_record_cycle() {
     state.record_cycle(&result);
     assert_eq!(state.total_cycles, 1);
     assert_eq!(state.last_summary.as_deref(), Some("Merged 2 duplicates"));
-    assert_eq!(state.last_compactions, Some(1));
+    assert_eq!(state.last_active_context_transactions, Some(1));
     assert_eq!(state.last_memories_modified, Some(3));
     assert_eq!(state.status, AmbientStatus::Idle);
 }
@@ -496,7 +496,7 @@ fn test_ambient_state_record_cycle_with_schedule() {
     let result = AmbientCycleResult {
         summary: "Done".into(),
         memories_modified: 0,
-        compactions: 0,
+        active_context_transactions: 0,
         proactive_work: None,
         next_schedule: Some(ScheduleRequest {
             wake_in_minutes: Some(15),
@@ -520,6 +520,40 @@ fn test_ambient_state_record_cycle_with_schedule() {
 
     state.record_cycle(&result);
     assert!(matches!(state.status, AmbientStatus::Scheduled { .. }));
+}
+
+#[test]
+fn legacy_ambient_metric_keys_load_and_new_serialization_uses_transaction_terminology() {
+    let state: AmbientState = serde_json::from_value(serde_json::json!({
+        "status": "Idle",
+        "last_run": null,
+        "last_summary": "legacy",
+        "last_compactions": 4,
+        "last_memories_modified": 2,
+        "total_cycles": 9
+    }))
+    .expect("legacy ambient state must load");
+    assert_eq!(state.last_active_context_transactions, Some(4));
+    let serialized_state = serde_json::to_value(&state).expect("serialize ambient state");
+    assert_eq!(serialized_state["last_active_context_transactions"], 4);
+    assert!(serialized_state.get("last_compactions").is_none());
+
+    let result: AmbientCycleResult = serde_json::from_value(serde_json::json!({
+        "summary": "legacy cycle",
+        "memories_modified": 1,
+        "compactions": 3,
+        "proactive_work": null,
+        "next_schedule": null,
+        "started_at": "2026-08-20T00:00:00Z",
+        "ended_at": "2026-08-20T00:01:00Z",
+        "status": "Complete",
+        "conversation": null
+    }))
+    .expect("legacy ambient cycle result must load");
+    assert_eq!(result.active_context_transactions, 3);
+    let serialized_result = serde_json::to_value(&result).expect("serialize ambient cycle result");
+    assert_eq!(serialized_result["active_context_transactions"], 3);
+    assert!(serialized_result.get("compactions").is_none());
 }
 
 #[test]

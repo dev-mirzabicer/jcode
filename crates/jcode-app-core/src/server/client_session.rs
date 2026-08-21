@@ -137,6 +137,7 @@ pub(super) async fn handle_clear_session(
     agent: &Arc<Mutex<Agent>>,
     provider: &Arc<dyn Provider>,
     registry: &Registry,
+    context_transactions: &crate::context::ContextTransactionService,
     sessions: &SessionAgents,
     shutdown_signals: &Arc<RwLock<HashMap<String, InterruptSignal>>>,
     soft_interrupt_queues: &SessionInterruptQueues,
@@ -194,6 +195,10 @@ pub(super) async fn handle_clear_session(
     let mut agent_guard = agent.lock().await;
     *agent_guard = new_agent;
     drop(agent_guard);
+    context_transactions.invalidate_session_drafts(
+        &old_session_id,
+        "session clear discarded authoritative history",
+    );
 
     {
         let mut sessions_guard = sessions.write().await;

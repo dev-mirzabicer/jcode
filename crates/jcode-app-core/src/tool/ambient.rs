@@ -124,8 +124,6 @@ struct EndCycleInput {
     summary: String,
     #[serde(deserialize_with = "super::serde_coerce::u32_from_string_or_number")]
     memories_modified: u32,
-    #[serde(deserialize_with = "super::serde_coerce::u32_from_string_or_number")]
-    compactions: u32,
     #[serde(default)]
     proactive_work: Option<String>,
     #[serde(default)]
@@ -158,7 +156,7 @@ impl Tool for EndAmbientCycleTool {
     fn parameters_schema(&self) -> Value {
         json!({
             "type": "object",
-            "required": ["summary", "memories_modified", "compactions"],
+            "required": ["summary", "memories_modified"],
             "properties": {
                 "intent": super::intent_schema_property(),
                 "summary": {
@@ -168,10 +166,6 @@ impl Tool for EndAmbientCycleTool {
                 "memories_modified": {
                     "type": "integer",
                     "description": "Count of memories created, merged, pruned, or updated"
-                },
-                "compactions": {
-                    "type": "integer",
-                    "description": "Number of context compactions during this cycle"
                 },
                 "proactive_work": {
                     "type": "string",
@@ -202,6 +196,10 @@ impl Tool for EndAmbientCycleTool {
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: EndCycleInput = serde_json::from_value(input)?;
+        let active_context_transactions = crate::session::Session::load(&ctx.session_id)
+            .map(|session| session.context_view.active_transaction_count())
+            .unwrap_or_default()
+            .min(u32::MAX as usize) as u32;
 
         let next_schedule = params.next_schedule.map(|ns| ScheduleRequest {
             wake_in_minutes: ns.wake_in_minutes,
@@ -222,7 +220,7 @@ impl Tool for EndAmbientCycleTool {
         let result = AmbientCycleResult {
             summary: params.summary.clone(),
             memories_modified: params.memories_modified,
-            compactions: params.compactions,
+            active_context_transactions,
             proactive_work: params.proactive_work,
             next_schedule: next_schedule.clone(),
             started_at: now, // approximate; the runner will override if it tracks start time
@@ -246,14 +244,14 @@ impl Tool for EndAmbientCycleTool {
 
             state.last_run = Some(now);
             state.last_summary = Some(params.summary.clone());
-            state.last_compactions = Some(params.compactions);
+            state.last_active_context_transactions = Some(active_context_transactions);
             state.last_memories_modified = Some(params.memories_modified);
             state.total_cycles += 1;
             let _ = state.save();
 
             Ok(ToolOutput::new(format!(
-                "Ambient cycle ended. Memories modified: {}, compactions: {}. Next wake: {}",
-                params.memories_modified, params.compactions, next_desc
+                "Ambient cycle ended. Memories modified: {}, active context transactions: {}. Next wake: {}",
+                params.memories_modified, active_context_transactions, next_desc
             ))
             .with_title("ambient cycle ended".to_string()))
         } else {

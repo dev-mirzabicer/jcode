@@ -136,11 +136,11 @@ pub fn gather_feedback_memories(memory_manager: &crate::memory::MemoryManager) -
                 let summary = transcript.summary.as_deref().unwrap_or("no summary");
                 let age = format_duration_rough(Utc::now() - transcript.started_at);
                 feedback.push(format!(
-                    "Past cycle ({} ago, {}): {} memories modified, {} compactions — {}",
+                    "Past cycle ({} ago, {}): {} memories modified, {} active context transactions — {}",
                     age,
                     status.to_lowercase(),
                     transcript.memories_modified,
-                    transcript.compactions,
+                    transcript.active_context_transactions,
                     summary,
                 ));
             }

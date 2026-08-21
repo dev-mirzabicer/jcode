@@ -93,15 +93,53 @@ impl Agent {
         selection: &crate::provider::RouteSelection,
         source: crate::provider::ProviderModelSelectionSource,
     ) -> Result<()> {
-        self.provider.set_route_selection(selection)?;
+        let has_active_operations =
+            !crate::context::projection_validation_operations(&self.session.context_view)
+                .is_empty();
+        let candidate_model = if has_active_operations {
+            let candidate = self.provider.fork();
+            candidate.set_route_selection(selection)?;
+            self.validate_provider_switch_projection(candidate.as_ref())?;
+            candidate.model()
+        } else {
+            selection.model.clone()
+        };
+
+        let mut previous_session = self.session.clone();
+        let mut next_session = self.session.clone();
+        next_session.provider_key =
+            crate::provider::MultiProvider::default_model_selection_from_route(
+                &selection.model,
+                &selection.api_method,
+                &selection.provider_label,
+            )
+            .provider_key
+            .or_else(|| Some(selection.runtime_key.stable_id()));
+        next_session.route_api_method = Some(selection.api_method.clone());
+        next_session.model = Some(candidate_model);
+        next_session.provider_session_id = None;
+        next_session.save()?;
+        if let Err(error) = self.provider.set_route_selection(selection) {
+            if previous_session.save().is_err() {
+                crate::logging::error(
+                    "Provider route switch failed after staging and durable session rollback also failed",
+                );
+            }
+            return Err(error);
+        }
+        self.session = next_session;
         let resolved_model = self.provider.model();
-        self.session.provider_key = Some(selection.runtime_key.stable_id());
-        self.session.route_api_method = Some(selection.api_method.clone());
-        self.session.model = Some(self.provider_model());
         let event = crate::provider::ProviderStateEvent::selected_model(source, resolved_model);
         self.provider_runtime_state.apply(event);
         self.update_context_runtime_budget();
-        self.persist_session_best_effort("route selection");
+        self.after_provider_context_changed(
+            "provider route switch",
+            format!(
+                "provider route changed to {} using {}",
+                selection.provider_label, selection.api_method
+            ),
+            true,
+        )?;
         self.log_env_snapshot("set_route_selection");
         Ok(())
     }
@@ -118,20 +156,65 @@ impl Agent {
         model: &str,
         source: crate::provider::ProviderModelSelectionSource,
     ) -> Result<()> {
-        crate::provider::set_model_with_auth_refresh(self.provider.as_ref(), model)?;
+        let candidate = self.provider.fork();
+        crate::provider::set_model_with_auth_refresh(candidate.as_ref(), model)?;
+        self.validate_provider_switch_projection(candidate.as_ref())?;
+
+        let mut previous_session = self.session.clone();
+        let mut next_session = self.session.clone();
+        let candidate_model = candidate.model();
+        if let Some(pin) = candidate.explicit_provider_pin_for_current_model() {
+            next_session.provider_key = Some("openrouter".to_string());
+            next_session.route_api_method = Some("openrouter".to_string());
+            next_session.model = Some(format!("{candidate_model}@{pin}"));
+        } else {
+            next_session.provider_key =
+                crate::provider::MultiProvider::session_provider_key_after_model_switch(
+                    model,
+                    candidate.name(),
+                    self.session.provider_key.as_deref(),
+                );
+            next_session.model = Some(candidate_model);
+        }
+        next_session.provider_session_id = None;
+        next_session.save()?;
+        if let Err(error) =
+            crate::provider::set_model_with_auth_refresh(self.provider.as_ref(), model)
+        {
+            if previous_session.save().is_err() {
+                crate::logging::error(
+                    "Provider model switch failed after staging and durable session rollback also failed",
+                );
+            }
+            return Err(error);
+        }
+        self.session = next_session;
+        self.reconcile_explicit_provider_pin_route();
         let resolved_model = self.provider.model();
-        self.session.provider_key =
-            crate::provider::MultiProvider::session_provider_key_after_model_switch(
-                model,
-                self.provider.name(),
-                self.session.provider_key.as_deref(),
-            );
-        self.session.model = Some(self.provider_model());
         let event = crate::provider::ProviderStateEvent::selected_model(source, resolved_model);
         self.provider_runtime_state.apply(event);
         self.update_context_runtime_budget();
-        self.persist_session_best_effort("model selection");
+        self.after_provider_context_changed(
+            "provider model switch",
+            format!("provider model changed to {}", self.provider.model()),
+            true,
+        )?;
         self.log_env_snapshot("set_model");
+        Ok(())
+    }
+
+    fn validate_provider_switch_projection(&mut self, candidate: &dyn Provider) -> Result<()> {
+        let operations =
+            crate::context::projection_validation_operations(&self.session.context_view);
+        if operations.is_empty() {
+            return Ok(());
+        }
+        let projected = self.session.projected_messages_for_provider()?;
+        crate::context::provider_validation::require_supported_projected_messages(
+            candidate,
+            &projected,
+            &operations,
+        )?;
         Ok(())
     }
 

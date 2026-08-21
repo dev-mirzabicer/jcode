@@ -662,11 +662,7 @@ fn clone_split_session(parent_session_id: &str) -> anyhow::Result<(String, Strin
     let parent = Session::load(parent_session_id)?;
 
     let mut child = Session::create(Some(parent_session_id.to_string()), None);
-    child.replace_messages(parent.messages.clone());
-    child.compaction = parent.compaction.clone();
-    child.context_view = parent.context_view.clone();
-    child.working_dir = parent.working_dir.clone();
-    child.model = parent.model.clone();
+    child.inherit_continuation_state_from(&parent);
     child.status = crate::session::SessionStatus::Closed;
     // The parent agent keeps ownership of any in-flight request; tell the
     // forked agent so it treats the next prompt as fresh work instead of

@@ -1434,6 +1434,7 @@ fn remote_context_report_uses_authoritative_protocol_metadata_without_fake_zeroe
     let unloaded = &app.display_messages().last().expect("unloaded report").content;
     assert!(unloaded.contains("- revision: not loaded"));
     assert!(unloaded.contains("- transactions: not loaded total, not loaded active"));
+    assert!(unloaded.contains("- transaction statuses: not fully loaded"));
     assert!(unloaded.contains("- authoritative stored messages: not loaded"));
     assert!(!unloaded.contains("- revision: 0\n- transactions: 0 total, 0 active"));
 
@@ -1458,6 +1459,7 @@ fn remote_context_report_uses_authoritative_protocol_metadata_without_fake_zeroe
     let loaded = &app.display_messages().last().expect("loaded report").content;
     assert!(loaded.contains("- revision: 4"));
     assert!(loaded.contains("- transactions: 3 total, 1 active"));
+    assert!(loaded.contains("- transaction statuses: not fully loaded"));
     assert!(loaded.contains("- authoritative stored messages: 1"));
     assert!(loaded.contains("source: authoritative remote context protocol metadata"));
 }

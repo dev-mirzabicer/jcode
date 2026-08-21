@@ -2,6 +2,7 @@ use crate::message::Message;
 use crate::provider::{
     ContextProjectionValidationOperation, ContextProjectionValidationReport, Provider,
 };
+use jcode_session_types::StoredContextViewState;
 use std::fmt;
 
 /// Run provider-specific projected-history validation without network I/O.
@@ -59,6 +60,20 @@ pub fn require_supported_projected_messages(
             report: Box::new(report),
         })
     }
+}
+
+/// Validate every active persisted operation against a candidate provider/model identity.
+/// A raw/default view has no provider-sensitive transform and therefore needs no adapter gate.
+pub fn require_supported_context_view(
+    provider: &dyn Provider,
+    messages: &[Message],
+    state: &StoredContextViewState,
+) -> Result<Option<ContextProjectionValidationReport>, UnsupportedProjectedContext> {
+    let operations = super::draft::projection_validation_operations(state);
+    if operations.is_empty() {
+        return Ok(None);
+    }
+    require_supported_projected_messages(provider, messages, &operations).map(Some)
 }
 
 #[cfg(test)]

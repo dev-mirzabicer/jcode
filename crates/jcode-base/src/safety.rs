@@ -118,7 +118,8 @@ pub struct AmbientTranscript {
     pub pending_permissions: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
-    pub compactions: u32,
+    #[serde(default, alias = "compactions")]
+    pub active_context_transactions: u32,
     pub memories_modified: u32,
     /// Full conversation transcript (markdown) for email notifications
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -524,6 +525,29 @@ pub fn new_request_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_ambient_transcript_metric_loads_but_serializes_with_transaction_terminology() {
+        let transcript: AmbientTranscript = serde_json::from_value(serde_json::json!({
+            "session_id": "legacy",
+            "started_at": "2026-08-20T00:00:00Z",
+            "ended_at": null,
+            "status": "complete",
+            "provider": "test",
+            "model": "test-model",
+            "actions": [],
+            "pending_permissions": 0,
+            "summary": null,
+            "compactions": 2,
+            "memories_modified": 1,
+            "conversation": null
+        }))
+        .expect("legacy ambient transcript must load");
+        assert_eq!(transcript.active_context_transactions, 2);
+        let serialized = serde_json::to_value(&transcript).expect("serialize transcript");
+        assert_eq!(serialized["active_context_transactions"], 2);
+        assert!(serialized.get("compactions").is_none());
+    }
 
     fn with_temp_home<F, T>(f: F) -> T
     where

@@ -776,6 +776,11 @@ impl App {
     }
 
     pub(super) fn repair_missing_tool_outputs(&mut self) -> usize {
+        let session_before = self.session.clone();
+        let provider_messages_before = self.messages.clone();
+        let tool_call_ids_before = self.tool_call_ids.clone();
+        let tool_result_ids_before = self.tool_result_ids.clone();
+        let scan_index_before = self.tool_output_scan_index;
         let missing_repairs = self.collect_missing_tool_outputs_since_last_scan();
         let mut repaired = 0usize;
         let mut inserted = 0usize;
@@ -816,8 +821,46 @@ impl App {
         self.tool_output_scan_index = self.local_transcript_message_count();
 
         if repaired > 0 {
-            self.reseed_context_runtime_from_provider_messages();
-            let _ = self.session.save();
+            let reconciliation = match jcode_context_core::reconcile_context_after_transcript_edit(
+                &self.session.messages,
+                &self.session.context_view,
+                chrono::Utc::now(),
+                "historical tool-output repair inserted exact provider structure",
+            ) {
+                Ok(reconciliation) => reconciliation,
+                Err(_) => {
+                    self.session = session_before;
+                    self.messages = provider_messages_before;
+                    self.tool_call_ids = tool_call_ids_before;
+                    self.tool_result_ids = tool_result_ids_before;
+                    self.tool_output_scan_index = scan_index_before;
+                    crate::logging::error(
+                        "Missing tool-output repair failed safely during context reconciliation",
+                    );
+                    return 0;
+                }
+            };
+            self.session.context_view = reconciliation.state;
+            self.session.provider_session_id = None;
+            if self.session.save().is_err() {
+                self.session = session_before;
+                self.messages = provider_messages_before;
+                self.tool_call_ids = tool_call_ids_before;
+                self.tool_result_ids = tool_result_ids_before;
+                self.tool_output_scan_index = scan_index_before;
+                crate::logging::error(
+                    "Missing tool-output repair failed safely during session persistence",
+                );
+                return 0;
+            }
+            if let Err(error) = self.after_local_provider_context_changed(
+                "historical tool repair",
+                &format!("inserted {repaired} missing tool output(s) into prior provider history"),
+            ) {
+                crate::logging::error(&format!(
+                    "Persisted tool-output repair could not rebuild provider context: {error}"
+                ));
+            }
         }
 
         repaired

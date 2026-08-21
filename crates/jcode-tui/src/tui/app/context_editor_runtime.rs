@@ -867,9 +867,10 @@ impl App {
                     self.is_processing,
                 ) {
                     Ok(mut transition) => {
-                        if let Err(error) = self
-                            .after_local_provider_context_changed(&transition.invalidation_detail)
-                        {
+                        if let Err(error) = self.after_local_provider_context_changed(
+                            "context transaction",
+                            &transition.invalidation_detail,
+                        ) {
                             transition.result.warnings.push(error);
                         }
                         let _ = self.local_context_event_tx.send(
@@ -979,9 +980,10 @@ impl App {
                     self.is_processing,
                 ) {
                     Ok(mut transition) => {
-                        if let Err(error) = self
-                            .after_local_provider_context_changed(&transition.invalidation_detail)
-                        {
+                        if let Err(error) = self.after_local_provider_context_changed(
+                            "context transaction",
+                            &transition.invalidation_detail,
+                        ) {
                             transition.result.warnings.push(error);
                         }
                         let _ = self.local_context_event_tx.send(
@@ -1019,9 +1021,10 @@ impl App {
                     self.is_processing,
                 ) {
                     Ok(mut transition) => {
-                        if let Err(error) = self
-                            .after_local_provider_context_changed(&transition.invalidation_detail)
-                        {
+                        if let Err(error) = self.after_local_provider_context_changed(
+                            "context transaction",
+                            &transition.invalidation_detail,
+                        ) {
                             transition.result.warnings.push(error);
                         }
                         let _ = self.local_context_event_tx.send(
@@ -1167,13 +1170,17 @@ impl App {
         });
     }
 
-    fn after_local_provider_context_changed(&mut self, detail: &str) -> Result<(), String> {
+    pub(super) fn after_local_provider_context_changed(
+        &mut self,
+        source: &'static str,
+        detail: &str,
+    ) -> Result<(), String> {
         #[cfg(test)]
         {
             self.context_reset_counters.hook_calls += 1;
             self.context_reset_counters.invalidation_records += 1;
         }
-        crate::cache_invalidation::record("context transaction", detail.to_string());
+        crate::cache_invalidation::record(source, detail.to_string());
         #[cfg(test)]
         {
             self.context_reset_counters.cache_generation_advances += 1;
@@ -1182,6 +1189,7 @@ impl App {
         self.kv_cache.kv_cache_baseline = None;
         self.kv_cache.cold_cache_warned_baseline_completed_at = None;
         self.provider_session_id = None;
+        self.session.provider_session_id = None;
         #[cfg(test)]
         {
             self.context_reset_counters.continuation_invalidations += 1;
@@ -1201,13 +1209,14 @@ impl App {
             }
             self.reseed_context_budget_from_messages(&[], "invalid changed provider context");
             format!(
-                "The context transaction was persisted, but rebuilding projected provider messages failed: {error}"
+                "The provider-context change was persisted, but rebuilding projected messages failed: {error}"
             )
         })?;
         #[cfg(test)]
         {
             self.context_reset_counters.budget_reseeds += 1;
         }
+        self.replace_provider_messages(projected.clone());
         self.reseed_context_budget_from_messages(&projected, detail);
         Ok(())
     }

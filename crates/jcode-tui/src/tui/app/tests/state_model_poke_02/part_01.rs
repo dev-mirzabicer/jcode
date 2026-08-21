@@ -1092,6 +1092,9 @@ fn test_context_command_reports_session_context_snapshot() {
         assert!(msg.content.contains("effective context tokens: 7000"));
         assert!(msg.content.contains("revision: 7"));
         assert!(msg.content.contains("transactions: 1 total, 1 active"));
+        assert!(msg
+            .content
+            .contains("transaction statuses: 0 reverted, 0 transcript-invalidated"));
         assert!(msg.content.contains("authoritative stored messages"));
         assert!(msg.content.contains("Session State"));
         assert!(msg.content.contains("Todos"));

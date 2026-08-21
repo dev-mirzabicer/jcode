@@ -299,7 +299,44 @@ impl App {
         if let Some(restored) = Self::restore_input_for_reload(session_id) {
             self.apply_restored_reload_input(restored);
         }
-        if let Ok(session) = Session::load(session_id) {
+        if let Ok(mut session) = Session::load(session_id) {
+            if let Some(model) = session.model.clone() {
+                let model_request =
+                    crate::provider::MultiProvider::model_switch_request_for_session_route(
+                        &model,
+                        session.provider_key.as_deref(),
+                        session.route_api_method.as_deref(),
+                    );
+                let candidate = self.provider.fork();
+                let candidate_identity = candidate
+                    .explicit_provider_pin_for_current_model()
+                    .map(|pin| format!("{}@{pin}", candidate.model()))
+                    .unwrap_or_else(|| candidate.model());
+                let route_restore = crate::provider::set_model_with_auth_refresh(
+                    candidate.as_ref(),
+                    &model_request,
+                );
+                let validation = match route_restore {
+                    Ok(()) => Ok(()),
+                    Err(_) if candidate_identity == model => Ok(()),
+                    Err(error) => Err(error),
+                }
+                .and_then(|()| {
+                    let projected = session.projected_messages_for_provider()?;
+                    jcode_app_core::context::provider_validation::require_supported_context_view(
+                        candidate.as_ref(),
+                        &projected,
+                        &session.context_view,
+                    )?;
+                    Ok(())
+                });
+                if let Err(error) = validation {
+                    self.push_display_message(DisplayMessage::error(format!(
+                        "Session restore was rejected before replacing the current session because its active context projection is unsupported by the saved provider/model: {error}"
+                    )));
+                    return;
+                }
+            }
             // Count stats before restoring
             let mut user_turns = 0;
             let mut assistant_turns = 0;
@@ -336,23 +373,28 @@ impl App {
                         self.session.provider_key.as_deref(),
                         self.session.route_api_method.as_deref(),
                     );
-                if let Err(e) = crate::provider::set_model_with_auth_refresh(
+                let current_identity = self
+                    .provider
+                    .explicit_provider_pin_for_current_model()
+                    .map(|pin| format!("{}@{pin}", self.provider.model()))
+                    .unwrap_or_else(|| self.provider.model());
+                match crate::provider::set_model_with_auth_refresh(
                     self.provider.as_ref(),
                     &model_request,
                 ) {
-                    self.push_display_message(DisplayMessage {
+                    Ok(()) => restored_model = true,
+                    Err(_) if current_identity == model => restored_model = true,
+                    Err(error) => self.push_display_message(DisplayMessage {
                         role: "system".to_string(),
                         content: format!(
                             "⚠ Failed to restore model '{}' via '{}': {}",
-                            model, model_request, e
+                            model, model_request, error
                         ),
                         tool_calls: vec![],
                         duration_secs: None,
                         title: None,
                         tool_data: None,
-                    });
-                } else {
-                    restored_model = true;
+                    }),
                 }
             }
 

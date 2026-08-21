@@ -26,44 +26,160 @@ impl App {
         "To turn this off, set [provider].cross_provider_failover = \"manual\" in ~/.jcode/config.toml or export JCODE_CROSS_PROVIDER_FAILOVER=manual."
     }
 
-    /// Shared post-switch bookkeeping for every local model/provider switch
-    /// path (/model, model cycling, failover, post-login activation).
-    ///
-    /// Centralized so all paths agree on what a switch means: reset provider
-    /// session ids, drop upstream/status details, invalidate the model picker
-    /// cache, update the context limit, recompute the session provider key,
-    /// and persist the session. Returns the active model after the switch.
-    ///
-    /// `model_request` is the original request string (it may carry an
-    /// explicit provider prefix like `openrouter:`); for provider-level
-    /// switches without a model request, pass the active model name.
-    pub(super) fn finalize_model_switch(&mut self, model_request: &str) -> String {
-        self.provider_session_id = None;
-        self.session.provider_session_id = None;
+    fn validate_local_provider_switch(
+        &mut self,
+        candidate: &dyn crate::provider::Provider,
+    ) -> anyhow::Result<()> {
+        let projected = self.session.projected_messages_for_provider()?;
+        jcode_app_core::context::provider_validation::require_supported_context_view(
+            candidate,
+            &projected,
+            &self.session.context_view,
+        )?;
+        Ok(())
+    }
+
+    fn finish_local_provider_switch(
+        &mut self,
+        source: &'static str,
+        detail: String,
+    ) -> anyhow::Result<String> {
         self.upstream_provider = None;
         self.status_detail = None;
         self.invalidate_model_picker_cache();
         let active_model = self.provider.model();
         self.update_context_limit_for_model(&active_model);
-        self.session.provider_key =
-            crate::provider::MultiProvider::session_provider_key_after_model_switch(
-                model_request,
-                self.provider.name(),
-                self.session.provider_key.as_deref(),
-            );
-        self.session.model = Some(active_model.clone());
-        let _ = self.session.save();
-        active_model
+        let session_id = self.session.id.clone();
+        self.context_transactions
+            .invalidate_session_drafts(&session_id, "provider or model identity changed");
+        self.context_protocol.invalidate_provider_identity();
+        self.after_local_provider_context_changed(source, &detail)
+            .map_err(anyhow::Error::msg)?;
+        Ok(active_model)
+    }
+
+    pub(super) fn apply_local_model_selection(
+        &mut self,
+        model_request: &str,
+    ) -> anyhow::Result<String> {
+        let candidate = self.provider.fork();
+        crate::provider::set_model_with_auth_refresh(candidate.as_ref(), model_request)?;
+        self.validate_local_provider_switch(candidate.as_ref())?;
+
+        let mut previous_session = self.session.clone();
+        let mut next_session = self.session.clone();
+        let candidate_model = candidate.model();
+        if let Some(pin) = candidate.explicit_provider_pin_for_current_model() {
+            next_session.provider_key = Some("openrouter".to_string());
+            next_session.route_api_method = Some("openrouter".to_string());
+            next_session.model = Some(format!("{candidate_model}@{pin}"));
+        } else {
+            next_session.provider_key =
+                crate::provider::MultiProvider::session_provider_key_after_model_switch(
+                    model_request,
+                    candidate.name(),
+                    self.session.provider_key.as_deref(),
+                );
+            next_session.model = Some(candidate_model);
+        }
+        next_session.provider_session_id = None;
+        next_session.save()?;
+        if let Err(error) =
+            crate::provider::set_model_with_auth_refresh(self.provider.as_ref(), model_request)
+        {
+            if previous_session.save().is_err() {
+                crate::logging::error(
+                    "Local model switch failed and durable session rollback also failed",
+                );
+            }
+            return Err(error);
+        }
+        self.session = next_session;
+        self.finish_local_provider_switch(
+            "provider model switch",
+            format!("provider model changed to {}", self.provider.model()),
+        )
+    }
+
+    pub(super) fn apply_local_route_selection(
+        &mut self,
+        selection: &crate::provider::RouteSelection,
+    ) -> anyhow::Result<String> {
+        let has_active_operations = self.session.context_view.active_transaction_count() > 0;
+        let candidate_model = if has_active_operations {
+            let candidate = self.provider.fork();
+            candidate.set_route_selection(selection)?;
+            self.validate_local_provider_switch(candidate.as_ref())?;
+            candidate.model()
+        } else {
+            selection.model.clone()
+        };
+
+        let mut previous_session = self.session.clone();
+        let mut next_session = self.session.clone();
+        next_session.provider_key =
+            crate::provider::MultiProvider::default_model_selection_from_route(
+                &selection.model,
+                &selection.api_method,
+                &selection.provider_label,
+            )
+            .provider_key
+            .or_else(|| Some(selection.runtime_key.stable_id()));
+        next_session.route_api_method = Some(selection.api_method.clone());
+        next_session.model = Some(candidate_model);
+        next_session.provider_session_id = None;
+        next_session.save()?;
+        if let Err(error) = self.provider.set_route_selection(selection) {
+            if previous_session.save().is_err() {
+                crate::logging::error(
+                    "Local route switch failed and durable session rollback also failed",
+                );
+            }
+            return Err(error);
+        }
+        self.session = next_session;
+        self.finish_local_provider_switch(
+            "provider route switch",
+            format!(
+                "provider route changed to {} using {}",
+                selection.provider_label, selection.api_method
+            ),
+        )
     }
 
     fn apply_provider_switch_for_failover(
         &mut self,
         prompt: &crate::provider::ProviderFailoverPrompt,
     ) -> anyhow::Result<String> {
-        self.provider
-            .switch_active_provider_to(&prompt.to_provider)?;
-        let active_model = self.provider.model();
-        Ok(self.finalize_model_switch(&active_model))
+        let candidate = self.provider.fork();
+        candidate.switch_active_provider_to(&prompt.to_provider)?;
+        self.validate_local_provider_switch(candidate.as_ref())?;
+
+        let mut previous_session = self.session.clone();
+        let mut next_session = self.session.clone();
+        let candidate_model = candidate.model();
+        next_session.provider_key =
+            crate::provider::MultiProvider::session_provider_key_after_model_switch(
+                &candidate_model,
+                candidate.name(),
+                self.session.provider_key.as_deref(),
+            );
+        next_session.model = Some(candidate_model);
+        next_session.provider_session_id = None;
+        next_session.save()?;
+        if let Err(error) = self.provider.switch_active_provider_to(&prompt.to_provider) {
+            if previous_session.save().is_err() {
+                crate::logging::error(
+                    "Local failover switch failed and durable session rollback also failed",
+                );
+            }
+            return Err(error);
+        }
+        self.session = next_session;
+        self.finish_local_provider_switch(
+            "provider failover switch",
+            format!("provider changed to {}", prompt.to_provider),
+        )
     }
 
     pub(super) fn cancel_pending_provider_failover(&mut self, notice: impl Into<String>) {
@@ -480,25 +596,8 @@ impl App {
             return true;
         }
 
-        match self.provider.set_route_selection(&offer.selection) {
-            Ok(()) => {
-                let spec = offer.selection.routed_model_spec();
-                self.provider_session_id = None;
-                self.session.provider_session_id = None;
-                self.upstream_provider = None;
-                self.status_detail = None;
-                self.invalidate_model_picker_cache();
-                let active_model = self.provider.model();
-                self.update_context_limit_for_model(&active_model);
-                self.session.provider_key =
-                    crate::provider::MultiProvider::session_provider_key_after_model_switch(
-                        &spec,
-                        self.provider.name(),
-                        self.session.provider_key.as_deref(),
-                    );
-                self.session.model = Some(active_model.clone());
-                self.session.route_api_method = Some(offer.selection.api_method.clone());
-                let _ = self.session.save();
+        match self.apply_local_route_selection(&offer.selection) {
+            Ok(active_model) => {
                 self.push_display_message(DisplayMessage::system(format!(
                     "↪ Switched to {} and resending (was {}).",
                     offer.target_label, offer.from_label,
@@ -539,9 +638,8 @@ impl App {
         };
         let next_model = models[next_index].clone();
 
-        match self.provider.set_model(&next_model) {
-            Ok(()) => {
-                self.finalize_model_switch(&next_model);
+        match self.apply_local_model_selection(&next_model) {
+            Ok(_) => {
                 let auth_suffix = self
                     .provider
                     .active_auth_method_label()
@@ -1183,9 +1281,8 @@ pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
     if let Some(model_name) = trimmed.strip_prefix("/model ") {
         app.record_keybinding_slow(crate::tui::app::shortcut_hints::LearnableAction::ModelSwitch);
         let model_name = model_name.trim();
-        match app.provider.set_model(model_name) {
-            Ok(()) => {
-                let active_model = app.finalize_model_switch(model_name);
+        match app.apply_local_model_selection(model_name) {
+            Ok(active_model) => {
                 let auth_suffix = app
                     .provider
                     .active_auth_method_label()

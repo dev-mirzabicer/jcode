@@ -1136,7 +1136,15 @@ async fn auth_model_first_prompt_e2e_state_space_is_bounded_by_selection_source(
 
         let mut first_prompt_output = None;
         if let Some(model) = scenario.manual_pick_after_first_snapshot {
-            handle_set_model(248, model.to_string(), &agent, &client_event_tx).await;
+            let context_transactions = Arc::new(crate::context::ContextTransactionService::new());
+            handle_set_model(
+                248,
+                model.to_string(),
+                &agent,
+                &context_transactions,
+                &client_event_tx,
+            )
+            .await;
             loop {
                 match client_event_rx.recv().await {
                     Some(ServerEvent::ModelChanged {

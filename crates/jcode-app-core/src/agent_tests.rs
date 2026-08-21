@@ -33,6 +33,58 @@ struct NativeAutoCompactionProvider;
 struct NativeCompactionStreamProvider;
 
 #[derive(Clone)]
+struct NoValidationSwitchProvider {
+    model: Arc<std::sync::Mutex<String>>,
+    invalidations: Arc<AtomicUsize>,
+}
+
+impl NoValidationSwitchProvider {
+    fn new(model: &str) -> Self {
+        Self {
+            model: Arc::new(std::sync::Mutex::new(model.to_string())),
+            invalidations: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+#[async_trait]
+impl Provider for NoValidationSwitchProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        Ok(Box::pin(futures::stream::empty()))
+    }
+
+    fn name(&self) -> &str {
+        "no-validation-switch"
+    }
+
+    fn model(&self) -> String {
+        self.model.lock().expect("model lock").clone()
+    }
+
+    fn set_model(&self, model: &str) -> Result<()> {
+        *self.model.lock().expect("model lock") = model.to_string();
+        Ok(())
+    }
+
+    fn invalidate_context_continuation(&self, _reason: &str) {
+        self.invalidations.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self {
+            model: Arc::new(std::sync::Mutex::new(self.model())),
+            invalidations: Arc::clone(&self.invalidations),
+        })
+    }
+}
+
+#[derive(Clone)]
 struct HiddenLimitEmergencyProvider {
     calls: Arc<AtomicUsize>,
     invalidations: Arc<AtomicUsize>,
@@ -370,24 +422,38 @@ fn context_test_text(id: &str, role: Role, text: &str) -> StoredMessage {
 fn applied_context_state(operations: Vec<StoredContextOperation>) -> StoredContextViewState {
     StoredContextViewState {
         revision: 1,
-        transactions: vec![StoredContextTransaction {
-            id: "phase-5-context-transaction".to_string(),
-            base_revision: 0,
-            created_at: context_test_timestamp(),
-            authorization: StoredContextAuthorization::Manual { initiated_by: None },
+        transactions: vec![context_test_transaction(
+            "phase-5-context-transaction",
+            0,
+            1,
             operations,
-            status_events: vec![StoredContextStatusEvent {
-                revision: 1,
-                timestamp: context_test_timestamp(),
-                kind: StoredContextTransactionStatusKind::Applied,
-                reason: Some("phase 5 projected request test".to_string()),
-            }],
-            application: None,
-            economics: None,
-            curator_usage: Vec::new(),
-            emergency_audit: None,
-        }],
+        )],
         ..StoredContextViewState::default()
+    }
+}
+
+fn context_test_transaction(
+    id: &str,
+    base_revision: u64,
+    applied_revision: u64,
+    operations: Vec<StoredContextOperation>,
+) -> StoredContextTransaction {
+    StoredContextTransaction {
+        id: id.to_string(),
+        base_revision,
+        created_at: context_test_timestamp(),
+        authorization: StoredContextAuthorization::Manual { initiated_by: None },
+        operations,
+        status_events: vec![StoredContextStatusEvent {
+            revision: applied_revision,
+            timestamp: context_test_timestamp(),
+            kind: StoredContextTransactionStatusKind::Applied,
+            reason: Some("projected request test".to_string()),
+        }],
+        application: None,
+        economics: None,
+        curator_usage: Vec::new(),
+        emergency_audit: None,
     }
 }
 
@@ -2203,6 +2269,62 @@ async fn context_budget_tracks_agent_create_append_usage_and_model_switch_withou
 }
 
 #[tokio::test]
+async fn unsupported_provider_switch_preserves_raw_context_state_and_continuation() {
+    let provider = Arc::new(NoValidationSwitchProvider::new("supported-before"));
+    let provider_dyn: Arc<dyn Provider> = provider.clone();
+    let mut agent = Agent::new(provider_dyn, Registry::empty());
+    let messages = vec![context_test_message(
+        "switch-source",
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "authoritative source".to_string(),
+            cache_control: None,
+        }],
+    )];
+    agent.session.replace_messages(messages.clone());
+    agent.session.context_view = applied_context_state(vec![range_summary_operation(
+        &messages,
+        0,
+        0,
+        "Stored provider-neutral summary",
+    )]);
+    agent.session.model = Some("supported-before".to_string());
+    agent.session.provider_session_id = Some("persisted-continuation".to_string());
+    agent.provider_session_id = Some("runtime-continuation".to_string());
+    let messages_before = serde_json::to_vec(&agent.session.messages).unwrap();
+    let context_before = serde_json::to_vec(&agent.session.context_view).unwrap();
+
+    let error = agent
+        .set_model("unsupported-after")
+        .expect_err("candidate without a production validation adapter must be rejected");
+
+    assert!(
+        error
+            .to_string()
+            .contains("no production request-builder validation adapter")
+    );
+    assert_eq!(provider.model(), "supported-before");
+    assert_eq!(agent.session.model.as_deref(), Some("supported-before"));
+    assert_eq!(
+        agent.provider_session_id.as_deref(),
+        Some("runtime-continuation")
+    );
+    assert_eq!(
+        agent.session.provider_session_id.as_deref(),
+        Some("persisted-continuation")
+    );
+    assert_eq!(provider.invalidations.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        serde_json::to_vec(&agent.session.messages).unwrap(),
+        messages_before
+    );
+    assert_eq!(
+        serde_json::to_vec(&agent.session.context_view).unwrap(),
+        context_before
+    );
+}
+
+#[tokio::test]
 async fn legacy_summary_attach_migrates_to_projection_and_invalidates_once() {
     let provider = Arc::new(ProjectedRequestProvider::new(10_000));
     let provider_dyn: Arc<dyn Provider> = provider.clone();
@@ -2335,6 +2457,133 @@ async fn context_budget_rewind_undo_and_repair_reseed_exactly_and_clear_observat
         serde_json::to_vec(&agent.session.context_view).unwrap(),
         context_before_repair
     );
+}
+
+#[tokio::test]
+async fn rewind_invalidates_only_removed_transaction_sources_and_undo_restores_exact_state() {
+    let provider = Arc::new(ProjectedRequestProvider::new(10_000));
+    let provider_dyn: Arc<dyn Provider> = provider.clone();
+    let mut agent = Agent::new(provider_dyn, Registry::empty());
+    let messages = vec![
+        context_test_message(
+            "retained-assistant",
+            Role::Assistant,
+            vec![
+                ContentBlock::Reasoning {
+                    text: "retained reasoning".to_string(),
+                },
+                ContentBlock::Text {
+                    text: "retained text".to_string(),
+                    cache_control: None,
+                },
+            ],
+        ),
+        context_test_message(
+            "removed-assistant",
+            Role::Assistant,
+            vec![
+                ContentBlock::Reasoning {
+                    text: "removed reasoning".to_string(),
+                },
+                ContentBlock::Text {
+                    text: "removed text".to_string(),
+                    cache_control: None,
+                },
+            ],
+        ),
+    ];
+    let context_state = StoredContextViewState {
+        revision: 2,
+        transactions: vec![
+            context_test_transaction(
+                "retained-transaction",
+                0,
+                1,
+                vec![reasoning_suppression_operation(&messages, 0, 0)],
+            ),
+            context_test_transaction(
+                "removed-transaction",
+                1,
+                2,
+                vec![reasoning_suppression_operation(&messages, 1, 0)],
+            ),
+        ],
+        ..StoredContextViewState::default()
+    };
+    agent.session.replace_messages(messages);
+    agent.session.context_view = context_state;
+    let messages_before = serde_json::to_vec(&agent.session.messages).unwrap();
+    let context_before = serde_json::to_vec(&agent.session.context_view).unwrap();
+
+    assert_eq!(agent.rewind_to_message(1).expect("rewind"), 1);
+    assert_eq!(agent.session.context_view.revision, 3);
+    assert!(agent.session.context_view.transactions[0].is_active());
+    assert_eq!(
+        agent.session.context_view.transactions[1]
+            .latest_status()
+            .expect("status")
+            .kind,
+        StoredContextTransactionStatusKind::InvalidatedByTranscriptEdit
+    );
+    assert_eq!(provider.invalidation_count(), 1);
+    agent
+        .messages_for_provider()
+        .expect("valid rewound projection");
+
+    assert_eq!(agent.undo_rewind().expect("undo"), 1);
+    assert_eq!(provider.invalidation_count(), 2);
+    assert_eq!(
+        serde_json::to_vec(&agent.session.messages).unwrap(),
+        messages_before
+    );
+    assert_eq!(
+        serde_json::to_vec(&agent.session.context_view).unwrap(),
+        context_before
+    );
+    agent
+        .messages_for_provider()
+        .expect("valid restored projection");
+}
+
+#[tokio::test]
+async fn missing_tool_repair_invalidates_summary_that_is_no_longer_structurally_closed() {
+    let provider = Arc::new(ProjectedRequestProvider::new(10_000));
+    let provider_dyn: Arc<dyn Provider> = provider.clone();
+    let mut agent = Agent::new(provider_dyn, Registry::empty());
+    let messages = vec![context_test_message(
+        "historical-tool-call",
+        Role::Assistant,
+        vec![ContentBlock::ToolUse {
+            id: "missing-historical-result".to_string(),
+            name: "read".to_string(),
+            input: serde_json::json!({"file_path": "src/lib.rs"}),
+            thought_signature: None,
+        }],
+    )];
+    agent.session.replace_messages(messages.clone());
+    agent.session.context_view = applied_context_state(vec![range_summary_operation(
+        &messages,
+        0,
+        0,
+        "Historical tool work before its repair",
+    )]);
+
+    assert_eq!(agent.repair_missing_tool_outputs(), 1);
+
+    assert_eq!(agent.session.messages.len(), 2);
+    assert_eq!(agent.session.context_view.revision, 2);
+    assert_eq!(
+        agent.session.context_view.transactions[0]
+            .latest_status()
+            .expect("status")
+            .kind,
+        StoredContextTransactionStatusKind::InvalidatedByTranscriptEdit
+    );
+    assert_eq!(provider.invalidation_count(), 1);
+    let projected = agent
+        .messages_for_provider()
+        .expect("valid repaired projection");
+    assert_eq!(projected.len(), 2);
 }
 
 // ── InterruptSignal tests ────────────────────────────────────────────────
@@ -2635,6 +2884,52 @@ async fn restore_session_resets_runtime_interrupt_and_queue_state() {
     assert_eq!(agent.last_usage.input_tokens, 0);
     assert_eq!(agent.last_usage.output_tokens, 0);
     assert!(agent.locked_tools.is_none());
+}
+
+#[tokio::test]
+async fn restore_session_rejects_unsupported_projection_before_live_state_changes() {
+    let _guard = crate::storage::lock_test_env();
+    let provider = Arc::new(NoValidationSwitchProvider::new("current-model"));
+    let provider_dyn: Arc<dyn Provider> = provider.clone();
+    let registry = Registry::new(provider_dyn.clone()).await;
+    let mut agent = Agent::new(provider_dyn, registry);
+    let original_session_id = agent.session_id().to_string();
+
+    let messages = vec![context_test_message(
+        "restore-source",
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "restore source".to_string(),
+            cache_control: None,
+        }],
+    )];
+    let mut restored = crate::session::Session::create_with_id(
+        "unsupported_projected_restore".to_string(),
+        None,
+        None,
+    );
+    restored.replace_messages(messages.clone());
+    restored.context_view = applied_context_state(vec![range_summary_operation(
+        &messages,
+        0,
+        0,
+        "stored summary",
+    )]);
+    restored.model = Some("candidate-model".to_string());
+    restored.save().expect("save restore fixture");
+
+    let error = agent
+        .restore_session(&restored.id)
+        .expect_err("restore must reject a provider without production validation");
+
+    assert!(
+        error
+            .to_string()
+            .contains("no production request-builder validation adapter")
+    );
+    assert_eq!(agent.session_id(), original_session_id);
+    assert_eq!(provider.model(), "current-model");
+    assert_eq!(provider.invalidations.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

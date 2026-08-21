@@ -2800,10 +2800,7 @@ impl App {
                         crate::auth::lifecycle::globally_preferred_default_route(&routes)
                     {
                         let selection = crate::provider::RouteSelection::from_model_route(&route);
-                        let model_request = selection.routed_model_spec();
-                        if provider.set_route_selection(&selection).is_ok() {
-                            self.finalize_model_switch(&model_request);
-                        }
+                        let _ = self.apply_local_route_selection(&selection);
                     }
                 } else {
                     let current_model = provider.model();
@@ -2814,9 +2811,7 @@ impl App {
                     ) {
                         let model_request =
                             activation.model_switch_request(provider.name(), &model);
-                        if provider.set_model(&model_request).is_ok() {
-                            self.finalize_model_switch(&model_request);
-                        }
+                        let _ = self.apply_local_model_selection(&model_request);
                     }
                 }
             }
@@ -2848,11 +2843,9 @@ impl App {
             return;
         };
         let selection = crate::provider::RouteSelection::from_model_route(&route);
-        let model_request = selection.routed_model_spec();
-        if self.provider.set_route_selection(&selection).is_err() {
+        let Ok(model) = self.apply_local_route_selection(&selection) else {
             return;
-        }
-        let model = self.finalize_model_switch(&model_request);
+        };
         *self
             .onboarding_auto_model_selection_baseline
             .lock()
@@ -2901,9 +2894,8 @@ impl App {
             format!("openrouter:{}", model)
         };
 
-        match self.provider.set_model(&model_request) {
-            Ok(()) => {
-                let active_model = self.finalize_model_switch(&model_request);
+        match self.apply_local_model_selection(&model_request) {
+            Ok(active_model) => {
                 crate::bus::Bus::global().publish_models_updated();
                 crate::logging::auth_event(
                     "auth_changed_runtime_model_applied",

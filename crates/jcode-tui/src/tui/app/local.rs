@@ -214,20 +214,82 @@ pub(super) fn handle_bus_event(
             if session_id != app.session.id {
                 return false;
             }
-            app.provider_session_id = None;
-            app.session.provider_session_id = None;
-            app.upstream_provider = None;
-            app.invalidate_model_picker_cache();
-            app.update_context_limit_for_model(&model);
-            app.session.provider_key = provider_key.or_else(|| {
+            let previous_model_request = app.session.model.as_ref().map(|previous_model| {
+                crate::provider::MultiProvider::model_switch_request_for_session_route(
+                    previous_model,
+                    app.session.provider_key.as_deref(),
+                    app.session.route_api_method.as_deref(),
+                )
+            });
+            let projected = match app.session.projected_messages_for_provider() {
+                Ok(projected) => projected,
+                Err(error) => {
+                    app.push_display_message(crate::tui::DisplayMessage::error(format!(
+                        "Login model activation was rejected because the active context projection is invalid: {error}"
+                    )));
+                    return true;
+                }
+            };
+            if let Err(error) =
+                jcode_app_core::context::provider_validation::require_supported_context_view(
+                    app.provider.as_ref(),
+                    &projected,
+                    &app.session.context_view,
+                )
+            {
+                if let Some(previous_model_request) = previous_model_request.as_deref() {
+                    let _ = crate::provider::set_model_with_auth_refresh(
+                        app.provider.as_ref(),
+                        previous_model_request,
+                    );
+                }
+                app.push_display_message(crate::tui::DisplayMessage::error(format!(
+                    "Login model activation was rejected to preserve the active context transactions: {error}"
+                )));
+                return true;
+            }
+
+            let mut previous_session = app.session.clone();
+            let mut next_session = app.session.clone();
+            next_session.provider_session_id = None;
+            next_session.provider_key = provider_key.or_else(|| {
                 crate::provider::MultiProvider::session_provider_key_after_model_switch(
                     &model,
                     app.provider.name(),
                     app.session.provider_key.as_deref(),
                 )
             });
-            app.session.model = Some(model.clone());
-            let _ = app.session.save();
+            next_session.model = Some(model.clone());
+            if let Err(error) = next_session.save() {
+                if let Some(previous_model_request) = previous_model_request.as_deref() {
+                    let _ = crate::provider::set_model_with_auth_refresh(
+                        app.provider.as_ref(),
+                        previous_model_request,
+                    );
+                }
+                if previous_session.save().is_err() {
+                    crate::logging::error(
+                        "Post-auth model activation persistence failed and durable session rollback also failed",
+                    );
+                }
+                app.push_display_message(crate::tui::DisplayMessage::error(format!(
+                    "Login model activation could not be persisted; the prior selection remains active: {error}"
+                )));
+                return true;
+            }
+            app.session = next_session;
+            app.upstream_provider = None;
+            app.invalidate_model_picker_cache();
+            app.update_context_limit_for_model(&model);
+            app.context_transactions
+                .invalidate_session_drafts(&session_id, "provider or model identity changed");
+            app.context_protocol.invalidate_provider_identity();
+            if let Err(error) = app.after_local_provider_context_changed(
+                "post-auth provider model switch",
+                &format!("provider model changed to {model} after authentication"),
+            ) {
+                app.push_display_message(crate::tui::DisplayMessage::error(error));
+            }
             if !app.auth_catalog_refresh_pending {
                 app.push_display_message(crate::tui::DisplayMessage::system(message));
             }

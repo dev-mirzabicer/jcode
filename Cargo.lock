@@ -4346,6 +4346,7 @@ dependencies = [
  "jcode-app-core",
  "jcode-build-meta",
  "jcode-config-types",
+ "jcode-context-core",
  "jcode-core",
  "jcode-fuzzy",
  "jcode-logging",

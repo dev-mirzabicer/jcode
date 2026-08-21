@@ -176,6 +176,7 @@ pub struct TokenUsage {
 #[derive(Debug, Clone)]
 struct RewindUndoSnapshot {
     messages: Vec<StoredMessage>,
+    context_view: jcode_session_types::StoredContextViewState,
     visible_message_count: usize,
 }
 
@@ -878,6 +879,10 @@ impl Agent {
     }
 
     fn repair_missing_tool_outputs(&mut self) -> usize {
+        let session_before = self.session.clone();
+        let tool_call_ids_before = self.tool_call_ids.clone();
+        let tool_result_ids_before = self.tool_result_ids.clone();
+        let scan_index_before = self.tool_output_scan_index;
         if self.tool_output_scan_index > self.session.messages.len() {
             self.reset_tool_output_tracking();
         }
@@ -969,7 +974,36 @@ impl Agent {
         self.tool_output_scan_index = self.session.messages.len();
 
         if repaired > 0 {
-            self.persist_session_best_effort("missing tool-output repair");
+            let reconciliation = match jcode_context_core::reconcile_context_after_transcript_edit(
+                &self.session.messages,
+                &self.session.context_view,
+                chrono::Utc::now(),
+                "historical tool-output repair inserted exact provider structure",
+            ) {
+                Ok(reconciliation) => reconciliation,
+                Err(_) => {
+                    self.session = session_before;
+                    self.tool_call_ids = tool_call_ids_before;
+                    self.tool_result_ids = tool_result_ids_before;
+                    self.tool_output_scan_index = scan_index_before;
+                    logging::error(
+                        "Missing tool-output repair failed safely during context reconciliation",
+                    );
+                    return 0;
+                }
+            };
+            self.session.context_view = reconciliation.state;
+            self.session.provider_session_id = None;
+            if self.session.save().is_err() {
+                self.session = session_before;
+                self.tool_call_ids = tool_call_ids_before;
+                self.tool_result_ids = tool_result_ids_before;
+                self.tool_output_scan_index = scan_index_before;
+                logging::error(
+                    "Missing tool-output repair failed safely during session persistence",
+                );
+                return 0;
+            }
             if let Err(error) = self.after_provider_context_changed(
                 "historical tool repair",
                 format!("inserted {repaired} missing tool output(s) into prior provider history"),

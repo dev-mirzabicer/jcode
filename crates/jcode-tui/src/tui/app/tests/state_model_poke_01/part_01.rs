@@ -128,11 +128,8 @@ fn test_rewind_undo_restores_truncated_messages() {
 
     assert_eq!(app.session.visible_conversation_message_count(), 3);
     assert_eq!(app.messages.len(), 3);
-    assert_eq!(app.provider_session_id.as_deref(), Some("provider-session"));
-    assert_eq!(
-        app.session.provider_session_id.as_deref(),
-        Some("provider-session")
-    );
+    assert!(app.provider_session_id.is_none());
+    assert!(app.session.provider_session_id.is_none());
     assert!(
         app.display_messages()
             .last()

@@ -373,6 +373,32 @@ pub fn derive_session_provider_key(provider_name: &str) -> Option<String> {
 }
 
 impl Session {
+    /// Clone the persisted state that defines a true continuation child.
+    ///
+    /// The child retains stable message IDs and an independent clone of the complete context-view
+    /// history, but never reuses provider-native continuation state from the parent process.
+    pub fn inherit_continuation_state_from(&mut self, parent: &Session) {
+        self.replace_messages(parent.messages.clone());
+        self.compaction = parent.compaction.clone();
+        self.context_view = parent.context_view.clone();
+        self.provider_session_id = None;
+        self.provider_key = parent.provider_key.clone();
+        self.model = parent.model.clone();
+        self.route_api_method = parent.route_api_method.clone();
+        self.reasoning_effort = parent.reasoning_effort.clone();
+        self.subagent_model = parent.subagent_model.clone();
+        self.improve_mode = parent.improve_mode;
+        self.autoreview_enabled = parent.autoreview_enabled;
+        self.autojudge_enabled = parent.autojudge_enabled;
+        self.is_canary = parent.is_canary;
+        self.testing_build = parent.testing_build.clone();
+        self.working_dir = parent.working_dir.clone();
+        self.is_debug = parent.is_debug;
+        self.memory_injections = parent.memory_injections.clone();
+        self.replay_events = parent.replay_events.clone();
+        self.mark_memory_profile_dirty();
+    }
+
     fn session_from_startup_stub(stub: SessionStartupStub) -> Self {
         let mut session = Self::create_with_id(stub.id, stub.parent_id, stub.title);
         session.custom_title = stub.custom_title;

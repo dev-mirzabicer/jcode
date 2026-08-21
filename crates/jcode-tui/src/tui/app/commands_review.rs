@@ -264,6 +264,7 @@ fn apply_judge_visible_context_if_needed(session: &mut Session, title_override: 
     let transcript = build_judge_visible_transcript_messages(&parent_session);
     session.replace_messages(transcript);
     session.compaction = None;
+    session.context_view = Default::default();
     session.provider_session_id = None;
 }
 
@@ -280,8 +281,36 @@ pub(crate) fn clear_side_panel_for_new_session(app: &mut App) {
 }
 
 pub(super) fn reset_current_session(app: &mut App) {
-    app.session.mark_closed();
-    let _ = app.session.save();
+    let mut previous_session = app.session.clone();
+    let previous_session_id = previous_session.id.clone();
+    let mut closed_session = previous_session.clone();
+    closed_session.mark_closed();
+    if let Err(error) = closed_session.save() {
+        app.push_display_message(DisplayMessage::error(format!(
+            "Failed to persist the current session before clear; nothing was changed: {error}"
+        )));
+        return;
+    }
+
+    let mut session = Session::create(None, None);
+    session.mark_active();
+    session.model = Some(app.provider.model());
+    session.provider_key = crate::session::derive_session_provider_key(app.provider.name());
+    session.autoreview_enabled = Some(app.autoreview_enabled);
+    session.autojudge_enabled = Some(app.autojudge_enabled);
+    session.ensure_initial_session_context_message();
+    if let Err(error) = session.save() {
+        if previous_session.save().is_err() {
+            crate::logging::error(
+                "Local session clear failed and restoring the prior durable session also failed",
+            );
+        }
+        app.push_display_message(DisplayMessage::error(format!(
+            "Failed to create the replacement session; the prior session remains active: {error}"
+        )));
+        return;
+    }
+
     app.clear_provider_messages();
     app.clear_display_messages();
     // A streaming mermaid preview (STREAMING_PREVIEW_DIAGRAM) belongs to the
@@ -307,16 +336,26 @@ pub(super) fn reset_current_session(app: &mut App) {
     app.pending_images.clear();
     app.active_skill = None;
     app.improve_mode = None;
-    let mut session = Session::create(None, None);
-    session.mark_active();
-    session.model = Some(app.provider.model());
-    session.provider_key = crate::session::derive_session_provider_key(app.provider.name());
-    session.autoreview_enabled = Some(app.autoreview_enabled);
-    session.autojudge_enabled = Some(app.autojudge_enabled);
-    session.ensure_initial_session_context_message();
     app.session = session;
     clear_side_panel_for_new_session(app);
-    app.provider_session_id = None;
+    app.context_transactions.invalidate_session_drafts(
+        &previous_session_id,
+        "session clear discarded authoritative history",
+    );
+    let session_id = app.session.id.clone();
+    app.context_protocol
+        .accept_history(&session_id, app.session.context_view.revision);
+    if let Err(error) = app.after_local_provider_context_changed(
+        "session clear",
+        "session clear replaced the complete provider history",
+    ) {
+        app.push_display_message(DisplayMessage::error(error));
+    } else {
+        // The reset hook invalidates usage attached to historical context. A
+        // clear has already materialized a brand-new empty session, so finish
+        // with the fresh-session zero state rather than a pending refresh.
+        app.clear_live_usage_state();
+    }
 }
 
 fn observe_status_message(app: &App) -> String {
@@ -638,12 +677,9 @@ fn clone_session_for_review(
 ) -> anyhow::Result<(String, String)> {
     let parent_session_id = current_feedback_target_session_id(app);
     let mut child = Session::create(Some(parent_session_id), Some(session_title.to_string()));
-    child.replace_messages(app.session.messages.clone());
-    child.compaction = app.session.compaction.clone();
-    child.working_dir = app.session.working_dir.clone();
+    child.inherit_continuation_state_from(&app.session);
     child.model = Some(initial_model);
     child.provider_key = provider_key_override.or_else(|| app.session.provider_key.clone());
-    child.subagent_model = app.session.subagent_model.clone();
     child.autoreview_enabled = Some(false);
     child.autojudge_enabled = Some(false);
     child.status = crate::session::SessionStatus::Closed;
@@ -654,14 +690,7 @@ fn clone_session_for_review(
 fn clone_session_for_prompt(app: &App) -> anyhow::Result<(String, String)> {
     let parent_session_id = active_session_id(app);
     let mut child = Session::create(Some(parent_session_id.clone()), None);
-    child.replace_messages(app.session.messages.clone());
-    child.compaction = app.session.compaction.clone();
-    child.working_dir = app.session.working_dir.clone();
-    child.model = app.session.model.clone();
-    child.provider_key = app.session.provider_key.clone();
-    child.subagent_model = app.session.subagent_model.clone();
-    child.autoreview_enabled = app.session.autoreview_enabled;
-    child.autojudge_enabled = app.session.autojudge_enabled;
+    child.inherit_continuation_state_from(&app.session);
     child.status = crate::session::SessionStatus::Closed;
     // The parent agent keeps ownership of any in-flight request; tell the
     // forked agent so it treats the next prompt as fresh work instead of

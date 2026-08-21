@@ -1,8 +1,8 @@
 //! Lenient serde deserializers for tool-input fields.
 //!
 //! Some providers (notably Claude's tool calling) emit numeric and boolean
-//! tool arguments as JSON *strings* — e.g. `{"compactions": "0"}` instead of
-//! `{"compactions": 0}` — even when the tool's JSON schema declares the field
+//! tool arguments as JSON *strings* — e.g. `{"memories_modified": "0"}` instead of
+//! `{"memories_modified": 0}` — even when the tool's JSON schema declares the field
 //! as `integer`/`boolean`. `serde_json` is strict by default and rejects these
 //! with errors like `invalid type: string "0", expected u32`, which causes the
 //! whole tool call to fail (see issue #106 for `end_ambient_cycle`).
@@ -154,7 +154,7 @@ mod tests {
 
     #[test]
     fn accepts_string_number() {
-        // The #106 case: Claude sends {"compactions": "0"}.
+        // The #106 case: Claude sends numeric tool arguments as strings.
         let d: Demo = serde_json::from_value(serde_json::json!({"n": "0"})).unwrap();
         assert_eq!(d.n, 0);
         let d: Demo = serde_json::from_value(serde_json::json!({"n": "42"})).unwrap();

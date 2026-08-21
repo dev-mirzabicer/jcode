@@ -379,6 +379,7 @@ pub(super) fn create_transfer_session_from_parent(
     child.working_dir = parent.working_dir.clone();
     child.model = parent.model.clone();
     child.provider_key = parent.provider_key.clone();
+    child.route_api_method = parent.route_api_method.clone();
     child.subagent_model = parent.subagent_model.clone();
     child.improve_mode = parent.improve_mode;
     child.autoreview_enabled = parent.autoreview_enabled;
@@ -1976,19 +1977,49 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
     }
 
     if trimmed == "/rewind undo" {
-        let Some(snapshot) = app.rewind_undo_snapshot.take() else {
+        let Some(snapshot) = app.rewind_undo_snapshot.clone() else {
             app.push_display_message(DisplayMessage::system("No rewind to undo.".to_string()));
             return true;
         };
 
         let current_count = app.session.rewind_target_count();
         let restored = snapshot.visible_message_count.saturating_sub(current_count);
+        let previous_session = app.session.clone();
         app.session.replace_messages(snapshot.messages);
-        app.provider_session_id = snapshot.provider_session_id;
-        app.session.provider_session_id = snapshot.session_provider_session_id;
+        app.session.context_view = snapshot.context_view;
+        app.session.provider_session_id = None;
         app.session.updated_at = chrono::Utc::now();
-        let provider_messages = app.session.raw_messages_for_provider_uncached();
-        app.replace_provider_messages(provider_messages);
+        if let Err(error) =
+            jcode_context_core::project_context(&app.session.messages, &app.session.context_view)
+        {
+            app.session = previous_session;
+            app.push_display_message(DisplayMessage::error(format!(
+                "Cannot undo rewind because the restored context is invalid: {error}"
+            )));
+            return true;
+        }
+        if let Err(error) = app.session.save() {
+            app.session = previous_session;
+            app.push_display_message(DisplayMessage::error(format!(
+                "Failed to persist rewind undo; the rewound history remains active: {error}"
+            )));
+            return true;
+        }
+        app.rewind_undo_snapshot = None;
+        if let Err(error) = app.after_local_provider_context_changed(
+            "conversation rewind undo",
+            "conversation rewind undo restored prior historical provider input",
+        ) {
+            app.push_display_message(DisplayMessage::error(error));
+        }
+        let session_id = app.session.id.clone();
+        let context_revision = app.session.context_view.revision;
+        app.context_transactions.invalidate_session_drafts(
+            &session_id,
+            "conversation rewind undo replaced authoritative history",
+        );
+        app.context_protocol
+            .accept_history(&session_id, context_revision);
 
         app.clear_display_messages();
         // Drop any streaming mermaid preview tied to the transcript being
@@ -2010,7 +2041,6 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
             });
         }
 
-        let _ = app.session.save();
         app.push_display_message(DisplayMessage::system(format!(
             "✓ Undid rewind. Restored {} message{}.",
             restored,
@@ -2058,16 +2088,58 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
         match num_str.parse::<usize>() {
             Ok(n) if n > 0 && n <= visible_count => {
                 let removed = visible_count - n;
-                app.rewind_undo_snapshot = Some(LocalRewindUndoSnapshot {
+                let undo_snapshot = LocalRewindUndoSnapshot {
                     messages: app.session.messages.clone(),
-                    provider_session_id: app.provider_session_id.clone(),
-                    session_provider_session_id: app.session.provider_session_id.clone(),
+                    context_view: app.session.context_view.clone(),
                     visible_message_count: visible_count,
-                });
+                };
+                let previous_session = app.session.clone();
                 app.session.truncate_messages(targets[n - 1] + 1);
-                let provider_messages = app.session.raw_messages_for_provider_uncached();
-                app.replace_provider_messages(provider_messages);
-                app.session.updated_at = chrono::Utc::now();
+                let timestamp = chrono::Utc::now();
+                let reconciliation =
+                    match jcode_context_core::reconcile_context_after_transcript_edit(
+                        &app.session.messages,
+                        &app.session.context_view,
+                        timestamp,
+                        "conversation rewind removed or changed exact source material",
+                    ) {
+                        Ok(reconciliation) => reconciliation,
+                        Err(error) => {
+                            app.session = previous_session;
+                            app.push_display_message(DisplayMessage::error(format!(
+                            "Cannot rewind because context transactions could not be reconciled: {error}"
+                        )));
+                            return true;
+                        }
+                    };
+                app.session.context_view = reconciliation.state;
+                app.session.provider_session_id = None;
+                app.session.updated_at = timestamp;
+                if let Err(error) = app.session.save() {
+                    app.session = previous_session;
+                    app.push_display_message(DisplayMessage::error(format!(
+                        "Failed to persist conversation rewind; no history was changed: {error}"
+                    )));
+                    return true;
+                }
+                app.rewind_undo_snapshot = Some(undo_snapshot);
+                if let Err(error) = app.after_local_provider_context_changed(
+                    "conversation rewind",
+                    &format!(
+                        "conversation rewound to stored message count {}",
+                        targets[n - 1] + 1
+                    ),
+                ) {
+                    app.push_display_message(DisplayMessage::error(error));
+                }
+                let session_id = app.session.id.clone();
+                let context_revision = app.session.context_view.revision;
+                app.context_transactions.invalidate_session_drafts(
+                    &session_id,
+                    "conversation rewind replaced authoritative history",
+                );
+                app.context_protocol
+                    .accept_history(&session_id, context_revision);
 
                 app.clear_display_messages();
                 // Same defensive preview clear as /rewind undo above.
@@ -2090,10 +2162,6 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
                         tool_data: rendered.tool_data,
                     });
                 }
-
-                app.provider_session_id = None;
-                app.session.provider_session_id = None;
-                let _ = app.session.save();
 
                 app.push_display_message(DisplayMessage::system(format!(
                     "✓ Rewound to message {}. Removed {} message{}. Undo anytime with /rewind undo.",

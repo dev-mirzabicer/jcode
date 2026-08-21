@@ -27,7 +27,7 @@ impl AmbientState {
     pub fn record_cycle(&mut self, result: &AmbientCycleResult) {
         self.last_run = Some(result.ended_at);
         self.last_summary = Some(result.summary.clone());
-        self.last_compactions = Some(result.compactions);
+        self.last_active_context_transactions = Some(result.active_context_transactions);
         self.last_memories_modified = Some(result.memories_modified);
         self.total_cycles += 1;
 

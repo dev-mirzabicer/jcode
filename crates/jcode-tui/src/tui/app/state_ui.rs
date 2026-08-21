@@ -2035,8 +2035,34 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
                 .history
                 .as_ref()
                 .filter(|history| revision == Some(history.context_revision));
+            let status_summary = history
+                .filter(|history| {
+                    history.offset == 0
+                        && history.next_offset.is_none()
+                        && history.transactions.len() == history.total_transactions
+                })
+                .map(|history| {
+                    let reverted = history
+                        .transactions
+                        .iter()
+                        .filter(|transaction| {
+                            transaction.latest_status
+                                == Some(jcode_session_types::StoredContextTransactionStatusKind::Reverted)
+                        })
+                        .count();
+                    let invalidated = history
+                        .transactions
+                        .iter()
+                        .filter(|transaction| {
+                            transaction.latest_status
+                                == Some(jcode_session_types::StoredContextTransactionStatusKind::InvalidatedByTranscriptEdit)
+                        })
+                        .count();
+                    format!("{reverted} reverted, {invalidated} transcript-invalidated")
+                })
+                .unwrap_or_else(|| "not fully loaded".to_string());
             format!(
-                "- revision: {}\n- transactions: {} total, {} active\n- authoritative stored messages: {}\n- source: authoritative remote context protocol metadata",
+                "- revision: {}\n- transactions: {} total, {} active\n- transaction statuses: {}\n- authoritative stored messages: {}\n- source: authoritative remote context protocol metadata",
                 revision
                     .map(|value| value.to_string())
                     .unwrap_or_else(|| "not loaded".to_string()),
@@ -2046,16 +2072,43 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
                 snapshot
                     .map(|value| value.active_transactions.len().to_string())
                     .unwrap_or_else(|| "not loaded".to_string()),
+                status_summary,
                 snapshot
                     .map(|value| value.raw_message_count.to_string())
                     .unwrap_or_else(|| "not loaded".to_string()),
             )
         } else {
+            let reverted = app
+                .session
+                .context_view
+                .transactions
+                .iter()
+                .filter(|transaction| {
+                    transaction.latest_status().is_some_and(|status| {
+                        status.kind
+                            == jcode_session_types::StoredContextTransactionStatusKind::Reverted
+                    })
+                })
+                .count();
+            let invalidated = app
+                .session
+                .context_view
+                .transactions
+                .iter()
+                .filter(|transaction| {
+                    transaction.latest_status().is_some_and(|status| {
+                        status.kind
+                            == jcode_session_types::StoredContextTransactionStatusKind::InvalidatedByTranscriptEdit
+                    })
+                })
+                .count();
             format!(
-                "- revision: {}\n- transactions: {} total, {} active\n- authoritative stored messages: {}",
+                "- revision: {}\n- transactions: {} total, {} active\n- transaction statuses: {} reverted, {} transcript-invalidated\n- authoritative stored messages: {}",
                 app.session.context_view.revision,
                 app.session.context_view.transactions.len(),
                 app.session.context_view.active_transaction_count(),
+                reverted,
+                invalidated,
                 app.session.messages.len(),
             )
         };

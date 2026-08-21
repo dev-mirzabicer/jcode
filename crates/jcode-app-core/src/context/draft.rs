@@ -640,6 +640,16 @@ impl ContextTransactionService {
             .ok_or_else(|| ContextServiceError::DraftNotFound(draft_id.to_string()))
     }
 
+    /// Fail every non-applying draft captured for a session whose lifecycle identity changed.
+    /// Applying drafts remain immutable while their atomic commit owns the session boundary.
+    pub fn invalidate_session_drafts(&self, session_id: &str, reason: &str) -> usize {
+        let reason = bounded_context_metadata(reason, 256);
+        let mut store = self.lock_store();
+        let invalidated = store.invalidate_session(session_id, &reason);
+        store.enforce_total_bytes(self.limits.max_total_bytes);
+        invalidated
+    }
+
     pub fn preview_draft_selection(
         &self,
         agent: &Arc<AsyncMutex<Agent>>,
@@ -1003,7 +1013,7 @@ impl ContextTransactionService {
         let current_reserved_bytes = current.reserved_bytes;
         if matches!(
             current.state,
-            DraftEntryState::Canceled | DraftEntryState::Expired
+            DraftEntryState::Failed(_) | DraftEntryState::Canceled | DraftEntryState::Expired
         ) {
             let entry = store
                 .entries
@@ -2180,6 +2190,37 @@ impl ContextDraftStore {
         }
     }
 
+    fn invalidate_session(&mut self, session_id: &str, reason: &str) -> usize {
+        let mut invalidated = 0usize;
+        for entry in self.entries.values_mut() {
+            if entry.identity.session_id != session_id {
+                continue;
+            }
+            match entry.state {
+                DraftEntryState::Preparing => {
+                    entry.cancellation.cancel();
+                    entry.state =
+                        DraftEntryState::Failed(ContextServiceError::Stale(reason.to_string()));
+                    entry.notify.notify_waiters();
+                    invalidated += 1;
+                }
+                DraftEntryState::Ready(_) => {
+                    entry.state =
+                        DraftEntryState::Failed(ContextServiceError::Stale(reason.to_string()));
+                    entry.refresh_terminal_reservation();
+                    entry.notify.notify_waiters();
+                    invalidated += 1;
+                }
+                DraftEntryState::Applying(_)
+                | DraftEntryState::Applied { .. }
+                | DraftEntryState::Failed(_)
+                | DraftEntryState::Canceled
+                | DraftEntryState::Expired => {}
+            }
+        }
+        invalidated
+    }
+
     fn total_bytes(&self) -> usize {
         self.entries.values().fold(0usize, |total, entry| {
             total.saturating_add(entry.reserved_bytes)
@@ -2415,6 +2456,64 @@ mod store_tests {
             .len();
         assert!(serialized_status > TERMINAL_DRAFT_RESERVATION_FLOOR_BYTES);
         assert_eq!(failed.reserved_bytes, serialized_status);
+    }
+
+    #[test]
+    fn lifecycle_invalidation_is_session_scoped_terminal_and_never_mutates_applying_drafts() {
+        let expires_at = Utc::now() + chrono::Duration::minutes(1);
+        let mut store = ContextDraftStore::default();
+        let mut preparing = entry(
+            "preparing",
+            DraftEntryState::Preparing,
+            expires_at,
+            4_096,
+            true,
+        );
+        preparing.identity.session_id = "discarded-session".to_string();
+        let preparing_token = preparing.cancellation.clone();
+        let mut ready = entry(
+            "ready",
+            DraftEntryState::Ready(draft("ready", expires_at)),
+            expires_at,
+            2_048,
+            false,
+        );
+        ready.identity.session_id = "discarded-session".to_string();
+        let mut applying = entry(
+            "applying",
+            DraftEntryState::Applying(draft("applying", expires_at)),
+            expires_at,
+            2_048,
+            false,
+        );
+        applying.identity.session_id = "discarded-session".to_string();
+        let mut other = entry("other", DraftEntryState::Preparing, expires_at, 1_024, true);
+        other.identity.session_id = "other-session".to_string();
+        store.entries.insert("preparing".to_string(), preparing);
+        store.entries.insert("ready".to_string(), ready);
+        store.entries.insert("applying".to_string(), applying);
+        store.entries.insert("other".to_string(), other);
+
+        assert_eq!(
+            store.invalidate_session("discarded-session", "session lifecycle changed"),
+            2
+        );
+
+        assert!(preparing_token.is_cancelled());
+        for id in ["preparing", "ready"] {
+            assert!(matches!(
+                store.entries[id].state,
+                DraftEntryState::Failed(ContextServiceError::Stale(_))
+            ));
+        }
+        assert!(matches!(
+            store.entries["applying"].state,
+            DraftEntryState::Applying(_)
+        ));
+        assert!(matches!(
+            store.entries["other"].state,
+            DraftEntryState::Preparing
+        ));
     }
 
     #[test]

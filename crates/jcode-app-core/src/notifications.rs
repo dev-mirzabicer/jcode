@@ -121,8 +121,8 @@ impl NotificationDispatcher {
     /// Send a cycle summary notification (after ambient cycle completes).
     pub fn dispatch_cycle_summary(&self, transcript: &AmbientTranscript) {
         let title = format!(
-            "Ambient cycle: {} memories, {} compactions",
-            transcript.memories_modified, transcript.compactions
+            "Ambient cycle: {} memories, {} active context transactions",
+            transcript.memories_modified, transcript.active_context_transactions
         );
         let safe_body = format_cycle_body_safe(transcript);
         let detailed_body = format_cycle_body_detailed(transcript);
@@ -873,7 +873,10 @@ fn format_cycle_body_safe(transcript: &AmbientTranscript) -> String {
         "Memories modified: {}",
         transcript.memories_modified
     ));
-    lines.push(format!("Compactions: {}", transcript.compactions));
+    lines.push(format!(
+        "Active context transactions: {}",
+        transcript.active_context_transactions
+    ));
 
     if transcript.pending_permissions > 0 {
         lines.push(format!(
@@ -902,12 +905,12 @@ fn format_cycle_body_detailed(transcript: &AmbientTranscript) -> String {
     lines.push("---".to_string());
     lines.push(String::new());
     lines.push(format!(
-        "**Status:** {:?} · **Provider:** {} ({}) · **Memories:** {} · **Compactions:** {}",
+        "**Status:** {:?} · **Provider:** {} ({}) · **Memories:** {} · **Active context transactions:** {}",
         transcript.status,
         transcript.provider,
         transcript.model,
         transcript.memories_modified,
-        transcript.compactions,
+        transcript.active_context_transactions,
     ));
 
     if transcript.pending_permissions > 0 {
@@ -947,14 +950,14 @@ mod tests {
             actions: Vec::new(),
             pending_permissions: 0,
             summary: Some("Cleaned up 3 stale memories.".to_string()),
-            compactions: 1,
+            active_context_transactions: 1,
             memories_modified: 3,
             conversation: None,
         };
 
         let body = format_cycle_body_safe(&transcript);
         assert!(body.contains("Memories modified: 3"));
-        assert!(body.contains("Compactions: 1"));
+        assert!(body.contains("Active context transactions: 1"));
         assert!(body.contains("Check jcode for full details"));
         // Safe body must NOT include model-generated summary
         assert!(!body.contains("Cleaned up"));
@@ -973,7 +976,7 @@ mod tests {
             actions: Vec::new(),
             pending_permissions: 0,
             summary: Some("Cleaned up 3 stale memories.".to_string()),
-            compactions: 1,
+            active_context_transactions: 1,
             memories_modified: 3,
             conversation: Some("### User\n\nBegin cycle.\n\n### Assistant\n\nDone.\n".to_string()),
         };
@@ -1001,7 +1004,7 @@ mod tests {
             actions: Vec::new(),
             pending_permissions: 2,
             summary: None,
-            compactions: 0,
+            active_context_transactions: 0,
             memories_modified: 0,
             conversation: None,
         };

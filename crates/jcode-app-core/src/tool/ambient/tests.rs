@@ -14,7 +14,7 @@ fn test_cycle_result_store_and_take() {
     let result = AmbientCycleResult {
         summary: "test".to_string(),
         memories_modified: 1,
-        compactions: 0,
+        active_context_transactions: 0,
         proactive_work: None,
         next_schedule: None,
         started_at: Utc::now(),
@@ -37,7 +37,7 @@ fn test_end_cycle_input_deserialization() {
     let input = json!({
         "summary": "Merged 3 duplicates",
         "memories_modified": 5,
-        "compactions": 1,
+        "compactions": 999,
         "proactive_work": "Fixed typo in README",
         "next_schedule": {
             "wake_in_minutes": 20,
@@ -49,7 +49,6 @@ fn test_end_cycle_input_deserialization() {
     let parsed: EndCycleInput = serde_json::from_value(input).unwrap();
     assert_eq!(parsed.summary, "Merged 3 duplicates");
     assert_eq!(parsed.memories_modified, 5);
-    assert_eq!(parsed.compactions, 1);
     assert_eq!(
         parsed.proactive_work.as_deref(),
         Some("Fixed typo in README")
@@ -61,11 +60,23 @@ fn test_end_cycle_input_deserialization() {
 }
 
 #[test]
+fn end_cycle_schema_does_not_accept_a_model_reported_context_transaction_count() {
+    let schema = EndAmbientCycleTool::new().parameters_schema();
+    let properties = schema["properties"].as_object().expect("properties object");
+    assert!(!properties.contains_key("compactions"));
+    assert!(!properties.contains_key("active_context_transactions"));
+    let required = schema["required"].as_array().expect("required array");
+    assert_eq!(
+        required,
+        &vec![json!("summary"), json!("memories_modified")]
+    );
+}
+
+#[test]
 fn test_end_cycle_input_minimal() {
     let input = json!({
         "summary": "Nothing to do",
-        "memories_modified": 0,
-        "compactions": 0
+        "memories_modified": 0
     });
 
     let parsed: EndCycleInput = serde_json::from_value(input).unwrap();
@@ -75,14 +86,13 @@ fn test_end_cycle_input_minimal() {
 }
 
 /// Regression for #106: Claude's tool calling emits numeric arguments as JSON
-/// *strings* (e.g. `{"compactions": "0"}`). Before the fix, this failed with
+/// *strings* (e.g. `{"memories_modified": "5"}`). Before the fix, this failed with
 /// `invalid type: string "0", expected u32`, breaking every ambient cycle.
 #[test]
 fn test_end_cycle_input_accepts_string_numbers() {
     let input = json!({
         "summary": "Stringified counts",
         "memories_modified": "5",
-        "compactions": "0",
         "next_schedule": {
             "wake_in_minutes": "20",
             "context": "later",
@@ -93,7 +103,6 @@ fn test_end_cycle_input_accepts_string_numbers() {
     let parsed: EndCycleInput = serde_json::from_value(input)
         .expect("string-encoded numbers must deserialize (regression #106)");
     assert_eq!(parsed.memories_modified, 5);
-    assert_eq!(parsed.compactions, 0);
     assert_eq!(parsed.next_schedule.unwrap().wake_in_minutes, Some(20));
 }
 

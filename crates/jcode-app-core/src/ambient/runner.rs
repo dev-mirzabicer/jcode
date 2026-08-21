@@ -323,7 +323,7 @@ impl AmbientRunnerHandle {
             "last_run": state.last_run.map(|t| t.to_rfc3339()),
             "last_summary": state.last_summary,
             "last_memories_modified": state.last_memories_modified,
-            "last_compactions": state.last_compactions,
+            "last_active_context_transactions": state.last_active_context_transactions,
             "queue_count": queue_count,
             "next_queue_preview": next_preview,
             "next_queue_due": next_due,
@@ -415,7 +415,7 @@ impl AmbientRunnerHandle {
                         "status": format!("{:?}", transcript.status),
                         "summary": transcript.summary,
                         "memories_modified": transcript.memories_modified,
-                        "compactions": transcript.compactions,
+                        "active_context_transactions": transcript.active_context_transactions,
                     }));
                 }
             }
@@ -900,8 +900,8 @@ impl AmbientRunnerHandle {
             match cycle_result {
                 Ok(result) => {
                     logging::info(&format!(
-                        "Ambient cycle complete: {} memories modified, {} compactions",
-                        result.memories_modified, result.compactions
+                        "Ambient cycle complete: {} memories modified, {} active context transactions",
+                        result.memories_modified, result.active_context_transactions
                     ));
 
                     // Update state
@@ -931,7 +931,7 @@ impl AmbientRunnerHandle {
                         actions: Vec::new(),
                         pending_permissions: self.inner.safety.pending_requests().len(),
                         summary: Some(result.summary.clone()),
-                        compactions: result.compactions,
+                        active_context_transactions: result.active_context_transactions,
                         memories_modified: result.memories_modified,
                         conversation: result.conversation.clone(),
                     };
@@ -1097,11 +1097,16 @@ impl AmbientRunnerHandle {
         if let Some(result) = ambient_tools::take_cycle_result() {
             ambient_tools::unregister_ambient_session(&ambient_session_id);
             let conversation = agent.export_conversation_markdown();
+            let active_context_transactions = agent
+                .context_view_state()
+                .active_transaction_count()
+                .min(u32::MAX as usize) as u32;
             agent.mark_closed();
             return Ok(AmbientCycleResult {
                 started_at,
                 ended_at: Utc::now(),
                 conversation: Some(conversation),
+                active_context_transactions,
                 ..result
             });
         }
@@ -1124,11 +1129,16 @@ impl AmbientRunnerHandle {
         if let Some(result) = ambient_tools::take_cycle_result() {
             ambient_tools::unregister_ambient_session(&ambient_session_id);
             let conversation = agent.export_conversation_markdown();
+            let active_context_transactions = agent
+                .context_view_state()
+                .active_transaction_count()
+                .min(u32::MAX as usize) as u32;
             agent.mark_closed();
             return Ok(AmbientCycleResult {
                 started_at,
                 ended_at: Utc::now(),
                 conversation: Some(conversation),
+                active_context_transactions,
                 ..result
             });
         }
@@ -1140,7 +1150,7 @@ impl AmbientRunnerHandle {
             summary: "Cycle ended without calling end_ambient_cycle (forced end after 2 attempts)"
                 .to_string(),
             memories_modified: 0,
-            compactions: 0,
+            active_context_transactions: 0,
             proactive_work: None,
             next_schedule: None,
             started_at,
@@ -1224,7 +1234,7 @@ impl AmbientRunnerHandle {
                 Ok(AmbientCycleResult {
                     summary: "Visible cycle ended (user closed window)".to_string(),
                     memories_modified: 0,
-                    compactions: 0,
+                    active_context_transactions: 0,
                     proactive_work: None,
                     next_schedule: None,
                     started_at,

@@ -6,6 +6,7 @@
 pub mod closure;
 pub mod economics;
 pub mod estimate;
+pub mod lifecycle;
 pub mod pressure;
 pub mod projection;
 pub mod target;
@@ -17,6 +18,7 @@ mod provider_validation_tests;
 pub use closure::*;
 pub use economics::*;
 pub use estimate::*;
+pub use lifecycle::*;
 pub use pressure::*;
 pub use projection::*;
 pub use target::*;

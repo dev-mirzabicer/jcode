@@ -426,6 +426,7 @@ fn apply_cycle_model(
     id: u64,
     direction: i8,
     agent: &mut Agent,
+    context_transactions: &crate::context::ContextTransactionService,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
     let models = agent.available_models_for_switching();
@@ -458,13 +459,11 @@ fn apply_cycle_model(
             ("available_models", len.to_string()),
         ],
     );
-    let result = {
-        let result = agent.set_model(&next_model);
-        if result.is_ok() {
-            agent.reset_provider_session();
-        }
-        result.map(|_| (agent.provider_model(), agent.provider_name()))
-    };
+    let result = agent.set_model(&next_model).map(|_| {
+        context_transactions
+            .invalidate_session_drafts(agent.session_id(), "provider or model identity changed");
+        (agent.provider_model(), agent.provider_name())
+    });
     send_model_changed_result(id, result, current, client_event_tx);
 }
 
@@ -472,18 +471,32 @@ pub(super) async fn handle_cycle_model(
     id: u64,
     direction: i8,
     agent: &Arc<Mutex<Agent>>,
+    context_transactions: &Arc<crate::context::ContextTransactionService>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
     if let Ok(mut agent_guard) = agent.try_lock() {
-        apply_cycle_model(id, direction, &mut agent_guard, client_event_tx);
+        apply_cycle_model(
+            id,
+            direction,
+            &mut agent_guard,
+            context_transactions.as_ref(),
+            client_event_tx,
+        );
     } else {
+        let context_transactions = Arc::clone(context_transactions);
         spawn_deferred_agent_mutation(
             "cycle_model",
             id,
             Arc::clone(agent),
             client_event_tx.clone(),
             move |agent_guard, client_event_tx| {
-                apply_cycle_model(id, direction, agent_guard, client_event_tx);
+                apply_cycle_model(
+                    id,
+                    direction,
+                    agent_guard,
+                    context_transactions.as_ref(),
+                    client_event_tx,
+                );
             },
         );
     }
@@ -546,6 +559,7 @@ fn apply_set_model(
     id: u64,
     model: String,
     agent: &mut Agent,
+    context_transactions: &crate::context::ContextTransactionService,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
     crate::logging::event_info(
@@ -577,13 +591,11 @@ fn apply_set_model(
     }
 
     let current = agent.provider_model();
-    let result = {
-        let result = agent.set_model(&model);
-        if result.is_ok() {
-            agent.reset_provider_session();
-        }
-        result.map(|_| (agent.provider_model(), agent.provider_name()))
-    };
+    let result = agent.set_model(&model).map(|_| {
+        context_transactions
+            .invalidate_session_drafts(agent.session_id(), "provider or model identity changed");
+        (agent.provider_model(), agent.provider_name())
+    });
     send_model_changed_result(id, result, current, client_event_tx);
 }
 
@@ -591,6 +603,7 @@ fn apply_set_route(
     id: u64,
     selection: crate::provider::RouteSelection,
     agent: &mut Agent,
+    context_transactions: &crate::context::ContextTransactionService,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
     crate::logging::event_info(
@@ -625,13 +638,11 @@ fn apply_set_route(
     }
 
     let current = agent.provider_model();
-    let result = {
-        let result = agent.set_route_selection(&selection);
-        if result.is_ok() {
-            agent.reset_provider_session();
-        }
-        result.map(|_| (agent.provider_model(), agent.provider_name()))
-    };
+    let result = agent.set_route_selection(&selection).map(|_| {
+        context_transactions
+            .invalidate_session_drafts(agent.session_id(), "provider or model identity changed");
+        (agent.provider_model(), agent.provider_name())
+    });
     send_model_changed_result(id, result, current, client_event_tx);
 }
 
@@ -639,18 +650,32 @@ pub(super) async fn handle_set_model(
     id: u64,
     model: String,
     agent: &Arc<Mutex<Agent>>,
+    context_transactions: &Arc<crate::context::ContextTransactionService>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
     if let Ok(mut agent_guard) = agent.try_lock() {
-        apply_set_model(id, model, &mut agent_guard, client_event_tx);
+        apply_set_model(
+            id,
+            model,
+            &mut agent_guard,
+            context_transactions.as_ref(),
+            client_event_tx,
+        );
     } else {
+        let context_transactions = Arc::clone(context_transactions);
         spawn_deferred_agent_mutation(
             "set_model",
             id,
             Arc::clone(agent),
             client_event_tx.clone(),
             move |agent_guard, client_event_tx| {
-                apply_set_model(id, model, agent_guard, client_event_tx);
+                apply_set_model(
+                    id,
+                    model,
+                    agent_guard,
+                    context_transactions.as_ref(),
+                    client_event_tx,
+                );
             },
         );
     }
@@ -660,18 +685,32 @@ pub(super) async fn handle_set_route(
     id: u64,
     selection: crate::provider::RouteSelection,
     agent: &Arc<Mutex<Agent>>,
+    context_transactions: &Arc<crate::context::ContextTransactionService>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
     if let Ok(mut agent_guard) = agent.try_lock() {
-        apply_set_route(id, selection, &mut agent_guard, client_event_tx);
+        apply_set_route(
+            id,
+            selection,
+            &mut agent_guard,
+            context_transactions.as_ref(),
+            client_event_tx,
+        );
     } else {
+        let context_transactions = Arc::clone(context_transactions);
         spawn_deferred_agent_mutation(
             "set_route",
             id,
             Arc::clone(agent),
             client_event_tx.clone(),
             move |agent_guard, client_event_tx| {
-                apply_set_route(id, selection, agent_guard, client_event_tx);
+                apply_set_route(
+                    id,
+                    selection,
+                    agent_guard,
+                    context_transactions.as_ref(),
+                    client_event_tx,
+                );
             },
         );
     }
@@ -1470,11 +1509,18 @@ mod tests {
 
         let (provider, agent, client_event_tx, mut client_event_rx) =
             test_agent("session_busy_set_model").await;
+        let context_transactions = Arc::new(crate::context::ContextTransactionService::new());
         let busy_agent_lock = agent.lock().await;
 
         timeout(
             Duration::from_millis(100),
-            handle_set_model(8, "test-model-b".to_string(), &agent, &client_event_tx),
+            handle_set_model(
+                8,
+                "test-model-b".to_string(),
+                &agent,
+                &context_transactions,
+                &client_event_tx,
+            ),
         )
         .await
         .expect("model changes must not wait for a busy agent mutex");

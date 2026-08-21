@@ -433,12 +433,34 @@ impl Agent {
         let stored_len = targets[message_index - 1] + 1;
 
         let removed = message_count - message_index;
-        self.rewind_undo_snapshot = Some(RewindUndoSnapshot {
+        let undo_snapshot = RewindUndoSnapshot {
             messages: self.session.messages.clone(),
+            context_view: self.session.context_view.clone(),
             visible_message_count: message_count,
-        });
+        };
+        let previous_session = self.session.clone();
         self.session.truncate_messages(stored_len);
-        self.session.updated_at = chrono::Utc::now();
+        let timestamp = chrono::Utc::now();
+        let reconciliation = jcode_context_core::reconcile_context_after_transcript_edit(
+            &self.session.messages,
+            &self.session.context_view,
+            timestamp,
+            "conversation rewind removed or changed exact source material",
+        )
+        .map_err(|error| {
+            self.session = previous_session.clone();
+            format!("Cannot rewind because context transactions could not be reconciled: {error}")
+        })?;
+        self.session.context_view = reconciliation.state;
+        self.session.provider_session_id = None;
+        self.session.updated_at = timestamp;
+        if let Err(error) = self.session.save() {
+            self.session = previous_session;
+            return Err(format!(
+                "Failed to persist conversation rewind; no history was changed: {error}"
+            ));
+        }
+        self.rewind_undo_snapshot = Some(undo_snapshot);
         self.reset_tool_output_tracking();
         if let Err(error) = self.after_provider_context_changed(
             "conversation rewind",
@@ -450,19 +472,33 @@ impl Agent {
                 error
             ));
         }
-        self.persist_session_best_effort("conversation rewind");
         Ok(removed)
     }
 
     pub fn undo_rewind(&mut self) -> Result<usize, String> {
-        let Some(snapshot) = self.rewind_undo_snapshot.take() else {
+        let Some(snapshot) = self.rewind_undo_snapshot.clone() else {
             return Err("No rewind to undo.".to_string());
         };
 
         let current_count = self.session.rewind_target_count();
         let restored = snapshot.visible_message_count.saturating_sub(current_count);
+        let previous_session = self.session.clone();
         self.session.replace_messages(snapshot.messages);
+        self.session.context_view = snapshot.context_view;
+        self.session.provider_session_id = None;
         self.session.updated_at = chrono::Utc::now();
+        jcode_context_core::project_context(&self.session.messages, &self.session.context_view)
+            .map_err(|error| {
+                self.session = previous_session.clone();
+                format!("Cannot undo rewind because the restored context is invalid: {error}")
+            })?;
+        if let Err(error) = self.session.save() {
+            self.session = previous_session;
+            return Err(format!(
+                "Failed to persist rewind undo; the rewound history remains active: {error}"
+            ));
+        }
+        self.rewind_undo_snapshot = None;
         self.reset_tool_output_tracking();
         if let Err(error) = self.after_provider_context_changed(
             "conversation rewind undo",
@@ -474,7 +510,6 @@ impl Agent {
                 error
             ));
         }
-        self.persist_session_best_effort("conversation rewind undo");
         Ok(restored)
     }
 
@@ -819,6 +854,32 @@ impl Agent {
         ));
         let previous_status = session.status.clone();
 
+        if let Some(model) = session.model.clone() {
+            let model_request =
+                crate::provider::MultiProvider::model_switch_request_for_session_route(
+                    &model,
+                    session.provider_key.as_deref(),
+                    session.route_api_method.as_deref(),
+                );
+            let candidate = self.provider.fork();
+            let candidate_identity = candidate
+                .explicit_provider_pin_for_current_model()
+                .map(|pin| format!("{}@{pin}", candidate.model()))
+                .unwrap_or_else(|| candidate.model());
+            if let Err(error) =
+                crate::provider::set_model_with_auth_refresh(candidate.as_ref(), &model_request)
+                && candidate_identity != model
+            {
+                return Err(error);
+            }
+            let projected = session.projected_messages_for_provider()?;
+            crate::context::provider_validation::require_supported_context_view(
+                candidate.as_ref(),
+                &projected,
+                &session.context_view,
+            )?;
+        }
+
         let assign_start = Instant::now();
         let previous_session_id = self.session.id.clone();
         // Restore provider_session_id for Claude CLI session resume
@@ -845,15 +906,19 @@ impl Agent {
                     self.session.provider_key.as_deref(),
                     self.session.route_api_method.as_deref(),
                 );
-            if let Err(e) =
-                crate::provider::set_model_with_auth_refresh(self.provider.as_ref(), &model_request)
-            {
-                logging::error(&format!(
+            let current_identity = self.provider_model();
+            match crate::provider::set_model_with_auth_refresh(
+                self.provider.as_ref(),
+                &model_request,
+            ) {
+                Ok(()) => self.reconcile_explicit_provider_pin_route(),
+                Err(_) if current_identity == model => {
+                    self.reconcile_explicit_provider_pin_route();
+                }
+                Err(error) => logging::error(&format!(
                     "Failed to restore session model '{}' via '{}': {}",
-                    model, model_request, e
-                ));
-            } else {
-                self.reconcile_explicit_provider_pin_route();
+                    model, model_request, error
+                )),
             }
         } else {
             self.session.model = Some(self.provider_model());

@@ -1012,6 +1012,113 @@ fn context_budget_rewind_undo_and_repair_reseed_exactly() {
 }
 
 #[test]
+fn local_rewind_invalidates_removed_transaction_and_undo_restores_exact_context_state() {
+    let mut app = create_test_app();
+    app.session.replace_messages(Vec::new());
+    for (reasoning, text) in [
+        ("retained reasoning", "retained text"),
+        ("removed reasoning", "removed text"),
+    ] {
+        app.session.add_message(
+            Role::Assistant,
+            vec![
+                ContentBlock::Reasoning {
+                    text: reasoning.to_string(),
+                },
+                ContentBlock::Text {
+                    text: text.to_string(),
+                    cache_control: None,
+                },
+            ],
+        );
+    }
+    let transaction = |id: &str,
+                       base_revision: u64,
+                       applied_revision: u64,
+                       message_index: usize| {
+        let target = jcode_context_core::build_content_target(
+            &app.session.messages,
+            message_index,
+            0,
+        )
+        .expect("reasoning target");
+        jcode_session_types::StoredContextTransaction {
+            id: id.to_string(),
+            base_revision,
+            created_at: chrono::Utc::now(),
+            authorization: jcode_session_types::StoredContextAuthorization::Manual {
+                initiated_by: None,
+            },
+            operations: vec![jcode_session_types::StoredContextOperation::ReasoningSuppression(
+                jcode_session_types::StoredReasoningSuppression {
+                    selection: jcode_session_types::StoredReasoningSelection::MessageRanges {
+                        ranges: Vec::new(),
+                    },
+                    targets: vec![target.clone()],
+                    assistant_turns_affected: 1,
+                    replay_block_kinds: vec![target.kind],
+                    original_token_estimate: 10,
+                    validation_evidence_version: 1,
+                    validation: Vec::new(),
+                },
+            )],
+            status_events: vec![jcode_session_types::StoredContextStatusEvent {
+                revision: applied_revision,
+                timestamp: chrono::Utc::now(),
+                kind: jcode_session_types::StoredContextTransactionStatusKind::Applied,
+                reason: None,
+            }],
+            application: None,
+            economics: None,
+            curator_usage: Vec::new(),
+            emergency_audit: None,
+        }
+    };
+    app.session.context_view = jcode_session_types::StoredContextViewState {
+        revision: 2,
+        transactions: vec![
+            transaction("retained", 0, 1, 0),
+            transaction("removed", 1, 2, 1),
+        ],
+        ..jcode_session_types::StoredContextViewState::default()
+    };
+    let messages_before = serde_json::to_vec(&app.session.messages).unwrap();
+    let context_before = serde_json::to_vec(&app.session.context_view).unwrap();
+    let projected = app.session.projected_messages_for_provider().unwrap();
+    app.replace_provider_messages(projected);
+
+    app.input = "/rewind 1".to_string();
+    app.submit_input();
+
+    assert_eq!(app.session.context_view.revision, 3);
+    assert!(app.session.context_view.transactions[0].is_active());
+    assert_eq!(
+        app.session.context_view.transactions[1]
+            .latest_status()
+            .expect("status")
+            .kind,
+        jcode_session_types::StoredContextTransactionStatusKind::InvalidatedByTranscriptEdit
+    );
+    assert_eq!(app.context_reset_counters.hook_calls, 1);
+    app.session
+        .projected_messages_for_provider()
+        .expect("rewound projection");
+
+    app.input = "/rewind undo".to_string();
+    app.submit_input();
+
+    assert_eq!(app.context_reset_counters.hook_calls, 2);
+    assert_eq!(serde_json::to_vec(&app.session.messages).unwrap(), messages_before);
+    assert_eq!(
+        serde_json::to_vec(&app.session.context_view).unwrap(),
+        context_before
+    );
+    app.session
+        .projected_messages_for_provider()
+        .expect("restored projection");
+}
+
+#[test]
 fn context_budget_legacy_summary_reseed_uses_summary_plus_tail() {
     let mut app = create_test_app();
     app.session.replace_messages(Vec::new());

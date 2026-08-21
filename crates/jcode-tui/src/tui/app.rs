@@ -183,8 +183,7 @@ struct TurnReasoningTrace {
 #[derive(Debug, Clone)]
 struct LocalRewindUndoSnapshot {
     messages: Vec<StoredMessage>,
-    provider_session_id: Option<String>,
-    session_provider_session_id: Option<String>,
+    context_view: jcode_session_types::StoredContextViewState,
     visible_message_count: usize,
 }
 

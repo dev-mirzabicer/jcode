@@ -144,7 +144,8 @@ pub struct AmbientState {
     pub status: AmbientStatus,
     pub last_run: Option<DateTime<Utc>>,
     pub last_summary: Option<String>,
-    pub last_compactions: Option<u32>,
+    #[serde(default, alias = "last_compactions")]
+    pub last_active_context_transactions: Option<u32>,
     pub last_memories_modified: Option<u32>,
     pub total_cycles: u64,
 }
@@ -154,7 +155,8 @@ pub struct AmbientState {
 pub struct AmbientCycleResult {
     pub summary: String,
     pub memories_modified: u32,
-    pub compactions: u32,
+    #[serde(default, alias = "compactions")]
+    pub active_context_transactions: u32,
     pub proactive_work: Option<String>,
     pub next_schedule: Option<ScheduleRequest>,
     pub started_at: DateTime<Utc>,

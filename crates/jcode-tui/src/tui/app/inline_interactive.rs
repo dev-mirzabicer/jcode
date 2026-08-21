@@ -3503,25 +3503,9 @@ impl App {
                             // "gpt-5.5 (high)" at low effort (issue #427).
                             self.pending_reasoning_effort = effort.clone();
                         } else {
-                            match self.provider.set_route_selection(&route_selection) {
-                                Ok(()) => {
+                            match self.apply_local_route_selection(&route_selection) {
+                                Ok(active_model) => {
                                     self.inline_interactive_state = None;
-                                    self.provider_session_id = None;
-                                    self.session.provider_session_id = None;
-                                    self.upstream_provider = None;
-                                    self.status_detail = None;
-                                    self.invalidate_model_picker_cache();
-                                    let active_model = self.provider.model();
-                                    self.update_context_limit_for_model(&active_model);
-                                    self.session.provider_key = crate::provider::MultiProvider::session_provider_key_after_model_switch(
-                                        &spec,
-                                        self.provider.name(),
-                                        self.session.provider_key.as_deref(),
-                                    );
-                                    self.session.model = Some(active_model.clone());
-                                    self.session.route_api_method =
-                                        Some(route_selection.api_method.clone());
-                                    let _ = self.session.save();
                                     crate::logging::event_info(
                                         "model_picker_select_applied",
                                         vec![

@@ -134,6 +134,14 @@ fn clone_split_session_uses_persisted_session_state() {
     );
     parent.working_dir = Some("/tmp/jcode-split-test".to_string());
     parent.model = Some("gpt-test".to_string());
+    parent.provider_key = Some("provider-test".to_string());
+    parent.route_api_method = Some("route-test".to_string());
+    parent.reasoning_effort = Some("high".to_string());
+    parent.subagent_model = Some("subagent-test".to_string());
+    parent.improve_mode = Some(crate::session::SessionImproveMode::ImproveRun);
+    parent.autoreview_enabled = Some(true);
+    parent.autojudge_enabled = Some(true);
+    parent.provider_session_id = Some("must-not-transfer".to_string());
     parent.add_message(
         Role::User,
         vec![ContentBlock::Text {
@@ -181,8 +189,36 @@ fn clone_split_session_uses_persisted_session_state() {
     assert_eq!(child.context_view, migrated_parent.context_view);
     assert_eq!(child.working_dir, parent.working_dir);
     assert_eq!(child.model, parent.model);
+    assert_eq!(child.provider_key, parent.provider_key);
+    assert_eq!(child.route_api_method, parent.route_api_method);
+    assert_eq!(child.reasoning_effort, parent.reasoning_effort);
+    assert_eq!(child.subagent_model, parent.subagent_model);
+    assert_eq!(child.improve_mode, parent.improve_mode);
+    assert_eq!(child.autoreview_enabled, parent.autoreview_enabled);
+    assert_eq!(child.autojudge_enabled, parent.autojudge_enabled);
+    assert!(child.provider_session_id.is_none());
     assert_eq!(child.status, crate::session::SessionStatus::Closed);
     assert_ne!(child.id, parent.id);
+
+    let parent_context_before = migrated_parent.context_view.clone();
+    let mut mutated_child = child.clone();
+    let next_revision = mutated_child.context_view.revision + 1;
+    mutated_child.context_view.revision = next_revision;
+    mutated_child.context_view.transactions[0]
+        .status_events
+        .push(jcode_session_types::StoredContextStatusEvent {
+            revision: next_revision,
+            timestamp: chrono::Utc::now(),
+            kind: jcode_session_types::StoredContextTransactionStatusKind::Reverted,
+            reason: Some("child-only revert".to_string()),
+        });
+    mutated_child.save().expect("save child-only mutation");
+    let parent_after_child_mutation =
+        crate::session::Session::load(&parent.id).expect("reload independent parent");
+    assert_eq!(
+        parent_after_child_mutation.context_view,
+        parent_context_before
+    );
 
     if let Some(prev_home) = prev_home {
         crate::env::set_var("JCODE_HOME", prev_home);
@@ -205,6 +241,8 @@ fn transfer_child_uses_authoritative_handoff_instead_of_invalid_legacy_compactio
     );
     parent.working_dir = Some("/tmp/jcode-transfer-test".to_string());
     parent.model = Some("gpt-test".to_string());
+    parent.provider_key = Some("provider-test".to_string());
+    parent.route_api_method = Some("route-test".to_string());
     parent.add_message(
         Role::User,
         vec![ContentBlock::Text {
@@ -212,6 +250,9 @@ fn transfer_child_uses_authoritative_handoff_instead_of_invalid_legacy_compactio
             cache_control: None,
         }],
     );
+    parent.save().expect("save transfer parent");
+    let parent_before = serde_json::to_vec(&crate::session::Session::load(&parent.id).unwrap())
+        .expect("serialize parent");
     let transfer = crate::session::StoredCompactionState {
         summary_text: "Readable transfer summary".to_string(),
         openai_encrypted_content: None,
@@ -228,6 +269,9 @@ fn transfer_child_uses_authoritative_handoff_instead_of_invalid_legacy_compactio
     assert_eq!(child.messages.len(), 1);
     assert!(child.compaction.is_none());
     assert_eq!(child.context_view, Default::default());
+    assert_eq!(child.provider_key, parent.provider_key);
+    assert_eq!(child.route_api_method, parent.route_api_method);
+    assert!(child.provider_session_id.is_none());
     let handoff = child.messages.first().expect("authoritative handoff");
     assert_eq!(
         handoff.display_role,
@@ -237,6 +281,11 @@ fn transfer_child_uses_authoritative_handoff_instead_of_invalid_legacy_compactio
     assert!(handoff_text.contains("Readable transfer summary"));
     assert!(handoff_text.contains(parent.id.as_str()));
     assert!(!handoff_text.contains("raw parent transcript must not be copied"));
+    assert_eq!(
+        serde_json::to_vec(&crate::session::Session::load(&parent.id).unwrap())
+            .expect("serialize parent"),
+        parent_before
+    );
 
     if let Some(prev_home) = prev_home {
         crate::env::set_var("JCODE_HOME", prev_home);

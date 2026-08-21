@@ -917,6 +917,10 @@ impl ContextProtocolState {
         self.accepted_transcript_digest = None;
     }
 
+    pub(super) fn invalidate_provider_identity(&mut self) {
+        self.invalidate_revision_scoped();
+    }
+
     fn clear_session_scoped(&mut self) {
         self.invalidate_revision_scoped();
         self.transaction_request = None;

@@ -89,6 +89,7 @@ async fn handle_clear_session_replaces_runtime_handles_and_updates_shutdown_regi
     let event_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let (swarm_event_tx, _swarm_event_rx) = broadcast::channel::<SwarmEvent>(8);
     let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
+    let context_transactions = crate::context::ContextTransactionService::new();
 
     let mut client_session_id = old_session_id.to_string();
     handle_clear_session(
@@ -99,6 +100,7 @@ async fn handle_clear_session_replaces_runtime_handles_and_updates_shutdown_regi
         &agent,
         &provider,
         &registry,
+        &context_transactions,
         &sessions,
         &shutdown_signals,
         &soft_interrupt_queues,
