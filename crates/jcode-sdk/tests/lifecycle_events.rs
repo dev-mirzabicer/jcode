@@ -55,6 +55,9 @@ impl UnixHarness {
             while !server_stop.load(Ordering::Acquire) {
                 match listener.accept() {
                     Ok((socket, _)) => {
+                        socket
+                            .set_nonblocking(false)
+                            .expect("blocking accepted mock socket");
                         server_clients.fetch_add(1, Ordering::AcqRel);
                         let sessions = Arc::clone(&server_sessions);
                         let clients = Arc::clone(&server_clients);
