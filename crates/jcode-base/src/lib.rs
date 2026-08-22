@@ -25,7 +25,6 @@ pub mod cache_invalidation;
 pub mod cache_tracker;
 pub mod claude_live;
 pub mod client_input;
-pub mod compaction;
 pub mod config;
 pub mod console;
 pub mod context_budget;
@@ -91,6 +90,7 @@ pub mod telemetry {
 }
 pub mod terminal_launch;
 pub mod todo;
+pub mod transfer_handoff;
 pub mod transport;
 pub mod usage;
 pub mod util;

@@ -141,7 +141,6 @@ pub enum ContextCuratorError {
     Canceled,
     Provider(String),
     UnexpectedToolUse,
-    UnexpectedProviderEvent(String),
     InvalidResponse(String),
 }
 
@@ -166,10 +165,6 @@ impl fmt::Display for ContextCuratorError {
             Self::Provider(reason) => write!(formatter, "context curator provider failed: {reason}"),
             Self::UnexpectedToolUse => formatter.write_str(
                 "context curator attempted a tool call; artifact generation requires JSON text only",
-            ),
-            Self::UnexpectedProviderEvent(event) => write!(
-                formatter,
-                "context curator emitted unsupported provider event {event}; artifact generation requires JSON text only"
             ),
             Self::InvalidResponse(reason) => {
                 write!(formatter, "context curator returned invalid structured output: {reason}")
@@ -428,11 +423,6 @@ async fn collect_curator_response(
             | StreamEvent::GeneratedImage { .. }
             | StreamEvent::NativeToolCall { .. } => {
                 return Err(ContextCuratorError::UnexpectedToolUse);
-            }
-            StreamEvent::Compaction { .. } => {
-                return Err(ContextCuratorError::UnexpectedProviderEvent(
-                    "native_compaction".to_string(),
-                ));
             }
             StreamEvent::Error { message, .. } => {
                 return Err(ContextCuratorError::Provider(message));
@@ -1787,7 +1777,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn response_collection_rejects_every_tool_and_native_output_shape() {
+    async fn response_collection_rejects_every_tool_output_shape() {
         let unexpected_tools = vec![
             StreamEvent::ToolUseStart {
                 id: "call".to_string(),
@@ -1821,19 +1811,6 @@ mod tests {
                 Err(ContextCuratorError::UnexpectedToolUse)
             ));
         }
-
-        let provider = ScriptedProvider::new(
-            "curator",
-            ScriptedBehavior::Events(vec![StreamEvent::Compaction {
-                trigger: "native".to_string(),
-                pre_tokens: Some(1),
-                openai_encrypted_content: Some("opaque".to_string()),
-            }]),
-        );
-        assert!(matches!(
-            collect_curator_response(&provider, &[], 1024).await,
-            Err(ContextCuratorError::UnexpectedProviderEvent(event)) if event == "native_compaction"
-        ));
     }
 
     #[tokio::test]

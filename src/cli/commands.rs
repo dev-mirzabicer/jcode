@@ -3134,31 +3134,6 @@ fn emit_ndjson_event(
                 &serde_json::json!({ "type": "session", "session_id": session_id }),
             )
         }
-        ServerEvent::Compaction {
-            trigger,
-            pre_tokens,
-            messages_dropped,
-            post_tokens,
-            tokens_saved,
-            duration_ms,
-            messages_compacted,
-            summary_chars,
-            active_messages,
-        } => write_json_line(
-            stdout,
-            &serde_json::json!({
-                "type": "compaction",
-                "trigger": trigger,
-                "pre_tokens": pre_tokens,
-                "messages_dropped": messages_dropped,
-                "post_tokens": post_tokens,
-                "tokens_saved": tokens_saved,
-                "duration_ms": duration_ms,
-                "messages_compacted": messages_compacted,
-                "summary_chars": summary_chars,
-                "active_messages": active_messages,
-            }),
-        ),
         ServerEvent::MemoryInjected {
             count,
             prompt_chars,

@@ -66,13 +66,12 @@ public struct TranscriptEntry: Equatable, Sendable, Identifiable {
 
 /// A transient, user-dismissible notice surfaced to the UI.
 ///
-/// Covers out-of-band server signals that must never be silently dropped:
-/// push notifications, interrupts, and context compaction events.
+/// Covers out-of-band server signals that must never be silently dropped,
+/// including push notifications and interrupts.
 public struct Notice: Equatable, Sendable, Identifiable {
     public enum Kind: Equatable, Sendable {
         case info
         case notification
-        case compaction
     }
 
     public var id: UUID
@@ -366,23 +365,10 @@ public enum SessionReducer {
                 state.reasoningEffort = effort
             }
 
-        case .compactResult(_, let message, let success):
-            if success {
-                state.notices.append(Notice(kind: .compaction, message: message))
-            } else {
-                state.errorBanner = message
-            }
-
         case .availableModelsUpdated(let models, let providerModel):
             state.availableModels = models
             if let providerModel {
                 state.modelName = providerModel
-            }
-
-        case .compaction(let trigger, let tokensSaved):
-            if let saved = tokensSaved, trigger != "background" {
-                state.notices.append(
-                    Notice(kind: .compaction, message: "Context compacted (\(saved) tokens saved)"))
             }
 
         case .notification(let fromName, let message):

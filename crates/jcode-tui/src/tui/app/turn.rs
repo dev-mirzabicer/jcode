@@ -13,7 +13,6 @@ fn stream_event_confirms_request_acceptance(event: &StreamEvent) -> bool {
             | StreamEvent::MessageEnd { .. }
             | StreamEvent::OpenAIReasoning { .. }
             | StreamEvent::NativeToolCall { .. }
-            | StreamEvent::Compaction { .. }
     )
 }
 
@@ -378,7 +377,6 @@ impl App {
             let mut reasoning_content = String::new();
             let mut reasoning_signature = String::new();
             let mut openai_reasoning_items: Vec<ContentBlock> = Vec::new();
-            let mut openai_native_compaction: Option<(String, usize)> = None;
 
             // Stream with input handling
             loop {
@@ -404,8 +402,6 @@ impl App {
                         let _ = self.flush_pending_resize_redraw();
                         let ops = self.stream_buffer.flush_smooth_frame();
                         self.apply_stream_ops(ops);
-                        // Poll for background compaction completion during streaming
-                        self.poll_compaction_completion();
                         status_spinner_renderer.draw_full(self, terminal)?;
                         super::run_shell::reset_status_spinner_interval(&mut status_spinner_interval, self);
                     }
@@ -854,7 +850,6 @@ impl App {
                                         reasoning_content.clear();
                                         reasoning_signature.clear();
                                         openai_reasoning_items.clear();
-                                        openai_native_compaction = None;
                                         saw_message_end = false;
                                         self.rollback_streaming_attempt();
                                         self.connection_phase_started = Some(Instant::now());
@@ -1000,29 +995,6 @@ impl App {
                                                 status,
                                             });
                                         }
-                                    }
-                                    StreamEvent::Compaction {
-                                        trigger,
-                                        pre_tokens,
-                                        openai_encrypted_content,
-                                    } => {
-                                        if let Some(encrypted_content) = openai_encrypted_content {
-                                            openai_native_compaction
-                                                .get_or_insert_with(|| {
-                                                    (encrypted_content, self.local_transcript_message_count())
-                                                });
-                                        }
-                                        // Flush any pending buffered text first
-                                        let ops = self.stream_buffer.flush();
-                                        self.apply_stream_ops(ops);
-                                        let tokens_str = pre_tokens
-                                            .map(|t| format!(" (was {} tokens)", t))
-                                            .unwrap_or_default();
-                                        let compact_msg = format!(
-                                            "📦 **Compaction complete** - context summarized ({}){}\n\n",
-                                            trigger, tokens_str
-                                        );
-                                        self.append_streaming_text(&compact_msg);
                                     }
                                     StreamEvent::UpstreamProvider { provider } => {
                                         // Store the upstream provider (e.g., Fireworks, Together)
@@ -1286,10 +1258,6 @@ impl App {
             } else {
                 None
             };
-
-            if let Some((encrypted_content, compacted_count)) = openai_native_compaction.take() {
-                self.apply_openai_native_compaction(encrypted_content, compacted_count)?;
-            }
 
             // Add remaining text to display
             let duration = self.display_turn_duration_secs();

@@ -523,17 +523,10 @@ pub fn handle_openai_output_item(
 ) -> Option<StreamEvent> {
     let item_type = item.get("type")?.as_str()?;
     match item_type {
-        "compaction" => {
-            let encrypted_content = item
-                .get("encrypted_content")
-                .and_then(|v| v.as_str())
-                .map(|value| value.to_string())?;
-            return Some(StreamEvent::Compaction {
-                trigger: "openai_native_auto".to_string(),
-                pre_tokens: None,
-                openai_encrypted_content: Some(encrypted_content),
-            });
-        }
+        // Historical responses may contain a provider-native compaction item.
+        // New Jcode requests never ask OpenAI to create one, and an unsolicited
+        // opaque item is not authoritative transcript or projected context.
+        "compaction" => return None,
         "function_call" | "custom_tool_call" => {
             let call_id = item
                 .get("call_id")

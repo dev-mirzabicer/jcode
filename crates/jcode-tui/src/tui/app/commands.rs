@@ -343,31 +343,19 @@ pub(super) fn transfer_pause_message() -> String {
         .to_string()
 }
 
-fn transfer_active_messages(session: &crate::session::Session) -> Vec<Message> {
-    let start = session
-        .compaction
-        .as_ref()
-        .map(|state| state.compacted_count.min(session.messages.len()))
-        .unwrap_or(0);
-    session.messages[start..]
-        .iter()
-        .map(crate::session::StoredMessage::to_message)
-        .collect()
-}
-
 pub(super) fn create_transfer_session_from_parent(
     parent_session_id: &str,
     parent: &crate::session::Session,
-    compaction: Option<crate::session::StoredCompactionState>,
+    summary: Option<String>,
 ) -> anyhow::Result<(String, String)> {
     let todos = crate::todo::load_todos(parent_session_id).unwrap_or_default();
     let mut child = crate::session::Session::create(Some(parent_session_id.to_string()), None);
     child.messages.clear();
     child.compaction = None;
     child.context_view = Default::default();
-    match compaction {
-        Some(compaction) => {
-            if !child.append_transfer_handoff(parent_session_id, &compaction.summary_text) {
+    match summary {
+        Some(summary) => {
+            if !child.append_transfer_handoff(parent_session_id, &summary) {
                 anyhow::bail!("transfer summary was empty; refusing to create a contextless child");
             }
         }
@@ -394,17 +382,14 @@ pub(super) fn create_transfer_session_from_parent(
 }
 
 async fn prepare_transfer_session_local(
-    parent: crate::session::Session,
+    mut parent: crate::session::Session,
     provider: std::sync::Arc<dyn crate::provider::Provider>,
 ) -> anyhow::Result<super::PreparedTransferSession> {
-    let compaction = crate::compaction::build_transfer_compaction_state(
-        provider,
-        transfer_active_messages(&parent),
-        parent.compaction.clone(),
-    )
-    .await?;
+    let messages = parent.projected_messages_for_provider()?;
+    let summary =
+        crate::transfer_handoff::build_transfer_handoff_summary(provider, messages).await?;
     let (session_id, session_name) =
-        create_transfer_session_from_parent(parent.id.as_str(), &parent, compaction)?;
+        create_transfer_session_from_parent(parent.id.as_str(), &parent, summary)?;
     Ok(super::PreparedTransferSession {
         session_id,
         session_name,

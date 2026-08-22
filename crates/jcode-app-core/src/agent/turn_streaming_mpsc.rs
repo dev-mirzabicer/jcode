@@ -348,7 +348,6 @@ impl Agent {
             // to clients as a keepalive; throttles issue #451 keepalives.
             let mut hidden_activity_last = Instant::now();
             let mut openai_reasoning_items: Vec<ContentBlock> = Vec::new();
-            let mut openai_native_compaction: Option<(String, usize)> = None;
             let mut tool_id_to_name: std::collections::HashMap<String, String> =
                 std::collections::HashMap::new();
 
@@ -406,7 +405,7 @@ impl Agent {
                         let err_str = e.to_string();
                         memory_pending.restore_now();
                         if self.provider_output_started()
-                            && (crate::compaction::is_request_payload_too_large_error(&err_str)
+                            && (jcode_provider_core::is_request_payload_too_large_error(&err_str)
                                 || Self::is_context_limit_error(&err_str))
                         {
                             let token_usage = (usage_input.is_some()
@@ -760,7 +759,6 @@ impl Agent {
                         reasoning_signature.clear();
                         reasoning_open = false;
                         openai_reasoning_items.clear();
-                        openai_native_compaction = None;
                         saw_message_end = false;
                         stop_reason = None;
                         let _ = event_tx.send(ServerEvent::RetryRollback { attempt, max });
@@ -814,15 +812,6 @@ impl Agent {
                             });
                         }
                     }
-                    StreamEvent::Compaction {
-                        openai_encrypted_content,
-                        ..
-                    } => {
-                        if let Some(encrypted_content) = openai_encrypted_content {
-                            openai_native_compaction
-                                .get_or_insert((encrypted_content, self.session.messages.len()));
-                        }
-                    }
                     StreamEvent::NativeToolCall {
                         request_id,
                         tool_name,
@@ -864,7 +853,7 @@ impl Agent {
                     } => {
                         memory_pending.restore_now();
                         if self.provider_output_started()
-                            && (crate::compaction::is_request_payload_too_large_error(&message)
+                            && (jcode_provider_core::is_request_payload_too_large_error(&message)
                                 || Self::is_context_limit_error(&message))
                         {
                             let token_usage = (usage_input.is_some()
@@ -1090,33 +1079,11 @@ impl Agent {
                 });
                 let message_id =
                     self.add_message_ext(Role::Assistant, content_blocks, None, token_usage);
-                self.push_embedding_snapshot_if_semantic(&text_content);
                 self.session.save()?;
                 Some(message_id)
             } else {
                 None
             };
-
-            if let Some((encrypted_content, compacted_count)) = openai_native_compaction.take() {
-                self.apply_openai_native_compaction(encrypted_content, compacted_count)?;
-                // Native OpenAI compaction is applied after the provider stream,
-                // so `messages_for_provider()` did not have an event to emit at
-                // the top of this iteration. Notify clients now, before any
-                // tool-driven continuation can enqueue its next KvCacheRequest.
-                // The FIFO event ordering lets the TUI invalidate its old
-                // append-only baseline before seeing the compacted signature.
-                let _ = event_tx.send(ServerEvent::Compaction {
-                    trigger: "openai_native".to_string(),
-                    pre_tokens: usage_input,
-                    post_tokens: None,
-                    tokens_saved: None,
-                    duration_ms: None,
-                    messages_dropped: None,
-                    messages_compacted: Some(compacted_count),
-                    summary_chars: None,
-                    active_messages: None,
-                });
-            }
 
             // If stop_reason indicates truncation (e.g. max_tokens), discard tool calls
             // with null/empty inputs since they were likely truncated mid-generation.

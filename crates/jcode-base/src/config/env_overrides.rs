@@ -727,19 +727,6 @@ impl Config {
                 self.provider.openai_service_tier = Some(trimmed);
             }
         }
-        if let Ok(v) = std::env::var("JCODE_OPENAI_NATIVE_COMPACTION_MODE") {
-            let trimmed = v.trim().to_ascii_lowercase();
-            if !trimmed.is_empty() {
-                self.provider.openai_native_compaction_mode = trimmed;
-            }
-        }
-        if let Ok(v) = std::env::var("JCODE_OPENAI_NATIVE_COMPACTION_THRESHOLD_TOKENS") {
-            if let Ok(parsed) = v.trim().parse::<usize>() {
-                if parsed > 0 {
-                    self.provider.openai_native_compaction_threshold_tokens = parsed;
-                }
-            }
-        }
         if let Ok(v) = std::env::var("JCODE_PRESERVE_REASONING_CONTEXT") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.provider.preserve_reasoning_context = parsed;

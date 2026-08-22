@@ -31,6 +31,64 @@ fn test_openai_fast_mode_defaults_to_priority() {
 }
 
 #[test]
+fn obsolete_compaction_config_keys_are_ignored_and_never_serialized() {
+    let config: Config = toml::from_str(
+        r#"
+[compaction]
+mode = "semantic"
+lookahead_turns = 99
+
+[provider]
+openai_native_compaction_mode = "auto"
+openai_native_compaction_threshold_tokens = 123456
+"#,
+    )
+    .expect("obsolete compaction keys remain backward-readable as unknown fields");
+
+    let serialized = toml::to_string(&config).expect("serialize config without obsolete fields");
+    for obsolete in [
+        "[compaction]",
+        "openai_native_compaction_mode",
+        "openai_native_compaction_threshold_tokens",
+    ] {
+        assert!(
+            !serialized.contains(obsolete),
+            "obsolete key must not be emitted or reactivate behavior: {obsolete}"
+        );
+    }
+}
+
+#[test]
+fn obsolete_compaction_environment_keys_do_not_change_config_or_fingerprint() {
+    let _guard = crate::storage::lock_test_env();
+    const MODE: &str = "JCODE_OPENAI_NATIVE_COMPACTION_MODE";
+    const THRESHOLD: &str = "JCODE_OPENAI_NATIVE_COMPACTION_THRESHOLD_TOKENS";
+    let previous_mode = std::env::var_os(MODE);
+    let previous_threshold = std::env::var_os(THRESHOLD);
+
+    crate::env::remove_var(MODE);
+    crate::env::remove_var(THRESHOLD);
+    let fingerprint_without = config_env_fingerprint();
+    let mut without = Config::default();
+    without.apply_env_overrides();
+
+    crate::env::set_var(MODE, "auto");
+    crate::env::set_var(THRESHOLD, "123456");
+    let fingerprint_with = config_env_fingerprint();
+    let mut with = Config::default();
+    with.apply_env_overrides();
+
+    restore_env_var(MODE, previous_mode);
+    restore_env_var(THRESHOLD, previous_threshold);
+
+    assert_eq!(fingerprint_with, fingerprint_without);
+    assert_eq!(
+        toml::to_string(&with).expect("serialize config with obsolete environment keys"),
+        toml::to_string(&without).expect("serialize control config")
+    );
+}
+
+#[test]
 fn missing_and_empty_context_tables_load_default_curator_configuration() {
     let missing: Config = toml::from_str("").expect("empty config");
     assert_eq!(missing.context, ContextConfig::default());

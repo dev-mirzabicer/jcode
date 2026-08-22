@@ -13,8 +13,8 @@
 
 use super::*;
 use crate::tui::info_widget::{
-    BackgroundInfo, CacheHitInfo, CompactionInfo, GitInfo, InfoWidgetData, MemoryInfo, SwarmInfo,
-    UsageInfo, UsageProvider,
+    BackgroundInfo, CacheHitInfo, GitInfo, InfoWidgetData, MemoryInfo, SwarmInfo, UsageInfo,
+    UsageProvider,
 };
 
 fn todo(id: &str, status: &str) -> crate::todo::TodoItem {
@@ -111,13 +111,6 @@ fn contended_data() -> InfoWidgetData {
             reported_input_tokens: 2_000,
             read_tokens: 1_500,
             ..Default::default()
-        }),
-        compaction_info: Some(CompactionInfo {
-            is_compacting: false,
-            compacted_messages: 12,
-            active_messages: 6,
-            summary_chars: 500,
-            mode: "auto".to_string(),
         }),
         git_info: Some(GitInfo {
             branch: "master".to_string(),

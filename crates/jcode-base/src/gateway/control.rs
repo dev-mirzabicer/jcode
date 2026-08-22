@@ -487,7 +487,7 @@ mod tests {
         let _lock = lock_env();
         let home = HomeGuard::new(
             "[gateway]\nenabled = false\nport = 7643\nbind_addr = \"0.0.0.0\"\n\n\
-             [compaction]\nlookahead_turns = 9\n",
+             [display]\nqueue_mode = true\n",
         );
 
         assert_eq!(
@@ -501,8 +501,8 @@ mod tests {
         let reloaded = crate::config::Config::load();
         assert!(reloaded.gateway.enabled);
         assert_eq!(reloaded.gateway.port, 7643);
-        assert_eq!(
-            reloaded.compaction.lookahead_turns, 9,
+        assert!(
+            reloaded.display.queue_mode,
             "unrelated config must survive the rewrite: {written}"
         );
     }

@@ -91,7 +91,7 @@ fn test_chatgpt_web_model_bypasses_live_api_catalog() {
 }
 
 #[test]
-fn test_chatgpt_browser_only_runtime_rejects_api_models_and_uses_local_compaction() {
+fn test_chatgpt_browser_only_runtime_rejects_api_models() {
     let _guard = jcode_base::storage::lock_test_env();
     let provider = OpenAIProvider::new_browser_only();
 
@@ -101,8 +101,6 @@ fn test_chatgpt_browser_only_runtime_rejects_api_models_and_uses_local_compactio
         provider.available_models_for_switching(),
         vec![CHATGPT_WEB_MODEL.to_string()]
     );
-    assert!(provider.supports_compaction());
-    assert!(provider.uses_jcode_compaction());
     assert_eq!(provider.available_transports(), vec!["browser"]);
     provider.set_transport("browser").unwrap();
     assert!(provider.set_transport("auto").is_err());
@@ -556,11 +554,6 @@ fn responses_url_honors_api_base_override_in_api_key_mode() {
     assert_eq!(
         OpenAIProvider::responses_ws_url(&api_key_creds),
         "ws://127.0.0.1:8317/v1/responses",
-    );
-    // Compact endpoint too.
-    assert_eq!(
-        OpenAIProvider::responses_compact_url(&api_key_creds),
-        "http://127.0.0.1:8317/v1/responses/compact",
     );
 }
 

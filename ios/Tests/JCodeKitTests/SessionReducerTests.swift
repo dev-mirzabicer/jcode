@@ -159,7 +159,7 @@ private func event(_ line: String) -> ConnectionOutput {
     #expect(state.notices.contains { $0.message == "Interrupted" })
 }
 
-// MARK: - Notices (notifications / compaction / dismissal)
+// MARK: - Notices (notifications / dismissal)
 
 @Test func notificationBecomesDismissibleNotice() {
     let state = run([
@@ -175,22 +175,6 @@ private func event(_ line: String) -> ConnectionOutput {
         event(#"{"type":"notification","message":"heads up"}"#)
     ])
     #expect(state.notices[0].message == "heads up")
-}
-
-@Test func foregroundCompactionSurfacesNotice() {
-    let state = run([
-        event(#"{"type":"compaction","trigger":"manual","tokens_saved":1234}"#)
-    ])
-    #expect(state.notices.count == 1)
-    #expect(state.notices[0].kind == .compaction)
-    #expect(state.notices[0].message.contains("1234"))
-}
-
-@Test func backgroundCompactionIsSilent() {
-    let state = run([
-        event(#"{"type":"compaction","trigger":"background","tokens_saved":50}"#)
-    ])
-    #expect(state.notices.isEmpty)
 }
 
 @Test func dismissNoticeRemovesOnlyThatNotice() {
@@ -505,25 +489,6 @@ private func event(_ line: String) -> ConnectionOutput {
         )
     ])
     #expect(state.reasoningEffort == "medium")
-}
-
-// MARK: - Compaction result
-
-@Test func compactResultSuccessBecomesNotice() {
-    let state = run([
-        event(#"{"type":"compact_result","id":1,"message":"Compaction started","success":true}"#)
-    ])
-    #expect(state.notices.count == 1)
-    #expect(state.notices[0].kind == .compaction)
-    #expect(state.errorBanner == nil)
-}
-
-@Test func compactResultFailureBecomesError() {
-    let state = run([
-        event(#"{"type":"compact_result","id":1,"message":"Nothing to compact","success":false}"#)
-    ])
-    #expect(state.notices.isEmpty)
-    #expect(state.errorBanner == "Nothing to compact")
 }
 
 // MARK: - Server lifecycle events

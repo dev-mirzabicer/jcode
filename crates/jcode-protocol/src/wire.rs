@@ -32,8 +32,11 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
-fn skip_legacy_compaction_mode(_: &jcode_config_types::CompactionMode) -> bool {
-    true
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LegacyContextCommand {
+    #[default]
+    Compact,
+    SetCompactionMode,
 }
 
 /// Client request to server
@@ -393,11 +396,14 @@ pub enum Request {
         enabled: bool,
     },
 
-    /// Set the compaction mode for this session
-    #[serde(rename = "set_compaction_mode")]
-    SetCompactionMode {
+    /// Compatibility-only envelope produced by [`crate::decode_request`] for
+    /// obsolete clients. It has no historical wire tag and cannot execute a
+    /// context mutation.
+    #[serde(rename = "__legacy_context_command")]
+    LegacyContextCommand {
         id: u64,
-        mode: jcode_config_types::CompactionMode,
+        #[serde(skip)]
+        command: LegacyContextCommand,
     },
 
     /// Set or clear the active session's custom display title.
@@ -415,10 +421,6 @@ pub enum Request {
     /// Transfer the current session into a compacted handoff session
     #[serde(rename = "transfer")]
     Transfer { id: u64 },
-
-    /// Trigger manual context compaction
-    #[serde(rename = "compact")]
-    Compact { id: u64 },
 
     /// Trigger immediate memory extraction for the current session
     #[serde(rename = "trigger_memory_extraction")]
@@ -1077,37 +1079,6 @@ pub enum ServerEvent {
     #[serde(rename = "memory_activity")]
     MemoryActivity { activity: MemoryActivitySnapshot },
 
-    /// Context compaction occurred (background summary or emergency drop)
-    #[serde(rename = "compaction")]
-    Compaction {
-        /// What triggered it: "background", "hard_compact", "auto_recovery"
-        trigger: String,
-        /// Token count before compaction
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pre_tokens: Option<u64>,
-        /// Token estimate after compaction was applied
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        post_tokens: Option<u64>,
-        /// Approximate tokens saved by this compaction event
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        tokens_saved: Option<u64>,
-        /// Time spent compacting in the background (0 for synchronous emergency compaction)
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        duration_ms: Option<u64>,
-        /// Number of messages dropped (for hard/emergency compaction)
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        messages_dropped: Option<usize>,
-        /// Number of messages summarized or compacted by this event
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        messages_compacted: Option<usize>,
-        /// Character count of the persisted summary after compaction
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        summary_chars: Option<usize>,
-        /// Count of recent messages still kept verbatim after compaction
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        active_messages: Option<usize>,
-    },
-
     /// Message/turn completed
     #[serde(rename = "done")]
     Done { id: u64 },
@@ -1261,9 +1232,6 @@ pub enum ServerEvent {
         /// Session-scoped automatic judge toggle.
         #[serde(skip_serializing_if = "Option::is_none")]
         autojudge_enabled: Option<bool>,
-        /// Active compaction mode for this session
-        #[serde(default, skip_serializing_if = "skip_legacy_compaction_mode")]
-        compaction_mode: jcode_config_types::CompactionMode,
         /// Persisted provider-context projection revision. New servers report
         /// this instead of an active automatic-compaction mode.
         #[serde(default)]
@@ -1530,15 +1498,6 @@ pub enum ServerEvent {
         error: Option<String>,
     },
 
-    /// Compaction mode changed (response to set_compaction_mode)
-    #[serde(rename = "compaction_mode_changed")]
-    CompactionModeChanged {
-        id: u64,
-        mode: jcode_config_types::CompactionMode,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        error: Option<String>,
-    },
-
     /// Available models updated (pushed after auth changes)
     #[serde(rename = "available_models_updated")]
     AvailableModelsUpdated {
@@ -1695,16 +1654,6 @@ pub enum ServerEvent {
         id: u64,
         new_session_id: String,
         new_session_name: String,
-    },
-
-    /// Response to compact request — context compaction status
-    #[serde(rename = "compact_result")]
-    CompactResult {
-        id: u64,
-        /// Human-readable status message
-        message: String,
-        /// Whether compaction was started successfully
-        success: bool,
     },
 
     /// Response to resume_all_sessions — summary of which sessions were continued.

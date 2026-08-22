@@ -674,31 +674,19 @@ fn clone_split_session(parent_session_id: &str) -> anyhow::Result<(String, Strin
     Ok((child.id.clone(), name))
 }
 
-fn transfer_active_messages(session: &Session) -> Vec<crate::message::Message> {
-    let start = session
-        .compaction
-        .as_ref()
-        .map(|state| state.compacted_count.min(session.messages.len()))
-        .unwrap_or(0);
-    session.messages[start..]
-        .iter()
-        .map(crate::session::StoredMessage::to_message)
-        .collect()
-}
-
 fn create_transfer_child_session(
     parent_session_id: &str,
     parent: &Session,
-    compaction: Option<crate::session::StoredCompactionState>,
+    summary: Option<String>,
 ) -> anyhow::Result<(String, String)> {
     let todos = crate::todo::load_todos(parent_session_id).unwrap_or_default();
     let mut child = Session::create(Some(parent_session_id.to_string()), None);
     child.messages.clear();
     child.compaction = None;
     child.context_view = Default::default();
-    match compaction {
-        Some(compaction) => {
-            if !child.append_transfer_handoff(parent_session_id, &compaction.summary_text) {
+    match summary {
+        Some(summary) => {
+            if !child.append_transfer_handoff(parent_session_id, &summary) {
                 anyhow::bail!("transfer summary was empty; refusing to create a contextless child");
             }
         }
@@ -792,7 +780,7 @@ pub(super) async fn handle_transfer(
             ("session_id", client_session_id.to_string()),
         ],
     );
-    let parent = match Session::load(client_session_id) {
+    let mut parent = match Session::load(client_session_id) {
         Ok(session) => session,
         Err(error) => {
             crate::logging::event_warn(
@@ -819,36 +807,44 @@ pub(super) async fn handle_transfer(
         agent_guard.provider_fork()
     };
 
-    let transfer_compaction = match crate::compaction::build_transfer_compaction_state(
-        provider,
-        transfer_active_messages(&parent),
-        parent.compaction.clone(),
-    )
-    .await
-    {
-        Ok(compaction) => compaction,
+    let projected_messages = match parent.projected_messages_for_provider() {
+        Ok(messages) => messages,
         Err(error) => {
-            crate::logging::event_warn(
-                "SESSION_LIFECYCLE",
-                vec![
-                    ("phase", "transfer_compaction_error".to_string()),
-                    ("request_id", id.to_string()),
-                    ("session_id", client_session_id.to_string()),
-                    ("error", crate::util::format_error_chain(&error)),
-                    ("elapsed_ms", started.elapsed().as_millis().to_string()),
-                ],
-            );
             let _ = client_event_tx.send(ServerEvent::Error {
                 id,
-                message: format!("Failed to compact session for transfer: {error}"),
+                message: format!("Failed to project session for transfer: {error}"),
                 retry_after_secs: None,
             });
             return;
         }
     };
+    let transfer_summary =
+        match crate::transfer_handoff::build_transfer_handoff_summary(provider, projected_messages)
+            .await
+        {
+            Ok(summary) => summary,
+            Err(error) => {
+                crate::logging::event_warn(
+                    "SESSION_LIFECYCLE",
+                    vec![
+                        ("phase", "transfer_summary_error".to_string()),
+                        ("request_id", id.to_string()),
+                        ("session_id", client_session_id.to_string()),
+                        ("error", crate::util::format_error_chain(&error)),
+                        ("elapsed_ms", started.elapsed().as_millis().to_string()),
+                    ],
+                );
+                let _ = client_event_tx.send(ServerEvent::Error {
+                    id,
+                    message: format!("Failed to summarize session for transfer: {error}"),
+                    retry_after_secs: None,
+                });
+                return;
+            }
+        };
 
     let (new_session_id, new_session_name) =
-        match create_transfer_child_session(client_session_id, &parent, transfer_compaction) {
+        match create_transfer_child_session(client_session_id, &parent, transfer_summary) {
             Ok(result) => result,
             Err(error) => {
                 crate::logging::event_warn(

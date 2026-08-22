@@ -158,7 +158,6 @@ Every ambient cycle **must** end with this tool call. The system uses the summar
     "summary": "Merged 3 duplicate memories, pruned 2 stale facts,
                 extracted memories from crashed session jcode-red-fox-1234",
     "memories_modified": 8,
-    "compactions": 2,
     "proactive_work": null,
     "next_schedule": {
         "wake_in_minutes": 25,
@@ -171,7 +170,6 @@ Every ambient cycle **must** end with this tool call. The system uses the summar
 |-------|----------|-------------|
 | `summary` | yes | Human-readable summary of what was done (goes into email/widget) |
 | `memories_modified` | yes | Count of memories created/merged/pruned/updated |
-| `compactions` | yes | Number of context compactions during this cycle |
 | `proactive_work` | no | Description of proactive code changes, if any |
 | `next_schedule` | no | When to wake next + context (falls back to system default if omitted) |
 
@@ -237,7 +235,7 @@ If you are not done, continue what you were doing.
 
 **If no `end_ambient_cycle` is called after two attempts:**
 - System generates a partial transcript marked as `incomplete`
-- Compaction count is pulled from system metrics
+- Active context-transaction count is pulled from authoritative system state
 - Default wake interval is scheduled
 - Warning logged for debugging
 
@@ -312,7 +310,7 @@ similar work before, don't do it. Code changes must go on a worktree
 branch with a PR via request_permission.
 
 When done, you MUST call end_ambient_cycle with a summary of
-everything you did, including compaction count. Always schedule
+everything you did. Always schedule
 your next wake time with context for what you plan to do next.
 ```
 
@@ -820,7 +818,11 @@ work_branch_prefix = "ambient/"
 
 ## Context Window Management
 
-Ambient mode uses the same compaction strategy as interactive sessions: **compact at 80% context window usage.** No special handling needed — if an ambient cycle is analyzing a large memory graph or many sessions, it compacts and continues.
+Ambient work defaults to blocking when a request cannot fit. It may attempt one
+reversible context transaction and one retry only when the current unattended
+turn carries explicit emergency authorization. If safe reduction is
+insufficient, the cycle reports the block without dropping transcript content,
+truncating tool results, stripping images, or retrying again.
 
 ---
 

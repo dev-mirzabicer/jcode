@@ -146,9 +146,6 @@ pub(super) struct CachedContextSnapshot {
     pub display_messages_version: u64,
     pub context_revision: u64,
     pub message_count: usize,
-    pub compaction_count: usize,
-    pub compaction_summary_chars: usize,
-    pub is_compacting: bool,
     pub snapshot: crate::tui::ContextSnapshot,
 }
 
@@ -260,7 +257,7 @@ pub(super) fn is_context_limit_error(error: &str) -> bool {
 /// the serialized request body size (dominated by inline base64 images), so it
 /// is recovered by stripping oversized images rather than by token compaction.
 pub(super) fn is_request_payload_too_large_error(error: &str) -> bool {
-    crate::compaction::is_request_payload_too_large_error(error)
+    jcode_provider_core::is_request_payload_too_large_error(error)
 }
 
 /// Parse a clock time like "5am" or "12:30pm" and return duration until that time

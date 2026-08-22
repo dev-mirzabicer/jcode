@@ -552,7 +552,6 @@ mod tests {
             tools: Arc::new(RwLock::new(tools)),
             skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
             context_budget: template_budget,
-            legacy_compaction: Arc::new(RwLock::new(crate::compaction::CompactionManager::new())),
         };
         let registry = template.clone();
         {

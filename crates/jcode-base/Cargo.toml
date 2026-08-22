@@ -99,7 +99,6 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 jcode-background-types = { path = "../jcode-background-types" }
 jcode-batch-types = { path = "../jcode-batch-types" }
 jcode-build-meta = { path = "../jcode-build-meta" }
-jcode-compaction-core = { path = "../jcode-compaction-core" }
 jcode-context-core = { path = "../jcode-context-core" }
 jcode-config-types = { path = "../jcode-config-types" }
 jcode-core = { path = "../jcode-core" }

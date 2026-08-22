@@ -190,16 +190,6 @@ pub(super) fn render_model_info(data: &InfoWidgetData, inner: Rect) -> Vec<Line<
 
     append_model_runtime_metadata(&mut spans, data);
 
-    if let Some(mode) = &data.native_compaction_mode {
-        let label = if let Some(tokens) = data.native_compaction_threshold_tokens {
-            format!("native {} @ {}k", mode, tokens / 1000)
-        } else {
-            format!("native {}", mode)
-        };
-        spans.push(Span::styled(" ", Style::default()));
-        spans.push(Span::styled(label, Style::default().fg(rgb(120, 210, 230))));
-    }
-
     let mut lines = vec![Line::from(spans)];
 
     let has_provider = data
@@ -399,8 +389,6 @@ mod tests {
             model: Some("gpt-5-codex".to_string()),
             reasoning_effort: Some("high".to_string()),
             service_tier: Some("priority".to_string()),
-            native_compaction_mode: None,
-            native_compaction_threshold_tokens: None,
             session_count: None,
             session_name: None,
             working_dir: None,
@@ -420,8 +408,6 @@ mod tests {
             ambient_info: None,
             observed_context_tokens: None,
             cache_hit_info: None,
-            compaction_info: None,
-            is_compacting: false,
             git_info: None,
         }
     }

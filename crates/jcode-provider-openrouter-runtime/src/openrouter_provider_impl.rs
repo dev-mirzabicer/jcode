@@ -777,10 +777,6 @@ impl Provider for OpenRouterProvider {
         ))
     }
 
-    fn supports_compaction(&self) -> bool {
-        true
-    }
-
     fn preferred_provider(&self) -> Option<String> {
         self.preferred_provider()
     }

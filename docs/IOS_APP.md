@@ -81,7 +81,7 @@ Client v1 events consumed: `ack`, `text_delta`, `reasoning_delta`,
 `reasoning_done`, `text_replace`, `tool_start`, `tool_input`, `tool_exec`,
 `tool_done`, `message_end`, `done`, `error`, `pong`, `state`, `session`,
 `session_renamed`, `history`, `model_changed`, `available_models_updated`,
-`tokens`, `interrupted`, `status_detail`, `notification`, `compaction`.
+`tokens`, `interrupted`, `status_detail`, `notification`.
 Unknown event types are ignored by design (forward compatibility).
 
 ## Feature scope

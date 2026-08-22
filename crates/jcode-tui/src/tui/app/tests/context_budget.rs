@@ -195,15 +195,6 @@ fn context_budget_model_switch_updates_budget_clears_observation_and_preserves_m
     let messages = vec![Message::user("stable provider history")];
     app.replace_provider_messages(messages.clone());
     set_app_context_observation(&app, 9_000);
-    {
-        let legacy_compaction = app.registry.legacy_compaction();
-        tokio::runtime::Runtime::new().unwrap().block_on(async {
-            legacy_compaction
-                .write()
-                .await
-                .update_observed_input_tokens(9_000);
-        });
-    }
     let messages_before = serde_json::to_vec(&app.messages).unwrap();
     let session_before = serde_json::to_vec(&app.session.messages).unwrap();
 
@@ -213,18 +204,6 @@ fn context_budget_model_switch_updates_budget_clears_observation_and_preserves_m
     let stats = context_budget_stats_for_app(&app);
     assert_eq!(stats.token_budget, 50_000);
     assert_eq!(stats.observed_input_tokens, None);
-    let provider_messages = app.materialized_provider_messages();
-    let legacy_observation = {
-        let legacy_compaction = app.registry.legacy_compaction();
-        tokio::runtime::Runtime::new().unwrap().block_on(async {
-            legacy_compaction
-                .read()
-                .await
-                .stats_with(&provider_messages)
-                .observed_input_tokens
-        })
-    };
-    assert_eq!(legacy_observation, None);
     assert_eq!(serde_json::to_vec(&app.messages).unwrap(), messages_before);
     assert_eq!(
         serde_json::to_vec(&app.session.messages).unwrap(),

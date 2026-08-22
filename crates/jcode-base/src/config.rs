@@ -4,15 +4,15 @@
 //! Environment variables override config file settings.
 
 pub use jcode_config_types::{
-    AgentsConfig, AmbientConfig, AuthConfig, AutoJudgeConfig, AutoReviewConfig, CompactionConfig,
-    CompactionMode, ContextConfig, ContextCuratorConfig, CrossProviderFailoverMode,
-    DiagramDisplayMode, DiagramPanePosition, DiffDisplayMode, DisplayConfig, FeatureConfig,
-    GatewayConfig, HookCommands, HooksConfig, KeybindingsConfig, LatexRenderingMode,
-    LaunchHotkeyEntry, LaunchHotkeysConfig, MarkdownSpacingMode, NamedProviderAuth,
-    NamedProviderConfig, NamedProviderModelConfig, NamedProviderType, NativeScrollbarConfig,
-    NotificationsConfig, OverscrollStatusMode, PowerConfig, ProviderConfig, ReasoningDisplayMode,
-    SafetyConfig, SessionPickerResumeAction, SponsorsConfig, SwarmSpawnMode, SwarmStripLayout,
-    TerminalConfig, UpdateChannel, WebSearchConfig, WebSearchEngine,
+    AgentsConfig, AmbientConfig, AuthConfig, AutoJudgeConfig, AutoReviewConfig, ContextConfig,
+    ContextCuratorConfig, CrossProviderFailoverMode, DiagramDisplayMode, DiagramPanePosition,
+    DiffDisplayMode, DisplayConfig, FeatureConfig, GatewayConfig, HookCommands, HooksConfig,
+    KeybindingsConfig, LatexRenderingMode, LaunchHotkeyEntry, LaunchHotkeysConfig,
+    MarkdownSpacingMode, NamedProviderAuth, NamedProviderConfig, NamedProviderModelConfig,
+    NamedProviderType, NativeScrollbarConfig, NotificationsConfig, OverscrollStatusMode,
+    PowerConfig, ProviderConfig, ReasoningDisplayMode, SafetyConfig, SessionPickerResumeAction,
+    SponsorsConfig, SwarmSpawnMode, SwarmStripLayout, TerminalConfig, UpdateChannel,
+    WebSearchConfig, WebSearchEngine,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -125,8 +125,6 @@ const CONFIG_ENV_KEYS: &[&str] = &[
     "JCODE_NO_EMOJI",
     "JCODE_NTFY_SERVER",
     "JCODE_NTFY_TOPIC",
-    "JCODE_OPENAI_NATIVE_COMPACTION_MODE",
-    "JCODE_OPENAI_NATIVE_COMPACTION_THRESHOLD_TOKENS",
     "JCODE_OPENAI_REASONING_EFFORT",
     "JCODE_OPENAI_SERVICE_TIER",
     "JCODE_OPENAI_TRANSPORT",
@@ -517,9 +515,6 @@ pub struct Config {
 
     /// WebSocket gateway configuration (for iOS/web clients)
     pub gateway: GatewayConfig,
-
-    /// Compaction configuration
-    pub compaction: CompactionConfig,
 
     /// User-controlled context-management configuration.
     pub context: ContextConfig,

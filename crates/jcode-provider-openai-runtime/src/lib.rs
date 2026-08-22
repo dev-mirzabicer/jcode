@@ -189,13 +189,6 @@ enum OpenAITransport {
     HTTPS,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OpenAINativeCompactionMode {
-    Auto,
-    Explicit,
-    Off,
-}
-
 /// Shared dual-auth credential pin (see `jcode_provider_core::CredentialMode`).
 /// The OpenAI-specific alias is kept so existing call sites read naturally.
 pub(crate) use jcode_provider_core::CredentialMode as OpenAICredentialMode;
@@ -206,31 +199,6 @@ pub(crate) fn load_credentials_for_mode(mode: OpenAICredentialMode) -> Result<Co
         OpenAICredentialMode::Auto => jcode_base::auth::codex::load_credentials(),
         OpenAICredentialMode::OAuth => jcode_base::auth::codex::load_oauth_credentials(),
         OpenAICredentialMode::ApiKey => jcode_base::auth::codex::load_api_key_credentials(),
-    }
-}
-
-impl OpenAINativeCompactionMode {
-    fn from_config(raw: &str) -> Self {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "auto" | "" => Self::Auto,
-            "explicit" | "manual" => Self::Explicit,
-            "off" | "disabled" | "none" => Self::Off,
-            other => {
-                jcode_base::logging::warn(&format!(
-                    "Unknown OpenAI native compaction mode '{}'; using auto. Use: auto, explicit, or off.",
-                    other
-                ));
-                Self::Auto
-            }
-        }
-    }
-
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Auto => "auto",
-            Self::Explicit => "explicit",
-            Self::Off => "off",
-        }
     }
 }
 
@@ -707,8 +675,6 @@ pub struct OpenAIProvider {
     reasoning_effort: Arc<StdRwLock<Option<String>>>,
     model_reasoning_efforts: Arc<StdRwLock<HashMap<String, Vec<String>>>>,
     service_tier: Arc<StdRwLock<Option<String>>>,
-    native_compaction_mode: OpenAINativeCompactionMode,
-    native_compaction_threshold_tokens: usize,
     transport_mode: Arc<RwLock<OpenAITransportMode>>,
     websocket_cooldowns: Arc<RwLock<HashMap<String, Instant>>>,
     websocket_failure_streaks: Arc<RwLock<HashMap<String, u32>>>,
@@ -829,15 +795,6 @@ impl OpenAIProvider {
                 .openai_transport
                 .as_deref(),
         );
-        let native_compaction_mode = OpenAINativeCompactionMode::from_config(
-            &jcode_base::config::config()
-                .provider
-                .openai_native_compaction_mode,
-        );
-        let native_compaction_threshold_tokens = jcode_base::config::config()
-            .provider
-            .openai_native_compaction_threshold_tokens
-            .max(1000);
         let model_reasoning_efforts =
             jcode_base::provider::cached_openai_reasoning_efforts().unwrap_or_default();
 
@@ -852,8 +809,6 @@ impl OpenAIProvider {
             reasoning_effort: Arc::new(StdRwLock::new(reasoning_effort)),
             model_reasoning_efforts: Arc::new(StdRwLock::new(model_reasoning_efforts)),
             service_tier: Arc::new(StdRwLock::new(service_tier)),
-            native_compaction_mode,
-            native_compaction_threshold_tokens,
             transport_mode: Arc::new(RwLock::new(transport_mode)),
             websocket_cooldowns: Arc::clone(&WEBSOCKET_COOLDOWNS),
             websocket_failure_streaks: Arc::clone(&WEBSOCKET_FAILURE_STREAKS),
@@ -1069,20 +1024,6 @@ impl OpenAIProvider {
         }
     }
 
-    fn native_compaction_threshold_for_context_window(
-        &self,
-        context_window: usize,
-    ) -> Option<usize> {
-        if self.native_compaction_mode != OpenAINativeCompactionMode::Auto {
-            return None;
-        }
-        Some(
-            self.native_compaction_threshold_tokens
-                .max(1000)
-                .min(context_window.max(1000)),
-        )
-    }
-
     fn parse_max_output_tokens(raw: Option<&str>) -> Option<u32> {
         let raw = match raw {
             Some(value) => value.trim(),
@@ -1184,10 +1125,6 @@ impl OpenAIProvider {
             .replace("http://", "ws://")
     }
 
-    fn responses_compact_url(credentials: &CodexCredentials) -> String {
-        format!("{}/compact", Self::responses_url(credentials))
-    }
-
     #[expect(
         clippy::too_many_arguments,
         reason = "request construction threads explicit per-request OpenAI settings without hidden state"
@@ -1203,7 +1140,6 @@ impl OpenAIProvider {
         service_tier: Option<&str>,
         prompt_cache_key: Option<&str>,
         prompt_cache_retention: Option<&str>,
-        native_compaction_threshold: Option<usize>,
     ) -> Value {
         let mut tools = api_tools.to_vec();
         // The hosted `image_generation` tool is only available to general
@@ -1235,15 +1171,6 @@ impl OpenAIProvider {
 
         if let Some(service_tier) = service_tier {
             request["service_tier"] = serde_json::json!(service_tier);
-        }
-
-        if let Some(compact_threshold) = native_compaction_threshold {
-            request["context_management"] = serde_json::json!([
-                {
-                    "type": "compaction",
-                    "compact_threshold": compact_threshold,
-                }
-            ]);
         }
 
         if !is_chatgpt_mode {

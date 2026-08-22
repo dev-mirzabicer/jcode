@@ -918,10 +918,6 @@ impl Provider for AntigravityProvider {
         Ok(())
     }
 
-    fn supports_compaction(&self) -> bool {
-        false
-    }
-
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(Self {
             client: self.client.clone(),

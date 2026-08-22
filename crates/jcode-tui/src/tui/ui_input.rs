@@ -557,7 +557,6 @@ fn format_stream_tokens(tokens: u64) -> String {
 
 fn occasional_session_history_warning(
     total_tokens: u64,
-    compaction_count: usize,
     context_limit: Option<usize>,
     width: usize,
     elapsed_secs: u64,
@@ -584,17 +583,8 @@ fn occasional_session_history_warning(
     }
 
     let tokens = format_stream_tokens(total_tokens);
-    let compactions = if compaction_count > 0 {
-        format!(
-            " and {compaction_count} compact{}",
-            if compaction_count == 1 { "" } else { "s" }
-        )
-    } else {
-        String::new()
-    };
-
     Some(format!(
-        "Session history: {tokens} tokens processed{compactions}; /clear starts fresh context"
+        "Session history: {tokens} tokens processed; /clear starts fresh context"
     ))
 }
 
@@ -1046,7 +1036,6 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
         let total = total_in + total_out;
         if let Some(warning) = occasional_session_history_warning(
             total,
-            app.session_compaction_count(),
             app.context_limit(),
             area.width as usize,
             app.animation_elapsed() as u64,
@@ -1056,12 +1045,11 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
                 .and_then(|limit| u64::try_from(limit).ok())
                 .map(|limit| limit.saturating_mul(3))
                 .unwrap_or(1_000_000);
-            let warning_color =
-                if total >= severe_token_threshold || app.session_compaction_count() >= 3 {
-                    rgb(255, 100, 100)
-                } else {
-                    rgb(255, 193, 7)
-                };
+            let warning_color = if total >= severe_token_threshold {
+                rgb(255, 100, 100)
+            } else {
+                rgb(255, 193, 7)
+            };
             Line::from(vec![
                 Span::styled("⚠ ", Style::default().fg(warning_color)),
                 Span::styled(warning, Style::default().fg(warning_color)),
@@ -1462,16 +1450,16 @@ mod tests {
 
     #[test]
     fn session_history_warning_is_clear_and_occasional() {
-        assert!(occasional_session_history_warning(249_999, 0, None, 100, 0).is_none());
-        assert!(occasional_session_history_warning(300_000, 0, None, 63, 0).is_none());
-        assert!(occasional_session_history_warning(300_000, 0, None, 100, 10).is_none());
-        assert!(occasional_session_history_warning(199_999, 0, Some(200_000), 100, 0).is_none());
-        assert!(occasional_session_history_warning(300_000, 0, Some(400_000), 100, 0).is_none());
-        assert!(occasional_session_history_warning(450_000, 0, Some(400_000), 100, 0).is_none());
+        assert!(occasional_session_history_warning(249_999, None, 100, 0).is_none());
+        assert!(occasional_session_history_warning(300_000, None, 63, 0).is_none());
+        assert!(occasional_session_history_warning(300_000, None, 100, 10).is_none());
+        assert!(occasional_session_history_warning(199_999, Some(200_000), 100, 0).is_none());
+        assert!(occasional_session_history_warning(300_000, Some(400_000), 100, 0).is_none());
+        assert!(occasional_session_history_warning(450_000, Some(400_000), 100, 0).is_none());
 
-        let warning = occasional_session_history_warning(2_500_000, 4, Some(500_000), 100, 0)
+        let warning = occasional_session_history_warning(2_500_000, Some(500_000), 100, 0)
             .expect("large sessions should get a brief reminder");
-        assert!(warning.contains("Session history: 2.5M tokens processed and 4 compacts"));
+        assert!(warning.contains("Session history: 2.5M tokens processed"));
         assert!(warning.contains("/clear starts fresh context"));
         assert!(!warning.contains("Context usage"));
     }

@@ -16,7 +16,6 @@ public enum Request: Equatable, Sendable {
     case resumeSession(id: UInt64, sessionID: String)
     case setModel(id: UInt64, model: String)
     case setReasoningEffort(id: UInt64, effort: String)
-    case compact(id: UInt64)
     case renameSession(id: UInt64, title: String?)
     case clear(id: UInt64)
 
@@ -25,7 +24,7 @@ public enum Request: Equatable, Sendable {
         case let .subscribe(id, _), let .message(id, _), let .cancel(id),
             let .softInterrupt(id, _, _), let .cancelSoftInterrupts(id),
             let .ping(id), let .getHistory(id), let .resumeSession(id, _),
-            let .setModel(id, _), let .setReasoningEffort(id, _), let .compact(id),
+            let .setModel(id, _), let .setReasoningEffort(id, _),
             let .renameSession(id, _), let .clear(id):
             return id
         }
@@ -64,8 +63,6 @@ public enum Request: Equatable, Sendable {
         case let .setReasoningEffort(_, effort):
             object["type"] = "set_reasoning_effort"
             object["effort"] = effort
-        case .compact:
-            object["type"] = "compact"
         case let .renameSession(_, title):
             object["type"] = "rename_session"
             if let title {
@@ -144,9 +141,7 @@ public enum ServerEvent: Equatable, Sendable {
     case history(HistoryPayload)
     case modelChanged(id: UInt64, model: String, error: String?)
     case reasoningEffortChanged(id: UInt64, effort: String?, error: String?)
-    case compactResult(id: UInt64, message: String, success: Bool)
     case availableModelsUpdated(models: [String], providerModel: String?)
-    case compaction(trigger: String, tokensSaved: UInt64?)
     case notification(fromName: String?, message: String)
     case reloading(newSocket: String?)
     case sessionCloseRequested(reason: String)
@@ -295,21 +290,10 @@ public enum ServerEvent: Equatable, Sendable {
                 effort: json.optionalString("effort"),
                 error: json.optionalString("error")
             )
-        case "compact_result":
-            return .compactResult(
-                id: json.uint64("id"),
-                message: json.string("message"),
-                success: json.bool("success")
-            )
         case "available_models_updated":
             return .availableModelsUpdated(
                 models: json.stringArray("available_models"),
                 providerModel: json.optionalString("provider_model")
-            )
-        case "compaction":
-            return .compaction(
-                trigger: json.string("trigger"),
-                tokensSaved: json.optionalUInt64("tokens_saved")
             )
         case "notification":
             return .notification(

@@ -139,8 +139,6 @@ enum SimpleKind {
     Model,
     /// Awaiting `reasoning_effort_changed`.
     ReasoningEffort,
-    /// Awaiting `compacted_history`.
-    Compact,
     /// Awaiting the catalog reply that answers `list_models`.
     Models,
     Credential {
@@ -664,11 +662,6 @@ impl BridgeState {
                     "effort": effort,
                 }))]
             }
-            "compact" => {
-                let id = self.legacy_id();
-                self.pending_simple.push((id, api_id, SimpleKind::Compact));
-                vec![Outbound::Legacy(json!({"type": "compact", "id": id}))]
-            }
             "rename_session" => {
                 let id = self.legacy_id();
                 self.pending_simple.push((id, api_id, SimpleKind::Ok));
@@ -938,33 +931,6 @@ impl BridgeState {
                     )],
                     None => vec![ServerFrame::reply(api_id, ApiEvent::Ok)],
                 }
-            }
-            // Compaction is scheduled, not performed inline, and the daemon
-            // reports refusal via `success: false` with a reason rather than
-            // an error frame. Relayed as a real error so a client is not told
-            // "done" about work that never happened.
-            "compact_result" => {
-                let id = event["id"].as_u64().unwrap_or(0);
-                let Some(api_id) = self.take_simple(id, SimpleKind::Compact) else {
-                    return vec![];
-                };
-                let message = event["message"].as_str().unwrap_or("").to_string();
-                if event["success"].as_bool() == Some(false) {
-                    return vec![ServerFrame::reply(
-                        api_id,
-                        ApiEvent::Error {
-                            code: ErrorCode::InvalidRequest,
-                            message,
-                        },
-                    )];
-                }
-                vec![ServerFrame::reply(
-                    api_id,
-                    ApiEvent::Compacted {
-                        session_id: session(self),
-                        message,
-                    },
-                )]
             }
             "session_renamed" => {
                 let session_id = event["session_id"]

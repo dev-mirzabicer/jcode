@@ -203,18 +203,6 @@ pub enum ApiEvent {
         modified_ms: Option<u64>,
     },
 
-    /// Reply to `Compact`: compaction was scheduled.
-    ///
-    /// Compaction is not synchronous. The daemon summarizes at the next safe
-    /// point rather than interrupting a turn mid-flight, so this confirms the
-    /// request was accepted, not that the transcript has already shrunk. A
-    /// client that wants the result should re-read the history afterwards.
-    Compacted {
-        session_id: String,
-        /// Human-readable status, e.g. why compaction was refused.
-        message: String,
-    },
-
     /// A session's title changed, whether set by a client or generated.
     SessionRenamed {
         session_id: String,

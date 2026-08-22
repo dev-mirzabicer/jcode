@@ -47,7 +47,6 @@ fn registry_with_context_budget_and_observation(
         tools: Arc::new(RwLock::new(HashMap::new())),
         skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
         context_budget: Arc::new(RwLock::new(context_budget)),
-        legacy_compaction: Arc::new(RwLock::new(CompactionManager::new())),
     }
 }
 
@@ -855,27 +854,6 @@ async fn test_context_guard_small_output_passes_through() {
 }
 
 #[tokio::test]
-async fn context_guard_is_independent_of_legacy_compaction_state() {
-    let registry = registry_with_context_budget(1_000);
-    let payload = "x".repeat(8_000);
-    let before = registry
-        .guard_context_overflow("test", ToolOutput::new(payload.clone()), false)
-        .await;
-
-    {
-        let legacy_compaction = registry.legacy_compaction();
-        let mut manager = legacy_compaction.write().await;
-        *manager = CompactionManager::new().with_budget(1_000_000);
-    }
-
-    let after = registry
-        .guard_context_overflow("test", ToolOutput::new(payload), false)
-        .await;
-    assert_eq!(before.output, after.output);
-    assert!(after.output.contains("OUTPUT WITHHELD"));
-}
-
-#[tokio::test]
 async fn registry_clone_shares_tools_and_skills_but_isolates_context_runtime() {
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;
@@ -885,21 +863,12 @@ async fn registry_clone_shares_tools_and_skills_but_isolates_context_runtime() {
         tracker.set_budget(10_000);
         tracker.update_observed_input_tokens(7_000);
     }
-    {
-        let legacy_compaction = registry.legacy_compaction();
-        legacy_compaction.write().await.set_budget(10_000);
-    }
-
     let cloned = registry.clone();
     assert!(Arc::ptr_eq(&registry.tools, &cloned.tools));
     assert!(Arc::ptr_eq(&registry.skills, &cloned.skills));
     assert!(!Arc::ptr_eq(
         &registry.context_budget,
         &cloned.context_budget
-    ));
-    assert!(!Arc::ptr_eq(
-        &registry.legacy_compaction,
-        &cloned.legacy_compaction
     ));
 
     {
@@ -908,25 +877,12 @@ async fn registry_clone_shares_tools_and_skills_but_isolates_context_runtime() {
         tracker.set_budget(50_000);
         tracker.update_observed_input_tokens(42_000);
     }
-    {
-        let cloned_legacy_compaction = cloned.legacy_compaction();
-        cloned_legacy_compaction.write().await.set_budget(50_000);
-    }
-
     let root_stats = registry.context_budget().read().await.stats();
     let cloned_stats = cloned.context_budget().read().await.stats();
     assert_eq!(root_stats.token_budget, 10_000);
     assert_eq!(root_stats.observed_input_tokens, Some(7_000));
     assert_eq!(cloned_stats.token_budget, 50_000);
     assert_eq!(cloned_stats.observed_input_tokens, Some(42_000));
-    assert_eq!(
-        registry.legacy_compaction().read().await.token_budget(),
-        10_000
-    );
-    assert_eq!(
-        cloned.legacy_compaction().read().await.token_budget(),
-        50_000
-    );
 }
 
 #[tokio::test]
@@ -940,10 +896,6 @@ async fn same_session_registry_clone_shares_context_runtime_for_tool_guards() {
     assert!(Arc::ptr_eq(
         &registry.context_budget,
         &shared.context_budget
-    ));
-    assert!(Arc::ptr_eq(
-        &registry.legacy_compaction,
-        &shared.legacy_compaction
     ));
 
     {

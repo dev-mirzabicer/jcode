@@ -82,15 +82,11 @@ private func encodedObject(_ request: Request) throws -> [String: Any] {
     #expect(rename["title"] as? String == "My session")
 }
 
-@Test func encodesReasoningEffortAndCompact() throws {
+@Test func encodesReasoningEffort() throws {
     let effort = try encodedObject(.setReasoningEffort(id: 13, effort: "high"))
     #expect(effort["type"] as? String == "set_reasoning_effort")
     #expect(effort["id"] as? UInt64 == 13)
     #expect(effort["effort"] as? String == "high")
-
-    let compact = try encodedObject(.compact(id: 14))
-    #expect(compact["type"] as? String == "compact")
-    #expect(compact["id"] as? UInt64 == 14)
 }
 
 // MARK: - ServerEvent decoding (fixtures mirror real server output)
@@ -223,7 +219,7 @@ private func encodedObject(_ request: Request) throws -> [String: Any] {
                 content: "note", displayRole: "system", point: "A", toolsSkipped: nil))
 }
 
-@Test func decodesEffortAndCompactResponses() throws {
+@Test func decodesEffortResponses() throws {
     #expect(
         try ServerEvent.decode(
             line: #"{"type":"reasoning_effort_changed","id":3,"effort":"high"}"#)
@@ -232,11 +228,6 @@ private func encodedObject(_ request: Request) throws -> [String: Any] {
         try ServerEvent.decode(
             line: #"{"type":"reasoning_effort_changed","id":4,"error":"unsupported"}"#)
             == .reasoningEffortChanged(id: 4, effort: nil, error: "unsupported"))
-    #expect(
-        try ServerEvent.decode(
-            line: #"{"type":"compact_result","id":5,"message":"Compaction started","success":true}"#
-        )
-            == .compactResult(id: 5, message: "Compaction started", success: true))
 }
 
 @Test func decodesServerLifecycleEvents() throws {

@@ -94,7 +94,7 @@ fn test_safety_transcript() {
         actions: vec![],
         pending_permissions: 0,
         summary: Some("Test cycle completed".to_string()),
-        compactions: 0,
+        active_context_transactions: 0,
         memories_modified: 3,
         conversation: None,
     };

@@ -868,18 +868,6 @@ impl crate::tui::TuiState for App {
         self.remote_total_tokens
     }
 
-    fn session_compaction_count(&self) -> usize {
-        if self.is_remote || !self.provider.uses_jcode_compaction() {
-            return 0;
-        }
-        self.registry
-            .legacy_compaction()
-            .try_read()
-            .ok()
-            .map(|manager| manager.compacted_count())
-            .unwrap_or(0)
-    }
-
     fn is_remote_mode(&self) -> bool {
         self.is_remote
     }
@@ -964,15 +952,6 @@ impl crate::tui::TuiState for App {
     }
 
     fn status_notice(&self) -> Option<String> {
-        if !self.is_remote
-            && self.provider.uses_jcode_compaction()
-            && let Ok(manager) = self.registry.legacy_compaction().try_read()
-            && manager.is_compacting()
-        {
-            return Some(Self::format_compaction_progress_notice(
-                self.app_started.elapsed(),
-            ));
-        }
         self.status_notice.as_ref().and_then(|(text, at)| {
             if at.elapsed() <= Duration::from_secs(3) {
                 Some(text.clone())
@@ -1064,31 +1043,6 @@ impl crate::tui::TuiState for App {
         } else {
             self.session.messages.len()
         };
-        let (compaction_count, compaction_summary_chars, is_compacting, compaction_fresh) =
-            if self.is_remote {
-                (0, 0, false, true)
-            } else if self.provider.uses_jcode_compaction() {
-                match self.registry.legacy_compaction().try_read() {
-                    Ok(manager) => (
-                        manager.compacted_count(),
-                        manager.summary_chars(),
-                        manager.is_compacting(),
-                        true,
-                    ),
-                    Err(_) => (0, 0, false, false),
-                }
-            } else {
-                (0, 0, false, true)
-            };
-
-        if !compaction_fresh {
-            return crate::tui::ContextSnapshot {
-                info: None,
-                revision: self.context_revision,
-                fresh: false,
-            };
-        }
-
         if let Ok(cache) = CACHE.lock()
             && let Some((ts, cached)) = &*cache
             && ts.elapsed() < TTL
@@ -1097,9 +1051,6 @@ impl crate::tui::TuiState for App {
             && cached.display_messages_version == self.display_messages_version
             && cached.context_revision == self.context_revision
             && cached.message_count == message_count
-            && cached.compaction_count == compaction_count
-            && cached.compaction_summary_chars == compaction_summary_chars
-            && cached.is_compacting == is_compacting
         {
             return cached.snapshot.clone();
         }
@@ -1140,26 +1091,20 @@ impl crate::tui::TuiState for App {
                 }
             }
         } else {
-            let skip = if self.provider.uses_jcode_compaction() {
-                let compaction = self.registry.legacy_compaction();
-                let result = compaction
-                    .try_read()
-                    .ok()
-                    .map(|manager| (manager.compacted_count(), manager.summary_chars()));
-                if let Some((cc, sc)) = result {
-                    if cc > 0 && sc > 0 {
-                        user_count += 1;
-                        user_chars += sc;
-                    }
-                    cc
-                } else {
-                    0
+            let projection = match jcode_context_core::project_context(
+                &self.session.messages,
+                &self.session.context_view,
+            ) {
+                Ok(projection) => projection,
+                Err(_) => {
+                    return crate::tui::ContextSnapshot {
+                        info: None,
+                        revision: self.context_revision,
+                        fresh: false,
+                    };
                 }
-            } else {
-                0
             };
-
-            for msg in self.session.messages.iter().skip(skip) {
+            for msg in &projection.messages {
                 match msg.role {
                     Role::User => user_count += 1,
                     Role::Assistant => asst_count += 1,
@@ -1269,9 +1214,6 @@ impl crate::tui::TuiState for App {
                     display_messages_version: self.display_messages_version,
                     context_revision: self.context_revision,
                     message_count,
-                    compaction_count,
-                    compaction_summary_chars,
-                    is_compacting,
                     snapshot: crate::tui::ContextSnapshot {
                         info: Some(info.clone()),
                         revision: self.context_revision,
@@ -1339,27 +1281,17 @@ impl crate::tui::TuiState for App {
         };
 
         let uses_remote_widget_metadata = self.is_remote || self.is_replay_runtime();
-        let (
-            model,
-            reasoning_effort,
-            service_tier,
-            native_compaction_mode,
-            native_compaction_threshold_tokens,
-        ) = if uses_remote_widget_metadata {
+        let (model, reasoning_effort, service_tier) = if uses_remote_widget_metadata {
             (
                 self.remote_provider_model.clone(),
                 self.remote_reasoning_effort.clone(),
                 self.remote_service_tier.clone(),
-                None,
-                None,
             )
         } else {
             (
                 Some(self.provider.model()),
                 self.provider.reasoning_effort(),
                 self.provider.service_tier(),
-                self.provider.native_compaction_mode(),
-                self.provider.native_compaction_threshold_tokens(),
             )
         };
 
@@ -1594,26 +1526,6 @@ impl crate::tui::TuiState for App {
 
         let workspace_animation_tick = self.app_started.elapsed().as_millis() as u64 / 180;
 
-        let compaction_info = if !self.is_remote && self.provider.uses_jcode_compaction() {
-            let compaction = self.registry.legacy_compaction();
-            compaction.try_read().ok().and_then(|manager| {
-                let compacted_messages = manager.compacted_count();
-                let summary_chars = manager.summary_chars();
-                let is_compacting = manager.is_compacting();
-                (is_compacting || compacted_messages > 0 || summary_chars > 0).then(|| {
-                    crate::tui::info_widget::CompactionInfo {
-                        is_compacting,
-                        compacted_messages,
-                        active_messages: manager.active_messages_count(),
-                        summary_chars,
-                        mode: manager.mode().as_str().to_string(),
-                    }
-                })
-            })
-        } else {
-            None
-        };
-
         crate::tui::info_widget::InfoWidgetData {
             todos,
             todo_goals,
@@ -1625,8 +1537,6 @@ impl crate::tui::TuiState for App {
             model,
             reasoning_effort,
             service_tier,
-            native_compaction_mode,
-            native_compaction_threshold_tokens,
             session_count,
             session_name,
             working_dir: self.session.working_dir.clone(),
@@ -1652,16 +1562,6 @@ impl crate::tui::TuiState for App {
             ambient_info: gather_ambient_info(crate::config::config().ambient.enabled),
             observed_context_tokens: self.current_stream_context_tokens(),
             cache_hit_info,
-            compaction_info,
-            is_compacting: if !self.is_remote && self.provider.uses_jcode_compaction() {
-                let compaction = self.registry.legacy_compaction();
-                compaction
-                    .try_read()
-                    .map(|m| m.is_compacting())
-                    .unwrap_or(false)
-            } else {
-                false
-            },
             git_info: gather_git_info(),
         }
     }

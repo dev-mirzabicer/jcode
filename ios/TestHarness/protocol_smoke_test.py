@@ -213,15 +213,8 @@ def main():
     check("set_reasoning_effort -> reasoning_effort_changed",
           rc is not None and rc.get("effort") == "low" and rc.get("error") is None)
 
-    # 10. compact
-    ws_send(s, json.dumps({"id": 7, "type": "compact"}))
-    evs = collect_events(s, until_type="compact_result")
-    cr = next((e for e in evs if e["type"] == "compact_result"), None)
-    check("compact -> compact_result success",
-          cr is not None and cr.get("success") is True and bool(cr.get("message")))
-
-    # 11. rename_session -> session_renamed broadcast (titles map)
-    ws_send(s, json.dumps({"id": 8, "type": "rename_session", "title": "Renamed by smoke"}))
+    # 10. rename_session -> session_renamed broadcast (titles map)
+    ws_send(s, json.dumps({"id": 7, "type": "rename_session", "title": "Renamed by smoke"}))
     evs = collect_events(s, until_type="session_renamed")
     rn = next((e for e in evs if e["type"] == "session_renamed"), None)
     check("rename_session -> session_renamed",

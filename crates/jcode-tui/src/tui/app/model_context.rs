@@ -743,14 +743,6 @@ impl App {
         } else {
             crate::logging::warn("Context budget lock unavailable during TUI model switch");
         }
-
-        // Transitional policy state uses the same model limit until Step 5
-        // removes automatic compaction from provider requests.
-        let legacy_compaction = self.registry.legacy_compaction();
-        if let Ok(mut manager) = legacy_compaction.try_write() {
-            manager.set_budget(limit);
-            manager.clear_observed_input_tokens();
-        };
     }
 
     pub(super) fn effective_context_tokens_from_usage(
@@ -765,9 +757,7 @@ impl App {
             self.provider.name().to_string()
         };
 
-        // Shared heuristic keeps the sidebar, policy-free tracker, and
-        // transitional compaction policy on the same provider accounting basis.
-        crate::compaction::effective_context_tokens_from_usage(
+        jcode_provider_core::effective_context_tokens_from_usage(
             &provider_name,
             input_tokens,
             cache_read_input_tokens,
@@ -857,14 +847,6 @@ impl App {
         } else {
             crate::logging::warn("Context budget lock unavailable during TUI usage update");
         }
-
-        if self.is_remote || !self.provider.uses_jcode_compaction() {
-            return;
-        }
-        let legacy_compaction = self.registry.legacy_compaction();
-        if let Ok(mut manager) = legacy_compaction.try_write() {
-            manager.update_observed_input_tokens(tokens);
-        };
     }
 
     /// Put the prompt that started the failed turn back into the input box so the
@@ -1136,69 +1118,11 @@ impl App {
             actions.push("Reset provider session resume state.".to_string());
         }
 
-        if !self.is_remote && self.provider.supports_compaction() {
-            let observed_tokens = self
-                .current_stream_context_tokens()
-                .or_else(|| context_error.then_some(self.context_limit));
-            let compaction = self.registry.legacy_compaction();
-            match compaction.try_write() {
-                Ok(mut manager) => {
-                    let mut provider_messages = self.materialized_provider_messages();
-                    if let Some(tokens) = observed_tokens {
-                        manager.update_observed_input_tokens(tokens);
-                    }
-                    let usage = manager.context_usage_with(&provider_messages);
-                    if usage > 1.5 {
-                        let recovery = manager.recover_within_budget(&mut provider_messages);
-                        match recovery.dropped {
-                            Some(dropped) if dropped > 0 => {
-                                self.sync_session_compaction_state_from_manager(&manager);
-                                actions.push(format!(
-                                    "Emergency compaction: dropped {} old messages (context was at {:.0}%).",
-                                    dropped,
-                                    usage * 100.0
-                                ));
-                            }
-                            Some(_) => {}
-                            None => {
-                                notes.push("Hard compaction failed.".to_string());
-                            }
-                        }
-                        if recovery.truncated > 0 {
-                            self.messages = provider_messages.clone();
-                            actions.push(format!(
-                                "Emergency truncation: shortened {} large tool result(s) to fit context.",
-                                recovery.truncated
-                            ));
-                        }
-                    } else {
-                        match manager.force_compact_with(&provider_messages, self.provider.clone())
-                        {
-                            Ok(()) => {
-                                actions.push("Started background context compaction.".to_string())
-                            }
-                            Err(reason) => match manager.hard_compact_with(&provider_messages) {
-                                Ok(dropped) => {
-                                    self.sync_session_compaction_state_from_manager(&manager);
-                                    actions.push(format!(
-                                            "Emergency compaction: dropped {} old messages (normal compaction failed: {}).",
-                                            dropped, reason
-                                        ));
-                                }
-                                Err(hard_reason) => {
-                                    notes.push(format!(
-                                        "Compaction not started: {}. Emergency fallback: {}",
-                                        reason, hard_reason
-                                    ));
-                                }
-                            },
-                        }
-                    }
-                }
-                Err(_) => notes.push("Could not access compaction manager (busy).".to_string()),
-            };
-        } else {
-            notes.push("Compaction is unavailable for this provider.".to_string());
+        if context_error {
+            notes.push(
+                "Context was preserved without automatic reduction. Use /compact or /context edit to review and explicitly apply a reversible context transaction."
+                    .to_string(),
+            );
         }
 
         self.last_stream_error = None;

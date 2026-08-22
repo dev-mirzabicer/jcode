@@ -45,172 +45,6 @@ impl App {
         }
     }
 
-    pub(super) fn format_compaction_strategy_label(trigger: &str) -> &'static str {
-        match trigger {
-            "manual" => "manual",
-            "proactive" => "proactive",
-            "semantic" => "semantic",
-            "reactive" => "reactive",
-            "auto_recovery" => "automatic recovery",
-            "hard_compact" => "emergency",
-            _ => "automatic",
-        }
-    }
-
-    pub(super) fn format_compaction_progress_notice(elapsed: std::time::Duration) -> String {
-        const BAR_WIDTH: usize = 12;
-        const PULSE_WIDTH: usize = 4;
-        let max_start = BAR_WIDTH.saturating_sub(PULSE_WIDTH);
-        let frame = (elapsed.as_millis() / 180) as usize;
-        let period = (max_start * 2).max(1);
-        let phase = frame % period;
-        let start = if phase <= max_start {
-            phase
-        } else {
-            period - phase
-        };
-        let mut bar = String::with_capacity(BAR_WIDTH);
-        for idx in 0..BAR_WIDTH {
-            if (start..start + PULSE_WIDTH).contains(&idx) {
-                bar.push('█');
-            } else {
-                bar.push('░');
-            }
-        }
-        format!("Compacting context [{}] {:.0}s", bar, elapsed.as_secs_f32())
-    }
-
-    pub(super) fn format_compaction_complete_message(
-        event: &crate::compaction::CompactionEvent,
-        context_limit: u64,
-    ) -> String {
-        if event.trigger == "hard_compact" {
-            return Self::format_emergency_compaction_message(event, context_limit);
-        }
-
-        let reason = match event.trigger.as_str() {
-            "auto_recovery" => "after the context window filled up",
-            _ => "to stay within the context window",
-        };
-        let strategy = Self::format_compaction_strategy_label(&event.trigger);
-        let mut message = format!(
-            "📦 Context compacted ({}) - older messages were summarized {}.",
-            strategy, reason
-        );
-        let details = Self::format_compaction_detail_segments(event, context_limit, false);
-        if !details.is_empty() {
-            message.push_str("\n\n");
-            message.push_str(&details.join(" · "));
-        }
-        message
-    }
-
-    pub(super) fn format_emergency_compaction_message(
-        event: &crate::compaction::CompactionEvent,
-        context_limit: u64,
-    ) -> String {
-        let mut message =
-            "📦 Emergency compaction - older messages were dropped to recover from context pressure. Recent context was kept.".to_string();
-        let details = Self::format_compaction_detail_segments(event, context_limit, true);
-        if !details.is_empty() {
-            message.push_str("\n\n");
-            message.push_str(&details.join(" · "));
-        }
-        message
-    }
-
-    fn format_compaction_detail_segments(
-        event: &crate::compaction::CompactionEvent,
-        context_limit: u64,
-        emergency: bool,
-    ) -> Vec<String> {
-        let mut details = Vec::new();
-
-        if let Some(duration_ms) = event.duration_ms {
-            details.push(format!(
-                "Took {}",
-                crate::message::Message::format_duration(duration_ms)
-            ));
-        }
-        if let Some(tokens) = event.pre_tokens {
-            details.push(format!(
-                "before ~{} tokens",
-                Self::format_compaction_number(tokens)
-            ));
-        }
-        if let Some(tokens) = event.post_tokens {
-            let mut segment = format!("now ~{} tokens", Self::format_compaction_number(tokens));
-            if context_limit > 0 {
-                segment.push_str(&format!(
-                    " ({})",
-                    Self::format_compaction_usage(tokens, context_limit)
-                ));
-            }
-            details.push(segment);
-        }
-        if let Some(saved) = event.tokens_saved.filter(|saved| *saved > 0) {
-            details.push(format!(
-                "saved ~{} tokens",
-                Self::format_compaction_number(saved)
-            ));
-        }
-
-        let message_count = event.messages_dropped.or(event.messages_compacted);
-        if let Some(count) = message_count {
-            let noun = if count == 1 { "message" } else { "messages" };
-            let verb = if emergency { "dropped" } else { "summarized" };
-            details.push(format!(
-                "{} {} {}",
-                verb,
-                Self::format_compaction_number(count as u64),
-                noun
-            ));
-        }
-
-        if let Some(summary_chars) = event.summary_chars.filter(|chars| *chars > 0) {
-            details.push(format!(
-                "summary {} chars",
-                Self::format_compaction_number(summary_chars as u64)
-            ));
-        }
-
-        if let Some(active_messages) = event.active_messages {
-            let noun = if active_messages == 1 {
-                "recent message"
-            } else {
-                "recent messages"
-            };
-            details.push(format!(
-                "kept {} {} live",
-                Self::format_compaction_number(active_messages as u64),
-                noun
-            ));
-        }
-
-        details
-    }
-
-    fn format_compaction_usage(tokens: u64, context_limit: u64) -> String {
-        let percent = (tokens as f64 / context_limit.max(1) as f64) * 100.0;
-        if percent >= 10.0 {
-            format!("{percent:.0}% of window")
-        } else {
-            format!("{percent:.1}% of window")
-        }
-    }
-
-    pub(super) fn format_compaction_number(value: u64) -> String {
-        let digits = value.to_string();
-        let mut formatted = String::with_capacity(digits.len() + digits.len() / 3);
-        for (idx, ch) in digits.chars().rev().enumerate() {
-            if idx > 0 && idx % 3 == 0 {
-                formatted.push(',');
-            }
-            formatted.push(ch);
-        }
-        formatted.chars().rev().collect()
-    }
-
     pub(super) fn add_provider_message(&mut self, message: Message) {
         if self.is_remote {
             self.ensure_provider_messages_hydrated();
@@ -225,21 +59,20 @@ impl App {
                 crate::logging::warn("Context budget lock unavailable during TUI message append");
             }
         }
-
-        if self.is_remote || !self.provider.uses_jcode_compaction() {
-            return;
-        }
-        let compaction = self.registry.legacy_compaction();
-        if let Ok(mut manager) = compaction.try_write() {
-            manager.notify_message_added_with(&message);
-        };
     }
 
     pub(super) fn replace_provider_messages(&mut self, messages: Vec<Message>) {
         self.messages = messages;
         self.last_injected_memory_signature = None;
         self.reset_tool_output_tracking();
-        self.reseed_context_runtime_from_provider_messages();
+        if self.is_remote {
+            self.reseed_context_runtime_from_provider_messages();
+        } else {
+            self.reseed_context_budget_from_messages(
+                &self.messages,
+                "TUI provider history replaced",
+            );
+        }
         self.note_runtime_memory_event_force("provider_messages_replaced", "provider_view_reset");
     }
 
@@ -247,7 +80,11 @@ impl App {
         self.messages.clear();
         self.last_injected_memory_signature = None;
         self.reset_tool_output_tracking();
-        self.reseed_context_runtime_from_provider_messages();
+        if self.is_remote {
+            self.reseed_context_runtime_from_provider_messages();
+        } else {
+            self.reseed_context_budget_from_messages(&[], "TUI provider history cleared");
+        }
         self.note_runtime_memory_event_force("provider_messages_cleared", "provider_view_cleared");
     }
 
@@ -271,31 +108,19 @@ impl App {
             return;
         }
 
-        let provider_messages = self.materialized_provider_messages();
-        let mut effective_messages = provider_messages.clone();
-
-        if self.provider.uses_jcode_compaction() || self.session.compaction.is_some() {
-            let legacy_compaction = self.registry.legacy_compaction();
-            if let Ok(mut manager) = legacy_compaction.try_write() {
-                manager.reset();
-                manager.set_budget(self.context_limit as usize);
-                if let Some(state) = self.session.compaction.as_ref() {
-                    manager.restore_persisted_state_with(state, &provider_messages);
-                } else {
-                    manager.seed_restored_messages_with(&provider_messages);
-                }
-                if manager.discard_oversized_openai_native_compaction() {
-                    self.sync_session_compaction_state_from_manager(&manager);
-                }
-                effective_messages = manager.messages_for_api_with(&provider_messages);
-            } else {
-                crate::logging::warn(
-                    "Legacy compaction lock unavailable during TUI context reseed",
-                );
+        match self.session.projected_messages_for_provider() {
+            Ok(provider_messages) => self.reseed_context_budget_from_messages(
+                &provider_messages,
+                "TUI provider-view reseed",
+            ),
+            Err(error) => {
+                self.reseed_context_budget_from_messages(&[], "invalid TUI context projection");
+                crate::logging::error(&format!(
+                    "Cannot seed local TUI provider context for session {}: {}",
+                    self.session.id, error
+                ));
             }
         }
-
-        self.reseed_context_budget_from_messages(&effective_messages, "TUI provider-view reseed");
     }
 
     pub(super) fn reseed_context_budget_from_messages(&self, messages: &[Message], reason: &str) {
@@ -308,129 +133,6 @@ impl App {
                 "Context budget lock unavailable during {reason}; accounting was not reseeded"
             ));
         }
-    }
-
-    pub(super) fn sync_session_compaction_state_from_manager(
-        &mut self,
-        manager: &crate::compaction::CompactionManager,
-    ) {
-        let new_state = manager.persisted_state();
-        if self.session.compaction != new_state {
-            self.session.compaction = new_state;
-            if let Err(err) = self.session.save() {
-                crate::logging::error(&format!(
-                    "Failed to persist compaction state for session {}: {}",
-                    self.session.id, err
-                ));
-            }
-        }
-    }
-
-    pub(super) fn apply_openai_native_compaction(
-        &mut self,
-        encrypted_content: String,
-        compacted_count: usize,
-    ) -> anyhow::Result<()> {
-        let encrypted_content_len = encrypted_content.len();
-        let (summary_text, openai_encrypted_content) =
-            if crate::provider::openai_request::openai_encrypted_content_is_sendable(
-                &encrypted_content,
-            ) {
-                (String::new(), Some(encrypted_content))
-            } else {
-                crate::logging::warn(&format!(
-                    "Discarding oversized OpenAI native compaction payload before TUI persist ({} chars)",
-                    encrypted_content_len,
-                ));
-                (
-                    crate::provider::openai_request::openai_encrypted_content_fallback_summary(
-                        encrypted_content_len,
-                    ),
-                    None,
-                )
-            };
-        let state = crate::session::StoredCompactionState {
-            summary_text,
-            openai_encrypted_content,
-            covers_up_to_turn: compacted_count,
-            original_turn_count: compacted_count,
-            compacted_count,
-        };
-
-        self.session.compaction = Some(state.clone());
-        self.reseed_context_runtime_from_provider_messages();
-
-        self.invalidate_kv_cache_after_compaction();
-        self.session.save()?;
-        Ok(())
-    }
-
-    pub(super) fn poll_compaction_completion(&mut self) -> bool {
-        if self.is_remote
-            || (!self.provider.supports_compaction() && self.session.compaction.is_none())
-        {
-            return false;
-        }
-        let provider_messages = self.materialized_provider_messages();
-        let compaction = self.registry.legacy_compaction();
-        let completed = if let Ok(mut manager) = compaction.try_write()
-            && let Some(event) = manager.poll_compaction_event_with(&provider_messages)
-        {
-            self.sync_session_compaction_state_from_manager(&manager);
-            let messages = manager.messages_for_api_with(&provider_messages);
-            Some((event, messages))
-        } else {
-            None
-        };
-        if let Some((event, messages)) = completed {
-            self.reseed_context_budget_from_messages(
-                &messages,
-                "TUI background compaction completion",
-            );
-            self.handle_compaction_event(event);
-            return true;
-        }
-        false
-    }
-
-    pub(super) fn handle_compaction_event(&mut self, event: CompactionEvent) {
-        self.invalidate_kv_cache_after_compaction();
-        if let Err(err) = self.session.save() {
-            crate::logging::warn(&format!(
-                "Failed to persist provider session reset after compaction for session {}: {}",
-                self.session.id, err
-            ));
-        }
-        let message = if event.messages_dropped.is_some() {
-            self.set_status_notice("Emergency compaction");
-            Self::format_emergency_compaction_message(&event, self.context_limit)
-        } else {
-            self.set_status_notice("Context compacted");
-            Self::format_compaction_complete_message(&event, self.context_limit)
-        };
-        self.push_display_message(DisplayMessage::system(message));
-    }
-
-    fn invalidate_kv_cache_after_compaction(&mut self) {
-        // Compaction intentionally replaces the provider-facing transcript
-        // (typically hundreds of messages become summary + recent tail). The
-        // previous request is therefore not a valid append-only cache baseline.
-        // Advance the generation as well as clearing the current baseline so a
-        // pre-compaction request that completes later cannot restore stale state.
-        self.kv_cache.cache_generation = self.kv_cache.cache_generation.wrapping_add(1);
-        self.kv_cache.kv_cache_baseline = None;
-        self.kv_cache.cold_cache_warned_baseline_completed_at = None;
-        self.provider_session_id = None;
-        self.session.provider_session_id = None;
-        // The sidebar/status context figure is derived from the last
-        // provider-reported stream usage, which described the *pre-compaction*
-        // message list. Mark it stale so the display falls back to the local
-        // estimate over the new (summary + recent) active messages until the
-        // next provider usage report arrives (issue #441). The raw counters
-        // are kept intact for turn footers and cost accounting.
-        self.streaming.streaming_context_stale = true;
-        self.streaming.streaming_usage_call_reset_pending = true;
-        self.bump_context_revision();
     }
 
     pub fn set_status_notice(&mut self, text: impl Into<String>) {

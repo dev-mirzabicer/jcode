@@ -1536,20 +1536,16 @@ async fn legacy_compaction_wire_requests_reject_without_mutating_live_session_as
         .cloned()
         .expect("live subscribed agent");
     let state_before = agent.lock().await.context_view_state().clone();
-    let mode_before = agent.lock().await.compaction_mode().await;
 
     async fn send_and_expect_legacy_rejection(
         writer: &mut crate::transport::WriteHalf,
         reader: &mut BufReader<crate::transport::ReadHalf>,
-        request: Request,
+        request_id: u64,
+        request_json: &str,
         expected_kind: crate::protocol::ContextRequestKind,
     ) {
-        let request_id = request.id();
         writer
-            .write_all(
-                (serde_json::to_string(&request).expect("serialize legacy request") + "\n")
-                    .as_bytes(),
-            )
+            .write_all(format!("{request_json}\n").as_bytes())
             .await
             .expect("write legacy request");
         let mut ack_seen = false;
@@ -1573,12 +1569,6 @@ async fn legacy_compaction_wire_requests_reject_without_mutating_live_session_as
                     assert!(message.contains("/context edit"));
                     break;
                 }
-                ServerEvent::CompactResult { .. } => {
-                    panic!("legacy Compact unexpectedly executed")
-                }
-                ServerEvent::CompactionModeChanged { .. } => {
-                    panic!("legacy SetCompactionMode unexpectedly executed")
-                }
                 _ => {}
             }
         }
@@ -1587,23 +1577,21 @@ async fn legacy_compaction_wire_requests_reject_without_mutating_live_session_as
     send_and_expect_legacy_rejection(
         &mut client_writer,
         &mut client_reader,
-        Request::Compact { id: 2 },
+        2,
+        r#"{"type":"compact","id":2}"#,
         crate::protocol::ContextRequestKind::LegacyCompact,
     )
     .await;
     send_and_expect_legacy_rejection(
         &mut client_writer,
         &mut client_reader,
-        Request::SetCompactionMode {
-            id: 3,
-            mode: crate::config::CompactionMode::Semantic,
-        },
+        3,
+        r#"{"type":"set_compaction_mode","id":3,"mode":"semantic"}"#,
         crate::protocol::ContextRequestKind::LegacySetCompactionMode,
     )
     .await;
 
     assert_eq!(agent.lock().await.context_view_state(), &state_before);
-    assert_eq!(agent.lock().await.compaction_mode().await, mode_before);
 
     drop(client_writer);
     server_task

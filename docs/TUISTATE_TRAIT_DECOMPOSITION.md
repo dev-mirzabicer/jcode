@@ -86,7 +86,7 @@ status_notice, status_detail, rate_limit_remaining, animation_elapsed
 ### TuiProviderState
 provider_name, provider_model, upstream_provider, connection_type,
 mcp_servers, available_skills, auth_status, update_cost,
-total_session_tokens, session_compaction_count, context_info,
+total_session_tokens, context_info,
 context_snapshot, context_limit, cache_ttl_status
 
 ### TuiSessionServerState

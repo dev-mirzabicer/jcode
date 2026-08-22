@@ -327,7 +327,7 @@ impl Agent {
         request_payload: ContextPayloadPressure,
         event_tx: Option<&mpsc::UnboundedSender<ServerEvent>>,
     ) -> Result<Option<anyhow::Error>> {
-        let reason = if crate::compaction::is_request_payload_too_large_error(error) {
+        let reason = if jcode_provider_core::is_request_payload_too_large_error(error) {
             ContextActionRequiredReason::PayloadTooLarge
         } else if Self::is_context_limit_error(error) {
             ContextActionRequiredReason::ProviderContextLimit
@@ -555,7 +555,6 @@ pub(super) fn stream_event_confirms_request_acceptance(event: &StreamEvent) -> b
             | StreamEvent::MessageEnd { .. }
             | StreamEvent::OpenAIReasoning { .. }
             | StreamEvent::NativeToolCall { .. }
-            | StreamEvent::Compaction { .. }
     )
 }
 

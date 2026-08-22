@@ -198,7 +198,7 @@ fn test_parse_openai_response_output_item_done_skips_duplicate_after_arguments_d
 }
 
 #[test]
-fn test_parse_openai_response_output_item_done_emits_native_compaction() {
+fn test_parse_openai_response_output_item_done_ignores_historical_native_compaction() {
     let mut saw_text_delta = false;
     let mut saw_thinking_delta = false;
     let mut streaming_tool_calls = HashMap::new();
@@ -213,21 +213,9 @@ fn test_parse_openai_response_output_item_done_emits_native_compaction() {
         &mut streaming_tool_calls,
         &mut completed_tool_items,
         &mut pending,
-    )
-    .expect("expected compaction event");
+    );
 
-    match event {
-        StreamEvent::Compaction {
-            trigger,
-            pre_tokens,
-            openai_encrypted_content,
-        } => {
-            assert_eq!(trigger, "openai_native_auto");
-            assert_eq!(pre_tokens, None);
-            assert_eq!(openai_encrypted_content.as_deref(), Some("enc_abc"));
-        }
-        other => panic!("expected Compaction, got {:?}", other),
-    }
+    assert!(event.is_none());
     assert!(pending.is_empty());
 }
 

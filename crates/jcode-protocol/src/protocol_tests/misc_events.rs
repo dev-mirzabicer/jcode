@@ -211,6 +211,35 @@ fn test_set_route_deserializes_as_set_model_compat_alias() -> Result<()> {
 }
 
 #[test]
+fn obsolete_compaction_commands_decode_only_to_non_executable_compatibility_envelopes() -> Result<()> {
+    for (json, expected_id, expected_command) in [
+        (
+            r#"{"type":"compact","id":42}"#,
+            42,
+            LegacyContextCommand::Compact,
+        ),
+        (
+            r#"{"type":"set_compaction_mode","id":43,"mode":"semantic"}"#,
+            43,
+            LegacyContextCommand::SetCompactionMode,
+        ),
+        (
+            r#"{"type":"compact"}"#,
+            0,
+            LegacyContextCommand::Compact,
+        ),
+    ] {
+        let decoded = decode_request(json)?;
+        let Request::LegacyContextCommand { id, command } = decoded else {
+            return Err(anyhow!("expected legacy context compatibility envelope"));
+        };
+        assert_eq!(id, expected_id);
+        assert_eq!(command, expected_command);
+    }
+    Ok(())
+}
+
+#[test]
 fn test_structured_set_route_decodes_as_set_route_not_set_model() -> Result<()> {
     // Regression for the "Invalid request: missing field `model`" bug seen when
     // switching models via the picker: a structured `set_route` request (with a

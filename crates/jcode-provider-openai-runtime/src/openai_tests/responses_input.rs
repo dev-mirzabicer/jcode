@@ -56,10 +56,6 @@ fn function_call_outputs(items: &[serde_json::Value], call_id: &str) -> Vec<Stri
         .collect()
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "test helper mirrors the request builder to keep call sites explicit"
-)]
 fn build_test_response_request(
     model_id: &str,
     is_chatgpt_mode: bool,
@@ -68,7 +64,6 @@ fn build_test_response_request(
     service_tier: Option<&str>,
     prompt_cache_key: Option<&str>,
     prompt_cache_retention: Option<&str>,
-    native_compaction_threshold: Option<usize>,
 ) -> serde_json::Value {
     OpenAIProvider::build_response_request(
         model_id,
@@ -81,7 +76,6 @@ fn build_test_response_request(
         service_tier,
         prompt_cache_key,
         prompt_cache_retention,
-        native_compaction_threshold,
     )
 }
 
@@ -311,7 +305,6 @@ fn test_build_response_request_for_gpt_5_4_1m_uses_base_model_without_extra_flag
         Some("unused"),
         Some("unused"),
         None,
-        None,
     );
 
     assert_eq!(request["model"], serde_json::json!("gpt-5.4"));
@@ -344,7 +337,6 @@ fn test_build_response_request_omits_image_generation_for_codex_models() {
         None,
         None,
         None,
-        None,
     );
 
     assert!(
@@ -362,7 +354,6 @@ fn test_build_response_request_keeps_image_generation_for_non_codex_chatgpt_mode
         "gpt-5.5",
         true,
         Some(DEFAULT_MAX_OUTPUT_TOKENS),
-        None,
         None,
         None,
         None,
@@ -388,7 +379,6 @@ fn test_build_response_request_omits_long_context_for_plain_gpt_5_4() {
         None,
         None,
         None,
-        None,
     );
 
     assert!(request.get("model_context_window").is_none());
@@ -404,7 +394,6 @@ fn test_build_response_request_defaults_extended_cache_retention_for_gpt_5_6() {
         None,
         None,
         None,
-        None,
     );
 
     assert_eq!(request["prompt_cache_retention"], serde_json::json!("24h"));
@@ -416,7 +405,6 @@ fn test_build_response_request_defaults_extended_cache_retention_for_gpt_5_5() {
         "gpt-5.5",
         false,
         Some(DEFAULT_MAX_OUTPUT_TOKENS),
-        None,
         None,
         None,
         None,
@@ -440,7 +428,6 @@ fn test_build_response_request_respects_configured_cache_retention() {
         None,
         None,
         Some("in_memory"),
-        None,
     );
 
     assert_eq!(

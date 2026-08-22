@@ -14,6 +14,7 @@ pub mod reasoning;
 pub mod retry_after;
 pub mod selection;
 pub mod transport;
+pub mod usage_accounting;
 
 pub use transport::is_transient_transport_error;
 
@@ -38,7 +39,7 @@ pub use context_validation::{
 };
 pub use failover::{
     FailoverDecision, ProviderFailoverPrompt, classify_failover_error_message,
-    parse_failover_prompt_message,
+    is_request_payload_too_large_error, parse_failover_prompt_message,
 };
 pub use fallback_pick::{
     FallbackPickOptions, error_looks_like_credential_failure, pick_next_fallback_route,
@@ -64,6 +65,7 @@ pub use selection::{
     model_name_for_provider, parse_provider_hint, provider_from_model_key, provider_key,
     provider_label, strip_own_model_prefix,
 };
+pub use usage_accounting::effective_context_tokens_from_usage;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -410,16 +412,6 @@ pub trait Provider: Send + Sync {
         vec![]
     }
 
-    /// Get the native compaction mode for the active provider, if any.
-    fn native_compaction_mode(&self) -> Option<String> {
-        None
-    }
-
-    /// Get the native compaction threshold in tokens for the active provider, if any.
-    fn native_compaction_threshold_tokens(&self) -> Option<usize> {
-        None
-    }
-
     fn transport(&self) -> Option<String> {
         None
     }
@@ -509,28 +501,6 @@ pub trait Provider: Send + Sync {
     /// "catalog still loading"). Empty when the catalog is live/authoritative.
     fn model_catalog_detail(&self) -> String {
         String::new()
-    }
-
-    /// Returns true if jcode should use its own compaction for this provider.
-    fn supports_compaction(&self) -> bool {
-        false
-    }
-
-    /// Returns true if jcode should proactively run its own summary-based compaction.
-    fn uses_jcode_compaction(&self) -> bool {
-        self.supports_compaction()
-    }
-
-    /// Ask the provider to produce a native compaction artifact.
-    async fn native_compact(
-        &self,
-        _messages: &[Message],
-        _existing_summary_text: Option<&str>,
-        _existing_openai_encrypted_content: Option<&str>,
-    ) -> Result<NativeCompactionResult> {
-        Err(anyhow::anyhow!(
-            "This provider does not support native compaction"
-        ))
     }
 
     /// Return the context window size (in tokens) for the current model.
@@ -786,12 +756,6 @@ pub fn fresh_transport_client() -> reqwest::Client {
         .pool_max_idle_per_host(0)
         .build()
         .unwrap_or_else(|_| shared_http_client())
-}
-
-#[derive(Debug, Clone)]
-pub struct NativeCompactionResult {
-    pub summary_text: Option<String>,
-    pub openai_encrypted_content: Option<String>,
 }
 
 /// A single route to access a model: model + provider + API method

@@ -836,45 +836,6 @@ fn reasoning_effort_reports_provider_refusal() {
     assert!(matches!(frames[0].event, ApiEvent::Error { .. }));
 }
 
-/// Compaction can be refused (nothing to compact, a turn in flight) and the
-/// daemon says so with `success: false`, not an error frame. Telling the
-/// client "done" would claim work that never happened.
-#[test]
-fn a_refused_compaction_is_an_error_not_a_success() {
-    let mut state = state_with_session();
-    let out = state.api_request_to_legacy(&json!({"id": 6, "req": "compact"}));
-    let legacy_id = match &out[0] {
-        Outbound::Legacy(value) => value["id"].as_u64().unwrap(),
-        _ => unreachable!(),
-    };
-    let frames = state.legacy_event_to_api(&json!({
-        "type": "compact_result", "id": legacy_id,
-        "message": "nothing to compact", "success": false,
-    }));
-    match &frames[0].event {
-        ApiEvent::Error { message, .. } => assert_eq!(message, "nothing to compact"),
-        other => panic!("unexpected: {other:?}"),
-    }
-}
-
-#[test]
-fn a_scheduled_compaction_reports_its_status() {
-    let mut state = state_with_session();
-    let out = state.api_request_to_legacy(&json!({"id": 6, "req": "compact"}));
-    let legacy_id = match &out[0] {
-        Outbound::Legacy(value) => value["id"].as_u64().unwrap(),
-        _ => unreachable!(),
-    };
-    let frames = state.legacy_event_to_api(&json!({
-        "type": "compact_result", "id": legacy_id,
-        "message": "compacting in the background", "success": true,
-    }));
-    match &frames[0].event {
-        ApiEvent::Compacted { message, .. } => assert_eq!(message, "compacting in the background"),
-        other => panic!("unexpected: {other:?}"),
-    }
-}
-
 /// Clearing a title is distinct from setting an empty one, so an absent title
 /// must not be sent as `""`, which the daemon would store as a real title.
 #[test]
@@ -1142,7 +1103,7 @@ fn archive_restore_and_retention_are_reversible_and_owner_only() {
         .iter()
         .find(|session| session.session_id == "old_session")
         .expect("old session remains restorable");
-    assert_eq!(old.archived, true);
+    assert!(old.archived);
     assert!(old.archived_at_ms.is_some());
     let recent = sessions
         .iter()

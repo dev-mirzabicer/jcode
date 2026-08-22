@@ -162,12 +162,6 @@ pub enum ApiRequest {
     /// support it answer with an error rather than silently ignoring it.
     SetReasoningEffort { session_id: String, effort: String },
 
-    /// Summarize the transcript so far, freeing context.
-    ///
-    /// Without this a long-lived client eventually hits the context limit and
-    /// has no recourse but to clear the conversation and lose everything.
-    Compact { session_id: String },
-
     /// Set a session's title, or clear it to restore the generated one.
     RenameSession {
         session_id: String,

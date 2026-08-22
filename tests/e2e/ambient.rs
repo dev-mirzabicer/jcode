@@ -14,7 +14,7 @@ fn test_ambient_state_lifecycle() {
     let result = AmbientCycleResult {
         summary: "Gardened 3 memories".to_string(),
         memories_modified: 3,
-        compactions: 0,
+        active_context_transactions: 0,
         proactive_work: None,
         next_schedule: None,
         started_at: chrono::Utc::now(),
@@ -28,7 +28,7 @@ fn test_ambient_state_lifecycle() {
     assert!(state.last_run.is_some());
     assert_eq!(state.last_summary.as_deref(), Some("Gardened 3 memories"));
     assert_eq!(state.last_memories_modified, Some(3));
-    assert_eq!(state.last_compactions, Some(0));
+    assert_eq!(state.last_active_context_transactions, Some(0));
     // No next_schedule → should be Idle
     assert!(matches!(state.status, AmbientStatus::Idle));
 }
@@ -40,60 +40,69 @@ fn test_ambient_scheduled_queue() {
 
     let tmp = std::env::temp_dir().join("jcode-test-queue.json");
     let _ = std::fs::remove_file(&tmp); // Clean up from previous runs
-    let mut queue = ScheduledQueue::load(tmp);
+    let mut queue = ScheduledQueue::load(tmp).expect("load scheduled queue");
     assert!(queue.is_empty());
 
     // Push items with different priorities
     let now = chrono::Utc::now();
-    queue.push(ScheduledItem {
-        id: "low_1".to_string(),
-        scheduled_for: now - chrono::Duration::minutes(5),
-        context: "low priority task".to_string(),
-        priority: Priority::Low,
-        target: jcode::ambient::ScheduleTarget::Ambient,
-        created_by_session: "test".to_string(),
-        created_at: now,
-        working_dir: None,
-        task_description: None,
-        relevant_files: Vec::new(),
-        git_branch: None,
-        additional_context: None,
-    });
+    queue
+        .try_push(ScheduledItem {
+            id: "low_1".to_string(),
+            scheduled_for: now - chrono::Duration::minutes(5),
+            context: "low priority task".to_string(),
+            priority: Priority::Low,
+            target: jcode::ambient::ScheduleTarget::Ambient,
+            created_by_session: "test".to_string(),
+            created_at: now,
+            working_dir: None,
+            task_description: None,
+            relevant_files: Vec::new(),
+            git_branch: None,
+            additional_context: None,
+            context_emergency_policy: Default::default(),
+        })
+        .expect("push low-priority scheduled item");
 
-    queue.push(ScheduledItem {
-        id: "high_1".to_string(),
-        scheduled_for: now - chrono::Duration::minutes(5),
-        context: "high priority task".to_string(),
-        priority: Priority::High,
-        target: jcode::ambient::ScheduleTarget::Ambient,
-        created_by_session: "test".to_string(),
-        created_at: now,
-        working_dir: None,
-        task_description: None,
-        relevant_files: Vec::new(),
-        git_branch: None,
-        additional_context: None,
-    });
+    queue
+        .try_push(ScheduledItem {
+            id: "high_1".to_string(),
+            scheduled_for: now - chrono::Duration::minutes(5),
+            context: "high priority task".to_string(),
+            priority: Priority::High,
+            target: jcode::ambient::ScheduleTarget::Ambient,
+            created_by_session: "test".to_string(),
+            created_at: now,
+            working_dir: None,
+            task_description: None,
+            relevant_files: Vec::new(),
+            git_branch: None,
+            additional_context: None,
+            context_emergency_policy: Default::default(),
+        })
+        .expect("push high-priority scheduled item");
 
-    queue.push(ScheduledItem {
-        id: "future_1".to_string(),
-        scheduled_for: now + chrono::Duration::hours(1),
-        context: "future task".to_string(),
-        priority: Priority::Normal,
-        target: jcode::ambient::ScheduleTarget::Ambient,
-        created_by_session: "test".to_string(),
-        created_at: now,
-        working_dir: None,
-        task_description: None,
-        relevant_files: Vec::new(),
-        git_branch: None,
-        additional_context: None,
-    });
+    queue
+        .try_push(ScheduledItem {
+            id: "future_1".to_string(),
+            scheduled_for: now + chrono::Duration::hours(1),
+            context: "future task".to_string(),
+            priority: Priority::Normal,
+            target: jcode::ambient::ScheduleTarget::Ambient,
+            created_by_session: "test".to_string(),
+            created_at: now,
+            working_dir: None,
+            task_description: None,
+            relevant_files: Vec::new(),
+            git_branch: None,
+            additional_context: None,
+            context_emergency_policy: Default::default(),
+        })
+        .expect("push future scheduled item");
 
     assert_eq!(queue.len(), 3);
 
     // Pop ready items: should get high priority first, then low (future not ready)
-    let ready = queue.pop_ready();
+    let ready = queue.pop_ready().expect("pop ready scheduled items");
     assert_eq!(ready.len(), 2);
     assert_eq!(ready[0].id, "high_1"); // High priority first
     assert_eq!(ready[1].id, "low_1"); // Low priority second
@@ -220,7 +229,7 @@ async fn test_ambient_end_cycle_tool() -> Result<()> {
         "Merged 2 duplicate memories, pruned 1 stale memory"
     );
     assert_eq!(result.memories_modified, 3);
-    assert_eq!(result.compactions, 0);
+    assert_eq!(result.active_context_transactions, 0);
 
     Ok(())
 }
@@ -553,7 +562,6 @@ async fn test_full_ambient_cycle_simulation() -> Result<()> {
     let end_cycle_input = serde_json::json!({
         "summary": "Gardened memory graph: merged 2 duplicates about dark mode preference, pruned 1 stale memory with confidence 0.02, verified 5 facts against codebase.",
         "memories_modified": 6,
-        "compactions": 1,
         "proactive_work": null,
         "next_schedule": {
             "wake_in_minutes": 45,
@@ -600,7 +608,7 @@ async fn test_full_ambient_cycle_simulation() -> Result<()> {
     assert!(result.is_some());
     let result = result.unwrap();
     assert_eq!(result.memories_modified, 6);
-    assert_eq!(result.compactions, 1);
+    assert_eq!(result.active_context_transactions, 0);
     assert!(result.summary.contains("Gardened memory graph"));
     assert!(result.next_schedule.is_some());
     let sched = result.next_schedule.unwrap();

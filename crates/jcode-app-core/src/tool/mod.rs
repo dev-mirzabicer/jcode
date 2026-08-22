@@ -37,7 +37,6 @@ mod webfetch;
 mod websearch;
 mod write;
 
-use crate::compaction::CompactionManager;
 use crate::context_budget::ContextBudgetTracker;
 use crate::provider::Provider;
 use crate::skill::SkillRegistry;
@@ -139,14 +138,12 @@ fn accepts_large_output(input: &Value) -> bool {
 
 /// Registry of available tools (Arc-wrapped for sharing)
 ///
-/// Clone creates fresh context accounting and legacy compaction policy state so
-/// each subagent gets independent message history tracking. Tools and skills are
-/// shared via Arc.
+/// Clone creates fresh context accounting so each subagent gets independent
+/// provider-history tracking. Tools and skills are shared via Arc.
 pub struct Registry {
     tools: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
     skills: Arc<RwLock<SkillRegistry>>,
     context_budget: Arc<RwLock<ContextBudgetTracker>>,
-    legacy_compaction: Arc<RwLock<CompactionManager>>,
 }
 
 impl Clone for Registry {
@@ -154,10 +151,9 @@ impl Clone for Registry {
         Self {
             tools: self.tools.clone(),
             skills: self.skills.clone(),
-            // Each clone gets fresh session-local accounting and transitional
-            // compaction policy so parallel subagents cannot corrupt one another.
+            // Each clone gets fresh session-local accounting so parallel
+            // subagents cannot corrupt one another.
             context_budget: Arc::new(RwLock::new(ContextBudgetTracker::new())),
-            legacy_compaction: Arc::new(RwLock::new(CompactionManager::new())),
         }
     }
 }
@@ -166,16 +162,15 @@ impl Registry {
     /// Clone this registry for work that remains part of the same session.
     ///
     /// Ordinary [`Clone`] deliberately creates fresh context accounting and
-    /// legacy compaction state for a new agent/session. Tool execution tasks,
-    /// batch subcalls, and same-session control operations must instead share
-    /// the current runtime state or the large-output guard will silently fall
-    /// back to an empty default tracker.
+    /// for a new agent/session. Tool execution tasks, batch subcalls, and
+    /// same-session control operations must instead share the current runtime
+    /// state or the large-output guard will silently fall back to an empty
+    /// default tracker.
     pub fn clone_with_shared_context_runtime(&self) -> Self {
         Self {
             tools: self.tools.clone(),
             skills: self.skills.clone(),
             context_budget: self.context_budget.clone(),
-            legacy_compaction: self.legacy_compaction.clone(),
         }
     }
 
@@ -210,7 +205,6 @@ impl Registry {
             tools: Arc::new(RwLock::new(HashMap::new())),
             skills: Arc::new(RwLock::new(SkillRegistry::default())),
             context_budget: Arc::new(RwLock::new(ContextBudgetTracker::new())),
-            legacy_compaction: Arc::new(RwLock::new(CompactionManager::new())),
         }
     }
 
@@ -335,14 +329,12 @@ impl Registry {
         let skills_ms = skills_start.elapsed().as_millis();
         let context_runtime_start = std::time::Instant::now();
         let context_budget = Arc::new(RwLock::new(ContextBudgetTracker::new()));
-        let legacy_compaction = Arc::new(RwLock::new(CompactionManager::new()));
         let context_runtime_ms = context_runtime_start.elapsed().as_millis();
         let registry_struct_start = std::time::Instant::now();
         let registry = Self {
             tools: Arc::new(RwLock::new(HashMap::new())),
             skills: skills.clone(),
             context_budget: context_budget.clone(),
-            legacy_compaction,
         };
         let registry_struct_ms = registry_struct_start.elapsed().as_millis();
 
@@ -1263,13 +1255,6 @@ impl Registry {
     /// Get shared access to policy-free context-budget accounting.
     pub fn context_budget(&self) -> Arc<RwLock<ContextBudgetTracker>> {
         self.context_budget.clone()
-    }
-
-    /// Transitional access to automatic compaction policy.
-    ///
-    /// This remains only until provider requests cut over to projected history.
-    pub fn legacy_compaction(&self) -> Arc<RwLock<CompactionManager>> {
-        self.legacy_compaction.clone()
     }
 }
 

@@ -1075,10 +1075,6 @@ impl Provider for CopilotApiProvider {
         Ok(())
     }
 
-    fn supports_compaction(&self) -> bool {
-        true
-    }
-
     fn model_catalog_detail(&self) -> String {
         self.model_catalog_detail_impl()
     }

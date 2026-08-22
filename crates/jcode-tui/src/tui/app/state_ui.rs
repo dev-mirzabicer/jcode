@@ -2113,51 +2113,6 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
             )
         };
 
-        let compaction_summary = if app.provider.supports_compaction() {
-            let manager = app.registry.legacy_compaction();
-            if let Ok(manager) = manager.try_read() {
-                let mode = if app.is_remote {
-                    app.remote_compaction_mode
-                        .as_ref()
-                        .map(|mode| mode.as_str().to_string())
-                        .unwrap_or_else(|| "unknown".to_string())
-                } else {
-                    manager.mode().as_str().to_string()
-                };
-                let summary_kind = match app.session.compaction.as_ref() {
-                    Some(state) if state.openai_encrypted_content.is_some() => {
-                        "native/openai-encrypted"
-                    }
-                    Some(_) => "summary-text",
-                    None => "none",
-                };
-                format!(
-                    "- supported: yes\n- mode: {}\n- jcode-managed: {}\n- active summary: {} ({})\n- compacted messages: {}\n- active messages: {}\n- summary chars: {}\n- compacting now: {}",
-                    mode,
-                    if app.provider.uses_jcode_compaction() {
-                        "yes"
-                    } else {
-                        "no"
-                    },
-                    if manager.persisted_state().is_some() {
-                        "yes"
-                    } else {
-                        "no"
-                    },
-                    summary_kind,
-                    manager.compacted_count(),
-                    manager.active_messages_count(),
-                    manager.summary_chars(),
-                    if manager.is_compacting() { "yes" } else { "no" },
-                )
-            } else {
-                "- supported: yes\n- state: unavailable (legacy compaction manager busy)"
-                    .to_string()
-            }
-        } else {
-            "- supported: no".to_string()
-        };
-
         let pending_images = app.pending_images.len();
         let queued_messages = app.queued_messages.len();
         let soft_interrupts = app.pending_soft_interrupts.len();
@@ -2280,8 +2235,6 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
         context_report.push_str(&context_budget_summary);
         context_report.push_str("\n\nContext Projection\n");
         context_report.push_str(&context_projection_summary);
-        context_report.push_str("\n\nLegacy Compaction\n");
-        context_report.push_str(&compaction_summary);
         context_report.push_str("\n\nSession State\n");
         context_report.push_str(&format!(
             "- queue mode: {}\n- queued messages: {}\n- interleave pending: {}\n- soft interrupts pending: {}\n- pasted snippets buffered: {}\n- pending images: {}\n- active skill: {}\n- autonomy mode: {}\n- subagent status: {}\n- provider session id: {}\n- status notice: {}\n- last stream error: {}\n- stashed input: {}\n",

@@ -253,16 +253,12 @@ fn transfer_child_uses_authoritative_handoff_instead_of_invalid_legacy_compactio
     parent.save().expect("save transfer parent");
     let parent_before = serde_json::to_vec(&crate::session::Session::load(&parent.id).unwrap())
         .expect("serialize parent");
-    let transfer = crate::session::StoredCompactionState {
-        summary_text: "Readable transfer summary".to_string(),
-        openai_encrypted_content: None,
-        covers_up_to_turn: 1,
-        original_turn_count: 1,
-        compacted_count: 0,
-    };
-
-    let (child_id, _) = create_transfer_child_session(&parent.id, &parent, Some(transfer))
-        .expect("create transfer child");
+    let (child_id, _) = create_transfer_child_session(
+        &parent.id,
+        &parent,
+        Some("Readable transfer summary".to_string()),
+    )
+    .expect("create transfer child");
     let child = crate::session::Session::load(&child_id).expect("load transfer child");
 
     assert_eq!(child.parent_id.as_deref(), Some(parent.id.as_str()));

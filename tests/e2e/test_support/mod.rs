@@ -274,11 +274,11 @@ struct WsTestClient {
 }
 
 #[derive(Clone, Default)]
-pub(crate) struct CapturingCompactionProvider {
+pub(crate) struct CapturingLegacyMigrationProvider {
     captured_messages: Arc<Mutex<Vec<Vec<Message>>>>,
 }
 
-impl CapturingCompactionProvider {
+impl CapturingLegacyMigrationProvider {
     pub(crate) fn new() -> Self {
         Self::default()
     }
@@ -289,7 +289,7 @@ impl CapturingCompactionProvider {
 }
 
 #[async_trait]
-impl Provider for CapturingCompactionProvider {
+impl Provider for CapturingLegacyMigrationProvider {
     async fn complete(
         &self,
         messages: &[Message],
@@ -303,7 +303,7 @@ impl Provider for CapturingCompactionProvider {
             .push(messages.to_vec());
 
         Ok(Box::pin(stream::iter(vec![
-            Ok(StreamEvent::TextDelta("compaction-ok".to_string())),
+            Ok(StreamEvent::TextDelta("migration-ok".to_string())),
             Ok(StreamEvent::MessageEnd {
                 stop_reason: Some("end_turn".to_string()),
             }),
@@ -311,15 +311,11 @@ impl Provider for CapturingCompactionProvider {
     }
 
     fn name(&self) -> &str {
-        "capturing-compaction"
-    }
-
-    fn supports_compaction(&self) -> bool {
-        true
+        "capturing-legacy-migration"
     }
 
     fn context_window(&self) -> usize {
-        1_000
+        32_000
     }
 
     fn fork(&self) -> Arc<dyn Provider> {

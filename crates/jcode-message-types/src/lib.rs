@@ -738,13 +738,6 @@ pub enum StreamEvent {
     },
     /// Provider session ID (for conversation resume)
     SessionId(String),
-    /// Compaction occurred (context was summarized)
-    Compaction {
-        trigger: String,
-        pre_tokens: Option<u64>,
-        /// Provider-native compaction artifact, if one was emitted.
-        openai_encrypted_content: Option<String>,
-    },
     /// Upstream provider info (e.g., which provider OpenRouter routed to)
     UpstreamProvider { provider: String },
     /// Native tool call from a provider bridge that needs execution by jcode
@@ -868,8 +861,8 @@ mod tests {
         };
 
         assert_eq!(
-            cache_relevant_message_hashes(&[sent.clone()]),
-            cache_relevant_message_hashes(&[persisted.clone()]),
+            cache_relevant_message_hashes(std::slice::from_ref(&sent)),
+            cache_relevant_message_hashes(std::slice::from_ref(&persisted)),
             "non-transmitted metadata must not change the cache-relevant hash"
         );
         assert_eq!(

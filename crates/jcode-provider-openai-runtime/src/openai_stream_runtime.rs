@@ -631,9 +631,6 @@ pub(super) async fn try_persistent_ws_continuation(
     if let Some(reasoning) = request.get("reasoning") {
         continuation_request["reasoning"] = reasoning.clone();
     }
-    if let Some(context_management) = request.get("context_management") {
-        continuation_request["context_management"] = context_management.clone();
-    }
     if let Some(include) = request.get("include") {
         continuation_request["include"] = include.clone();
     }
@@ -675,7 +672,6 @@ pub(super) async fn try_persistent_ws_continuation(
         "tool_choice": continuation_request.get("tool_choice"),
         "parallel_tool_calls": continuation_request.get("parallel_tool_calls"),
         "reasoning": continuation_request.get("reasoning"),
-        "context_management": continuation_request.get("context_management"),
         "include": continuation_request.get("include"),
         "service_tier": continuation_request.get("service_tier"),
         "prompt_cache_key": continuation_request.get("prompt_cache_key"),

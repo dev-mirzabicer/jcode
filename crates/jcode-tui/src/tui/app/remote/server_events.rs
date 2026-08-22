@@ -2427,23 +2427,6 @@ pub(in crate::tui::app) fn handle_server_event(
             }
             false
         }
-        ServerEvent::CompactionModeChanged { mode, error, .. } => {
-            if let Some(err) = error {
-                app.push_display_message(DisplayMessage::error(format!(
-                    "Failed to set compaction mode: {}",
-                    err
-                )));
-            } else {
-                let label = mode.as_str();
-                app.remote_compaction_mode = Some(mode);
-                app.push_display_message(DisplayMessage::system(format!(
-                    "✓ Compaction mode → {}",
-                    label
-                )));
-                app.set_status_notice(format!("Compaction: {}", label));
-            }
-            false
-        }
         ServerEvent::SoftInterruptInjected {
             content,
             display_role,
@@ -2701,30 +2684,6 @@ pub(in crate::tui::app) fn handle_server_event(
             app.set_status_notice(crate::message::input_shell_status_notice(&result));
             false
         }
-        ServerEvent::Compaction {
-            trigger,
-            pre_tokens,
-            post_tokens,
-            tokens_saved,
-            duration_ms,
-            messages_dropped,
-            messages_compacted,
-            summary_chars,
-            active_messages,
-        } => {
-            app.handle_compaction_event(crate::compaction::CompactionEvent {
-                trigger,
-                pre_tokens,
-                post_tokens,
-                tokens_saved,
-                duration_ms,
-                messages_dropped,
-                messages_compacted,
-                summary_chars,
-                active_messages,
-            });
-            false
-        }
         ServerEvent::SplitResponse {
             new_session_id,
             new_session_name,
@@ -2823,18 +2782,6 @@ pub(in crate::tui::app) fn handle_server_event(
                         )));
                     }
                 }
-            }
-            false
-        }
-        ServerEvent::CompactResult {
-            message, success, ..
-        } => {
-            if success {
-                app.push_display_message(DisplayMessage::system(message));
-                app.set_status_notice("Compacting context");
-            } else {
-                app.push_display_message(DisplayMessage::system(message));
-                app.set_status_notice("Compaction failed");
             }
             false
         }

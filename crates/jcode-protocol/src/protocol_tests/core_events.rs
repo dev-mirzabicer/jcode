@@ -390,7 +390,7 @@ fn test_interrupted_event_roundtrip() -> Result<()> {
 }
 
 #[test]
-fn test_history_event_decodes_without_compaction_mode_for_older_servers() -> Result<()> {
+fn test_history_event_defaults_context_revision_for_older_servers() -> Result<()> {
     let json = r#"{
             "type":"history",
             "id":1,
@@ -407,7 +407,6 @@ fn test_history_event_decodes_without_compaction_mode_for_older_servers() -> Res
         provider_model,
         available_models,
         connection_type,
-        compaction_mode,
         context_revision,
         side_panel,
         ..
@@ -419,10 +418,6 @@ fn test_history_event_decodes_without_compaction_mode_for_older_servers() -> Res
     assert_eq!(provider_model.as_deref(), Some("gpt-5.4"));
     assert_eq!(available_models, vec!["gpt-5.4"]);
     assert_eq!(connection_type.as_deref(), Some("websocket"));
-    assert_eq!(
-        compaction_mode,
-        jcode_config_types::CompactionMode::Reactive
-    );
     assert_eq!(context_revision, 0);
     assert!(!side_panel.has_pages());
     Ok(())
@@ -473,7 +468,6 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         subagent_model: None,
         autoreview_enabled: None,
         autojudge_enabled: None,
-        compaction_mode: jcode_config_types::CompactionMode::Reactive,
         context_revision: 73,
         activity: None,
         side_panel: jcode_side_panel_types::SidePanelSnapshot {

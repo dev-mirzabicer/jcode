@@ -5,7 +5,6 @@ use super::keybind::{
 use super::markdown::IncrementalMarkdownRenderer;
 use super::stream_buffer::StreamBuffer;
 use crate::bus::{Bus, BusEvent, LoginCompleted, ToolEvent, ToolStatus};
-use crate::compaction::CompactionEvent;
 use crate::config::config;
 use crate::id;
 use crate::mcp::McpManager;
@@ -1211,7 +1210,6 @@ pub struct App {
     remote_reasoning_effort: Option<String>,
     remote_service_tier: Option<String>,
     remote_transport: Option<String>,
-    remote_compaction_mode: Option<crate::config::CompactionMode>,
     remote_available_entries: Vec<String>,
     remote_model_options: Vec<crate::provider::ModelRoute>,
     pending_remote_model_refresh_snapshot: Option<(Vec<String>, Vec<crate::provider::ModelRoute>)>,

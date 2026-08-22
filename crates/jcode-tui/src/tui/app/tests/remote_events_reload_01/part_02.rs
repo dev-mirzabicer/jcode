@@ -386,7 +386,6 @@ fn test_remote_rewind_completion_shows_undo_hint_after_history_refresh() {
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
-            compaction_mode: crate::config::CompactionMode::Reactive,
             context_revision: 0,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),

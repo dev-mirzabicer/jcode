@@ -1087,7 +1087,8 @@ fn test_context_command_reports_session_context_snapshot() {
         assert!(msg.content.contains("Prompt / Context Composition"));
         assert!(msg.content.contains("Context Budget"));
         assert!(msg.content.contains("Context Projection"));
-        assert!(msg.content.contains("Legacy Compaction"));
+        assert!(!msg.content.contains("Legacy Compaction"));
+        assert!(!msg.content.contains("automatic compaction"));
         assert!(msg.content.contains("estimated message tokens"));
         assert!(msg.content.contains("effective context tokens: 7000"));
         assert!(msg.content.contains("revision: 7"));

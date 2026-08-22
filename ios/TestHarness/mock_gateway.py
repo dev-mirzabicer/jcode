@@ -304,8 +304,6 @@ async def handle_request(ws, state, raw):
     elif req_type == "set_reasoning_effort":
         state.reasoning_effort = msg.get("effort", state.reasoning_effort)
         await send_event(ws, {"type": "reasoning_effort_changed", "id": req_id, "effort": state.reasoning_effort, "error": None})
-    elif req_type == "compact":
-        await send_event(ws, {"type": "compact_result", "id": req_id, "message": "Compacted context (2048 tokens saved)", "success": True})
     elif req_type == "rename_session":
         state.title = msg.get("title") or "Untitled"
         await send_event(ws, {"type": "session_renamed", "session_id": state.session_id, "display_title": state.title})
@@ -321,9 +319,8 @@ async def handle_request(ws, state, raw):
     elif req_type == "cancel_soft_interrupts":
         await send_event(ws, {"type": "ack", "id": req_id})
     elif req_type == "_notify":
-        # Test-only: synthesize a push notification + a compaction notice.
+        # Test-only: synthesize a push notification.
         await send_event(ws, {"type": "notification", "from_name": "swarm", "message": "build finished"})
-        await send_event(ws, {"type": "compaction", "trigger": "manual", "tokens_saved": 4096})
     else:
         print(f"[ws] (ignored unknown request {req_type})", file=sys.stderr)
 
@@ -483,8 +480,6 @@ async def push_demo_loop(ws):
     try:
         await asyncio.sleep(2.5)
         await send_event(ws, {"type": "notification", "from_name": "swarm", "message": "build finished"})
-        await asyncio.sleep(1.5)
-        await send_event(ws, {"type": "compaction", "trigger": "manual", "tokens_saved": 4096})
     except asyncio.CancelledError:
         pass
     except Exception:
@@ -511,7 +506,7 @@ async def main():
     parser.add_argument("--code", default="123456")
     parser.add_argument("--token", default="mocktoken0123456789abcdef")
     parser.add_argument("--push-demo", action="store_true",
-                        help="spontaneously push notification + compaction notices after connect")
+                        help="spontaneously push a notification after connect")
     parser.add_argument("--scenario", default="",
                         help="pre-seed transcript: empty|short|tool|long|code")
     args = parser.parse_args()

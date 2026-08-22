@@ -97,7 +97,6 @@ export type ApiRequest =
   | { req: "file_status"; session_id: string; path: string }
   | { req: "set_model"; session_id: string; model: string }
   | { req: "set_reasoning_effort"; session_id: string; effort: string }
-  | { req: "compact"; session_id: string }
   | { req: "rename_session"; session_id: string; title?: string }
   | { req: "rewind_undo"; session_id: string }
   | { req: "cancel_soft_interrupts"; session_id: string }
@@ -180,7 +179,6 @@ export type ApiEvent =
       size?: number;
       modified_ms?: number;
     }
-  | { ev: "compacted"; session_id: string; message: string }
   | {
       ev: "session_renamed";
       session_id: string;
@@ -248,7 +246,6 @@ export const KNOWN_EVENT_KINDS = [
   "files",
   "text_matches",
   "file_status",
-  "compacted",
   "session_renamed",
 ] as const;
 
@@ -280,7 +277,6 @@ export const KNOWN_REQUEST_KINDS = [
   "file_status",
   "set_model",
   "set_reasoning_effort",
-  "compact",
   "rename_session",
   "rewind_undo",
   "cancel_soft_interrupts",

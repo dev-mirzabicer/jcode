@@ -105,9 +105,6 @@ pub enum DebugEvent {
     /// Thinking ended
     ThinkingEnd,
 
-    /// Compaction occurred
-    Compaction { trigger: String, pre_tokens: u64 },
-
     /// Error occurred
     Error { message: String },
 }
@@ -171,12 +168,6 @@ pub enum BackendEvent {
     /// Thinking completed with duration
     ThinkingDone {
         duration_secs: f32,
-    },
-
-    /// Context compaction occurred
-    Compaction {
-        trigger: String,
-        pre_tokens: u64,
     },
 
     /// Session ID assigned/updated
@@ -853,16 +844,6 @@ impl RemoteConnection {
         self.send_request(request).await
     }
 
-    /// Set compaction mode on the server for this session.
-    pub async fn set_compaction_mode(&mut self, mode: crate::config::CompactionMode) -> Result<()> {
-        let request = Request::SetCompactionMode {
-            id: self.next_request_id,
-            mode,
-        };
-        self.next_request_id += 1;
-        self.send_request(request).await
-    }
-
     /// Set or clear the custom session display title on the server.
     pub async fn rename_session(&mut self, title: Option<String>) -> Result<()> {
         let request = Request::RenameSession {
@@ -977,15 +958,6 @@ impl RemoteConnection {
     pub async fn transfer(&mut self) -> Result<u64> {
         let id = self.next_request_id;
         let request = Request::Transfer { id };
-        self.next_request_id += 1;
-        self.send_request(request).await?;
-        Ok(id)
-    }
-
-    /// Trigger manual context compaction on the server
-    pub async fn compact(&mut self) -> Result<u64> {
-        let id = self.next_request_id;
-        let request = Request::Compact { id };
         self.next_request_id += 1;
         self.send_request(request).await?;
         Ok(id)

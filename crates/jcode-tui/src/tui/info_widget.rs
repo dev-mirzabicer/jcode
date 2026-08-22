@@ -83,8 +83,6 @@ pub enum WidgetKind {
     SwarmStatus,
     /// Background work indicator
     BackgroundTasks,
-    /// Conversation context compaction status
-    Compaction,
     /// Subscription quota bars
     UsageLimits,
     /// Session-level KV cache hit ratio
@@ -114,7 +112,6 @@ impl WidgetKind {
             WidgetKind::KvCache => 6,
             WidgetKind::MemoryActivity => 7,
             WidgetKind::ModelInfo => 8,
-            WidgetKind::Compaction => 9,
             WidgetKind::BackgroundTasks => 10,
             WidgetKind::GitStatus => 11,
             WidgetKind::SwarmStatus => 12, // Session list - lower priority
@@ -133,7 +130,6 @@ impl WidgetKind {
             WidgetKind::ContextUsage => Side::Right,
             WidgetKind::MemoryActivity => Side::Right,
             WidgetKind::SwarmStatus => Side::Left,
-            WidgetKind::Compaction => Side::Left,
             WidgetKind::BackgroundTasks => Side::Left,
             WidgetKind::AmbientMode => Side::Left,
             WidgetKind::UsageLimits => Side::Left,
@@ -154,7 +150,6 @@ impl WidgetKind {
             WidgetKind::ContextUsage => 2,
             WidgetKind::MemoryActivity => 3,
             WidgetKind::SwarmStatus => 3,
-            WidgetKind::Compaction => 3,
             WidgetKind::BackgroundTasks => 2,
             WidgetKind::AmbientMode => 3,
             WidgetKind::UsageLimits => 3,
@@ -177,7 +172,6 @@ impl WidgetKind {
             WidgetKind::KvCache,
             WidgetKind::MemoryActivity,
             WidgetKind::ModelInfo,
-            WidgetKind::Compaction,
             WidgetKind::BackgroundTasks,
             WidgetKind::GitStatus,
             WidgetKind::SwarmStatus,
@@ -196,7 +190,6 @@ impl WidgetKind {
             WidgetKind::MemoryActivity => "memory",
             WidgetKind::SwarmStatus => "swarm",
             WidgetKind::BackgroundTasks => "background",
-            WidgetKind::Compaction => "compaction",
             WidgetKind::AmbientMode => "ambient",
             WidgetKind::UsageLimits => "usage",
             WidgetKind::KvCache => "kv-cache",
@@ -230,7 +223,6 @@ pub(crate) fn is_overview_mergeable(kind: WidgetKind) -> bool {
             | WidgetKind::ContextUsage
             | WidgetKind::SwarmStatus
             | WidgetKind::BackgroundTasks
-            | WidgetKind::Compaction
             | WidgetKind::ModelInfo
             | WidgetKind::UsageLimits
             | WidgetKind::KvCache
@@ -608,8 +600,6 @@ pub struct InfoWidgetData {
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
     pub service_tier: Option<String>,
-    pub native_compaction_mode: Option<String>,
-    pub native_compaction_threshold_tokens: Option<usize>,
     pub session_count: Option<usize>,
     pub session_name: Option<String>,
     /// Current working directory for this session.
@@ -646,21 +636,8 @@ pub struct InfoWidgetData {
     pub observed_context_tokens: Option<u64>,
     /// Session-level cache read ratio, when the active provider reports cache telemetry.
     pub cache_hit_info: Option<CacheHitInfo>,
-    /// Conversation compaction status, shown as a compact rounded status card.
-    pub compaction_info: Option<CompactionInfo>,
-    /// Whether background compaction is currently in progress
-    pub is_compacting: bool,
     /// Git repository status
     pub git_info: Option<GitInfo>,
-}
-
-#[derive(Clone, Debug)]
-pub struct CompactionInfo {
-    pub is_compacting: bool,
-    pub compacted_messages: usize,
-    pub active_messages: usize,
-    pub summary_chars: usize,
-    pub mode: String,
 }
 
 impl InfoWidgetData {
@@ -727,9 +704,6 @@ impl InfoWidgetData {
                 if self.cache_hit_info.is_some() {
                     sections += 1;
                 }
-                if self.compaction_info.is_some() {
-                    sections += 1;
-                }
                 if self
                     .git_info
                     .as_ref()
@@ -765,7 +739,6 @@ impl InfoWidgetData {
                 .as_ref()
                 .map(|b| b.running_count > 0)
                 .unwrap_or(false),
-            WidgetKind::Compaction => self.compaction_info.is_some(),
             WidgetKind::AmbientMode => false,
             WidgetKind::UsageLimits => self
                 .usage_info
@@ -812,18 +785,6 @@ impl InfoWidgetData {
                     1 // Very high - right after diagrams
                 } else if max_pct >= 50 {
                     3 // Elevated - after overview and todos
-                } else {
-                    kind.priority()
-                }
-            }
-            WidgetKind::Compaction => {
-                if self
-                    .compaction_info
-                    .as_ref()
-                    .map(|info| info.is_compacting)
-                    .unwrap_or(false)
-                {
-                    2
                 } else {
                     kind.priority()
                 }
@@ -1165,12 +1126,6 @@ pub(crate) fn calculate_widget_height(
                     1 + task_lines + overflow_line
                 })
                 .unwrap_or(1)
-        }
-        WidgetKind::Compaction => {
-            if data.compaction_info.is_none() {
-                return 0;
-            }
-            2
         }
         WidgetKind::AmbientMode => {
             let Some(info) = &data.ambient_info else {
@@ -1626,7 +1581,6 @@ fn render_widget_content(
         WidgetKind::MemoryActivity => render_memory_widget(data, inner),
         WidgetKind::SwarmStatus => render_swarm_widget(data, inner),
         WidgetKind::BackgroundTasks => render_background_widget(data, inner),
-        WidgetKind::Compaction => render_compaction_widget(data, inner),
         WidgetKind::AmbientMode => render_ambient_widget(data, inner),
         WidgetKind::UsageLimits => render_usage_widget(data, inner),
         WidgetKind::KvCache => render_kv_cache_widget(data, inner),
@@ -1634,43 +1588,6 @@ fn render_widget_content(
         WidgetKind::Tips => render_tips_widget(inner),
         WidgetKind::GitStatus => render_git_widget(data, inner),
     }
-}
-
-fn render_compaction_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
-    let Some(info) = data.compaction_info.as_ref() else {
-        return Vec::new();
-    };
-    let title_color = if info.is_compacting {
-        rgb(255, 220, 140)
-    } else {
-        rgb(110, 210, 140)
-    };
-    let label_color = rgb(140, 140, 150);
-    let status = if info.is_compacting {
-        "compacting"
-    } else {
-        "compacted"
-    };
-    let summary_tokens = (info.summary_chars / crate::compaction::CHARS_PER_TOKEN)
-        .max(usize::from(info.summary_chars > 0));
-    let detail = format!(
-        "{} old · {} active · ~{} summary tok",
-        info.compacted_messages, info.active_messages, summary_tokens
-    );
-    vec![
-        Line::from(vec![
-            Span::styled("Compaction ", Style::default().fg(label_color)),
-            Span::styled(status, Style::default().fg(title_color).bold()),
-            Span::styled(
-                format!(" · {}", info.mode),
-                Style::default().fg(label_color),
-            ),
-        ]),
-        Line::from(Span::styled(
-            truncate_smart(&detail, inner.width as usize),
-            Style::default().fg(rgb(180, 180, 190)),
-        )),
-    ]
 }
 
 fn render_kv_cache_widget(data: &InfoWidgetData, _inner: Rect) -> Vec<Line<'static>> {
@@ -2218,14 +2135,8 @@ fn render_context_compact(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'stati
         .map(|t| t as usize)
         .unwrap_or_else(|| info.estimated_tokens());
     let limit_tokens = data.context_limit.unwrap_or(DEFAULT_CONTEXT_LIMIT).max(1);
-    let label = if data.is_compacting {
-        "Context📦"
-    } else {
-        "Context"
-    };
-
     vec![render_context_usage_line(
-        label,
+        "Context",
         used_tokens,
         limit_tokens,
         inner.width,

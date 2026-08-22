@@ -3485,7 +3485,6 @@ dependencies = [
  "jcode-background-types",
  "jcode-batch-types",
  "jcode-build-meta",
- "jcode-compaction-core",
  "jcode-config-types",
  "jcode-context-core",
  "jcode-core",
@@ -3573,14 +3572,6 @@ name = "jcode-command-risk"
 version = "0.1.0"
 dependencies = [
  "tempfile",
-]
-
-[[package]]
-name = "jcode-compaction-core"
-version = "0.1.0"
-dependencies = [
- "jcode-message-types",
- "serde_json",
 ]
 
 [[package]]

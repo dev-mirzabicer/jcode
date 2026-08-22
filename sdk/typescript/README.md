@@ -227,7 +227,6 @@ discovery pass only.
 | `searchText(id, query, options?)` | Bounded rooted literal text search |
 | `fileStatus(id, path)` | Read safe rooted file metadata |
 | `setReasoningEffort(id, effort)` | Set the cost/quality dial |
-| `compact(id)` | Schedule transcript compaction to free context |
 | `renameSession(id, title?)` | Set a session title, or clear it |
 | `rewindUndo(id)` | Restore what the last `rewind` removed |
 | `cancelSoftInterrupts(id)` | Retract queued soft interrupts |
@@ -275,17 +274,7 @@ Pass `includeArchived: true` to display and restore archived sessions.
 inactive persisted sessions when sessions are listed. Omit `days` to disable
 automatic retention.
 
-## Long sessions
-
-`compact(id)` summarizes the transcript so far, freeing context. It is
-asynchronous: the daemon summarizes at the next safe point rather than
-interrupting a turn, so it resolving means the request was accepted, not that
-the transcript has already shrunk. Read the history afterwards for the result.
-
-It is refused below about 10% context usage, on the grounds that there is
-nothing worth compacting yet, and the rejection carries the current usage. So
-treat `invalid_request` here as information for the user rather than an error
-to retry.
+## History edits
 
 ```ts
 await client.renameSession(id, "nightly refactor");  // omit the title to clear it
@@ -388,7 +377,7 @@ try {
 | `unexpected_reply` | A reply was valid protocol data but not the event kind required by that SDK method. | Upgrade both sides and report the server/client versions with the error. |
 | `unknown_request` | The bridge does not implement that request tag. | Upgrade jcode, or stop using that newer SDK method with this bridge. |
 | `unknown_session` | The session no longer exists, is not available to this instance, or the connection is not attached where attachment is required. | Refresh `listSessions()`, use the right private/shared instance, and attach when the method requires it. |
-| `invalid_request` | Arguments or current state violate the operation's contract (for example an invalid model, retry count, path, or compaction request). | Correct the caller input. The message contains the rejected constraint; do not blindly retry. |
+| `invalid_request` | Arguments or current state violate the operation's contract (for example an invalid model, retry count, path, or route selection). | Correct the caller input. The message contains the rejected constraint; do not blindly retry. |
 | `invalid_option` | A client-only option is outside its allowed range. | Correct the named option, such as `discoveryIntervalMs` or `maxBufferedEvents`. |
 | `internal` | The bridge or daemon failed unexpectedly while handling a valid request. | Preserve the message and jcode logs, retry once if safe, then report it if reproducible. |
 

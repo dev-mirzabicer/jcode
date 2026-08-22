@@ -923,7 +923,7 @@ impl AcpRuntime {
                             state.context_limit(),
                         )
                     };
-                    let used = crate::compaction::effective_context_tokens_from_usage(
+                    let used = crate::provider::effective_context_tokens_from_usage(
                         &provider_name,
                         input,
                         cache_read_input,
@@ -1488,13 +1488,6 @@ impl EventMapper {
                         "text": format!("Generated image: {path} ({output_format}){}", revised_prompt.map(|prompt| format!("\nRevised prompt: {prompt}")).unwrap_or_default()),
                     }
                 }]
-            })],
-            ServerEvent::Compaction { trigger, .. } if self.profile.is_extended() => vec![json!({
-                "sessionUpdate": "agent_message_chunk",
-                "content": {
-                    "type": "text",
-                    "text": format!("\n[Jcode compacted context: {trigger}]\n"),
-                }
             })],
             ServerEvent::SessionRenamed { display_title, .. } => vec![json!({
                 "sessionUpdate": "session_info_update",

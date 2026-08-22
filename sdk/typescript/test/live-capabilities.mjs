@@ -1,9 +1,9 @@
 /**
- * Live coverage for the seven capabilities added to close the API gaps.
+ * Live coverage for the capabilities added to close the API gaps.
  *
  * A mock server proves the SDK sends the right frames; it cannot prove the
  * daemon answers them. Every one of these crosses a distinct translation path,
- * and three of them (set_model, set_reasoning_effort, compact) report failure
+ * and two of them (set_model and set_reasoning_effort) report failure
  * in-band on a success-shaped event, which is exactly the sort of thing that
  * looks fine in a unit test and silently no-ops in production.
  */
@@ -141,17 +141,6 @@ await step("rewind then rewindUndo restores the transcript", async () => {
     );
   }
   console.log(`     ${before.length} -> ${trimmed.length} -> ${restored.length}`);
-});
-
-await step("compact is scheduled, or explains why it was refused", async () => {
-  try {
-    const message = await client.compact(id);
-    console.log(`     accepted: ${message.slice(0, 70)}`);
-  } catch (error) {
-    if (!(error instanceof HarnessError)) throw error;
-    if (error.code !== "invalid_request") throw error;
-    console.log(`     refused: ${error.message.slice(0, 70)}`);
-  }
 });
 
 await step("these requests need an attached session", async () => {

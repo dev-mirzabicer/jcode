@@ -1,6 +1,6 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
-mod compaction;
+mod context_usage;
 mod emergency;
 mod environment;
 mod inline_tail;
@@ -465,7 +465,6 @@ impl Agent {
         agent.session.ensure_initial_session_context_message();
         agent.sync_memory_dedup_state_from_session();
         if migration_changed_provider_context {
-            agent.restore_legacy_compaction_runtime_from_session();
             if let Err(error) = agent.after_provider_context_changed(
                 "legacy context migration",
                 "legacy context migration activated while attaching session",
@@ -498,8 +497,6 @@ impl Agent {
             "reseed_context_runtime_from_session: session has {} messages",
             self.session.messages.len()
         ));
-        self.restore_legacy_compaction_runtime_from_session();
-
         match self.projected_provider_messages_for_request() {
             Ok(provider_messages) => {
                 logging::info(&format!(
@@ -517,31 +514,6 @@ impl Agent {
                     self.session.id, error
                 ));
             }
-        }
-    }
-
-    fn restore_legacy_compaction_runtime_from_session(&mut self) {
-        let legacy_compaction = self.registry.legacy_compaction();
-        let sanitized_state = if let Ok(mut manager) = legacy_compaction.try_write() {
-            manager.reset();
-            manager.set_budget(self.provider.context_window());
-            if let Some(state) = self.session.compaction.as_ref() {
-                manager.restore_persisted_stored_state_with(state, &self.session.messages);
-            } else {
-                manager.seed_restored_stored_messages_with(&self.session.messages);
-            }
-            manager
-                .discard_oversized_openai_native_compaction()
-                .then(|| manager.persisted_state())
-        } else {
-            logging::warn(
-                "reseed_context_runtime_from_session: legacy compaction lock unavailable; projected accounting will still be restored",
-            );
-            None
-        };
-        if let Some(state) = sanitized_state {
-            self.session.compaction = state;
-            self.persist_session_best_effort("sanitized oversized OpenAI native compaction");
         }
     }
 
@@ -570,13 +542,6 @@ impl Agent {
             return;
         };
 
-        let legacy_compaction = self.registry.legacy_compaction();
-        if let Ok(mut manager) = legacy_compaction.try_write() {
-            manager.notify_message_added_blocks(&message.content);
-        } else {
-            logging::warn("Legacy compaction lock unavailable during message append");
-        }
-
         let context_budget = self.registry.context_budget();
         if let Ok(mut tracker) = context_budget.try_write() {
             tracker.record_stored_message(message);
@@ -593,14 +558,6 @@ impl Agent {
             tracker.clear_observed_input_tokens();
         } else {
             logging::warn("Context budget lock unavailable during model budget update");
-        }
-
-        let legacy_compaction = self.registry.legacy_compaction();
-        if let Ok(mut manager) = legacy_compaction.try_write() {
-            manager.set_budget(budget);
-            manager.clear_observed_input_tokens();
-        } else {
-            logging::warn("Legacy compaction lock unavailable during model budget update");
         }
     }
 
@@ -734,79 +691,6 @@ impl Agent {
                 Err(error)
             }
         }
-    }
-
-    fn sync_session_compaction_state_from_manager(
-        &mut self,
-        manager: &crate::compaction::CompactionManager,
-    ) {
-        let new_state = manager.persisted_state();
-        if self.session.compaction != new_state {
-            self.session.compaction = new_state;
-            if let Err(err) = self.session.save() {
-                logging::error(&format!(
-                    "Failed to persist compaction state for session {}: {}",
-                    self.session.id, err
-                ));
-            }
-        }
-    }
-
-    fn apply_openai_native_compaction(
-        &mut self,
-        encrypted_content: String,
-        compacted_count: usize,
-    ) -> Result<()> {
-        let encrypted_content_len = encrypted_content.len();
-        let (summary_text, openai_encrypted_content) =
-            if crate::provider::openai_request::openai_encrypted_content_is_sendable(
-                &encrypted_content,
-            ) {
-                (String::new(), Some(encrypted_content))
-            } else {
-                logging::warn(&format!(
-                    "Discarding oversized OpenAI native compaction payload before persist ({} chars)",
-                    encrypted_content_len,
-                ));
-                (
-                    crate::provider::openai_request::openai_encrypted_content_fallback_summary(
-                        encrypted_content_len,
-                    ),
-                    None,
-                )
-            };
-        let state = crate::session::StoredCompactionState {
-            summary_text,
-            openai_encrypted_content,
-            covers_up_to_turn: compacted_count,
-            original_turn_count: compacted_count,
-            compacted_count,
-        };
-
-        self.session.compaction = Some(state.clone());
-        let legacy_compaction = self.registry.legacy_compaction();
-        if let Ok(mut manager) = legacy_compaction.try_write() {
-            manager.set_budget(self.provider.context_window());
-            manager.restore_persisted_stored_state_with(&state, &self.session.messages);
-        }
-
-        self.session.save()?;
-        self.after_provider_context_changed(
-            "OpenAI native compaction",
-            format!(
-                "OpenAI native compaction changed historical provider state at stored count {compacted_count}"
-            ),
-            true,
-        )?;
-        crate::runtime_memory_log::emit_event(
-            crate::runtime_memory_log::RuntimeMemoryLogEvent::new(
-                "native_compaction_applied",
-                "provider_native_compaction_persisted",
-            )
-            .with_session_id(self.session.id.clone())
-            .force_attribution(),
-        );
-        Ok(())
     }
 
     fn messages_for_provider(&mut self) -> Result<Vec<Message>> {

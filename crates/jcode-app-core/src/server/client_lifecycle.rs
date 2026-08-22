@@ -283,27 +283,6 @@ fn server_reload_starting() -> bool {
     )
 }
 
-fn compaction_server_event(event: crate::compaction::CompactionEvent) -> ServerEvent {
-    ServerEvent::Compaction {
-        trigger: event.trigger,
-        pre_tokens: event.pre_tokens,
-        post_tokens: event.post_tokens,
-        tokens_saved: event.tokens_saved,
-        duration_ms: event.duration_ms,
-        messages_dropped: event.messages_dropped,
-        messages_compacted: event.messages_compacted,
-        summary_chars: event.summary_chars,
-        active_messages: event.active_messages,
-    }
-}
-
-async fn poll_agent_compaction_completion(agent: Arc<Mutex<Agent>>) -> Option<ServerEvent> {
-    let mut agent_guard = agent.lock().await;
-    agent_guard
-        .poll_compaction_completion_event()
-        .map(compaction_server_event)
-}
-
 async fn refresh_session_control_handle(
     session_id: &str,
     agent: &Arc<Mutex<Agent>>,
@@ -893,15 +872,6 @@ pub(super) async fn handle_client(
                                 snapshot: update.snapshot,
                             });
                         }
-                    }
-                    Ok(BusEvent::CompactionFinished) => {
-                        let agent = Arc::clone(&agent);
-                        let tx = client_event_tx.clone();
-                        tokio::spawn(async move {
-                            if let Some(event) = poll_agent_compaction_completion(agent).await {
-                                let _ = tx.send(event);
-                            }
-                        });
                     }
                     _ => {}
                 }
@@ -2011,13 +1981,16 @@ pub(super) async fn handle_client(
                 handle_set_transport(id, transport, &agent, &client_event_tx).await;
             }
 
-            Request::SetCompactionMode { id, mode } => {
-                let _ = mode;
-                reject_legacy_context_request(
-                    id,
-                    crate::protocol::ContextRequestKind::LegacySetCompactionMode,
-                    &client_event_tx,
-                );
+            Request::LegacyContextCommand { id, command } => {
+                let request = match command {
+                    crate::protocol::LegacyContextCommand::Compact => {
+                        crate::protocol::ContextRequestKind::LegacyCompact
+                    }
+                    crate::protocol::LegacyContextCommand::SetCompactionMode => {
+                        crate::protocol::ContextRequestKind::LegacySetCompactionMode
+                    }
+                };
+                reject_legacy_context_request(id, request, &client_event_tx);
             }
 
             Request::RenameSession { id, title } => {
@@ -2121,14 +2094,6 @@ pub(super) async fn handle_client(
                     continue;
                 }
                 handle_transfer(id, &client_session_id, &agent, &client_event_tx).await;
-            }
-
-            Request::Compact { id } => {
-                reject_legacy_context_request(
-                    id,
-                    crate::protocol::ContextRequestKind::LegacyCompact,
-                    &client_event_tx,
-                );
             }
 
             Request::TriggerMemoryExtraction { id } => {

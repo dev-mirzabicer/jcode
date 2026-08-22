@@ -1,7 +1,7 @@
 use crate::test_support::*;
 
 #[tokio::test]
-async fn resume_session_restores_persisted_compaction_for_provider_context() -> Result<()> {
+async fn resume_session_migrates_legacy_compaction_into_provider_context() -> Result<()> {
     let _env = setup_test_env()?;
     let runtime_dir = short_runtime_dir(format!(
         "jcode-compaction-resume-test-{}",
@@ -14,7 +14,7 @@ async fn resume_session_restores_persisted_compaction_for_provider_context() -> 
     let socket_path = runtime_dir.join("jcode.sock");
     let debug_socket_path = runtime_dir.join("jcode-debug.sock");
 
-    let provider = CapturingCompactionProvider::new();
+    let provider = CapturingLegacyMigrationProvider::new();
     let captured_messages = provider.captured_messages();
     let provider: Arc<dyn Provider> = Arc::new(provider);
     let server_instance =
@@ -100,7 +100,7 @@ async fn resume_session_restores_persisted_compaction_for_provider_context() -> 
         );
 
         let summary_text = flatten_text_blocks(&provider_messages[0]);
-        assert!(summary_text.contains("Previous Conversation Summary"));
+        assert!(summary_text.contains("Selected Conversation Summary"));
         assert!(summary_text.contains("Gemini OAuth reload fixes"));
 
         let joined = provider_messages

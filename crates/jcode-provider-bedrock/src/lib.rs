@@ -250,6 +250,7 @@ impl BedrockProvider {
         jcode_provider_env::load_api_key_from_env_or_config(API_KEY_ENV, ENV_FILE)
     }
 
+    #[cfg(any(feature = "aws-sdk", test))]
     fn configured_bearer_token_for_runtime() -> Option<String> {
         Self::configured_profile()
             .is_none()
@@ -1626,14 +1627,6 @@ impl Provider for BedrockProvider {
 
     fn context_window(&self) -> usize {
         Self::model_info(&self.model()).context_tokens
-    }
-
-    fn supports_compaction(&self) -> bool {
-        true
-    }
-
-    fn uses_jcode_compaction(&self) -> bool {
-        true
     }
 
     fn fork(&self) -> Arc<dyn Provider> {

@@ -236,7 +236,6 @@ impl Agent {
             // Track tool results from provider (already executed by Claude Code CLI)
             let mut sdk_tool_results: std::collections::HashMap<String, (String, bool)> =
                 std::collections::HashMap::new();
-            let mut openai_native_compaction: Option<(String, usize)> = None;
 
             while let Some(event) = stream.next().await {
                 let event = match event {
@@ -245,7 +244,7 @@ impl Agent {
                         let err_str = e.to_string();
                         memory_pending.restore_now();
                         if self.provider_output_started()
-                            && (crate::compaction::is_request_payload_too_large_error(&err_str)
+                            && (jcode_provider_core::is_request_payload_too_large_error(&err_str)
                                 || Self::is_context_limit_error(&err_str))
                         {
                             self.checkpoint_partial_provider_output(
@@ -536,7 +535,6 @@ impl Agent {
                         reasoning_content.clear();
                         reasoning_signature.clear();
                         openai_reasoning_items.clear();
-                        openai_native_compaction = None;
                         saw_message_end = false;
                         stop_reason = None;
                     }
@@ -581,26 +579,6 @@ impl Agent {
                                 encrypted_content,
                                 status,
                             });
-                        }
-                    }
-                    StreamEvent::Compaction {
-                        trigger,
-                        pre_tokens,
-                        openai_encrypted_content,
-                    } => {
-                        if let Some(encrypted_content) = openai_encrypted_content {
-                            openai_native_compaction
-                                .get_or_insert((encrypted_content, self.session.messages.len()));
-                        }
-                        if print_output {
-                            let tokens_str = pre_tokens
-                                .map(|t| format!(" ({} tokens)", t))
-                                .unwrap_or_default();
-                            crate::terminal_println!(
-                                "📦 Context compacted ({}){}",
-                                trigger,
-                                tokens_str
-                            );
                         }
                     }
                     StreamEvent::NativeToolCall {
@@ -650,7 +628,7 @@ impl Agent {
                         }
                         memory_pending.restore_now();
                         if self.provider_output_started()
-                            && (crate::compaction::is_request_payload_too_large_error(&message)
+                            && (jcode_provider_core::is_request_payload_too_large_error(&message)
                                 || Self::is_context_limit_error(&message))
                         {
                             self.checkpoint_partial_provider_output(
@@ -821,16 +799,11 @@ impl Agent {
                 });
                 let message_id =
                     self.add_message_ext(Role::Assistant, content_blocks, None, token_usage);
-                self.push_embedding_snapshot_if_semantic(&text_content);
                 self.session.save()?;
                 Some(message_id)
             } else {
                 None
             };
-
-            if let Some((encrypted_content, compacted_count)) = openai_native_compaction.take() {
-                self.apply_openai_native_compaction(encrypted_content, compacted_count)?;
-            }
 
             // If stop_reason indicates truncation (e.g. max_tokens), discard tool calls
             // with null/empty inputs since they were likely truncated mid-generation.

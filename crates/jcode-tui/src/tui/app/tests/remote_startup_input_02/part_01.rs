@@ -1288,13 +1288,6 @@ fn test_create_transfer_session_from_parent_copies_todos_and_uses_authoritative_
             tool_duration_ms: None,
             token_usage: None,
         });
-        let transfer_compaction = crate::session::StoredCompactionState {
-            summary_text: "Compacted handoff summary".to_string(),
-            openai_encrypted_content: None,
-            covers_up_to_turn: 1,
-            original_turn_count: 1,
-            compacted_count: 0,
-        };
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
@@ -1315,7 +1308,7 @@ fn test_create_transfer_session_from_parent_copies_todos_and_uses_authoritative_
         let (child_id, _) = super::commands::create_transfer_session_from_parent(
             &app.session.id,
             &app.session,
-            Some(transfer_compaction.clone()),
+            Some("Compacted handoff summary".to_string()),
         )
         .expect("create transfer session");
         let child = crate::session::Session::load(&child_id).expect("load child session");

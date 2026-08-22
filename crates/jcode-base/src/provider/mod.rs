@@ -61,13 +61,13 @@ pub use jcode_provider_core::{
     ContextProjectionValidationStatus, ContextProviderFamily, ContextProviderValidationIdentity,
     ContextReasoningBlockKind, ContextRequestBuilderValidation, CredentialMode,
     DEFAULT_CONTEXT_LIMIT, EventStream, JCODE_USER_AGENT, ModelCapabilities,
-    ModelCatalogRefreshSummary, ModelRoute, ModelRouteApiMethod, NativeCompactionResult,
-    NativeToolResult, NativeToolResultSender, PremiumMode, Provider, RouteBillingKind,
-    RouteCheapnessEstimate, RouteCostConfidence, RouteCostSource, RouteSelection, RuntimeKey,
-    context_projection_validation_report, dedupe_model_routes, explicit_model_provider_prefix,
-    fresh_transport_client, inferred_reasoning_efforts, model_name_for_provider,
-    normalize_copilot_model_name, provider_from_model_key, shared_http_client,
-    summarize_model_catalog_refresh,
+    ModelCatalogRefreshSummary, ModelRoute, ModelRouteApiMethod, NativeToolResult,
+    NativeToolResultSender, PremiumMode, Provider, RouteBillingKind, RouteCheapnessEstimate,
+    RouteCostConfidence, RouteCostSource, RouteSelection, RuntimeKey,
+    context_projection_validation_report, dedupe_model_routes, effective_context_tokens_from_usage,
+    explicit_model_provider_prefix, fresh_transport_client, inferred_reasoning_efforts,
+    model_name_for_provider, normalize_copilot_model_name, provider_from_model_key,
+    shared_http_client, summarize_model_catalog_refresh,
 };
 pub use jcode_provider_core::{
     FallbackPickOptions, error_looks_like_credential_failure, model_route_provider_labels_match,
@@ -2476,24 +2476,6 @@ impl Provider for MultiProvider {
         }
     }
 
-    fn native_compaction_mode(&self) -> Option<String> {
-        match self.active_provider() {
-            ActiveProvider::OpenAI => self
-                .openai_provider()
-                .and_then(|o| o.native_compaction_mode()),
-            _ => None,
-        }
-    }
-
-    fn native_compaction_threshold_tokens(&self) -> Option<usize> {
-        match self.active_provider() {
-            ActiveProvider::OpenAI => self
-                .openai_provider()
-                .and_then(|o| o.native_compaction_threshold_tokens()),
-            _ => None,
-        }
-    }
-
     fn transport(&self) -> Option<String> {
         match self.active_provider() {
             ActiveProvider::OpenAI => self.openai_provider().and_then(|o| o.transport()),
@@ -2522,193 +2504,6 @@ impl Provider for MultiProvider {
             ActiveProvider::Gemini => vec![],
             ActiveProvider::Cursor => vec![],
             _ => vec![],
-        }
-    }
-
-    fn supports_compaction(&self) -> bool {
-        match self.active_provider() {
-            ActiveProvider::Claude => {
-                if self.anthropic_provider().is_some() {
-                    true
-                } else {
-                    self.claude_provider()
-                        .map(|c| c.supports_compaction())
-                        .unwrap_or(false)
-                }
-            }
-            ActiveProvider::OpenAI => self
-                .openai_provider()
-                .map(|o| o.supports_compaction())
-                .unwrap_or(false),
-            ActiveProvider::Copilot => self
-                .copilot_provider()
-                .map(|o| o.supports_compaction())
-                .unwrap_or(false),
-            ActiveProvider::Antigravity => self
-                .antigravity_provider()
-                .map(|o| o.supports_compaction())
-                .unwrap_or(false),
-            ActiveProvider::Gemini => self
-                .gemini_provider()
-                .map(|o| o.supports_compaction())
-                .unwrap_or(false),
-            ActiveProvider::Cursor => self
-                .cursor_provider()
-                .map(|o| o.supports_compaction())
-                .unwrap_or(false),
-            ActiveProvider::Bedrock => self
-                .bedrock_provider()
-                .map(|o| o.uses_jcode_compaction())
-                .unwrap_or(false),
-            ActiveProvider::OpenRouter => self
-                .active_openrouter_execution_provider()
-                .map(|o| o.supports_compaction())
-                .unwrap_or(false),
-        }
-    }
-
-    fn uses_jcode_compaction(&self) -> bool {
-        match self.active_provider() {
-            ActiveProvider::Claude => {
-                if self.anthropic_provider().is_some() {
-                    true
-                } else {
-                    self.claude_provider()
-                        .map(|c| c.uses_jcode_compaction())
-                        .unwrap_or(false)
-                }
-            }
-            ActiveProvider::OpenAI => self
-                .openai_provider()
-                .map(|o| o.uses_jcode_compaction())
-                .unwrap_or(false),
-            ActiveProvider::Copilot => self
-                .copilot_provider()
-                .map(|o| o.uses_jcode_compaction())
-                .unwrap_or(false),
-            ActiveProvider::Antigravity => self
-                .antigravity_provider()
-                .map(|o| o.uses_jcode_compaction())
-                .unwrap_or(false),
-            ActiveProvider::Gemini => self
-                .gemini_provider()
-                .map(|o| o.uses_jcode_compaction())
-                .unwrap_or(false),
-            ActiveProvider::Cursor => self
-                .cursor_provider()
-                .map(|o| o.uses_jcode_compaction())
-                .unwrap_or(false),
-            ActiveProvider::Bedrock => false,
-            ActiveProvider::OpenRouter => self
-                .active_openrouter_execution_provider()
-                .map(|o| o.uses_jcode_compaction())
-                .unwrap_or(false),
-        }
-    }
-
-    async fn native_compact(
-        &self,
-        messages: &[Message],
-        existing_summary_text: Option<&str>,
-        existing_openai_encrypted_content: Option<&str>,
-    ) -> Result<NativeCompactionResult> {
-        match self.active_provider() {
-            ActiveProvider::Claude => {
-                if let Some(anthropic) = self.anthropic_provider() {
-                    anthropic
-                        .native_compact(
-                            messages,
-                            existing_summary_text,
-                            existing_openai_encrypted_content,
-                        )
-                        .await
-                } else if let Some(claude) = self.claude_provider() {
-                    claude
-                        .native_compact(
-                            messages,
-                            existing_summary_text,
-                            existing_openai_encrypted_content,
-                        )
-                        .await
-                } else {
-                    Err(anyhow::anyhow!("Claude provider unavailable"))
-                }
-            }
-            ActiveProvider::OpenAI => {
-                if let Some(openai) = self.openai_provider() {
-                    openai
-                        .native_compact(
-                            messages,
-                            existing_summary_text,
-                            existing_openai_encrypted_content,
-                        )
-                        .await
-                } else {
-                    Err(anyhow::anyhow!("OpenAI provider unavailable"))
-                }
-            }
-            ActiveProvider::Copilot => {
-                let provider = self.copilot_provider();
-                if let Some(copilot) = provider {
-                    copilot
-                        .native_compact(
-                            messages,
-                            existing_summary_text,
-                            existing_openai_encrypted_content,
-                        )
-                        .await
-                } else {
-                    Err(anyhow::anyhow!("Copilot provider unavailable"))
-                }
-            }
-            ActiveProvider::Antigravity => Err(anyhow::anyhow!(
-                "Antigravity does not support native compaction"
-            )),
-            ActiveProvider::Gemini => {
-                let provider = self.gemini_provider();
-                if let Some(gemini) = provider {
-                    gemini
-                        .native_compact(
-                            messages,
-                            existing_summary_text,
-                            existing_openai_encrypted_content,
-                        )
-                        .await
-                } else {
-                    Err(anyhow::anyhow!("Gemini provider unavailable"))
-                }
-            }
-            ActiveProvider::Cursor => {
-                let provider = self.cursor_provider();
-                if let Some(cursor) = provider {
-                    cursor
-                        .native_compact(
-                            messages,
-                            existing_summary_text,
-                            existing_openai_encrypted_content,
-                        )
-                        .await
-                } else {
-                    Err(anyhow::anyhow!("Cursor provider unavailable"))
-                }
-            }
-            ActiveProvider::Bedrock => Err(anyhow::anyhow!(
-                "AWS Bedrock does not support native compaction"
-            )),
-            ActiveProvider::OpenRouter => {
-                let provider = self.active_openrouter_execution_provider();
-                if let Some(openrouter) = provider {
-                    openrouter
-                        .native_compact(
-                            messages,
-                            existing_summary_text,
-                            existing_openai_encrypted_content,
-                        )
-                        .await
-                } else {
-                    Err(anyhow::anyhow!("OpenRouter provider unavailable"))
-                }
-            }
         }
     }
 

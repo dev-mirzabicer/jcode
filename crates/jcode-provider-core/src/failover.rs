@@ -66,6 +66,24 @@ fn contains_independent_status_code(haystack: &str, code: &str) -> bool {
     })
 }
 
+/// Whether a provider error indicates that the serialized request body was too
+/// large, distinct from exceeding the model's token context window.
+///
+/// Inline base64 images can dominate this failure mode while remaining
+/// intentionally bounded in token estimates, so callers must preserve the
+/// payload and report a payload-specific block instead of treating it as token
+/// pressure or mutating authoritative history.
+pub fn is_request_payload_too_large_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("request_too_large")
+        || lower.contains("request too large")
+        || lower.contains("payload too large")
+        || lower.contains("request entity too large")
+        || lower.contains("request exceeds the maximum size")
+        || lower.contains("exceeds the maximum size")
+        || contains_independent_status_code(&lower, "413")
+}
+
 pub fn classify_failover_error_message(message: &str) -> FailoverDecision {
     let lower = message.to_ascii_lowercase();
 
@@ -178,5 +196,20 @@ mod tests {
             classify_failover_error_message("model version 4130 failed"),
             FailoverDecision::None
         );
+    }
+
+    #[test]
+    fn payload_classifier_distinguishes_standalone_413_from_longer_numbers() {
+        assert!(is_request_payload_too_large_error("413 Payload Too Large"));
+        assert!(is_request_payload_too_large_error(
+            "request_too_large: Request exceeds the maximum size"
+        ));
+        assert!(is_request_payload_too_large_error("request too large"));
+        assert!(!is_request_payload_too_large_error(
+            "context length exceeded"
+        ));
+        assert!(!is_request_payload_too_large_error(
+            "model version 4130 failed"
+        ));
     }
 }

@@ -691,19 +691,6 @@ export class JcodeClient extends EventEmitter {
     await this.requestOk({ req: "set_reasoning_effort", session_id: sessionId, effort });
   }
 
-  /**
-   * Schedule compaction of the transcript so far, freeing context.
-   *
-   * Not synchronous: the daemon summarizes at the next safe point rather than
-   * interrupting a turn, so this resolving means the request was accepted. Read
-   * the history afterwards to see the result. A refusal (nothing to compact, a
-   * turn in flight) rejects with `invalid_request` and the reason.
-   */
-  async compact(sessionId: string): Promise<string> {
-    const frame = await this.expectReply({ req: "compact", session_id: sessionId }, "compacted");
-    return frame.message;
-  }
-
   /** Set a session's title. Omit `title` to restore the generated one. */
   async renameSession(sessionId: string, title?: string): Promise<void> {
     await this.requestOk({ req: "rename_session", session_id: sessionId, title });

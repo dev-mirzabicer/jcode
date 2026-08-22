@@ -138,8 +138,8 @@ struct ErrorBanner: View {
     }
 }
 
-/// Stack of dismissible notices for out-of-band server signals
-/// (push notifications, interrupts, context compaction).
+/// Stack of dismissible notices for out-of-band server signals such as push
+/// notifications and interrupts.
 struct NoticeStack: View {
     let notices: [Notice]
     let onDismiss: (UUID) -> Void
@@ -177,7 +177,6 @@ private struct NoticeRow: View {
         switch notice.kind {
         case .info: "info.circle.fill"
         case .notification: "bell.fill"
-        case .compaction: "arrow.down.right.and.arrow.up.left"
         }
     }
 
@@ -185,7 +184,6 @@ private struct NoticeRow: View {
         switch notice.kind {
         case .info: Theme.textSecondary
         case .notification: Theme.mint
-        case .compaction: Theme.warning
         }
     }
 }

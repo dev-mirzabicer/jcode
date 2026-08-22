@@ -41,7 +41,6 @@ fn stream_event_is_replay_visible(event: &StreamEvent) -> bool {
         | StreamEvent::ThinkingSignatureDelta(_)
         | StreamEvent::OpenAIReasoning { .. }
         | StreamEvent::MessageEnd { .. }
-        | StreamEvent::Compaction { .. }
         | StreamEvent::NativeToolCall { .. } => true,
         StreamEvent::ThinkingStart
         | StreamEvent::ThinkingEnd

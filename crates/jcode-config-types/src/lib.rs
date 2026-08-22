@@ -10,38 +10,6 @@ pub use keybindings::{
     keybinding_default, keybinding_defaults_report, validate_keybinding_defaults,
 };
 
-/// Compaction mode
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum CompactionMode {
-    /// Compact when context hits a fixed threshold (default)
-    #[default]
-    Reactive,
-    /// Compact early based on predicted token growth rate
-    Proactive,
-    /// Compact based on semantic topic shifts and relevance scoring
-    Semantic,
-}
-
-impl CompactionMode {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Reactive => "reactive",
-            Self::Proactive => "proactive",
-            Self::Semantic => "semantic",
-        }
-    }
-
-    pub fn parse(input: &str) -> Option<Self> {
-        match input.trim().to_ascii_lowercase().as_str() {
-            "reactive" => Some(Self::Reactive),
-            "proactive" => Some(Self::Proactive),
-            "semantic" => Some(Self::Semantic),
-            _ => None,
-        }
-    }
-}
-
 /// Session picker Enter action: "current-terminal" (default) or "new-terminal".
 /// Ctrl+Enter performs the alternate action.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -343,58 +311,6 @@ impl CrossProviderFailoverMode {
             "manual" => Some(Self::Manual),
             "countdown" | "auto" | "automatic" => Some(Self::Countdown),
             _ => None,
-        }
-    }
-}
-
-/// Compaction configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct CompactionConfig {
-    /// Compaction mode: reactive (default), proactive, or semantic
-    pub mode: CompactionMode,
-
-    /// [proactive] Number of turns to look ahead when projecting token growth
-    pub lookahead_turns: usize,
-
-    /// [proactive] EWMA alpha for token growth smoothing (0.0-1.0, higher = more recency bias)
-    pub ewma_alpha: f32,
-
-    /// [proactive/semantic] Minimum context fill level before any proactive check fires (0.0-1.0)
-    pub proactive_floor: f32,
-
-    /// [proactive/semantic] Minimum number of token snapshots needed before proactive check
-    pub min_samples: usize,
-
-    /// [proactive/semantic] Number of stable turns (no growth) before suppressing proactive compact
-    pub stall_window: usize,
-
-    /// [proactive/semantic] Minimum turns between two compactions (cooldown)
-    pub min_turns_between_compactions: usize,
-
-    /// [semantic] Cosine similarity threshold below which a topic shift is detected (0.0-1.0)
-    pub topic_shift_threshold: f32,
-
-    /// [semantic] Cosine similarity above which a message is kept verbatim (0.0-1.0)
-    pub relevance_keep_threshold: f32,
-
-    /// [semantic] Number of recent turns to look at for building the "current goal" embedding
-    pub goal_window_turns: usize,
-}
-
-impl Default for CompactionConfig {
-    fn default() -> Self {
-        Self {
-            mode: CompactionMode::Reactive,
-            lookahead_turns: 15,
-            ewma_alpha: 0.3,
-            proactive_floor: 0.40,
-            min_samples: 3,
-            stall_window: 5,
-            min_turns_between_compactions: 10,
-            topic_shift_threshold: 0.45,
-            relevance_keep_threshold: 0.65,
-            goal_window_turns: 5,
         }
     }
 }
@@ -1212,10 +1128,6 @@ pub struct ProviderConfig {
     pub openai_transport: Option<String>,
     /// OpenAI service tier override (priority|flex)
     pub openai_service_tier: Option<String>,
-    /// OpenAI native compaction mode: "auto", "explicit", or "off".
-    pub openai_native_compaction_mode: String,
-    /// Token threshold at which OpenAI auto native compaction should trigger.
-    pub openai_native_compaction_threshold_tokens: usize,
     /// Preserve provider-native reasoning/thinking items for future-turn context when supported.
     pub preserve_reasoning_context: bool,
     /// How to handle cross-provider failover when the same input would be resent elsewhere.
@@ -1248,8 +1160,6 @@ impl Default for ProviderConfig {
             anthropic_reasoning_effort: None,
             openai_transport: None,
             openai_service_tier: Some("priority".to_string()),
-            openai_native_compaction_mode: "auto".to_string(),
-            openai_native_compaction_threshold_tokens: 200_000,
             preserve_reasoning_context: true,
             cross_provider_failover: CrossProviderFailoverMode::Countdown,
             same_provider_account_failover: true,

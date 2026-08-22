@@ -46,17 +46,6 @@ impl Agent {
         self.registry.clone()
     }
 
-    pub async fn compaction_mode(&self) -> crate::config::CompactionMode {
-        self.registry.legacy_compaction().read().await.mode()
-    }
-
-    pub async fn set_compaction_mode(&self, mode: crate::config::CompactionMode) -> Result<()> {
-        let compaction = self.registry.legacy_compaction();
-        let mut manager = compaction.write().await;
-        manager.set_mode(mode);
-        Ok(())
-    }
-
     pub fn provider_messages(&mut self) -> Result<Vec<Message>> {
         self.messages_for_provider()
     }

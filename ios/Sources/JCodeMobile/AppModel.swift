@@ -141,11 +141,6 @@ final class AppModel {
         send { .setReasoningEffort(id: $0, effort: effort) }
     }
 
-    /// Asks the server to compact the conversation context.
-    func compactConversation() {
-        send { .compact(id: $0) }
-    }
-
     func renameSession(_ title: String) {
         send { .renameSession(id: $0, title: title.isEmpty ? nil : title) }
     }

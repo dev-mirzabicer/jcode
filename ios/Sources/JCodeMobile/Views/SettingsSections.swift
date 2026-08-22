@@ -23,14 +23,6 @@ struct SettingsSessionsSection: View {
             .listRowBackground(Theme.surface)
             .accessibilityHint("Opens a field to rename the active session")
             Button {
-                model.compactConversation()
-            } label: {
-                Label("Compact conversation", systemImage: "arrow.down.right.and.arrow.up.left")
-                    .foregroundStyle(Theme.textPrimary)
-            }
-            .listRowBackground(Theme.surface)
-            .accessibilityHint("Summarizes older messages to free context")
-            Button {
                 model.clearConversation()
                 dismiss()
             } label: {

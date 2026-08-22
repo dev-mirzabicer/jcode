@@ -15,7 +15,7 @@ built against on this machine, without a device, network, or provider cost.
   - `GET /ws` -> WebSocket upgrade carrying the newline-delimited JSON protocol
   A `message` request triggers a scripted assistant turn (reasoning, text
   deltas, a `bash` tool-call lifecycle, tokens, done). `--push-demo` also pushes
-  an out-of-band notification + compaction notice after connect.
+  an out-of-band notification after connect.
 
 - **`protocol_smoke_test.py`** - a stdlib WebSocket/HTTP client that drives the
   mock and asserts the full happy-path event sequence (pair, subscribe,

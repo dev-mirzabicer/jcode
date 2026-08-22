@@ -175,7 +175,7 @@ pub type ReloadRecoverySnapshot = jcode_selfdev_types::ReloadRecoveryDirective;
 
 mod wire;
 pub use wire::TaskGraphNodeSpec;
-pub use wire::{Request, ServerEvent};
+pub use wire::{LegacyContextCommand, Request, ServerEvent};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallSummary {
@@ -610,11 +610,10 @@ impl Request {
             Request::SetTransport { id, .. } => *id,
             Request::SetPremiumMode { id, .. } => *id,
             Request::SetFeature { id, .. } => *id,
-            Request::SetCompactionMode { id, .. } => *id,
+            Request::LegacyContextCommand { id, .. } => *id,
             Request::RenameSession { id, .. } => *id,
             Request::Split { id } => *id,
             Request::Transfer { id } => *id,
-            Request::Compact { id } => *id,
             Request::TriggerMemoryExtraction { id } => *id,
             Request::NotifyAuthChanged { id, .. } => *id,
             Request::SwitchAnthropicAccount { id, .. } => *id,
@@ -721,11 +720,27 @@ pub fn decode_request(line: &str) -> Result<Request, serde_json::Error> {
         Err(error) => {
             if let Some(request) = decode_legacy_set_route_model(line) {
                 Ok(request)
+            } else if let Some(request) = decode_legacy_context_command(line) {
+                Ok(request)
             } else {
                 Err(error)
             }
         }
     }
+}
+
+/// Decode obsolete automatic-compaction client requests into a compatibility
+/// envelope whose only server behavior is a typed migration rejection.
+fn decode_legacy_context_command(line: &str) -> Option<Request> {
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    let obj = value.as_object()?;
+    let command = match obj.get("type")?.as_str()? {
+        "compact" => wire::LegacyContextCommand::Compact,
+        "set_compaction_mode" => wire::LegacyContextCommand::SetCompactionMode,
+        _ => return None,
+    };
+    let id = obj.get("id").and_then(|value| value.as_u64()).unwrap_or(0);
+    Some(Request::LegacyContextCommand { id, command })
 }
 
 /// Recognize the legacy `{"type":"set_route","id":N,"model":"..."}` shape and

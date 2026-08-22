@@ -96,7 +96,6 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     needs_redraw |= app.poll_session_picker_load();
     needs_redraw |= app.poll_session_picker_presence();
     needs_redraw |= app.onboarding_tick();
-    needs_redraw |= app.poll_compaction_completion();
     needs_redraw |= app.maybe_refresh_overnight_display_card();
     needs_redraw |= super::commands::poll_local_transfer_prepare(app);
     needs_redraw |= super::commands::maybe_begin_pending_local_transfer(app);
@@ -330,7 +329,6 @@ pub(super) fn handle_bus_event(
             app.handle_dictation_failure(message);
             true
         }
-        Ok(BusEvent::CompactionFinished) => app.poll_compaction_completion(),
         Ok(BusEvent::SidePanelUpdated(update)) => {
             if update.session_id == app.session.id {
                 app.set_side_panel_snapshot(update.snapshot);

@@ -28,9 +28,7 @@ struct DelayedProvider {
     first_event_delay: Duration,
 }
 
-struct NativeAutoCompactionProvider;
-
-struct NativeCompactionStreamProvider;
+struct ImmediateEmptyProvider;
 
 #[derive(Clone)]
 struct NoValidationSwitchProvider {
@@ -347,14 +345,6 @@ impl Provider for ProjectedRequestProvider {
 
     fn model(&self) -> String {
         "projected-request-model".to_string()
-    }
-
-    fn supports_compaction(&self) -> bool {
-        true
-    }
-
-    fn uses_jcode_compaction(&self) -> bool {
-        true
     }
 
     fn context_window(&self) -> usize {
@@ -751,7 +741,7 @@ impl Provider for DelayedProvider {
 }
 
 #[async_trait]
-impl Provider for NativeAutoCompactionProvider {
+impl Provider for ImmediateEmptyProvider {
     async fn complete(
         &self,
         _messages: &[Message],
@@ -767,14 +757,6 @@ impl Provider for NativeAutoCompactionProvider {
         "openai"
     }
 
-    fn supports_compaction(&self) -> bool {
-        true
-    }
-
-    fn uses_jcode_compaction(&self) -> bool {
-        false
-    }
-
     fn context_window(&self) -> usize {
         1_000
     }
@@ -785,50 +767,6 @@ impl Provider for NativeAutoCompactionProvider {
 
     async fn complete_simple(&self, _prompt: &str, _system: &str) -> Result<String> {
         Ok("manual summary from native-auto provider".to_string())
-    }
-}
-
-#[async_trait]
-impl Provider for NativeCompactionStreamProvider {
-    async fn complete(
-        &self,
-        _messages: &[Message],
-        _tools: &[ToolDefinition],
-        _system: &str,
-        _resume_session_id: Option<&str>,
-    ) -> Result<EventStream> {
-        let (tx, rx) = tokio_mpsc::channel::<Result<StreamEvent>>(4);
-        tokio::spawn(async move {
-            let _ = tx
-                .send(Ok(StreamEvent::Compaction {
-                    trigger: "openai_native".to_string(),
-                    pre_tokens: Some(80_000),
-                    openai_encrypted_content: Some("enc_native_test".to_string()),
-                }))
-                .await;
-            let _ = tx
-                .send(Ok(StreamEvent::MessageEnd {
-                    stop_reason: Some("end_turn".to_string()),
-                }))
-                .await;
-        });
-        Ok(Box::pin(ReceiverStream::new(rx)))
-    }
-
-    fn name(&self) -> &str {
-        "openai"
-    }
-
-    fn supports_compaction(&self) -> bool {
-        true
-    }
-
-    fn uses_jcode_compaction(&self) -> bool {
-        false
-    }
-
-    fn fork(&self) -> Arc<dyn Provider> {
-        Arc::new(Self)
     }
 }
 
@@ -875,7 +813,7 @@ fn tool_output_to_content_blocks_preserves_labeled_images() {
 
 #[tokio::test]
 async fn queued_soft_interrupt_images_are_injected_as_image_blocks() {
-    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let provider: Arc<dyn Provider> = Arc::new(ImmediateEmptyProvider);
     let registry = Registry::new(provider.clone()).await;
     let _guard = crate::storage::lock_test_env();
     let mut agent = Agent::new(provider, registry);
@@ -974,45 +912,6 @@ async fn run_turn_streaming_mpsc_emits_keepalive_while_provider_is_quiet() {
 
     assert!(saw_text, "expected delayed provider text after keepalive");
     task.await.unwrap().unwrap();
-}
-
-#[tokio::test]
-async fn run_turn_streaming_mpsc_emits_native_compaction_for_client_cache_reset() {
-    let _guard = crate::storage::lock_test_env();
-    let provider: Arc<dyn Provider> = Arc::new(NativeCompactionStreamProvider);
-    let registry = Registry::new(provider.clone()).await;
-    let mut agent = Agent::new(provider, registry);
-    agent.add_message(
-        Role::User,
-        vec![ContentBlock::Text {
-            text: "compact this".to_string(),
-            cache_control: None,
-        }],
-    );
-
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    agent.run_turn_streaming_mpsc(tx).await.unwrap();
-
-    let mut saw_native_compaction = false;
-    while let Ok(event) = rx.try_recv() {
-        if let ServerEvent::Compaction {
-            trigger,
-            messages_compacted,
-            ..
-        } = event
-        {
-            assert_eq!(trigger, "openai_native");
-            assert!(
-                messages_compacted.is_some_and(|count| count > 0),
-                "native compaction should report a non-empty compacted prefix"
-            );
-            saw_native_compaction = true;
-        }
-    }
-    assert!(
-        saw_native_compaction,
-        "native provider compaction must reach clients so they clear KV baselines"
-    );
 }
 
 /// Provider that transparently switches its model mid-stream, mimicking the
@@ -1288,7 +1187,7 @@ fn projected_request_distills_tool_result_without_changing_pair_metadata() {
 }
 
 #[tokio::test]
-async fn live_agent_request_matches_combined_projection_without_starting_legacy_compaction() {
+async fn live_agent_request_matches_combined_projection_without_automatic_context_mutation() {
     let _guard = crate::storage::lock_test_env();
     let provider = Arc::new(ProjectedRequestProvider::new(1_000));
     let provider_dyn: Arc<dyn Provider> = provider.clone();
@@ -1312,10 +1211,6 @@ async fn live_agent_request_matches_combined_projection_without_starting_legacy_
         estimated_message_tokens(&expected)
     );
 
-    {
-        let legacy = agent.registry.legacy_compaction();
-        legacy.write().await.update_observed_input_tokens(999);
-    }
     let invalidations_before_request = provider.invalidation_count();
 
     let response = agent.run_turn(false).await.expect("live projected turn");
@@ -1334,13 +1229,10 @@ async fn live_agent_request_matches_combined_projection_without_starting_legacy_
         serde_json::to_vec(&agent.session.messages[..raw_message_count_before]).unwrap(),
         raw_before
     );
-    let legacy = agent.registry.legacy_compaction();
-    let raw_provider = agent.session.raw_messages_for_provider_uncached();
-    assert!(!legacy.read().await.stats_with(&raw_provider).is_compacting);
 }
 
 #[test]
-fn stale_projection_blocks_request_without_raw_fallback_or_legacy_compaction() {
+fn stale_projection_blocks_request_without_raw_fallback_or_context_mutation() {
     let provider = Arc::new(ProjectedRequestProvider::new(1_000));
     let provider_dyn: Arc<dyn Provider> = provider.clone();
     let mut session = Session::create(None, None);
@@ -1374,15 +1266,6 @@ fn stale_projection_blocks_request_without_raw_fallback_or_legacy_compaction() {
     assert_eq!(
         serde_json::to_vec(&agent.session.messages).unwrap(),
         raw_before
-    );
-    let legacy = agent.registry.legacy_compaction();
-    let raw_provider = agent.session.raw_messages_for_provider_uncached();
-    assert!(
-        !legacy
-            .try_read()
-            .unwrap()
-            .stats_with(&raw_provider)
-            .is_compacting
     );
 }
 
@@ -1488,38 +1371,6 @@ async fn historical_context_change_resets_provider_runtime_exactly_once() {
     assert_eq!(documented.detail, "context revision 1 applied");
 }
 
-#[test]
-fn projected_agent_rejects_legacy_manual_compaction_without_mutating_context() {
-    let provider = Arc::new(ProjectedRequestProvider::new(1_000));
-    let provider_dyn: Arc<dyn Provider> = provider.clone();
-    let mut agent = Agent::new(provider_dyn, Registry::empty());
-    for index in 0..20 {
-        agent.add_message(
-            Role::User,
-            vec![ContentBlock::Text {
-                text: format!("large message {index} {}", "x".repeat(200)),
-                cache_control: None,
-            }],
-        );
-    }
-    let raw_before = serde_json::to_vec(&agent.session.messages).unwrap();
-    let projected_before = agent.messages_for_provider().expect("projected history");
-
-    let (message, started) = agent.request_manual_compaction();
-    assert!(!started);
-    assert!(message.contains("provider projection were not changed"));
-    assert_eq!(provider.summary_request_count(), 0);
-    assert!(agent.session.compaction.is_none());
-    assert_eq!(
-        serde_json::to_vec(&agent.session.messages).unwrap(),
-        raw_before
-    );
-    assert_eq!(
-        serde_json::to_vec(&agent.messages_for_provider().expect("unchanged projection")).unwrap(),
-        serde_json::to_vec(&projected_before).unwrap()
-    );
-}
-
 fn drain_server_events(
     receiver: &mut tokio_mpsc::UnboundedReceiver<ServerEvent>,
 ) -> Vec<ServerEvent> {
@@ -1571,11 +1422,6 @@ async fn phase10_correlated_preflight_blocks_before_provider_call_and_rolls_back
             ..
         } if metadata.matches(501, prompt, 1)
     )));
-    assert!(
-        !events
-            .iter()
-            .any(|event| matches!(event, ServerEvent::Compaction { .. }))
-    );
 }
 
 #[tokio::test]
@@ -2226,13 +2072,6 @@ async fn context_budget_tracks_agent_create_append_usage_and_model_switch_withou
         .set_model("small")
         .expect("switch back to small model");
     agent.update_context_usage_from_stream(9_500, None, None);
-    {
-        let legacy_compaction = agent.registry.legacy_compaction();
-        legacy_compaction
-            .write()
-            .await
-            .update_observed_input_tokens(9_500);
-    }
     agent
         .set_route_selection(&crate::provider::RouteSelection {
             model: "large".to_string(),
@@ -2245,16 +2084,6 @@ async fn context_budget_tracks_agent_create_append_usage_and_model_switch_withou
     let route_switched_stats = agent_context_budget_stats(&agent).await;
     assert_eq!(route_switched_stats.token_budget, 50_000);
     assert_eq!(route_switched_stats.observed_input_tokens, None);
-    let route_messages = agent.messages_for_provider().expect("route projection");
-    let legacy_observation = {
-        let legacy_compaction = agent.registry.legacy_compaction();
-        legacy_compaction
-            .read()
-            .await
-            .stats_with(&route_messages)
-            .observed_input_tokens
-    };
-    assert_eq!(legacy_observation, None);
     assert_eq!(
         serde_json::to_vec(&agent.session.context_view).unwrap(),
         context_before_append
@@ -2664,7 +2493,7 @@ async fn interrupt_signal_notified_completes_after_fire() {
 #[tokio::test]
 async fn new_agent_registers_active_pid_and_clear_swaps_it() {
     let _guard = crate::storage::lock_test_env();
-    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let provider: Arc<dyn Provider> = Arc::new(ImmediateEmptyProvider);
     let registry = Registry::new(provider.clone()).await;
     let mut agent = Agent::new(provider, registry);
 
@@ -2706,7 +2535,7 @@ async fn gmail_is_exposed_by_default_and_can_be_explicitly_disabled() {
     crate::env::remove_var("JCODE_DISABLE_BASE_TOOLS");
     crate::config::Config::invalidate_cache();
 
-    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let provider: Arc<dyn Provider> = Arc::new(ImmediateEmptyProvider);
     let registry = Registry::new(provider.clone()).await;
     let mut agent = Agent::new(provider, registry);
     let definitions = agent.tool_definitions().await;
@@ -2739,7 +2568,7 @@ async fn gmail_is_exposed_by_default_and_can_be_explicitly_disabled() {
     crate::env::set_var("JCODE_DISABLED_TOOLS", tool_name);
     crate::config::Config::invalidate_cache();
 
-    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let provider: Arc<dyn Provider> = Arc::new(ImmediateEmptyProvider);
     let registry = Registry::new(provider.clone()).await;
     let mut agent = Agent::new(provider, registry);
     let definitions = agent.tool_definitions().await;
@@ -2820,7 +2649,7 @@ fn seed_transient_session_state(agent: &mut Agent) {
 #[tokio::test]
 async fn clear_resets_runtime_interrupt_and_queue_state() {
     let _guard = crate::storage::lock_test_env();
-    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let provider: Arc<dyn Provider> = Arc::new(ImmediateEmptyProvider);
     let registry = Registry::new(provider.clone()).await;
     let mut agent = Agent::new(provider, registry);
 
@@ -2849,7 +2678,7 @@ async fn clear_resets_runtime_interrupt_and_queue_state() {
 #[tokio::test]
 async fn restore_session_resets_runtime_interrupt_and_queue_state() {
     let _guard = crate::storage::lock_test_env();
-    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let provider: Arc<dyn Provider> = Arc::new(ImmediateEmptyProvider);
     let registry = Registry::new(provider.clone()).await;
     let mut agent = Agent::new(provider, registry);
 
@@ -2969,7 +2798,7 @@ async fn restore_session_rehydrates_injected_memory_ids() {
     let _guard = crate::storage::lock_test_env();
     crate::memory::clear_all_pending_memory();
 
-    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let provider: Arc<dyn Provider> = Arc::new(ImmediateEmptyProvider);
     let registry = Registry::new(provider.clone()).await;
     let mut agent = Agent::new(provider, registry);
 
@@ -3010,7 +2839,7 @@ async fn build_memory_prompt_nonblocking_defers_pending_memory_during_tool_loop(
     let _guard = crate::storage::lock_test_env();
     crate::memory::clear_all_pending_memory();
 
-    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let provider: Arc<dyn Provider> = Arc::new(ImmediateEmptyProvider);
     let registry = Registry::new(provider.clone()).await;
     let agent = Agent::new(provider, registry);
     let session_id = agent.session.id.clone();
@@ -3060,7 +2889,7 @@ async fn memory_injection_message_defaults_to_ephemeral_history() {
     crate::env::set_var("JCODE_PERSIST_MEMORY_INJECTIONS", "false");
     crate::config::invalidate_config_cache();
 
-    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let provider: Arc<dyn Provider> = Arc::new(ImmediateEmptyProvider);
     let registry = Registry::new(provider.clone()).await;
     let mut agent = Agent::new(provider, registry);
     let before = agent.session.messages.len();
@@ -3093,7 +2922,7 @@ async fn memory_injection_message_can_persist_to_history() {
     crate::env::set_var("JCODE_PERSIST_MEMORY_INJECTIONS", "true");
     crate::config::invalidate_config_cache();
 
-    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let provider: Arc<dyn Provider> = Arc::new(ImmediateEmptyProvider);
     let registry = Registry::new(provider.clone()).await;
     let mut agent = Agent::new(provider, registry);
     let before = agent.session.messages.len();
@@ -3131,7 +2960,7 @@ async fn mark_closed_persists_soft_interrupts_for_restore_after_reload() {
     let prev_home = std::env::var_os("JCODE_HOME");
     crate::env::set_var("JCODE_HOME", temp.path());
 
-    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let provider: Arc<dyn Provider> = Arc::new(ImmediateEmptyProvider);
     let registry = Registry::new(provider.clone()).await;
     let mut agent = Agent::new(provider.clone(), registry.clone());
     let session_id = agent.session_id().to_string();
@@ -3172,7 +3001,7 @@ async fn soft_interrupt_injection_preserves_exact_authorization_scope_and_persis
     let prev_home = std::env::var_os("JCODE_HOME");
     crate::env::set_var("JCODE_HOME", temp.path());
 
-    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let provider: Arc<dyn Provider> = Arc::new(ImmediateEmptyProvider);
     let registry = Registry::new(provider.clone()).await;
     let mut agent = Agent::new(provider, registry);
     agent.session.save().expect("save session");
@@ -3337,7 +3166,7 @@ async fn soft_interrupt_injection_preserves_exact_authorization_scope_and_persis
 #[tokio::test]
 async fn env_snapshot_detail_is_minimal_for_empty_sessions_and_full_after_history() {
     let _guard = crate::storage::lock_test_env();
-    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let provider: Arc<dyn Provider> = Arc::new(ImmediateEmptyProvider);
     let registry = Registry::new(provider.clone()).await;
     let mut agent = Agent::new(provider, registry);
 
@@ -3400,7 +3229,7 @@ impl crate::tool::Tool for FakeMcpTool {
 #[tokio::test]
 async fn mcp_tools_registered_after_lock_are_visible_to_agent() {
     let _guard = crate::storage::lock_test_env();
-    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let provider: Arc<dyn Provider> = Arc::new(ImmediateEmptyProvider);
     let registry = Registry::new(provider.clone()).await;
     let mut agent = Agent::new(provider, registry);
 
@@ -3462,7 +3291,7 @@ async fn mcp_tools_registered_after_lock_are_visible_to_agent() {
 #[tokio::test]
 async fn mcp_late_registration_rebuild_happens_at_most_once() {
     let _guard = crate::storage::lock_test_env();
-    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let provider: Arc<dyn Provider> = Arc::new(ImmediateEmptyProvider);
     let registry = Registry::new(provider.clone()).await;
     let mut agent = Agent::new(provider, registry);
 
@@ -3534,7 +3363,7 @@ async fn mcp_late_registration_rebuild_happens_at_most_once() {
 #[tokio::test]
 async fn tool_snapshot_is_stable_without_new_mcp_tools() {
     let _guard = crate::storage::lock_test_env();
-    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let provider: Arc<dyn Provider> = Arc::new(ImmediateEmptyProvider);
     let registry = Registry::new(provider.clone()).await;
     let mut agent = Agent::new(provider, registry);
 
@@ -3764,7 +3593,7 @@ fn guardrail_notice_for_transient_empty_does_not_blame_content_filter() {
 #[tokio::test]
 async fn empty_post_tool_response_is_retried_in_shared_helper() {
     let _guard = crate::storage::lock_test_env();
-    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let provider: Arc<dyn Provider> = Arc::new(ImmediateEmptyProvider);
     let registry = Registry::new(provider.clone()).await;
     let mut agent = Agent::new(provider, registry);
 

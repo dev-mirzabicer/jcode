@@ -28,6 +28,10 @@ enum Disposition {
     ClientInternal,
     /// A real gap. Worth exposing, not yet done. Every entry needs a reason
     /// that says what a client cannot build without it.
+    #[expect(
+        dead_code,
+        reason = "the capability ledger supports explicit gaps even when the current ledger has none"
+    )]
     Gap(&'static str),
 }
 
@@ -37,28 +41,39 @@ use Disposition::{ClientInternal, Covered, Gap};
 ///
 /// Sorted by name so additions produce clean diffs.
 const LEDGER: &[(&str, Disposition)] = &[
+    ("ApplyContextDraft", ClientInternal),
     ("BackgroundTool", ClientInternal),
     ("Cancel", Covered),
+    ("CancelContextDraft", ClientInternal),
     ("CancelSoftInterrupts", Covered),
     ("Clear", Covered),
     ("ClientDebugResponse", ClientInternal),
-    ("Compact", Covered),
     ("CycleModel", ClientInternal),
     ("GetCompactedHistory", ClientInternal),
+    ("GetContextDraftStatus", ClientInternal),
+    ("GetContextEditorSnapshot", ClientInternal),
+    ("GetContextMessageDetail", ClientInternal),
+    ("GetContextTransactionDetail", ClientInternal),
     ("GetHistory", Covered),
     ("GetModelCatalog", Covered),
     ("InputShell", ClientInternal),
+    ("ListContextTransactions", ClientInternal),
     ("Message", Covered),
     ("NotifyAuthChanged", Covered),
+    ("PrepareContextDraft", ClientInternal),
+    ("PreviewContextDraftSelection", ClientInternal),
+    ("PreviewContextRanges", ClientInternal),
     ("RefreshModels", ClientInternal),
+    ("ReapplyContextTransaction", ClientInternal),
     ("Reload", ClientInternal),
     ("RenameSession", Covered),
     ("ResumeAllSessions", ClientInternal),
     ("ResumeSession", ClientInternal),
+    ("RevertContextTransaction", ClientInternal),
     ("Rewind", Covered),
     ("RewindUndo", Covered),
     ("RunSubagent", ClientInternal),
-    ("SetCompactionMode", ClientInternal),
+    ("SetContextEmergencyPolicy", ClientInternal),
     ("SetFeature", ClientInternal),
     ("SetModel", Covered),
     ("SetPremiumMode", ClientInternal),

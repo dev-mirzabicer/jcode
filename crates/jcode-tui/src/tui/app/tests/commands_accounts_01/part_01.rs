@@ -1749,22 +1749,12 @@ fn test_context_undo_waits_for_authoritative_history_and_requires_confirmation()
 }
 
 #[test]
-fn test_compact_mode_commands_are_obsolete_and_do_not_mutate_local_mode() {
+fn test_compact_mode_commands_are_obsolete_and_do_not_open_or_stage_context_edits() {
     for command in ["/compact mode semantic", "/compact mode"] {
         let mut app = create_test_app();
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            app.registry
-                .legacy_compaction()
-                .write()
-                .await
-                .set_mode(crate::config::CompactionMode::Proactive);
-        });
         app.input = command.to_string();
         app.submit_input();
 
-        let mode = rt.block_on(async { app.registry.legacy_compaction().read().await.mode() });
-        assert_eq!(mode, crate::config::CompactionMode::Proactive);
         let last = app.display_messages().last().expect("missing response");
         assert_eq!(last.role, "system");
         assert_eq!(
