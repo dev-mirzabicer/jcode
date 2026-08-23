@@ -342,6 +342,28 @@ pub struct StoredContextArtifactGenerator {
     pub prompt_version: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<StoredContextCuratorRole>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection_source: Option<StoredContextCuratorSelectionSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transaction_instructions: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_instructions: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StoredContextCuratorRole {
+    RangeSummarizer,
+    ToolResultDistiller,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StoredContextCuratorSelectionSource {
+    ConfiguredDefault,
+    PerRunOverride,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -460,6 +482,14 @@ pub struct StoredContextCuratorUsage {
     pub provider: String,
     pub model: String,
     pub route: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<StoredContextCuratorRole>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_version: Option<String>,
     pub input_tokens: u64,
     pub output_tokens: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -594,8 +624,12 @@ mod tests {
             provider: "test-provider".to_string(),
             model: "test-model".to_string(),
             route: "test-route".to_string(),
-            prompt_version: "context-curator-v1".to_string(),
+            prompt_version: "context-range-summarizer-v2".to_string(),
             effort: Some("high".to_string()),
+            role: Some(StoredContextCuratorRole::RangeSummarizer),
+            selection_source: Some(StoredContextCuratorSelectionSource::PerRunOverride),
+            transaction_instructions: Some("Preserve benchmark evidence.".to_string()),
+            task_instructions: Some("Keep exact compiler diagnostics.".to_string()),
         }
     }
 
@@ -755,6 +789,10 @@ mod tests {
                 provider: "test-provider".to_string(),
                 model: "test-model".to_string(),
                 route: "test-route".to_string(),
+                effort: Some("high".to_string()),
+                role: Some(StoredContextCuratorRole::RangeSummarizer),
+                artifact_id: Some("range-1".to_string()),
+                prompt_version: Some("context-range-summarizer-v2".to_string()),
                 input_tokens: 15_000,
                 output_tokens: 2_000,
                 cache_read_input_tokens: Some(10_000),

@@ -1,5 +1,6 @@
 use crate::protocol::{
-    ContextActionRequiredReason, ContextDraft, ContextDraftIdentity, ContextDraftProgress,
+    ContextActionRequiredReason, ContextCuratorPlanPreview, ContextCuratorRoutePreview,
+    ContextCuratorSelection, ContextDraft, ContextDraftIdentity, ContextDraftProgress,
     ContextDraftSelectionPreview, ContextEditorSnapshot, ContextMessageDetail,
     ContextMessageRangeSelection, ContextPayloadPressure, ContextPendingInputMetadata,
     ContextPreflightReport, ContextRangeClosurePreview, ContextRequestKind, ContextServiceError,
@@ -16,7 +17,12 @@ pub(crate) struct ContextProtocolState {
     detail_request: Option<ContextDetailRequest>,
     pub detail: Option<ContextMessageDetail>,
     range_preview_request: Option<ContextRangePreviewRequest>,
+    pub range_preview_result_id: Option<u64>,
     pub range_preview: Option<ContextRangeClosurePreview>,
+    curator_plan_request: Option<ContextCuratorPlanRequest>,
+    pub curator_plan: Option<ContextCuratorPlanPreview>,
+    curator_default_request_id: Option<u64>,
+    pub curator_default_result: Option<ContextCuratorDefaultResult>,
     pub draft_monitor_request_id: Option<u64>,
     draft_monitor_request_kind: Option<ContextRequestKind>,
     pub tracked_draft_id: Option<String>,
@@ -55,6 +61,21 @@ struct ContextRangePreviewRequest {
     context_revision: u64,
     transcript_digest: u64,
     canonical_ranges: Vec<ContextMessageRangeSelection>,
+}
+
+#[derive(Clone)]
+struct ContextCuratorPlanRequest {
+    id: u64,
+    session_id: String,
+    context_revision: u64,
+    transcript_digest: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ContextCuratorDefaultResult {
+    pub selection: ContextCuratorSelection,
+    pub resolved_route: Option<ContextCuratorRoutePreview>,
+    pub unavailable_reason: Option<String>,
 }
 
 #[derive(Clone)]
@@ -273,12 +294,15 @@ impl ContextProtocolState {
                 "total": detail.content.total_chars,
             })),
             "range_request_id": self.range_preview_request.as_ref().map(|request| request.id),
+            "range_result_id": self.range_preview_result_id,
             "range_preview": self.range_preview.as_ref().map(|preview| serde_json::json!({
                 "session_id": preview.session_id,
                 "context_revision": preview.context_revision,
                 "ranges": preview.ranges.len(),
                 "shadowed": preview.shadowed_active_operations.len(),
             })),
+            "curator_plan_request_id": self.curator_plan_request.as_ref().map(|request| request.id),
+            "curator_default_request_id": self.curator_default_request_id,
             "draft_monitor_request_id": self.draft_monitor_request_id,
             "draft_monitor_request_kind": self.draft_monitor_request_kind,
             "tracked_draft_id": self.tracked_draft_id,
@@ -433,6 +457,7 @@ impl ContextProtocolState {
             transcript_digest,
             canonical_ranges: canonical_range_selections(ranges),
         });
+        self.range_preview_result_id = None;
         self.range_preview = None;
     }
 
@@ -459,7 +484,69 @@ impl ContextProtocolState {
             return false;
         }
         self.range_preview_request = None;
+        self.range_preview_result_id = Some(id);
         self.range_preview = Some(preview);
+        true
+    }
+
+    pub fn begin_curator_plan_request(
+        &mut self,
+        id: u64,
+        session_id: String,
+        context_revision: u64,
+        transcript_digest: u64,
+    ) {
+        self.last_rejection = None;
+        self.curator_plan_request = Some(ContextCuratorPlanRequest {
+            id,
+            session_id,
+            context_revision,
+            transcript_digest,
+        });
+        self.curator_plan = None;
+    }
+
+    pub fn accept_curator_plan(&mut self, id: u64, preview: ContextCuratorPlanPreview) -> bool {
+        let Some(expected) = self.curator_plan_request.as_ref() else {
+            return false;
+        };
+        if expected.id != id
+            || expected.session_id != preview.session_id
+            || expected.context_revision != preview.context_revision
+            || expected.transcript_digest != preview.transcript_digest
+            || self.accepted_session_id.as_deref() != Some(preview.session_id.as_str())
+            || self.accepted_context_revision != Some(preview.context_revision)
+            || self.accepted_transcript_digest != Some(preview.transcript_digest)
+        {
+            return false;
+        }
+        self.curator_plan_request = None;
+        self.curator_plan = Some(preview);
+        true
+    }
+
+    pub fn begin_curator_default_request(&mut self, id: u64) {
+        self.last_rejection = None;
+        self.curator_default_request_id = Some(id);
+        self.curator_default_result = None;
+    }
+
+    pub fn accept_curator_default_saved(
+        &mut self,
+        id: u64,
+        selection: ContextCuratorSelection,
+        resolved_route: Option<ContextCuratorRoutePreview>,
+        unavailable_reason: Option<String>,
+    ) -> bool {
+        if self.curator_default_request_id != Some(id) {
+            return false;
+        }
+        self.curator_default_request_id = None;
+        self.curator_default_result = Some(ContextCuratorDefaultResult {
+            selection,
+            resolved_route,
+            unavailable_reason,
+        });
         true
     }
 
@@ -772,6 +859,11 @@ impl ContextProtocolState {
                 .range_preview_request
                 .as_ref()
                 .is_some_and(|expected| expected.id == id),
+            ContextRequestKind::CuratorPlanPreview => self
+                .curator_plan_request
+                .as_ref()
+                .is_some_and(|expected| expected.id == id),
+            ContextRequestKind::SaveCuratorDefault => self.curator_default_request_id == Some(id),
             ContextRequestKind::PrepareDraft => {
                 self.draft_monitor_request_id == Some(id)
                     && self.draft_monitor_request_kind == Some(request)
@@ -841,6 +933,8 @@ impl ContextProtocolState {
             ContextRequestKind::Snapshot => self.snapshot_request_id = None,
             ContextRequestKind::MessageDetail => self.detail_request = None,
             ContextRequestKind::RangeClosurePreview => self.range_preview_request = None,
+            ContextRequestKind::CuratorPlanPreview => self.curator_plan_request = None,
+            ContextRequestKind::SaveCuratorDefault => self.curator_default_request_id = None,
             ContextRequestKind::PrepareDraft
             | ContextRequestKind::CancelDraft
             | ContextRequestKind::DraftStatus => {
@@ -924,7 +1018,10 @@ impl ContextProtocolState {
         self.detail_request = None;
         self.detail = None;
         self.range_preview_request = None;
+        self.range_preview_result_id = None;
         self.range_preview = None;
+        self.curator_plan_request = None;
+        self.curator_plan = None;
         self.draft_monitor_request_id = None;
         self.draft_monitor_request_kind = None;
         self.tracked_draft_id = None;
@@ -944,6 +1041,8 @@ impl ContextProtocolState {
         self.transaction_result = None;
         self.policy_request_id = None;
         self.emergency_policy = None;
+        self.curator_default_request_id = None;
+        self.curator_default_result = None;
         self.last_rejection = None;
     }
 
@@ -1125,6 +1224,8 @@ mod tests {
             emergency_policy: StoredContextEmergencyPolicy::Block,
             curator_route: None,
             curator_unavailable_reason: None,
+            curator_default: Default::default(),
+            curator_route_options: Vec::new(),
         }
     }
 
@@ -1539,6 +1640,60 @@ mod tests {
         assert!(!state.accept_snapshot(10, snapshot("session-1", 4, 99)));
         assert!(state.accept_snapshot(20, snapshot("session-1", 4, 99)));
         assert_eq!(state.active_editor_epoch(), Some(second_epoch));
+    }
+
+    #[test]
+    fn curator_plan_and_default_results_require_exact_request_and_snapshot_identity() {
+        let mut state = ContextProtocolState::default();
+        state.begin_editor_epoch();
+        state.begin_snapshot_request(1);
+        assert!(state.accept_snapshot(1, snapshot("session-1", 4, 99)));
+
+        let preview = ContextCuratorPlanPreview {
+            session_id: "session-1".to_string(),
+            context_revision: 4,
+            transcript_digest: 99,
+            route: ContextCuratorRoutePreview {
+                provider_name: "anthropic".to_string(),
+                provider_display_name: "Anthropic".to_string(),
+                model: "claude-fable-5".to_string(),
+                route: "anthropic-api".to_string(),
+                effort: Some("high".to_string()),
+            },
+            using_configured_default: false,
+            tasks: Vec::new(),
+            fingerprint: "a".repeat(64),
+        };
+        state.begin_curator_plan_request(10, "session-1".to_string(), 4, 99);
+        assert!(!state.accept_curator_plan(11, preview.clone()));
+        let mut stale = preview.clone();
+        stale.context_revision = 5;
+        assert!(!state.accept_curator_plan(10, stale));
+        assert!(state.accept_curator_plan(10, preview.clone()));
+        assert_eq!(state.curator_plan, Some(preview));
+
+        let selection = ContextCuratorSelection {
+            provider: Some("anthropic".to_string()),
+            route: Some("anthropic-api".to_string()),
+            model: Some("claude-fable-5".to_string()),
+            effort: Some("high".to_string()),
+        };
+        state.begin_curator_default_request(20);
+        assert!(!state.accept_curator_default_saved(21, selection.clone(), None, None));
+        assert!(state.accept_curator_default_saved(20, selection.clone(), None, None));
+        assert_eq!(
+            state
+                .curator_default_result
+                .as_ref()
+                .map(|result| &result.selection),
+            Some(&selection)
+        );
+
+        state.invalidate_revision_scoped();
+        assert!(state.curator_plan.is_none());
+        assert!(state.curator_default_result.is_some());
+        state.reset_editor_scoped();
+        assert!(state.curator_default_result.is_none());
     }
 
     #[test]

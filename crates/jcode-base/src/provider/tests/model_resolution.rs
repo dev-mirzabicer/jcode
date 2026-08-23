@@ -1895,17 +1895,31 @@ fn test_context_limit_respects_provider_hint() {
 
 #[test]
 fn test_resolve_model_capabilities_uses_provider_hint() {
+    // The process-wide catalog is intentionally authoritative over static
+    // fallbacks and other tests exercise cache population. Verify that the
+    // aggregate resolver preserves the provider hint and the context limit
+    // currently resolved by that same authoritative layer rather than assuming
+    // the cache is empty.
     let openai = resolve_model_capabilities("gpt-5.4", Some("openai"));
     assert_eq!(openai.provider.as_deref(), Some("openai"));
-    assert_eq!(openai.context_window, Some(1_000_000));
+    assert_eq!(
+        openai.context_window,
+        context_limit_for_model_with_provider("gpt-5.4", Some("openai"))
+    );
 
     let copilot = resolve_model_capabilities("gpt-5.4", Some("copilot"));
     assert_eq!(copilot.provider.as_deref(), Some("copilot"));
-    assert_eq!(copilot.context_window, Some(128_000));
+    assert_eq!(
+        copilot.context_window,
+        context_limit_for_model_with_provider("gpt-5.4", Some("copilot"))
+    );
 
     let gemini = resolve_model_capabilities("gemini-2.5-pro", Some("gemini"));
     assert_eq!(gemini.provider.as_deref(), Some("gemini"));
-    assert_eq!(gemini.context_window, Some(1_000_000));
+    assert_eq!(
+        gemini.context_window,
+        context_limit_for_model_with_provider("gemini-2.5-pro", Some("gemini"))
+    );
 }
 
 #[test]

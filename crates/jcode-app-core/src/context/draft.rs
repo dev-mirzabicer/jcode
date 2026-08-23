@@ -1,10 +1,14 @@
 use crate::agent::Agent;
 use crate::context::change_digest::extract_context_change_evidence;
 use crate::context::commit::selected_distillation_operations;
+#[cfg(test)]
+use crate::context::curator::RANGE_SUMMARIZER_BASE_PROMPT;
 use crate::context::curator::{
-    ContextCuratorArtifacts, ContextCuratorLimits, ContextCuratorRangeWork, ContextCuratorRoute,
-    ContextCuratorToolArtifact, ContextCuratorToolWork, resolve_context_curator_route,
-    run_context_curator,
+    CONTEXT_RANGE_SUMMARIZER_PROMPT_VERSION, CONTEXT_TOOL_DISTILLER_PROMPT_VERSION,
+    ContextCuratorArtifacts, ContextCuratorLimits, ContextCuratorPlan, ContextCuratorPlanInput,
+    ContextCuratorRangeWork, ContextCuratorRoute, ContextCuratorToolArtifact,
+    ContextCuratorToolWork, build_context_curator_plan, curator_route_options,
+    resolve_context_curator_route, run_context_curator_plan,
 };
 use crate::context::provider_validation::require_supported_projected_messages;
 use crate::context::{
@@ -15,11 +19,14 @@ use crate::message::ContentBlock;
 #[cfg(test)]
 use crate::protocol::ContextToolResultSelection;
 use crate::protocol::{
-    CONTEXT_IDENTIFIER_MAX_CHARS, ContextClosedRangePreview, ContextDistillationProposal,
-    ContextDraft, ContextDraftIdentity, ContextDraftPhase, ContextDraftPreview,
-    ContextDraftProgress, ContextDraftRequest, ContextDraftSelectionPreview, ContextDraftStatus,
-    ContextIneligibleDistillation, ContextMessageRangeSelection, ContextOperationPreview,
-    ContextRangeClosurePreview, ContextReasoningSelectionRequest, ContextServiceError,
+    CONTEXT_CURATOR_INSTRUCTION_MAX_CHARS, CONTEXT_CURATOR_TOTAL_INSTRUCTION_MAX_CHARS,
+    CONTEXT_IDENTIFIER_MAX_CHARS, CONTEXT_MAX_SUMMARY_RANGES, ContextClosedRangePreview,
+    ContextCuratorPlanPreview, ContextCuratorRunConfig, ContextCuratorSelection,
+    ContextDistillationProposal, ContextDraft, ContextDraftIdentity, ContextDraftPhase,
+    ContextDraftPreview, ContextDraftProgress, ContextDraftRequest, ContextDraftSelectionPreview,
+    ContextDraftStatus, ContextIneligibleDistillation, ContextMessageRangeSelection,
+    ContextOperationPreview, ContextRangeClosurePreview, ContextReasoningSelectionRequest,
+    ContextServiceError,
 };
 use crate::provider::ContextProjectionValidationReport;
 use crate::provider::{
@@ -35,11 +42,11 @@ use jcode_context_core::{
     resolve_reasoning_suppression_keep_latest, validate_context_state,
 };
 use jcode_session_types::{
-    StoredContextAuthorization, StoredContextBlockKind, StoredContextCuratorUsage,
-    StoredContextEconomics, StoredContextOperation, StoredContextStatusEvent,
-    StoredContextTransaction, StoredContextTransactionStatusKind, StoredContextViewState,
-    StoredMessage, StoredMessageRange, StoredRangeSummary, StoredReasoningSuppression,
-    StoredToolResultDistillation,
+    StoredContextAuthorization, StoredContextBlockKind, StoredContextCuratorRole,
+    StoredContextCuratorSelectionSource, StoredContextCuratorUsage, StoredContextEconomics,
+    StoredContextOperation, StoredContextStatusEvent, StoredContextTransaction,
+    StoredContextTransactionStatusKind, StoredContextViewState, StoredMessage, StoredMessageRange,
+    StoredRangeSummary, StoredReasoningSuppression, StoredToolResultDistillation,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -66,6 +73,107 @@ fn bounded_context_metadata(value: &str, max_chars: usize) -> String {
         .collect::<String>();
     bounded.push('…');
     bounded
+}
+
+fn curator_selection_from_config(
+    config: &crate::config::ContextCuratorConfig,
+) -> ContextCuratorSelection {
+    ContextCuratorSelection {
+        provider: config.provider.clone(),
+        route: config.route.clone(),
+        model: config.model.clone(),
+        effort: config.effort.clone(),
+    }
+}
+
+fn effective_curator_config(
+    configured_default: &crate::config::ContextCuratorConfig,
+    run: &ContextCuratorRunConfig,
+) -> (
+    crate::config::ContextCuratorConfig,
+    StoredContextCuratorSelectionSource,
+) {
+    match run.selection.as_ref() {
+        None => (
+            configured_default.clone(),
+            StoredContextCuratorSelectionSource::ConfiguredDefault,
+        ),
+        Some(selection) => (
+            crate::config::ContextCuratorConfig {
+                provider: selection.provider.clone(),
+                route: selection.route.clone(),
+                model: selection.model.clone(),
+                effort: selection.effort.clone(),
+            },
+            StoredContextCuratorSelectionSource::PerRunOverride,
+        ),
+    }
+}
+
+pub(crate) fn validate_context_curator_selection(
+    selection: &ContextCuratorSelection,
+) -> Result<(), ContextServiceError> {
+    for (value, label) in [
+        (selection.provider.as_deref(), "curator provider"),
+        (selection.route.as_deref(), "curator route"),
+        (selection.model.as_deref(), "curator model"),
+        (selection.effort.as_deref(), "curator effort"),
+    ] {
+        if let Some(value) = value {
+            let chars = value.chars().count();
+            if value.trim().is_empty() || chars > CONTEXT_IDENTIFIER_MAX_CHARS {
+                return Err(ContextServiceError::InvalidSelection(format!(
+                    "{label} must contain between 1 and {CONTEXT_IDENTIFIER_MAX_CHARS} characters"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_context_curator_run_config(
+    run: &ContextCuratorRunConfig,
+) -> Result<(), ContextServiceError> {
+    if let Some(selection) = run.selection.as_ref() {
+        validate_context_curator_selection(selection)?;
+    }
+    if run.range_instructions.len() > CONTEXT_MAX_SUMMARY_RANGES {
+        return Err(ContextServiceError::InvalidSelection(format!(
+            "at most {CONTEXT_MAX_SUMMARY_RANGES} range-specific curator instructions may be supplied"
+        )));
+    }
+    let mut total_chars = run.transaction_instructions.chars().count();
+    if total_chars > CONTEXT_CURATOR_INSTRUCTION_MAX_CHARS {
+        return Err(ContextServiceError::InvalidSelection(format!(
+            "transaction-wide curator instructions contain {total_chars} characters, exceeding the {CONTEXT_CURATOR_INSTRUCTION_MAX_CHARS}-character per-field bound"
+        )));
+    }
+    for item in &run.range_instructions {
+        let chars = item.instructions.chars().count();
+        if chars > CONTEXT_CURATOR_INSTRUCTION_MAX_CHARS {
+            return Err(ContextServiceError::InvalidSelection(format!(
+                "range-specific curator instructions contain {chars} characters, exceeding the {CONTEXT_CURATOR_INSTRUCTION_MAX_CHARS}-character per-field bound"
+            )));
+        }
+        total_chars = total_chars.saturating_add(chars);
+    }
+    if total_chars > CONTEXT_CURATOR_TOTAL_INSTRUCTION_MAX_CHARS {
+        return Err(ContextServiceError::InvalidSelection(format!(
+            "curator instructions contain {total_chars} characters in total, exceeding the {CONTEXT_CURATOR_TOTAL_INSTRUCTION_MAX_CHARS}-character bound"
+        )));
+    }
+    if let Some(fingerprint) = run.expected_plan_fingerprint.as_deref()
+        && (fingerprint.len() != 64
+            || !fingerprint
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()))
+    {
+        return Err(ContextServiceError::InvalidSelection(
+            "curator plan fingerprint must be exactly 64 lowercase hexadecimal characters"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -223,6 +331,8 @@ impl ContextTransactionService {
         if let Some(projected_request_tokens) = projected_request_tokens {
             snapshot.projected_request_tokens = projected_request_tokens;
         }
+        snapshot.curator_default = curator_selection_from_config(curator_config);
+        snapshot.curator_route_options = curator_route_options(&provider.model_routes());
         match resolve_context_curator_route(
             provider.fork(),
             &provider.model_routes(),
@@ -432,6 +542,93 @@ impl ContextTransactionService {
         })
     }
 
+    pub fn preview_context_curator_plan(
+        &self,
+        agent: &mut Agent,
+        processing: bool,
+        expected_context_revision: u64,
+        expected_transcript_digest: u64,
+        request: ContextDraftRequest,
+    ) -> Result<ContextCuratorPlanPreview, ContextServiceError> {
+        let provider = agent.provider_handle();
+        self.preview_context_curator_plan_for_session(
+            agent.session_id(),
+            agent.messages(),
+            agent.context_view_state(),
+            processing,
+            provider.as_ref(),
+            &agent.context_route_identity(),
+            &agent.model_routes(),
+            expected_context_revision,
+            expected_transcript_digest,
+            request,
+            &crate::config::config().context.curator,
+        )
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "exact curator preview retains authoritative session, route, transcript, and configured-default identity"
+    )]
+    pub fn preview_context_curator_plan_for_session(
+        &self,
+        session_id: &str,
+        messages: &[StoredMessage],
+        context_view: &StoredContextViewState,
+        processing: bool,
+        provider: &dyn Provider,
+        route: &str,
+        model_routes: &[ModelRoute],
+        expected_context_revision: u64,
+        expected_transcript_digest: u64,
+        request: ContextDraftRequest,
+        configured_default: &crate::config::ContextCuratorConfig,
+    ) -> Result<ContextCuratorPlanPreview, ContextServiceError> {
+        if processing {
+            return Err(ContextServiceError::SessionBusy);
+        }
+        if context_view.revision != expected_context_revision {
+            return Err(ContextServiceError::Stale(format!(
+                "context revision changed from {expected_context_revision} to {}",
+                context_view.revision
+            )));
+        }
+        let transcript_digest = authoritative_transcript_digest(messages);
+        if transcript_digest != expected_transcript_digest {
+            return Err(ContextServiceError::Stale(format!(
+                "transcript digest changed from {expected_transcript_digest} to {transcript_digest}"
+            )));
+        }
+        if request.is_empty() {
+            return Err(ContextServiceError::EmptyRequest);
+        }
+        let (effective_config, _) = effective_curator_config(configured_default, &request.curator);
+        let now = Utc::now();
+        let identity = ContextDraftIdentity {
+            draft_id: format!("preview-{}", Uuid::new_v4()),
+            session_id: session_id.to_string(),
+            base_context_revision: context_view.revision,
+            raw_message_count: messages.len(),
+            transcript_digest,
+            provider_name: provider.name().to_string(),
+            model: provider.model(),
+            route: route.to_string(),
+            created_at: now,
+            expires_at: now,
+        };
+        let capture = capture_context_draft(messages, context_view, identity, request)?;
+        if capture.ranges.is_empty() && capture.tools.is_empty() {
+            return Err(ContextServiceError::InvalidSelection(
+                "the staged request contains no range-summary or tool-distillation curator task"
+                    .to_string(),
+            ));
+        }
+        let curator_route =
+            resolve_context_curator_route(provider.fork(), model_routes, route, &effective_config)
+                .map_err(|error| ContextServiceError::Curator(error.to_string()))?;
+        self.preview_plan_from_capture(&curator_route, &capture)
+    }
+
     pub fn prepare_draft(
         self: &Arc<Self>,
         agent: Arc<AsyncMutex<Agent>>,
@@ -459,6 +656,8 @@ impl ContextTransactionService {
         if request.is_empty() {
             return Err(ContextServiceError::EmptyRequest);
         }
+        let (effective_curator_config, _) =
+            effective_curator_config(curator_config, &request.curator);
         let guard = agent
             .try_lock()
             .map_err(|_| ContextServiceError::SessionBusy)?;
@@ -495,11 +694,15 @@ impl ContextTransactionService {
                     provider_fork,
                     &model_routes,
                     &identity.route,
-                    curator_config,
+                    &effective_curator_config,
                 )
                 .map_err(|error| ContextServiceError::Curator(error.to_string()))?,
             )
         };
+        let plan = route
+            .as_ref()
+            .map(|route| build_plan_for_capture(route, &capture, self.limits.curator, true))
+            .transpose()?;
         drop(guard);
 
         let reserved_bytes = serde_json::to_vec(&capture)
@@ -533,7 +736,7 @@ impl ContextTransactionService {
         let service = Arc::clone(self);
         runtime.spawn(async move {
             service
-                .prepare_draft_task(agent, capture, route, cancellation)
+                .prepare_draft_task(agent, capture, route, plan, cancellation)
                 .await;
         });
         Ok(draft_id)
@@ -551,6 +754,9 @@ impl ContextTransactionService {
         if request.is_empty() {
             return Err(ContextServiceError::EmptyRequest);
         }
+        let configured_default = crate::config::config().context.curator.clone();
+        let (effective_curator_config, _) =
+            effective_curator_config(&configured_default, &request.curator);
         let draft_id = Uuid::new_v4().to_string();
         let created_at = Utc::now();
         let expires_at = created_at
@@ -582,11 +788,15 @@ impl ContextTransactionService {
                     input.provider.fork(),
                     &input.model_routes,
                     &identity.route,
-                    &crate::config::config().context.curator,
+                    &effective_curator_config,
                 )
                 .map_err(|error| ContextServiceError::Curator(error.to_string()))?,
             )
         };
+        let plan = route
+            .as_ref()
+            .map(|route| build_plan_for_capture(route, &capture, self.limits.curator, true))
+            .transpose()?;
         let reserved_bytes = serde_json::to_vec(&capture)
             .map(|bytes| bytes.len())
             .unwrap_or(self.limits.max_total_bytes);
@@ -620,6 +830,7 @@ impl ContextTransactionService {
                 .prepare_draft_task_for_session(
                     capture,
                     route,
+                    plan,
                     input.provider,
                     input.estimated_total_request_tokens_before,
                     cancellation,
@@ -835,11 +1046,20 @@ impl ContextTransactionService {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    fn preview_plan_from_capture(
+        &self,
+        route: &ContextCuratorRoute,
+        capture: &CapturedContextDraft,
+    ) -> Result<ContextCuratorPlanPreview, ContextServiceError> {
+        build_plan_for_capture(route, capture, self.limits.curator, false).map(|plan| plan.preview)
+    }
+
     async fn prepare_draft_task(
         self: Arc<Self>,
         agent: Arc<AsyncMutex<Agent>>,
         capture: CapturedContextDraft,
         route: Option<ContextCuratorRoute>,
+        plan: Option<ContextCuratorPlan>,
         cancellation: CancellationToken,
     ) {
         let draft_id = capture.identity.draft_id.clone();
@@ -849,20 +1069,32 @@ impl ContextTransactionService {
             0,
             capture.ranges.len().saturating_add(capture.tools.len()),
         );
-        let artifacts = match route.as_ref() {
-            Some(route) => {
-                run_context_curator(
+        let total_items = capture.ranges.len().saturating_add(capture.tools.len());
+        let artifacts = match (route.as_ref(), plan.as_ref()) {
+            (Some(route), Some(plan)) => {
+                run_context_curator_plan(
                     route,
                     &capture.messages,
-                    &capture.ranges,
-                    &capture.tools,
-                    &capture.active_summary_texts,
+                    plan,
                     &cancellation,
                     self.limits.curator,
+                    |completed, _| {
+                        self.update_progress(
+                            &draft_id,
+                            ContextDraftPhase::PreparingArtifacts,
+                            completed,
+                            total_items,
+                        );
+                    },
                 )
                 .await
             }
-            None => Ok(ContextCuratorArtifacts::default()),
+            (None, None) => Ok(ContextCuratorArtifacts::default()),
+            _ => Err(
+                crate::context::curator::ContextCuratorError::InvalidResponse(
+                    "curator route and atomic plan availability diverged".to_string(),
+                ),
+            ),
         };
         let artifacts = match artifacts {
             Ok(artifacts) => artifacts,
@@ -921,6 +1153,7 @@ impl ContextTransactionService {
         self: Arc<Self>,
         capture: CapturedContextDraft,
         route: Option<ContextCuratorRoute>,
+        plan: Option<ContextCuratorPlan>,
         provider: Arc<dyn Provider>,
         estimated_total_request_tokens_before: Option<usize>,
         cancellation: CancellationToken,
@@ -932,20 +1165,32 @@ impl ContextTransactionService {
             0,
             capture.ranges.len().saturating_add(capture.tools.len()),
         );
-        let artifacts = match route.as_ref() {
-            Some(route) => {
-                run_context_curator(
+        let total_items = capture.ranges.len().saturating_add(capture.tools.len());
+        let artifacts = match (route.as_ref(), plan.as_ref()) {
+            (Some(route), Some(plan)) => {
+                run_context_curator_plan(
                     route,
                     &capture.messages,
-                    &capture.ranges,
-                    &capture.tools,
-                    &capture.active_summary_texts,
+                    plan,
                     &cancellation,
                     self.limits.curator,
+                    |completed, _| {
+                        self.update_progress(
+                            &draft_id,
+                            ContextDraftPhase::PreparingArtifacts,
+                            completed,
+                            total_items,
+                        );
+                    },
                 )
                 .await
             }
-            None => Ok(ContextCuratorArtifacts::default()),
+            (None, None) => Ok(ContextCuratorArtifacts::default()),
+            _ => Err(
+                crate::context::curator::ContextCuratorError::InvalidResponse(
+                    "curator route and atomic plan availability diverged".to_string(),
+                ),
+            ),
         };
         let artifacts = match artifacts {
             Ok(artifacts) => artifacts,
@@ -1088,6 +1333,50 @@ impl ContextTransactionService {
     }
 }
 
+fn build_plan_for_capture(
+    route: &ContextCuratorRoute,
+    capture: &CapturedContextDraft,
+    limits: ContextCuratorLimits,
+    require_reviewed_fingerprint: bool,
+) -> Result<ContextCuratorPlan, ContextServiceError> {
+    let plan = build_context_curator_plan(
+        route,
+        ContextCuratorPlanInput {
+            session_id: &capture.identity.session_id,
+            context_revision: capture.identity.base_context_revision,
+            transcript_digest: capture.identity.transcript_digest,
+            messages: &capture.messages,
+            ranges: &capture.ranges,
+            tools: &capture.tools,
+            active_summary_texts: &capture.active_summary_texts,
+            transaction_instructions: &capture.transaction_instructions,
+            selection_source: capture.curator_selection_source,
+        },
+        limits,
+    )
+    .map_err(|error| ContextServiceError::Curator(error.to_string()))?;
+    if require_reviewed_fingerprint
+        && matches!(
+            &capture.authorization,
+            StoredContextAuthorization::Manual { .. }
+        )
+    {
+        let Some(expected) = capture.expected_plan_fingerprint.as_deref() else {
+            return Err(ContextServiceError::InvalidSelection(
+                "manual curator preparation requires an exact reviewed plan fingerprint"
+                    .to_string(),
+            ));
+        };
+        if expected != plan.preview.fingerprint {
+            return Err(ContextServiceError::Stale(
+                "the effective curator route, prompts, limits, or source scope changed after review; prepare a fresh exact preview"
+                    .to_string(),
+            ));
+        }
+    }
+    Ok(plan)
+}
+
 #[derive(Clone, Serialize)]
 pub(crate) struct CapturedRange {
     request_id: String,
@@ -1129,6 +1418,9 @@ struct CapturedContextDraft {
     reasoning: Option<StoredReasoningSuppression>,
     tools: Vec<ContextCuratorToolWork>,
     active_summary_texts: Vec<String>,
+    curator_selection_source: StoredContextCuratorSelectionSource,
+    transaction_instructions: String,
+    expected_plan_fingerprint: Option<String>,
     notices: Vec<String>,
 }
 
@@ -1138,6 +1430,7 @@ fn capture_context_draft(
     identity: ContextDraftIdentity,
     request: ContextDraftRequest,
 ) -> Result<CapturedContextDraft, ContextServiceError> {
+    validate_context_curator_run_config(&request.curator)?;
     let messages = messages.to_vec();
     let base_context_view = context_view.clone();
     validate_context_state(&base_context_view)
@@ -1145,7 +1438,10 @@ fn capture_context_draft(
     project_context(&messages, &base_context_view)
         .map_err(|error| ContextServiceError::Projection(error.to_string()))?;
     let message_indices = unique_message_indices(&messages)?;
+    let range_instructions =
+        resolve_range_instructions(&request.summary_ranges, &request.curator.range_instructions)?;
     let resolved = resolve_summary_ranges(&messages, &base_context_view, &request.summary_ranges)?;
+    let requested_ranges = resolved.requested_ranges;
     let closed_ranges = resolved.closed_ranges;
     let shadowed = resolved.shadowed_active_operations;
     if !shadowed.is_empty() && !request.allow_shadowing_active_operations {
@@ -1171,12 +1467,28 @@ fn capture_context_draft(
             .map(|message| estimate_message_tokens(&message.to_message()))
             .fold(0usize, usize::saturating_add);
         let request_id = format!("range-{}", index + 1);
+        let requested = requested_ranges
+            .iter()
+            .find(|requested| {
+                requested.start == closed.requested_start && requested.end == closed.requested_end
+            })
+            .ok_or_else(|| {
+                ContextServiceError::Runtime(format!(
+                    "closed range {}..={} lost its requested stable-message identity",
+                    closed.requested_start, closed.requested_end
+                ))
+            })?;
+        let additional_instructions = range_instructions
+            .get(&canonical_range_key(&requested.selection))
+            .cloned()
+            .unwrap_or_default();
         ranges.push(ContextCuratorRangeWork {
             request_id: request_id.clone(),
             source_range: source_range.clone(),
             changed_files: evidence.changed_files.clone(),
             change_evidence_complete: evidence.complete,
             change_evidence_warnings: evidence.warnings.clone(),
+            additional_instructions,
         });
         range_metadata.push(CapturedRange {
             request_id,
@@ -1335,8 +1647,56 @@ fn capture_context_draft(
         reasoning,
         tools,
         active_summary_texts,
+        curator_selection_source: if request.curator.selection.is_some() {
+            StoredContextCuratorSelectionSource::PerRunOverride
+        } else {
+            StoredContextCuratorSelectionSource::ConfiguredDefault
+        },
+        transaction_instructions: request.curator.transaction_instructions,
+        expected_plan_fingerprint: request.curator.expected_plan_fingerprint,
         notices,
     })
+}
+
+fn canonical_range_key(selection: &ContextMessageRangeSelection) -> (String, String) {
+    if selection.start_message_id <= selection.end_message_id {
+        (
+            selection.start_message_id.clone(),
+            selection.end_message_id.clone(),
+        )
+    } else {
+        (
+            selection.end_message_id.clone(),
+            selection.start_message_id.clone(),
+        )
+    }
+}
+
+fn resolve_range_instructions(
+    selected_ranges: &[ContextMessageRangeSelection],
+    instructions: &[crate::protocol::ContextCuratorRangeInstructions],
+) -> Result<BTreeMap<(String, String), String>, ContextServiceError> {
+    let selected = selected_ranges
+        .iter()
+        .map(canonical_range_key)
+        .collect::<BTreeSet<_>>();
+    let mut resolved = BTreeMap::new();
+    for item in instructions {
+        let key = canonical_range_key(&item.range);
+        if !selected.contains(&key) {
+            return Err(ContextServiceError::InvalidSelection(format!(
+                "range-specific curator instructions reference an unstaged range {}..{}",
+                item.range.start_message_id, item.range.end_message_id
+            )));
+        }
+        if resolved.insert(key, item.instructions.clone()).is_some() {
+            return Err(ContextServiceError::InvalidSelection(format!(
+                "range-specific curator instructions were supplied more than once for {}..{}",
+                item.range.start_message_id, item.range.end_message_id
+            )));
+        }
+    }
+    Ok(resolved)
 }
 
 fn resolve_summary_ranges(
@@ -1607,8 +1967,8 @@ fn build_ready_draft_inner(
     route: Option<ContextCuratorRoute>,
     artifacts: ContextCuratorArtifacts,
 ) -> Result<ContextDraft, ContextServiceError> {
-    let generator = match route.as_ref() {
-        Some(route) => Some(route.generator()),
+    let curator_route = match route.as_ref() {
+        Some(route) => Some(route),
         None if capture.range_metadata.is_empty() && capture.tools.is_empty() => None,
         None => {
             return Err(ContextServiceError::Curator(
@@ -1620,6 +1980,16 @@ fn build_ready_draft_inner(
     let now = Utc::now();
     let mut required_operations = Vec::new();
     for metadata in &capture.range_metadata {
+        let work = capture
+            .ranges
+            .iter()
+            .find(|range| range.request_id == metadata.request_id)
+            .ok_or_else(|| {
+                ContextServiceError::Curator(format!(
+                    "missing captured range work {}",
+                    metadata.request_id
+                ))
+            })?;
         let artifact = artifacts
             .range_summaries
             .get(&metadata.request_id)
@@ -1638,7 +2008,22 @@ fn build_ready_draft_inner(
             changed_files: metadata.changed_files.clone(),
             change_evidence_complete: metadata.change_evidence_complete,
             boundary_expansions: metadata.boundary_expansions.clone(),
-            generator: generator.clone(),
+            generator: Some(
+                curator_route
+                    .ok_or_else(|| {
+                        ContextServiceError::Curator(format!(
+                            "range artifact {} has no independent curator route identity",
+                            metadata.request_id
+                        ))
+                    })?
+                    .generator(
+                        StoredContextCuratorRole::RangeSummarizer,
+                        CONTEXT_RANGE_SUMMARIZER_PROMPT_VERSION,
+                        capture.curator_selection_source,
+                        &capture.transaction_instructions,
+                        &work.additional_instructions,
+                    ),
+            ),
             source_token_estimate: metadata.source_token_estimate,
             replacement_token_estimate: 0,
             warnings,
@@ -1683,11 +2068,19 @@ fn build_ready_draft_inner(
                     replacement_ratio_millionths: ratio,
                     preservation_rationale,
                     uncertainties,
-                    generator: generator.clone().ok_or_else(|| {
-                        ContextServiceError::Curator(format!(
-                            "tool artifact {request_id} has no independent curator route identity"
-                        ))
-                    })?,
+                    generator: curator_route
+                        .ok_or_else(|| {
+                            ContextServiceError::Curator(format!(
+                                "tool artifact {request_id} has no independent curator route identity"
+                            ))
+                        })?
+                        .generator(
+                            StoredContextCuratorRole::ToolResultDistiller,
+                            CONTEXT_TOOL_DISTILLER_PROMPT_VERSION,
+                            capture.curator_selection_source,
+                            &capture.transaction_instructions,
+                            "",
+                        ),
                     created_at: now,
                 };
                 if !operation.is_strictly_below_percent(20) {
@@ -1764,7 +2157,7 @@ fn build_ready_draft_inner(
         distillation_proposals: proposals,
         ineligible_distillations: ineligible,
         preview,
-        curator_usage: artifacts.usage.into_iter().collect(),
+        curator_usage: artifacts.usage,
     })
 }
 
@@ -3300,17 +3693,21 @@ mod orchestration_tests {
                             .expect("curator-release semaphore")
                             .forget();
                     }
-                    let response = serde_json::to_string(&serde_json::json!({
-                        "range_summaries": [],
-                        "tool_distillations": [{
-                            "request_id": "tool-1",
+                    let response = if system.starts_with(RANGE_SUMMARIZER_BASE_PROMPT) {
+                        serde_json::to_string(&serde_json::json!({
+                            "summary": "All operationally relevant range facts are preserved.",
+                            "file_change_digest": "No structured file changes were observed.",
+                            "warnings": []
+                        }))?
+                    } else {
+                        serde_json::to_string(&serde_json::json!({
                             "eligible": true,
                             "replacement": DISTILLED_RESULT,
                             "preservation_rationale": "The exact success state and absence of file changes are preserved.",
                             "ineligible_reason": null,
                             "uncertainties": []
-                        }]
-                    }))?;
+                        }))?
+                    };
                     Ok(Box::pin(stream::iter(vec![
                         Ok(StreamEvent::TextDelta(response)),
                         Ok(StreamEvent::TokenUsage {
@@ -3374,6 +3771,13 @@ mod orchestration_tests {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(effort.to_string());
             Ok(())
+        }
+
+        fn reasoning_effort(&self) -> Option<String> {
+            self.effort
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
         }
 
         fn context_window(&self) -> usize {
@@ -3518,6 +3922,7 @@ mod orchestration_tests {
                 block_ordinal: 0,
             }],
             allow_shadowing_active_operations: false,
+            curator: Default::default(),
             authorization: StoredContextAuthorization::Manual {
                 initiated_by: Some("orchestration-test".to_string()),
             },
@@ -3541,9 +3946,21 @@ mod orchestration_tests {
         service: &Arc<ContextTransactionService>,
         agent: Arc<AsyncMutex<Agent>>,
     ) -> Result<String, ContextServiceError> {
+        let mut request = request();
+        let fingerprint = {
+            let mut guard = agent
+                .try_lock()
+                .map_err(|_| ContextServiceError::SessionBusy)?;
+            let revision = guard.context_view_state().revision;
+            let digest = authoritative_transcript_digest(guard.messages());
+            service
+                .preview_context_curator_plan(&mut guard, false, revision, digest, request.clone())?
+                .fingerprint
+        };
+        request.curator.expected_plan_fingerprint = Some(fingerprint);
         service.prepare_draft_with_curator_config(
             agent,
-            request(),
+            request,
             false,
             &crate::config::ContextCuratorConfig::default(),
         )
@@ -3653,6 +4070,7 @@ mod orchestration_tests {
                 None,
                 &crate::config::ContextCuratorConfig {
                     provider: Some("curator-upstream".to_string()),
+                    route: None,
                     model: Some("selected-curator-model".to_string()),
                     effort: Some("high".to_string()),
                 },
@@ -3695,6 +4113,7 @@ mod orchestration_tests {
                 None,
                 &crate::config::ContextCuratorConfig {
                     provider: Some("missing-provider".to_string()),
+                    route: None,
                     model: Some("missing-model".to_string()),
                     effort: None,
                 },
@@ -3723,6 +4142,7 @@ mod orchestration_tests {
                 None,
                 &crate::config::ContextCuratorConfig {
                     provider: Some("same-provider".to_string()),
+                    route: None,
                     model: Some("same-model".to_string()),
                     effort: None,
                 },
@@ -3771,6 +4191,7 @@ mod orchestration_tests {
                 None,
                 &crate::config::ContextCuratorConfig {
                     provider: Some(long_selector),
+                    route: None,
                     model: Some("missing-model".to_string()),
                     effort: None,
                 },
@@ -3779,9 +4200,65 @@ mod orchestration_tests {
         let reason = bounded
             .curator_unavailable_reason
             .expect("bounded unavailable reason");
-        assert_eq!(reason.chars().count(), CONTEXT_IDENTIFIER_MAX_CHARS);
-        assert!(reason.ends_with('…'));
+        assert!(reason.chars().count() <= CONTEXT_IDENTIFIER_MAX_CHARS);
+        assert!(reason.contains("exceeding the 512-character bound"));
         assert!(!reason.contains(RAW_RESULT_SENTINEL));
+    }
+
+    #[tokio::test]
+    async fn manual_curator_generation_requires_the_exact_reviewed_plan() {
+        let provider = DraftProvider::new();
+        let agent = test_agent(&provider);
+        let (service, _) = test_service(ContextServiceLimits::default());
+
+        let missing = service
+            .prepare_draft_with_curator_config(
+                Arc::clone(&agent),
+                request(),
+                false,
+                &crate::config::ContextCuratorConfig::default(),
+            )
+            .expect_err("unreviewed manual generation must fail");
+        assert!(matches!(missing, ContextServiceError::InvalidSelection(_)));
+
+        let mut reviewed = request();
+        let fingerprint = {
+            let guard = agent.lock().await;
+            let provider_handle = guard.provider_handle();
+            let route = guard.context_route_identity();
+            let routes = guard.model_routes();
+            service
+                .preview_context_curator_plan_for_session(
+                    guard.session_id(),
+                    guard.messages(),
+                    guard.context_view_state(),
+                    false,
+                    provider_handle.as_ref(),
+                    &route,
+                    &routes,
+                    guard.context_view_state().revision,
+                    authoritative_transcript_digest(guard.messages()),
+                    reviewed.clone(),
+                    &crate::config::ContextCuratorConfig::default(),
+                )
+                .expect("exact manual preview")
+                .fingerprint
+        };
+        reviewed.curator.expected_plan_fingerprint = Some(fingerprint);
+        let stale = service
+            .prepare_draft_with_curator_config(
+                Arc::clone(&agent),
+                reviewed,
+                false,
+                &crate::config::ContextCuratorConfig {
+                    model: Some("changed-curator-model".to_string()),
+                    ..crate::config::ContextCuratorConfig::default()
+                },
+            )
+            .expect_err("changed effective curator plan must fail");
+        assert!(matches!(stale, ContextServiceError::Stale(_)));
+        assert!(provider.curator_calls().is_empty());
+        assert!(service.lock_store().entries.is_empty());
     }
 
     #[tokio::test]
@@ -3790,7 +4267,23 @@ mod orchestration_tests {
         provider.gate_curator();
         let agent = test_agent(&provider);
         let (service, _) = test_service(ContextServiceLimits::default());
-        let draft_request = request();
+        let mut draft_request = request();
+        let fingerprint = {
+            let mut guard = agent.lock().await;
+            let revision = guard.context_view_state().revision;
+            let digest = authoritative_transcript_digest(guard.messages());
+            service
+                .preview_context_curator_plan(
+                    &mut guard,
+                    false,
+                    revision,
+                    digest,
+                    draft_request.clone(),
+                )
+                .expect("review exact gated curator plan")
+                .fingerprint
+        };
+        draft_request.curator.expected_plan_fingerprint = Some(fingerprint);
         let draft_id = service
             .prepare_draft_with_curator_config(
                 Arc::clone(&agent),
@@ -3864,15 +4357,30 @@ mod orchestration_tests {
         assert!(
             curator_calls[0]
                 .system
-                .contains("user-authorized, reversible provider-context transaction")
+                .contains("__tool-result distiller__")
         );
+        assert!(!curator_calls[0].system.contains("__range summarizer__"));
         let curator_messages = serde_json::to_string(&curator_calls[0].messages).expect("messages");
-        assert!(curator_messages.contains("tool_distillation_requests"));
+        assert!(curator_messages.contains("complete_tool_result"));
+        assert!(!curator_messages.contains("tool_distillation_requests"));
+        assert!(!curator_messages.contains("request_id"));
         assert!(curator_messages.contains(RAW_RESULT_SENTINEL));
         assert_eq!(draft.default_selected_distillation_ids(), vec!["tool-1"]);
         assert_eq!(draft.curator_usage.len(), 1);
         assert_eq!(draft.curator_usage[0].input_tokens, 120);
         assert_eq!(draft.curator_usage[0].output_tokens, 30);
+        assert_eq!(
+            draft.curator_usage[0].role,
+            Some(StoredContextCuratorRole::ToolResultDistiller)
+        );
+        assert_eq!(
+            draft.curator_usage[0].artifact_id.as_deref(),
+            Some("tool-1")
+        );
+        assert_eq!(
+            draft.curator_usage[0].prompt_version.as_deref(),
+            Some(CONTEXT_TOOL_DISTILLER_PROMPT_VERSION)
+        );
 
         let status_json = serde_json::to_string(
             &service
@@ -3891,6 +4399,23 @@ mod orchestration_tests {
             let mut guard = agent.lock().await;
             let transaction = &guard.context_view_state().transactions[0];
             assert_eq!(transaction.curator_usage.len(), 1);
+            let StoredContextOperation::ToolResultDistillation(distillation) =
+                &transaction.operations[0]
+            else {
+                panic!("expected persisted tool distillation")
+            };
+            assert_eq!(
+                distillation.generator.role,
+                Some(StoredContextCuratorRole::ToolResultDistiller)
+            );
+            assert_eq!(
+                distillation.generator.selection_source,
+                Some(StoredContextCuratorSelectionSource::ConfiguredDefault)
+            );
+            assert_eq!(
+                distillation.generator.prompt_version,
+                CONTEXT_TOOL_DISTILLER_PROMPT_VERSION
+            );
             let economics = transaction
                 .economics
                 .as_ref()
@@ -3920,8 +4445,8 @@ mod orchestration_tests {
         assert_eq!(live_calls.len(), 1);
         assert_eq!(live_calls[0].system, "normal coding system prompt");
         let live_json = serde_json::to_string(&live_calls[0].messages).expect("live messages");
-        assert!(!live_json.contains("tool_distillation_requests"));
-        assert!(!live_json.contains("context-curator-v1"));
+        assert!(!live_json.contains("complete_tool_result"));
+        assert!(!live_json.contains(CONTEXT_TOOL_DISTILLER_PROMPT_VERSION));
         assert!(!live_json.contains(RAW_RESULT_SENTINEL));
     }
 
@@ -4118,6 +4643,7 @@ mod orchestration_tests {
                 }),
                 tool_results: Vec::new(),
                 allow_shadowing_active_operations: false,
+                curator: Default::default(),
                 authorization: StoredContextAuthorization::Manual { initiated_by: None },
             },
         )
@@ -4174,11 +4700,13 @@ mod orchestration_tests {
                     }),
                     tool_results: Vec::new(),
                     allow_shadowing_active_operations: false,
+                    curator: Default::default(),
                     authorization: StoredContextAuthorization::Manual { initiated_by: None },
                 },
                 false,
                 &crate::config::ContextCuratorConfig {
                     provider: Some("intentionally-missing-curator-route".to_string()),
+                    route: None,
                     model: Some("intentionally-missing-curator-model".to_string()),
                     effort: Some("high".to_string()),
                 },
@@ -4251,6 +4779,7 @@ mod orchestration_tests {
                 }),
                 tool_results: Vec::new(),
                 allow_shadowing_active_operations: false,
+                curator: Default::default(),
                 authorization: StoredContextAuthorization::Manual { initiated_by: None },
             },
         )
@@ -4323,6 +4852,7 @@ mod orchestration_tests {
                 }),
                 tool_results: Vec::new(),
                 allow_shadowing_active_operations: false,
+                curator: Default::default(),
                 authorization: StoredContextAuthorization::Manual { initiated_by: None },
             },
         )
@@ -4394,6 +4924,7 @@ mod orchestration_tests {
                 }),
                 tool_results: Vec::new(),
                 allow_shadowing_active_operations: false,
+                curator: Default::default(),
                 authorization: StoredContextAuthorization::Manual { initiated_by: None },
             },
         ) {
@@ -4449,6 +4980,7 @@ mod orchestration_tests {
                     }),
                     tool_results: Vec::new(),
                     allow_shadowing_active_operations: false,
+                    curator: Default::default(),
                     authorization: StoredContextAuthorization::Manual { initiated_by: None },
                 },
             )
@@ -4538,6 +5070,7 @@ mod orchestration_tests {
                     }),
                     tool_results: Vec::new(),
                     allow_shadowing_active_operations: false,
+                    curator: Default::default(),
                     authorization: StoredContextAuthorization::Manual { initiated_by: None },
                 },
             )
@@ -4595,6 +5128,7 @@ mod orchestration_tests {
                 }),
                 tool_results: Vec::new(),
                 allow_shadowing_active_operations: false,
+                curator: Default::default(),
                 authorization: StoredContextAuthorization::Manual { initiated_by: None },
             },
         )

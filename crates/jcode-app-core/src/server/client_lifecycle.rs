@@ -42,9 +42,10 @@ use super::context_control::{
     handle_apply_context_draft, handle_cancel_context_draft, handle_get_context_draft_status,
     handle_get_context_editor_snapshot, handle_get_context_message_detail,
     handle_get_context_transaction_detail, handle_list_context_transactions,
-    handle_prepare_context_draft, handle_preview_context_draft_selection,
-    handle_preview_context_ranges, handle_reapply_context_transaction,
-    handle_revert_context_transaction, handle_set_context_emergency_policy,
+    handle_prepare_context_draft, handle_preview_context_curator_plan,
+    handle_preview_context_draft_selection, handle_preview_context_ranges,
+    handle_reapply_context_transaction, handle_revert_context_transaction,
+    handle_save_context_curator_default, handle_set_context_emergency_policy,
     reject_legacy_context_request,
 };
 use super::provider_control::{
@@ -1679,6 +1680,32 @@ pub(super) async fn handle_client(
                 &context_transactions,
                 &client_event_tx,
             ),
+
+            Request::PreviewContextCuratorPlan {
+                id,
+                expected_context_revision,
+                expected_transcript_digest,
+                request,
+            } => handle_preview_context_curator_plan(
+                id,
+                expected_context_revision,
+                expected_transcript_digest,
+                request,
+                &agent,
+                &context_transactions,
+                client_is_processing,
+                &client_event_tx,
+            ),
+
+            Request::SaveContextCuratorDefault { id, selection } => {
+                handle_save_context_curator_default(
+                    id,
+                    selection,
+                    &agent,
+                    client_is_processing,
+                    &client_event_tx,
+                );
+            }
 
             Request::PrepareContextDraft { id, request } => handle_prepare_context_draft(
                 id,

@@ -594,6 +594,10 @@ mod tests {
             route: "route".to_string(),
             prompt_version: "v1".to_string(),
             effort: None,
+            role: None,
+            selection_source: None,
+            transaction_instructions: None,
+            task_instructions: None,
         }
     }
 

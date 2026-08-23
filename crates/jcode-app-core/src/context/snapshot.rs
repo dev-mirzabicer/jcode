@@ -238,6 +238,8 @@ pub fn build_context_editor_snapshot(
         emergency_policy: input.context_view.emergency_policy.clone(),
         curator_route: None,
         curator_unavailable_reason: None,
+        curator_default: Default::default(),
+        curator_route_options: Vec::new(),
     })
 }
 
@@ -827,6 +829,10 @@ mod tests {
                             route: "test".to_string(),
                             prompt_version: "test".to_string(),
                             effort: None,
+                            role: None,
+                            selection_source: None,
+                            transaction_instructions: None,
+                            task_instructions: None,
                         },
                         created_at: Utc::now(),
                     },

@@ -450,6 +450,7 @@ impl Agent {
             reasoning,
             tool_results,
             allow_shadowing_active_operations: false,
+            curator: Default::default(),
             authorization: StoredContextAuthorization::UnattendedEmergency {
                 authorization_source: authorization.authorization_source.clone(),
                 trigger: Some(emergency_trigger_label(trigger_kind).to_string()),

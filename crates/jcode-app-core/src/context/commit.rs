@@ -1076,6 +1076,10 @@ mod tests {
             route: "curator-route".to_string(),
             prompt_version: "context-curator-v1".to_string(),
             effort: None,
+            role: None,
+            selection_source: None,
+            transaction_instructions: None,
+            task_instructions: None,
         }
     }
 
@@ -1234,6 +1238,10 @@ mod tests {
                 provider: "curator-test".to_string(),
                 model: "curator-model".to_string(),
                 route: "curator-route".to_string(),
+                effort: None,
+                role: None,
+                artifact_id: None,
+                prompt_version: None,
                 input_tokens: 100,
                 output_tokens: 20,
                 cache_read_input_tokens: Some(50),

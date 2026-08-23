@@ -154,6 +154,99 @@ impl Config {
         Self::set_default_model(model, cfg.provider.default_provider.as_deref())
     }
 
+    /// Persist only the simple context-curator route default.
+    ///
+    /// This intentionally edits the existing TOML document in place so comments,
+    /// unknown compatibility keys, and unrelated user formatting survive. The
+    /// resulting document is validated through the authoritative config schema
+    /// before a durable temp-file-and-rename write publishes it.
+    pub fn set_context_curator(curator: &ContextCuratorConfig) -> anyhow::Result<()> {
+        use anyhow::Context as _;
+        use toml_edit::{Document, Item, Table, TableLike, value};
+
+        let path = Self::path().ok_or_else(|| anyhow::anyhow!("No config path"))?;
+        let existing = match std::fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("Failed to read config file {}", path.display()));
+            }
+        };
+        let mut document = existing.parse::<Document>().with_context(|| {
+            format!(
+                "Failed to parse config file {} before saving curator defaults",
+                path.display()
+            )
+        })?;
+
+        if document.get("context").is_none() {
+            document["context"] = Item::Table(Table::new());
+        }
+        let context = document["context"].as_table_like_mut().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Cannot save curator defaults because 'context' in {} is not a TOML table",
+                path.display()
+            )
+        })?;
+        if context.get("curator").is_none() {
+            context.insert("curator", Item::Table(Table::new()));
+        }
+        let curator_table = context
+            .get_mut("curator")
+            .and_then(Item::as_table_like_mut)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Cannot save curator defaults because 'context.curator' in {} is not a TOML table",
+                    path.display()
+                )
+            })?;
+
+        fn patch_optional_string(table: &mut dyn TableLike, key: &str, configured: Option<&str>) {
+            if let Some(configured) = configured {
+                let key_decor = table.key_decor(key).cloned();
+                let decor = table
+                    .get(key)
+                    .and_then(Item::as_value)
+                    .map(|value| value.decor().clone());
+                let mut replacement = value(configured);
+                if let (Some(decor), Some(value)) = (decor, replacement.as_value_mut()) {
+                    *value.decor_mut() = decor;
+                }
+                table.insert(key, replacement);
+                if let (Some(key_decor), Some(replacement_decor)) =
+                    (key_decor, table.key_decor_mut(key))
+                {
+                    *replacement_decor = key_decor;
+                }
+            } else {
+                table.remove(key);
+            }
+        }
+
+        patch_optional_string(curator_table, "provider", curator.provider.as_deref());
+        patch_optional_string(curator_table, "route", curator.route.as_deref());
+        patch_optional_string(curator_table, "model", curator.model.as_deref());
+        patch_optional_string(curator_table, "effort", curator.effort.as_deref());
+
+        let rendered = document.to_string();
+        toml::from_str::<Self>(&rendered).with_context(|| {
+            format!(
+                "Refusing to save invalid curator defaults to {}",
+                path.display()
+            )
+        })?;
+        jcode_storage::write_bytes(&path, rendered.as_bytes()).with_context(|| {
+            format!(
+                "Failed to durably save curator defaults to {}",
+                path.display()
+            )
+        })?;
+        Self::invalidate_cache();
+        crate::logging::info("Saved context curator provider/route/model/effort defaults");
+        Ok(())
+    }
+
     /// Update the persisted OpenAI reasoning effort preference.
     pub fn set_openai_reasoning_effort(value: Option<&str>) -> anyhow::Result<()> {
         let mut cfg = Self::load();

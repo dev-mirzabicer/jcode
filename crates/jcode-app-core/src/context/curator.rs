@@ -1,16 +1,24 @@
 use crate::config::ContextCuratorConfig;
 use crate::message::{ContentBlock, Message, Role, StreamEvent};
+use crate::protocol::{
+    CONTEXT_IDENTIFIER_MAX_CHARS, CONTEXT_PROTOCOL_MAX_EVENT_BYTES, ContextCuratorPlanPreview,
+    ContextCuratorRouteOption, ContextCuratorRoutePreview, ContextCuratorSourcePurpose,
+    ContextCuratorSourceScope, ContextCuratorTaskPreview,
+};
 use crate::provider::{ModelRoute, Provider, RouteSelection};
 use futures::StreamExt;
 use jcode_context_core::{
     ContextTargetIndex, context_token_rates_for_input_tokens, estimate_content_block_tokens,
+    estimate_message_tokens,
 };
 use jcode_session_types::{
     StoredContentTarget, StoredContextArtifactGenerator, StoredContextBillingMode,
-    StoredContextCuratorUsage, StoredContextPricingSnapshot, StoredMessage, StoredMessageRange,
+    StoredContextCuratorRole, StoredContextCuratorSelectionSource, StoredContextCuratorUsage,
+    StoredContextPricingSnapshot, StoredMessage, StoredMessageRange,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
@@ -18,15 +26,37 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-pub const CONTEXT_CURATOR_PROMPT_VERSION: &str = "context-curator-v1";
+pub const CONTEXT_RANGE_SUMMARIZER_PROMPT_VERSION: &str = "context-range-summarizer-v2";
+pub const CONTEXT_TOOL_DISTILLER_PROMPT_VERSION: &str = "context-tool-result-distiller-v2";
 
-const CURATOR_SYSTEM_PROMPT: &str = r#"You prepare artifacts for a user-authorized, reversible provider-context transaction. Return exactly one JSON object matching the supplied schema. Do not use markdown fences or commentary.
+/// Product-approved verbatim base role instruction. Do not edit without an
+/// explicit product decision and prompt-version change.
+pub const RANGE_SUMMARIZER_BASE_PROMPT: &str = r#"This is `jcode`, an agentic coding harness. You are a __range summarizer__. A "range" is a (continuous) *slice* from a coding session. You will be given such a slice, and your task is to **losslessly summarize this slice**. A coding session, expectedly, includes user messages, assistant messages, assistant tool calls and their outputs. The purpose of compacting a slice is to reduce clutter by compressing a less-relevant past slice of a session into a smaller one. Less-relevant does not mean *not relevant*, and that's the reason you are "summarizing" it instead of simply removing it from the session history.
+The slice will be *replaced* with your summary, and thus the working agent will *forget* the original slice completely, and their memory of that slice will be replaced by your summary. Thus, the agent will _rely_ on your summary. The agent will **continue working** after your summary. The agent does _not_ continue from where your summary ends — the slice you see is not the full session itself.
+For example, if the session had 100 messages, your slice can be anything: message 20 to 30, 10 to 90, 50 to 80, and so on.
+Keep your summary very detailed, informative, high-quality, well-written, and robust. Tell about what's been done, what interactions happened, what tool calls were made, what actions were taken, and so on. If files were read, explain the contents of these files (since if your slice contains a file read, it means the agent will "forget" that file as well, evidently), and so on. Make your summary *intentional*, and specific, and detailed. Not "files were read", "x file was read", "commits were made", and so on — these give no valuable information to the agent.
+Return exactly one JSON object matching the supplied schema. Do not use markdown fences. Be **meticulous**."#;
 
-Range summaries must preserve every fact that can affect continued work: user intent and preferences, decisions and rejected alternatives, exact constraints and invariants, end-of-range implementation state, files and symbols changed, commands and observed results, failures, unresolved issues, next steps, provider/environment facts, and operationally relevant IDs, hashes, paths, versions, values, and error strings. Never claim unverified work passed. Never invent changed files. Prefer precise facts over vague prose.
+const RANGE_MANDATORY_INSTRUCTIONS: &str = r#"Mandatory correctness requirements:
+- Preserve user intent and preferences, decisions and rejected alternatives, exact constraints and invariants, implementation state at the end of the slice, files and symbols changed, commands and observed results, failures, unresolved issues, next steps, provider and environment facts, and operationally relevant IDs, hashes, paths, versions, values, and error strings.
+- Preserve the substantive contents and findings of file reads, not merely the fact that a file was read.
+- Never claim unverified work passed, omit unresolved failures, invent changed files, or replace precise technical facts with vague prose.
+- Use the harness-generated changed-file evidence honestly. When it is marked incomplete, retain that uncertainty.
+- Return only the required JSON object with non-empty `summary`, `file_change_digest`, and `warnings` fields of the declared types."#;
 
-Tool-result distillation is eligible only when the replacement preserves every fact that could affect continued work and is strictly below the supplied token target. Preserve exact errors and failing names, paths and line numbers, hashes, IDs, ports, versions, values, test counts, exit status, user-visible output, warnings, uncertainty, negative findings, and information relied upon later. Mark a result ineligible when this cannot be done safely. A completely unnecessary result still needs a concise explicit distilled marker.
+const TOOL_DISTILLER_BASE_PROMPT: &str = r#"This is `jcode`, an agentic coding harness. You are a __tool-result distiller__. You will receive one complete tool result, its matching tool call, and only the supporting conversation needed to understand what later work relies upon. Your task is to decide whether that one result can be replaced by a substantially smaller representation without losing any meaningful information that could affect continued coding work.
 
-Jcode owns all authoritative targets and hashes. Never create or modify target IDs. Never omit a requested ID, duplicate an ID, or return an unknown ID."#;
+The original tool result will disappear from the provider-facing context if the user accepts your proposal. Preserve exact errors and failing names, paths and line numbers, hashes, IDs, ports, versions, values, test counts, exit status, user-visible output, warnings, uncertainty, negative findings, and every fact relied upon later. A vague statement that a command ran or a file was inspected is not a substitute for its substantive findings. If a safe replacement cannot fit strictly below the supplied token threshold, mark the result ineligible.
+
+Return exactly one JSON object matching the supplied schema. Do not use markdown fences or commentary. Be meticulous."#;
+
+const TOOL_MANDATORY_INSTRUCTIONS: &str = r#"Mandatory correctness requirements:
+- Evaluate only the one supplied tool result. Do not summarize unrelated conversation or propose other context operations.
+- `eligible: true` requires a non-empty replacement and preservation rationale, no ineligible reason, and a replacement that remains strictly below 20 percent after Jcode re-tokenizes the preserved ToolResult structure.
+- `eligible: false` requires a non-empty ineligible reason and must not provide eligible-only fields.
+- A completely unnecessary result still needs a concise explicit marker when eligible.
+- Preserve uncertainty and mark the result ineligible whenever lossless reduction below the limit is not possible.
+- Return only the required JSON object."#;
 
 #[derive(Clone)]
 pub struct ContextCuratorRoute {
@@ -54,13 +84,34 @@ impl fmt::Debug for ContextCuratorRoute {
 }
 
 impl ContextCuratorRoute {
-    pub fn generator(&self) -> StoredContextArtifactGenerator {
+    pub fn preview(&self) -> ContextCuratorRoutePreview {
+        ContextCuratorRoutePreview {
+            provider_name: self.provider_name.clone(),
+            provider_display_name: self.provider_display_name.clone(),
+            model: self.model.clone(),
+            route: self.route.clone(),
+            effort: self.effort.clone(),
+        }
+    }
+
+    pub fn generator(
+        &self,
+        role: StoredContextCuratorRole,
+        prompt_version: &str,
+        selection_source: StoredContextCuratorSelectionSource,
+        transaction_instructions: &str,
+        task_instructions: &str,
+    ) -> StoredContextArtifactGenerator {
         StoredContextArtifactGenerator {
             provider: self.provider_name.clone(),
             model: self.model.clone(),
             route: self.route.clone(),
-            prompt_version: CONTEXT_CURATOR_PROMPT_VERSION.to_string(),
+            prompt_version: prompt_version.to_string(),
             effort: self.effort.clone(),
+            role: Some(role),
+            selection_source: Some(selection_source),
+            transaction_instructions: nonempty_owned(transaction_instructions),
+            task_instructions: nonempty_owned(task_instructions),
         }
     }
 }
@@ -69,6 +120,7 @@ impl ContextCuratorRoute {
 pub struct ContextCuratorLimits {
     pub max_request_bytes: usize,
     pub max_response_bytes: usize,
+    pub max_plan_preview_bytes: usize,
     pub timeout: Duration,
 }
 
@@ -77,6 +129,7 @@ impl Default for ContextCuratorLimits {
         Self {
             max_request_bytes: 32 * 1024 * 1024,
             max_response_bytes: 2 * 1024 * 1024,
+            max_plan_preview_bytes: CONTEXT_PROTOCOL_MAX_EVENT_BYTES.saturating_sub(4 * 1024),
             timeout: Duration::from_secs(10 * 60),
         }
     }
@@ -89,6 +142,7 @@ pub(crate) struct ContextCuratorRangeWork {
     pub changed_files: Vec<String>,
     pub change_evidence_complete: bool,
     pub change_evidence_warnings: Vec<String>,
+    pub additional_instructions: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -128,20 +182,43 @@ pub enum ContextCuratorToolArtifact {
 pub struct ContextCuratorArtifacts {
     pub range_summaries: BTreeMap<String, ContextCuratorRangeArtifact>,
     pub tool_distillations: BTreeMap<String, ContextCuratorToolArtifact>,
-    pub usage: Option<StoredContextCuratorUsage>,
+    pub usage: Vec<StoredContextCuratorUsage>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ContextCuratorError {
     Route(String),
-    RequestTooLarge { bytes: usize, limit: usize },
-    ImagesUnsupported { count: usize, provider: String },
-    ResponseTooLarge { bytes: usize, limit: usize },
+    RequestTooLarge {
+        bytes: usize,
+        limit: usize,
+    },
+    InputTooLarge {
+        estimated_tokens: usize,
+        safe_budget: usize,
+    },
+    ImagesUnsupported {
+        count: usize,
+        provider: String,
+    },
+    ResponseTooLarge {
+        bytes: usize,
+        limit: usize,
+    },
+    PlanPreviewTooLarge {
+        bytes: usize,
+        limit: usize,
+    },
     Timeout,
     Canceled,
     Provider(String),
     UnexpectedToolUse,
     InvalidResponse(String),
+    TaskFailed {
+        task_id: String,
+        completed: usize,
+        total: usize,
+        reason: String,
+    },
 }
 
 impl fmt::Display for ContextCuratorError {
@@ -150,15 +227,26 @@ impl fmt::Display for ContextCuratorError {
             Self::Route(reason) => write!(formatter, "context curator route is unavailable: {reason}"),
             Self::RequestTooLarge { bytes, limit } => write!(
                 formatter,
-                "context curator request is {bytes} bytes, exceeding the {limit}-byte bound"
+                "complete atomic curator request is {bytes} bytes, exceeding the {limit}-byte bound; no source was truncated"
+            ),
+            Self::InputTooLarge {
+                estimated_tokens,
+                safe_budget,
+            } => write!(
+                formatter,
+                "complete atomic curator input is estimated at {estimated_tokens} tokens, exceeding the selected route's safe {safe_budget}-token input budget; no source was truncated"
             ),
             Self::ImagesUnsupported { count, provider } => write!(
                 formatter,
-                "context curator material contains {count} image(s), but route {provider} does not support image input"
+                "complete atomic curator material contains {count} image(s), but route {provider} does not support image input"
             ),
             Self::ResponseTooLarge { bytes, limit } => write!(
                 formatter,
                 "context curator response reached {bytes} bytes, exceeding the {limit}-byte bound"
+            ),
+            Self::PlanPreviewTooLarge { bytes, limit } => write!(
+                formatter,
+                "exact curator plan preview is {bytes} bytes, exceeding the {limit}-byte bound; reduce the number of atomic tasks or ephemeral instructions before generation"
             ),
             Self::Timeout => formatter.write_str("context curator request timed out"),
             Self::Canceled => formatter.write_str("context curator request was canceled"),
@@ -169,36 +257,89 @@ impl fmt::Display for ContextCuratorError {
             Self::InvalidResponse(reason) => {
                 write!(formatter, "context curator returned invalid structured output: {reason}")
             }
+            Self::TaskFailed {
+                task_id,
+                completed,
+                total,
+                reason,
+            } => write!(
+                formatter,
+                "atomic curator task {task_id} failed after {completed} of {total} task(s) completed: {reason}; no generated artifact was activated or retained as an applicable transaction"
+            ),
         }
     }
 }
 
 impl Error for ContextCuratorError {}
 
-pub(crate) fn resolve_context_curator_route(
+pub fn resolve_context_curator_route(
     provider_fork: Arc<dyn Provider>,
     model_routes: &[ModelRoute],
     active_route: &str,
     config: &ContextCuratorConfig,
 ) -> Result<ContextCuratorRoute, ContextCuratorError> {
+    for (label, value) in [
+        ("provider", config.provider.as_deref()),
+        ("route", config.route.as_deref()),
+        ("model", config.model.as_deref()),
+        ("effort", config.effort.as_deref()),
+    ] {
+        if let Some(value) = value {
+            let chars = value.chars().count();
+            if value.trim().is_empty() {
+                return Err(ContextCuratorError::Route(format!(
+                    "configured curator {label} selector is empty"
+                )));
+            }
+            if chars > CONTEXT_IDENTIFIER_MAX_CHARS {
+                return Err(ContextCuratorError::Route(format!(
+                    "configured curator {label} selector contains {chars} characters, exceeding the {CONTEXT_IDENTIFIER_MAX_CHARS}-character bound"
+                )));
+            }
+        }
+    }
     let mut route = active_route.to_string();
+    let requested_model = config
+        .model
+        .clone()
+        .unwrap_or_else(|| provider_fork.model());
+    let has_route_selector = config
+        .route
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty());
+    let has_provider_selector = config
+        .provider
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty());
 
-    if let Some(provider_selector) = config.provider.as_deref() {
-        let requested_model = config
-            .model
-            .clone()
-            .unwrap_or_else(|| provider_fork.model());
+    if has_route_selector || has_provider_selector {
         let matches = model_routes
             .iter()
             .filter(|candidate| candidate.available && candidate.model == requested_model)
-            .filter(|candidate| route_selector_matches(provider_selector, candidate))
+            .filter(|candidate| {
+                config.provider.as_deref().is_none_or(|selector| {
+                    if config.route.is_none() {
+                        // Preserve the pre-Phase-15 overloaded provider selector for
+                        // existing config files while new UI writes a separate route.
+                        route_selector_matches(selector, candidate)
+                    } else {
+                        candidate.provider.eq_ignore_ascii_case(selector.trim())
+                    }
+                })
+            })
+            .filter(|candidate| {
+                config
+                    .route
+                    .as_deref()
+                    .is_none_or(|selector| route_selector_matches(selector, candidate))
+            })
             .collect::<Vec<_>>();
         let selected = match matches.as_slice() {
             [selected] => *selected,
             [] => {
                 return Err(ContextCuratorError::Route(format!(
-                    "no available route matches provider {:?} and model {:?}",
-                    provider_selector, requested_model
+                    "no available route matches provider {:?}, route {:?}, and model {:?}",
+                    config.provider, config.route, requested_model
                 )));
             }
             _ => {
@@ -208,19 +349,18 @@ pub(crate) fn resolve_context_curator_route(
                     .collect::<Vec<_>>()
                     .join(", ");
                 return Err(ContextCuratorError::Route(format!(
-                    "provider {:?} and model {:?} are ambiguous; matching routes: {choices}",
-                    provider_selector, requested_model
+                    "provider {:?}, route {:?}, and model {:?} are ambiguous; matching routes: {choices}",
+                    config.provider, config.route, requested_model
                 )));
             }
         };
-        let selection = RouteSelection::from_model_route(selected);
         provider_fork
-            .set_route_selection(&selection)
+            .set_route_selection(&RouteSelection::from_model_route(selected))
             .map_err(|error| ContextCuratorError::Route(error.to_string()))?;
         route = selected.api_method.clone();
-    } else if let Some(model) = config.model.as_deref() {
+    } else if config.model.is_some() {
         provider_fork
-            .set_model(model)
+            .set_model(&requested_model)
             .map_err(|error| ContextCuratorError::Route(error.to_string()))?;
     }
 
@@ -251,14 +391,55 @@ pub(crate) fn resolve_context_curator_route(
         jcode_session_types::StoredContextCacheWarmth::Unknown,
     );
     Ok(ContextCuratorRoute {
-        provider: provider_fork,
+        provider: Arc::clone(&provider_fork),
         provider_name,
         provider_display_name,
         model,
         route,
-        effort: config.effort.clone(),
+        effort: provider_fork.reasoning_effort(),
         pricing,
     })
+}
+
+pub(crate) fn curator_route_options(model_routes: &[ModelRoute]) -> Vec<ContextCuratorRouteOption> {
+    let mut seen = BTreeSet::new();
+    let mut options = model_routes
+        .iter()
+        .filter(|route| route.available)
+        .filter_map(|route| {
+            let key = (
+                route.provider.to_ascii_lowercase(),
+                route.api_method.to_ascii_lowercase(),
+                route.model.to_ascii_lowercase(),
+            );
+            seen.insert(key).then(|| ContextCuratorRouteOption {
+                provider: route.provider.clone(),
+                route: route.api_method.clone(),
+                model: route.model.clone(),
+                detail: route.detail.clone(),
+                efforts: jcode_provider_core::inferred_reasoning_efforts(
+                    Some(&route.provider),
+                    Some(&route.model),
+                )
+                .into_iter()
+                .filter(|effort| !matches!(*effort, "swarm" | "swarm-deep"))
+                .map(str::to_string)
+                .collect(),
+            })
+        })
+        .collect::<Vec<_>>();
+    options.sort_by(|left, right| {
+        left.model
+            .to_ascii_lowercase()
+            .cmp(&right.model.to_ascii_lowercase())
+            .then_with(|| {
+                left.provider
+                    .to_ascii_lowercase()
+                    .cmp(&right.provider.to_ascii_lowercase())
+            })
+            .then_with(|| left.route.cmp(&right.route))
+    });
+    options
 }
 
 fn route_selector_matches(selector: &str, route: &ModelRoute) -> bool {
@@ -272,6 +453,155 @@ fn route_selector_matches(selector: &str, route: &ModelRoute) -> bool {
         || selection.runtime_key.stable_id().to_ascii_lowercase() == selector
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct ContextCuratorPlan {
+    tasks: Vec<ContextCuratorTask>,
+    pub preview: ContextCuratorPlanPreview,
+}
+
+#[derive(Clone, Debug)]
+struct ContextCuratorTask {
+    task_id: String,
+    role: StoredContextCuratorRole,
+    kind: ContextCuratorTaskKind,
+    system_prompt: String,
+    response_contract: String,
+    scope: Vec<ScopedMessage>,
+    active_summary_texts: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+enum ContextCuratorTaskKind {
+    Range(ContextCuratorRangeWork),
+    Tool(ContextCuratorToolWork),
+}
+
+#[derive(Clone, Debug)]
+struct ScopedMessage {
+    purpose: ContextCuratorSourcePurpose,
+    message_index: usize,
+    block_ordinals: Vec<usize>,
+    includes_all_blocks: bool,
+}
+
+pub(crate) struct ContextCuratorPlanInput<'a> {
+    pub session_id: &'a str,
+    pub context_revision: u64,
+    pub transcript_digest: u64,
+    pub messages: &'a [StoredMessage],
+    pub ranges: &'a [ContextCuratorRangeWork],
+    pub tools: &'a [ContextCuratorToolWork],
+    pub active_summary_texts: &'a [String],
+    pub transaction_instructions: &'a str,
+    pub selection_source: StoredContextCuratorSelectionSource,
+}
+
+pub(crate) fn build_context_curator_plan(
+    route: &ContextCuratorRoute,
+    input: ContextCuratorPlanInput<'_>,
+    limits: ContextCuratorLimits,
+) -> Result<ContextCuratorPlan, ContextCuratorError> {
+    let target_index = ContextTargetIndex::new(input.messages);
+    let selected_ranges = input
+        .ranges
+        .iter()
+        .map(|range| {
+            target_index
+                .resolve_message_range(&range.source_range)
+                .map_err(|error| ContextCuratorError::InvalidResponse(error.to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let tool_exclusions = tool_source_exclusions(input.messages, input.tools, &target_index)?;
+    let mut tasks = Vec::with_capacity(input.ranges.len().saturating_add(input.tools.len()));
+
+    for range in input.ranges {
+        let (start, end) = target_index
+            .resolve_message_range(&range.source_range)
+            .map_err(|error| ContextCuratorError::InvalidResponse(error.to_string()))?;
+        let scope = (start..=end)
+            .map(|message_index| ScopedMessage {
+                purpose: ContextCuratorSourcePurpose::PrimaryRange,
+                message_index,
+                block_ordinals: Vec::new(),
+                includes_all_blocks: true,
+            })
+            .collect::<Vec<_>>();
+        tasks.push(ContextCuratorTask {
+            task_id: range.request_id.clone(),
+            role: StoredContextCuratorRole::RangeSummarizer,
+            kind: ContextCuratorTaskKind::Range(range.clone()),
+            system_prompt: range_system_prompt(
+                input.transaction_instructions,
+                &range.additional_instructions,
+            ),
+            response_contract: pretty_json(&range_response_schema())?,
+            scope,
+            active_summary_texts: Vec::new(),
+        });
+    }
+
+    for tool in input.tools {
+        let scope = tool_scope(
+            input.messages,
+            tool,
+            input.tools,
+            &selected_ranges,
+            &tool_exclusions,
+            &target_index,
+        )?;
+        tasks.push(ContextCuratorTask {
+            task_id: tool.request_id.clone(),
+            role: StoredContextCuratorRole::ToolResultDistiller,
+            kind: ContextCuratorTaskKind::Tool(tool.clone()),
+            system_prompt: tool_system_prompt(input.transaction_instructions),
+            response_contract: pretty_json(&tool_response_schema())?,
+            scope,
+            active_summary_texts: input.active_summary_texts.to_vec(),
+        });
+    }
+
+    let mut previews = Vec::with_capacity(tasks.len());
+    for task in &tasks {
+        let prepared = prepare_task_call(route, input.messages, task, limits)?;
+        previews.push(ContextCuratorTaskPreview {
+            task_id: task.task_id.clone(),
+            role: task.role,
+            target_label: task_target_label(task),
+            effective_system_prompt: task.system_prompt.clone(),
+            response_contract: task.response_contract.clone(),
+            estimated_input_tokens: prepared.estimated_input_tokens,
+            safe_input_budget: prepared.safe_input_budget,
+            request_bytes: prepared.request_bytes,
+            request_byte_limit: limits.max_request_bytes,
+            image_count: prepared.image_count,
+            source_scope: public_scope(input.messages, task),
+        });
+    }
+
+    let mut preview = ContextCuratorPlanPreview {
+        session_id: input.session_id.to_string(),
+        context_revision: input.context_revision,
+        transcript_digest: input.transcript_digest,
+        route: route.preview(),
+        using_configured_default: input.selection_source
+            == StoredContextCuratorSelectionSource::ConfiguredDefault,
+        tasks: previews,
+        fingerprint: String::new(),
+    };
+    let canonical = serde_json::to_vec(&preview)
+        .map_err(|error| ContextCuratorError::InvalidResponse(error.to_string()))?;
+    let final_preview_bytes = canonical.len().saturating_add(128);
+    if final_preview_bytes > limits.max_plan_preview_bytes {
+        return Err(ContextCuratorError::PlanPreviewTooLarge {
+            bytes: final_preview_bytes,
+            limit: limits.max_plan_preview_bytes,
+        });
+    }
+    preview.fingerprint = format!("{:x}", Sha256::digest(canonical));
+    Ok(ContextCuratorPlan { tasks, preview })
+}
+
+#[cfg(test)]
 pub(crate) async fn run_context_curator(
     route: &ContextCuratorRoute,
     messages: &[StoredMessage],
@@ -281,28 +611,157 @@ pub(crate) async fn run_context_curator(
     cancellation: &CancellationToken,
     limits: ContextCuratorLimits,
 ) -> Result<ContextCuratorArtifacts, ContextCuratorError> {
+    let plan = build_context_curator_plan(
+        route,
+        ContextCuratorPlanInput {
+            session_id: "",
+            context_revision: 0,
+            transcript_digest: 0,
+            messages,
+            ranges,
+            tools,
+            active_summary_texts,
+            transaction_instructions: "",
+            selection_source: StoredContextCuratorSelectionSource::ConfiguredDefault,
+        },
+        limits,
+    )?;
+    run_context_curator_plan(route, messages, &plan, cancellation, limits, |_, _| {}).await
+}
+
+pub(crate) async fn run_context_curator_plan<F>(
+    route: &ContextCuratorRoute,
+    messages: &[StoredMessage],
+    plan: &ContextCuratorPlan,
+    cancellation: &CancellationToken,
+    limits: ContextCuratorLimits,
+    mut on_completed: F,
+) -> Result<ContextCuratorArtifacts, ContextCuratorError>
+where
+    F: FnMut(usize, Option<&StoredContextCuratorUsage>),
+{
     if cancellation.is_cancelled() {
         return Err(ContextCuratorError::Canceled);
     }
-    if ranges.is_empty() && tools.is_empty() {
-        return Ok(ContextCuratorArtifacts::default());
+    let mut artifacts = ContextCuratorArtifacts::default();
+    let total = plan.tasks.len();
+    for (index, task) in plan.tasks.iter().enumerate() {
+        if cancellation.is_cancelled() {
+            return Err(ContextCuratorError::Canceled);
+        }
+        let result = run_context_curator_task(route, messages, task, cancellation, limits)
+            .await
+            .map_err(|error| match error {
+                ContextCuratorError::Canceled => ContextCuratorError::Canceled,
+                other => ContextCuratorError::TaskFailed {
+                    task_id: task.task_id.clone(),
+                    completed: index,
+                    total,
+                    reason: other.to_string(),
+                },
+            })?;
+        match result.artifact {
+            ContextCuratorTaskArtifact::Range(artifact) => {
+                artifacts
+                    .range_summaries
+                    .insert(task.task_id.clone(), artifact);
+            }
+            ContextCuratorTaskArtifact::Tool(artifact) => {
+                artifacts
+                    .tool_distillations
+                    .insert(task.task_id.clone(), artifact);
+            }
+        }
+        if let Some(usage) = result.usage.as_ref() {
+            artifacts.usage.push(usage.clone());
+        }
+        on_completed(index + 1, result.usage.as_ref());
     }
-    let request = build_curator_request(messages, ranges, tools, active_summary_texts)?;
-    let request_json = serde_json::to_string(&request)
-        .map_err(|error| ContextCuratorError::InvalidResponse(error.to_string()))?;
-    let request_bytes = request_json.len().saturating_add(
-        request
-            .images
-            .iter()
-            .map(|image| image.data.len())
-            .fold(0usize, usize::saturating_add),
+    Ok(artifacts)
+}
+
+struct ContextCuratorTaskResult {
+    artifact: ContextCuratorTaskArtifact,
+    usage: Option<StoredContextCuratorUsage>,
+}
+
+enum ContextCuratorTaskArtifact {
+    Range(ContextCuratorRangeArtifact),
+    Tool(ContextCuratorToolArtifact),
+}
+
+async fn run_context_curator_task(
+    route: &ContextCuratorRoute,
+    messages: &[StoredMessage],
+    task: &ContextCuratorTask,
+    cancellation: &CancellationToken,
+    limits: ContextCuratorLimits,
+) -> Result<ContextCuratorTaskResult, ContextCuratorError> {
+    let prepared = prepare_task_call(route, messages, task, limits)?;
+    let provider = route.provider.fork();
+    if provider.name() != route.provider_name
+        || provider.model() != route.model
+        || provider.reasoning_effort() != route.effort
+    {
+        return Err(ContextCuratorError::Route(format!(
+            "independent task fork changed curator identity from {}/{}/{:?} to {}/{}/{:?}",
+            route.provider_name,
+            route.model,
+            route.effort,
+            provider.name(),
+            provider.model(),
+            provider.reasoning_effort()
+        )));
+    }
+    let call = collect_curator_response(
+        provider.as_ref(),
+        &prepared.provider_messages,
+        &task.system_prompt,
+        limits.max_response_bytes,
     );
-    if request_bytes > limits.max_request_bytes {
-        return Err(ContextCuratorError::RequestTooLarge {
-            bytes: request_bytes,
-            limit: limits.max_request_bytes,
-        });
+    let collected = tokio::select! {
+        _ = cancellation.cancelled() => return Err(ContextCuratorError::Canceled),
+        result = tokio::time::timeout(limits.timeout, call) => {
+            match result {
+                Ok(result) => result?,
+                Err(_) => return Err(ContextCuratorError::Timeout),
+            }
+        }
+    };
+    if cancellation.is_cancelled() {
+        return Err(ContextCuratorError::Canceled);
     }
+
+    let prompt_version = task_prompt_version(task.role);
+    let usage = build_curator_usage(route, task, prompt_version, collected.usage);
+    let artifact = match &task.kind {
+        ContextCuratorTaskKind::Range(_) => {
+            ContextCuratorTaskArtifact::Range(parse_range_response(&collected.text)?)
+        }
+        ContextCuratorTaskKind::Tool(work) => {
+            ContextCuratorTaskArtifact::Tool(parse_tool_response(&collected.text, work)?)
+        }
+    };
+    Ok(ContextCuratorTaskResult { artifact, usage })
+}
+
+struct PreparedTaskCall {
+    provider_messages: Vec<Message>,
+    request_bytes: usize,
+    estimated_input_tokens: usize,
+    safe_input_budget: usize,
+    image_count: usize,
+}
+
+fn prepare_task_call(
+    route: &ContextCuratorRoute,
+    messages: &[StoredMessage],
+    task: &ContextCuratorTask,
+    limits: ContextCuratorLimits,
+) -> Result<PreparedTaskCall, ContextCuratorError> {
+    let request = build_task_request(messages, task)?;
+    let request_json = serde_json::to_string(&request.payload)
+        .map_err(|error| ContextCuratorError::InvalidResponse(error.to_string()))?;
     if !request.images.is_empty() && !route.provider.supports_image_input() {
         return Err(ContextCuratorError::ImagesUnsupported {
             count: request.images.len(),
@@ -330,28 +789,40 @@ pub(crate) async fn run_context_curator(
         timestamp: None,
         tool_duration_ms: None,
     }];
-
-    let call = collect_curator_response(
-        route.provider.as_ref(),
-        &provider_messages,
-        limits.max_response_bytes,
-    );
-    let collected = tokio::select! {
-        _ = cancellation.cancelled() => return Err(ContextCuratorError::Canceled),
-        result = tokio::time::timeout(limits.timeout, call) => {
-            match result {
-                Ok(result) => result?,
-                Err(_) => return Err(ContextCuratorError::Timeout),
-            }
-        }
-    };
-    if cancellation.is_cancelled() {
-        return Err(ContextCuratorError::Canceled);
+    let request_bytes = serde_json::to_vec(&provider_messages)
+        .map_err(|error| ContextCuratorError::InvalidResponse(error.to_string()))?
+        .len()
+        .saturating_add(task.system_prompt.len());
+    if request_bytes > limits.max_request_bytes {
+        return Err(ContextCuratorError::RequestTooLarge {
+            bytes: request_bytes,
+            limit: limits.max_request_bytes,
+        });
     }
-
-    parse_curator_response(&collected.text, ranges, tools).map(|mut artifacts| {
-        artifacts.usage = build_curator_usage(route, collected.usage);
-        artifacts
+    let prompt_message = Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: task.system_prompt.clone(),
+            cache_control: None,
+        }],
+        timestamp: None,
+        tool_duration_ms: None,
+    };
+    let estimated_input_tokens = estimate_message_tokens(&provider_messages[0])
+        .saturating_add(estimate_message_tokens(&prompt_message));
+    let safe_input_budget = route.provider.context_request_budget().safe_input_budget();
+    if estimated_input_tokens > safe_input_budget {
+        return Err(ContextCuratorError::InputTooLarge {
+            estimated_tokens: estimated_input_tokens,
+            safe_budget: safe_input_budget,
+        });
+    }
+    Ok(PreparedTaskCall {
+        provider_messages,
+        request_bytes,
+        estimated_input_tokens,
+        safe_input_budget,
+        image_count: request.images.len(),
     })
 }
 
@@ -371,10 +842,11 @@ struct CollectedCuratorResponse {
 async fn collect_curator_response(
     provider: &dyn Provider,
     messages: &[Message],
+    system_prompt: &str,
     max_response_bytes: usize,
 ) -> Result<CollectedCuratorResponse, ContextCuratorError> {
     let response = provider
-        .complete(messages, &[], CURATOR_SYSTEM_PROMPT, None)
+        .complete(messages, &[], system_prompt, None)
         .await
         .map_err(|error| ContextCuratorError::Provider(error.to_string()))?;
     tokio::pin!(response);
@@ -435,6 +907,8 @@ async fn collect_curator_response(
 
 fn build_curator_usage(
     route: &ContextCuratorRoute,
+    task: &ContextCuratorTask,
+    prompt_version: &str,
     usage: CuratorUsageAccumulator,
 ) -> Option<StoredContextCuratorUsage> {
     let input_tokens = usage.input_tokens?;
@@ -445,6 +919,10 @@ fn build_curator_usage(
         provider: route.provider_name.clone(),
         model: route.model.clone(),
         route: route.route.clone(),
+        effort: route.effort.clone(),
+        role: Some(task.role),
+        artifact_id: Some(task.task_id.clone()),
+        prompt_version: Some(prompt_version.to_string()),
         input_tokens,
         output_tokens,
         cache_read_input_tokens,
@@ -522,9 +1000,7 @@ fn exact_usage_cost(
 
 #[derive(Clone, Copy)]
 enum CacheUsageAccounting {
-    /// `input_tokens` excludes the separately reported cache-read and cache-write tokens.
     Split,
-    /// `input_tokens` includes the separately reported cache-read and cache-write subsets.
     Inclusive,
 }
 
@@ -543,45 +1019,47 @@ fn cache_usage_accounting(provider_name: &str) -> Option<CacheUsageAccounting> {
     None
 }
 
-#[derive(Serialize)]
-struct CuratorRequestPayload {
-    contract_version: &'static str,
-    response_schema: Value,
-    range_requests: Vec<CuratorRangeRequestPayload>,
-    tool_distillation_requests: Vec<CuratorToolRequestPayload>,
-    conversation_messages: Vec<CuratorMessagePayload>,
-    active_summary_texts: Vec<String>,
-    #[serde(skip)]
+struct BuiltTaskRequest {
+    payload: CuratorTaskRequestPayload,
     images: Vec<CuratorImageAttachment>,
 }
 
 #[derive(Serialize)]
-struct CuratorRangeRequestPayload {
-    request_id: String,
-    start_message_id: String,
-    end_message_id: String,
-    message_count: usize,
-    changed_files: Vec<String>,
-    change_evidence_complete: bool,
-    change_evidence_warnings: Vec<String>,
+#[serde(tag = "task", rename_all = "snake_case")]
+enum CuratorTaskRequestPayload {
+    RangeSummary {
+        response_schema: Value,
+        changed_file_evidence: CuratorChangedFileEvidence,
+        conversation_slice: Vec<CuratorMessagePayload>,
+    },
+    ToolResultDistillation {
+        response_schema: Value,
+        tool: CuratorToolPayload,
+        matching_tool_call: Vec<CuratorMessagePayload>,
+        complete_tool_result: Vec<CuratorMessagePayload>,
+        supporting_conversation: Vec<CuratorMessagePayload>,
+        active_context_summaries: Vec<String>,
+    },
 }
 
 #[derive(Serialize)]
-struct CuratorToolRequestPayload {
-    request_id: String,
-    tool_name: String,
-    tool_call_id: String,
-    result_message_id: String,
-    result_block_ordinal: usize,
-    tool_input: Value,
+struct CuratorChangedFileEvidence {
+    paths: Vec<String>,
+    complete: bool,
+    warnings: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct CuratorToolPayload {
+    name: String,
+    input: Value,
     original_token_estimate: usize,
     replacement_must_be_below_tokens: usize,
 }
 
 #[derive(Serialize)]
 struct CuratorMessagePayload {
-    message_id: String,
-    stored_index: usize,
+    sequence: usize,
     role: Role,
     blocks: Vec<Value>,
 }
@@ -592,116 +1070,113 @@ struct CuratorImageAttachment {
     data: String,
 }
 
-fn build_curator_request(
+fn build_task_request(
     messages: &[StoredMessage],
-    ranges: &[ContextCuratorRangeWork],
-    tools: &[ContextCuratorToolWork],
-    active_summary_texts: &[String],
-) -> Result<CuratorRequestPayload, ContextCuratorError> {
-    let target_index = ContextTargetIndex::new(messages);
-    let mut included_indices = BTreeSet::new();
-    for range in ranges {
-        let (start, end) = target_index
-            .resolve_message_range(&range.source_range)
-            .map_err(|error| ContextCuratorError::InvalidResponse(error.to_string()))?;
-        included_indices.extend(start..=end);
-        if start > 0 {
-            included_indices.insert(start - 1);
-        }
-        if end + 1 < messages.len() {
-            included_indices.insert(end + 1);
-        }
-    }
-    for tool in tools {
-        included_indices.insert(tool.message_index);
-        included_indices.extend(tool.message_index.saturating_sub(2)..messages.len());
-        if let Some(call_index) = find_tool_call_message(messages, &tool.tool_call_id) {
-            included_indices.insert(call_index);
-        }
-    }
-
+    task: &ContextCuratorTask,
+) -> Result<BuiltTaskRequest, ContextCuratorError> {
     let mut images = Vec::new();
-    let conversation_messages = included_indices
-        .into_iter()
-        .filter_map(|index| messages.get(index).map(|message| (index, message)))
-        .map(|(stored_index, message)| CuratorMessagePayload {
-            message_id: message.id.clone(),
-            stored_index,
-            role: message.role.clone(),
-            blocks: message
-                .content
-                .iter()
-                .enumerate()
-                .map(|(block_index, block)| {
-                    curator_block_payload(message, block_index, block, &mut images)
-                })
-                .collect(),
-        })
-        .collect();
-
-    let response_schema = json!({
-        "range_summaries": [{
-            "request_id": "range request ID",
-            "summary": "non-empty information-preserving summary",
-            "file_change_digest": "evidence-based digest; may be empty when no files changed",
-            "warnings": ["uncertainty or preservation warning"]
-        }],
-        "tool_distillations": [{
-            "request_id": "tool request ID",
-            "eligible": true,
-            "replacement": "required and non-empty only when eligible",
-            "preservation_rationale": "required and non-empty only when eligible",
-            "ineligible_reason": "required and non-empty only when ineligible",
-            "uncertainties": ["uncertainty"]
-        }]
-    });
-    Ok(CuratorRequestPayload {
-        contract_version: CONTEXT_CURATOR_PROMPT_VERSION,
-        response_schema,
-        range_requests: ranges
-            .iter()
-            .map(|range| CuratorRangeRequestPayload {
-                request_id: range.request_id.clone(),
-                start_message_id: range.source_range.start_message_id.clone(),
-                end_message_id: range.source_range.end_message_id.clone(),
-                message_count: range.source_range.message_count,
-                changed_files: range.changed_files.clone(),
-                change_evidence_complete: range.change_evidence_complete,
-                change_evidence_warnings: range.change_evidence_warnings.clone(),
-            })
-            .collect(),
-        tool_distillation_requests: tools
-            .iter()
-            .map(|tool| CuratorToolRequestPayload {
-                request_id: tool.request_id.clone(),
-                tool_name: tool.tool_name.clone(),
-                tool_call_id: tool.tool_call_id.clone(),
-                result_message_id: tool.target.message_id.clone(),
-                result_block_ordinal: tool.target.block_ordinal_hint,
-                tool_input: tool.tool_input.clone(),
-                original_token_estimate: tool.original_token_estimate,
-                replacement_must_be_below_tokens: tool
+    let payload = match &task.kind {
+        ContextCuratorTaskKind::Range(work) => CuratorTaskRequestPayload::RangeSummary {
+            response_schema: range_response_schema(),
+            changed_file_evidence: CuratorChangedFileEvidence {
+                paths: work.changed_files.clone(),
+                complete: work.change_evidence_complete,
+                warnings: work.change_evidence_warnings.clone(),
+            },
+            conversation_slice: scoped_payloads(
+                messages,
+                task.scope
+                    .iter()
+                    .filter(|scope| scope.purpose == ContextCuratorSourcePurpose::PrimaryRange),
+                &mut images,
+            )?,
+        },
+        ContextCuratorTaskKind::Tool(work) => CuratorTaskRequestPayload::ToolResultDistillation {
+            response_schema: tool_response_schema(),
+            tool: CuratorToolPayload {
+                name: work.tool_name.clone(),
+                input: work.tool_input.clone(),
+                original_token_estimate: work.original_token_estimate,
+                replacement_must_be_below_tokens: work
                     .original_token_estimate
                     .saturating_mul(20)
                     .saturating_sub(1)
                     / 100,
+            },
+            matching_tool_call: scoped_payloads(
+                messages,
+                task.scope
+                    .iter()
+                    .filter(|scope| scope.purpose == ContextCuratorSourcePurpose::PrimaryToolCall),
+                &mut images,
+            )?,
+            complete_tool_result: scoped_payloads(
+                messages,
+                task.scope.iter().filter(|scope| {
+                    scope.purpose == ContextCuratorSourcePurpose::PrimaryToolResult
+                }),
+                &mut images,
+            )?,
+            supporting_conversation: scoped_payloads(
+                messages,
+                task.scope.iter().filter(|scope| {
+                    scope.purpose == ContextCuratorSourcePurpose::SupportingConversation
+                }),
+                &mut images,
+            )?,
+            active_context_summaries: task.active_summary_texts.clone(),
+        },
+    };
+    Ok(BuiltTaskRequest { payload, images })
+}
+
+fn scoped_payloads<'a>(
+    messages: &[StoredMessage],
+    scopes: impl Iterator<Item = &'a ScopedMessage>,
+    images: &mut Vec<CuratorImageAttachment>,
+) -> Result<Vec<CuratorMessagePayload>, ContextCuratorError> {
+    scopes
+        .enumerate()
+        .map(|(sequence, scope)| {
+            let message = messages.get(scope.message_index).ok_or_else(|| {
+                ContextCuratorError::InvalidResponse(format!(
+                    "curator scope references missing stored message index {}",
+                    scope.message_index
+                ))
+            })?;
+            let ordinals = if scope.includes_all_blocks {
+                (0..message.content.len()).collect::<Vec<_>>()
+            } else {
+                scope.block_ordinals.clone()
+            };
+            let blocks = ordinals
+                .into_iter()
+                .map(|ordinal| {
+                    let block = message.content.get(ordinal).ok_or_else(|| {
+                        ContextCuratorError::InvalidResponse(format!(
+                            "curator scope references missing block {ordinal} in stored message index {}",
+                            scope.message_index
+                        ))
+                    })?;
+                    curator_block_payload(block, images)
+                })
+                .collect::<Result<Vec<_>, ContextCuratorError>>()?;
+            Ok(CuratorMessagePayload {
+                sequence,
+                role: message.role.clone(),
+                blocks,
             })
-            .collect(),
-        conversation_messages,
-        active_summary_texts: active_summary_texts.to_vec(),
-        images,
-    })
+        })
+        .collect()
 }
 
 fn curator_block_payload(
-    message: &StoredMessage,
-    block_index: usize,
     block: &ContentBlock,
     images: &mut Vec<CuratorImageAttachment>,
-) -> Value {
-    match block {
+) -> Result<Value, ContextCuratorError> {
+    let payload = match block {
         ContentBlock::Image { media_type, data } => {
-            let image_ref = format!("{}-image-{block_index}", message.id);
+            let image_ref = format!("image-{}", images.len() + 1);
             images.push(CuratorImageAttachment {
                 image_ref: image_ref.clone(),
                 media_type: media_type.clone(),
@@ -745,32 +1220,269 @@ fn curator_block_payload(
             "kind": "legacy_openai_compaction",
             "encrypted_content_present": !encrypted_content.is_empty()
         }),
-        other => {
-            serde_json::to_value(other).unwrap_or_else(|_| json!({"kind": "unserializable_block"}))
+        other => serde_json::to_value(other).map_err(|error| {
+            ContextCuratorError::InvalidResponse(format!(
+                "failed to serialize complete curator source block: {error}"
+            ))
+        })?,
+    };
+    Ok(payload)
+}
+
+fn tool_source_exclusions(
+    messages: &[StoredMessage],
+    tools: &[ContextCuratorToolWork],
+    target_index: &ContextTargetIndex<'_>,
+) -> Result<BTreeMap<usize, BTreeSet<usize>>, ContextCuratorError> {
+    let mut exclusions = BTreeMap::<usize, BTreeSet<usize>>::new();
+    for tool in tools {
+        let target = target_index
+            .resolve_content_target(&tool.target)
+            .map_err(|error| ContextCuratorError::InvalidResponse(error.to_string()))?;
+        exclusions
+            .entry(target.message_index)
+            .or_default()
+            .insert(target.block_index);
+        for (message_index, message) in messages.iter().enumerate() {
+            for (block_index, block) in message.content.iter().enumerate() {
+                if matches!(block, ContentBlock::ToolUse { id, .. } if id == &tool.tool_call_id) {
+                    exclusions
+                        .entry(message_index)
+                        .or_default()
+                        .insert(block_index);
+                }
+            }
+        }
+    }
+    Ok(exclusions)
+}
+
+fn tool_scope(
+    messages: &[StoredMessage],
+    tool: &ContextCuratorToolWork,
+    all_tools: &[ContextCuratorToolWork],
+    selected_ranges: &[(usize, usize)],
+    exclusions: &BTreeMap<usize, BTreeSet<usize>>,
+    target_index: &ContextTargetIndex<'_>,
+) -> Result<Vec<ScopedMessage>, ContextCuratorError> {
+    let target = target_index
+        .resolve_content_target(&tool.target)
+        .map_err(|error| ContextCuratorError::InvalidResponse(error.to_string()))?;
+    let call_blocks = messages
+        .iter()
+        .enumerate()
+        .flat_map(|(message_index, message)| {
+            message
+                .content
+                .iter()
+                .enumerate()
+                .filter_map(move |(block_index, block)| {
+                    matches!(block, ContentBlock::ToolUse { id, .. } if id == &tool.tool_call_id)
+                        .then_some((message_index, block_index))
+                })
+        })
+        .collect::<Vec<_>>();
+    if call_blocks.len() != 1 {
+        return Err(ContextCuratorError::InvalidResponse(format!(
+            "tool task {:?} requires exactly one matching ToolUse, found {}",
+            tool.request_id,
+            call_blocks.len()
+        )));
+    }
+    let (call_message_index, call_block_index) = call_blocks[0];
+    let mut scope = vec![
+        ScopedMessage {
+            purpose: ContextCuratorSourcePurpose::PrimaryToolCall,
+            message_index: call_message_index,
+            block_ordinals: vec![call_block_index],
+            includes_all_blocks: false,
+        },
+        ScopedMessage {
+            purpose: ContextCuratorSourcePurpose::PrimaryToolResult,
+            message_index: target.message_index,
+            block_ordinals: vec![target.block_index],
+            includes_all_blocks: false,
+        },
+    ];
+
+    let own_source = BTreeSet::from([
+        (call_message_index, call_block_index),
+        (target.message_index, target.block_index),
+    ]);
+    let supporting_ordinals = |message_index: usize| -> Vec<usize> {
+        if selected_ranges
+            .iter()
+            .any(|(start, end)| *start <= message_index && message_index <= *end)
+        {
+            return Vec::new();
+        }
+        let excluded = exclusions.get(&message_index);
+        messages[message_index]
+            .content
+            .iter()
+            .enumerate()
+            .filter_map(|(block_index, _)| {
+                (!own_source.contains(&(message_index, block_index))
+                    && !excluded.is_some_and(|items| items.contains(&block_index)))
+                .then_some(block_index)
+            })
+            .collect()
+    };
+
+    let before = call_message_index.min(target.message_index);
+    if let Some(prior_user_index) = (0..before).rev().find(|index| {
+        messages[*index].role == Role::User && !supporting_ordinals(*index).is_empty()
+    }) {
+        let ordinals = supporting_ordinals(prior_user_index);
+        scope.push(scoped_support(messages, prior_user_index, ordinals));
+    }
+    for message_index in [call_message_index, target.message_index] {
+        let ordinals = supporting_ordinals(message_index);
+        if !ordinals.is_empty() {
+            scope.push(scoped_support(messages, message_index, ordinals));
+        }
+    }
+    for message_index in target.message_index.saturating_add(1)..messages.len() {
+        let ordinals = supporting_ordinals(message_index);
+        if !ordinals.is_empty() {
+            scope.push(scoped_support(messages, message_index, ordinals));
+        }
+    }
+
+    debug_assert!(
+        all_tools
+            .iter()
+            .any(|candidate| candidate.request_id == tool.request_id)
+    );
+    Ok(scope)
+}
+
+fn scoped_support(
+    messages: &[StoredMessage],
+    message_index: usize,
+    ordinals: Vec<usize>,
+) -> ScopedMessage {
+    let includes_all_blocks = ordinals.len() == messages[message_index].content.len();
+    ScopedMessage {
+        purpose: ContextCuratorSourcePurpose::SupportingConversation,
+        message_index,
+        block_ordinals: if includes_all_blocks {
+            Vec::new()
+        } else {
+            ordinals
+        },
+        includes_all_blocks,
+    }
+}
+
+fn public_scope(
+    messages: &[StoredMessage],
+    task: &ContextCuratorTask,
+) -> Vec<ContextCuratorSourceScope> {
+    let mut scope = task
+        .scope
+        .iter()
+        .map(|item| ContextCuratorSourceScope {
+            purpose: item.purpose,
+            message_id: messages
+                .get(item.message_index)
+                .map(|message| message.id.clone()),
+            stored_index: Some(item.message_index),
+            block_ordinals: item.block_ordinals.clone(),
+            includes_all_blocks: item.includes_all_blocks,
+        })
+        .collect::<Vec<_>>();
+    scope.extend(
+        task.active_summary_texts
+            .iter()
+            .map(|_| ContextCuratorSourceScope {
+                purpose: ContextCuratorSourcePurpose::ActiveSummary,
+                message_id: None,
+                stored_index: None,
+                block_ordinals: Vec::new(),
+                includes_all_blocks: true,
+            }),
+    );
+    scope
+}
+
+fn task_target_label(task: &ContextCuratorTask) -> String {
+    match &task.kind {
+        ContextCuratorTaskKind::Range(work) => format!(
+            "range {}..{} ({} messages)",
+            work.source_range.start_index_hint,
+            work.source_range.end_index_hint,
+            work.source_range.message_count
+        ),
+        ContextCuratorTaskKind::Tool(work) => {
+            format!("{} result for call {}", work.tool_name, work.tool_call_id)
         }
     }
 }
 
-fn find_tool_call_message(messages: &[StoredMessage], tool_call_id: &str) -> Option<usize> {
-    messages.iter().position(|message| {
-        message
-            .content
-            .iter()
-            .any(|block| matches!(block, ContentBlock::ToolUse { id, .. } if id == tool_call_id))
+fn range_system_prompt(transaction: &str, task: &str) -> String {
+    effective_prompt(
+        RANGE_SUMMARIZER_BASE_PROMPT,
+        RANGE_MANDATORY_INSTRUCTIONS,
+        transaction,
+        task,
+    )
+}
+
+fn tool_system_prompt(transaction: &str) -> String {
+    effective_prompt(
+        TOOL_DISTILLER_BASE_PROMPT,
+        TOOL_MANDATORY_INSTRUCTIONS,
+        transaction,
+        "",
+    )
+}
+
+fn effective_prompt(base: &str, mandatory: &str, transaction: &str, task: &str) -> String {
+    let mut prompt = format!("{base}\n\n{mandatory}");
+    if !transaction.trim().is_empty() {
+        prompt
+            .push_str("\n\nUser-approved additional instructions for this context transaction:\n");
+        prompt.push_str(transaction);
+    }
+    if !task.trim().is_empty() {
+        prompt.push_str("\n\nUser-approved additional instructions for this specific range:\n");
+        prompt.push_str(task);
+    }
+    if !transaction.trim().is_empty() || !task.trim().is_empty() {
+        prompt.push_str(
+            "\n\nThese additional instructions are additive. Ignore any part that conflicts with the base role, mandatory preservation guarantees, complete-source semantics, or output contract.",
+        );
+    }
+    prompt
+}
+
+fn range_response_schema() -> Value {
+    json!({
+        "summary": "non-empty lossless summary",
+        "file_change_digest": "evidence-based digest; may state that no files changed",
+        "warnings": ["uncertainty or preservation warning"]
     })
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CuratorResponsePayload {
-    range_summaries: Vec<CuratorRangeResponse>,
-    tool_distillations: Vec<CuratorToolResponse>,
+fn tool_response_schema() -> Value {
+    json!({
+        "eligible": true,
+        "replacement": "required and non-empty only when eligible",
+        "preservation_rationale": "required and non-empty only when eligible",
+        "ineligible_reason": "required and non-empty only when ineligible",
+        "uncertainties": ["uncertainty"]
+    })
+}
+
+fn pretty_json(value: &Value) -> Result<String, ContextCuratorError> {
+    serde_json::to_string_pretty(value)
+        .map_err(|error| ContextCuratorError::InvalidResponse(error.to_string()))
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CuratorRangeResponse {
-    request_id: String,
     summary: String,
     file_change_digest: String,
     warnings: Vec<String>,
@@ -779,7 +1491,6 @@ struct CuratorRangeResponse {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CuratorToolResponse {
-    request_id: String,
     eligible: bool,
     replacement: Option<String>,
     preservation_rationale: Option<String>,
@@ -787,170 +1498,90 @@ struct CuratorToolResponse {
     uncertainties: Vec<String>,
 }
 
-fn parse_curator_response(
-    raw: &str,
-    ranges: &[ContextCuratorRangeWork],
-    tools: &[ContextCuratorToolWork],
-) -> Result<ContextCuratorArtifacts, ContextCuratorError> {
-    let response: CuratorResponsePayload = serde_json::from_str(raw.trim())
+fn parse_range_response(raw: &str) -> Result<ContextCuratorRangeArtifact, ContextCuratorError> {
+    let response: CuratorRangeResponse = serde_json::from_str(raw.trim())
         .map_err(|error| ContextCuratorError::InvalidResponse(error.to_string()))?;
-    let expected_ranges = ranges
-        .iter()
-        .map(|range| range.request_id.as_str())
-        .collect::<BTreeSet<_>>();
-    let expected_tools = tools
-        .iter()
-        .map(|tool| tool.request_id.as_str())
-        .collect::<BTreeSet<_>>();
-    let tool_by_id = tools
-        .iter()
-        .map(|tool| (tool.request_id.as_str(), tool))
-        .collect::<BTreeMap<_, _>>();
-    let mut artifacts = ContextCuratorArtifacts::default();
+    if response.summary.trim().is_empty() {
+        return Err(ContextCuratorError::InvalidResponse(
+            "range summary is empty".to_string(),
+        ));
+    }
+    if response.file_change_digest.trim().is_empty() {
+        return Err(ContextCuratorError::InvalidResponse(
+            "range file-change digest is empty".to_string(),
+        ));
+    }
+    Ok(ContextCuratorRangeArtifact {
+        summary: response.summary,
+        file_change_digest: response.file_change_digest,
+        warnings: response.warnings,
+    })
+}
 
-    for range in response.range_summaries {
-        if !expected_ranges.contains(range.request_id.as_str()) {
+fn parse_tool_response(
+    raw: &str,
+    work: &ContextCuratorToolWork,
+) -> Result<ContextCuratorToolArtifact, ContextCuratorError> {
+    let response: CuratorToolResponse = serde_json::from_str(raw.trim())
+        .map_err(|error| ContextCuratorError::InvalidResponse(error.to_string()))?;
+    if response.eligible {
+        let replacement = response
+            .replacement
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                ContextCuratorError::InvalidResponse(
+                    "eligible tool result has no replacement".to_string(),
+                )
+            })?;
+        let rationale = response
+            .preservation_rationale
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                ContextCuratorError::InvalidResponse(
+                    "eligible tool result has no preservation rationale".to_string(),
+                )
+            })?;
+        if response.ineligible_reason.is_some() {
+            return Err(ContextCuratorError::InvalidResponse(
+                "eligible tool result also supplied an ineligible reason".to_string(),
+            ));
+        }
+        let replacement_block = replacement_tool_result_block(work, replacement.clone());
+        let replacement_token_estimate = estimate_content_block_tokens(&replacement_block);
+        if work.original_token_estimate == 0
+            || (replacement_token_estimate as u128).saturating_mul(100)
+                >= (work.original_token_estimate as u128).saturating_mul(20)
+        {
             return Err(ContextCuratorError::InvalidResponse(format!(
-                "unknown range request ID {:?}",
-                range.request_id
+                "eligible tool request {:?} replacement is not strictly below 20 percent ({} of {} estimated tokens)",
+                work.request_id, replacement_token_estimate, work.original_token_estimate
             )));
         }
-        if artifacts.range_summaries.contains_key(&range.request_id) {
-            return Err(ContextCuratorError::InvalidResponse(format!(
-                "duplicate range request ID {:?}",
-                range.request_id
-            )));
+        Ok(ContextCuratorToolArtifact::Eligible {
+            replacement,
+            replacement_token_estimate,
+            preservation_rationale: rationale,
+            uncertainties: response.uncertainties,
+        })
+    } else {
+        if response.replacement.is_some() || response.preservation_rationale.is_some() {
+            return Err(ContextCuratorError::InvalidResponse(
+                "ineligible tool result supplied eligible-only fields".to_string(),
+            ));
         }
-        if range.summary.trim().is_empty() {
-            return Err(ContextCuratorError::InvalidResponse(format!(
-                "range {:?} has an empty summary",
-                range.request_id
-            )));
-        }
-        artifacts.range_summaries.insert(
-            range.request_id,
-            ContextCuratorRangeArtifact {
-                summary: range.summary,
-                file_change_digest: range.file_change_digest,
-                warnings: range.warnings,
-            },
-        );
+        let reason = response
+            .ineligible_reason
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                ContextCuratorError::InvalidResponse(
+                    "ineligible tool result has no reason".to_string(),
+                )
+            })?;
+        Ok(ContextCuratorToolArtifact::Ineligible {
+            reason,
+            uncertainties: response.uncertainties,
+        })
     }
-    if artifacts.range_summaries.len() != expected_ranges.len() {
-        let missing = expected_ranges
-            .into_iter()
-            .filter(|id| !artifacts.range_summaries.contains_key(*id))
-            .collect::<Vec<_>>()
-            .join(", ");
-        return Err(ContextCuratorError::InvalidResponse(format!(
-            "missing range summary request IDs: {missing}"
-        )));
-    }
-
-    for tool in response.tool_distillations {
-        if !expected_tools.contains(tool.request_id.as_str()) {
-            return Err(ContextCuratorError::InvalidResponse(format!(
-                "unknown tool request ID {:?}",
-                tool.request_id
-            )));
-        }
-        if artifacts.tool_distillations.contains_key(&tool.request_id) {
-            return Err(ContextCuratorError::InvalidResponse(format!(
-                "duplicate tool request ID {:?}",
-                tool.request_id
-            )));
-        }
-        let work = tool_by_id[tool.request_id.as_str()];
-        let artifact = if tool.eligible {
-            let replacement = tool
-                .replacement
-                .filter(|value| !value.trim().is_empty())
-                .ok_or_else(|| {
-                    ContextCuratorError::InvalidResponse(format!(
-                        "eligible tool request {:?} has no replacement",
-                        tool.request_id
-                    ))
-                })?;
-            let rationale = tool
-                .preservation_rationale
-                .filter(|value| !value.trim().is_empty())
-                .ok_or_else(|| {
-                    ContextCuratorError::InvalidResponse(format!(
-                        "eligible tool request {:?} has no preservation rationale",
-                        tool.request_id
-                    ))
-                })?;
-            if tool
-                .ineligible_reason
-                .as_deref()
-                .is_some_and(|value| !value.trim().is_empty())
-            {
-                return Err(ContextCuratorError::InvalidResponse(format!(
-                    "eligible tool request {:?} also supplied an ineligible reason",
-                    tool.request_id
-                )));
-            }
-            let replacement_block = replacement_tool_result_block(work, replacement.clone());
-            let replacement_token_estimate = estimate_content_block_tokens(&replacement_block);
-            if work.original_token_estimate == 0
-                || (replacement_token_estimate as u128).saturating_mul(100)
-                    >= (work.original_token_estimate as u128).saturating_mul(20)
-            {
-                return Err(ContextCuratorError::InvalidResponse(format!(
-                    "eligible tool request {:?} replacement is not strictly below 20 percent ({} of {} estimated tokens)",
-                    tool.request_id, replacement_token_estimate, work.original_token_estimate
-                )));
-            }
-            ContextCuratorToolArtifact::Eligible {
-                replacement,
-                replacement_token_estimate,
-                preservation_rationale: rationale,
-                uncertainties: tool.uncertainties,
-            }
-        } else {
-            if tool
-                .replacement
-                .as_deref()
-                .is_some_and(|value| !value.trim().is_empty())
-                || tool
-                    .preservation_rationale
-                    .as_deref()
-                    .is_some_and(|value| !value.trim().is_empty())
-            {
-                return Err(ContextCuratorError::InvalidResponse(format!(
-                    "ineligible tool request {:?} supplied eligible-only fields",
-                    tool.request_id
-                )));
-            }
-            let reason = tool
-                .ineligible_reason
-                .filter(|value| !value.trim().is_empty())
-                .ok_or_else(|| {
-                    ContextCuratorError::InvalidResponse(format!(
-                        "ineligible tool request {:?} has no reason",
-                        tool.request_id
-                    ))
-                })?;
-            ContextCuratorToolArtifact::Ineligible {
-                reason,
-                uncertainties: tool.uncertainties,
-            }
-        };
-        artifacts
-            .tool_distillations
-            .insert(tool.request_id, artifact);
-    }
-    if artifacts.tool_distillations.len() != expected_tools.len() {
-        let missing = expected_tools
-            .into_iter()
-            .filter(|id| !artifacts.tool_distillations.contains_key(*id))
-            .collect::<Vec<_>>()
-            .join(", ");
-        return Err(ContextCuratorError::InvalidResponse(format!(
-            "missing tool distillation request IDs: {missing}"
-        )));
-    }
-    Ok(artifacts)
 }
 
 fn replacement_tool_result_block(
@@ -962,6 +1593,17 @@ fn replacement_tool_result_block(
         content: replacement,
         is_error: work.is_error,
     }
+}
+
+fn task_prompt_version(role: StoredContextCuratorRole) -> &'static str {
+    match role {
+        StoredContextCuratorRole::RangeSummarizer => CONTEXT_RANGE_SUMMARIZER_PROMPT_VERSION,
+        StoredContextCuratorRole::ToolResultDistiller => CONTEXT_TOOL_DISTILLER_PROMPT_VERSION,
+    }
+}
+
+fn nonempty_owned(value: &str) -> Option<String> {
+    (!value.trim().is_empty()).then(|| value.to_string())
 }
 
 #[cfg(test)]
@@ -1086,6 +1728,15 @@ mod tests {
             Ok(())
         }
 
+        fn reasoning_effort(&self) -> Option<String> {
+            self.state
+                .efforts
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .last()
+                .cloned()
+        }
+
         fn fork(&self) -> Arc<dyn Provider> {
             Arc::new(self.clone())
         }
@@ -1137,6 +1788,7 @@ mod tests {
         ];
         let config = ContextCuratorConfig {
             provider: Some("anthropic".to_string()),
+            route: None,
             model: Some("target-model".to_string()),
             effort: Some("high".to_string()),
         };
@@ -1189,6 +1841,7 @@ mod tests {
             "active-route",
             &ContextCuratorConfig {
                 provider: Some("missing".to_string()),
+                route: None,
                 model: Some("target-model".to_string()),
                 effort: None,
             },
@@ -1202,6 +1855,7 @@ mod tests {
             "active-route",
             &ContextCuratorConfig {
                 provider: Some("provider a".to_string()),
+                route: None,
                 model: Some("target-model".to_string()),
                 effort: None,
             },
@@ -1219,12 +1873,18 @@ mod tests {
                 "active-route",
                 &ContextCuratorConfig {
                     provider: Some(selector.to_string()),
+                    route: None,
                     model: Some("target-model".to_string()),
                     effort: None,
                 },
             )
             .expect_err("unsafe selector must fail");
-            assert!(error.to_string().contains("no available route matches"));
+            let message = error.to_string();
+            if selector.is_empty() {
+                assert!(message.contains("selector is empty"));
+            } else {
+                assert!(message.contains("no available route matches"));
+            }
         }
     }
 
@@ -1261,6 +1921,7 @@ mod tests {
     #[derive(Clone)]
     enum ScriptedBehavior {
         Events(Vec<StreamEvent>),
+        RoleResponses { range: String, tool: String },
         EventsThenPending(Vec<StreamEvent>),
         CompletePending,
         CompleteError(String),
@@ -1356,6 +2017,16 @@ mod tests {
                     stream::iter(events.into_iter().map(Ok::<_, anyhow::Error>))
                         .chain(stream::pending()),
                 )),
+                ScriptedBehavior::RoleResponses { range, tool } => {
+                    let response = if system.starts_with(RANGE_SUMMARIZER_BASE_PROMPT) {
+                        range
+                    } else {
+                        tool
+                    };
+                    Ok(Box::pin(stream::iter(vec![Ok(StreamEvent::TextDelta(
+                        response,
+                    ))])))
+                }
                 ScriptedBehavior::CompletePending => {
                     futures::future::pending::<()>().await;
                     unreachable!("pending curator provider completed")
@@ -1421,6 +2092,52 @@ mod tests {
         }
     }
 
+    fn complete_tool_fixture(
+        content: &str,
+        original: usize,
+    ) -> (Vec<StoredMessage>, ContextCuratorToolWork) {
+        let messages = vec![
+            StoredMessage {
+                id: "call-message".to_string(),
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "call".to_string(),
+                    name: "read".to_string(),
+                    input: json!({"file_path": "src/lib.rs"}),
+                    thought_signature: None,
+                }],
+                display_role: None,
+                timestamp: None,
+                tool_duration_ms: None,
+                token_usage: None,
+            },
+            StoredMessage {
+                id: "result".to_string(),
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "call".to_string(),
+                    content: content.to_string(),
+                    is_error: Some(false),
+                }],
+                display_role: None,
+                timestamp: None,
+                tool_duration_ms: None,
+                token_usage: None,
+            },
+        ];
+        let work = ContextCuratorToolWork {
+            request_id: "tool-1".to_string(),
+            target: build_content_target(&messages, 1, 0).expect("target"),
+            message_index: 1,
+            tool_name: "read".to_string(),
+            tool_call_id: "call".to_string(),
+            tool_input: json!({"file_path": "src/lib.rs"}),
+            is_error: Some(false),
+            original_token_estimate: original,
+        };
+        (messages, work)
+    }
+
     fn range_work(messages: &[StoredMessage]) -> ContextCuratorRangeWork {
         ContextCuratorRangeWork {
             request_id: "range-1".to_string(),
@@ -1428,6 +2145,19 @@ mod tests {
             changed_files: vec!["src/lib.rs".to_string()],
             change_evidence_complete: true,
             change_evidence_warnings: Vec::new(),
+            additional_instructions: String::new(),
+        }
+    }
+
+    fn isolated_tool_task(messages: &[StoredMessage]) -> ContextCuratorTask {
+        ContextCuratorTask {
+            task_id: "tool-1".to_string(),
+            role: StoredContextCuratorRole::ToolResultDistiller,
+            kind: ContextCuratorTaskKind::Tool(tool_work(messages, 1_000)),
+            system_prompt: tool_system_prompt(""),
+            response_contract: pretty_json(&tool_response_schema()).expect("schema"),
+            scope: Vec::new(),
+            active_summary_texts: Vec::new(),
         }
     }
 
@@ -1466,78 +2196,77 @@ mod tests {
 
     fn ineligible_tool_response() -> String {
         serde_json::to_string(&json!({
-            "range_summaries": [],
-            "tool_distillations": [{
-                "request_id": "tool-1",
-                "eligible": false,
-                "replacement": null,
-                "preservation_rationale": null,
-                "ineligible_reason": "safe reduction is unavailable",
-                "uncertainties": ["later references may depend on the full output"]
-            }]
+            "eligible": false,
+            "replacement": null,
+            "preservation_rationale": null,
+            "ineligible_reason": "safe reduction is unavailable",
+            "uncertainties": ["later references may depend on the full output"]
         }))
         .expect("response JSON")
     }
 
     fn range_response() -> String {
         serde_json::to_string(&json!({
-            "range_summaries": [{
-                "request_id": "range-1",
-                "summary": "All operationally relevant range facts are preserved.",
-                "file_change_digest": "Updated src/lib.rs.",
-                "warnings": []
-            }],
-            "tool_distillations": []
+            "summary": "All operationally relevant range facts are preserved.",
+            "file_change_digest": "Updated src/lib.rs.",
+            "warnings": []
         }))
         .expect("response JSON")
     }
 
     #[test]
-    fn parser_rejects_missing_duplicate_unknown_and_malformed_tool_ids() {
-        let messages = message_with_result(&"x".repeat(1_000));
-        let work = tool_work(&messages, 1_000);
-        for raw in [
-            r#"{"range_summaries":[],"tool_distillations":[]}"#,
-            r#"{"range_summaries":[],"tool_distillations":[{"request_id":"unknown","eligible":false,"replacement":null,"preservation_rationale":null,"ineligible_reason":"no","uncertainties":[]}]}"#,
-            r#"{"range_summaries":[],"tool_distillations":[{"request_id":"tool-1","eligible":false,"replacement":null,"preservation_rationale":null,"ineligible_reason":"no","uncertainties":[]},{"request_id":"tool-1","eligible":false,"replacement":null,"preservation_rationale":null,"ineligible_reason":"no","uncertainties":[]}]}"#,
-            "not json",
-        ] {
-            assert!(parse_curator_response(raw, &[], std::slice::from_ref(&work)).is_err());
-        }
-    }
-
-    #[test]
-    fn parser_rejects_missing_duplicate_unknown_and_empty_range_artifacts() {
-        let messages = message_with_result("context");
-        let range = range_work(&messages);
-        for raw in [
-            r#"{"range_summaries":[],"tool_distillations":[]}"#,
-            r#"{"range_summaries":[{"request_id":"unknown","summary":"summary","file_change_digest":"","warnings":[]}],"tool_distillations":[]}"#,
-            r#"{"range_summaries":[{"request_id":"range-1","summary":"summary","file_change_digest":"","warnings":[]},{"request_id":"range-1","summary":"summary","file_change_digest":"","warnings":[]}],"tool_distillations":[]}"#,
-            r#"{"range_summaries":[{"request_id":"range-1","summary":"   ","file_change_digest":"","warnings":[]}],"tool_distillations":[]}"#,
-        ] {
-            assert!(parse_curator_response(raw, std::slice::from_ref(&range), &[]).is_err());
-        }
-    }
-
-    #[test]
-    fn parser_rejects_inconsistent_tool_fields_unknown_fields_and_non_document_json() {
+    fn role_parsers_reject_missing_unknown_malformed_and_non_document_json() {
         let messages = message_with_result(&"x".repeat(4_000));
         let work = tool_work(&messages, 4_000);
         for raw in [
-            r#"{"range_summaries":[],"tool_distillations":[{"request_id":"tool-1","eligible":true,"replacement":"short","preservation_rationale":null,"ineligible_reason":null,"uncertainties":[]}] }"#,
-            r#"{"range_summaries":[],"tool_distillations":[{"request_id":"tool-1","eligible":true,"replacement":"short","preservation_rationale":"complete","ineligible_reason":"contradiction","uncertainties":[]}] }"#,
-            r#"{"range_summaries":[],"tool_distillations":[{"request_id":"tool-1","eligible":false,"replacement":"short","preservation_rationale":null,"ineligible_reason":"no","uncertainties":[]}] }"#,
-            r#"{"range_summaries":[],"tool_distillations":[{"request_id":"tool-1","eligible":false,"replacement":null,"preservation_rationale":"complete","ineligible_reason":"no","uncertainties":[]}] }"#,
-            r#"{"range_summaries":[],"tool_distillations":[{"request_id":"tool-1","eligible":false,"replacement":null,"preservation_rationale":null,"ineligible_reason":null,"uncertainties":[]}] }"#,
-            r#"{"range_summaries":[],"tool_distillations":[{"request_id":"tool-1","eligible":false,"replacement":null,"preservation_rationale":null,"ineligible_reason":"no","uncertainties":[],"extra":true}] }"#,
-            r#"{"range_summaries":[],"tool_distillations":[],"extra":true}"#,
+            r#"{}"#,
+            r#"{"eligible":false,"replacement":null,"preservation_rationale":null,"ineligible_reason":"no","uncertainties":[],"extra":true}"#,
+            r#"[]"#,
+            "not json",
             r#"```json
-{"range_summaries":[],"tool_distillations":[]}
+{"eligible":false,"replacement":null,"preservation_rationale":null,"ineligible_reason":"no","uncertainties":[]}
 ```"#,
-            r#"{"range_summaries":[],"tool_distillations":[]} trailing"#,
+            r#"{"eligible":false,"replacement":null,"preservation_rationale":null,"ineligible_reason":"no","uncertainties":[]} trailing"#,
         ] {
-            assert!(parse_curator_response(raw, &[], std::slice::from_ref(&work)).is_err());
+            assert!(parse_tool_response(raw, &work).is_err());
+        }
+        for raw in [
+            r#"{}"#,
+            r#"{"summary":"summary","file_change_digest":"","warnings":[],"extra":true}"#,
+            r#"{"summary":"summary","file_change_digest":"   ","warnings":[]}"#,
+            r#"{"summary":"   ","file_change_digest":"","warnings":[]}"#,
+            r#"[]"#,
+            "not json",
+        ] {
+            assert!(parse_range_response(raw).is_err());
+        }
+    }
+
+    #[test]
+    fn range_parser_accepts_exact_single_artifact_contract() {
+        let artifact = parse_range_response(&range_response()).expect("range artifact");
+        assert_eq!(
+            artifact.summary,
+            "All operationally relevant range facts are preserved."
+        );
+        assert_eq!(artifact.file_change_digest, "Updated src/lib.rs.");
+        assert!(artifact.warnings.is_empty());
+    }
+
+    #[test]
+    fn tool_parser_rejects_inconsistent_eligible_and_ineligible_fields() {
+        let messages = message_with_result(&"x".repeat(4_000));
+        let work = tool_work(&messages, 4_000);
+        for raw in [
+            r#"{"eligible":true,"replacement":"short","preservation_rationale":null,"ineligible_reason":null,"uncertainties":[]}"#,
+            r#"{"eligible":true,"replacement":"short","preservation_rationale":"complete","ineligible_reason":"contradiction","uncertainties":[]}"#,
+            r#"{"eligible":true,"replacement":"short","preservation_rationale":"complete","ineligible_reason":"","uncertainties":[]}"#,
+            r#"{"eligible":false,"replacement":"short","preservation_rationale":null,"ineligible_reason":"no","uncertainties":[]}"#,
+            r#"{"eligible":false,"replacement":null,"preservation_rationale":"complete","ineligible_reason":"no","uncertainties":[]}"#,
+            r#"{"eligible":false,"replacement":"","preservation_rationale":null,"ineligible_reason":"no","uncertainties":[]}"#,
+            r#"{"eligible":false,"replacement":null,"preservation_rationale":null,"ineligible_reason":null,"uncertainties":[]}"#,
+        ] {
+            assert!(parse_tool_response(raw, &work).is_err());
         }
     }
 
@@ -1554,24 +2283,19 @@ mod tests {
         let exact_original = replacement_tokens * 5;
         let exact = tool_work(&messages, exact_original);
         let raw = serde_json::to_string(&json!({
-            "range_summaries": [],
-            "tool_distillations": [{
-                "request_id": "tool-1",
-                "eligible": true,
-                "replacement": replacement,
-                "preservation_rationale": "complete",
-                "ineligible_reason": null,
-                "uncertainties": []
-            }]
+            "eligible": true,
+            "replacement": replacement,
+            "preservation_rationale": "complete",
+            "ineligible_reason": null,
+            "uncertainties": []
         }))
         .expect("json");
-        assert!(parse_curator_response(&raw, &[], &[exact]).is_err());
+        assert!(parse_tool_response(&raw, &exact).is_err());
 
         let below = tool_work(&messages, exact_original + 1);
-        let artifacts = parse_curator_response(&raw, &[], &[below]).expect("below 20 percent");
         assert!(matches!(
-            artifacts.tool_distillations.get("tool-1"),
-            Some(ContextCuratorToolArtifact::Eligible { .. })
+            parse_tool_response(&raw, &below).expect("below 20 percent"),
+            ContextCuratorToolArtifact::Eligible { .. }
         ));
     }
 
@@ -1585,7 +2309,6 @@ mod tests {
         let replacement = "distilled error".to_string();
         let mut work = tool_work(&messages, 0);
         let replacement_block = replacement_tool_result_block(&work, replacement.clone());
-
         assert!(matches!(
             replacement_block,
             ContentBlock::ToolResult {
@@ -1600,52 +2323,281 @@ mod tests {
             replacement.clone(),
         ));
         let raw = serde_json::to_string(&json!({
-            "range_summaries": [],
-            "tool_distillations": [{
-                "request_id": "tool-1",
-                "eligible": true,
-                "replacement": replacement,
-                "preservation_rationale": "the complete error remains actionable",
-                "ineligible_reason": null,
-                "uncertainties": []
-            }]
+            "eligible": true,
+            "replacement": replacement,
+            "preservation_rationale": "the complete error remains actionable",
+            "ineligible_reason": null,
+            "uncertainties": []
         }))
         .expect("error-result response");
         work.original_token_estimate = replacement_tokens.saturating_mul(5);
-        assert!(
-            parse_curator_response(&raw, &[], std::slice::from_ref(&work)).is_err(),
-            "an error-result replacement at exactly 20 percent must be rejected"
-        );
+        assert!(parse_tool_response(&raw, &work).is_err());
 
         work.original_token_estimate = work.original_token_estimate.saturating_add(1);
-        let artifacts = parse_curator_response(&raw, &[], &[work])
-            .expect("error-result replacement strictly below 20 percent");
         assert!(matches!(
-            artifacts.tool_distillations.get("tool-1"),
-            Some(ContextCuratorToolArtifact::Eligible {
+            parse_tool_response(&raw, &work)
+                .expect("error-result replacement strictly below 20 percent"),
+            ContextCuratorToolArtifact::Eligible {
                 replacement_token_estimate,
                 ..
-            }) if *replacement_token_estimate == replacement_tokens
+            } if replacement_token_estimate == replacement_tokens
         ));
     }
 
     #[test]
-    fn parser_retains_ineligible_candidates_with_reason_and_uncertainty() {
+    fn parser_retains_ineligible_candidate_reason_and_uncertainty() {
         let messages = message_with_result(&"x".repeat(1_000));
         let work = tool_work(&messages, 1_000);
-        let artifacts = parse_curator_response(
-            &ineligible_tool_response(),
-            &[],
-            std::slice::from_ref(&work),
-        )
-        .expect("ineligible artifact");
         assert_eq!(
-            artifacts.tool_distillations.get("tool-1"),
-            Some(&ContextCuratorToolArtifact::Ineligible {
+            parse_tool_response(&ineligible_tool_response(), &work).expect("ineligible artifact"),
+            ContextCuratorToolArtifact::Ineligible {
                 reason: "safe reduction is unavailable".to_string(),
                 uncertainties: vec!["later references may depend on the full output".to_string()],
-            })
+            }
         );
+    }
+
+    #[tokio::test]
+    async fn three_ranges_and_five_tools_use_eight_isolated_role_specific_complete_calls() {
+        let mut messages = Vec::new();
+        let mut ranges = Vec::new();
+        for index in 0..3 {
+            messages.push(StoredMessage {
+                id: format!("range-message-{index}"),
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: format!("RANGE_SOURCE_SENTINEL_{index}"),
+                    cache_control: None,
+                }],
+                display_role: None,
+                timestamp: None,
+                tool_duration_ms: None,
+                token_usage: None,
+            });
+            let message_index = messages.len() - 1;
+            ranges.push(ContextCuratorRangeWork {
+                request_id: format!("range-{}", index + 1),
+                source_range: build_message_range(&messages, message_index, message_index)
+                    .expect("range"),
+                changed_files: vec![format!("src/range_{index}.rs")],
+                change_evidence_complete: true,
+                change_evidence_warnings: Vec::new(),
+                additional_instructions: format!("RANGE_ONLY_INSTRUCTION_{index}"),
+            });
+        }
+        let mut tools = Vec::new();
+        for index in 0..5 {
+            let call_id = format!("call-{index}");
+            messages.push(StoredMessage {
+                id: format!("tool-call-message-{index}"),
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: call_id.clone(),
+                    name: "read".to_string(),
+                    input: json!({"file_path": format!("src/tool_{index}.rs")}),
+                    thought_signature: None,
+                }],
+                display_role: None,
+                timestamp: None,
+                tool_duration_ms: None,
+                token_usage: None,
+            });
+            messages.push(StoredMessage {
+                id: format!("tool-result-message-{index}"),
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: call_id.clone(),
+                    content: format!("TOOL_RESULT_SENTINEL_{index}_{}", "x".repeat(2_000)),
+                    is_error: Some(false),
+                }],
+                display_role: None,
+                timestamp: None,
+                tool_duration_ms: None,
+                token_usage: None,
+            });
+            let message_index = messages.len() - 1;
+            tools.push(ContextCuratorToolWork {
+                request_id: format!("tool-{}", index + 1),
+                target: build_content_target(&messages, message_index, 0).expect("target"),
+                message_index,
+                tool_name: "read".to_string(),
+                tool_call_id: call_id,
+                tool_input: json!({"file_path": format!("src/tool_{index}.rs")}),
+                is_error: Some(false),
+                original_token_estimate: 1_000,
+            });
+        }
+
+        let provider = Arc::new(ScriptedProvider::new(
+            "curator",
+            ScriptedBehavior::RoleResponses {
+                range: range_response(),
+                tool: serde_json::to_string(&json!({
+                    "eligible": true,
+                    "replacement": "Distilled output retained the exact operational result.",
+                    "preservation_rationale": "All continuation-relevant facts are retained.",
+                    "ineligible_reason": null,
+                    "uncertainties": []
+                }))
+                .expect("tool response"),
+            },
+        ));
+        let route = curator_route(
+            provider.clone(),
+            pricing(StoredContextBillingMode::Unknown, None, None, None, None),
+        );
+        let plan = build_context_curator_plan(
+            &route,
+            ContextCuratorPlanInput {
+                session_id: "session",
+                context_revision: 7,
+                transcript_digest: 42,
+                messages: &messages,
+                ranges: &ranges,
+                tools: &tools,
+                active_summary_texts: &[],
+                transaction_instructions: "TRANSACTION_WIDE_INSTRUCTION",
+                selection_source: StoredContextCuratorSelectionSource::PerRunOverride,
+            },
+            ContextCuratorLimits::default(),
+        )
+        .expect("complete atomic plan");
+        assert_eq!(plan.preview.tasks.len(), 8);
+        assert!(!plan.preview.using_configured_default);
+
+        let artifacts = run_context_curator_plan(
+            &route,
+            &messages,
+            &plan,
+            &CancellationToken::new(),
+            ContextCuratorLimits::default(),
+            |_, _| {},
+        )
+        .await
+        .expect("eight isolated curator calls");
+        assert_eq!(artifacts.range_summaries.len(), 3);
+        assert_eq!(artifacts.tool_distillations.len(), 5);
+        assert_eq!(provider.call_count(), 8);
+
+        let calls = provider.captured_calls();
+        for (index, call) in calls.iter().take(3).enumerate() {
+            assert!(call.system.starts_with(RANGE_SUMMARIZER_BASE_PROMPT));
+            assert!(call.system.contains("TRANSACTION_WIDE_INSTRUCTION"));
+            assert!(
+                call.system
+                    .contains(&format!("RANGE_ONLY_INSTRUCTION_{index}"))
+            );
+            for other in 0..3 {
+                if other != index {
+                    assert!(
+                        !call
+                            .system
+                            .contains(&format!("RANGE_ONLY_INSTRUCTION_{other}"))
+                    );
+                }
+            }
+            let payload = match &call.messages[0].content[0] {
+                ContentBlock::Text { text, .. } => text,
+                other => panic!("expected JSON payload, got {other:?}"),
+            };
+            assert!(payload.contains(&format!("RANGE_SOURCE_SENTINEL_{index}")));
+            for other in 0..3 {
+                if other != index {
+                    assert!(!payload.contains(&format!("RANGE_SOURCE_SENTINEL_{other}")));
+                }
+            }
+            assert!(!payload.contains("TOOL_RESULT_SENTINEL_"));
+            assert!(!payload.contains("request_id"));
+        }
+        for (index, call) in calls.iter().skip(3).take(5).enumerate() {
+            assert!(call.system.starts_with(TOOL_DISTILLER_BASE_PROMPT));
+            assert!(call.system.contains("TRANSACTION_WIDE_INSTRUCTION"));
+            assert!(!call.system.contains("RANGE_ONLY_INSTRUCTION_"));
+            let payload = match &call.messages[0].content[0] {
+                ContentBlock::Text { text, .. } => text,
+                other => panic!("expected JSON payload, got {other:?}"),
+            };
+            assert!(payload.contains(&format!("TOOL_RESULT_SENTINEL_{index}")));
+            assert!(payload.contains(&format!("src/tool_{index}.rs")));
+            for other in 0..5 {
+                if other != index {
+                    assert!(!payload.contains(&format!("TOOL_RESULT_SENTINEL_{other}")));
+                }
+            }
+            assert!(!payload.contains("RANGE_SOURCE_SENTINEL_"));
+            assert!(!payload.contains("request_id"));
+        }
+    }
+
+    #[test]
+    fn complete_atomic_source_overflow_fails_before_any_provider_call() {
+        let messages = vec![StoredMessage {
+            id: "large-range".to_string(),
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "COMPLETE_SOURCE_SENTINEL".repeat(2_000),
+                cache_control: None,
+            }],
+            display_role: None,
+            timestamp: None,
+            tool_duration_ms: None,
+            token_usage: None,
+        }];
+        let range = range_work(&messages);
+        let provider = Arc::new(ScriptedProvider::new(
+            "curator",
+            ScriptedBehavior::Events(Vec::new()),
+        ));
+        let route = curator_route(
+            provider.clone(),
+            pricing(StoredContextBillingMode::Unknown, None, None, None, None),
+        );
+        let error = build_context_curator_plan(
+            &route,
+            ContextCuratorPlanInput {
+                session_id: "session",
+                context_revision: 0,
+                transcript_digest: 1,
+                messages: &messages,
+                ranges: &[range],
+                tools: &[],
+                active_summary_texts: &[],
+                transaction_instructions: "",
+                selection_source: StoredContextCuratorSelectionSource::ConfiguredDefault,
+            },
+            ContextCuratorLimits {
+                max_request_bytes: 128,
+                ..ContextCuratorLimits::default()
+            },
+        )
+        .expect_err("complete source must fail rather than truncate");
+        assert!(matches!(error, ContextCuratorError::RequestTooLarge { .. }));
+        assert_eq!(provider.call_count(), 0);
+
+        let preview_error = build_context_curator_plan(
+            &route,
+            ContextCuratorPlanInput {
+                session_id: "session",
+                context_revision: 0,
+                transcript_digest: 1,
+                messages: &messages,
+                ranges: &[range_work(&messages)],
+                tools: &[],
+                active_summary_texts: &[],
+                transaction_instructions: "",
+                selection_source: StoredContextCuratorSelectionSource::ConfiguredDefault,
+            },
+            ContextCuratorLimits {
+                max_plan_preview_bytes: 1,
+                ..ContextCuratorLimits::default()
+            },
+        )
+        .expect_err("oversized exact preview must fail before generation");
+        assert!(matches!(
+            preview_error,
+            ContextCuratorError::PlanPreviewTooLarge { .. }
+        ));
+        assert_eq!(provider.call_count(), 0);
     }
 
     #[test]
@@ -1748,10 +2700,22 @@ mod tests {
                 Some(12.5),
             ),
         );
-        assert!(build_curator_usage(&route, CuratorUsageAccumulator::default()).is_none());
+        let messages = message_with_result("usage fixture");
+        let task = isolated_tool_task(&messages);
         assert!(
             build_curator_usage(
                 &route,
+                &task,
+                CONTEXT_TOOL_DISTILLER_PROMPT_VERSION,
+                CuratorUsageAccumulator::default(),
+            )
+            .is_none()
+        );
+        assert!(
+            build_curator_usage(
+                &route,
+                &task,
+                CONTEXT_TOOL_DISTILLER_PROMPT_VERSION,
                 CuratorUsageAccumulator {
                     input_tokens: Some(100),
                     ..CuratorUsageAccumulator::default()
@@ -1761,6 +2725,8 @@ mod tests {
         );
         let usage = build_curator_usage(
             &route,
+            &task,
+            CONTEXT_TOOL_DISTILLER_PROMPT_VERSION,
             CuratorUsageAccumulator {
                 input_tokens: Some(100),
                 output_tokens: Some(20),
@@ -1807,7 +2773,7 @@ mod tests {
         for event in unexpected_tools {
             let provider = ScriptedProvider::new("curator", ScriptedBehavior::Events(vec![event]));
             assert!(matches!(
-                collect_curator_response(&provider, &[], 1024).await,
+                collect_curator_response(&provider, &[], RANGE_SUMMARIZER_BASE_PROMPT, 1024,).await,
                 Err(ContextCuratorError::UnexpectedToolUse)
             ));
         }
@@ -1823,7 +2789,13 @@ mod tests {
             }]),
         );
         assert!(matches!(
-            collect_curator_response(&provider, &[], 1024).await,
+            collect_curator_response(
+                &provider,
+                &[],
+                RANGE_SUMMARIZER_BASE_PROMPT,
+                1024,
+            )
+            .await,
             Err(ContextCuratorError::Provider(message)) if message == "provider event failed"
         ));
 
@@ -1832,7 +2804,13 @@ mod tests {
             ScriptedBehavior::CompleteError("provider completion failed".to_string()),
         );
         assert!(matches!(
-            collect_curator_response(&provider, &[], 1024).await,
+            collect_curator_response(
+                &provider,
+                &[],
+                RANGE_SUMMARIZER_BASE_PROMPT,
+                1024,
+            )
+            .await,
             Err(ContextCuratorError::Provider(message)) if message.contains("provider completion failed")
         ));
 
@@ -1841,7 +2819,7 @@ mod tests {
             ScriptedBehavior::Events(vec![StreamEvent::TextDelta("12345".to_string())]),
         );
         assert!(matches!(
-            collect_curator_response(&provider, &[], 4).await,
+            collect_curator_response(&provider, &[], RANGE_SUMMARIZER_BASE_PROMPT, 4).await,
             Err(ContextCuratorError::ResponseTooLarge { bytes: 5, limit: 4 })
         ));
     }
@@ -1869,9 +2847,10 @@ mod tests {
                 },
             ]),
         );
-        let collected = collect_curator_response(&provider, &[], 16 * 1024)
-            .await
-            .expect("collected response");
+        let collected =
+            collect_curator_response(&provider, &[], RANGE_SUMMARIZER_BASE_PROMPT, 16 * 1024)
+                .await
+                .expect("collected response");
         assert_eq!(collected.text, final_json);
         assert_eq!(collected.usage.input_tokens, Some(100));
         assert_eq!(collected.usage.output_tokens, Some(20));
@@ -1881,8 +2860,7 @@ mod tests {
 
     #[tokio::test]
     async fn canceled_request_fails_before_provider_poll_and_stream_cancellation_is_terminal() {
-        let messages = message_with_result(&"x".repeat(1_000));
-        let work = tool_work(&messages, 1_000);
+        let (messages, work) = complete_tool_fixture(&"x".repeat(1_000), 1_000);
         let provider = Arc::new(ScriptedProvider::new(
             "curator",
             ScriptedBehavior::CompletePending,
@@ -1944,8 +2922,7 @@ mod tests {
 
     #[tokio::test]
     async fn curator_timeout_and_request_bounds_fail_without_partial_artifacts() {
-        let messages = message_with_result(&"x".repeat(1_000));
-        let work = tool_work(&messages, 1_000);
+        let (messages, work) = complete_tool_fixture(&"x".repeat(1_000), 1_000);
         let provider = Arc::new(ScriptedProvider::new(
             "curator",
             ScriptedBehavior::CompletePending,
@@ -1954,21 +2931,27 @@ mod tests {
             provider.clone(),
             pricing(StoredContextBillingMode::Unknown, None, None, None, None),
         );
+        let timeout = run_context_curator(
+            &route,
+            &messages,
+            &[],
+            std::slice::from_ref(&work),
+            &[],
+            &CancellationToken::new(),
+            ContextCuratorLimits {
+                timeout: Duration::from_millis(10),
+                ..ContextCuratorLimits::default()
+            },
+        )
+        .await;
         assert!(matches!(
-            run_context_curator(
-                &route,
-                &messages,
-                &[],
-                std::slice::from_ref(&work),
-                &[],
-                &CancellationToken::new(),
-                ContextCuratorLimits {
-                    timeout: Duration::from_millis(10),
-                    ..ContextCuratorLimits::default()
-                },
-            )
-            .await,
-            Err(ContextCuratorError::Timeout)
+            timeout,
+            Err(ContextCuratorError::TaskFailed {
+                task_id,
+                completed: 0,
+                total: 1,
+                reason,
+            }) if task_id == "tool-1" && reason.contains("timed out")
         ));
         assert_eq!(provider.call_count(), 1);
 
@@ -2066,7 +3049,8 @@ mod tests {
         let calls = provider.captured_calls();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].tool_count, 0);
-        assert_eq!(calls[0].system, CURATOR_SYSTEM_PROMPT);
+        assert_eq!(calls[0].system, range_system_prompt("", ""));
+        assert!(calls[0].system.starts_with(RANGE_SUMMARIZER_BASE_PROMPT));
         let request_text = match &calls[0].messages[0].content[0] {
             ContentBlock::Text { text, .. } => text,
             other => panic!("expected JSON text, got {other:?}"),

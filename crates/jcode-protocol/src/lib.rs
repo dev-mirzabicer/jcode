@@ -583,6 +583,8 @@ impl Request {
             Request::GetContextEditorSnapshot { id, .. } => *id,
             Request::GetContextMessageDetail { id, .. } => *id,
             Request::PreviewContextRanges { id, .. } => *id,
+            Request::PreviewContextCuratorPlan { id, .. } => *id,
+            Request::SaveContextCuratorDefault { id, .. } => *id,
             Request::PrepareContextDraft { id, .. } => *id,
             Request::CancelContextDraft { id, .. } => *id,
             Request::GetContextDraftStatus { id, .. } => *id,

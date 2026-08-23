@@ -679,6 +679,8 @@ impl RemoteConnection {
             Request::GetContextEditorSnapshot { .. }
                 | Request::GetContextMessageDetail { .. }
                 | Request::PreviewContextRanges { .. }
+                | Request::PreviewContextCuratorPlan { .. }
+                | Request::SaveContextCuratorDefault { .. }
                 | Request::PrepareContextDraft { .. }
                 | Request::CancelContextDraft { .. }
                 | Request::GetContextDraftStatus { .. }
@@ -1573,6 +1575,7 @@ mod tests {
                     ),
                     tool_results: Vec::new(),
                     allow_shadowing_active_operations: false,
+                    curator: Default::default(),
                     authorization: jcode_session_types::StoredContextAuthorization::Manual {
                         initiated_by: None,
                     },
@@ -1664,9 +1667,44 @@ mod tests {
             },
             "send policy request"
         );
+        send_reserved!(
+            14,
+            |id| Request::PreviewContextCuratorPlan {
+                id,
+                expected_context_revision: 4,
+                expected_transcript_digest: 99,
+                request: ContextDraftRequest {
+                    summary_ranges: vec![crate::protocol::ContextMessageRangeSelection {
+                        start_message_id: "message-1".to_string(),
+                        end_message_id: "message-2".to_string(),
+                    }],
+                    reasoning: None,
+                    tool_results: Vec::new(),
+                    allow_shadowing_active_operations: false,
+                    curator: Default::default(),
+                    authorization: jcode_session_types::StoredContextAuthorization::Manual {
+                        initiated_by: None,
+                    },
+                },
+            },
+            "send curator plan preview request"
+        );
+        send_reserved!(
+            15,
+            |id| Request::SaveContextCuratorDefault {
+                id,
+                selection: crate::protocol::ContextCuratorSelection {
+                    provider: Some("anthropic".to_string()),
+                    route: Some("anthropic-api".to_string()),
+                    model: Some("claude-fable-5".to_string()),
+                    effort: Some("high".to_string()),
+                },
+            },
+            "send curator default request"
+        );
 
         let mut requests = Vec::new();
-        for _ in 0..13 {
+        for _ in 0..15 {
             let mut line = String::new();
             reader
                 .read_line(&mut line)
@@ -1679,7 +1717,7 @@ mod tests {
         }
         assert_eq!(
             requests.iter().map(Request::id).collect::<Vec<_>>(),
-            (1..=13).collect::<Vec<_>>()
+            (1..=15).collect::<Vec<_>>()
         );
         assert!(matches!(
             &requests[0],
@@ -1791,7 +1829,34 @@ mod tests {
                 ..
             } if authorization_source == "scheduled-task-1"
         ));
-        assert_eq!(remote.next_request_id, 14);
+        assert!(matches!(
+            &requests[13],
+            Request::PreviewContextCuratorPlan {
+                expected_context_revision: 4,
+                expected_transcript_digest: 99,
+                request: ContextDraftRequest { summary_ranges, .. },
+                ..
+            } if summary_ranges == &[crate::protocol::ContextMessageRangeSelection {
+                start_message_id: "message-1".to_string(),
+                end_message_id: "message-2".to_string(),
+            }]
+        ));
+        assert!(matches!(
+            &requests[14],
+            Request::SaveContextCuratorDefault {
+                selection: crate::protocol::ContextCuratorSelection {
+                    provider: Some(provider),
+                    route: Some(route),
+                    model: Some(model),
+                    effort: Some(effort),
+                },
+                ..
+            } if provider == "anthropic"
+                && route == "anthropic-api"
+                && model == "claude-fable-5"
+                && effort == "high"
+        ));
+        assert_eq!(remote.next_request_id, 16);
     }
 
     #[tokio::test]

@@ -149,6 +149,20 @@ impl App {
             ServerEvent::ContextRangeClosurePreview { id, preview } => {
                 self.context_protocol.accept_range_preview(id, preview)
             }
+            ServerEvent::ContextCuratorPlanPreview { id, preview } => {
+                self.context_protocol.accept_curator_plan(id, preview)
+            }
+            ServerEvent::ContextCuratorDefaultSaved {
+                id,
+                selection,
+                resolved_route,
+                unavailable_reason,
+            } => self.context_protocol.accept_curator_default_saved(
+                id,
+                selection,
+                resolved_route,
+                unavailable_reason,
+            ),
             ServerEvent::ContextDraftProgress {
                 id,
                 draft_id,
@@ -499,6 +513,38 @@ impl App {
                     None,
                 )
             }
+            ContextEditorAction::PreviewCuratorPlan {
+                context_revision,
+                transcript_digest,
+                request,
+            } => {
+                self.context_protocol.begin_curator_plan_request(
+                    id,
+                    self.context_session_id(),
+                    context_revision,
+                    transcript_digest,
+                );
+                (
+                    Request::PreviewContextCuratorPlan {
+                        id,
+                        expected_context_revision: context_revision,
+                        expected_transcript_digest: transcript_digest,
+                        request,
+                    },
+                    ContextRequestKind::CuratorPlanPreview,
+                    None,
+                    None,
+                )
+            }
+            ContextEditorAction::SaveCuratorDefault(selection) => {
+                self.context_protocol.begin_curator_default_request(id);
+                (
+                    Request::SaveContextCuratorDefault { id, selection },
+                    ContextRequestKind::SaveCuratorDefault,
+                    None,
+                    None,
+                )
+            }
             ContextEditorAction::PrepareDraft(request) => {
                 self.context_protocol.begin_prepare_draft(id);
                 (
@@ -760,6 +806,78 @@ impl App {
                 self.send_local_context_result(
                     id,
                     ContextRequestKind::RangeClosurePreview,
+                    None,
+                    None,
+                    event,
+                );
+            }
+            ContextEditorAction::PreviewCuratorPlan {
+                context_revision,
+                transcript_digest,
+                request,
+            } => {
+                self.context_protocol.begin_curator_plan_request(
+                    id,
+                    self.session.id.clone(),
+                    context_revision,
+                    transcript_digest,
+                );
+                let event = self
+                    .context_transactions
+                    .preview_context_curator_plan_for_session(
+                        &self.session.id,
+                        &self.session.messages,
+                        &self.session.context_view,
+                        self.is_processing,
+                        self.provider.as_ref(),
+                        &self.local_context_route_identity(),
+                        &self.provider.model_routes(),
+                        context_revision,
+                        transcript_digest,
+                        request,
+                        &crate::config::config().context.curator,
+                    )
+                    .map(|preview| ServerEvent::ContextCuratorPlanPreview { id, preview });
+                self.send_local_context_result(
+                    id,
+                    ContextRequestKind::CuratorPlanPreview,
+                    None,
+                    None,
+                    event,
+                );
+            }
+            ContextEditorAction::SaveCuratorDefault(selection) => {
+                self.context_protocol.begin_curator_default_request(id);
+                let config = crate::config::ContextCuratorConfig {
+                    provider: selection.provider.clone(),
+                    route: selection.route.clone(),
+                    model: selection.model.clone(),
+                    effort: selection.effort.clone(),
+                };
+                let event = if self.is_processing {
+                    Err(ContextServiceError::SessionBusy)
+                } else {
+                    crate::context::resolve_context_curator_route(
+                        self.provider.fork(),
+                        &self.provider.model_routes(),
+                        &self.local_context_route_identity(),
+                        &config,
+                    )
+                    .map_err(|error| ContextServiceError::Curator(error.to_string()))
+                    .and_then(|route| {
+                        crate::config::Config::set_context_curator(&config)
+                            .map_err(|error| ContextServiceError::Persistence(error.to_string()))?;
+                        Ok(ServerEvent::ContextCuratorDefaultSaved {
+                            id,
+                            selection,
+                            resolved_route: Some(route.preview()),
+                            unavailable_reason: None,
+                        })
+                    })
+                };
+                self.send_local_context_result(
+                    id,
+                    ContextRequestKind::SaveCuratorDefault,
                     None,
                     None,
                     event,

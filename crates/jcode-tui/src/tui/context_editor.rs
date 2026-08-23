@@ -1,11 +1,12 @@
 use crate::message::Role;
 use crate::protocol::{
-    ContextDraft, ContextDraftPhase, ContextDraftProgress, ContextDraftRequest,
-    ContextDraftSelectionPreview, ContextEditorMessage, ContextEditorSnapshot,
+    ContextCuratorPlanPreview, ContextCuratorRangeInstructions, ContextCuratorRunConfig,
+    ContextCuratorSelection, ContextDraft, ContextDraftPhase, ContextDraftProgress,
+    ContextDraftRequest, ContextDraftSelectionPreview, ContextEditorMessage, ContextEditorSnapshot,
     ContextMessageDetail, ContextMessageDetailFormat, ContextMessageRangeSelection,
     ContextOperationBadgeKind, ContextRangeClosurePreview, ContextReasoningSelectionRequest,
-    ContextRequestKind, ContextTextChunk, ContextToolResultSelection, ContextTransactionDetail,
-    ContextTransactionSummary,
+    ContextRequestKind, ContextServiceError, ContextTextChunk, ContextToolResultSelection,
+    ContextTransactionDetail, ContextTransactionSummary,
 };
 use crate::tui::app::context_protocol::{
     ContextClientDraftState, ContextProtocolState, ContextTransactionHistoryPage,
@@ -59,10 +60,37 @@ pub enum ContextEditorModal {
     ToolScan,
     EmergencyPolicyMenu,
     EmergencyPolicyInput,
+    CuratorSettings,
     ApplyConfirmation,
     RevertConfirmation,
     ReapplyConfirmation,
     Help,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ContextCuratorSettingsPage {
+    Overview,
+    Route,
+    TransactionInstructions,
+    RangeInstructions,
+    Plan,
+}
+
+impl ContextCuratorSettingsPage {
+    fn next(self, direction: i8) -> Self {
+        let pages = [
+            Self::Overview,
+            Self::Route,
+            Self::TransactionInstructions,
+            Self::RangeInstructions,
+            Self::Plan,
+        ];
+        let current = pages.iter().position(|page| *page == self).unwrap_or(0);
+        let next = current
+            .saturating_add_signed(direction as isize)
+            .min(pages.len().saturating_sub(1));
+        pages[next]
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -92,6 +120,12 @@ pub enum ContextEditorAction {
         transcript_digest: u64,
         ranges: Vec<ContextMessageRangeSelection>,
     },
+    PreviewCuratorPlan {
+        context_revision: u64,
+        transcript_digest: u64,
+        request: ContextDraftRequest,
+    },
+    SaveCuratorDefault(ContextCuratorSelection),
     PrepareDraft(ContextDraftRequest),
     CancelDraft {
         draft_id: String,
@@ -139,6 +173,7 @@ enum ContextEditorToolbarAction {
     Reasoning,
     ToggleOutput,
     ScanOutputs,
+    Curator,
     Prepare,
     History,
     Policy,
@@ -248,6 +283,7 @@ pub struct ContextEditor {
     selected_message_ids: BTreeSet<String>,
     summary_anchor: Option<String>,
     pending_range_preview: Option<ContextRangeClosurePreview>,
+    last_range_preview_result_id: Option<u64>,
     staged_ranges: Vec<crate::protocol::ContextClosedRangePreview>,
     allow_shadowing_active_operations: bool,
     reasoning: Option<ContextReasoningSelectionRequest>,
@@ -256,6 +292,19 @@ pub struct ContextEditor {
     tool_targets: BTreeSet<(String, usize)>,
     tool_scan_input: String,
     emergency_policy_input: String,
+    curator_settings_page: ContextCuratorSettingsPage,
+    curator_selection: Option<ContextCuratorSelection>,
+    curator_route_filter: String,
+    curator_route_cursor: usize,
+    curator_transaction_instructions: String,
+    curator_range_instructions: BTreeMap<(String, String), String>,
+    curator_range_cursor: usize,
+    curator_plan: Option<ContextCuratorPlanPreview>,
+    curator_plan_request: Option<ContextDraftRequest>,
+    curator_plan_pending: bool,
+    curator_plan_scroll: usize,
+    last_curator_default_result:
+        Option<crate::tui::app::context_protocol::ContextCuratorDefaultResult>,
     draft_id: Option<String>,
     draft_progress: Option<ContextDraftProgress>,
     draft: Option<ContextDraft>,
@@ -325,6 +374,7 @@ impl ContextEditor {
             selected_message_ids: BTreeSet::new(),
             summary_anchor: None,
             pending_range_preview: None,
+            last_range_preview_result_id: None,
             staged_ranges: Vec::new(),
             allow_shadowing_active_operations: false,
             reasoning: None,
@@ -333,6 +383,18 @@ impl ContextEditor {
             tool_targets: BTreeSet::new(),
             tool_scan_input: "2000 5".to_string(),
             emergency_policy_input: "5 10 1 1 1".to_string(),
+            curator_settings_page: ContextCuratorSettingsPage::Overview,
+            curator_selection: None,
+            curator_route_filter: String::new(),
+            curator_route_cursor: 0,
+            curator_transaction_instructions: String::new(),
+            curator_range_instructions: BTreeMap::new(),
+            curator_range_cursor: 0,
+            curator_plan: None,
+            curator_plan_request: None,
+            curator_plan_pending: false,
+            curator_plan_scroll: 0,
+            last_curator_default_result: None,
             draft_id: None,
             draft_progress: None,
             draft: None,
@@ -480,11 +542,44 @@ impl ContextEditor {
             }
         }
 
-        if let Some(preview) = state.range_preview.as_ref()
-            && self.pending_range_preview.as_ref() != Some(preview)
+        if let (Some(result_id), Some(preview)) =
+            (state.range_preview_result_id, state.range_preview.as_ref())
+            && self.last_range_preview_result_id != Some(result_id)
         {
+            self.last_range_preview_result_id = Some(result_id);
             self.pending_range_preview = Some(preview.clone());
             self.phase = ContextEditorPhase::ConfirmRangeClosure;
+            self.error = None;
+        }
+
+        if let Some(plan) = state.curator_plan.as_ref()
+            && self.curator_plan.as_ref() != Some(plan)
+        {
+            self.curator_plan = Some(plan.clone());
+            self.curator_plan_pending = false;
+            self.curator_plan_scroll = 0;
+            self.status = Some(format!(
+                "Validated {} isolated curator call(s). Inspect prompts and source scope before generation.",
+                plan.tasks.len()
+            ));
+            self.error = None;
+        }
+
+        if let Some(result) = state.curator_default_result.as_ref()
+            && self.last_curator_default_result.as_ref() != Some(result)
+        {
+            self.last_curator_default_result = Some(result.clone());
+            if let Some(snapshot) = self.snapshot.as_mut() {
+                snapshot.curator_default = result.selection.clone();
+                snapshot.curator_route = result.resolved_route.clone();
+                snapshot.curator_unavailable_reason = result.unavailable_reason.clone();
+            }
+            self.curator_selection = None;
+            self.invalidate_curator_plan();
+            self.status = Some(
+                "Saved curator provider/route/model/effort as the durable default. Ephemeral instructions were not saved."
+                    .to_string(),
+            );
             self.error = None;
         }
 
@@ -647,6 +742,10 @@ impl ContextEditor {
                 self.summary_anchor = None;
                 self.pending_range_preview = None;
                 self.staged_ranges.clear();
+                self.curator_selection = None;
+                self.curator_transaction_instructions.clear();
+                self.curator_range_instructions.clear();
+                self.invalidate_curator_plan();
                 self.reasoning = None;
                 self.tool_targets.clear();
                 self.draft_id = None;
@@ -722,6 +821,26 @@ impl ContextEditor {
             self.last_rejection_id = Some(rejection.request_id);
             self.error = Some(rejection.error.to_string());
             self.selection_preview_pending = false;
+            match rejection.request {
+                ContextRequestKind::CuratorPlanPreview => {
+                    self.curator_plan_pending = false;
+                    self.curator_plan = None;
+                    self.phase = ContextEditorPhase::Editing;
+                    self.curator_settings_page = ContextCuratorSettingsPage::Plan;
+                    self.modal = Some(ContextEditorModal::CuratorSettings);
+                    self.status = Some(
+                        "Exact curator plan validation failed. Staged operations and ephemeral settings were preserved; adjust them or retry."
+                            .to_string(),
+                    );
+                }
+                ContextRequestKind::SaveCuratorDefault => {
+                    self.status = Some(
+                        "The curator default was not saved. The prior durable default remains active."
+                            .to_string(),
+                    );
+                }
+                _ => {}
+            }
         }
     }
 
@@ -766,6 +885,10 @@ impl ContextEditor {
             self.summary_anchor = None;
             self.pending_range_preview = None;
             self.staged_ranges.clear();
+            self.curator_selection = None;
+            self.curator_transaction_instructions.clear();
+            self.curator_range_instructions.clear();
+            self.invalidate_curator_plan();
             self.reasoning = None;
             self.tool_targets.clear();
             self.draft = None;
@@ -786,6 +909,8 @@ impl ContextEditor {
                     .insert(range.requested.end_message_id.clone());
             }
             self.staged_ranges.clear();
+            self.curator_range_instructions.clear();
+            self.invalidate_curator_plan();
             self.pending_range_preview = None;
             self.allow_shadowing_active_operations = false;
             self.draft = None;
@@ -993,6 +1118,12 @@ impl ContextEditor {
                 self.queue_authoritative_history_refresh(transaction_id, revision);
             }
             ContextClientDraftState::Failed { error, stale, .. } => {
+                if matches!(&error, ContextServiceError::Curator(_)) {
+                    self.status = Some(
+                        "No curator artifacts were retained because the atomic preparation failed. Retrying will rerun every isolated curator call from a freshly validated exact plan."
+                            .to_string(),
+                    );
+                }
                 self.error = Some(error.to_string());
                 self.stale = stale;
                 self.phase = if self.draft.is_some() {
@@ -1003,7 +1134,12 @@ impl ContextEditor {
             }
             ContextClientDraftState::Canceled(_) => {
                 self.status = Some(
-                    "Draft preparation canceled. Staged selections were preserved.".to_string(),
+                    if self.staged_ranges.is_empty() && self.tool_targets.is_empty() {
+                        "Draft preparation canceled. Staged selections were preserved.".to_string()
+                    } else {
+                        "Draft preparation canceled. Staged selections were preserved, no curator artifacts were retained, and retrying will rerun every isolated call."
+                        .to_string()
+                    },
                 );
                 self.draft_progress = None;
                 self.phase = ContextEditorPhase::Editing;
@@ -1089,6 +1225,17 @@ impl ContextEditor {
                         self.allow_shadowing_active_operations =
                             !preview.shadowed_active_operations.is_empty();
                         self.staged_ranges = preview.ranges;
+                        let retained = self
+                            .staged_ranges
+                            .iter()
+                            .map(|range| canonical_editor_range_key(&range.requested))
+                            .collect::<BTreeSet<_>>();
+                        self.curator_range_instructions
+                            .retain(|key, _| retained.contains(key));
+                        self.curator_range_cursor = self
+                            .curator_range_cursor
+                            .min(self.staged_ranges.len().saturating_sub(1));
+                        self.invalidate_curator_plan();
                         self.summary_anchor = None;
                         self.phase = ContextEditorPhase::Editing;
                         self.status = Some(format!(
@@ -1179,11 +1326,25 @@ impl ContextEditor {
             KeyCode::Char('s') => self.handle_summary_anchor(),
             KeyCode::Char('x') => {
                 if let Some(message) = self.current_message() {
+                    let previous_len = self.staged_ranges.len();
                     self.staged_ranges.retain(|range| {
                         let start = range.source_range.start_index_hint;
                         let end = range.source_range.end_index_hint;
                         !(start <= message.stored_index && message.stored_index <= end)
                     });
+                    if self.staged_ranges.len() != previous_len {
+                        let retained = self
+                            .staged_ranges
+                            .iter()
+                            .map(|range| canonical_editor_range_key(&range.requested))
+                            .collect::<BTreeSet<_>>();
+                        self.curator_range_instructions
+                            .retain(|key, _| retained.contains(key));
+                        self.curator_range_cursor = self
+                            .curator_range_cursor
+                            .min(self.staged_ranges.len().saturating_sub(1));
+                        self.invalidate_curator_plan();
+                    }
                 }
                 (false, None)
             }
@@ -1197,6 +1358,12 @@ impl ContextEditor {
             }
             KeyCode::Char('D') => {
                 self.modal = Some(ContextEditorModal::ToolScan);
+                (false, None)
+            }
+            KeyCode::Char('C') => {
+                self.curator_settings_page = ContextCuratorSettingsPage::Overview;
+                self.modal = Some(ContextEditorModal::CuratorSettings);
+                self.error = None;
                 (false, None)
             }
             KeyCode::Char('P') => {
@@ -1275,7 +1442,83 @@ impl ContextEditor {
             );
             return (false, None);
         }
-        let request = ContextDraftRequest {
+        let mut request = self.current_draft_request();
+        if request.is_empty() {
+            self.error = Some(
+                "Stage at least one summary, reasoning, or tool-result operation.".to_string(),
+            );
+            return (false, None);
+        }
+        let requires_curator =
+            !request.summary_ranges.is_empty() || !request.tool_results.is_empty();
+        if requires_curator
+            && self.curator_selection.is_none()
+            && let Some(reason) = self
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.curator_unavailable_reason.as_deref())
+        {
+            self.error = Some(format!(
+                "The configured curator default is unavailable: {reason}. Open Curator settings with C and choose a capable route."
+            ));
+            return (false, None);
+        }
+        if requires_curator
+            && (self.curator_plan.as_ref().is_none()
+                || self.curator_plan_request.as_ref() != Some(&request))
+        {
+            let Some(snapshot) = self.snapshot.as_ref() else {
+                self.error = Some(
+                    "Load the authoritative snapshot before previewing curator work.".to_string(),
+                );
+                return (false, None);
+            };
+            let context_revision = snapshot.context_revision;
+            let transcript_digest = snapshot.transcript_digest;
+            self.curator_plan = None;
+            self.curator_plan_request = Some(request.clone());
+            self.curator_plan_pending = true;
+            self.phase = ContextEditorPhase::Editing;
+            self.curator_settings_page = ContextCuratorSettingsPage::Plan;
+            self.modal = Some(ContextEditorModal::CuratorSettings);
+            self.status = Some(
+                "Preparing an exact no-model preview of every isolated curator prompt and source scope."
+                    .to_string(),
+            );
+            self.error = None;
+            return (
+                false,
+                Some(ContextEditorAction::PreviewCuratorPlan {
+                    context_revision,
+                    transcript_digest,
+                    request,
+                }),
+            );
+        }
+        if requires_curator {
+            let Some(plan) = self.curator_plan.as_ref() else {
+                self.error = Some(
+                    "The exact curator plan is unavailable. Prepare a fresh preview before generation."
+                        .to_string(),
+                );
+                return (false, None);
+            };
+            if plan.fingerprint.is_empty() {
+                self.error = Some(
+                    "The curator plan did not include an exact fingerprint. Prepare a fresh preview before generation."
+                        .to_string(),
+                );
+                return (false, None);
+            }
+            request.curator.expected_plan_fingerprint = Some(plan.fingerprint.clone());
+        }
+        self.phase = ContextEditorPhase::PreparingDraft;
+        self.error = None;
+        (false, Some(ContextEditorAction::PrepareDraft(request)))
+    }
+
+    fn current_draft_request(&self) -> ContextDraftRequest {
+        ContextDraftRequest {
             summary_ranges: self
                 .staged_ranges
                 .iter()
@@ -1291,40 +1534,33 @@ impl ContextEditor {
                 })
                 .collect(),
             allow_shadowing_active_operations: self.allow_shadowing_active_operations,
+            curator: ContextCuratorRunConfig {
+                selection: self.curator_selection.clone(),
+                transaction_instructions: self.curator_transaction_instructions.clone(),
+                range_instructions: self
+                    .staged_ranges
+                    .iter()
+                    .filter_map(|range| {
+                        let instructions = self
+                            .curator_range_instructions
+                            .get(&canonical_editor_range_key(&range.requested))?;
+                        (!instructions.is_empty()).then(|| ContextCuratorRangeInstructions {
+                            range: range.requested.clone(),
+                            instructions: instructions.clone(),
+                        })
+                    })
+                    .collect(),
+                expected_plan_fingerprint: None,
+            },
             authorization: StoredContextAuthorization::Manual { initiated_by: None },
-        };
-        if request.is_empty() {
-            self.error = Some(
-                "Stage at least one summary, reasoning, or tool-result operation.".to_string(),
-            );
-            return (false, None);
         }
-        let requires_curator =
-            !request.summary_ranges.is_empty() || !request.tool_results.is_empty();
-        if requires_curator
-            && let Some(reason) = self
-                .snapshot
-                .as_ref()
-                .and_then(|snapshot| snapshot.curator_unavailable_reason.as_deref())
-        {
-            self.error = Some(format!(
-                "An independent curator route is required for range summaries or tool-result evaluation: {reason}"
-            ));
-            return (false, None);
-        }
-        if requires_curator
-            && self.snapshot.as_ref().is_some_and(|snapshot| {
-                snapshot.curator_route.is_none() && snapshot.curator_unavailable_reason.is_none()
-            })
-        {
-            self.status = Some(
-                "This server did not report curator-route availability. Draft preparation will still fail closed if no independent route can be resolved."
-                    .to_string(),
-            );
-        }
-        self.phase = ContextEditorPhase::PreparingDraft;
-        self.error = None;
-        (false, Some(ContextEditorAction::PrepareDraft(request)))
+    }
+
+    fn invalidate_curator_plan(&mut self) {
+        self.curator_plan = None;
+        self.curator_plan_request = None;
+        self.curator_plan_pending = false;
+        self.curator_plan_scroll = 0;
     }
 
     fn handle_review_key(&mut self, code: KeyCode) -> (bool, Option<ContextEditorAction>) {
@@ -1464,7 +1700,7 @@ impl ContextEditor {
         &mut self,
         modal: ContextEditorModal,
         code: KeyCode,
-        _modifiers: KeyModifiers,
+        modifiers: KeyModifiers,
     ) -> (bool, Option<ContextEditorAction>) {
         if code == KeyCode::Esc {
             self.modal = None;
@@ -1632,6 +1868,9 @@ impl ContextEditor {
                 }
                 _ => (false, None),
             },
+            ContextEditorModal::CuratorSettings => {
+                self.handle_curator_settings_key(code, modifiers)
+            }
             ContextEditorModal::ApplyConfirmation => match code {
                 KeyCode::Enter | KeyCode::Char('y') => {
                     if let Some(reason) = self.apply_disabled_reason() {
@@ -1716,6 +1955,284 @@ impl ContextEditor {
         }
     }
 
+    fn handle_curator_settings_key(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+    ) -> (bool, Option<ContextEditorAction>) {
+        if code == KeyCode::Tab {
+            self.curator_settings_page = self.curator_settings_page.next(1);
+            self.curator_plan_scroll = 0;
+            return (false, None);
+        }
+        if code == KeyCode::BackTab {
+            self.curator_settings_page = self.curator_settings_page.next(-1);
+            self.curator_plan_scroll = 0;
+            return (false, None);
+        }
+        let control = modifiers.contains(KeyModifiers::CONTROL);
+        if (control && code == KeyCode::Char('p'))
+            || (!control
+                && code == KeyCode::Char('p')
+                && !matches!(
+                    self.curator_settings_page,
+                    ContextCuratorSettingsPage::TransactionInstructions
+                        | ContextCuratorSettingsPage::RangeInstructions
+                ))
+        {
+            return (false, self.preview_curator_plan_action());
+        }
+        if (control && code == KeyCode::Char('s'))
+            || (!control
+                && code == KeyCode::Char('s')
+                && matches!(
+                    self.curator_settings_page,
+                    ContextCuratorSettingsPage::Overview
+                        | ContextCuratorSettingsPage::Route
+                        | ContextCuratorSettingsPage::Plan
+                ))
+        {
+            let Some(selection) = self.effective_curator_selection() else {
+                self.error = Some(
+                    "No resolved curator default is available to save. Choose a route first."
+                        .to_string(),
+                );
+                return (false, None);
+            };
+            return (
+                false,
+                Some(ContextEditorAction::SaveCuratorDefault(selection)),
+            );
+        }
+        if (control && code == KeyCode::Char('d'))
+            || (!control
+                && code == KeyCode::Char('d')
+                && matches!(
+                    self.curator_settings_page,
+                    ContextCuratorSettingsPage::Overview
+                        | ContextCuratorSettingsPage::Route
+                        | ContextCuratorSettingsPage::Plan
+                ))
+        {
+            self.curator_selection = None;
+            self.invalidate_curator_plan();
+            self.status = Some(
+                "Restored the configured curator default for this run. Ephemeral instructions remain unchanged."
+                    .to_string(),
+            );
+            return (false, None);
+        }
+
+        match self.curator_settings_page {
+            ContextCuratorSettingsPage::Overview => (false, None),
+            ContextCuratorSettingsPage::Route => match code {
+                KeyCode::Up => {
+                    self.curator_route_cursor = self.curator_route_cursor.saturating_sub(1);
+                    (false, None)
+                }
+                KeyCode::Down => {
+                    let max = self.filtered_curator_routes().len().saturating_sub(1);
+                    self.curator_route_cursor =
+                        self.curator_route_cursor.saturating_add(1).min(max);
+                    (false, None)
+                }
+                KeyCode::Enter => {
+                    if let Some(route) = self
+                        .filtered_curator_routes()
+                        .get(self.curator_route_cursor)
+                        .cloned()
+                    {
+                        self.curator_selection = Some(ContextCuratorSelection {
+                            provider: Some(route.provider),
+                            route: Some(route.route),
+                            model: Some(route.model),
+                            effort: route.efforts.first().cloned(),
+                        });
+                        self.invalidate_curator_plan();
+                        self.error = None;
+                    }
+                    (false, None)
+                }
+                KeyCode::Char('e') => {
+                    self.cycle_curator_effort();
+                    (false, None)
+                }
+                KeyCode::Backspace => {
+                    self.curator_route_filter.pop();
+                    self.curator_route_cursor = 0;
+                    (false, None)
+                }
+                KeyCode::Char(character) if !control => {
+                    self.curator_route_filter.push(character);
+                    self.curator_route_cursor = 0;
+                    (false, None)
+                }
+                _ => (false, None),
+            },
+            ContextCuratorSettingsPage::TransactionInstructions => match code {
+                KeyCode::Enter => {
+                    self.curator_transaction_instructions.push('\n');
+                    self.invalidate_curator_plan();
+                    (false, None)
+                }
+                KeyCode::Backspace => {
+                    self.curator_transaction_instructions.pop();
+                    self.invalidate_curator_plan();
+                    (false, None)
+                }
+                KeyCode::Char(character) if !control => {
+                    self.curator_transaction_instructions.push(character);
+                    self.invalidate_curator_plan();
+                    (false, None)
+                }
+                _ => (false, None),
+            },
+            ContextCuratorSettingsPage::RangeInstructions => {
+                if code == KeyCode::Char('[') {
+                    self.curator_range_cursor = self.curator_range_cursor.saturating_sub(1);
+                    return (false, None);
+                }
+                if code == KeyCode::Char(']') {
+                    self.curator_range_cursor = self
+                        .curator_range_cursor
+                        .saturating_add(1)
+                        .min(self.staged_ranges.len().saturating_sub(1));
+                    return (false, None);
+                }
+                let Some(range) = self.staged_ranges.get(self.curator_range_cursor) else {
+                    self.error = Some(
+                        "Stage at least one summary range before adding range-specific instructions."
+                            .to_string(),
+                    );
+                    return (false, None);
+                };
+                let key = canonical_editor_range_key(&range.requested);
+                let instructions = self.curator_range_instructions.entry(key).or_default();
+                match code {
+                    KeyCode::Enter => instructions.push('\n'),
+                    KeyCode::Backspace => {
+                        instructions.pop();
+                    }
+                    KeyCode::Char(character) if !control => instructions.push(character),
+                    _ => return (false, None),
+                }
+                self.invalidate_curator_plan();
+                (false, None)
+            }
+            ContextCuratorSettingsPage::Plan => match code {
+                KeyCode::PageUp | KeyCode::Up => {
+                    self.curator_plan_scroll = self.curator_plan_scroll.saturating_sub(10);
+                    (false, None)
+                }
+                KeyCode::PageDown | KeyCode::Down => {
+                    self.curator_plan_scroll = self.curator_plan_scroll.saturating_add(10);
+                    (false, None)
+                }
+                KeyCode::Char('g') | KeyCode::Enter => {
+                    self.modal = None;
+                    self.prepare_action()
+                }
+                _ => (false, None),
+            },
+        }
+    }
+
+    fn preview_curator_plan_action(&mut self) -> Option<ContextEditorAction> {
+        if self.curator_plan_pending {
+            self.status = Some(
+                "Exact curator plan validation is already in progress. Esc closes this modal without canceling the authoritative request."
+                    .to_string(),
+            );
+            return None;
+        }
+        let request = self.current_draft_request();
+        if request.summary_ranges.is_empty() && request.tool_results.is_empty() {
+            self.error = Some(
+                "Stage a range summary or tool-result candidate before previewing curator calls."
+                    .to_string(),
+            );
+            return None;
+        }
+        let snapshot = self.snapshot.as_ref()?;
+        let context_revision = snapshot.context_revision;
+        let transcript_digest = snapshot.transcript_digest;
+        self.curator_plan = None;
+        self.curator_plan_request = Some(request.clone());
+        self.curator_plan_pending = true;
+        self.curator_settings_page = ContextCuratorSettingsPage::Plan;
+        self.status = Some("Validating complete source, prompts, and route budgets…".to_string());
+        Some(ContextEditorAction::PreviewCuratorPlan {
+            context_revision,
+            transcript_digest,
+            request,
+        })
+    }
+
+    fn effective_curator_selection(&self) -> Option<ContextCuratorSelection> {
+        self.curator_selection.clone().or_else(|| {
+            self.snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.curator_default.clone())
+        })
+    }
+
+    fn filtered_curator_routes(&self) -> Vec<crate::protocol::ContextCuratorRouteOption> {
+        let query = self.curator_route_filter.trim().to_ascii_lowercase();
+        self.snapshot
+            .as_ref()
+            .map(|snapshot| {
+                snapshot
+                    .curator_route_options
+                    .iter()
+                    .filter(|route| {
+                        query.is_empty()
+                            || route.provider.to_ascii_lowercase().contains(&query)
+                            || route.route.to_ascii_lowercase().contains(&query)
+                            || route.model.to_ascii_lowercase().contains(&query)
+                            || route.detail.to_ascii_lowercase().contains(&query)
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn cycle_curator_effort(&mut self) {
+        let Some(selection) = self.curator_selection.as_mut() else {
+            self.error = Some("Choose a per-run route before cycling effort.".to_string());
+            return;
+        };
+        let Some(route) = self.snapshot.as_ref().and_then(|snapshot| {
+            snapshot.curator_route_options.iter().find(|route| {
+                selection.provider.as_deref() == Some(route.provider.as_str())
+                    && selection.route.as_deref() == Some(route.route.as_str())
+                    && selection.model.as_deref() == Some(route.model.as_str())
+            })
+        }) else {
+            self.error =
+                Some("The selected route no longer exists in the current catalog.".to_string());
+            return;
+        };
+        if route.efforts.is_empty() {
+            selection.effort = None;
+        } else {
+            let next = selection
+                .effort
+                .as_deref()
+                .and_then(|effort| {
+                    route
+                        .efforts
+                        .iter()
+                        .position(|candidate| candidate == effort)
+                })
+                .map(|index| (index + 1) % route.efforts.len())
+                .unwrap_or(0);
+            selection.effort = Some(route.efforts[next].clone());
+        }
+        self.invalidate_curator_plan();
+        self.error = None;
+    }
+
     fn current_detail_action(&self) -> Option<ContextEditorAction> {
         self.current_message().and_then(|message| {
             let block = message.blocks.get(self.block_cursor)?;
@@ -1751,6 +2268,7 @@ impl ContextEditor {
                 ("Reasoning", ContextEditorToolbarAction::Reasoning),
                 ("Output", ContextEditorToolbarAction::ToggleOutput),
                 ("Scan", ContextEditorToolbarAction::ScanOutputs),
+                ("Curator", ContextEditorToolbarAction::Curator),
                 ("Detail", ContextEditorToolbarAction::Detail),
                 ("Prepare", ContextEditorToolbarAction::Prepare),
                 ("History", ContextEditorToolbarAction::History),
@@ -1804,6 +2322,7 @@ impl ContextEditor {
             ContextEditorToolbarAction::Reasoning => Some(KeyCode::Char('R')),
             ContextEditorToolbarAction::ToggleOutput => Some(KeyCode::Char('d')),
             ContextEditorToolbarAction::ScanOutputs => Some(KeyCode::Char('D')),
+            ContextEditorToolbarAction::Curator => Some(KeyCode::Char('C')),
             ContextEditorToolbarAction::Prepare => Some(KeyCode::Char('g')),
             ContextEditorToolbarAction::History => Some(KeyCode::Char('H')),
             ContextEditorToolbarAction::Policy => Some(KeyCode::Char('P')),
@@ -1839,6 +2358,7 @@ impl ContextEditor {
         match action {
             ContextEditorToolbarAction::Range => self.current_message().is_some(),
             ContextEditorToolbarAction::Reasoning | ContextEditorToolbarAction::History => true,
+            ContextEditorToolbarAction::Curator => self.snapshot.is_some(),
             ContextEditorToolbarAction::Policy => !self
                 .snapshot
                 .as_ref()
@@ -2236,7 +2756,7 @@ impl ContextEditor {
     fn render_footer(&mut self, frame: &mut Frame, area: Rect) {
         let help = match self.phase {
             ContextEditorPhase::Editing => {
-                "s range · Space select · R reasoning · d/D outputs · P policy · g review · H history · / search · ? help · Esc"
+                "s range · Space select · R reasoning · d/D outputs · C curator · P policy · g review · H history · / search · ? help · Esc"
             }
             ContextEditorPhase::ConfirmRangeClosure => "Enter confirm closure · Esc reject",
             ContextEditorPhase::PreparingDraft => {
@@ -2323,6 +2843,34 @@ impl ContextEditor {
                     "Curator route availability was not reported by this server.",
                 ));
             }
+            if let Some(selection) = self.curator_selection.as_ref() {
+                lines.push(Line::from(format!(
+                    "Per-run curator override: provider {} · route {} · model {} · effort {}",
+                    selection.provider.as_deref().unwrap_or("active fork"),
+                    selection.route.as_deref().unwrap_or("active route"),
+                    selection.model.as_deref().unwrap_or("active model"),
+                    selection.effort.as_deref().unwrap_or("provider default")
+                )));
+            } else {
+                lines.push(Line::from("Curator selection source: configured default"));
+            }
+            lines.push(Line::from(format!(
+                "Curator instructions: {} transaction character(s) · {} range override(s) · exact plan {}",
+                self.curator_transaction_instructions.chars().count(),
+                self.curator_range_instructions
+                    .values()
+                    .filter(|value| !value.is_empty())
+                    .count(),
+                if self.curator_plan_pending {
+                    "pending"
+                } else if self.curator_plan_request.as_ref() == Some(&self.current_draft_request())
+                    && self.curator_plan.is_some()
+                {
+                    "validated"
+                } else {
+                    "missing/stale"
+                }
+            )));
         }
         for (index, range) in self.staged_ranges.iter().enumerate() {
             lines.push(Line::from(format!(
@@ -2499,8 +3047,13 @@ impl ContextEditor {
         let Some(modal) = self.modal else {
             return;
         };
-        let width = area.width.saturating_sub(8).clamp(20, 76);
+        let width = if modal == ContextEditorModal::CuratorSettings {
+            area.width.saturating_sub(4).clamp(30, 120)
+        } else {
+            area.width.saturating_sub(8).clamp(20, 76)
+        };
         let height = match modal {
+            ContextEditorModal::CuratorSettings => area.height.saturating_sub(4).max(8),
             ContextEditorModal::Help => 18,
             ContextEditorModal::ReasoningMenu => 9,
             ContextEditorModal::EmergencyPolicyMenu => {
@@ -2555,6 +3108,10 @@ impl ContextEditor {
                     self.emergency_policy_input
                 ),
             ),
+            ContextEditorModal::CuratorSettings => (
+                "Curator settings · Tab/Shift-Tab pages",
+                self.curator_settings_body(width as usize),
+            ),
             ContextEditorModal::ApplyConfirmation => (
                 "Apply transaction?",
                 self.apply_confirmation_text(),
@@ -2571,21 +3128,210 @@ impl ContextEditor {
             ),
             ContextEditorModal::Help => (
                 "Context editor help",
-                "Stable IDs, never wrapped rows, own every selection.\n\ns anchors structurally closed summary ranges.\nSpace selects stable messages or toggles a reviewed proposal.\nR stages replayed-reasoning suppression.\nd marks the selected ToolResult block. D scans mechanically.\nP configures explicit unattended emergency authorization.\ng prepares one curator-backed atomic review.\nTab changes pane focus. Arrow/vim keys navigate.\nOriginal Session.messages is never changed by these operations.\n\n? or Enter closes help."
+                "Stable IDs, never wrapped rows, own every selection.\n\ns anchors structurally closed summary ranges.\nSpace selects stable messages or toggles a reviewed proposal.\nR stages replayed-reasoning suppression.\nd marks the selected ToolResult block. D scans mechanically.\nC opens per-run curator settings, exact prompts/source scope, and explicit default save.\nP configures explicit unattended emergency authorization.\ng first requires exact curator-plan review, then prepares one atomic transaction.\nTab changes pane focus. Arrow/vim keys navigate.\nOriginal Session.messages is never changed by these operations.\n\n? or Enter closes help."
                     .to_string(),
             ),
         };
-        frame.render_widget(
-            Paragraph::new(body)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(format!(" {title} "))
-                        .border_style(Style::default().fg(Color::Magenta)),
+        let paragraph = Paragraph::new(body)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!(" {title} "))
+                    .border_style(Style::default().fg(Color::Magenta)),
+            )
+            .wrap(Wrap { trim: false });
+        let paragraph = if modal == ContextEditorModal::CuratorSettings
+            && self.curator_settings_page == ContextCuratorSettingsPage::Plan
+        {
+            paragraph.scroll((self.curator_plan_scroll.min(u16::MAX as usize) as u16, 0))
+        } else {
+            paragraph
+        };
+        frame.render_widget(paragraph, modal_area);
+    }
+
+    fn curator_settings_body(&self, width: usize) -> String {
+        let tabs = "Overview · Route · Transaction instructions · Range instructions · Exact plan";
+        let header = format!("{tabs}\nPage: {:?}\n\n", self.curator_settings_page);
+        let feedback = self
+            .error
+            .as_ref()
+            .map(|error| format!("ERROR: {error}\n\n"))
+            .unwrap_or_default();
+        let controls = "\n\nTab/Shift-Tab change page · Ctrl-P preview · Ctrl-S save route default · Ctrl-D restore configured default · Esc close\nOnly provider/route/model/effort are saved. Transaction and range instructions always remain ephemeral.";
+        let body = match self.curator_settings_page {
+            ContextCuratorSettingsPage::Overview => {
+                let current = self.effective_curator_selection().unwrap_or_default();
+                let source = if self.curator_selection.is_some() {
+                    "temporary per-run override"
+                } else {
+                    "configured default"
+                };
+                let resolved = self
+                    .snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.curator_route.as_ref())
+                    .map(|route| {
+                        format!(
+                            "{} / {} / {} · model {} · effort {}",
+                            route.provider_display_name,
+                            route.provider_name,
+                            route.route,
+                            route.model,
+                            route.effort.as_deref().unwrap_or("unspecified")
+                        )
+                    })
+                    .unwrap_or_else(|| "not resolved for the configured default".to_string());
+                format!(
+                    "Selection source: {source}\nConfigured values: provider={} · route={} · model={} · effort={}\nResolved route: {resolved}\n\nTransaction instructions: {} characters\nRange-specific instructions: {} staged range(s)\nExact plan: {}\n\np preview · s save current provider/route/model/effort · d restore configured default",
+                    current.provider.as_deref().unwrap_or("active fork"),
+                    current.route.as_deref().unwrap_or("active route"),
+                    current.model.as_deref().unwrap_or("active model"),
+                    current.effort.as_deref().unwrap_or("provider default"),
+                    self.curator_transaction_instructions.chars().count(),
+                    self.curator_range_instructions
+                        .values()
+                        .filter(|value| !value.is_empty())
+                        .count(),
+                    if self.curator_plan_pending {
+                        "pending"
+                    } else if self.curator_plan_request.as_ref()
+                        == Some(&self.current_draft_request())
+                        && self.curator_plan.is_some()
+                    {
+                        "current and validated"
+                    } else {
+                        "missing or stale"
+                    }
                 )
-                .wrap(Wrap { trim: false }),
-            modal_area,
-        );
+            }
+            ContextCuratorSettingsPage::Route => {
+                let routes = self.filtered_curator_routes();
+                let mut lines = vec![format!(
+                    "Search: {}\nType to filter · Up/Down navigate · Enter choose · e cycle selected effort\n",
+                    self.curator_route_filter
+                )];
+                if routes.is_empty() {
+                    lines.push("No available curator route matches this filter.".to_string());
+                }
+                for (index, route) in routes.iter().enumerate() {
+                    lines.push(format!(
+                        "{} {} / {} · {} · efforts {}{}",
+                        if index == self.curator_route_cursor {
+                            "›"
+                        } else {
+                            " "
+                        },
+                        route.provider,
+                        route.route,
+                        route.model,
+                        if route.efforts.is_empty() {
+                            "provider default".to_string()
+                        } else {
+                            route.efforts.join(",")
+                        },
+                        if route.detail.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" · {}", one_line(&route.detail, width.saturating_sub(8)))
+                        }
+                    ));
+                }
+                lines.join("\n")
+            }
+            ContextCuratorSettingsPage::TransactionInstructions => format!(
+                "These instructions apply additively to every atomic curator call in this transaction. Mandatory role and preservation contracts cannot be disabled.\n\n{}\n\nType freely · Enter newline · Backspace · Ctrl-P preview",
+                if self.curator_transaction_instructions.is_empty() {
+                    "(none)"
+                } else {
+                    &self.curator_transaction_instructions
+                }
+            ),
+            ContextCuratorSettingsPage::RangeInstructions => {
+                let Some(range) = self.staged_ranges.get(self.curator_range_cursor) else {
+                    return format!("{header}Stage at least one summary range first.{controls}");
+                };
+                let key = canonical_editor_range_key(&range.requested);
+                let instructions = self
+                    .curator_range_instructions
+                    .get(&key)
+                    .map(String::as_str)
+                    .unwrap_or("");
+                format!(
+                    "Range {} of {} · requested {}..{} · closed {}..{}\n[ and ] change range\n\n{}\n\nType freely · Enter newline · Backspace · Ctrl-P preview",
+                    self.curator_range_cursor + 1,
+                    self.staged_ranges.len(),
+                    range.requested.start_message_id,
+                    range.requested.end_message_id,
+                    range.source_range.start_index_hint,
+                    range.source_range.end_index_hint,
+                    if instructions.is_empty() {
+                        "(none)"
+                    } else {
+                        instructions
+                    }
+                )
+            }
+            ContextCuratorSettingsPage::Plan => {
+                if self.curator_plan_pending {
+                    "Validating complete atomic source, exact prompts, byte bounds, image capability, and provider input budget…".to_string()
+                } else if self.curator_plan_request.as_ref() != Some(&self.current_draft_request())
+                {
+                    "The displayed plan is missing or stale because selections/settings changed. Press p or Ctrl-P to regenerate it.".to_string()
+                } else if let Some(plan) = self.curator_plan.as_ref() {
+                    let mut lines = vec![format!(
+                        "Route: {} / {} / {} · model {} · effort {}\nTasks: {} isolated call(s) · configured default: {}\nExact plan fingerprint: {}\n",
+                        plan.route.provider_display_name,
+                        plan.route.provider_name,
+                        plan.route.route,
+                        plan.route.model,
+                        plan.route.effort.as_deref().unwrap_or("unspecified"),
+                        plan.tasks.len(),
+                        plan.using_configured_default,
+                        plan.fingerprint
+                    )];
+                    for (index, task) in plan.tasks.iter().enumerate() {
+                        lines.push(format!(
+                            "\n=== Atomic call {} · {:?} · {} ===\nEstimated input {} / safe {} tokens · request {} / {} bytes · images {}\n\nEffective system prompt:\n{}\n\nResponse contract:\n{}\n\nExact source scope:",
+                            index + 1,
+                            task.role,
+                            task.target_label,
+                            task.estimated_input_tokens,
+                            task.safe_input_budget,
+                            task.request_bytes,
+                            task.request_byte_limit,
+                            task.image_count,
+                            task.effective_system_prompt,
+                            task.response_contract,
+                        ));
+                        for source in &task.source_scope {
+                            lines.push(format!(
+                                "  {:?} · message {} · stored index {} · {}",
+                                source.purpose,
+                                source
+                                    .message_id
+                                    .as_deref()
+                                    .unwrap_or("generated active summary"),
+                                source
+                                    .stored_index
+                                    .map(|index| index.to_string())
+                                    .unwrap_or_else(|| "n/a".to_string()),
+                                if source.includes_all_blocks {
+                                    "all blocks".to_string()
+                                } else {
+                                    format!("blocks {:?}", source.block_ordinals)
+                                }
+                            ));
+                        }
+                    }
+                    lines.push("\nPress g or Enter to generate after inspection. p refreshes. PageUp/PageDown scroll.".to_string());
+                    lines.join("\n")
+                } else {
+                    "No exact curator plan is available. Press p or Ctrl-P to build one without invoking a model.".to_string()
+                }
+            }
+        };
+        format!("{header}{feedback}{body}{controls}")
     }
 
     fn preview_lines(&self, width: usize) -> Vec<Line<'static>> {
@@ -3333,10 +4079,12 @@ impl ContextEditor {
         if !self.tool_targets.remove(&target) {
             self.tool_targets.insert(target);
         }
+        self.invalidate_curator_plan();
         self.error = None;
     }
 
     fn scan_tool_results(&mut self, minimum_tokens: usize, protected_recent_turns: usize) {
+        let previous_target_count = self.tool_targets.len();
         let protected_start = self.protected_recent_assistant_start(protected_recent_turns);
         let staged_intervals = self
             .staged_ranges
@@ -3369,6 +4117,9 @@ impl ContextEditor {
             "Marked {} mechanical candidate(s); curator eligibility is still required.",
             self.tool_targets.len()
         ));
+        if self.tool_targets.len() != previous_target_count {
+            self.invalidate_curator_plan();
+        }
     }
 
     fn protected_recent_assistant_start(&self, protected: usize) -> Option<usize> {
@@ -3554,6 +4305,13 @@ impl ContextEditor {
             "operations_scroll": self.operations_scroll,
             "narrow_layout": self.narrow_layout,
             "selection_preview_pending": self.selection_preview_pending,
+            "curator_settings_page": format!("{:?}", self.curator_settings_page),
+            "curator_plan_pending": self.curator_plan_pending,
+            "curator_plan_tasks": self.curator_plan.as_ref().map(|plan| plan.tasks.len()),
+            "curator_plan_current": self.curator_plan.is_some()
+                && self.curator_plan_request.as_ref() == Some(&self.current_draft_request()),
+            "curator_route_options": self.snapshot.as_ref().map(|snapshot| snapshot.curator_route_options.len()).unwrap_or(0),
+            "has_error": self.error.is_some(),
             "stale": self.stale,
         })
     }
@@ -3685,6 +4443,20 @@ fn metadata_only_chunk(total_chars: usize) -> ContextTextChunk {
         total_chars,
         text: String::new(),
         next_start_char: None,
+    }
+}
+
+fn canonical_editor_range_key(selection: &ContextMessageRangeSelection) -> (String, String) {
+    if selection.start_message_id <= selection.end_message_id {
+        (
+            selection.start_message_id.clone(),
+            selection.end_message_id.clone(),
+        )
+    } else {
+        (
+            selection.end_message_id.clone(),
+            selection.start_message_id.clone(),
+        )
     }
 }
 
@@ -4242,6 +5014,19 @@ mod tests {
                 effort: Some("high".to_string()),
             }),
             curator_unavailable_reason: None,
+            curator_default: ContextCuratorSelection {
+                provider: Some("openai".to_string()),
+                route: Some("oauth".to_string()),
+                model: Some("gpt-curator-test".to_string()),
+                effort: Some("high".to_string()),
+            },
+            curator_route_options: vec![crate::protocol::ContextCuratorRouteOption {
+                provider: "anthropic".to_string(),
+                route: "anthropic-api".to_string(),
+                model: "claude-fable-5".to_string(),
+                detail: "Anthropic API route".to_string(),
+                efforts: vec!["low".to_string(), "high".to_string()],
+            }],
         }
     }
 
@@ -4343,6 +5128,10 @@ mod tests {
             route: "curator-route".to_string(),
             prompt_version: "context-curator-v1".to_string(),
             effort: Some("high".to_string()),
+            role: None,
+            selection_source: None,
+            transaction_instructions: None,
+            task_instructions: None,
         };
         let target = StoredContentTarget {
             message_id: "message-2".to_string(),
@@ -4446,6 +5235,10 @@ mod tests {
             provider: "curator-provider".to_string(),
             model: "curator-model".to_string(),
             route: "curator-route".to_string(),
+            effort: None,
+            role: None,
+            artifact_id: None,
+            prompt_version: None,
             input_tokens: 1_000,
             output_tokens: 200,
             cache_read_input_tokens: Some(400),
@@ -5274,6 +6067,267 @@ mod tests {
         assert_eq!(
             editor.apply_disabled_reason(),
             Some("session is processing")
+        );
+    }
+
+    #[test]
+    fn curator_settings_control_one_run_preview_exact_prompts_and_save_only_route_defaults() {
+        let mut editor = ContextEditor::new(ContextEditorOpenMode::Edit);
+        editor.apply_snapshot(snapshot());
+        editor.phase = ContextEditorPhase::Editing;
+        editor.staged_ranges = vec![closed_range(0, 1)];
+
+        assert_eq!(
+            editor.handle_key(KeyCode::Char('C'), KeyModifiers::NONE).1,
+            None
+        );
+        assert_eq!(editor.modal, Some(ContextEditorModal::CuratorSettings));
+        assert!(
+            editor
+                .curator_settings_body(100)
+                .contains("configured default")
+        );
+
+        editor.handle_key(KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(
+            editor.curator_settings_page,
+            ContextCuratorSettingsPage::Route
+        );
+        editor.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(
+            editor.curator_selection,
+            Some(ContextCuratorSelection {
+                provider: Some("anthropic".to_string()),
+                route: Some("anthropic-api".to_string()),
+                model: Some("claude-fable-5".to_string()),
+                effort: Some("low".to_string()),
+            })
+        );
+        editor.handle_key(KeyCode::Char('e'), KeyModifiers::NONE);
+        assert_eq!(
+            editor
+                .curator_selection
+                .as_ref()
+                .and_then(|selection| selection.effort.as_deref()),
+            Some("high")
+        );
+
+        editor.handle_key(KeyCode::Tab, KeyModifiers::NONE);
+        for character in "TRANSACTION_INSTRUCTION".chars() {
+            editor.handle_key(KeyCode::Char(character), KeyModifiers::NONE);
+        }
+        editor.handle_key(KeyCode::Tab, KeyModifiers::NONE);
+        for character in "RANGE_INSTRUCTION".chars() {
+            editor.handle_key(KeyCode::Char(character), KeyModifiers::NONE);
+        }
+
+        let (_, action) = editor.handle_key(KeyCode::Char('p'), KeyModifiers::CONTROL);
+        let ContextEditorAction::PreviewCuratorPlan { request, .. } =
+            action.expect("exact plan preview action")
+        else {
+            panic!("expected curator plan preview")
+        };
+        assert_eq!(request.curator.selection, editor.curator_selection.clone());
+        assert_eq!(
+            request.curator.transaction_instructions,
+            "TRANSACTION_INSTRUCTION"
+        );
+        assert_eq!(request.curator.range_instructions.len(), 1);
+        assert_eq!(
+            request.curator.range_instructions[0].instructions,
+            "RANGE_INSTRUCTION"
+        );
+
+        let plan = ContextCuratorPlanPreview {
+            session_id: "session-1".to_string(),
+            context_revision: 4,
+            transcript_digest: 99,
+            route: crate::protocol::ContextCuratorRoutePreview {
+                provider_name: "anthropic".to_string(),
+                provider_display_name: "Anthropic".to_string(),
+                model: "claude-fable-5".to_string(),
+                route: "anthropic-api".to_string(),
+                effort: Some("high".to_string()),
+            },
+            using_configured_default: false,
+            tasks: vec![crate::protocol::ContextCuratorTaskPreview {
+                task_id: "range-1".to_string(),
+                role: jcode_session_types::StoredContextCuratorRole::RangeSummarizer,
+                target_label: "range 0..1".to_string(),
+                effective_system_prompt: "EXACT_EFFECTIVE_PROMPT".to_string(),
+                response_contract: "EXACT_RESPONSE_CONTRACT".to_string(),
+                estimated_input_tokens: 1_000,
+                safe_input_budget: 100_000,
+                request_bytes: 5_000,
+                request_byte_limit: 32 * 1024 * 1024,
+                image_count: 0,
+                source_scope: vec![crate::protocol::ContextCuratorSourceScope {
+                    purpose: crate::protocol::ContextCuratorSourcePurpose::PrimaryRange,
+                    message_id: Some("message-0".to_string()),
+                    stored_index: Some(0),
+                    block_ordinals: Vec::new(),
+                    includes_all_blocks: true,
+                }],
+            }],
+            fingerprint: "b".repeat(64),
+        };
+        editor.curator_plan_request = Some(request.clone());
+        editor.curator_plan = Some(plan);
+        editor.curator_plan_pending = false;
+        let body = editor.curator_settings_body(100);
+        for expected in [
+            "EXACT_EFFECTIVE_PROMPT",
+            "EXACT_RESPONSE_CONTRACT",
+            "PrimaryRange",
+            "message-0",
+            "all blocks",
+        ] {
+            assert!(
+                body.contains(expected),
+                "missing exact plan detail: {expected}"
+            );
+        }
+
+        let (_, save) = editor.handle_key(KeyCode::Char('s'), KeyModifiers::CONTROL);
+        assert_eq!(
+            save,
+            Some(ContextEditorAction::SaveCuratorDefault(
+                editor.curator_selection.clone().expect("per-run selection")
+            ))
+        );
+        let (_, prepare) = editor.handle_key(KeyCode::Char('g'), KeyModifiers::NONE);
+        let mut reviewed_request = request;
+        reviewed_request.curator.expected_plan_fingerprint = Some("b".repeat(64));
+        assert_eq!(
+            prepare,
+            Some(ContextEditorAction::PrepareDraft(reviewed_request))
+        );
+
+        editor.modal = Some(ContextEditorModal::CuratorSettings);
+        editor.handle_key(KeyCode::Char('d'), KeyModifiers::CONTROL);
+        assert_eq!(editor.curator_selection, None);
+        assert!(editor.curator_plan.is_none());
+        assert_eq!(
+            editor.curator_transaction_instructions,
+            "TRANSACTION_INSTRUCTION"
+        );
+    }
+
+    #[test]
+    fn curator_failure_and_cancellation_disclose_full_atomic_retry_behavior() {
+        let identity = draft().identity;
+        let mut editor = ContextEditor::new(ContextEditorOpenMode::Edit);
+        editor.apply_snapshot(snapshot());
+        editor.apply_draft_state(ContextClientDraftState::Failed {
+            identity: identity.clone(),
+            error: ContextServiceError::Curator("atomic task tool-2 failed".to_string()),
+            stale: false,
+        });
+        let failed = editor.status.as_deref().expect("curator failure status");
+        assert!(failed.contains("No curator artifacts were retained"));
+        assert!(failed.contains("rerun every isolated curator call"));
+
+        editor.tool_targets.insert(("message-2".to_string(), 0));
+        editor.apply_draft_state(ContextClientDraftState::Canceled(identity));
+        let canceled = editor.status.as_deref().expect("curator cancel status");
+        assert!(canceled.contains("no curator artifacts were retained"));
+        assert!(canceled.contains("rerun every isolated call"));
+    }
+
+    #[test]
+    fn curator_plan_transport_failure_stays_in_modal_and_releases_pending_state() {
+        let mut protocol = ContextProtocolState::default();
+        protocol.begin_snapshot_request(1);
+        assert!(protocol.accept_snapshot(1, snapshot()));
+
+        let mut editor = ContextEditor::new(ContextEditorOpenMode::Edit);
+        editor.sync_protocol(&protocol);
+        editor.curator_plan_pending = true;
+        editor.curator_plan_request = Some(editor.current_draft_request());
+        protocol.begin_curator_plan_request(2, "session-1".to_string(), 4, 99);
+        assert!(protocol.accept_rejection(
+            2,
+            ContextRequestKind::CuratorPlanPreview,
+            None,
+            None,
+            ContextServiceError::Runtime("transport unavailable".to_string()),
+        ));
+
+        editor.sync_protocol(&protocol);
+        assert!(!editor.curator_plan_pending);
+        assert_eq!(editor.phase, ContextEditorPhase::Editing);
+        assert_eq!(editor.modal, Some(ContextEditorModal::CuratorSettings));
+        assert_eq!(
+            editor.curator_settings_page,
+            ContextCuratorSettingsPage::Plan
+        );
+        assert!(
+            editor
+                .curator_settings_body(100)
+                .contains("ERROR: context service runtime error: transport unavailable")
+        );
+
+        let cursor = editor.cursor;
+        let (_, action) = editor.handle_key(KeyCode::Char('j'), KeyModifiers::NONE);
+        assert!(action.is_none());
+        assert_eq!(
+            editor.cursor, cursor,
+            "modal input must not leak to history"
+        );
+
+        editor.curator_plan_pending = true;
+        assert!(editor.preview_curator_plan_action().is_none());
+        assert!(
+            editor
+                .status
+                .as_deref()
+                .is_some_and(|status| { status.contains("already in progress") })
+        );
+    }
+
+    #[test]
+    fn accepted_range_preview_is_consumed_once_and_identical_later_request_is_new() {
+        let selection = ContextMessageRangeSelection {
+            start_message_id: "message-0".to_string(),
+            end_message_id: "message-1".to_string(),
+        };
+        let preview = range_preview(vec![closed_range(0, 1)], Vec::new());
+        let mut protocol = ContextProtocolState::default();
+        protocol.begin_snapshot_request(1);
+        assert!(protocol.accept_snapshot(1, snapshot()));
+        protocol.begin_range_preview_request(
+            2,
+            "session-1".to_string(),
+            4,
+            99,
+            vec![selection.clone()],
+        );
+        assert!(protocol.accept_range_preview(2, preview.clone()));
+
+        let mut editor = ContextEditor::new(ContextEditorOpenMode::Edit);
+        editor.sync_protocol(&protocol);
+        assert_eq!(editor.phase, ContextEditorPhase::ConfirmRangeClosure);
+        editor.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(editor.phase, ContextEditorPhase::Editing);
+        assert!(editor.pending_range_preview.is_none());
+
+        editor.sync_protocol(&protocol);
+        assert_eq!(
+            editor.phase,
+            ContextEditorPhase::Editing,
+            "the accepted cached response must not reactivate after confirmation"
+        );
+
+        protocol.begin_range_preview_request(3, "session-1".to_string(), 4, 99, vec![selection]);
+        assert!(protocol.accept_range_preview(3, preview));
+        editor.sync_protocol(&protocol);
+        assert_eq!(editor.phase, ContextEditorPhase::ConfirmRangeClosure);
+        editor.handle_key(KeyCode::Char('n'), KeyModifiers::NONE);
+        editor.sync_protocol(&protocol);
+        assert_eq!(
+            editor.phase,
+            ContextEditorPhase::Editing,
+            "the accepted cached response must not reactivate after rejection"
         );
     }
 

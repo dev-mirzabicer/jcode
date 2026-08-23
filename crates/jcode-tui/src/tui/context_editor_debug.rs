@@ -519,6 +519,8 @@ fn debug_snapshot(
         curator_unavailable_reason: matches!(curator, CuratorFixture::Unavailable).then(|| {
             "No independent synthetic curator route is configured for this fixture.".to_string()
         }),
+        curator_default: Default::default(),
+        curator_route_options: Vec::new(),
     }
 }
 
@@ -658,6 +660,10 @@ fn debug_draft(pricing: PricingFixture, proposal_count: usize) -> ContextDraft {
         route: "synthetic-curator-route".to_string(),
         prompt_version: "context-curator-debug-v1".to_string(),
         effort: Some("high".to_string()),
+        role: None,
+        selection_source: None,
+        transaction_instructions: None,
+        task_instructions: None,
     };
     let reasoning = StoredContextOperation::ReasoningSuppression(StoredReasoningSuppression {
         selection: StoredReasoningSelection::KeepLatestAssistantTurns {
@@ -765,6 +771,10 @@ fn debug_draft(pricing: PricingFixture, proposal_count: usize) -> ContextDraft {
             provider: "synthetic-curator".to_string(),
             model: "synthetic-curator-model".to_string(),
             route: "synthetic-curator-route".to_string(),
+            effort: Some("high".to_string()),
+            role: None,
+            artifact_id: None,
+            prompt_version: None,
             input_tokens: 12_000,
             output_tokens: 1_400,
             cache_read_input_tokens: Some(4_000),

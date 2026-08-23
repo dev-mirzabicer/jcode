@@ -97,6 +97,8 @@ fn parity_snapshot() -> crate::protocol::ContextEditorSnapshot {
         emergency_policy: jcode_session_types::StoredContextEmergencyPolicy::Block,
         curator_route: None,
         curator_unavailable_reason: Some("curator unavailable in parity fixture".to_string()),
+        curator_default: Default::default(),
+        curator_route_options: Vec::new(),
     }
 }
 
@@ -1071,6 +1073,7 @@ fn parity_draft_request() -> crate::protocol::ContextDraftRequest {
         ),
         tool_results: Vec::new(),
         allow_shadowing_active_operations: false,
+        curator: Default::default(),
         authorization: jcode_session_types::StoredContextAuthorization::Manual {
             initiated_by: None,
         },
@@ -1194,6 +1197,8 @@ fn pending_request_id_for_kind(
         ContextRequestKind::Snapshot => "snapshot_request_id",
         ContextRequestKind::MessageDetail => "detail_request_id",
         ContextRequestKind::RangeClosurePreview => "range_request_id",
+        ContextRequestKind::CuratorPlanPreview => "curator_plan_request_id",
+        ContextRequestKind::SaveCuratorDefault => "curator_default_request_id",
         ContextRequestKind::PrepareDraft
         | ContextRequestKind::CancelDraft
         | ContextRequestKind::DraftStatus => "draft_monitor_request_id",

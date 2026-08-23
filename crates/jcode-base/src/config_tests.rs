@@ -108,6 +108,7 @@ model = "claude-fable-5"
     .expect("partial curator config");
 
     assert_eq!(config.context.curator.provider, None);
+    assert_eq!(config.context.curator.route, None);
     assert_eq!(
         config.context.curator.model.as_deref(),
         Some("claude-fable-5")
@@ -120,6 +121,7 @@ fn complete_context_curator_configuration_round_trips() {
     let context = ContextConfig {
         curator: ContextCuratorConfig {
             provider: Some("anthropic".to_string()),
+            route: Some("anthropic-api".to_string()),
             model: Some("claude-fable-5".to_string()),
             effort: Some("high".to_string()),
         },
@@ -136,6 +138,7 @@ fn default_curator_serialization_omits_absent_route_fields() {
     let encoded = toml::to_string(&ContextConfig::default()).expect("serialize default context");
 
     assert!(!encoded.contains("provider ="));
+    assert!(!encoded.contains("route ="));
     assert!(!encoded.contains("model ="));
     assert!(!encoded.contains("effort ="));
 }
@@ -155,8 +158,78 @@ legacy_route_hint = "ignored"
     .expect("legacy-compatible context config");
 
     assert_eq!(config.context.curator.provider.as_deref(), Some("openai"));
+    assert_eq!(config.context.curator.route, None);
     assert_eq!(config.context.curator.model, None);
     assert_eq!(config.context.curator.effort, None);
+}
+
+#[test]
+fn curator_default_save_is_durable_comment_preserving_and_removes_only_owned_keys() {
+    let _guard = crate::storage::lock_test_env();
+    let previous_home = std::env::var_os("JCODE_HOME");
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", dir.path());
+    Config::invalidate_cache();
+
+    let path = Config::path().expect("config path");
+    std::fs::create_dir_all(path.parent().expect("config parent")).expect("config directory");
+    let original = r#"# user's leading comment
+[display]
+centered = false # preserve inline comment
+
+[context]
+legacy_mode = "manual"
+
+[context.curator]
+# preserve curator comment
+provider = "old-provider"
+legacy_route_hint = "keep-me"
+"#;
+    std::fs::write(&path, original).expect("initial config");
+
+    let saved = ContextCuratorConfig {
+        provider: Some("anthropic".to_string()),
+        route: Some("anthropic-api".to_string()),
+        model: Some("claude-fable-5".to_string()),
+        effort: Some("high".to_string()),
+    };
+    Config::set_context_curator(&saved).expect("durable curator save");
+    let content = std::fs::read_to_string(&path).expect("saved config");
+    for preserved in [
+        "# user's leading comment",
+        "centered = false # preserve inline comment",
+        "legacy_mode = \"manual\"",
+        "# preserve curator comment",
+        "legacy_route_hint = \"keep-me\"",
+    ] {
+        assert!(
+            content.contains(preserved),
+            "missing preserved text: {preserved}"
+        );
+    }
+    let strict = Config::load_strict().expect("strict saved config");
+    assert_eq!(strict.context.curator, saved);
+
+    Config::set_context_curator(&ContextCuratorConfig::default())
+        .expect("restore active-provider default");
+    let restored = std::fs::read_to_string(&path).expect("restored config");
+    for key in ["provider =", "route =", "model =", "effort ="] {
+        assert!(
+            !restored.contains(key),
+            "owned key remained after restore: {key}"
+        );
+    }
+    assert!(restored.contains("legacy_route_hint = \"keep-me\""));
+    assert_eq!(
+        Config::load_strict()
+            .expect("strict restored config")
+            .context
+            .curator,
+        ContextCuratorConfig::default()
+    );
+
+    restore_env_var("JCODE_HOME", previous_home);
+    Config::invalidate_cache();
 }
 
 #[test]

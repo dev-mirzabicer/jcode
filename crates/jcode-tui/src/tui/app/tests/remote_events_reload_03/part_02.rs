@@ -531,6 +531,8 @@ fn context_protocol_events_reduce_with_exact_correlation_and_prompt_safe_action_
             emergency_policy: jcode_session_types::StoredContextEmergencyPolicy::Block,
             curator_route: None,
             curator_unavailable_reason: None,
+            curator_default: Default::default(),
+            curator_route_options: Vec::new(),
         }
     }
 

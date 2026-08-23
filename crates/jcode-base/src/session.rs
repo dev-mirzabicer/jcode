@@ -2069,6 +2069,9 @@ fn redact_context_view(context_view: &mut StoredContextViewState) {
                     for warning in &mut summary.warnings {
                         *warning = crate::message::redact_secrets(warning);
                     }
+                    if let Some(generator) = summary.generator.as_mut() {
+                        redact_context_generator(generator);
+                    }
                 }
                 jcode_session_types::StoredContextOperation::ReasoningSuppression(suppression) => {
                     for validation in &mut suppression.validation {
@@ -2087,6 +2090,7 @@ fn redact_context_view(context_view: &mut StoredContextViewState) {
                     for uncertainty in &mut distillation.uncertainties {
                         *uncertainty = crate::message::redact_secrets(uncertainty);
                     }
+                    redact_context_generator(&mut distillation.generator);
                 }
             }
         }
@@ -2122,6 +2126,15 @@ fn redact_context_view(context_view: &mut StoredContextViewState) {
     } = &mut context_view.emergency_policy
     {
         *authorization_source = crate::message::redact_secrets(authorization_source);
+    }
+}
+
+fn redact_context_generator(generator: &mut jcode_session_types::StoredContextArtifactGenerator) {
+    if let Some(instructions) = generator.transaction_instructions.as_mut() {
+        *instructions = crate::message::redact_secrets(instructions);
+    }
+    if let Some(instructions) = generator.task_instructions.as_mut() {
+        *instructions = crate::message::redact_secrets(instructions);
     }
 }
 

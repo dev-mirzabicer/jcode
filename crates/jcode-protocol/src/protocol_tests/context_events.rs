@@ -200,6 +200,8 @@ fn context_snapshot() -> ContextEditorSnapshot {
         emergency_policy: jcode_session_types::StoredContextEmergencyPolicy::Block,
         curator_route: None,
         curator_unavailable_reason: None,
+        curator_default: ContextCuratorSelection::default(),
+        curator_route_options: Vec::new(),
     }
 }
 
@@ -276,9 +278,53 @@ fn context_requests_roundtrip_preserve_ids_and_payloads() -> Result<()> {
                     block_ordinal: 1,
                 }],
                 allow_shadowing_active_operations: true,
+                curator: Default::default(),
                 authorization: jcode_session_types::StoredContextAuthorization::Manual {
                     initiated_by: Some("mirza".to_string()),
                 },
+            },
+        },
+        Request::PreviewContextCuratorPlan {
+            id: 40,
+            expected_context_revision: 4,
+            expected_transcript_digest: 99,
+            request: ContextDraftRequest {
+                summary_ranges: vec![ContextMessageRangeSelection {
+                    start_message_id: "message-1".to_string(),
+                    end_message_id: "message-2".to_string(),
+                }],
+                reasoning: None,
+                tool_results: Vec::new(),
+                allow_shadowing_active_operations: false,
+                curator: ContextCuratorRunConfig {
+                    selection: Some(ContextCuratorSelection {
+                        provider: Some("anthropic".to_string()),
+                        route: Some("anthropic-api".to_string()),
+                        model: Some("claude-fable-5".to_string()),
+                        effort: Some("high".to_string()),
+                    }),
+                    transaction_instructions: "Preserve benchmark evidence.".to_string(),
+                    range_instructions: vec![ContextCuratorRangeInstructions {
+                        range: ContextMessageRangeSelection {
+                            start_message_id: "message-1".to_string(),
+                            end_message_id: "message-2".to_string(),
+                        },
+                        instructions: "Keep exact error strings.".to_string(),
+                    }],
+                    expected_plan_fingerprint: None,
+                },
+                authorization: jcode_session_types::StoredContextAuthorization::Manual {
+                    initiated_by: None,
+                },
+            },
+        },
+        Request::SaveContextCuratorDefault {
+            id: 41,
+            selection: ContextCuratorSelection {
+                provider: Some("anthropic".to_string()),
+                route: Some("anthropic-api".to_string()),
+                model: Some("claude-fable-5".to_string()),
+                effort: Some("high".to_string()),
             },
         },
         Request::CancelContextDraft {
@@ -437,6 +483,8 @@ fn context_event_id(event: &ServerEvent) -> u64 {
         ServerEvent::ContextEditorSnapshot { id, .. }
         | ServerEvent::ContextMessageDetail { id, .. }
         | ServerEvent::ContextRangeClosurePreview { id, .. }
+        | ServerEvent::ContextCuratorPlanPreview { id, .. }
+        | ServerEvent::ContextCuratorDefaultSaved { id, .. }
         | ServerEvent::ContextDraftProgress { id, .. }
         | ServerEvent::ContextDraftReady { id, .. }
         | ServerEvent::ContextDraftApplying { id, .. }
@@ -473,6 +521,53 @@ fn context_events_roundtrip_preserve_request_and_draft_correlation() -> Result<(
         ServerEvent::ContextRangeClosurePreview {
             id: 3,
             preview: context_range_preview(),
+        },
+        ServerEvent::ContextCuratorPlanPreview {
+            id: 40,
+            preview: ContextCuratorPlanPreview {
+                session_id: "session-1".to_string(),
+                context_revision: 4,
+                transcript_digest: 99,
+                route: ContextCuratorRoutePreview {
+                    provider_name: "anthropic".to_string(),
+                    provider_display_name: "Anthropic".to_string(),
+                    model: "claude-fable-5".to_string(),
+                    route: "anthropic-api".to_string(),
+                    effort: Some("high".to_string()),
+                },
+                using_configured_default: false,
+                tasks: vec![ContextCuratorTaskPreview {
+                    task_id: "range-1".to_string(),
+                    role: jcode_session_types::StoredContextCuratorRole::RangeSummarizer,
+                    target_label: "range 1..2".to_string(),
+                    effective_system_prompt: "exact prompt".to_string(),
+                    response_contract: "exact schema".to_string(),
+                    estimated_input_tokens: 1_000,
+                    safe_input_budget: 100_000,
+                    request_bytes: 4_000,
+                    request_byte_limit: 32 * 1024 * 1024,
+                    image_count: 0,
+                    source_scope: vec![ContextCuratorSourceScope {
+                        purpose: ContextCuratorSourcePurpose::PrimaryRange,
+                        message_id: Some("message-1".to_string()),
+                        stored_index: Some(1),
+                        block_ordinals: Vec::new(),
+                        includes_all_blocks: true,
+                    }],
+                }],
+                fingerprint: "a".repeat(64),
+            },
+        },
+        ServerEvent::ContextCuratorDefaultSaved {
+            id: 41,
+            selection: ContextCuratorSelection {
+                provider: Some("anthropic".to_string()),
+                route: Some("anthropic-api".to_string()),
+                model: Some("claude-fable-5".to_string()),
+                effort: Some("high".to_string()),
+            },
+            resolved_route: None,
+            unavailable_reason: None,
         },
         ServerEvent::ContextDraftProgress {
             id: 4,
@@ -637,9 +732,13 @@ fn context_snapshot_curator_route_fields_roundtrip_and_old_payloads_default() ->
         .expect("snapshot serialization is an object");
     object.remove("curator_route");
     object.remove("curator_unavailable_reason");
+    object.remove("curator_default");
+    object.remove("curator_route_options");
     let decoded_old: ContextEditorSnapshot = serde_json::from_value(old_payload)?;
     assert_eq!(decoded_old.curator_route, None);
     assert_eq!(decoded_old.curator_unavailable_reason, None);
+    assert_eq!(decoded_old.curator_default, ContextCuratorSelection::default());
+    assert!(decoded_old.curator_route_options.is_empty());
 
     snapshot.curator_route = None;
     snapshot.curator_unavailable_reason = Some(

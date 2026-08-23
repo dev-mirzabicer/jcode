@@ -3,10 +3,10 @@ use jcode_message_types::Role;
 use jcode_provider_core::ContextProjectionValidationReport;
 use jcode_session_types::{
     StoredContextApplication, StoredContextAuthorization, StoredContextBlockKind,
-    StoredContextCuratorUsage, StoredContextEconomics, StoredContextEmergencyPolicy,
-    StoredContextOperation, StoredContextTransaction, StoredContextTransactionStatusKind,
-    StoredDisplayRole, StoredMessageRange, StoredRangeBoundaryExpansion,
-    StoredToolResultDistillation,
+    StoredContextCuratorRole, StoredContextCuratorUsage, StoredContextEconomics,
+    StoredContextEmergencyPolicy, StoredContextOperation, StoredContextTransaction,
+    StoredContextTransactionStatusKind, StoredDisplayRole, StoredMessageRange,
+    StoredRangeBoundaryExpansion, StoredToolResultDistillation,
 };
 use serde::{Deserialize, Serialize};
 use std::error::Error;
@@ -22,6 +22,8 @@ pub const CONTEXT_MAX_SUMMARY_RANGES: usize = 256;
 pub const CONTEXT_MAX_TOOL_RESULT_SELECTIONS: usize = 1_024;
 pub const CONTEXT_MAX_DISTILLATION_SELECTIONS: usize = 1_024;
 pub const CONTEXT_IDENTIFIER_MAX_CHARS: usize = 512;
+pub const CONTEXT_CURATOR_INSTRUCTION_MAX_CHARS: usize = 64 * 1024;
+pub const CONTEXT_CURATOR_TOTAL_INSTRUCTION_MAX_CHARS: usize = 2 * 1024 * 1024;
 pub const CONTEXT_PROTOCOL_MAX_EVENT_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,6 +120,10 @@ pub struct ContextEditorSnapshot {
     pub curator_route: Option<ContextCuratorRoutePreview>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub curator_unavailable_reason: Option<String>,
+    #[serde(default)]
+    pub curator_default: ContextCuratorSelection,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub curator_route_options: Vec<ContextCuratorRouteOption>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,6 +134,106 @@ pub struct ContextCuratorRoutePreview {
     pub route: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ContextCuratorSelection {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextCuratorRouteOption {
+    pub provider: String,
+    pub route: String,
+    pub model: String,
+    pub detail: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub efforts: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextCuratorRangeInstructions {
+    pub range: ContextMessageRangeSelection,
+    pub instructions: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ContextCuratorRunConfig {
+    /// `None` resolves the configured default. `Some(default())` explicitly uses
+    /// an independent fork of the active provider/model for this run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<ContextCuratorSelection>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub transaction_instructions: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub range_instructions: Vec<ContextCuratorRangeInstructions>,
+    /// When present, draft preparation must rebuild the identical no-model plan
+    /// before making any curator call. This closes route/config/transcript races
+    /// between user review and generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_plan_fingerprint: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextCuratorSourcePurpose {
+    PrimaryRange,
+    PrimaryToolCall,
+    PrimaryToolResult,
+    SupportingConversation,
+    ActiveSummary,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextCuratorSourceScope {
+    pub purpose: ContextCuratorSourcePurpose,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stored_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub block_ordinals: Vec<usize>,
+    #[serde(default)]
+    pub includes_all_blocks: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextCuratorTaskPreview {
+    pub task_id: String,
+    pub role: StoredContextCuratorRole,
+    pub target_label: String,
+    pub effective_system_prompt: String,
+    pub response_contract: String,
+    pub estimated_input_tokens: usize,
+    pub safe_input_budget: usize,
+    pub request_bytes: usize,
+    pub request_byte_limit: usize,
+    pub image_count: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_scope: Vec<ContextCuratorSourceScope>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextCuratorPlanPreview {
+    pub session_id: String,
+    pub context_revision: u64,
+    pub transcript_digest: u64,
+    pub route: ContextCuratorRoutePreview,
+    #[serde(default)]
+    pub using_configured_default: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tasks: Vec<ContextCuratorTaskPreview>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub fingerprint: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -237,6 +343,8 @@ pub struct ContextDraftRequest {
     pub tool_results: Vec<ContextToolResultSelection>,
     #[serde(default)]
     pub allow_shadowing_active_operations: bool,
+    #[serde(default)]
+    pub curator: ContextCuratorRunConfig,
     pub authorization: StoredContextAuthorization,
 }
 
@@ -533,6 +641,8 @@ pub enum ContextRequestKind {
     Snapshot,
     MessageDetail,
     RangeClosurePreview,
+    CuratorPlanPreview,
+    SaveCuratorDefault,
     PrepareDraft,
     CancelDraft,
     DraftStatus,

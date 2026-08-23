@@ -191,6 +191,22 @@ pub enum Request {
         ranges: Vec<ContextMessageRangeSelection>,
     },
 
+    /// Build and validate the exact isolated curator-call plan without invoking a model.
+    #[serde(rename = "preview_context_curator_plan")]
+    PreviewContextCuratorPlan {
+        id: u64,
+        expected_context_revision: u64,
+        expected_transcript_digest: u64,
+        request: ContextDraftRequest,
+    },
+
+    /// Persist only provider/route/model/effort as the global curator default.
+    #[serde(rename = "save_context_curator_default")]
+    SaveContextCuratorDefault {
+        id: u64,
+        selection: ContextCuratorSelection,
+    },
+
     /// Capture and prepare one atomic context transaction draft.
     #[serde(rename = "prepare_context_draft")]
     PrepareContextDraft {
@@ -1278,6 +1294,24 @@ pub enum ServerEvent {
     ContextRangeClosurePreview {
         id: u64,
         preview: ContextRangeClosurePreview,
+    },
+
+    /// Exact role prompts, source scope, and limits for every pending atomic curator call.
+    #[serde(rename = "context_curator_plan_preview")]
+    ContextCuratorPlanPreview {
+        id: u64,
+        preview: ContextCuratorPlanPreview,
+    },
+
+    /// The durable curator default was written successfully and resolved against this session.
+    #[serde(rename = "context_curator_default_saved")]
+    ContextCuratorDefaultSaved {
+        id: u64,
+        selection: ContextCuratorSelection,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolved_route: Option<ContextCuratorRoutePreview>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        unavailable_reason: Option<String>,
     },
 
     /// Context draft preparation progress. The request ID is retained across

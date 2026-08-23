@@ -383,6 +383,10 @@ fn context_test_generator() -> StoredContextArtifactGenerator {
         route: "test-route".to_string(),
         prompt_version: "phase-5-projection-test".to_string(),
         effort: None,
+        role: None,
+        selection_source: None,
+        transaction_instructions: None,
+        task_instructions: None,
     }
 }
 

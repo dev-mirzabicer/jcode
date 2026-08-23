@@ -1320,6 +1320,7 @@ fn prepare_local_reasoning_only_draft(
                     ),
                     tool_results: Vec::new(),
                     allow_shadowing_active_operations: false,
+                    curator: Default::default(),
                     authorization: jcode_session_types::StoredContextAuthorization::Manual {
                         initiated_by: None,
                     },

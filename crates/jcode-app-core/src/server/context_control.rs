@@ -5,9 +5,10 @@ use crate::protocol::{
     CONTEXT_MAX_DISTILLATION_SELECTIONS, CONTEXT_MAX_SUMMARY_RANGES,
     CONTEXT_MAX_TOOL_RESULT_SELECTIONS, CONTEXT_MESSAGE_DETAIL_DEFAULT_MAX_CHARS,
     CONTEXT_MESSAGE_DETAIL_MAX_CHARS, CONTEXT_PROTOCOL_MAX_EVENT_BYTES,
-    CONTEXT_SNAPSHOT_DEFAULT_PAGE_SIZE, CONTEXT_SNAPSHOT_MAX_PAGE_SIZE, ContextDraftRequest,
-    ContextDraftStatus, ContextMessageRangeSelection, ContextReasoningSelectionRequest,
-    ContextRequestKind, ContextServiceError, ContextTransactionDetail, ServerEvent,
+    CONTEXT_SNAPSHOT_DEFAULT_PAGE_SIZE, CONTEXT_SNAPSHOT_MAX_PAGE_SIZE, ContextCuratorSelection,
+    ContextDraftRequest, ContextDraftStatus, ContextMessageRangeSelection,
+    ContextReasoningSelectionRequest, ContextRequestKind, ContextServiceError,
+    ContextTransactionDetail, ServerEvent,
 };
 use jcode_session_types::{StoredContextAuthorization, StoredContextEmergencyPolicy};
 use std::sync::Arc;
@@ -131,6 +132,94 @@ pub(super) fn handle_preview_context_ranges(
         result,
         id,
         ContextRequestKind::RangeClosurePreview,
+        None,
+        None,
+    );
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "curator preview preserves exact request and authoritative transcript identity"
+)]
+pub(super) fn handle_preview_context_curator_plan(
+    id: u64,
+    expected_context_revision: u64,
+    expected_transcript_digest: u64,
+    request: ContextDraftRequest,
+    agent: &Arc<Mutex<Agent>>,
+    service: &Arc<ContextTransactionService>,
+    processing: bool,
+    event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    let result = validate_draft_request(&request).and_then(|()| {
+        let mut agent = agent
+            .try_lock()
+            .map_err(|_| ContextServiceError::SessionBusy)?;
+        service
+            .preview_context_curator_plan(
+                &mut agent,
+                processing,
+                expected_context_revision,
+                expected_transcript_digest,
+                request,
+            )
+            .map(|preview| ServerEvent::ContextCuratorPlanPreview { id, preview })
+    });
+    emit_result(
+        event_tx,
+        result,
+        id,
+        ContextRequestKind::CuratorPlanPreview,
+        None,
+        None,
+    );
+}
+
+pub(super) fn handle_save_context_curator_default(
+    id: u64,
+    selection: ContextCuratorSelection,
+    agent: &Arc<Mutex<Agent>>,
+    processing: bool,
+    event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    let result = (|| {
+        if processing {
+            return Err(ContextServiceError::SessionBusy);
+        }
+        crate::context::validate_context_curator_selection(&selection)?;
+        let config = crate::config::ContextCuratorConfig {
+            provider: selection.provider.clone(),
+            route: selection.route.clone(),
+            model: selection.model.clone(),
+            effort: selection.effort.clone(),
+        };
+        let resolved_route = {
+            let agent = agent
+                .try_lock()
+                .map_err(|_| ContextServiceError::SessionBusy)?;
+            crate::context::resolve_context_curator_route(
+                agent.provider_fork(),
+                &agent.model_routes(),
+                &agent.context_route_identity(),
+                &config,
+            )
+            .map_err(|error| ContextServiceError::Curator(error.to_string()))?
+            .preview()
+        };
+        crate::config::Config::set_context_curator(&config)
+            .map_err(|error| ContextServiceError::Persistence(error.to_string()))?;
+        Ok(ServerEvent::ContextCuratorDefaultSaved {
+            id,
+            selection,
+            resolved_route: Some(resolved_route),
+            unavailable_reason: None,
+        })
+    })();
+    emit_result(
+        event_tx,
+        result,
+        id,
+        ContextRequestKind::SaveCuratorDefault,
         None,
         None,
     );
@@ -658,6 +747,17 @@ fn validate_draft_request(request: &ContextDraftRequest) -> Result<(), ContextSe
     for result in &request.tool_results {
         validate_identifier(&result.message_id, "tool-result message ID")?;
     }
+    crate::context::validate_context_curator_run_config(&request.curator)?;
+    for item in &request.curator.range_instructions {
+        validate_identifier(
+            &item.range.start_message_id,
+            "curator-instruction range start message ID",
+        )?;
+        validate_identifier(
+            &item.range.end_message_id,
+            "curator-instruction range end message ID",
+        )?;
+    }
     Ok(())
 }
 
@@ -806,8 +906,9 @@ mod tests {
     };
     use crate::message::{ContentBlock, Message, Role, StreamEvent, ToolDefinition};
     use crate::protocol::{
-        ContextDraftIdentity, ContextDraftPhase, ContextDraftProgress, ContextMessageDetailFormat,
-        ContextMessageRangeSelection, ContextToolResultSelection,
+        CONTEXT_CURATOR_INSTRUCTION_MAX_CHARS, ContextCuratorRangeInstructions,
+        ContextCuratorRunConfig, ContextDraftIdentity, ContextDraftPhase, ContextDraftProgress,
+        ContextMessageDetailFormat, ContextMessageRangeSelection, ContextToolResultSelection,
     };
     use crate::provider::{
         ContextProjectionValidationOperation, ContextProviderFamily,
@@ -1001,6 +1102,7 @@ mod tests {
             }),
             tool_results: Vec::new(),
             allow_shadowing_active_operations: false,
+            curator: Default::default(),
             authorization: StoredContextAuthorization::Manual {
                 initiated_by: Some("server-context-test".to_string()),
             },
@@ -1845,7 +1947,7 @@ mod tests {
             .expect("idle agent")
             .session_id()
             .to_string();
-        let invalid_cases = [
+        let mut invalid_cases = vec![
             ContextDraftRequest {
                 summary_ranges: vec![ContextMessageRangeSelection {
                     start_message_id: "".to_string(),
@@ -1854,6 +1956,7 @@ mod tests {
                 reasoning: None,
                 tool_results: Vec::new(),
                 allow_shadowing_active_operations: false,
+                curator: Default::default(),
                 authorization: StoredContextAuthorization::Manual { initiated_by: None },
             },
             ContextDraftRequest {
@@ -1866,6 +1969,7 @@ mod tests {
                 }),
                 tool_results: Vec::new(),
                 allow_shadowing_active_operations: false,
+                curator: Default::default(),
                 authorization: StoredContextAuthorization::Manual { initiated_by: None },
             },
             ContextDraftRequest {
@@ -1876,6 +1980,7 @@ mod tests {
                     block_ordinal: 0,
                 }],
                 allow_shadowing_active_operations: false,
+                curator: Default::default(),
                 authorization: StoredContextAuthorization::Manual { initiated_by: None },
             },
             ContextDraftRequest {
@@ -1885,6 +1990,7 @@ mod tests {
                 }),
                 tool_results: Vec::new(),
                 allow_shadowing_active_operations: false,
+                curator: Default::default(),
                 authorization: StoredContextAuthorization::Manual {
                     initiated_by: Some("x".repeat(CONTEXT_IDENTIFIER_MAX_CHARS + 1)),
                 },
@@ -1896,6 +2002,7 @@ mod tests {
                 }),
                 tool_results: Vec::new(),
                 allow_shadowing_active_operations: false,
+                curator: Default::default(),
                 authorization: StoredContextAuthorization::UnattendedEmergency {
                     authorization_source: "forged-client-authorization".to_string(),
                     trigger: None,
@@ -1909,11 +2016,62 @@ mod tests {
                 }),
                 tool_results: Vec::new(),
                 allow_shadowing_active_operations: false,
+                curator: Default::default(),
                 authorization: StoredContextAuthorization::LegacyMigration {
                     source: StoredLegacyContextSource::JcodeTextCompaction,
                 },
             },
         ];
+        invalid_cases.push(ContextDraftRequest {
+            summary_ranges: Vec::new(),
+            reasoning: Some(ContextReasoningSelectionRequest::KeepLatestAssistantTurns {
+                protected_recent_assistant_turns: 5,
+            }),
+            tool_results: Vec::new(),
+            allow_shadowing_active_operations: false,
+            curator: ContextCuratorRunConfig {
+                selection: Some(ContextCuratorSelection {
+                    provider: Some(String::new()),
+                    ..ContextCuratorSelection::default()
+                }),
+                ..ContextCuratorRunConfig::default()
+            },
+            authorization: StoredContextAuthorization::Manual { initiated_by: None },
+        });
+        invalid_cases.push(ContextDraftRequest {
+            summary_ranges: Vec::new(),
+            reasoning: Some(ContextReasoningSelectionRequest::KeepLatestAssistantTurns {
+                protected_recent_assistant_turns: 5,
+            }),
+            tool_results: Vec::new(),
+            allow_shadowing_active_operations: false,
+            curator: ContextCuratorRunConfig {
+                transaction_instructions: "x".repeat(CONTEXT_CURATOR_INSTRUCTION_MAX_CHARS + 1),
+                ..ContextCuratorRunConfig::default()
+            },
+            authorization: StoredContextAuthorization::Manual { initiated_by: None },
+        });
+        invalid_cases.push(ContextDraftRequest {
+            summary_ranges: Vec::new(),
+            reasoning: Some(ContextReasoningSelectionRequest::KeepLatestAssistantTurns {
+                protected_recent_assistant_turns: 5,
+            }),
+            tool_results: Vec::new(),
+            allow_shadowing_active_operations: false,
+            curator: ContextCuratorRunConfig {
+                range_instructions: (0..33)
+                    .map(|index| ContextCuratorRangeInstructions {
+                        range: ContextMessageRangeSelection {
+                            start_message_id: format!("start-{index}"),
+                            end_message_id: format!("end-{index}"),
+                        },
+                        instructions: "x".repeat(CONTEXT_CURATOR_INSTRUCTION_MAX_CHARS),
+                    })
+                    .collect(),
+                ..ContextCuratorRunConfig::default()
+            },
+            authorization: StoredContextAuthorization::Manual { initiated_by: None },
+        });
         for (index, request) in invalid_cases.into_iter().enumerate() {
             let id = 70 + index as u64;
             handle_prepare_context_draft(id, request, &session_id, &agent, &service, false, &tx);

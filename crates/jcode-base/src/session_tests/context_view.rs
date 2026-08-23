@@ -99,6 +99,10 @@ fn generator() -> StoredContextArtifactGenerator {
         route: "test-route".to_string(),
         prompt_version: "context-curator-v1".to_string(),
         effort: Some("high".to_string()),
+        role: None,
+        selection_source: None,
+        transaction_instructions: None,
+        task_instructions: None,
     }
 }
 
@@ -747,6 +751,10 @@ fn context_export_redaction_is_exhaustive_and_does_not_mutate_or_persist_redacti
     summary.file_change_digest = SECRET.to_string();
     summary.changed_files = vec![SECRET.to_string()];
     summary.warnings = vec![SECRET.to_string()];
+    if let Some(generator) = summary.generator.as_mut() {
+        generator.transaction_instructions = Some(SECRET.to_string());
+        generator.task_instructions = Some(SECRET.to_string());
+    }
     let suppression = StoredReasoningSuppression {
         selection: StoredReasoningSelection::MessageRanges { ranges: Vec::new() },
         targets: vec![reasoning_target],
@@ -773,7 +781,12 @@ fn context_export_redaction_is_exhaustive_and_does_not_mutate_or_persist_redacti
         replacement_ratio_millionths: 100_000,
         preservation_rationale: SECRET.to_string(),
         uncertainties: vec![SECRET.to_string()],
-        generator: generator(),
+        generator: {
+            let mut generator = generator();
+            generator.transaction_instructions = Some(SECRET.to_string());
+            generator.task_instructions = Some(SECRET.to_string());
+            generator
+        },
         created_at: timestamp(),
     };
     let source_digest = summary.source_range.source_digest;
