@@ -60,7 +60,8 @@ impl App {
     }
 
     pub(super) fn open_context_editor(&mut self, mode: ContextEditorOpenMode) {
-        let editor = ContextEditor::new(mode);
+        let epoch = self.context_protocol.begin_editor_epoch();
+        let editor = ContextEditor::new_for_protocol_epoch(mode, epoch);
         let initial_action = editor.initial_action();
         self.context_editor_overlay = Some(RefCell::new(editor));
         self.context_editor_actions.clear();
@@ -76,8 +77,16 @@ impl App {
         let Some(editor_cell) = self.context_editor_overlay.as_ref() else {
             return false;
         };
-        let (close, action) = editor_cell.borrow_mut().handle_key(code, modifiers);
+        let (close, action, epoch) = {
+            let mut editor = editor_cell.borrow_mut();
+            let (close, action) = editor.handle_key(code, modifiers);
+            (close, action, editor.protocol_epoch())
+        };
         if close {
+            self.context_editor_actions.clear();
+            if let Some(epoch) = epoch {
+                self.context_protocol.end_editor_epoch(epoch);
+            }
             self.context_editor_overlay = None;
             self.force_full_redraw = true;
         }

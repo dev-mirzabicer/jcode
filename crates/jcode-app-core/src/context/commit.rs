@@ -257,6 +257,10 @@ impl ContextTransactionService {
             })?;
         let mut operations = draft.required_operations.clone();
         operations.extend(selected_distillations);
+        if operations.is_empty() {
+            self.restore_applying_draft(draft_id);
+            return Err(ContextServiceError::EmptyRequest);
+        }
         let proposed_state = state_with_transaction(
             agent.context_view_state(),
             &draft.identity.draft_id,
@@ -339,6 +343,10 @@ impl ContextTransactionService {
             })?;
         let mut operations = draft.required_operations.clone();
         operations.extend(selected_distillations);
+        if operations.is_empty() {
+            self.restore_applying_draft(draft_id);
+            return Err(ContextServiceError::EmptyRequest);
+        }
         let proposed_state = state_with_transaction(
             &session.context_view,
             &draft.identity.draft_id,
@@ -1553,6 +1561,50 @@ mod tests {
         assert!(matches!(
             service.draft_status("draft-1").expect("draft status"),
             crate::context::ContextDraftStatus::Ready { .. }
+        ));
+    }
+
+    #[test]
+    fn empty_ready_draft_is_non_applicable_and_causes_no_persistence_or_runtime_reset() {
+        let CommitServiceFixture {
+            service,
+            agent,
+            provider,
+            persistence,
+            raw_before,
+        } = service_fixture(true, false);
+        {
+            let mut store = service.lock_store();
+            let entry = store.entries.get_mut("draft-1").expect("ready draft entry");
+            let DraftEntryState::Ready(draft) = &mut entry.state else {
+                panic!("expected ready draft");
+            };
+            draft.required_operations.clear();
+            draft.distillation_proposals.clear();
+            draft.preview.operation_previews.clear();
+            draft.preview.proposed_context_revision = draft.preview.current_context_revision;
+            entry.reserved_bytes = serde_json::to_vec(draft).expect("draft bytes").len();
+        }
+        let before = agent
+            .try_lock()
+            .expect("idle agent")
+            .context_view_state()
+            .clone();
+
+        let error = service
+            .apply_draft(&agent, "draft-1", Some(Vec::new()), false)
+            .expect_err("empty draft must not apply");
+
+        assert!(matches!(error, ContextServiceError::EmptyRequest));
+        let guard = agent.try_lock().expect("idle agent");
+        assert_eq!(guard.context_view_state(), &before);
+        assert_eq!(serde_json::to_vec(guard.messages()).unwrap(), raw_before);
+        drop(guard);
+        assert_eq!(persistence.calls(), 0);
+        assert_eq!(provider.invalidation_count(), 0);
+        assert!(matches!(
+            service.draft_status("draft-1"),
+            Ok(crate::context::ContextDraftStatus::Ready { .. })
         ));
     }
 

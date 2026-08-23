@@ -3,8 +3,8 @@ use crate::protocol::{
     ContextDraft, ContextDraftPhase, ContextDraftProgress, ContextDraftRequest,
     ContextDraftSelectionPreview, ContextEditorMessage, ContextEditorSnapshot,
     ContextMessageDetail, ContextMessageDetailFormat, ContextMessageRangeSelection,
-    ContextRangeClosurePreview, ContextReasoningSelectionRequest, ContextRequestKind,
-    ContextTextChunk, ContextToolResultSelection, ContextTransactionDetail,
+    ContextOperationBadgeKind, ContextRangeClosurePreview, ContextReasoningSelectionRequest,
+    ContextRequestKind, ContextTextChunk, ContextToolResultSelection, ContextTransactionDetail,
     ContextTransactionSummary,
 };
 use crate::tui::app::context_protocol::{
@@ -231,6 +231,7 @@ impl ContextDetailBuffer {
 
 #[derive(Clone, Debug)]
 pub struct ContextEditor {
+    protocol_epoch: Option<u64>,
     open_mode: ContextEditorOpenMode,
     phase: ContextEditorPhase,
     modal: Option<ContextEditorModal>,
@@ -292,6 +293,14 @@ pub struct ContextEditor {
 
 impl ContextEditor {
     pub fn new(mode: ContextEditorOpenMode) -> Self {
+        Self::new_with_protocol_epoch(mode, None)
+    }
+
+    pub(crate) fn new_for_protocol_epoch(mode: ContextEditorOpenMode, epoch: u64) -> Self {
+        Self::new_with_protocol_epoch(mode, Some(epoch))
+    }
+
+    fn new_with_protocol_epoch(mode: ContextEditorOpenMode, protocol_epoch: Option<u64>) -> Self {
         let phase = match mode {
             ContextEditorOpenMode::Edit => ContextEditorPhase::Loading,
             ContextEditorOpenMode::History
@@ -299,6 +308,7 @@ impl ContextEditor {
             | ContextEditorOpenMode::UndoLatest => ContextEditorPhase::History,
         };
         Self {
+            protocol_epoch,
             open_mode: mode,
             phase,
             modal: None,
@@ -400,6 +410,10 @@ impl ContextEditor {
             .or(self.history_context_revision)
     }
 
+    pub(crate) fn protocol_epoch(&self) -> Option<u64> {
+        self.protocol_epoch
+    }
+
     pub fn take_follow_up_action(&mut self) -> Option<ContextEditorAction> {
         self.pending_follow_up_action.take().or_else(|| {
             self.pending_auto_page
@@ -424,6 +438,12 @@ impl ContextEditor {
     }
 
     pub(crate) fn sync_protocol(&mut self, state: &ContextProtocolState) {
+        if self
+            .protocol_epoch
+            .is_some_and(|epoch| state.active_editor_epoch() != Some(epoch))
+        {
+            return;
+        }
         if let Some(snapshot) = state.snapshot.as_ref()
             && self.last_snapshot_identity.as_ref() != Some(snapshot)
         {
@@ -2338,7 +2358,7 @@ impl ContextEditor {
         let Some(selection) = self.reasoning.as_ref() else {
             return vec![Line::from("Reasoning suppression: none staged")];
         };
-        let selected_indices = match selection {
+        let (selected_indices, protected_indices) = match selection {
             ContextReasoningSelectionRequest::KeepLatestAssistantTurns {
                 protected_recent_assistant_turns,
             } => {
@@ -2348,15 +2368,21 @@ impl ContextEditor {
                     .filter(|message| message.role == Role::Assistant)
                     .map(|message| message.stored_index)
                     .collect::<Vec<_>>();
-                assistants
-                    .iter()
-                    .take(
-                        assistants
-                            .len()
-                            .saturating_sub(*protected_recent_assistant_turns),
-                    )
-                    .copied()
-                    .collect::<BTreeSet<_>>()
+                let protected_start = assistants
+                    .len()
+                    .saturating_sub(*protected_recent_assistant_turns);
+                (
+                    assistants
+                        .iter()
+                        .take(protected_start)
+                        .copied()
+                        .collect::<BTreeSet<_>>(),
+                    assistants
+                        .iter()
+                        .skip(protected_start)
+                        .copied()
+                        .collect::<BTreeSet<_>>(),
+                )
             }
             ContextReasoningSelectionRequest::MessageRanges { ranges } => {
                 let mut indices = BTreeSet::new();
@@ -2384,7 +2410,7 @@ impl ContextEditor {
                     };
                     indices.extend(start..=end);
                 }
-                indices
+                (indices, BTreeSet::new())
             }
         };
         let mut assistant_turns = BTreeSet::new();
@@ -2392,20 +2418,41 @@ impl ContextEditor {
         let mut removable_tokens = 0usize;
         let mut kinds = BTreeSet::new();
         let mut trace_only_count = 0usize;
-        for message in self
-            .rows
-            .values()
-            .filter(|message| selected_indices.contains(&message.stored_index))
-        {
+        let mut already_suppressed_count = 0usize;
+        let mut active_summary_count = 0usize;
+        let mut protected_count = 0usize;
+        let mut non_replayable_count = 0usize;
+        for message in self.rows.values() {
             for block in &message.blocks {
-                if block.provider_removable_reasoning {
+                if protected_indices.contains(&message.stored_index)
+                    && block.provider_removable_reasoning
+                {
+                    protected_count = protected_count.saturating_add(1);
+                    continue;
+                }
+                if !selected_indices.contains(&message.stored_index) {
+                    continue;
+                }
+                if block.kind == StoredContextBlockKind::ReasoningTrace {
+                    trace_only_count = trace_only_count.saturating_add(1);
+                    non_replayable_count = non_replayable_count.saturating_add(1);
+                } else if replayed_reasoning_kind(block.kind) && !block.provider_removable_reasoning
+                {
+                    non_replayable_count = non_replayable_count.saturating_add(1);
+                } else if block.provider_removable_reasoning && message.summary_coverage.is_some() {
+                    active_summary_count = active_summary_count.saturating_add(1);
+                } else if block.provider_removable_reasoning
+                    && block.active_operations.iter().any(|operation| {
+                        operation.kind == ContextOperationBadgeKind::ReasoningSuppression
+                    })
+                {
+                    already_suppressed_count = already_suppressed_count.saturating_add(1);
+                } else if block.provider_removable_reasoning {
                     assistant_turns.insert(message.stored_index);
                     target_count = target_count.saturating_add(1);
                     removable_tokens =
                         removable_tokens.saturating_add(block.estimated_provider_tokens);
                     kinds.insert(block.kind);
-                } else if block.kind == StoredContextBlockKind::ReasoningTrace {
-                    trace_only_count = trace_only_count.saturating_add(1);
                 }
             }
         }
@@ -2432,6 +2479,9 @@ impl ContextEditor {
                     .join(", ")
             }
         ))];
+        lines.push(Line::from(format!(
+            "Planning categories: {target_count} newly eligible · {already_suppressed_count} already suppressed · {active_summary_count} covered by active summaries · {protected_count} protected · {non_replayable_count} non-replayable"
+        )));
         if trace_only_count > 0 {
             lines.push(Line::from(format!(
                 "ReasoningTrace: {trace_only_count} visible history-only block(s); zero provider-token savings."
@@ -3382,6 +3432,9 @@ impl ContextEditor {
         let Some(draft) = self.draft.as_ref() else {
             return Some("no ready draft is available");
         };
+        if draft.required_operations.is_empty() && self.selected_distillation_ids.is_empty() {
+            return Some("the review contains no provider-context changes");
+        }
         if self.stale {
             return Some("draft is stale");
         }
@@ -3888,6 +3941,15 @@ fn reasoning_selection_label(selection: &jcode_session_types::StoredReasoningSel
                 .join(", ")
         ),
     }
+}
+
+fn replayed_reasoning_kind(kind: StoredContextBlockKind) -> bool {
+    matches!(
+        kind,
+        StoredContextBlockKind::Reasoning
+            | StoredContextBlockKind::AnthropicThinking
+            | StoredContextBlockKind::OpenAiReasoning
+    )
 }
 
 fn format_tokens(tokens: usize) -> String {
@@ -4840,6 +4902,48 @@ mod tests {
     }
 
     #[test]
+    fn staged_reasoning_statistics_distinguish_new_active_covered_protected_and_non_replayable() {
+        let mut editor = ContextEditor::new(ContextEditorOpenMode::Edit);
+        let mut snapshot = interaction_snapshot();
+        snapshot.raw_message_count = 8;
+        snapshot.message_page_end = 8;
+        snapshot.messages.push(message(7, "protected assistant"));
+        for index in [1usize, 3, 5, 7] {
+            snapshot.messages[index].blocks = vec![context_block(
+                0,
+                StoredContextBlockKind::OpenAiReasoning,
+                100,
+            )];
+        }
+        snapshot.messages[1].blocks.push(context_block(
+            1,
+            StoredContextBlockKind::ReasoningTrace,
+            80,
+        ));
+        snapshot.messages[3].blocks[0].active_operations =
+            vec![crate::protocol::ContextOperationBadge {
+                transaction_id: "active-reasoning".to_string(),
+                operation_index: 0,
+                kind: ContextOperationBadgeKind::ReasoningSuppression,
+            }];
+        snapshot.messages[5].summary_coverage = Some(crate::protocol::ContextSummaryCoverage {
+            transaction_id: "active-summary".to_string(),
+            operation_index: 0,
+        });
+        editor.apply_snapshot(snapshot);
+        editor.reasoning = Some(ContextReasoningSelectionRequest::KeepLatestAssistantTurns {
+            protected_recent_assistant_turns: 1,
+        });
+
+        let rendered = rendered_text(editor.reasoning_statistics_lines());
+        assert!(rendered.contains("1 newly eligible"));
+        assert!(rendered.contains("1 already suppressed"));
+        assert!(rendered.contains("1 covered by active summaries"));
+        assert!(rendered.contains("1 protected"));
+        assert!(rendered.contains("1 non-replayable"));
+    }
+
+    #[test]
     fn mouse_hit_testing_uses_rendered_scroll_start_after_search() {
         let mut editor = ContextEditor::new(ContextEditorOpenMode::Edit);
         let messages = (0..40)
@@ -5380,6 +5484,30 @@ mod tests {
 
         editor.stale = true;
         assert_eq!(editor.apply_disabled_reason(), Some("draft is stale"));
+    }
+
+    #[test]
+    fn no_change_review_is_visible_and_cannot_queue_apply() {
+        let mut editor = ready_editor();
+        let mut no_change = draft();
+        no_change.required_operations.clear();
+        no_change.distillation_proposals.clear();
+        no_change.preview.operation_previews.clear();
+        no_change.preview.proposed_context_revision = no_change.preview.current_context_revision;
+        no_change.preview.notices = vec![
+            "No provider-context change remains after exact filtering; this is a no-op."
+                .to_string(),
+        ];
+        editor.apply_draft_state(ContextClientDraftState::Ready(Box::new(no_change)));
+
+        assert_eq!(
+            editor.apply_disabled_reason(),
+            Some("the review contains no provider-context changes")
+        );
+        assert!(rendered_text(editor.review_lines(120)).contains("no-op"));
+        let (_, action) = editor.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(action, None);
+        assert_eq!(editor.modal, None);
     }
 
     #[test]

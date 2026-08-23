@@ -9,6 +9,8 @@ use jcode_session_types::StoredContextEmergencyPolicy;
 
 #[derive(Clone, Default)]
 pub(crate) struct ContextProtocolState {
+    editor_epoch_counter: u64,
+    active_editor_epoch: Option<u64>,
     pub snapshot_request_id: Option<u64>,
     pub snapshot: Option<ContextEditorSnapshot>,
     detail_request: Option<ContextDetailRequest>,
@@ -165,6 +167,25 @@ pub(crate) struct ContextActionRequiredState {
 }
 
 impl ContextProtocolState {
+    pub(super) fn begin_editor_epoch(&mut self) -> u64 {
+        self.editor_epoch_counter = self.editor_epoch_counter.wrapping_add(1).max(1);
+        self.reset_editor_scoped();
+        self.active_editor_epoch = Some(self.editor_epoch_counter);
+        self.editor_epoch_counter
+    }
+
+    pub(super) fn end_editor_epoch(&mut self, epoch: u64) {
+        if self.active_editor_epoch != Some(epoch) {
+            return;
+        }
+        self.reset_editor_scoped();
+        self.active_editor_epoch = None;
+    }
+
+    pub(crate) fn active_editor_epoch(&self) -> Option<u64> {
+        self.active_editor_epoch
+    }
+
     #[cfg(test)]
     pub(crate) fn test_signature(&self) -> serde_json::Value {
         let draft = self.draft.as_ref().map(|draft| match draft {
@@ -917,17 +938,21 @@ impl ContextProtocolState {
         self.accepted_transcript_digest = None;
     }
 
-    pub(super) fn invalidate_provider_identity(&mut self) {
-        self.invalidate_revision_scoped();
-    }
-
-    fn clear_session_scoped(&mut self) {
+    fn reset_editor_scoped(&mut self) {
         self.invalidate_revision_scoped();
         self.transaction_request = None;
         self.transaction_result = None;
         self.policy_request_id = None;
         self.emergency_policy = None;
         self.last_rejection = None;
+    }
+
+    pub(super) fn invalidate_provider_identity(&mut self) {
+        self.invalidate_revision_scoped();
+    }
+
+    fn clear_session_scoped(&mut self) {
+        self.reset_editor_scoped();
         self.action_required = None;
         self.accepted_session_id = None;
         self.accepted_context_revision = None;
@@ -937,6 +962,11 @@ impl ContextProtocolState {
 fn canonical_range_selections(
     mut ranges: Vec<ContextMessageRangeSelection>,
 ) -> Vec<ContextMessageRangeSelection> {
+    for range in &mut ranges {
+        if range.start_message_id > range.end_message_id {
+            std::mem::swap(&mut range.start_message_id, &mut range.end_message_id);
+        }
+    }
     ranges.sort_by(|left, right| {
         left.start_message_id
             .cmp(&right.start_message_id)
@@ -959,7 +989,7 @@ mod tests {
     };
     use jcode_session_types::{
         StoredContextAuthorization, StoredContextBlockKind, StoredContextEconomics,
-        StoredContextTransactionStatusKind,
+        StoredContextTransactionStatusKind, StoredMessageRange,
     };
 
     fn timestamp() -> DateTime<Utc> {
@@ -1481,5 +1511,76 @@ mod tests {
             ContextServiceError::Persistence("disk full".to_string()),
         ));
         assert_eq!(state.policy_request_id, None);
+    }
+
+    #[test]
+    fn editor_epochs_clear_cached_results_and_reject_late_prior_epoch_responses() {
+        let mut state = ContextProtocolState::default();
+        state.accept_history("session-1", 4);
+        let first_epoch = state.begin_editor_epoch();
+        state.begin_snapshot_request(10);
+        assert!(state.accept_snapshot(10, snapshot("session-1", 4, 99)));
+        state.range_preview = Some(ContextRangeClosurePreview {
+            session_id: "session-1".to_string(),
+            context_revision: 4,
+            transcript_digest: 99,
+            ranges: Vec::new(),
+            shadowed_active_operations: Vec::new(),
+        });
+
+        state.end_editor_epoch(first_epoch);
+        assert_eq!(state.active_editor_epoch(), None);
+        assert!(state.snapshot.is_none());
+        assert!(state.range_preview.is_none());
+
+        let second_epoch = state.begin_editor_epoch();
+        assert_ne!(second_epoch, first_epoch);
+        state.begin_snapshot_request(20);
+        assert!(!state.accept_snapshot(10, snapshot("session-1", 4, 99)));
+        assert!(state.accept_snapshot(20, snapshot("session-1", 4, 99)));
+        assert_eq!(state.active_editor_epoch(), Some(second_epoch));
+    }
+
+    #[test]
+    fn backward_range_requests_accept_the_same_canonical_preview_as_forward_requests() {
+        let mut state = ContextProtocolState::default();
+        state.accept_history("session-1", 4);
+        state.begin_editor_epoch();
+        state.begin_snapshot_request(1);
+        assert!(state.accept_snapshot(1, snapshot("session-1", 4, 99)));
+        state.begin_range_preview_request(
+            2,
+            "session-1".to_string(),
+            4,
+            99,
+            vec![ContextMessageRangeSelection {
+                start_message_id: "message-z".to_string(),
+                end_message_id: "message-a".to_string(),
+            }],
+        );
+        let preview = ContextRangeClosurePreview {
+            session_id: "session-1".to_string(),
+            context_revision: 4,
+            transcript_digest: 99,
+            ranges: vec![crate::protocol::ContextClosedRangePreview {
+                requested: ContextMessageRangeSelection {
+                    start_message_id: "message-a".to_string(),
+                    end_message_id: "message-z".to_string(),
+                },
+                source_range: StoredMessageRange {
+                    start_message_id: "message-a".to_string(),
+                    end_message_id: "message-z".to_string(),
+                    start_index_hint: 1,
+                    end_index_hint: 9,
+                    source_digest: 7,
+                    message_count: 9,
+                },
+                boundary_expansions: Vec::new(),
+                source_tokens: 100,
+            }],
+            shadowed_active_operations: Vec::new(),
+        };
+
+        assert!(state.accept_range_preview(2, preview));
     }
 }

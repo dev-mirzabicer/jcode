@@ -21,7 +21,6 @@ use crate::protocol::{
     ContextIneligibleDistillation, ContextMessageRangeSelection, ContextOperationPreview,
     ContextRangeClosurePreview, ContextReasoningSelectionRequest, ContextServiceError,
 };
-#[cfg(test)]
 use crate::provider::ContextProjectionValidationReport;
 use crate::provider::{
     ContextProjectionOperationKind, ContextProjectionValidationOperation,
@@ -1112,6 +1111,13 @@ struct ResolvedRequestedSummaryRange {
     end: usize,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ReasoningFilterStats {
+    selected_summary_targets: usize,
+    active_summary_targets: usize,
+    already_suppressed_targets: usize,
+}
+
 #[derive(Serialize)]
 struct CapturedContextDraft {
     identity: ContextDraftIdentity,
@@ -1135,6 +1141,8 @@ fn capture_context_draft(
     let messages = messages.to_vec();
     let base_context_view = context_view.clone();
     validate_context_state(&base_context_view)
+        .map_err(|error| ContextServiceError::Projection(error.to_string()))?;
+    project_context(&messages, &base_context_view)
         .map_err(|error| ContextServiceError::Projection(error.to_string()))?;
     let message_indices = unique_message_indices(&messages)?;
     let resolved = resolve_summary_ranges(&messages, &base_context_view, &request.summary_ranges)?;
@@ -1192,7 +1200,7 @@ fn capture_context_draft(
             let ranges = ranges
                 .iter()
                 .map(|range| {
-                    let start = *message_indices
+                    let first = *message_indices
                         .get(&range.start_message_id)
                         .ok_or_else(|| {
                             ContextServiceError::InvalidSelection(format!(
@@ -1200,12 +1208,13 @@ fn capture_context_draft(
                                 range.start_message_id
                             ))
                         })?;
-                    let end = *message_indices.get(&range.end_message_id).ok_or_else(|| {
+                    let second = *message_indices.get(&range.end_message_id).ok_or_else(|| {
                         ContextServiceError::InvalidSelection(format!(
                             "reasoning range end message not found: {}",
                             range.end_message_id
                         ))
                     })?;
+                    let (start, end) = ordered_interval(first, second);
                     build_message_range(&messages, start, end)
                         .map_err(|error| ContextServiceError::InvalidSelection(error.to_string()))
                 })
@@ -1217,22 +1226,39 @@ fn capture_context_draft(
         }
         None => None,
     };
-    let (reasoning, omitted_reasoning_targets) = match reasoning {
+    let (reasoning, reasoning_filter_stats) = match reasoning {
         Some(suppression) => {
-            let (suppression, omitted) =
-                filter_shadowed_reasoning(&messages, suppression, &summary_intervals)?;
-            (Some(suppression), omitted)
+            let (suppression, stats) = filter_effective_reasoning(
+                &messages,
+                &base_context_view,
+                suppression,
+                &summary_intervals,
+            )?;
+            (Some(suppression), stats)
         }
-        None => (None, 0),
+        None => (None, ReasoningFilterStats::default()),
     };
 
     let mut notices = shadowed
         .into_iter()
         .map(|operation| format!("Selected summaries shadow active operation {operation}."))
         .collect::<Vec<_>>();
-    if omitted_reasoning_targets > 0 {
+    if reasoning_filter_stats.selected_summary_targets > 0 {
         notices.push(format!(
-            "Selected summaries already replace {omitted_reasoning_targets} staged replayed-reasoning block target(s); those targets were omitted."
+            "Selected summaries already replace {} staged replayed-reasoning block target(s); those targets were omitted.",
+            reasoning_filter_stats.selected_summary_targets
+        ));
+    }
+    if reasoning_filter_stats.active_summary_targets > 0 {
+        notices.push(format!(
+            "Active range summaries already remove {} requested replayed-reasoning block target(s) from provider context; those targets are already satisfied.",
+            reasoning_filter_stats.active_summary_targets
+        ));
+    }
+    if reasoning_filter_stats.already_suppressed_targets > 0 {
+        notices.push(format!(
+            "Active context transactions already suppressed {} requested replayed-reasoning block target(s); only newly eligible exact targets remain staged.",
+            reasoning_filter_stats.already_suppressed_targets
         ));
     }
     let mut tools = Vec::new();
@@ -1291,13 +1317,6 @@ fn capture_context_draft(
             original_token_estimate: estimate_content_block_tokens(block),
         });
     }
-    let reasoning_has_targets = reasoning
-        .as_ref()
-        .is_some_and(|suppression| !suppression.targets.is_empty());
-    if range_metadata.is_empty() && tools.is_empty() && !reasoning_has_targets {
-        return Err(ContextServiceError::EmptyRequest);
-    }
-
     let active_summary_texts = base_context_view
         .active_transactions()
         .flat_map(|transaction| transaction.operations.iter())
@@ -1326,28 +1345,35 @@ fn resolve_summary_ranges(
     ranges: &[ContextMessageRangeSelection],
 ) -> Result<ResolvedSummaryRanges, ContextServiceError> {
     let message_indices = unique_message_indices(messages)?;
-    let requested_ranges = ranges
+    let mut requested_ranges = ranges
         .iter()
         .map(|range| {
-            Ok(ResolvedRequestedSummaryRange {
-                start: *message_indices
-                    .get(&range.start_message_id)
-                    .ok_or_else(|| {
-                        ContextServiceError::InvalidSelection(format!(
-                            "range start message not found: {}",
-                            range.start_message_id
-                        ))
-                    })?,
-                end: *message_indices.get(&range.end_message_id).ok_or_else(|| {
+            let first = *message_indices
+                .get(&range.start_message_id)
+                .ok_or_else(|| {
                     ContextServiceError::InvalidSelection(format!(
-                        "range end message not found: {}",
-                        range.end_message_id
+                        "range start message not found: {}",
+                        range.start_message_id
                     ))
-                })?,
-                selection: range.clone(),
+                })?;
+            let second = *message_indices.get(&range.end_message_id).ok_or_else(|| {
+                ContextServiceError::InvalidSelection(format!(
+                    "range end message not found: {}",
+                    range.end_message_id
+                ))
+            })?;
+            let (start, end) = ordered_interval(first, second);
+            Ok(ResolvedRequestedSummaryRange {
+                selection: ContextMessageRangeSelection {
+                    start_message_id: messages[start].id.clone(),
+                    end_message_id: messages[end].id.clone(),
+                },
+                start,
+                end,
             })
         })
         .collect::<Result<Vec<_>, ContextServiceError>>()?;
+    requested_ranges.sort_by_key(|range| (range.start, range.end));
     let closed_ranges = if requested_ranges.is_empty() {
         Vec::new()
     } else {
@@ -1444,13 +1470,48 @@ fn active_block_operations_shadowed(
     Ok(shadowed.into_iter().collect())
 }
 
-fn filter_shadowed_reasoning(
+fn ordered_interval(first: usize, second: usize) -> (usize, usize) {
+    if first <= second {
+        (first, second)
+    } else {
+        (second, first)
+    }
+}
+
+fn filter_effective_reasoning(
     messages: &[StoredMessage],
+    state: &StoredContextViewState,
     mut suppression: StoredReasoningSuppression,
     summary_intervals: &[(usize, usize)],
-) -> Result<(StoredReasoningSuppression, usize), ContextServiceError> {
+) -> Result<(StoredReasoningSuppression, ReasoningFilterStats), ContextServiceError> {
     let target_index = ContextTargetIndex::new(messages);
-    let original_target_count = suppression.targets.len();
+    let mut active_summary_intervals = Vec::new();
+    let mut active_suppression_targets = BTreeSet::new();
+    for transaction in state.active_transactions() {
+        for operation in &transaction.operations {
+            match operation {
+                StoredContextOperation::RangeSummary(summary) => {
+                    active_summary_intervals.push(
+                        target_index
+                            .resolve_message_range(&summary.source_range)
+                            .map_err(|error| ContextServiceError::Stale(error.to_string()))?,
+                    );
+                }
+                StoredContextOperation::ReasoningSuppression(active) => {
+                    for target in &active.targets {
+                        let resolved = target_index
+                            .resolve_content_target(target)
+                            .map_err(|error| ContextServiceError::Stale(error.to_string()))?;
+                        active_suppression_targets
+                            .insert((resolved.message_index, resolved.block_index));
+                    }
+                }
+                StoredContextOperation::ToolResultDistillation(_) => {}
+            }
+        }
+    }
+
+    let mut stats = ReasoningFilterStats::default();
     let mut retained = Vec::new();
     let mut turns = BTreeSet::new();
     let mut kinds = BTreeSet::new();
@@ -1460,6 +1521,15 @@ fn filter_shadowed_reasoning(
             .resolve_content_target(&target)
             .map_err(|error| ContextServiceError::InvalidSelection(error.to_string()))?;
         if interval_contains(summary_intervals, resolved.message_index) {
+            stats.selected_summary_targets = stats.selected_summary_targets.saturating_add(1);
+            continue;
+        }
+        if interval_contains(&active_summary_intervals, resolved.message_index) {
+            stats.active_summary_targets = stats.active_summary_targets.saturating_add(1);
+            continue;
+        }
+        if active_suppression_targets.contains(&(resolved.message_index, resolved.block_index)) {
+            stats.already_suppressed_targets = stats.already_suppressed_targets.saturating_add(1);
             continue;
         }
         turns.insert(resolved.message_index);
@@ -1473,8 +1543,7 @@ fn filter_shadowed_reasoning(
     suppression.assistant_turns_affected = turns.len();
     suppression.replay_block_kinds = kinds.into_iter().collect();
     suppression.original_token_estimate = tokens;
-    let omitted = original_target_count.saturating_sub(suppression.targets.len());
-    Ok((suppression, omitted))
+    Ok((suppression, stats))
 }
 
 fn interval_contains(intervals: &[(usize, usize)], index: usize) -> bool {
@@ -1649,19 +1718,17 @@ fn build_ready_draft_inner(
     operations.extend(proposals.iter().map(|proposal| {
         StoredContextOperation::ToolResultDistillation(proposal.operation.clone())
     }));
-    let proposed_revision = capture
-        .base_context_view
-        .revision
-        .checked_add(1)
-        .ok_or(ContextServiceError::RevisionOverflow)?;
-    fill_range_replacement_estimates(
-        &capture.messages,
-        &capture.base_context_view,
-        &capture.identity.draft_id,
-        proposed_revision,
-        capture.authorization.clone(),
-        &mut operations,
-    )?;
+    let proposed_revision = proposed_revision(&capture.base_context_view, &operations)?;
+    if !operations.is_empty() {
+        fill_range_replacement_estimates(
+            &capture.messages,
+            &capture.base_context_view,
+            &capture.identity.draft_id,
+            proposed_revision,
+            capture.authorization.clone(),
+            &mut operations,
+        )?;
+    }
     copy_filled_range_estimates(&operations, &mut required_operations);
     let pricing = crate::provider::pricing::context_pricing_snapshot(
         &provider.model(),
@@ -1669,6 +1736,13 @@ fn build_ready_draft_inner(
         &capture.identity.route,
         jcode_session_types::StoredContextCacheWarmth::Unknown,
     );
+    let mut notices = capture.notices;
+    if operations.is_empty() {
+        notices.push(
+            "No provider-context change remains after exact active-operation and proposal filtering. This review is a no-op and cannot be applied."
+                .to_string(),
+        );
+    }
     let preview = build_preview(ContextDraftPreviewInput {
         provider,
         messages: &capture.messages,
@@ -1679,7 +1753,7 @@ fn build_ready_draft_inner(
         operations: &operations,
         pricing: Some(&pricing),
         estimated_total_request_tokens_before,
-        notices: capture.notices,
+        notices,
         ranges: &capture.range_metadata,
         proposals: &proposals,
     })?;
@@ -1779,23 +1853,24 @@ pub(crate) fn build_preview(
     } = input;
     let before = project_context(messages, base_state)
         .map_err(|error| ContextServiceError::Projection(error.to_string()))?;
-    let proposed_state = state_with_transaction(
+    let proposed_state = proposed_state_for_operations(
         base_state,
         transaction_id,
         proposed_revision,
         authorization,
-        operations.to_vec(),
-        None,
-        Vec::new(),
-    );
+        operations,
+    )?;
     validate_context_state(&proposed_state)
         .map_err(|error| ContextServiceError::Projection(error.to_string()))?;
     let after = project_context(messages, &proposed_state)
         .map_err(|error| ContextServiceError::Projection(error.to_string()))?;
     let validation_operations = projection_validation_operations(&proposed_state);
-    let validation =
-        require_supported_projected_messages(provider, &after.messages, &validation_operations)
-            .map_err(|error| ContextServiceError::ProviderValidation(error.to_string()))?;
+    let validation = validation_for_preview(
+        provider,
+        &after.messages,
+        &validation_operations,
+        !operations.is_empty(),
+    )?;
     let analysis = analyze_cache_prefix(&before.messages, &after.messages);
     let estimated_total_request_tokens_after = estimated_total_request_tokens_before
         .and_then(|total| total.checked_sub(analysis.old_total_tokens))
@@ -1896,29 +1971,27 @@ fn build_draft_selection_preview(
         selected_distillation_operations(draft, Some(&selected_distillation_ids))?;
     let mut operations = draft.required_operations.clone();
     operations.extend(selected_operations);
-    let proposed_revision = base_state
-        .revision
-        .checked_add(1)
-        .ok_or(ContextServiceError::RevisionOverflow)?;
+    let proposed_revision = proposed_revision(base_state, &operations)?;
     let before = project_context(messages, base_state)
         .map_err(|error| ContextServiceError::Projection(error.to_string()))?;
-    let proposed_state = state_with_transaction(
+    let proposed_state = proposed_state_for_operations(
         base_state,
         &draft.identity.draft_id,
         proposed_revision,
         draft.authorization.clone(),
-        operations,
-        None,
-        Vec::new(),
-    );
+        &operations,
+    )?;
     validate_context_state(&proposed_state)
         .map_err(|error| ContextServiceError::Projection(error.to_string()))?;
     let after = project_context(messages, &proposed_state)
         .map_err(|error| ContextServiceError::Projection(error.to_string()))?;
     let validation_operations = projection_validation_operations(&proposed_state);
-    let validation =
-        require_supported_projected_messages(provider, &after.messages, &validation_operations)
-            .map_err(|error| ContextServiceError::ProviderValidation(error.to_string()))?;
+    let validation = validation_for_preview(
+        provider,
+        &after.messages,
+        &validation_operations,
+        !operations.is_empty(),
+    )?;
     let analysis = analyze_cache_prefix(&before.messages, &after.messages);
     let estimated_total_request_tokens_after = estimated_total_request_tokens_before
         .and_then(|total| total.checked_sub(analysis.old_total_tokens))
@@ -1949,6 +2022,66 @@ fn build_draft_selection_preview(
         selected_distillation_ids,
         preview,
     })
+}
+
+fn proposed_revision(
+    base_state: &StoredContextViewState,
+    operations: &[StoredContextOperation],
+) -> Result<u64, ContextServiceError> {
+    if operations.is_empty() {
+        Ok(base_state.revision)
+    } else {
+        base_state
+            .revision
+            .checked_add(1)
+            .ok_or(ContextServiceError::RevisionOverflow)
+    }
+}
+
+fn validation_for_preview(
+    provider: &dyn Provider,
+    messages: &[crate::message::Message],
+    operations: &[ContextProjectionValidationOperation],
+    changes_context: bool,
+) -> Result<ContextProjectionValidationReport, ContextServiceError> {
+    if !changes_context {
+        return Ok(provider.validate_projected_context(messages, operations));
+    }
+    require_supported_projected_messages(provider, messages, operations)
+        .map_err(|error| ContextServiceError::ProviderValidation(error.to_string()))
+}
+
+fn proposed_state_for_operations(
+    base_state: &StoredContextViewState,
+    transaction_id: &str,
+    proposed_revision: u64,
+    authorization: StoredContextAuthorization,
+    operations: &[StoredContextOperation],
+) -> Result<StoredContextViewState, ContextServiceError> {
+    if operations.is_empty() {
+        if proposed_revision != base_state.revision {
+            return Err(ContextServiceError::Runtime(format!(
+                "no-change preview proposed revision {proposed_revision} instead of current revision {}",
+                base_state.revision
+            )));
+        }
+        return Ok(base_state.clone());
+    }
+    if proposed_revision <= base_state.revision {
+        return Err(ContextServiceError::Runtime(format!(
+            "context-changing preview proposed non-advancing revision {proposed_revision} from {}",
+            base_state.revision
+        )));
+    }
+    Ok(state_with_transaction(
+        base_state,
+        transaction_id,
+        proposed_revision,
+        authorization,
+        operations.to_vec(),
+        None,
+        Vec::new(),
+    ))
 }
 
 pub(crate) fn state_with_transaction(
@@ -4068,6 +4201,460 @@ mod orchestration_tests {
             [StoredContextOperation::ReasoningSuppression(suppression)]
                 if suppression.targets.len() == 1
         ));
+    }
+
+    #[test]
+    fn repeated_reasoning_suppression_treats_active_exact_targets_as_satisfied() {
+        let messages = vec![stored(
+            "reasoning-message",
+            Role::Assistant,
+            vec![ContentBlock::Reasoning {
+                text: "historical replayed reasoning".repeat(40),
+            }],
+        )];
+        let existing =
+            resolve_reasoning_suppression_keep_latest(&messages, 0).expect("existing suppression");
+        let context_view = state_with_transaction(
+            &StoredContextViewState::default(),
+            "existing-suppression",
+            1,
+            StoredContextAuthorization::Manual { initiated_by: None },
+            vec![StoredContextOperation::ReasoningSuppression(existing)],
+            None,
+            Vec::new(),
+        );
+        let context_view: StoredContextViewState = serde_json::from_slice(
+            &serde_json::to_vec(&context_view).expect("serialize persisted context state"),
+        )
+        .expect("reload persisted context state");
+        let identity = ContextDraftIdentity {
+            draft_id: "repeated-reasoning".to_string(),
+            session_id: "session-repeated-reasoning".to_string(),
+            base_context_revision: context_view.revision,
+            raw_message_count: messages.len(),
+            transcript_digest: authoritative_transcript_digest(&messages),
+            provider_name: "draft-provider".to_string(),
+            model: "draft-model".to_string(),
+            route: "draft-route".to_string(),
+            created_at: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::minutes(30),
+        };
+
+        let capture = capture_context_draft(
+            &messages,
+            &context_view,
+            identity,
+            ContextDraftRequest {
+                summary_ranges: Vec::new(),
+                reasoning: Some(ContextReasoningSelectionRequest::KeepLatestAssistantTurns {
+                    protected_recent_assistant_turns: 0,
+                }),
+                tool_results: Vec::new(),
+                allow_shadowing_active_operations: false,
+                authorization: StoredContextAuthorization::Manual { initiated_by: None },
+            },
+        )
+        .expect("redundant reasoning request remains a visible no-change capture");
+
+        let reasoning = capture.reasoning.expect("reasoning selection is retained");
+        assert!(reasoning.targets.is_empty());
+        assert_eq!(reasoning.assistant_turns_affected, 0);
+        assert_eq!(reasoning.original_token_estimate, 0);
+        assert!(
+            capture
+                .notices
+                .iter()
+                .any(|notice| notice.contains("already suppressed"))
+        );
+    }
+
+    #[test]
+    fn partial_reasoning_overlap_retains_only_new_exact_targets() {
+        let messages = vec![
+            stored(
+                "reasoning-one",
+                Role::Assistant,
+                vec![ContentBlock::Reasoning {
+                    text: "first historical reasoning".repeat(20),
+                }],
+            ),
+            stored(
+                "reasoning-two",
+                Role::Assistant,
+                vec![ContentBlock::OpenAIReasoning {
+                    id: "reasoning-item-two".to_string(),
+                    summary: vec!["second historical reasoning".repeat(20)],
+                    encrypted_content: None,
+                    status: None,
+                }],
+            ),
+        ];
+        let first_range = build_message_range(&messages, 0, 0).expect("first range");
+        let existing = resolve_reasoning_suppression_for_ranges(&messages, &[first_range])
+            .expect("existing suppression");
+        let context_view = state_with_transaction(
+            &StoredContextViewState::default(),
+            "existing-suppression",
+            1,
+            StoredContextAuthorization::Manual { initiated_by: None },
+            vec![StoredContextOperation::ReasoningSuppression(existing)],
+            None,
+            Vec::new(),
+        );
+        let capture = capture_context_draft(
+            &messages,
+            &context_view,
+            ContextDraftIdentity {
+                draft_id: "partial-overlap".to_string(),
+                session_id: "session-partial-overlap".to_string(),
+                base_context_revision: 1,
+                raw_message_count: messages.len(),
+                transcript_digest: authoritative_transcript_digest(&messages),
+                provider_name: "draft-provider".to_string(),
+                model: "draft-model".to_string(),
+                route: "draft-route".to_string(),
+                created_at: Utc::now(),
+                expires_at: Utc::now() + chrono::Duration::minutes(30),
+            },
+            ContextDraftRequest {
+                summary_ranges: Vec::new(),
+                reasoning: Some(ContextReasoningSelectionRequest::KeepLatestAssistantTurns {
+                    protected_recent_assistant_turns: 0,
+                }),
+                tool_results: Vec::new(),
+                allow_shadowing_active_operations: false,
+                authorization: StoredContextAuthorization::Manual { initiated_by: None },
+            },
+        )
+        .expect("partial overlap capture");
+
+        let reasoning = capture.reasoning.expect("reasoning selection");
+        assert_eq!(reasoning.targets.len(), 1);
+        assert_eq!(reasoning.targets[0].message_id, "reasoning-two");
+        assert_eq!(reasoning.assistant_turns_affected, 1);
+        assert!(
+            capture
+                .notices
+                .iter()
+                .any(|notice| notice.contains("already suppressed 1"))
+        );
+    }
+
+    #[test]
+    fn duplicate_active_reasoning_transforms_remain_strictly_invalid() {
+        let messages = vec![stored(
+            "reasoning-message",
+            Role::Assistant,
+            vec![ContentBlock::Reasoning {
+                text: "duplicated persisted transform target".repeat(20),
+            }],
+        )];
+        let suppression =
+            resolve_reasoning_suppression_keep_latest(&messages, 0).expect("suppression");
+        let first = state_with_transaction(
+            &StoredContextViewState::default(),
+            "first-suppression",
+            1,
+            StoredContextAuthorization::Manual { initiated_by: None },
+            vec![StoredContextOperation::ReasoningSuppression(
+                suppression.clone(),
+            )],
+            None,
+            Vec::new(),
+        );
+        let duplicated = state_with_transaction(
+            &first,
+            "duplicate-suppression",
+            2,
+            StoredContextAuthorization::Manual { initiated_by: None },
+            vec![StoredContextOperation::ReasoningSuppression(suppression)],
+            None,
+            Vec::new(),
+        );
+
+        let error = match capture_context_draft(
+            &messages,
+            &duplicated,
+            ContextDraftIdentity {
+                draft_id: "strict-duplicate".to_string(),
+                session_id: "session-strict-duplicate".to_string(),
+                base_context_revision: 2,
+                raw_message_count: messages.len(),
+                transcript_digest: authoritative_transcript_digest(&messages),
+                provider_name: "draft-provider".to_string(),
+                model: "draft-model".to_string(),
+                route: "draft-route".to_string(),
+                created_at: Utc::now(),
+                expires_at: Utc::now() + chrono::Duration::minutes(30),
+            },
+            ContextDraftRequest {
+                summary_ranges: Vec::new(),
+                reasoning: Some(ContextReasoningSelectionRequest::KeepLatestAssistantTurns {
+                    protected_recent_assistant_turns: 0,
+                }),
+                tool_results: Vec::new(),
+                allow_shadowing_active_operations: false,
+                authorization: StoredContextAuthorization::Manual { initiated_by: None },
+            },
+        ) {
+            Ok(_) => panic!("duplicate active persisted transforms must remain invalid"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(error, ContextServiceError::Projection(_)));
+        assert!(error.to_string().contains("duplicate"));
+    }
+
+    #[test]
+    fn reverted_reapplied_and_invalidated_reasoning_history_controls_future_eligibility() {
+        let messages = vec![stored(
+            "reasoning-message",
+            Role::Assistant,
+            vec![ContentBlock::AnthropicThinking {
+                thinking: "signed historical thinking".repeat(20),
+                signature: "signature".to_string(),
+            }],
+        )];
+        let suppression =
+            resolve_reasoning_suppression_keep_latest(&messages, 0).expect("suppression");
+        let mut state = state_with_transaction(
+            &StoredContextViewState::default(),
+            "history-suppression",
+            1,
+            StoredContextAuthorization::Manual { initiated_by: None },
+            vec![StoredContextOperation::ReasoningSuppression(suppression)],
+            None,
+            Vec::new(),
+        );
+        let capture_targets = |state: &StoredContextViewState| {
+            capture_context_draft(
+                &messages,
+                state,
+                ContextDraftIdentity {
+                    draft_id: format!("history-{}", state.revision),
+                    session_id: "session-history".to_string(),
+                    base_context_revision: state.revision,
+                    raw_message_count: messages.len(),
+                    transcript_digest: authoritative_transcript_digest(&messages),
+                    provider_name: "draft-provider".to_string(),
+                    model: "draft-model".to_string(),
+                    route: "draft-route".to_string(),
+                    created_at: Utc::now(),
+                    expires_at: Utc::now() + chrono::Duration::minutes(30),
+                },
+                ContextDraftRequest {
+                    summary_ranges: Vec::new(),
+                    reasoning: Some(ContextReasoningSelectionRequest::KeepLatestAssistantTurns {
+                        protected_recent_assistant_turns: 0,
+                    }),
+                    tool_results: Vec::new(),
+                    allow_shadowing_active_operations: false,
+                    authorization: StoredContextAuthorization::Manual { initiated_by: None },
+                },
+            )
+            .expect("history capture")
+            .reasoning
+            .expect("reasoning selection")
+            .targets
+            .len()
+        };
+        assert_eq!(capture_targets(&state), 0);
+
+        state.revision = 2;
+        state.transactions[0]
+            .status_events
+            .push(StoredContextStatusEvent {
+                revision: 2,
+                timestamp: Utc::now(),
+                kind: StoredContextTransactionStatusKind::Reverted,
+                reason: Some("test revert".to_string()),
+            });
+        assert_eq!(capture_targets(&state), 1);
+
+        state.revision = 3;
+        state.transactions[0]
+            .status_events
+            .push(StoredContextStatusEvent {
+                revision: 3,
+                timestamp: Utc::now(),
+                kind: StoredContextTransactionStatusKind::Reapplied,
+                reason: Some("test reapply".to_string()),
+            });
+        assert_eq!(capture_targets(&state), 0);
+
+        state.revision = 4;
+        state.transactions[0]
+            .status_events
+            .push(StoredContextStatusEvent {
+                revision: 4,
+                timestamp: Utc::now(),
+                kind: StoredContextTransactionStatusKind::InvalidatedByTranscriptEdit,
+                reason: Some("test invalidation".to_string()),
+            });
+        assert_eq!(capture_targets(&state), 1);
+    }
+
+    #[test]
+    fn backward_manual_reasoning_ranges_equal_forward_ranges() {
+        let messages = vec![
+            stored(
+                "reasoning-one",
+                Role::Assistant,
+                vec![ContentBlock::Reasoning {
+                    text: "first".repeat(20),
+                }],
+            ),
+            stored(
+                "reasoning-two",
+                Role::Assistant,
+                vec![ContentBlock::Reasoning {
+                    text: "second".repeat(20),
+                }],
+            ),
+        ];
+        let capture = |start: &str, end: &str| {
+            capture_context_draft(
+                &messages,
+                &StoredContextViewState::default(),
+                ContextDraftIdentity {
+                    draft_id: format!("{start}-{end}"),
+                    session_id: "session-manual-ranges".to_string(),
+                    base_context_revision: 0,
+                    raw_message_count: messages.len(),
+                    transcript_digest: authoritative_transcript_digest(&messages),
+                    provider_name: "draft-provider".to_string(),
+                    model: "draft-model".to_string(),
+                    route: "draft-route".to_string(),
+                    created_at: Utc::now(),
+                    expires_at: Utc::now() + chrono::Duration::minutes(30),
+                },
+                ContextDraftRequest {
+                    summary_ranges: Vec::new(),
+                    reasoning: Some(ContextReasoningSelectionRequest::MessageRanges {
+                        ranges: vec![ContextMessageRangeSelection {
+                            start_message_id: start.to_string(),
+                            end_message_id: end.to_string(),
+                        }],
+                    }),
+                    tool_results: Vec::new(),
+                    allow_shadowing_active_operations: false,
+                    authorization: StoredContextAuthorization::Manual { initiated_by: None },
+                },
+            )
+            .expect("manual reasoning capture")
+            .reasoning
+            .expect("reasoning selection")
+        };
+
+        assert_eq!(
+            capture("reasoning-one", "reasoning-two"),
+            capture("reasoning-two", "reasoning-one")
+        );
+    }
+
+    #[test]
+    fn redundant_reasoning_builds_a_visible_non_mutating_review() {
+        let provider = DraftProvider::new();
+        let messages = vec![stored(
+            "reasoning-message",
+            Role::Assistant,
+            vec![ContentBlock::Reasoning {
+                text: "historical replayed reasoning".repeat(40),
+            }],
+        )];
+        let existing =
+            resolve_reasoning_suppression_keep_latest(&messages, 0).expect("existing suppression");
+        let state = state_with_transaction(
+            &StoredContextViewState::default(),
+            "existing-suppression",
+            1,
+            StoredContextAuthorization::Manual { initiated_by: None },
+            vec![StoredContextOperation::ReasoningSuppression(existing)],
+            None,
+            Vec::new(),
+        );
+        let capture = capture_context_draft(
+            &messages,
+            &state,
+            ContextDraftIdentity {
+                draft_id: "no-change-review".to_string(),
+                session_id: "session-no-change".to_string(),
+                base_context_revision: 1,
+                raw_message_count: messages.len(),
+                transcript_digest: authoritative_transcript_digest(&messages),
+                provider_name: provider.name().to_string(),
+                model: provider.model(),
+                route: "draft-route".to_string(),
+                created_at: Utc::now(),
+                expires_at: Utc::now() + chrono::Duration::minutes(30),
+            },
+            ContextDraftRequest {
+                summary_ranges: Vec::new(),
+                reasoning: Some(ContextReasoningSelectionRequest::KeepLatestAssistantTurns {
+                    protected_recent_assistant_turns: 0,
+                }),
+                tool_results: Vec::new(),
+                allow_shadowing_active_operations: false,
+                authorization: StoredContextAuthorization::Manual { initiated_by: None },
+            },
+        )
+        .expect("redundant capture");
+        let draft = build_ready_draft_inner(
+            &provider,
+            None,
+            capture,
+            None,
+            ContextCuratorArtifacts::default(),
+        )
+        .expect("no-change ready review");
+
+        assert!(draft.required_operations.is_empty());
+        assert!(draft.distillation_proposals.is_empty());
+        assert_eq!(draft.preview.current_context_revision, 1);
+        assert_eq!(draft.preview.proposed_context_revision, 1);
+        assert!(draft.preview.operation_previews.is_empty());
+        assert!(
+            draft
+                .preview
+                .notices
+                .iter()
+                .any(|notice| notice.contains("no-op and cannot be applied"))
+        );
+    }
+
+    #[test]
+    fn forward_and_backward_summary_ranges_produce_the_same_canonical_preview() {
+        let session = test_session();
+        let service = ContextTransactionService::new();
+        let digest = authoritative_transcript_digest(&session.messages);
+        let forward = service
+            .preview_context_ranges(
+                &session.id,
+                &session.messages,
+                &session.context_view,
+                session.context_view.revision,
+                digest,
+                &[ContextMessageRangeSelection {
+                    start_message_id: "tool-call-message".to_string(),
+                    end_message_id: "tool-result-message".to_string(),
+                }],
+            )
+            .expect("forward range preview");
+        let backward = service
+            .preview_context_ranges(
+                &session.id,
+                &session.messages,
+                &session.context_view,
+                session.context_view.revision,
+                digest,
+                &[ContextMessageRangeSelection {
+                    start_message_id: "tool-result-message".to_string(),
+                    end_message_id: "tool-call-message".to_string(),
+                }],
+            )
+            .expect("backward range preview");
+
+        assert_eq!(backward, forward);
     }
 
     #[tokio::test]

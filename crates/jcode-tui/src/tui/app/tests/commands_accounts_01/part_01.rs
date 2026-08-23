@@ -1663,6 +1663,56 @@ fn test_compact_opens_context_editor_locally() {
 }
 
 #[test]
+fn test_repeated_compact_does_not_replay_prior_editor_protocol_state() {
+    use crate::protocol::ContextRangeClosurePreview;
+    use crate::tui::context_editor::{ContextEditorOpenMode, ContextEditorPhase};
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    let mut app = create_test_app();
+    app.open_context_editor(ContextEditorOpenMode::Edit);
+    assert!(app.dispatch_local_context_editor_actions());
+    assert!(app.drain_local_context_events());
+    assert_eq!(
+        app.context_editor_overlay
+            .as_ref()
+            .expect("first editor")
+            .borrow()
+            .phase(),
+        ContextEditorPhase::Editing
+    );
+
+    let snapshot = app
+        .context_protocol
+        .snapshot
+        .as_ref()
+        .expect("first authoritative snapshot")
+        .clone();
+    app.context_protocol.range_preview = Some(ContextRangeClosurePreview {
+        session_id: snapshot.session_id,
+        context_revision: snapshot.context_revision,
+        transcript_digest: snapshot.transcript_digest,
+        ranges: Vec::new(),
+        shadowed_active_operations: Vec::new(),
+    });
+
+    assert!(app.handle_context_editor_key(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(app.context_editor_overlay.is_none());
+
+    app.open_context_editor(ContextEditorOpenMode::Edit);
+    assert!(app.dispatch_local_context_editor_actions());
+    assert!(app.drain_local_context_events());
+    assert_eq!(
+        app.context_editor_overlay
+            .as_ref()
+            .expect("reopened editor")
+            .borrow()
+            .phase(),
+        ContextEditorPhase::Editing,
+        "a new editor invocation must not consume cached modal, draft, history, or rejection state from the prior invocation"
+    );
+}
+
+#[test]
 fn test_context_editor_commands_open_exact_local_modes_and_initial_actions() {
     use crate::tui::context_editor::ContextEditorAction;
 
