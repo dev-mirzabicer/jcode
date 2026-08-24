@@ -1,4 +1,5 @@
 use super::*;
+use crate::protocol::ContextCuratorRoutePreview;
 use chrono::{DateTime, Duration, Utc};
 use jcode_session_types::{
     StoredContentTarget, StoredContextApplication, StoredContextArtifactGenerator,
@@ -27,6 +28,18 @@ const DEBUG_FIXTURE_NAMES: &[&str] = &[
     "candidate-scan",
     "curator-available",
     "curator-unavailable",
+    "curator-workspace-overview",
+    "curator-workspace-route",
+    "curator-workspace-instructions",
+    "curator-workspace-plan-pending",
+    "curator-workspace-multi-task-plan",
+    "curator-workspace-plan-failure",
+    "curator-workspace-generating",
+    "curator-workspace-canceled",
+    "curator-workspace-task-failure",
+    "curator-workspace-save-success",
+    "curator-workspace-save-failure",
+    "curator-workspace-narrow",
     "reasoning-only-no-curator",
     "draft-progress",
     "cancel-draft",
@@ -200,6 +213,177 @@ impl ContextEditor {
                     "No independent curator route is available for summaries or tool-result evaluation."
                         .to_string(),
                 );
+            }
+            "curator-workspace-overview"
+            | "curator-workspace-route"
+            | "curator-workspace-instructions"
+            | "curator-workspace-plan-pending"
+            | "curator-workspace-multi-task-plan"
+            | "curator-workspace-plan-failure"
+            | "curator-workspace-generating"
+            | "curator-workspace-canceled"
+            | "curator-workspace-task-failure"
+            | "curator-workspace-save-success"
+            | "curator-workspace-save-failure"
+            | "curator-workspace-narrow" => {
+                self.apply_snapshot(debug_snapshot(48, 48, false, CuratorFixture::Available));
+                self.staged_ranges = debug_workspace_ranges();
+                self.tool_targets.insert(("debug-message-2".to_string(), 0));
+                self.curator_transaction_instructions =
+                    "Preserve exact synthetic test counts and unresolved failures.".to_string();
+                let first_range = canonical_editor_range_key(&self.staged_ranges[0].requested);
+                self.curator_range_instructions.insert(
+                    first_range,
+                    "Retain the parser decision and every rejected alternative.".to_string(),
+                );
+
+                let section = match name {
+                    "curator-workspace-route"
+                    | "curator-workspace-save-success"
+                    | "curator-workspace-save-failure" => CuratorWorkspaceSection::Route,
+                    "curator-workspace-instructions" => CuratorWorkspaceSection::Instructions,
+                    "curator-workspace-plan-pending"
+                    | "curator-workspace-multi-task-plan"
+                    | "curator-workspace-plan-failure"
+                    | "curator-workspace-generating"
+                    | "curator-workspace-canceled"
+                    | "curator-workspace-task-failure" => CuratorWorkspaceSection::ExactCalls,
+                    _ => CuratorWorkspaceSection::Overview,
+                };
+                self.open_curator_workspace(section);
+                self.curator_workspace.pane = CuratorWorkspacePane::Detail;
+
+                match name {
+                    "curator-workspace-route" => {
+                        self.curator_selection = Some(ContextCuratorSelection {
+                            provider: Some("synthetic-openrouter".to_string()),
+                            route: Some("openrouter-chat".to_string()),
+                            model: Some("synthetic-reasoner-xl".to_string()),
+                            effort: Some("high".to_string()),
+                        });
+                        self.invalidate_curator_plan();
+                        self.align_curator_route_cursor_to_effective_selection();
+                    }
+                    "curator-workspace-instructions" => {
+                        self.curator_workspace.instruction_scope = CuratorInstructionScope::Range;
+                        self.curator_workspace.instruction_editing = true;
+                        self.prepare_instruction_editor_cursor();
+                        self.invalidate_curator_plan();
+                    }
+                    "curator-workspace-plan-pending" => {
+                        self.curator_plan_request = Some(self.current_draft_request());
+                        self.curator_plan_pending = true;
+                        self.status = Some(
+                            "Checking exact prompts, source scope, route identity, images, and budgets without invoking a model."
+                                .to_string(),
+                        );
+                    }
+                    "curator-workspace-multi-task-plan" => {
+                        let request = self.current_draft_request();
+                        let plan = debug_curator_plan(&request);
+                        self.curator_plan_request = Some(request);
+                        self.curator_plan = Some(plan);
+                        self.curator_plan_pending = false;
+                        self.curator_workspace_plan_accepted(3);
+                    }
+                    "curator-workspace-plan-failure" => {
+                        self.curator_workspace_plan_rejected();
+                        self.error = Some(
+                            "Atomic call 2 exceeds the synthetic route's exact safe input budget."
+                                .to_string(),
+                        );
+                    }
+                    "curator-workspace-generating"
+                    | "curator-workspace-canceled"
+                    | "curator-workspace-task-failure" => {
+                        let request = self.current_draft_request();
+                        let plan = debug_curator_plan(&request);
+                        self.curator_plan_request = Some(request);
+                        self.curator_plan = Some(plan);
+                        self.curator_workspace_plan_accepted(3);
+                        self.draft_progress = Some(ContextDraftProgress {
+                            phase: ContextDraftPhase::PreparingArtifacts,
+                            completed_items: if name == "curator-workspace-generating" {
+                                1
+                            } else {
+                                2
+                            },
+                            total_items: 3,
+                        });
+                        self.draft_id = Some("debug-draft-progress".to_string());
+                        match name {
+                            "curator-workspace-generating" => {
+                                self.phase = ContextEditorPhase::PreparingDraft;
+                                self.status = Some(
+                                    "Generating isolated curator calls in reviewed order."
+                                        .to_string(),
+                                );
+                            }
+                            "curator-workspace-canceled" => {
+                                self.phase = ContextEditorPhase::Editing;
+                                self.curator_workspace
+                                    .mark_generation_outcome(CuratorGenerationOutcome::Canceled);
+                                self.status = Some(
+                                    "Preparation was canceled; staged work remains available."
+                                        .to_string(),
+                                );
+                            }
+                            _ => {
+                                self.phase = ContextEditorPhase::Editing;
+                                self.curator_workspace
+                                    .mark_generation_outcome(CuratorGenerationOutcome::Failed);
+                                self.error = Some(
+                                    "Atomic call 3 failed: the synthetic route rejected the exact response contract."
+                                        .to_string(),
+                                );
+                            }
+                        }
+                    }
+                    "curator-workspace-save-success" => {
+                        let selected = ContextCuratorSelection {
+                            provider: Some("synthetic-openrouter".to_string()),
+                            route: Some("openrouter-chat".to_string()),
+                            model: Some("synthetic-reasoner-xl".to_string()),
+                            effort: Some("high".to_string()),
+                        };
+                        if let Some(snapshot) = self.snapshot.as_mut() {
+                            snapshot.curator_default = selected;
+                            snapshot.curator_route = Some(ContextCuratorRoutePreview {
+                                provider_name: "synthetic-openrouter".to_string(),
+                                provider_display_name: "Synthetic OpenRouter".to_string(),
+                                model: "synthetic-reasoner-xl".to_string(),
+                                route: "openrouter-chat".to_string(),
+                                effort: Some("high".to_string()),
+                            });
+                        }
+                        self.curator_selection = None;
+                        self.curator_workspace_default_saved();
+                    }
+                    "curator-workspace-save-failure" => {
+                        self.curator_selection = Some(ContextCuratorSelection {
+                            provider: Some("synthetic-openrouter".to_string()),
+                            route: Some("openrouter-chat".to_string()),
+                            model: Some("synthetic-reasoner-xl".to_string()),
+                            effort: Some("high".to_string()),
+                        });
+                        self.error = Some(
+                            "Could not persist curator defaults; the previous durable default remains active."
+                                .to_string(),
+                        );
+                        self.align_curator_route_cursor_to_effective_selection();
+                    }
+                    "curator-workspace-narrow" => {
+                        self.narrow_layout = true;
+                        self.curator_workspace.narrow_detail_open = true;
+                        self.curator_workspace.section = CuratorWorkspaceSection::ExactCalls;
+                        let request = self.current_draft_request();
+                        let plan = debug_curator_plan(&request);
+                        self.curator_plan_request = Some(request);
+                        self.curator_plan = Some(plan);
+                        self.curator_workspace_plan_accepted(3);
+                    }
+                    _ => {}
+                }
             }
             "reasoning-only-no-curator" => {
                 self.apply_snapshot(debug_snapshot(32, 32, false, CuratorFixture::Unavailable));
@@ -520,7 +704,172 @@ fn debug_snapshot(
             "No independent synthetic curator route is configured for this fixture.".to_string()
         }),
         curator_default: Default::default(),
-        curator_route_options: Vec::new(),
+        curator_route_options: if matches!(curator, CuratorFixture::Available) {
+            debug_curator_route_options()
+        } else {
+            Vec::new()
+        },
+    }
+}
+
+fn debug_curator_route_options() -> Vec<crate::protocol::ContextCuratorRouteOption> {
+    [
+        (
+            "synthetic-curator",
+            "synthetic-curator-route",
+            "synthetic-curator-model",
+            "Current independent synthetic route · image input available",
+            &["low", "high"][..],
+        ),
+        (
+            "synthetic-anthropic",
+            "anthropic-api",
+            "synthetic-fable-5",
+            "Large-context signed-thinking capable route",
+            &["low", "high", "max"][..],
+        ),
+        (
+            "synthetic-openrouter",
+            "openrouter-chat",
+            "synthetic-reasoner-xl",
+            "Metered reasoning route · complete-source budget 1M",
+            &["minimal", "medium", "high"][..],
+        ),
+        (
+            "synthetic-openai",
+            "oauth",
+            "synthetic-sol",
+            "Subscription route · persistent continuation isolated",
+            &["low", "xhigh"][..],
+        ),
+        (
+            "synthetic-bedrock",
+            "bedrock-converse",
+            "synthetic-nova-pro",
+            "AWS inference-profile route",
+            &[][..],
+        ),
+        (
+            "synthetic-gemini",
+            "google-ai",
+            "synthetic-gemini-pro",
+            "Image-capable route · thought signatures preserved",
+            &["low", "high"][..],
+        ),
+    ]
+    .into_iter()
+    .map(
+        |(provider, route, model, detail, efforts)| crate::protocol::ContextCuratorRouteOption {
+            provider: provider.to_string(),
+            route: route.to_string(),
+            model: model.to_string(),
+            detail: detail.to_string(),
+            efforts: efforts.iter().map(|effort| (*effort).to_string()).collect(),
+        },
+    )
+    .collect()
+}
+
+fn debug_workspace_ranges() -> Vec<crate::protocol::ContextClosedRangePreview> {
+    let first = debug_range_preview(false).ranges.remove(0);
+    let mut second = first.clone();
+    second.requested = ContextMessageRangeSelection {
+        start_message_id: "debug-message-18".to_string(),
+        end_message_id: "debug-message-27".to_string(),
+    };
+    second.source_range = StoredMessageRange {
+        start_message_id: "debug-message-18".to_string(),
+        end_message_id: "debug-message-28".to_string(),
+        start_index_hint: 18,
+        end_index_hint: 28,
+        source_digest: 0x8484,
+        message_count: 11,
+    };
+    second.boundary_expansions.clear();
+    second.source_tokens = 31_600;
+    vec![first, second]
+}
+
+fn debug_curator_plan(request: &ContextDraftRequest) -> ContextCuratorPlanPreview {
+    let range_tasks = request.summary_ranges.iter().enumerate().map(|(index, range)| {
+        crate::protocol::ContextCuratorTaskPreview {
+            task_id: format!("debug-range-task-{index}"),
+            role: jcode_session_types::StoredContextCuratorRole::RangeSummarizer,
+            target_label: match index {
+                0 => "messages 4..10 · 7 messages · structurally closed".to_string(),
+                _ => "messages 18..28 · 11 messages · structurally closed".to_string(),
+            },
+            effective_system_prompt: format!(
+                "SYNTHETIC RANGE ROLE {index}\nMandatory preservation contract remains active.\nTransaction instruction is additive.\nPROMPT TAIL {index}"
+            ),
+            response_contract:
+                "{\n  \"summary\": \"string\",\n  \"file_change_digest\": \"string\",\n  \"warnings\": []\n}\nCONTRACT TAIL"
+                    .to_string(),
+            estimated_input_tokens: 18_000 + index * 11_000,
+            safe_input_budget: 360_000,
+            request_bytes: 84_000 + index * 32_000,
+            request_byte_limit: 32 * 1024 * 1024,
+            image_count: index,
+            source_scope: vec![crate::protocol::ContextCuratorSourceScope {
+                purpose: crate::protocol::ContextCuratorSourcePurpose::PrimaryRange,
+                message_id: Some(range.start_message_id.clone()),
+                stored_index: Some(if index == 0 { 4 } else { 18 }),
+                block_ordinals: Vec::new(),
+                includes_all_blocks: true,
+            }],
+        }
+    });
+    let tool_tasks = request.tool_results.iter().enumerate().map(|(index, target)| {
+        crate::protocol::ContextCuratorTaskPreview {
+            task_id: format!("debug-tool-task-{index}"),
+            role: jcode_session_types::StoredContextCuratorRole::ToolResultDistiller,
+            target_label: format!(
+                "synthetic_read · message 2 · block {}",
+                target.block_ordinal
+            ),
+            effective_system_prompt:
+                "SYNTHETIC TOOL DISTILLER\nStrict below-twenty-percent preservation gate.\nTOOL PROMPT TAIL"
+                    .to_string(),
+            response_contract:
+                "{\n  \"eligible\": true,\n  \"replacement\": \"string\",\n  \"preservation_rationale\": \"string\"\n}\nTOOL CONTRACT TAIL"
+                    .to_string(),
+            estimated_input_tokens: 42_000,
+            safe_input_budget: 360_000,
+            request_bytes: 210_000,
+            request_byte_limit: 32 * 1024 * 1024,
+            image_count: 0,
+            source_scope: vec![
+                crate::protocol::ContextCuratorSourceScope {
+                    purpose: crate::protocol::ContextCuratorSourcePurpose::PrimaryToolCall,
+                    message_id: Some(target.message_id.clone()),
+                    stored_index: Some(2),
+                    block_ordinals: vec![target.block_ordinal],
+                    includes_all_blocks: false,
+                },
+                crate::protocol::ContextCuratorSourceScope {
+                    purpose: crate::protocol::ContextCuratorSourcePurpose::PrimaryToolResult,
+                    message_id: Some(target.message_id.clone()),
+                    stored_index: Some(2),
+                    block_ordinals: vec![target.block_ordinal],
+                    includes_all_blocks: false,
+                },
+            ],
+        }
+    });
+    ContextCuratorPlanPreview {
+        session_id: "debug-session-context-editor".to_string(),
+        context_revision: 12,
+        transcript_digest: 0x5afe_cafe,
+        route: crate::protocol::ContextCuratorRoutePreview {
+            provider_name: "synthetic-curator".to_string(),
+            provider_display_name: "Synthetic Curator".to_string(),
+            model: "synthetic-curator-model".to_string(),
+            route: "synthetic-curator-route".to_string(),
+            effort: Some("high".to_string()),
+        },
+        using_configured_default: true,
+        tasks: range_tasks.chain(tool_tasks).collect(),
+        fingerprint: "d".repeat(64),
     }
 }
 
