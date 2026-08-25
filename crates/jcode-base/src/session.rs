@@ -1043,6 +1043,7 @@ impl Session {
                     file_change_digest: String::new(),
                     changed_files: Vec::new(),
                     change_evidence_complete: false,
+                    file_evidence: None,
                     boundary_expansions: closed.expansions,
                     generator: None,
                     source_token_estimate,
@@ -2065,6 +2066,24 @@ fn redact_context_view(context_view: &mut StoredContextViewState) {
                         crate::message::redact_secrets(&summary.file_change_digest);
                     for path in &mut summary.changed_files {
                         *path = crate::message::redact_secrets(path);
+                    }
+                    if let Some(evidence) = summary.file_evidence.as_mut() {
+                        for category in [
+                            &mut evidence.changed,
+                            &mut evidence.read_or_inspected,
+                            &mut evidence.searched_or_browsed,
+                        ] {
+                            for path in &mut category.paths {
+                                *path = crate::message::redact_secrets(path);
+                            }
+                            for warning in &mut category.warnings {
+                                *warning = crate::message::redact_secrets(warning);
+                            }
+                            category.paths.sort();
+                            category.paths.dedup();
+                            category.warnings.sort();
+                            category.warnings.dedup();
+                        }
                     }
                     for warning in &mut summary.warnings {
                         *warning = crate::message::redact_secrets(warning);

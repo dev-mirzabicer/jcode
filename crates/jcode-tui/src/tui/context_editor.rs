@@ -160,6 +160,7 @@ enum ContextEditorToolbarAction {
     History,
     Policy,
     Detail,
+    Provenance,
     ConfirmRange,
     RejectRange,
     CancelDraft,
@@ -172,6 +173,54 @@ enum ContextEditorToolbarAction {
     CopyMetadata,
     NextHistoryPage,
     BackToHistory,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TransactionDetailOrigin {
+    TransactionHistory,
+    AuthoritativeHistory {
+        message_id: String,
+        block_ordinal: Option<usize>,
+        operation_index: usize,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ContextProvenanceTarget {
+    transaction_id: String,
+    operation_index: usize,
+    kind: ContextOperationBadgeKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SummaryCoverageRail {
+    None,
+    Unknown,
+    Single,
+    Start,
+    Interior,
+    End,
+    ContinuesBefore,
+    ContinuesAfter,
+    ContinuesBoth,
+    Gap,
+}
+
+impl SummaryCoverageRail {
+    fn label(self) -> &'static str {
+        match self {
+            Self::None => "  ",
+            Self::Unknown => "?S",
+            Self::Single => "◆S",
+            Self::Start => "╭S",
+            Self::Interior => "│S",
+            Self::End => "╰S",
+            Self::ContinuesBefore => "↑S",
+            Self::ContinuesAfter => "↓S",
+            Self::ContinuesBoth => "↕S",
+            Self::Gap => "⋮S",
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -298,6 +347,7 @@ pub struct ContextEditor {
     history_session_id: Option<String>,
     history_cursor: usize,
     transaction_detail: Option<ContextTransactionDetail>,
+    transaction_detail_origin: Option<TransactionDetailOrigin>,
     error: Option<String>,
     status: Option<String>,
     stale: bool,
@@ -384,6 +434,7 @@ impl ContextEditor {
             history_session_id: None,
             history_cursor: 0,
             transaction_detail: None,
+            transaction_detail_origin: None,
             error: None,
             status: None,
             stale: false,
@@ -733,6 +784,7 @@ impl ContextEditor {
                 self.selection_preview = None;
                 self.selection_preview_pending = false;
                 self.transaction_detail = None;
+                self.transaction_detail_origin = None;
                 self.last_transaction_detail_signature = None;
                 self.history.clear();
                 self.history_total = 0;
@@ -816,6 +868,15 @@ impl ContextEditor {
                             .to_string(),
                     );
                 }
+                ContextRequestKind::TransactionDetail => {
+                    self.transaction_detail = None;
+                    self.transaction_detail_origin = None;
+                    self.last_transaction_detail_signature = None;
+                    self.status = Some(
+                        "Exact transaction provenance could not be loaded; no fallback target was selected."
+                            .to_string(),
+                    );
+                }
                 _ => {}
             }
         }
@@ -872,6 +933,10 @@ impl ContextEditor {
             self.draft = None;
             self.draft_id = None;
             self.selection_preview = None;
+            self.transaction_detail = None;
+            self.transaction_detail_origin = None;
+            self.last_transaction_detail_signature = None;
+            self.phase = ContextEditorPhase::Editing;
             self.stale = true;
             self.error = Some(
                 "The editor session changed. All staged selections were cleared rather than retargeted by position."
@@ -900,6 +965,9 @@ impl ContextEditor {
             self.selected_distillation_ids.clear();
             self.selection_preview = None;
             self.selection_preview_pending = false;
+            self.transaction_detail = None;
+            self.transaction_detail_origin = None;
+            self.last_transaction_detail_signature = None;
             self.stale = true;
             self.phase = ContextEditorPhase::Editing;
             self.error = Some(
@@ -1194,8 +1262,7 @@ impl ContextEditor {
                 return (false, None);
             }
             if self.phase == ContextEditorPhase::InspectTransaction {
-                self.phase = ContextEditorPhase::History;
-                self.transaction_detail = None;
+                self.leave_transaction_detail();
                 return (false, None);
             }
             return (true, None);
@@ -1411,6 +1478,7 @@ impl ContextEditor {
                     }),
                 )
             }
+            KeyCode::Char('v') => (false, self.begin_current_provenance()),
             KeyCode::Enter => (false, self.current_detail_action()),
             _ => (false, None),
         }
@@ -1682,6 +1750,8 @@ impl ContextEditor {
             ),
             KeyCode::Enter => {
                 let action = self.current_transaction().map(|transaction| {
+                    self.transaction_detail_origin =
+                        Some(TransactionDetailOrigin::TransactionHistory);
                     ContextEditorAction::LoadTransactionDetail {
                         context_revision: self.history_context_revision.unwrap_or_default(),
                         transaction_id: transaction.id,
@@ -2053,6 +2123,104 @@ impl ContextEditor {
         })
     }
 
+    fn current_provenance_target(&self) -> Option<ContextProvenanceTarget> {
+        let message = self.current_message()?;
+        if let Some(block) = message.blocks.get(self.block_cursor)
+            && let Some(operation) = block.active_operations.first()
+        {
+            return Some(ContextProvenanceTarget {
+                transaction_id: operation.transaction_id.clone(),
+                operation_index: operation.operation_index,
+                kind: operation.kind.clone(),
+            });
+        }
+        if let Some(coverage) = message.summary_coverage.as_ref() {
+            return Some(ContextProvenanceTarget {
+                transaction_id: coverage.transaction_id.clone(),
+                operation_index: coverage.operation_index,
+                kind: ContextOperationBadgeKind::RangeSummary,
+            });
+        }
+        message
+            .active_operations
+            .iter()
+            .find(|operation| operation.kind != ContextOperationBadgeKind::RangeSummary)
+            .map(|operation| ContextProvenanceTarget {
+                transaction_id: operation.transaction_id.clone(),
+                operation_index: operation.operation_index,
+                kind: operation.kind.clone(),
+            })
+    }
+
+    fn begin_current_provenance(&mut self) -> Option<ContextEditorAction> {
+        let target = self.current_provenance_target()?;
+        let message = self.current_message()?;
+        let block_ordinal = message
+            .blocks
+            .get(self.block_cursor)
+            .map(|block| block.ordinal);
+        let context_revision = self.snapshot.as_ref()?.context_revision;
+        self.transaction_detail_origin = Some(TransactionDetailOrigin::AuthoritativeHistory {
+            message_id: message.message_id,
+            block_ordinal,
+            operation_index: target.operation_index,
+        });
+        self.status = Some(format!(
+            "Loading {:?} provenance from transaction {}.",
+            target.kind,
+            short_id(&target.transaction_id)
+        ));
+        Some(ContextEditorAction::LoadTransactionDetail {
+            context_revision,
+            transaction_id: target.transaction_id,
+        })
+    }
+
+    fn leave_transaction_detail(&mut self) {
+        let origin = self.transaction_detail_origin.take();
+        self.transaction_detail = None;
+        self.last_transaction_detail_signature = None;
+        match origin {
+            Some(TransactionDetailOrigin::AuthoritativeHistory {
+                message_id,
+                block_ordinal,
+                ..
+            }) => {
+                self.phase = ContextEditorPhase::Editing;
+                if let Some(position) = self
+                    .visible_message_ids()
+                    .iter()
+                    .position(|candidate| candidate == &message_id)
+                {
+                    self.cursor = position;
+                    if let Some(block_ordinal) = block_ordinal {
+                        let restored_block = self.current_message().and_then(|message| {
+                            message
+                                .blocks
+                                .iter()
+                                .position(|block| block.ordinal == block_ordinal)
+                        });
+                        if let Some(restored_block) = restored_block {
+                            self.block_cursor = restored_block;
+                        } else {
+                            self.block_cursor = 0;
+                            self.status = Some(
+                                "The original provenance block is no longer present; the message remains selected without retargeting another block."
+                                    .to_string(),
+                            );
+                        }
+                    } else {
+                        self.block_cursor = 0;
+                    }
+                }
+            }
+            Some(TransactionDetailOrigin::TransactionHistory) | None => {
+                self.phase = ContextEditorPhase::History;
+            }
+        }
+        self.preview_scroll = 0;
+    }
+
     fn toolbar_items(&self) -> Vec<(&'static str, ContextEditorToolbarAction)> {
         match self.phase {
             ContextEditorPhase::Loading => Vec::new(),
@@ -2063,6 +2231,7 @@ impl ContextEditor {
                 ("Scan", ContextEditorToolbarAction::ScanOutputs),
                 ("Curator", ContextEditorToolbarAction::Curator),
                 ("Detail", ContextEditorToolbarAction::Detail),
+                ("Provenance", ContextEditorToolbarAction::Provenance),
                 ("Prepare", ContextEditorToolbarAction::Prepare),
                 ("History", ContextEditorToolbarAction::History),
                 ("Policy", ContextEditorToolbarAction::Policy),
@@ -2097,7 +2266,17 @@ impl ContextEditor {
                 items
             }
             ContextEditorPhase::InspectTransaction => vec![
-                ("Back", ContextEditorToolbarAction::BackToHistory),
+                (
+                    if matches!(
+                        self.transaction_detail_origin,
+                        Some(TransactionDetailOrigin::AuthoritativeHistory { .. })
+                    ) {
+                        "Back to editor"
+                    } else {
+                        "Back to history"
+                    },
+                    ContextEditorToolbarAction::BackToHistory,
+                ),
                 ("Copy", ContextEditorToolbarAction::CopyMetadata),
             ],
         }
@@ -2120,6 +2299,7 @@ impl ContextEditor {
             ContextEditorToolbarAction::History => Some(KeyCode::Char('H')),
             ContextEditorToolbarAction::Policy => Some(KeyCode::Char('P')),
             ContextEditorToolbarAction::Detail => return self.current_detail_action(),
+            ContextEditorToolbarAction::Provenance => return self.begin_current_provenance(),
             ContextEditorToolbarAction::ConfirmRange => Some(KeyCode::Enter),
             ContextEditorToolbarAction::RejectRange => Some(KeyCode::Char('n')),
             ContextEditorToolbarAction::CancelDraft => Some(KeyCode::Char('c')),
@@ -2139,8 +2319,7 @@ impl ContextEditor {
                     });
             }
             ContextEditorToolbarAction::BackToHistory => {
-                self.phase = ContextEditorPhase::History;
-                self.transaction_detail = None;
+                self.leave_transaction_detail();
                 return None;
             }
         };
@@ -2176,6 +2355,7 @@ impl ContextEditor {
                         || !self.tool_targets.is_empty())
             }
             ContextEditorToolbarAction::Detail => self.current_detail_action().is_some(),
+            ContextEditorToolbarAction::Provenance => self.current_provenance_target().is_some(),
             ContextEditorToolbarAction::ConfirmRange => self.pending_range_preview.is_some(),
             ContextEditorToolbarAction::RejectRange => true,
             ContextEditorToolbarAction::CancelDraft => self.draft_id.is_some(),
@@ -2437,47 +2617,64 @@ impl ContextEditor {
                 })
                 .collect::<Vec<_>>()
         } else {
-            let ids = self.visible_message_ids();
+            let messages = self
+                .visible_message_ids()
+                .into_iter()
+                .filter_map(|id| self.message_by_id(&id).cloned())
+                .collect::<Vec<_>>();
             let start = self.cursor.saturating_sub(height.saturating_sub(1));
             self.rendered_message_start = start;
-            ids.iter()
+            messages
+                .iter()
                 .enumerate()
                 .skip(start)
                 .take(height)
-                .filter_map(|(visible_index, id)| {
-                    let message = self.message_by_id(id)?;
+                .map(|(visible_index, message)| {
                     let marker = if visible_index == self.cursor {
                         "›"
                     } else {
                         " "
                     };
-                    let selected = if self.selected_message_ids.contains(id) {
+                    let selected = if self.selected_message_ids.contains(&message.message_id) {
                         "●"
                     } else {
                         " "
                     };
                     let staged = if self.message_in_staged_range(message.stored_index) {
                         "Σ"
-                    } else if self.summary_anchor.as_deref() == Some(id.as_str()) {
+                    } else if self.summary_anchor.as_deref()
+                        == Some(message.message_id.as_str())
+                    {
                         "A"
                     } else {
                         " "
                     };
+                    let rail = summary_coverage_rail(
+                        message,
+                        visible_index
+                            .checked_sub(1)
+                            .and_then(|index| messages.get(index)),
+                        messages.get(visible_index.saturating_add(1)),
+                        &self.rows,
+                    )
+                    .label();
+                    let (reasoning_active, distillation_active) =
+                        active_block_operation_markers(message);
+                    let reasoning = if reasoning_active { "R" } else { " " };
+                    let distillation = if distillation_active { "D" } else { " " };
                     let role = role_label(&message.role);
                     let preview =
-                        one_line(&message.preview, inner.width.saturating_sub(24) as usize);
-                    Some(
-                        Line::from(format!(
-                            "{marker}{selected}{staged} {:>5} {role} {:>6} {preview}",
-                            message.stored_index,
-                            format_tokens(message.raw_provider_tokens)
-                        ))
-                        .style(if visible_index == self.cursor {
-                            Style::default().fg(Color::Black).bg(Color::Yellow)
-                        } else {
-                            Style::default()
-                        }),
-                    )
+                        one_line(&message.preview, inner.width.saturating_sub(30) as usize);
+                    Line::from(format!(
+                        "{marker}{selected}{staged} {rail} {:>5} {role} {reasoning}{distillation} {:>6} {preview}",
+                        message.stored_index,
+                        format_tokens(message.raw_provider_tokens)
+                    ))
+                    .style(if visible_index == self.cursor {
+                        Style::default().fg(Color::Black).bg(Color::Yellow)
+                    } else {
+                        Style::default()
+                    })
                 })
                 .collect::<Vec<_>>()
         };
@@ -2569,7 +2766,14 @@ impl ContextEditor {
                 "Enter inspect · r revert · p reapply · c copy metadata · e editor · Esc"
             }
             ContextEditorPhase::InspectTransaction => {
-                "PgUp/PgDn scroll · c copy metadata · Esc history"
+                if matches!(
+                    self.transaction_detail_origin,
+                    Some(TransactionDetailOrigin::AuthoritativeHistory { .. })
+                ) {
+                    "PgUp/PgDn scroll · c copy metadata · Esc editor"
+                } else {
+                    "PgUp/PgDn scroll · c copy metadata · Esc history"
+                }
             }
             ContextEditorPhase::Loading => "Loading… · Esc",
         };
@@ -2919,7 +3123,7 @@ impl ContextEditor {
             ),
             ContextEditorModal::Help => (
                 "Context editor help",
-                "Stable IDs, never wrapped rows, own every selection.\n\ns anchors structurally closed summary ranges.\nSpace selects stable messages or toggles a reviewed proposal.\nR stages replayed-reasoning suppression.\nd marks the selected ToolResult block. D scans mechanically.\nC opens per-run curator settings, exact prompts/source scope, and explicit default save.\nP configures explicit unattended emergency authorization.\ng first requires exact curator-plan review, then prepares one atomic transaction.\nTab changes pane focus. Arrow/vim keys navigate.\nOriginal Session.messages is never changed by these operations.\n\n? or Enter closes help."
+                "Stable IDs, never wrapped rows, own every selection.\n\ns anchors structurally closed summary ranges.\nSpace selects stable messages or toggles a reviewed proposal.\nR stages replayed-reasoning suppression.\nd marks the selected ToolResult block. D scans mechanically.\nC opens per-run curator settings, exact prompts/source scope, and explicit default save.\nv opens the exact owning transaction for the selected active block or summary.\nP configures explicit unattended emergency authorization.\ng first requires exact curator-plan review, then prepares one atomic transaction.\nTab changes pane focus. Arrow/vim keys navigate.\nOriginal Session.messages is never changed by these operations.\n\n? or Enter closes help."
                     .to_string(),
             ),
         };
@@ -2959,8 +3163,14 @@ impl ContextEditor {
             )),
             Line::from(""),
             Line::from(one_line(&message.preview, width.saturating_sub(2))),
-            Line::from(""),
         ];
+        let active_context = self.active_context_preview_lines(&message);
+        if !active_context.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from("Active context"));
+            lines.extend(active_context);
+        }
+        lines.push(Line::from(""));
         for (index, block) in message.blocks.iter().enumerate() {
             let selected = if index == self.block_cursor {
                 "›"
@@ -3068,6 +3278,76 @@ impl ContextEditor {
             lines.push(Line::from(
                 "ReasoningTrace is transcript-only and contributes zero provider replay tokens.",
             ));
+        }
+        lines
+    }
+
+    fn active_context_preview_lines(&self, message: &ContextEditorMessage) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
+        if let Some(coverage) = message.summary_coverage.as_ref() {
+            let exact_bounds_available = coverage.message_count > 0
+                && !coverage.start_message_id.is_empty()
+                && !coverage.end_message_id.is_empty()
+                && coverage.start_stored_index <= coverage.end_stored_index
+                && coverage.message_count
+                    == coverage
+                        .end_stored_index
+                        .saturating_sub(coverage.start_stored_index)
+                        .saturating_add(1)
+                && message.stored_index >= coverage.start_stored_index
+                && message.stored_index <= coverage.end_stored_index;
+            if !exact_bounds_available {
+                lines.push(Line::from(format!(
+                    "S ACTIVE · exact bounds unavailable · tx {} · operation {}",
+                    short_id(&coverage.transaction_id),
+                    coverage.operation_index + 1
+                )));
+            } else {
+                let position = if coverage.start_stored_index == coverage.end_stored_index {
+                    "single-message range"
+                } else if message.stored_index == coverage.start_stored_index {
+                    "exact start"
+                } else if message.stored_index == coverage.end_stored_index {
+                    "exact end"
+                } else {
+                    "interior"
+                };
+                lines.push(Line::from(format!(
+                    "S ACTIVE · {position} · messages {}..{} · {} message(s) · tx {} · operation {}",
+                    coverage.start_stored_index,
+                    coverage.end_stored_index,
+                    coverage.message_count,
+                    short_id(&coverage.transaction_id),
+                    coverage.operation_index + 1
+                )));
+            }
+        }
+        for block in &message.blocks {
+            for operation in &block.active_operations {
+                let label = match operation.kind {
+                    ContextOperationBadgeKind::ReasoningSuppression
+                        if block.provider_removable_reasoning =>
+                    {
+                        "R ACTIVE"
+                    }
+                    ContextOperationBadgeKind::ToolResultDistillation => "D ACTIVE",
+                    _ => continue,
+                };
+                lines.push(Line::from(format!(
+                    "{label} · block {} · tx {} · operation {}",
+                    block.ordinal,
+                    short_id(&operation.transaction_id),
+                    operation.operation_index + 1
+                )));
+            }
+        }
+        if let Some(target) = self.current_provenance_target() {
+            lines.push(Line::from(format!(
+                "v provenance · {:?} · tx {} · operation {}",
+                target.kind,
+                short_id(&target.transaction_id),
+                target.operation_index + 1
+            )));
         }
         lines
     }
@@ -3207,22 +3487,7 @@ impl ContextEditor {
                         "Files changed digest",
                         &summary.file_change_digest,
                     );
-                    lines.push(Line::from(format!(
-                        "Changed-file evidence: {}",
-                        if summary.change_evidence_complete {
-                            "complete for recognized structured mutations"
-                        } else {
-                            "potentially incomplete because indirect changes may exist"
-                        }
-                    )));
-                    if summary.changed_files.is_empty() {
-                        lines.push(Line::from("Changed paths: none recorded"));
-                    } else {
-                        lines.push(Line::from("Changed paths:"));
-                        for path in &summary.changed_files {
-                            lines.push(Line::from(format!("  • {path}")));
-                        }
-                    }
+                    push_file_evidence_lines(&mut lines, &summary.effective_file_evidence());
                     if summary.boundary_expansions.is_empty() {
                         lines.push(Line::from("Boundary expansions: none"));
                     } else {
@@ -3430,6 +3695,15 @@ impl ContextEditor {
                 transaction.status_events.len()
             )),
         ];
+        if let Some(TransactionDetailOrigin::AuthoritativeHistory {
+            operation_index, ..
+        }) = self.transaction_detail_origin.as_ref()
+        {
+            lines.push(Line::from(format!(
+                "Provenance origin: Authoritative History · operation {}",
+                operation_index + 1
+            )));
+        }
         for event in &transaction.status_events {
             lines.push(Line::from(format!(
                 "  • revision {} · {:?} · {}",
@@ -3458,10 +3732,21 @@ impl ContextEditor {
         }
         for (operation_index, operation) in transaction.operations.iter().enumerate() {
             lines.push(Line::from(""));
+            let origin = if matches!(
+                self.transaction_detail_origin.as_ref(),
+                Some(TransactionDetailOrigin::AuthoritativeHistory {
+                    operation_index: selected,
+                    ..
+                }) if *selected == operation_index
+            ) {
+                "▶ ORIGIN · "
+            } else {
+                ""
+            };
             match operation {
                 StoredContextOperation::RangeSummary(summary) => {
                     lines.push(Line::from(format!(
-                        "Range summary {} · raw {}..{} · {} message(s)",
+                        "{origin}Range summary {} · raw {}..{} · {} message(s)",
                         operation_index + 1,
                         summary.source_range.start_index_hint,
                         summary.source_range.end_index_hint,
@@ -3479,13 +3764,7 @@ impl ContextEditor {
                         "Files changed digest",
                         &summary.file_change_digest,
                     );
-                    lines.push(Line::from(format!(
-                        "Changed-file evidence complete: {}",
-                        summary.change_evidence_complete
-                    )));
-                    for path in &summary.changed_files {
-                        lines.push(Line::from(format!("Changed path: {path}")));
-                    }
+                    push_file_evidence_lines(&mut lines, &summary.effective_file_evidence());
                     for expansion in &summary.boundary_expansions {
                         lines.push(Line::from(format!(
                             "Boundary expansion: message {} ({}) · {}",
@@ -3503,7 +3782,7 @@ impl ContextEditor {
                 }
                 StoredContextOperation::ReasoningSuppression(suppression) => {
                     lines.push(Line::from(format!(
-                        "Reasoning suppression {} · {} targets · {} assistant turn(s) · {}",
+                        "{origin}Reasoning suppression {} · {} targets · {} assistant turn(s) · {}",
                         operation_index + 1,
                         suppression.targets.len(),
                         suppression.assistant_turns_affected,
@@ -3524,7 +3803,7 @@ impl ContextEditor {
                 }
                 StoredContextOperation::ToolResultDistillation(distillation) => {
                     lines.push(Line::from(format!(
-                        "Tool distillation {} · {} · call {} · {} → {} · retained {:.2}%",
+                        "{origin}Tool distillation {} · {} · call {} · {} → {} · retained {:.2}%",
                         operation_index + 1,
                         distillation.tool_name,
                         distillation.tool_call_id,
@@ -3879,7 +4158,7 @@ impl ContextEditor {
     }
 
     pub fn debug_summary(&self) -> serde_json::Value {
-        serde_json::json!({
+        let mut summary = serde_json::json!({
             "open": true,
             "open_mode": self.open_mode,
             "phase": self.phase,
@@ -3922,7 +4201,26 @@ impl ContextEditor {
             "curator_route_options": self.snapshot.as_ref().map(|snapshot| snapshot.curator_route_options.len()).unwrap_or(0),
             "has_error": self.error.is_some(),
             "stale": self.stale,
-        })
+        });
+        summary["active_context"] = serde_json::json!({
+            "summary_rows": self.rows.values().filter(|message| message.summary_coverage.is_some()).count(),
+            "reasoning_blocks": self.rows.values().flat_map(|message| &message.blocks).filter(|block| {
+                block.provider_removable_reasoning && block.active_operations.iter().any(|operation| operation.kind == ContextOperationBadgeKind::ReasoningSuppression)
+            }).count(),
+            "distillation_blocks": self.rows.values().flat_map(|message| &message.blocks).filter(|block| {
+                block.active_operations.iter().any(|operation| operation.kind == ContextOperationBadgeKind::ToolResultDistillation)
+            }).count(),
+            "detail_origin": match self.transaction_detail_origin.as_ref() {
+                Some(TransactionDetailOrigin::AuthoritativeHistory { .. }) => Some("authoritative_history"),
+                Some(TransactionDetailOrigin::TransactionHistory) => Some("transaction_history"),
+                None => None,
+            },
+            "operation_index": match self.transaction_detail_origin.as_ref() {
+                Some(TransactionDetailOrigin::AuthoritativeHistory { operation_index, .. }) => Some(*operation_index),
+                _ => None,
+            },
+        });
+        summary
     }
 }
 
@@ -4101,6 +4399,55 @@ fn push_multiline_section(lines: &mut Vec<Line<'static>>, label: &str, text: &st
         return;
     }
     lines.extend(text.split('\n').map(|line| Line::from(format!("  {line}"))));
+}
+
+fn push_file_evidence_lines(
+    lines: &mut Vec<Line<'static>>,
+    evidence: &jcode_session_types::StoredContextFileEvidence,
+) {
+    lines.push(Line::from("Harness-generated file evidence"));
+    push_path_evidence_lines(lines, "Files changed", &evidence.changed);
+    push_path_evidence_lines(
+        lines,
+        "Files read or inspected",
+        &evidence.read_or_inspected,
+    );
+    push_path_evidence_lines(
+        lines,
+        "Paths searched or browsed",
+        &evidence.searched_or_browsed,
+    );
+}
+
+fn push_path_evidence_lines(
+    lines: &mut Vec<Line<'static>>,
+    label: &str,
+    evidence: &jcode_session_types::StoredContextPathEvidence,
+) {
+    lines.push(Line::from(format!(
+        "{label} · {}",
+        if evidence.complete {
+            "complete"
+        } else {
+            "incomplete"
+        }
+    )));
+    if evidence.paths.is_empty() {
+        lines.push(Line::from("  none observed"));
+    } else {
+        lines.extend(
+            evidence
+                .paths
+                .iter()
+                .map(|path| Line::from(format!("  {path}"))),
+        );
+    }
+    lines.extend(
+        evidence
+            .warnings
+            .iter()
+            .map(|warning| Line::from(format!("  Evidence warning: {warning}"))),
+    );
 }
 
 fn push_economics_lines(
@@ -4333,6 +4680,101 @@ fn replayed_reasoning_kind(kind: StoredContextBlockKind) -> bool {
     )
 }
 
+fn summary_coverage_rail(
+    current: &ContextEditorMessage,
+    previous_visible: Option<&ContextEditorMessage>,
+    next_visible: Option<&ContextEditorMessage>,
+    loaded_rows: &BTreeMap<usize, ContextEditorMessage>,
+) -> SummaryCoverageRail {
+    let Some(coverage) = current.summary_coverage.as_ref() else {
+        return SummaryCoverageRail::None;
+    };
+    if coverage.message_count == 0
+        || coverage.start_message_id.is_empty()
+        || coverage.end_message_id.is_empty()
+        || coverage.start_stored_index > coverage.end_stored_index
+        || coverage.message_count
+            != coverage
+                .end_stored_index
+                .saturating_sub(coverage.start_stored_index)
+                .saturating_add(1)
+        || current.stored_index < coverage.start_stored_index
+        || current.stored_index > coverage.end_stored_index
+        || (current.stored_index == coverage.start_stored_index
+            && current.message_id != coverage.start_message_id)
+        || (current.stored_index == coverage.end_stored_index
+            && current.message_id != coverage.end_message_id)
+    {
+        return SummaryCoverageRail::Unknown;
+    }
+    if coverage.start_stored_index == coverage.end_stored_index {
+        return SummaryCoverageRail::Single;
+    }
+    if current.stored_index == coverage.start_stored_index {
+        return SummaryCoverageRail::Start;
+    }
+    if current.stored_index == coverage.end_stored_index {
+        return SummaryCoverageRail::End;
+    }
+
+    let previous_contiguous = previous_visible.is_some_and(|previous| {
+        previous.stored_index.saturating_add(1) == current.stored_index
+            && same_summary_owner(previous, current)
+    });
+    let next_contiguous = next_visible.is_some_and(|next| {
+        current.stored_index.saturating_add(1) == next.stored_index
+            && same_summary_owner(current, next)
+    });
+    if !previous_contiguous {
+        if current
+            .stored_index
+            .checked_sub(1)
+            .is_some_and(|index| loaded_rows.contains_key(&index))
+        {
+            return SummaryCoverageRail::Gap;
+        }
+        return if next_contiguous {
+            SummaryCoverageRail::ContinuesBefore
+        } else {
+            SummaryCoverageRail::ContinuesBoth
+        };
+    }
+    if !next_contiguous && !loaded_rows.contains_key(&current.stored_index.saturating_add(1)) {
+        return SummaryCoverageRail::ContinuesAfter;
+    }
+    SummaryCoverageRail::Interior
+}
+
+fn same_summary_owner(left: &ContextEditorMessage, right: &ContextEditorMessage) -> bool {
+    match (
+        left.summary_coverage.as_ref(),
+        right.summary_coverage.as_ref(),
+    ) {
+        (Some(left), Some(right)) => {
+            left.transaction_id == right.transaction_id
+                && left.operation_index == right.operation_index
+        }
+        _ => false,
+    }
+}
+
+fn active_block_operation_markers(message: &ContextEditorMessage) -> (bool, bool) {
+    let reasoning = message.blocks.iter().any(|block| {
+        block.provider_removable_reasoning
+            && block
+                .active_operations
+                .iter()
+                .any(|operation| operation.kind == ContextOperationBadgeKind::ReasoningSuppression)
+    });
+    let distillation = message.blocks.iter().any(|block| {
+        block
+            .active_operations
+            .iter()
+            .any(|operation| operation.kind == ContextOperationBadgeKind::ToolResultDistillation)
+    });
+    (reasoning, distillation)
+}
+
 fn format_tokens(tokens: usize) -> String {
     if tokens >= 1_000_000 {
         format!("{:.2}M", tokens as f64 / 1_000_000.0)
@@ -4538,7 +4980,8 @@ mod tests {
     use crate::protocol::{
         ContextClosedRangePreview, ContextDistillationProposal, ContextDraftIdentity,
         ContextDraftPreview, ContextEditorBlock, ContextIneligibleDistillation,
-        ContextOperationCounts, ContextTransactionResult,
+        ContextOperationBadge, ContextOperationCounts, ContextSummaryCoverage,
+        ContextTransactionResult,
     };
     use crate::tui::app::context_protocol::ContextTransactionOutcome;
     use chrono::{DateTime, Duration, Utc};
@@ -4785,6 +5228,23 @@ mod tests {
                 ),
                 changed_files: vec![format!("src/{prefix}_changed.rs")],
                 change_evidence_complete: false,
+                file_evidence: Some(jcode_session_types::StoredContextFileEvidence {
+                    changed: jcode_session_types::StoredContextPathEvidence {
+                        paths: vec![format!("src/{prefix}_changed.rs")],
+                        complete: true,
+                        warnings: Vec::new(),
+                    },
+                    read_or_inspected: jcode_session_types::StoredContextPathEvidence {
+                        paths: vec![format!("src/{prefix}_read.rs")],
+                        complete: true,
+                        warnings: Vec::new(),
+                    },
+                    searched_or_browsed: jcode_session_types::StoredContextPathEvidence {
+                        paths: vec![format!("src/{prefix}_searched")],
+                        complete: false,
+                        warnings: vec![format!("{prefix} EVIDENCE_WARNING_TAIL")],
+                    },
+                }),
                 boundary_expansions: vec![StoredRangeBoundaryExpansion {
                     message_id: "message-2".to_string(),
                     stored_index_hint: 2,
@@ -5107,6 +5567,54 @@ mod tests {
         }
     }
 
+    fn summary_coverage(
+        transaction_id: &str,
+        operation_index: usize,
+        start: usize,
+        end: usize,
+    ) -> ContextSummaryCoverage {
+        ContextSummaryCoverage {
+            transaction_id: transaction_id.to_string(),
+            operation_index,
+            start_message_id: format!("message-{start}"),
+            end_message_id: format!("message-{end}"),
+            start_stored_index: start,
+            end_stored_index: end,
+            message_count: end.saturating_sub(start).saturating_add(1),
+        }
+    }
+
+    fn operation_badge(
+        transaction_id: &str,
+        operation_index: usize,
+        kind: ContextOperationBadgeKind,
+    ) -> ContextOperationBadge {
+        ContextOperationBadge {
+            transaction_id: transaction_id.to_string(),
+            operation_index,
+            kind,
+        }
+    }
+
+    fn apply_summary_coverage(
+        messages: &mut [ContextEditorMessage],
+        transaction_id: &str,
+        operation_index: usize,
+        start: usize,
+        end: usize,
+    ) {
+        let coverage = summary_coverage(transaction_id, operation_index, start, end);
+        let badge = operation_badge(
+            transaction_id,
+            operation_index,
+            ContextOperationBadgeKind::RangeSummary,
+        );
+        for message in &mut messages[start..=end] {
+            message.summary_coverage = Some(coverage.clone());
+            message.active_operations.push(badge.clone());
+        }
+    }
+
     fn range_preview(
         ranges: Vec<ContextClosedRangePreview>,
         shadowed_active_operations: Vec<String>,
@@ -5122,7 +5630,7 @@ mod tests {
 
     fn interaction_signature(editor: &ContextEditor) -> String {
         format!(
-            "{:?}|{:?}|{:?}|{}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{}|{}|{:?}|{:?}|{}|{}",
+            "{:?}|{:?}|{:?}|{}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{}|{}|{:?}|{:?}|{}|{}|{:?}",
             editor.phase,
             editor.modal,
             editor.focus,
@@ -5140,6 +5648,7 @@ mod tests {
             editor.history_cursor,
             editor.transaction_detail.is_some(),
             editor.selection_preview_pending,
+            editor.transaction_detail_origin,
         )
     }
 
@@ -5331,6 +5840,11 @@ mod tests {
         snapshot.messages[5].summary_coverage = Some(crate::protocol::ContextSummaryCoverage {
             transaction_id: "active-summary".to_string(),
             operation_index: 0,
+            start_message_id: snapshot.messages[5].message_id.clone(),
+            end_message_id: snapshot.messages[5].message_id.clone(),
+            start_stored_index: snapshot.messages[5].stored_index,
+            end_stored_index: snapshot.messages[5].stored_index,
+            message_count: 1,
         });
         editor.apply_snapshot(snapshot);
         editor.reasoning = Some(ContextReasoningSelectionRequest::KeepLatestAssistantTurns {
@@ -5808,6 +6322,8 @@ mod tests {
                     block_ordinals: Vec::new(),
                     includes_all_blocks: true,
                 }],
+                file_evidence: None,
+                user_instructions: crate::protocol::ContextCuratorInstructionDisclosure::default(),
             }],
             fingerprint: "b".repeat(64),
         };
@@ -7798,7 +8314,65 @@ mod tests {
             assert!(!summary.contains("replacement_content"));
             assert!(!summary.contains("preservation_rationale"));
             assert!(!summary.contains("summary_text"));
+            assert!(!summary.contains("src/debug-read"));
+            assert!(!summary.contains("crates/jcode-tui"));
+            assert!(!summary.contains("Synthetic shell"));
         }
+    }
+
+    #[test]
+    fn phase16_visual_fixtures_show_coverage_continuity_provenance_and_evidence_at_wide_and_narrow_sizes()
+     {
+        let mut coverage = ContextEditor::new(ContextEditorOpenMode::Edit);
+        coverage
+            .apply_debug_fixture("active-coverage")
+            .expect("active coverage fixture");
+        let wide = render_editor_text(&mut coverage, 140, 48);
+        for expected in ["╭S", "│S", "RD", "Σ", "Active context", "v provenance"] {
+            assert!(wide.contains(expected), "missing {expected}: {wide}");
+        }
+        coverage.focus = ContextEditorPane::Preview;
+        coverage.preview_scroll = 3;
+        let narrow = render_editor_text(&mut coverage, 72, 24);
+        assert!(narrow.contains("Active context"), "{narrow}");
+        assert_toolbar_rectangles_do_not_overlap(&coverage);
+
+        let mut page = ContextEditor::new(ContextEditorOpenMode::Edit);
+        page.apply_debug_fixture("active-coverage-page")
+            .expect("coverage page fixture");
+        let wide_page = render_editor_text(&mut page, 140, 48);
+        assert!(wide_page.contains("↑S"), "{wide_page}");
+        assert!(wide_page.contains("↓S"), "{wide_page}");
+
+        let mut provenance = ContextEditor::new(ContextEditorOpenMode::Edit);
+        provenance
+            .apply_debug_fixture("active-provenance")
+            .expect("active provenance fixture");
+        let provenance_frame = render_editor_text(&mut provenance, 140, 48);
+        assert!(provenance_frame.contains("▶ ORIGIN · Range summary 1"));
+        assert!(provenance_frame.contains("[Back to editor]"));
+        assert!(provenance_frame.contains("Esc editor"));
+        let evidence_frame = (0..160).find_map(|scroll| {
+            provenance.preview_scroll = scroll;
+            let frame = render_editor_text(&mut provenance, 140, 48);
+            frame
+                .contains("Files read or inspected · complete")
+                .then_some(frame)
+        });
+        assert!(
+            evidence_frame.is_some(),
+            "structured evidence must remain reachable through transaction-detail scrolling"
+        );
+
+        let mut scope = ContextEditor::new(ContextEditorOpenMode::Edit);
+        scope
+            .apply_debug_fixture("curator-workspace-multi-task-plan")
+            .expect("Scope fixture");
+        scope.curator_workspace.plan_detail = CuratorPlanDetail::SourceScope;
+        let scope_frame = render_editor_text(&mut scope, 140, 48);
+        assert!(scope_frame.contains("Harness-generated file evidence"));
+        assert!(scope_frame.contains("Paths searched or browsed · incomplete"));
+        assert!(scope_frame.contains("Complete-source preflight"));
     }
 
     #[test]
@@ -7833,6 +8407,7 @@ mod tests {
             "LONG_FIELD NORMALIZATION_TAIL",
             "LONG_FIELD VALIDATION_FINDING_TAIL",
             "LONG_FIELD ECONOMICS_TAIL",
+            "LONG_FIELD EVIDENCE_WARNING_TAIL",
         ] {
             assert!(review.contains(expected), "missing review field {expected}");
         }
@@ -7852,9 +8427,285 @@ mod tests {
             "LONG_FIELD REPLACEMENT_TAIL",
             "LONG_FIELD RATIONALE_TAIL",
             "LONG_FIELD ECONOMICS_TAIL",
+            "LONG_FIELD EVIDENCE_WARNING_TAIL",
         ] {
             assert!(detail.contains(expected), "missing detail field {expected}");
         }
+    }
+
+    #[test]
+    fn semantic_summary_rail_is_exact_for_boundaries_pages_gaps_and_adjacent_owners() {
+        let mut messages = (0..8)
+            .map(|index| message(index, &format!("row {index}")))
+            .collect::<Vec<_>>();
+        apply_summary_coverage(&mut messages, "prefix", 0, 0, 2);
+        apply_summary_coverage(&mut messages, "single", 0, 3, 3);
+        apply_summary_coverage(&mut messages, "adjacent", 1, 4, 7);
+        let rows = messages
+            .iter()
+            .cloned()
+            .map(|message| (message.stored_index, message))
+            .collect::<BTreeMap<_, _>>();
+        let rails = messages
+            .iter()
+            .enumerate()
+            .map(|(index, current)| {
+                summary_coverage_rail(
+                    current,
+                    index.checked_sub(1).and_then(|index| messages.get(index)),
+                    messages.get(index + 1),
+                    &rows,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rails,
+            vec![
+                SummaryCoverageRail::Start,
+                SummaryCoverageRail::Interior,
+                SummaryCoverageRail::End,
+                SummaryCoverageRail::Single,
+                SummaryCoverageRail::Start,
+                SummaryCoverageRail::Interior,
+                SummaryCoverageRail::Interior,
+                SummaryCoverageRail::End,
+            ]
+        );
+
+        let page = [messages[5].clone(), messages[6].clone()]
+            .into_iter()
+            .map(|message| (message.stored_index, message))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            summary_coverage_rail(&messages[5], None, Some(&messages[6]), &page),
+            SummaryCoverageRail::ContinuesBefore
+        );
+        assert_eq!(
+            summary_coverage_rail(&messages[6], Some(&messages[5]), None, &page),
+            SummaryCoverageRail::ContinuesAfter
+        );
+        let one_row = [(messages[6].stored_index, messages[6].clone())]
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            summary_coverage_rail(&messages[6], None, None, &one_row),
+            SummaryCoverageRail::ContinuesBoth
+        );
+        assert_eq!(
+            summary_coverage_rail(&messages[6], Some(&messages[4]), Some(&messages[7]), &rows,),
+            SummaryCoverageRail::Gap
+        );
+
+        let mut unknown = messages[1].clone();
+        unknown.summary_coverage = Some(ContextSummaryCoverage {
+            transaction_id: "legacy-server".to_string(),
+            operation_index: 0,
+            start_message_id: String::new(),
+            end_message_id: String::new(),
+            start_stored_index: 0,
+            end_stored_index: 0,
+            message_count: 0,
+        });
+        assert_eq!(
+            summary_coverage_rail(&unknown, None, None, &rows),
+            SummaryCoverageRail::Unknown
+        );
+
+        messages[4].preview = "coverage needle".to_string();
+        messages[6].preview = "coverage needle".to_string();
+        let mut filtered_snapshot = snapshot();
+        filtered_snapshot.raw_message_count = messages.len();
+        filtered_snapshot.message_page_end = messages.len();
+        filtered_snapshot.messages = messages;
+        let mut editor = ContextEditor::new(ContextEditorOpenMode::Edit);
+        editor.apply_snapshot(filtered_snapshot);
+        editor.search_query = "coverage needle".to_string();
+        editor.cursor = 1;
+        editor.staged_ranges = vec![closed_range(6, 6)];
+        let rendered = render_editor_text(&mut editor, 120, 40);
+        assert!(rendered.contains("Σ ⋮S"), "{rendered}");
+    }
+
+    #[test]
+    fn active_block_markers_exclude_trace_only_reasoning_and_provenance_is_origin_aware() {
+        let mut rich_snapshot = snapshot();
+        let reasoning_badge = operation_badge(
+            "reasoning-tx",
+            1,
+            ContextOperationBadgeKind::ReasoningSuppression,
+        );
+        let distillation_badge = operation_badge(
+            "distillation-tx",
+            2,
+            ContextOperationBadgeKind::ToolResultDistillation,
+        );
+        apply_summary_coverage(&mut rich_snapshot.messages, "summary-tx", 0, 1, 2);
+        rich_snapshot.messages[0].active_operations =
+            vec![reasoning_badge.clone(), distillation_badge.clone()];
+        let mut trace = context_block(0, StoredContextBlockKind::ReasoningTrace, 300);
+        trace.active_operations = vec![reasoning_badge.clone()];
+        let mut reasoning = context_block(1, StoredContextBlockKind::OpenAiReasoning, 600);
+        reasoning.active_operations = vec![reasoning_badge.clone()];
+        let mut tool = context_block(2, StoredContextBlockKind::ToolResult, 2_000);
+        tool.active_operations = vec![distillation_badge];
+        rich_snapshot.messages[0].blocks = vec![trace, reasoning, tool];
+
+        assert_eq!(
+            active_block_operation_markers(&rich_snapshot.messages[0]),
+            (true, true)
+        );
+        rich_snapshot.messages[0].blocks[1]
+            .active_operations
+            .clear();
+        assert_eq!(
+            active_block_operation_markers(&rich_snapshot.messages[0]),
+            (false, true),
+            "history-only ReasoningTrace must not produce an active R marker"
+        );
+        rich_snapshot.messages[0].blocks[1].active_operations = vec![reasoning_badge];
+
+        let mut editor = ContextEditor::new(ContextEditorOpenMode::Edit);
+        editor.apply_snapshot(rich_snapshot.clone());
+        editor.block_cursor = 1;
+        let rendered = render_editor_text(&mut editor, 120, 40);
+        assert!(rendered.contains("╭S"), "{rendered}");
+        assert!(rendered.contains("RD"), "{rendered}");
+        assert!(rendered.contains("R ACTIVE · block 1"), "{rendered}");
+        assert!(rendered.contains("D ACTIVE · block 2"), "{rendered}");
+
+        assert_toolbar_matches_key(
+            editor.clone(),
+            ContextEditorToolbarAction::Provenance,
+            KeyCode::Char('v'),
+        );
+        let (_, action) = editor.handle_key(KeyCode::Char('v'), KeyModifiers::NONE);
+        assert_eq!(
+            action,
+            Some(ContextEditorAction::LoadTransactionDetail {
+                context_revision: 4,
+                transaction_id: "reasoning-tx".to_string(),
+            }),
+            "selected exact block owns its provenance"
+        );
+        assert!(matches!(
+            editor.transaction_detail_origin,
+            Some(TransactionDetailOrigin::AuthoritativeHistory {
+                operation_index: 1,
+                ..
+            })
+        ));
+        let mut rejected = editor.clone();
+        let mut rejected_protocol = ContextProtocolState::default();
+        rejected_protocol.last_rejection =
+            Some(crate::tui::app::context_protocol::ContextRequestRejection {
+                request_id: 77,
+                request: ContextRequestKind::TransactionDetail,
+                draft_id: None,
+                transaction_id: Some("reasoning-tx".to_string()),
+                error: ContextServiceError::Runtime("synthetic transport failure".to_string()),
+            });
+        rejected.sync_protocol(&rejected_protocol);
+        assert!(rejected.transaction_detail_origin.is_none());
+        assert!(rejected.transaction_detail.is_none());
+        assert!(
+            rejected
+                .status
+                .as_deref()
+                .is_some_and(|status| status.contains("no fallback target"))
+        );
+        editor.last_transaction_detail_signature = Some((4, "reasoning-tx".to_string()));
+        editor.phase = ContextEditorPhase::InspectTransaction;
+        let (close, _) = editor.handle_key(KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!close);
+        assert_eq!(editor.phase, ContextEditorPhase::Editing);
+        assert_eq!(editor.cursor, 0);
+        assert_eq!(editor.block_cursor, 1);
+        assert!(editor.last_transaction_detail_signature.is_none());
+
+        let mut summary_only = ContextEditor::new(ContextEditorOpenMode::Edit);
+        rich_snapshot.messages[0].blocks[1]
+            .active_operations
+            .clear();
+        rich_snapshot.messages[0].blocks[2]
+            .active_operations
+            .clear();
+        rich_snapshot.messages[0].active_operations.clear();
+        apply_summary_coverage(&mut rich_snapshot.messages, "summary-tx", 0, 0, 2);
+        summary_only.apply_snapshot(rich_snapshot);
+        summary_only.block_cursor = 1;
+        let summary_rendered = render_editor_text(&mut summary_only, 120, 40);
+        assert!(
+            summary_rendered.contains("S ACTIVE · exact start"),
+            "{summary_rendered}"
+        );
+        let (_, action) = summary_only.handle_key(KeyCode::Char('v'), KeyModifiers::NONE);
+        assert!(matches!(
+            action,
+            Some(ContextEditorAction::LoadTransactionDetail { transaction_id, .. })
+                if transaction_id == "summary-tx"
+        ));
+        summary_only.transaction_detail = Some(transaction_detail_from_draft(
+            "provenance",
+            &comprehensive_draft("provenance"),
+        ));
+        summary_only.phase = ContextEditorPhase::InspectTransaction;
+        let detail = rendered_text(summary_only.transaction_detail_lines(100));
+        assert!(detail.contains("Provenance origin: Authoritative History · operation 1"));
+        assert!(detail.contains("▶ ORIGIN · Range summary 1"));
+
+        let mut revised = snapshot();
+        revised.context_revision = 5;
+        summary_only.apply_snapshot(revised);
+        assert!(summary_only.transaction_detail_origin.is_none());
+        assert!(summary_only.transaction_detail.is_none());
+        assert_eq!(summary_only.phase, ContextEditorPhase::Editing);
+
+        let mut history = ContextEditor::new(ContextEditorOpenMode::History);
+        history.phase = ContextEditorPhase::History;
+        history.history_context_revision = Some(4);
+        history.history = vec![transaction_summary("history-tx", true, 4)];
+        let (_, action) = history.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(matches!(
+            action,
+            Some(ContextEditorAction::LoadTransactionDetail { transaction_id, .. })
+                if transaction_id == "history-tx"
+        ));
+        history.phase = ContextEditorPhase::InspectTransaction;
+        let _ = history.handle_key(KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(history.phase, ContextEditorPhase::History);
+    }
+
+    #[test]
+    fn exact_call_scope_discloses_authority_evidence_instructions_and_preflight() {
+        let mut editor = ContextEditor::new(ContextEditorOpenMode::Edit);
+        editor
+            .apply_debug_fixture("curator-workspace-multi-task-plan")
+            .expect("exact-call fixture");
+        let plan = editor.curator_plan.as_ref().expect("curator plan");
+        let task = plan.tasks.first().expect("range task");
+        let scope = rendered_text(curator_task_detail_lines(
+            task,
+            plan,
+            CuratorPlanDetail::SourceScope,
+        ));
+        for expected in [
+            "Authoritative primary source",
+            "Supporting conversation",
+            "Active summaries",
+            "Harness-generated file evidence",
+            "Files changed · complete",
+            "Files read or inspected · complete",
+            "Paths searched or browsed · incomplete",
+            "User instructions",
+            "Complete-source preflight",
+        ] {
+            assert!(scope.contains(expected), "missing {expected}: {scope}");
+        }
+        assert!(scope.contains("src/debug-read-0.rs"), "{scope}");
+        assert!(
+            scope.contains("none"),
+            "empty source classes must be deliberate"
+        );
     }
 
     #[test]

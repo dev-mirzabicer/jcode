@@ -4,9 +4,9 @@ use jcode_provider_core::ContextProjectionValidationReport;
 use jcode_session_types::{
     StoredContextApplication, StoredContextAuthorization, StoredContextBlockKind,
     StoredContextCuratorRole, StoredContextCuratorUsage, StoredContextEconomics,
-    StoredContextEmergencyPolicy, StoredContextOperation, StoredContextTransaction,
-    StoredContextTransactionStatusKind, StoredDisplayRole, StoredMessageRange,
-    StoredRangeBoundaryExpansion, StoredToolResultDistillation,
+    StoredContextEmergencyPolicy, StoredContextFileEvidence, StoredContextOperation,
+    StoredContextTransaction, StoredContextTransactionStatusKind, StoredDisplayRole,
+    StoredMessageRange, StoredRangeBoundaryExpansion, StoredToolResultDistillation,
 };
 use serde::{Deserialize, Serialize};
 use std::error::Error;
@@ -45,6 +45,16 @@ pub struct ContextOperationBadge {
 pub struct ContextSummaryCoverage {
     pub transaction_id: String,
     pub operation_index: usize,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub start_message_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub end_message_id: String,
+    #[serde(default)]
+    pub start_stored_index: usize,
+    #[serde(default)]
+    pub end_stored_index: usize,
+    #[serde(default)]
+    pub message_count: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -206,6 +216,14 @@ pub struct ContextCuratorSourceScope {
     pub includes_all_blocks: bool,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextCuratorInstructionDisclosure {
+    #[serde(default)]
+    pub transaction_wide_chars: usize,
+    #[serde(default)]
+    pub task_specific_chars: usize,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextCuratorTaskPreview {
     pub task_id: String,
@@ -220,6 +238,10 @@ pub struct ContextCuratorTaskPreview {
     pub image_count: usize,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_scope: Vec<ContextCuratorSourceScope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_evidence: Option<StoredContextFileEvidence>,
+    #[serde(default)]
+    pub user_instructions: ContextCuratorInstructionDisclosure,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -419,6 +441,8 @@ pub enum ContextOperationPreview {
         replacement_tokens: usize,
         changed_files: Vec<String>,
         change_evidence_complete: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file_evidence: Option<Box<StoredContextFileEvidence>>,
     },
     ReasoningSuppression {
         target_count: usize,

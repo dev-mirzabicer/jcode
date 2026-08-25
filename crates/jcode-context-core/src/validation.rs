@@ -1,7 +1,9 @@
 use jcode_message_types::{ContentBlock, Message};
 use jcode_session_types::{
-    STORED_CONTEXT_VIEW_SCHEMA_VERSION, StoredContextTransactionStatusKind, StoredContextViewState,
-    StoredMessage,
+    STORED_CONTEXT_EVIDENCE_MAX_PATH_CHARS, STORED_CONTEXT_EVIDENCE_MAX_PATHS_PER_CATEGORY,
+    STORED_CONTEXT_EVIDENCE_MAX_WARNING_CHARS, STORED_CONTEXT_EVIDENCE_MAX_WARNINGS_PER_CATEGORY,
+    STORED_CONTEXT_VIEW_SCHEMA_VERSION, StoredContextOperation, StoredContextPathEvidence,
+    StoredContextTransactionStatusKind, StoredContextViewState, StoredMessage,
 };
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
@@ -48,6 +50,12 @@ pub enum ContextStateValidationError {
         transaction_id: String,
         previous: Option<StoredContextTransactionStatusKind>,
         next: StoredContextTransactionStatusKind,
+    },
+    InvalidFileEvidence {
+        transaction_id: String,
+        operation_index: usize,
+        category: String,
+        reason: String,
     },
 }
 
@@ -110,6 +118,15 @@ impl fmt::Display for ContextStateValidationError {
                 formatter,
                 "transaction {transaction_id} has invalid status transition {previous:?} -> {next:?}"
             ),
+            Self::InvalidFileEvidence {
+                transaction_id,
+                operation_index,
+                category,
+                reason,
+            } => write!(
+                formatter,
+                "transaction {transaction_id} operation {operation_index} has invalid {category} file evidence: {reason}"
+            ),
         }
     }
 }
@@ -138,6 +155,28 @@ pub fn validate_context_state(
                 base_revision: transaction.base_revision,
                 state_revision: state.revision,
             });
+        }
+        for (operation_index, operation) in transaction.operations.iter().enumerate() {
+            let StoredContextOperation::RangeSummary(summary) = operation else {
+                continue;
+            };
+            let Some(evidence) = summary.file_evidence.as_ref() else {
+                continue;
+            };
+            for (category, category_evidence) in [
+                ("changed", &evidence.changed),
+                ("read_or_inspected", &evidence.read_or_inspected),
+                ("searched_or_browsed", &evidence.searched_or_browsed),
+            ] {
+                if let Some(reason) = invalid_file_evidence_reason(category_evidence) {
+                    return Err(ContextStateValidationError::InvalidFileEvidence {
+                        transaction_id: transaction.id.clone(),
+                        operation_index,
+                        category: category.to_string(),
+                        reason,
+                    });
+                }
+            }
         }
         if transaction.status_events.is_empty() {
             return Err(ContextStateValidationError::MissingStatusHistory {
@@ -182,6 +221,39 @@ pub fn validate_context_state(
         }
     }
     Ok(())
+}
+
+fn invalid_file_evidence_reason(evidence: &StoredContextPathEvidence) -> Option<String> {
+    if evidence.paths.len() > STORED_CONTEXT_EVIDENCE_MAX_PATHS_PER_CATEGORY {
+        return Some("path count exceeds the persisted category limit".to_string());
+    }
+    if evidence.warnings.len() > STORED_CONTEXT_EVIDENCE_MAX_WARNINGS_PER_CATEGORY {
+        return Some("warning count exceeds the persisted category limit".to_string());
+    }
+    if evidence.paths.iter().any(|path| {
+        path.trim().is_empty() || path.chars().count() > STORED_CONTEXT_EVIDENCE_MAX_PATH_CHARS
+    }) {
+        return Some("a path is empty or exceeds the persisted character limit".to_string());
+    }
+    if evidence.warnings.iter().any(|warning| {
+        warning.trim().is_empty()
+            || warning.chars().count() > STORED_CONTEXT_EVIDENCE_MAX_WARNING_CHARS
+    }) {
+        return Some("a warning is empty or exceeds the persisted character limit".to_string());
+    }
+    if evidence.paths.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Some("paths are not strictly sorted and deduplicated".to_string());
+    }
+    if evidence.warnings.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Some("warnings are not strictly sorted and deduplicated".to_string());
+    }
+    if evidence.complete && !evidence.warnings.is_empty() {
+        return Some("complete evidence cannot carry uncertainty warnings".to_string());
+    }
+    if !evidence.complete && evidence.warnings.is_empty() {
+        return Some("incomplete evidence must explain why it may be incomplete".to_string());
+    }
+    None
 }
 
 fn valid_status_transition(
@@ -368,7 +440,8 @@ mod tests {
     use chrono::Utc;
     use jcode_message_types::Role;
     use jcode_session_types::{
-        StoredContextAuthorization, StoredContextStatusEvent, StoredContextTransaction,
+        StoredContextAuthorization, StoredContextFileEvidence, StoredContextStatusEvent,
+        StoredContextTransaction, StoredMessageRange, StoredRangeSummary,
     };
 
     fn stored(role: Role, content: Vec<ContentBlock>) -> StoredMessage {
@@ -612,6 +685,95 @@ mod tests {
         assert!(matches!(
             validate_projected_structure(&raw, &[raw[0].to_message()]),
             Err(StructuralValidationError::CallLostItsResult { .. })
+        ));
+    }
+
+    #[test]
+    fn strict_state_validation_rejects_unbounded_unsorted_or_unexplained_file_evidence() {
+        let transaction_with = |evidence: StoredContextFileEvidence| StoredContextTransaction {
+            id: "evidence-tx".to_string(),
+            base_revision: 0,
+            created_at: Utc::now(),
+            authorization: StoredContextAuthorization::Manual { initiated_by: None },
+            operations: vec![StoredContextOperation::RangeSummary(StoredRangeSummary {
+                source_range: StoredMessageRange {
+                    start_message_id: "m0".to_string(),
+                    end_message_id: "m0".to_string(),
+                    start_index_hint: 0,
+                    end_index_hint: 0,
+                    source_digest: 1,
+                    message_count: 1,
+                },
+                summary_text: "summary".to_string(),
+                file_change_digest: String::new(),
+                changed_files: Vec::new(),
+                change_evidence_complete: false,
+                file_evidence: Some(evidence),
+                boundary_expansions: Vec::new(),
+                generator: None,
+                source_token_estimate: 10,
+                replacement_token_estimate: 1,
+                warnings: Vec::new(),
+                created_at: Utc::now(),
+                legacy_coverage: None,
+            })],
+            status_events: vec![StoredContextStatusEvent {
+                revision: 1,
+                timestamp: Utc::now(),
+                kind: StoredContextTransactionStatusKind::Applied,
+                reason: None,
+            }],
+            application: None,
+            economics: None,
+            curator_usage: Vec::new(),
+            emergency_audit: None,
+        };
+        let state_with = |evidence| StoredContextViewState {
+            revision: 1,
+            transactions: vec![transaction_with(evidence)],
+            ..StoredContextViewState::default()
+        };
+
+        let valid = StoredContextFileEvidence {
+            changed: StoredContextPathEvidence {
+                paths: vec!["src/a.rs".to_string(), "src/b.rs".to_string()],
+                complete: true,
+                warnings: Vec::new(),
+            },
+            read_or_inspected: StoredContextPathEvidence {
+                paths: Vec::new(),
+                complete: true,
+                warnings: Vec::new(),
+            },
+            searched_or_browsed: StoredContextPathEvidence {
+                paths: Vec::new(),
+                complete: false,
+                warnings: vec!["shell access is opaque".to_string()],
+            },
+        };
+        assert!(validate_context_state(&state_with(valid.clone())).is_ok());
+
+        let mut unsorted = valid.clone();
+        unsorted.changed.paths.reverse();
+        assert!(matches!(
+            validate_context_state(&state_with(unsorted)),
+            Err(ContextStateValidationError::InvalidFileEvidence { .. })
+        ));
+
+        let mut unexplained = valid.clone();
+        unexplained.searched_or_browsed.warnings.clear();
+        assert!(matches!(
+            validate_context_state(&state_with(unexplained)),
+            Err(ContextStateValidationError::InvalidFileEvidence { .. })
+        ));
+
+        let mut oversized = valid;
+        oversized.changed.paths = (0..=STORED_CONTEXT_EVIDENCE_MAX_PATHS_PER_CATEGORY)
+            .map(|index| format!("src/{index:04}.rs"))
+            .collect();
+        assert!(matches!(
+            validate_context_state(&state_with(oversized)),
+            Err(ContextStateValidationError::InvalidFileEvidence { .. })
         ));
     }
 }

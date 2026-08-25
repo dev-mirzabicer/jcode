@@ -118,6 +118,7 @@ fn range_summary(
         file_change_digest: String::new(),
         changed_files: Vec::new(),
         change_evidence_complete: false,
+        file_evidence: None,
         boundary_expansions: Vec::new(),
         generator: Some(generator()),
         source_token_estimate: 1_000,
@@ -354,6 +355,28 @@ fn context_state_round_trips_through_snapshot_journal_stub_and_remote_startup() 
         1,
         "Unicode summary: İstanbul, 日本語, 🧪",
     );
+    let StoredContextOperation::RangeSummary(summary) =
+        &mut session.context_view.transactions[0].operations[0]
+    else {
+        return Err(anyhow!("expected range summary persistence fixture"));
+    };
+    summary.file_evidence = Some(jcode_session_types::StoredContextFileEvidence {
+        changed: jcode_session_types::StoredContextPathEvidence {
+            paths: vec!["src/lib.rs".to_string()],
+            complete: true,
+            warnings: Vec::new(),
+        },
+        read_or_inspected: jcode_session_types::StoredContextPathEvidence {
+            paths: vec!["src/parser.rs".to_string()],
+            complete: true,
+            warnings: Vec::new(),
+        },
+        searched_or_browsed: jcode_session_types::StoredContextPathEvidence {
+            paths: vec!["src".to_string()],
+            complete: false,
+            warnings: vec!["shell activity may be incomplete".to_string()],
+        },
+    });
     session.save()?;
 
     let snapshot_path = session_path(id)?;
@@ -367,6 +390,16 @@ fn context_state_round_trips_through_snapshot_journal_stub_and_remote_startup() 
 
     let mut loaded = Session::load(id)?;
     assert_eq!(loaded.context_view, session.context_view);
+    let StoredContextOperation::RangeSummary(loaded_summary) =
+        &loaded.context_view.transactions[0].operations[0]
+    else {
+        return Err(anyhow!("expected loaded range summary"));
+    };
+    let loaded_evidence = loaded_summary.effective_file_evidence();
+    assert_eq!(loaded_evidence.changed.paths, ["src/lib.rs"]);
+    assert_eq!(loaded_evidence.read_or_inspected.paths, ["src/parser.rs"]);
+    assert_eq!(loaded_evidence.searched_or_browsed.paths, ["src"]);
+    assert!(!loaded_evidence.searched_or_browsed.complete);
     assert_serialized_eq(&loaded.messages, &session.messages)?;
     assert_projected_contains_summary(&mut loaded, "İstanbul, 日本語, 🧪", 4)?;
 
@@ -750,6 +783,23 @@ fn context_export_redaction_is_exhaustive_and_does_not_mutate_or_persist_redacti
     let mut summary = range_summary(&session.messages, 0, 0, SECRET);
     summary.file_change_digest = SECRET.to_string();
     summary.changed_files = vec![SECRET.to_string()];
+    summary.file_evidence = Some(jcode_session_types::StoredContextFileEvidence {
+        changed: jcode_session_types::StoredContextPathEvidence {
+            paths: vec![SECRET.to_string()],
+            complete: false,
+            warnings: vec![SECRET.to_string()],
+        },
+        read_or_inspected: jcode_session_types::StoredContextPathEvidence {
+            paths: vec![SECRET.to_string()],
+            complete: false,
+            warnings: vec![SECRET.to_string()],
+        },
+        searched_or_browsed: jcode_session_types::StoredContextPathEvidence {
+            paths: vec![SECRET.to_string()],
+            complete: false,
+            warnings: vec![SECRET.to_string()],
+        },
+    });
     summary.warnings = vec![SECRET.to_string()];
     if let Some(generator) = summary.generator.as_mut() {
         generator.transaction_instructions = Some(SECRET.to_string());
@@ -893,6 +943,8 @@ fn context_export_redaction_is_exhaustive_and_does_not_mutate_or_persist_redacti
     let redacted_json = serde_json::to_string(&redacted)?;
     assert!(!redacted_json.contains(SECRET));
     assert!(redacted_json.contains("[REDACTED_SECRET]"));
+    jcode_context_core::validate_context_state(&redacted.context_view)
+        .map_err(|error| anyhow!("redacted context state must remain valid: {error}"))?;
     assert!(redacted_json.contains("redaction-transaction"));
     assert_eq!(
         redacted.context_view.transactions[0].operations.len(),
@@ -904,6 +956,7 @@ fn context_export_redaction_is_exhaustive_and_does_not_mutate_or_persist_redacti
         return Err(anyhow!("expected redacted summary"));
     };
     assert_eq!(redacted_summary.source_range.source_digest, source_digest);
+    assert!(redacted_summary.file_evidence.is_some());
     let StoredContextOperation::ToolResultDistillation(redacted_distillation) =
         &redacted.context_view.transactions[0].operations[2]
     else {

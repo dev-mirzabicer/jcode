@@ -1,5 +1,5 @@
 use crate::agent::Agent;
-use crate::context::change_digest::extract_context_change_evidence;
+use crate::context::change_digest::extract_context_file_evidence;
 use crate::context::commit::selected_distillation_operations;
 #[cfg(test)]
 use crate::context::curator::RANGE_SUMMARIZER_BASE_PROMPT;
@@ -44,9 +44,10 @@ use jcode_context_core::{
 use jcode_session_types::{
     StoredContextAuthorization, StoredContextBlockKind, StoredContextCuratorRole,
     StoredContextCuratorSelectionSource, StoredContextCuratorUsage, StoredContextEconomics,
-    StoredContextOperation, StoredContextStatusEvent, StoredContextTransaction,
-    StoredContextTransactionStatusKind, StoredContextViewState, StoredMessage, StoredMessageRange,
-    StoredRangeSummary, StoredReasoningSuppression, StoredToolResultDistillation,
+    StoredContextFileEvidence, StoredContextOperation, StoredContextStatusEvent,
+    StoredContextTransaction, StoredContextTransactionStatusKind, StoredContextViewState,
+    StoredMessage, StoredMessageRange, StoredRangeSummary, StoredReasoningSuppression,
+    StoredToolResultDistillation,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -1382,9 +1383,7 @@ pub(crate) struct CapturedRange {
     request_id: String,
     source_range: StoredMessageRange,
     boundary_expansions: Vec<jcode_session_types::StoredRangeBoundaryExpansion>,
-    changed_files: Vec<String>,
-    change_evidence_complete: bool,
-    change_evidence_warnings: Vec<String>,
+    file_evidence: StoredContextFileEvidence,
     source_token_estimate: usize,
 }
 
@@ -1460,7 +1459,7 @@ fn capture_context_draft(
         let source_range = closed
             .to_stored_range(&messages)
             .map_err(|error| ContextServiceError::InvalidSelection(error.to_string()))?;
-        let evidence = extract_context_change_evidence(&messages, &source_range)
+        let evidence = extract_context_file_evidence(&messages, &source_range)
             .map_err(|error| ContextServiceError::InvalidSelection(error.to_string()))?;
         let source_token_estimate = messages[closed.start..=closed.end]
             .iter()
@@ -1485,18 +1484,14 @@ fn capture_context_draft(
         ranges.push(ContextCuratorRangeWork {
             request_id: request_id.clone(),
             source_range: source_range.clone(),
-            changed_files: evidence.changed_files.clone(),
-            change_evidence_complete: evidence.complete,
-            change_evidence_warnings: evidence.warnings.clone(),
+            file_evidence: evidence.clone(),
             additional_instructions,
         });
         range_metadata.push(CapturedRange {
             request_id,
             source_range,
             boundary_expansions: closed.expansions.clone(),
-            changed_files: evidence.changed_files,
-            change_evidence_complete: evidence.complete,
-            change_evidence_warnings: evidence.warnings,
+            file_evidence: evidence,
             source_token_estimate,
         });
     }
@@ -1999,14 +1994,13 @@ fn build_ready_draft_inner(
                     metadata.request_id
                 ))
             })?;
-        let mut warnings = metadata.change_evidence_warnings.clone();
-        warnings.extend(artifact.warnings.clone());
         required_operations.push(StoredContextOperation::RangeSummary(StoredRangeSummary {
             source_range: metadata.source_range.clone(),
             summary_text: artifact.summary.clone(),
             file_change_digest: artifact.file_change_digest.clone(),
-            changed_files: metadata.changed_files.clone(),
-            change_evidence_complete: metadata.change_evidence_complete,
+            changed_files: Vec::new(),
+            change_evidence_complete: false,
+            file_evidence: Some(metadata.file_evidence.clone()),
             boundary_expansions: metadata.boundary_expansions.clone(),
             generator: Some(
                 curator_route
@@ -2026,7 +2020,7 @@ fn build_ready_draft_inner(
             ),
             source_token_estimate: metadata.source_token_estimate,
             replacement_token_estimate: 0,
-            warnings,
+            warnings: artifact.warnings.clone(),
             created_at: now,
             legacy_coverage: None,
         }));
@@ -2309,6 +2303,7 @@ pub(crate) fn build_preview(
                     replacement_tokens: summary.replacement_token_estimate,
                     changed_files: summary.changed_files.clone(),
                     change_evidence_complete: summary.change_evidence_complete,
+                    file_evidence: summary.file_evidence.clone().map(Box::new),
                 }
             }
             StoredContextOperation::ReasoningSuppression(suppression) => {

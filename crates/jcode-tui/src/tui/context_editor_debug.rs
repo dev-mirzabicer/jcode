@@ -7,14 +7,17 @@ use jcode_session_types::{
     StoredContextInputPriceTier, StoredContextOperation, StoredContextPricingSnapshot,
     StoredContextStatusEvent, StoredContextTransaction, StoredMessageRange,
     StoredProviderValidationEvidence, StoredProviderValidationOutcome,
-    StoredRangeBoundaryExpansion, StoredReasoningSelection, StoredReasoningSuppression,
-    StoredToolResultDistillation,
+    StoredRangeBoundaryExpansion, StoredRangeSummary, StoredReasoningSelection,
+    StoredReasoningSuppression, StoredToolResultDistillation,
 };
 
 const DEBUG_FIXTURE_NAMES: &[&str] = &[
     "empty",
     "loading",
     "paged-long-history",
+    "active-coverage",
+    "active-coverage-page",
+    "active-provenance",
     "search-stable-selection",
     "range-anchor",
     "structural-expansion",
@@ -102,6 +105,75 @@ impl ContextEditor {
                 self.status = Some(
                     "Showing the first bounded page of a 640-message authoritative transcript."
                         .to_string(),
+                );
+            }
+            "active-coverage" => {
+                let mut snapshot = debug_snapshot(48, 48, false, CuratorFixture::Available);
+                debug_add_summary_coverage(&mut snapshot, "debug-summary-prefix", 0, 0, 2);
+                debug_add_summary_coverage(&mut snapshot, "debug-summary-middle", 0, 12, 14);
+                debug_add_summary_coverage(&mut snapshot, "debug-summary-single", 0, 21, 21);
+                debug_add_summary_coverage(&mut snapshot, "debug-summary-adjacent-a", 0, 22, 27);
+                debug_add_summary_coverage(&mut snapshot, "debug-summary-adjacent-b", 0, 28, 33);
+                debug_add_summary_coverage(&mut snapshot, "debug-summary-suffix", 0, 38, 47);
+                debug_add_block_operation(
+                    &mut snapshot,
+                    16,
+                    ContextOperationBadgeKind::ReasoningSuppression,
+                    "debug-reasoning-owner",
+                    1,
+                );
+                debug_add_block_operation(
+                    &mut snapshot,
+                    16,
+                    ContextOperationBadgeKind::ToolResultDistillation,
+                    "debug-distillation-owner",
+                    2,
+                );
+                self.apply_snapshot(snapshot);
+                self.cursor = 16;
+                self.staged_ranges = vec![debug_range_preview(false).ranges.remove(0)];
+                self.status = Some(
+                    "Active summary rails, exact R/D operations, and newly staged Σ coverage remain distinct."
+                        .to_string(),
+                );
+            }
+            "active-coverage-page" => {
+                let mut snapshot = debug_snapshot(80, 40, false, CuratorFixture::Available);
+                snapshot.message_page_start = 20;
+                snapshot.message_page_end = 40;
+                snapshot.next_message_page_start = Some(40);
+                snapshot.messages = (20..40).map(debug_message).collect();
+                debug_add_summary_coverage(&mut snapshot, "debug-summary-through-page", 0, 10, 50);
+                self.rows = snapshot
+                    .messages
+                    .iter()
+                    .cloned()
+                    .map(|message| (message.stored_index, message))
+                    .collect();
+                self.snapshot = Some(snapshot);
+                self.phase = ContextEditorPhase::Editing;
+                self.cursor = 19;
+                self.pending_auto_page = None;
+                self.status = Some(
+                    "The loaded page begins and ends inside one longer authoritative active summary."
+                        .to_string(),
+                );
+            }
+            "active-provenance" => {
+                let mut snapshot = debug_snapshot(32, 32, false, CuratorFixture::Available);
+                debug_add_summary_coverage(&mut snapshot, "debug-transaction-detail", 0, 4, 10);
+                self.apply_snapshot(snapshot);
+                self.cursor = 6;
+                self.transaction_detail_origin =
+                    Some(TransactionDetailOrigin::AuthoritativeHistory {
+                        message_id: "debug-message-6".to_string(),
+                        block_ordinal: Some(0),
+                        operation_index: 0,
+                    });
+                self.transaction_detail = Some(debug_provenance_transaction_detail());
+                self.phase = ContextEditorPhase::InspectTransaction;
+                self.status = Some(
+                    "Opened exact operation provenance from Authoritative History.".to_string(),
                 );
             }
             "search-stable-selection" => {
@@ -712,6 +784,102 @@ fn debug_snapshot(
     }
 }
 
+fn debug_add_summary_coverage(
+    snapshot: &mut ContextEditorSnapshot,
+    transaction_id: &str,
+    operation_index: usize,
+    start: usize,
+    end: usize,
+) {
+    let coverage = crate::protocol::ContextSummaryCoverage {
+        transaction_id: transaction_id.to_string(),
+        operation_index,
+        start_message_id: format!("debug-message-{start}"),
+        end_message_id: format!("debug-message-{end}"),
+        start_stored_index: start,
+        end_stored_index: end,
+        message_count: end.saturating_sub(start).saturating_add(1),
+    };
+    let badge = crate::protocol::ContextOperationBadge {
+        transaction_id: transaction_id.to_string(),
+        operation_index,
+        kind: ContextOperationBadgeKind::RangeSummary,
+    };
+    for message in snapshot
+        .messages
+        .iter_mut()
+        .filter(|message| start <= message.stored_index && message.stored_index <= end)
+    {
+        message.summary_coverage = Some(coverage.clone());
+        message.active_operations.push(badge.clone());
+        message.projected_provider_tokens = 0;
+    }
+}
+
+fn debug_add_block_operation(
+    snapshot: &mut ContextEditorSnapshot,
+    stored_index: usize,
+    kind: ContextOperationBadgeKind,
+    transaction_id: &str,
+    operation_index: usize,
+) {
+    let Some(message) = snapshot
+        .messages
+        .iter_mut()
+        .find(|message| message.stored_index == stored_index)
+    else {
+        return;
+    };
+    let badge = crate::protocol::ContextOperationBadge {
+        transaction_id: transaction_id.to_string(),
+        operation_index,
+        kind: kind.clone(),
+    };
+    message.active_operations.push(badge.clone());
+    match kind {
+        ContextOperationBadgeKind::ReasoningSuppression => {
+            if let Some(block) = message.blocks.first_mut() {
+                block.kind = jcode_session_types::StoredContextBlockKind::OpenAiReasoning;
+                block.provider_removable_reasoning = true;
+                message.removable_reasoning_kinds = vec![block.kind];
+                block.active_operations.push(badge);
+            }
+        }
+        ContextOperationBadgeKind::ToolResultDistillation => {
+            if let Some(block) = message
+                .blocks
+                .iter_mut()
+                .find(|block| block.kind == jcode_session_types::StoredContextBlockKind::ToolResult)
+            {
+                block.active_operations.push(badge);
+            } else {
+                let ordinal = message
+                    .blocks
+                    .iter()
+                    .map(|block| block.ordinal)
+                    .max()
+                    .unwrap_or(0)
+                    .saturating_add(1);
+                message.blocks.push(crate::protocol::ContextEditorBlock {
+                    ordinal,
+                    kind: jcode_session_types::StoredContextBlockKind::ToolResult,
+                    semantic_id: Some(format!("debug-tool-result-{stored_index}")),
+                    estimated_provider_tokens: 4_200,
+                    tool_name: Some("synthetic_read".to_string()),
+                    tool_use_id: Some(format!("debug-tool-result-{stored_index}")),
+                    tool_result_is_error: false,
+                    has_image_payload: false,
+                    has_tool_thought_signature: false,
+                    provider_removable_reasoning: false,
+                    active_operations: vec![badge],
+                });
+                message.raw_provider_tokens = message.raw_provider_tokens.saturating_add(4_200);
+            }
+        }
+        ContextOperationBadgeKind::RangeSummary => {}
+    }
+}
+
 fn debug_curator_route_options() -> Vec<crate::protocol::ContextCuratorRouteOption> {
     [
         (
@@ -792,6 +960,13 @@ fn debug_workspace_ranges() -> Vec<crate::protocol::ContextClosedRangePreview> {
 
 fn debug_curator_plan(request: &ContextDraftRequest) -> ContextCuratorPlanPreview {
     let range_tasks = request.summary_ranges.iter().enumerate().map(|(index, range)| {
+        let task_instruction_chars = request
+            .curator
+            .range_instructions
+            .iter()
+            .find(|instructions| instructions.range == *range)
+            .map(|instructions| instructions.instructions.chars().count())
+            .unwrap_or(0);
         crate::protocol::ContextCuratorTaskPreview {
             task_id: format!("debug-range-task-{index}"),
             role: jcode_session_types::StoredContextCuratorRole::RangeSummarizer,
@@ -817,6 +992,34 @@ fn debug_curator_plan(request: &ContextDraftRequest) -> ContextCuratorPlanPrevie
                 block_ordinals: Vec::new(),
                 includes_all_blocks: true,
             }],
+            file_evidence: Some(jcode_session_types::StoredContextFileEvidence {
+                changed: jcode_session_types::StoredContextPathEvidence {
+                    paths: vec![format!("src/debug-range-{index}.rs")],
+                    complete: true,
+                    warnings: Vec::new(),
+                },
+                read_or_inspected: jcode_session_types::StoredContextPathEvidence {
+                    paths: vec![format!("src/debug-read-{index}.rs")],
+                    complete: true,
+                    warnings: Vec::new(),
+                },
+                searched_or_browsed: jcode_session_types::StoredContextPathEvidence {
+                    paths: vec!["crates/jcode-tui".to_string()],
+                    complete: false,
+                    warnings: vec![
+                        "Synthetic shell activity makes searched-path evidence incomplete."
+                            .to_string(),
+                    ],
+                },
+            }),
+            user_instructions: crate::protocol::ContextCuratorInstructionDisclosure {
+                transaction_wide_chars: request
+                    .curator
+                    .transaction_instructions
+                    .chars()
+                    .count(),
+                task_specific_chars: task_instruction_chars,
+            },
         }
     });
     let tool_tasks = request.tool_results.iter().enumerate().map(|(index, target)| {
@@ -854,6 +1057,15 @@ fn debug_curator_plan(request: &ContextDraftRequest) -> ContextCuratorPlanPrevie
                     includes_all_blocks: false,
                 },
             ],
+            file_evidence: None,
+            user_instructions: crate::protocol::ContextCuratorInstructionDisclosure {
+                transaction_wide_chars: request
+                    .curator
+                    .transaction_instructions
+                    .chars()
+                    .count(),
+                task_specific_chars: 0,
+            },
         }
     });
     ContextCuratorPlanPreview {
@@ -1210,6 +1422,56 @@ fn debug_transaction_detail() -> ContextTransactionDetail {
             emergency_audit: None,
         },
     }
+}
+
+fn debug_provenance_transaction_detail() -> ContextTransactionDetail {
+    let mut detail = debug_transaction_detail();
+    detail.transaction.operations.insert(
+        0,
+        StoredContextOperation::RangeSummary(StoredRangeSummary {
+            source_range: StoredMessageRange {
+                start_message_id: "debug-message-4".to_string(),
+                end_message_id: "debug-message-10".to_string(),
+                start_index_hint: 4,
+                end_index_hint: 10,
+                source_digest: 0x16_cafe,
+                message_count: 7,
+            },
+            summary_text: "Synthetic substantive summary: src/context_editor.rs derives stable coverage from authoritative global range boundaries rather than visible row positions."
+                .to_string(),
+            file_change_digest: "Synthetic curator digest: Context Editor presentation changed; authoritative transcript content remained unchanged."
+                .to_string(),
+            changed_files: Vec::new(),
+            change_evidence_complete: false,
+            file_evidence: Some(jcode_session_types::StoredContextFileEvidence {
+                changed: jcode_session_types::StoredContextPathEvidence {
+                    paths: vec!["crates/jcode-tui/src/tui/context_editor.rs".to_string()],
+                    complete: true,
+                    warnings: Vec::new(),
+                },
+                read_or_inspected: jcode_session_types::StoredContextPathEvidence {
+                    paths: vec!["crates/jcode-protocol/src/context.rs".to_string()],
+                    complete: true,
+                    warnings: Vec::new(),
+                },
+                searched_or_browsed: jcode_session_types::StoredContextPathEvidence {
+                    paths: vec!["crates/jcode-tui/src/tui".to_string()],
+                    complete: false,
+                    warnings: vec![
+                        "Synthetic shell search means additional paths may be absent.".to_string(),
+                    ],
+                },
+            }),
+            boundary_expansions: Vec::new(),
+            generator: None,
+            source_token_estimate: 24_000,
+            replacement_token_estimate: 2_400,
+            warnings: Vec::new(),
+            created_at: debug_timestamp(),
+            legacy_coverage: None,
+        }),
+    );
+    detail
 }
 
 fn debug_detail(

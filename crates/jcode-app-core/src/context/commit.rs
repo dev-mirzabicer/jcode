@@ -1154,6 +1154,7 @@ mod tests {
             file_change_digest: "No files changed.".to_string(),
             changed_files: Vec::new(),
             change_evidence_complete: true,
+            file_evidence: None,
             boundary_expansions: Vec::new(),
             generator: Some(generator()),
             source_token_estimate: estimate_message_tokens(&messages[summary_index].to_message()),

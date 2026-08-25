@@ -16,6 +16,8 @@ use jcode_session_types::{
     StoredContextCuratorRole, StoredContextCuratorSelectionSource, StoredContextCuratorUsage,
     StoredContextPricingSnapshot, StoredMessage, StoredMessageRange,
 };
+#[cfg(test)]
+use jcode_session_types::{StoredContextFileEvidence, StoredContextPathEvidence};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -26,7 +28,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-pub const CONTEXT_RANGE_SUMMARIZER_PROMPT_VERSION: &str = "context-range-summarizer-v2";
+pub const CONTEXT_RANGE_SUMMARIZER_PROMPT_VERSION: &str = "context-range-summarizer-v3";
 pub const CONTEXT_TOOL_DISTILLER_PROMPT_VERSION: &str = "context-tool-result-distiller-v2";
 
 /// Product-approved verbatim base role instruction. Do not edit without an
@@ -41,7 +43,9 @@ const RANGE_MANDATORY_INSTRUCTIONS: &str = r#"Mandatory correctness requirements
 - Preserve user intent and preferences, decisions and rejected alternatives, exact constraints and invariants, implementation state at the end of the slice, files and symbols changed, commands and observed results, failures, unresolved issues, next steps, provider and environment facts, and operationally relevant IDs, hashes, paths, versions, values, and error strings.
 - Preserve the substantive contents and findings of file reads, not merely the fact that a file was read.
 - Never claim unverified work passed, omit unresolved failures, invent changed files, or replace precise technical facts with vague prose.
-- Use the harness-generated changed-file evidence honestly. When it is marked incomplete, retain that uncertainty.
+- Treat the complete `conversation_slice` as the authoritative primary source. Harness-generated file evidence is supporting metadata and never replaces substantive source content.
+- Keep files changed, files read or inspected, and paths searched or browsed distinct. A search or directory browse does not prove that a file was read, and a read does not prove that a file changed.
+- Use every harness-generated evidence category honestly. When any category is marked incomplete, retain its uncertainty and reasons.
 - Return only the required JSON object with non-empty `summary`, `file_change_digest`, and `warnings` fields of the declared types."#;
 
 const TOOL_DISTILLER_BASE_PROMPT: &str = r#"This is `jcode`, an agentic coding harness. You are a __tool-result distiller__. You will receive one complete tool result, its matching tool call, and only the supporting conversation needed to understand what later work relies upon. Your task is to decide whether that one result can be replaced by a substantially smaller representation without losing any meaningful information that could affect continued coding work.
@@ -139,9 +143,7 @@ impl Default for ContextCuratorLimits {
 pub(crate) struct ContextCuratorRangeWork {
     pub request_id: String,
     pub source_range: StoredMessageRange,
-    pub changed_files: Vec<String>,
-    pub change_evidence_complete: bool,
-    pub change_evidence_warnings: Vec<String>,
+    pub file_evidence: jcode_session_types::StoredContextFileEvidence,
     pub additional_instructions: String,
 }
 
@@ -575,6 +577,19 @@ pub(crate) fn build_context_curator_plan(
             request_byte_limit: limits.max_request_bytes,
             image_count: prepared.image_count,
             source_scope: public_scope(input.messages, task),
+            file_evidence: match &task.kind {
+                ContextCuratorTaskKind::Range(work) => Some(work.file_evidence.clone()),
+                ContextCuratorTaskKind::Tool(_) => None,
+            },
+            user_instructions: crate::protocol::ContextCuratorInstructionDisclosure {
+                transaction_wide_chars: input.transaction_instructions.chars().count(),
+                task_specific_chars: match &task.kind {
+                    ContextCuratorTaskKind::Range(work) => {
+                        work.additional_instructions.chars().count()
+                    }
+                    ContextCuratorTaskKind::Tool(_) => 0,
+                },
+            },
         });
     }
 
@@ -1029,7 +1044,7 @@ struct BuiltTaskRequest {
 enum CuratorTaskRequestPayload {
     RangeSummary {
         response_schema: Value,
-        changed_file_evidence: CuratorChangedFileEvidence,
+        harness_file_evidence: CuratorFileEvidencePayload,
         conversation_slice: Vec<CuratorMessagePayload>,
     },
     ToolResultDistillation {
@@ -1043,10 +1058,34 @@ enum CuratorTaskRequestPayload {
 }
 
 #[derive(Serialize)]
-struct CuratorChangedFileEvidence {
+struct CuratorFileEvidencePayload {
+    changed: CuratorPathEvidencePayload,
+    read_or_inspected: CuratorPathEvidencePayload,
+    searched_or_browsed: CuratorPathEvidencePayload,
+}
+
+#[derive(Serialize)]
+struct CuratorPathEvidencePayload {
     paths: Vec<String>,
     complete: bool,
     warnings: Vec<String>,
+}
+
+impl From<&jcode_session_types::StoredContextFileEvidence> for CuratorFileEvidencePayload {
+    fn from(evidence: &jcode_session_types::StoredContextFileEvidence) -> Self {
+        let category = |category: &jcode_session_types::StoredContextPathEvidence| {
+            CuratorPathEvidencePayload {
+                paths: category.paths.clone(),
+                complete: category.complete,
+                warnings: category.warnings.clone(),
+            }
+        };
+        Self {
+            changed: category(&evidence.changed),
+            read_or_inspected: category(&evidence.read_or_inspected),
+            searched_or_browsed: category(&evidence.searched_or_browsed),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -1078,11 +1117,7 @@ fn build_task_request(
     let payload = match &task.kind {
         ContextCuratorTaskKind::Range(work) => CuratorTaskRequestPayload::RangeSummary {
             response_schema: range_response_schema(),
-            changed_file_evidence: CuratorChangedFileEvidence {
-                paths: work.changed_files.clone(),
-                complete: work.change_evidence_complete,
-                warnings: work.change_evidence_warnings.clone(),
-            },
+            harness_file_evidence: CuratorFileEvidencePayload::from(&work.file_evidence),
             conversation_slice: scoped_payloads(
                 messages,
                 task.scope
@@ -2142,10 +2177,26 @@ mod tests {
         ContextCuratorRangeWork {
             request_id: "range-1".to_string(),
             source_range: build_message_range(messages, 0, messages.len() - 1).expect("range"),
-            changed_files: vec!["src/lib.rs".to_string()],
-            change_evidence_complete: true,
-            change_evidence_warnings: Vec::new(),
+            file_evidence: complete_file_evidence(vec!["src/lib.rs".to_string()]),
             additional_instructions: String::new(),
+        }
+    }
+
+    fn complete_file_evidence(changed_paths: Vec<String>) -> StoredContextFileEvidence {
+        StoredContextFileEvidence {
+            changed: StoredContextPathEvidence {
+                paths: changed_paths,
+                complete: true,
+                warnings: Vec::new(),
+            },
+            read_or_inspected: StoredContextPathEvidence {
+                complete: true,
+                ..StoredContextPathEvidence::default()
+            },
+            searched_or_browsed: StoredContextPathEvidence {
+                complete: true,
+                ..StoredContextPathEvidence::default()
+            },
         }
     }
 
@@ -2379,9 +2430,7 @@ mod tests {
                 request_id: format!("range-{}", index + 1),
                 source_range: build_message_range(&messages, message_index, message_index)
                     .expect("range"),
-                changed_files: vec![format!("src/range_{index}.rs")],
-                change_evidence_complete: true,
-                change_evidence_warnings: Vec::new(),
+                file_evidence: complete_file_evidence(vec![format!("src/range_{index}.rs")]),
                 additional_instructions: format!("RANGE_ONLY_INSTRUCTION_{index}"),
             });
         }
@@ -2464,6 +2513,25 @@ mod tests {
         .expect("complete atomic plan");
         assert_eq!(plan.preview.tasks.len(), 8);
         assert!(!plan.preview.using_configured_default);
+        for (index, task) in plan.preview.tasks.iter().take(3).enumerate() {
+            let evidence = task.file_evidence.as_ref().expect("range file evidence");
+            assert_eq!(evidence.changed.paths, [format!("src/range_{index}.rs")]);
+            assert!(evidence.changed.complete);
+            assert!(evidence.read_or_inspected.complete);
+            assert!(evidence.searched_or_browsed.complete);
+            assert_eq!(
+                task.user_instructions.transaction_wide_chars,
+                "TRANSACTION_WIDE_INSTRUCTION".chars().count()
+            );
+            assert_eq!(
+                task.user_instructions.task_specific_chars,
+                format!("RANGE_ONLY_INSTRUCTION_{index}").chars().count()
+            );
+        }
+        for task in plan.preview.tasks.iter().skip(3) {
+            assert!(task.file_evidence.is_none());
+            assert_eq!(task.user_instructions.task_specific_chars, 0);
+        }
 
         let artifacts = run_context_curator_plan(
             &route,
@@ -2482,6 +2550,14 @@ mod tests {
         let calls = provider.captured_calls();
         for (index, call) in calls.iter().take(3).enumerate() {
             assert!(call.system.starts_with(RANGE_SUMMARIZER_BASE_PROMPT));
+            assert!(
+                call.system
+                    .contains("conversation_slice` as the authoritative primary source")
+            );
+            assert!(
+                call.system
+                    .contains("A search or directory browse does not prove that a file was read")
+            );
             assert!(call.system.contains("TRANSACTION_WIDE_INSTRUCTION"));
             assert!(
                 call.system
@@ -2508,6 +2584,19 @@ mod tests {
             }
             assert!(!payload.contains("TOOL_RESULT_SENTINEL_"));
             assert!(!payload.contains("request_id"));
+            let payload_json: Value = serde_json::from_str(payload).expect("range payload JSON");
+            assert_eq!(
+                payload_json["harness_file_evidence"]["changed"]["paths"],
+                json!([format!("src/range_{index}.rs")])
+            );
+            assert_eq!(
+                payload_json["harness_file_evidence"]["read_or_inspected"]["complete"],
+                json!(true)
+            );
+            assert_eq!(
+                payload_json["harness_file_evidence"]["searched_or_browsed"]["paths"],
+                json!([])
+            );
         }
         for (index, call) in calls.iter().skip(3).take(5).enumerate() {
             assert!(call.system.starts_with(TOOL_DISTILLER_BASE_PROMPT));

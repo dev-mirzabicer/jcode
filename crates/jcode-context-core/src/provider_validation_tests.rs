@@ -192,6 +192,7 @@ fn real_range_summary_projection_replacing_complete_tool_pair_is_provider_valid(
         file_change_digest: "No files were changed.".to_string(),
         changed_files: Vec::new(),
         change_evidence_complete: true,
+        file_evidence: None,
         boundary_expansions: Vec::new(),
         generator: Some(generator()),
         source_token_estimate: 2_000,

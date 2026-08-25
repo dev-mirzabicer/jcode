@@ -542,6 +542,7 @@ mod tests {
                     file_change_digest: String::new(),
                     changed_files: Vec::new(),
                     change_evidence_complete: false,
+                    file_evidence: None,
                     boundary_expansions: Vec::new(),
                     generator: None,
                     source_token_estimate: 0,

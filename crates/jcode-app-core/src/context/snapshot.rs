@@ -59,7 +59,7 @@ pub fn build_context_editor_snapshot(
 
     for transaction in input.context_view.active_transactions() {
         for (operation_index, operation) in transaction.operations.iter().enumerate() {
-            let (kind, message_indices, block_target) = match operation {
+            let (kind, message_indices, block_target, summary_bounds) = match operation {
                 StoredContextOperation::RangeSummary(summary) => {
                     let (start, end) = target_index
                         .resolve_message_range(&summary.source_range)
@@ -68,6 +68,7 @@ pub fn build_context_editor_snapshot(
                         ContextOperationBadgeKind::RangeSummary,
                         (start..=end).collect::<Vec<_>>(),
                         None,
+                        Some((start, end)),
                     )
                 }
                 StoredContextOperation::ReasoningSuppression(suppression) => {
@@ -84,6 +85,7 @@ pub fn build_context_editor_snapshot(
                         ContextOperationBadgeKind::ReasoningSuppression,
                         indices.into_iter().collect(),
                         Some(targets),
+                        None,
                     )
                 }
                 StoredContextOperation::ToolResultDistillation(distillation) => {
@@ -94,6 +96,7 @@ pub fn build_context_editor_snapshot(
                         ContextOperationBadgeKind::ToolResultDistillation,
                         vec![resolved.message_index],
                         Some(vec![(resolved.message_index, resolved.block_index)]),
+                        None,
                     )
                 }
             };
@@ -102,13 +105,19 @@ pub fn build_context_editor_snapshot(
                 operation_index,
                 kind,
             };
+            let coverage = summary_bounds.map(|(start, end)| ContextSummaryCoverage {
+                transaction_id: transaction.id.clone(),
+                operation_index,
+                start_message_id: input.messages[start].id.clone(),
+                end_message_id: input.messages[end].id.clone(),
+                start_stored_index: start,
+                end_stored_index: end,
+                message_count: end.saturating_sub(start).saturating_add(1),
+            });
             for message_index in message_indices {
                 message_badges[message_index].push(badge.clone());
-                if badge.kind == ContextOperationBadgeKind::RangeSummary {
-                    summary_coverage[message_index] = Some(ContextSummaryCoverage {
-                        transaction_id: transaction.id.clone(),
-                        operation_index,
-                    });
+                if let Some(coverage) = coverage.as_ref() {
+                    summary_coverage[message_index] = Some(coverage.clone());
                 }
             }
             if let Some(targets) = block_target {
@@ -1019,6 +1028,7 @@ mod tests {
                     file_change_digest: String::new(),
                     changed_files: Vec::new(),
                     change_evidence_complete: true,
+                    file_evidence: None,
                     boundary_expansions: Vec::new(),
                     generator: None,
                     source_token_estimate: 20,
@@ -1048,12 +1058,106 @@ mod tests {
             vec!["first", "second", "suffix"]
         );
         for row in &snapshot.messages[..2] {
-            assert!(row.summary_coverage.is_some());
+            let coverage = row.summary_coverage.as_ref().expect("summary coverage");
+            assert_eq!(coverage.start_message_id, "first");
+            assert_eq!(coverage.end_message_id, "second");
+            assert_eq!(coverage.start_stored_index, 0);
+            assert_eq!(coverage.end_stored_index, 1);
+            assert_eq!(coverage.message_count, 2);
             assert_eq!(row.projected_provider_tokens, 0);
             assert!(row.raw_provider_tokens > 0);
         }
         assert!(snapshot.messages[2].summary_coverage.is_none());
         assert!(snapshot.messages[2].projected_provider_tokens > 0);
+
+        let page = paginate_context_editor_snapshot(snapshot, 1, 1).expect("interior page");
+        assert_eq!(page.message_page_start, 1);
+        assert_eq!(page.message_page_end, 2);
+        assert_eq!(page.messages.len(), 1);
+        let coverage = page.messages[0]
+            .summary_coverage
+            .as_ref()
+            .expect("interior coverage remains authoritative");
+        assert_eq!(coverage.start_stored_index, 0);
+        assert_eq!(coverage.end_stored_index, 1);
+        assert_eq!(coverage.start_message_id, "first");
+        assert_eq!(coverage.end_message_id, "second");
+
+        let mut lifecycle = state;
+        lifecycle.revision = 2;
+        lifecycle.transactions[0]
+            .status_events
+            .push(StoredContextStatusEvent {
+                revision: 2,
+                timestamp: Utc::now(),
+                kind: StoredContextTransactionStatusKind::Reverted,
+                reason: None,
+            });
+        let reverted = build_context_editor_snapshot(ContextSnapshotInput {
+            session_id: "summary",
+            messages: &messages,
+            context_view: &lifecycle,
+            processing: false,
+            provider: &SnapshotProvider,
+            route: "test-route",
+        })
+        .expect("reverted snapshot");
+        assert!(
+            reverted
+                .messages
+                .iter()
+                .all(|message| message.summary_coverage.is_none())
+        );
+
+        lifecycle.revision = 3;
+        lifecycle.transactions[0]
+            .status_events
+            .push(StoredContextStatusEvent {
+                revision: 3,
+                timestamp: Utc::now(),
+                kind: StoredContextTransactionStatusKind::Reapplied,
+                reason: None,
+            });
+        let reapplied = build_context_editor_snapshot(ContextSnapshotInput {
+            session_id: "summary",
+            messages: &messages,
+            context_view: &lifecycle,
+            processing: false,
+            provider: &SnapshotProvider,
+            route: "test-route",
+        })
+        .expect("reapplied snapshot");
+        assert!(reapplied.messages[..2].iter().all(|message| {
+            message
+                .summary_coverage
+                .as_ref()
+                .is_some_and(|coverage| coverage.transaction_id == "summary-tx")
+        }));
+
+        lifecycle.revision = 4;
+        lifecycle.transactions[0]
+            .status_events
+            .push(StoredContextStatusEvent {
+                revision: 4,
+                timestamp: Utc::now(),
+                kind: StoredContextTransactionStatusKind::InvalidatedByTranscriptEdit,
+                reason: Some("source changed".to_string()),
+            });
+        let invalidated = build_context_editor_snapshot(ContextSnapshotInput {
+            session_id: "summary",
+            messages: &messages,
+            context_view: &lifecycle,
+            processing: false,
+            provider: &SnapshotProvider,
+            route: "test-route",
+        })
+        .expect("invalidated snapshot");
+        assert!(
+            invalidated
+                .messages
+                .iter()
+                .all(|message| message.summary_coverage.is_none())
+        );
     }
 
     #[test]

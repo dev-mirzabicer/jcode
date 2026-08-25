@@ -2,7 +2,7 @@ use super::*;
 use crate::protocol::{
     CONTEXT_CURATOR_INSTRUCTION_MAX_CHARS, CONTEXT_CURATOR_TOTAL_INSTRUCTION_MAX_CHARS,
     ContextCuratorRouteOption, ContextCuratorRoutePreview, ContextCuratorSourcePurpose,
-    ContextCuratorTaskPreview,
+    ContextCuratorSourceScope, ContextCuratorTaskPreview,
 };
 use jcode_session_types::{StoredContextCuratorRole, StoredReasoningSelection};
 
@@ -3325,6 +3325,42 @@ fn source_purpose_label(purpose: ContextCuratorSourcePurpose) -> &'static str {
     }
 }
 
+fn push_scope_group<'a>(
+    lines: &mut Vec<Line<'static>>,
+    label: &str,
+    scopes: impl Iterator<Item = &'a ContextCuratorSourceScope>,
+) {
+    lines.push(Line::from(label.to_string()));
+    let scopes = scopes.collect::<Vec<_>>();
+    if scopes.is_empty() {
+        lines.push(Line::from("  none"));
+        return;
+    }
+    for scope in scopes {
+        lines.push(Line::from(format!(
+            "  {} · {} · message {} · stored {}",
+            source_purpose_label(scope.purpose),
+            if scope.includes_all_blocks {
+                "all blocks".to_string()
+            } else {
+                format!("blocks {:?}", scope.block_ordinals)
+            },
+            scope.message_id.as_deref().unwrap_or("anonymous"),
+            scope
+                .stored_index
+                .map_or_else(|| "n/a".to_string(), |value| value.to_string()),
+        )));
+    }
+}
+
+fn instruction_scope_label(chars: usize) -> String {
+    if chars == 0 {
+        "none".to_string()
+    } else {
+        format!("{chars} character(s) · exact text is visible under Prompt")
+    }
+}
+
 pub(super) fn curator_task_detail_lines(
     task: &ContextCuratorTaskPreview,
     plan: &ContextCuratorPlanPreview,
@@ -3399,22 +3435,54 @@ pub(super) fn curator_task_detail_lines(
                 )),
                 Line::from(""),
             ];
-            for (index, scope) in task.source_scope.iter().enumerate() {
-                lines.push(Line::from(format!(
-                    "{}. {} · message {} · stored {} · {}",
-                    index + 1,
-                    source_purpose_label(scope.purpose),
-                    scope.message_id.as_deref().unwrap_or("anonymous"),
-                    scope
-                        .stored_index
-                        .map_or_else(|| "n/a".to_string(), |value| value.to_string()),
-                    if scope.includes_all_blocks {
-                        "all blocks".to_string()
-                    } else {
-                        format!("blocks {:?}", scope.block_ordinals)
-                    }
-                )));
+            push_scope_group(
+                &mut lines,
+                "Authoritative primary source",
+                task.source_scope.iter().filter(|scope| {
+                    matches!(
+                        scope.purpose,
+                        ContextCuratorSourcePurpose::PrimaryRange
+                            | ContextCuratorSourcePurpose::PrimaryToolCall
+                            | ContextCuratorSourcePurpose::PrimaryToolResult
+                    )
+                }),
+            );
+            push_scope_group(
+                &mut lines,
+                "Supporting conversation",
+                task.source_scope.iter().filter(|scope| {
+                    scope.purpose == ContextCuratorSourcePurpose::SupportingConversation
+                }),
+            );
+            push_scope_group(
+                &mut lines,
+                "Active summaries",
+                task.source_scope
+                    .iter()
+                    .filter(|scope| scope.purpose == ContextCuratorSourcePurpose::ActiveSummary),
+            );
+            lines.push(Line::from(""));
+            if let Some(evidence) = task.file_evidence.as_ref() {
+                super::push_file_evidence_lines(&mut lines, evidence);
+            } else {
+                lines.push(Line::from("Harness-generated file evidence"));
+                lines.push(Line::from("  none for this atomic task"));
             }
+            lines.push(Line::from(""));
+            lines.push(Line::from("User instructions"));
+            lines.push(Line::from(format!(
+                "  Transaction-wide: {}",
+                instruction_scope_label(task.user_instructions.transaction_wide_chars)
+            )));
+            lines.push(Line::from(format!(
+                "  Task-specific: {}",
+                instruction_scope_label(task.user_instructions.task_specific_chars)
+            )));
+            lines.push(Line::from(""));
+            lines.push(Line::from("Complete-source preflight"));
+            lines.push(Line::from(
+                "  passed for the exact source, evidence, instructions, route, and limits shown here",
+            ));
             lines
         }
         CuratorPlanDetail::Integrity => vec![
@@ -3570,16 +3638,7 @@ fn required_operation_detail_lines(operation: &StoredContextOperation) -> Vec<Li
                 "File-change digest",
                 &summary.file_change_digest,
             );
-            if !summary.changed_files.is_empty() {
-                lines.push(Line::from(format!(
-                    "Changed paths: {}",
-                    summary.changed_files.join(", ")
-                )));
-            }
-            lines.push(Line::from(format!(
-                "Change evidence complete: {}",
-                summary.change_evidence_complete
-            )));
+            super::push_file_evidence_lines(&mut lines, &summary.effective_file_evidence());
             for warning in &summary.warnings {
                 push_workspace_labeled_multiline(&mut lines, "Warning", warning);
             }

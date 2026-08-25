@@ -6,8 +6,8 @@ use crate::{
 use jcode_message_types::{ContentBlock, Message, Role};
 use jcode_session_types::{
     StoredContextBlockKind, StoredContextOperation, StoredContextOperationCounts,
-    StoredContextViewState, StoredMessage, StoredMessageRange, StoredRangeSummary,
-    StoredToolResultDistillation,
+    StoredContextPathEvidence, StoredContextViewState, StoredMessage, StoredMessageRange,
+    StoredRangeSummary, StoredToolResultDistillation,
 };
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
@@ -529,7 +529,24 @@ fn summary_message(raw: &[StoredMessage], range: &ResolvedRangeOperation<'_>) ->
         range.end - range.start + 1,
         range.summary.summary_text.trim()
     );
-    if !range.summary.file_change_digest.trim().is_empty() {
+    if let Some(evidence) = range.summary.file_evidence.as_ref() {
+        if !range.summary.file_change_digest.trim().is_empty() {
+            text.push_str("\n\n### Curator file-change digest\n");
+            text.push_str(range.summary.file_change_digest.trim());
+        }
+        text.push_str("\n\n### Harness-generated file evidence");
+        append_file_evidence_category(&mut text, "Files changed", &evidence.changed);
+        append_file_evidence_category(
+            &mut text,
+            "Files read or inspected",
+            &evidence.read_or_inspected,
+        );
+        append_file_evidence_category(
+            &mut text,
+            "Paths searched or browsed",
+            &evidence.searched_or_browsed,
+        );
+    } else if !range.summary.file_change_digest.trim().is_empty() {
         text.push_str("\n\n### Files changed in this range\n");
         text.push_str(range.summary.file_change_digest.trim());
     } else if !range.summary.changed_files.is_empty() {
@@ -547,6 +564,31 @@ fn summary_message(raw: &[StoredMessage], range: &ResolvedRangeOperation<'_>) ->
         }],
         timestamp: raw.get(range.start).and_then(|message| message.timestamp),
         tool_duration_ms: None,
+    }
+}
+
+fn append_file_evidence_category(
+    text: &mut String,
+    label: &str,
+    evidence: &StoredContextPathEvidence,
+) {
+    let completeness = if evidence.complete {
+        "complete"
+    } else {
+        "incomplete"
+    };
+    text.push_str(&format!("\n\n#### {label} · {completeness}"));
+    if evidence.paths.is_empty() {
+        text.push_str("\n- None observed by supported structured tools.");
+    } else {
+        for path in &evidence.paths {
+            text.push_str("\n- ");
+            text.push_str(path);
+        }
+    }
+    for warning in &evidence.warnings {
+        text.push_str("\n- Evidence warning: ");
+        text.push_str(warning);
     }
 }
 
@@ -608,6 +650,7 @@ mod tests {
             file_change_digest: String::new(),
             changed_files: Vec::new(),
             change_evidence_complete: false,
+            file_evidence: None,
             boundary_expansions: Vec::new(),
             generator: Some(generator()),
             source_token_estimate: 1_000,
@@ -842,6 +885,86 @@ mod tests {
             projection.messages[4].content.as_slice(),
             [ContentBlock::Text { .. }]
         ));
+    }
+
+    #[test]
+    fn range_summary_wrapper_separates_curator_digest_from_structured_evidence_and_keeps_legacy_fallback()
+     {
+        let raw = fixture();
+        let mut structured = summary(&raw, 1, 2, "structured summary");
+        structured.file_change_digest = "Curator-authored changed-file findings.".to_string();
+        structured.file_evidence = Some(jcode_session_types::StoredContextFileEvidence {
+            changed: StoredContextPathEvidence {
+                paths: vec!["src/lib.rs".to_string()],
+                complete: true,
+                warnings: Vec::new(),
+            },
+            read_or_inspected: StoredContextPathEvidence {
+                paths: vec!["src/parser.rs".to_string()],
+                complete: true,
+                warnings: Vec::new(),
+            },
+            searched_or_browsed: StoredContextPathEvidence {
+                paths: Vec::new(),
+                complete: false,
+                warnings: vec!["shell search scope may be incomplete".to_string()],
+            },
+        });
+        let projection = project_context(
+            &raw,
+            &applied_state(vec![StoredContextOperation::RangeSummary(structured)]),
+        )
+        .expect("structured evidence projection");
+        let structured_text = projection
+            .messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .find_map(|block| match block {
+                ContentBlock::Text { text, .. } if text.contains("structured summary") => {
+                    Some(text.as_str())
+                }
+                _ => None,
+            })
+            .expect("structured summary text");
+        for expected in [
+            "### Curator file-change digest",
+            "### Harness-generated file evidence",
+            "#### Files changed · complete",
+            "src/lib.rs",
+            "#### Files read or inspected · complete",
+            "src/parser.rs",
+            "#### Paths searched or browsed · incomplete",
+            "None observed by supported structured tools.",
+            "Evidence warning: shell search scope may be incomplete",
+        ] {
+            assert!(
+                structured_text.contains(expected),
+                "missing {expected}: {structured_text}"
+            );
+        }
+
+        let mut legacy = summary(&raw, 1, 2, "legacy summary");
+        legacy.changed_files = vec!["legacy/path.rs".to_string()];
+        legacy.change_evidence_complete = true;
+        let projection = project_context(
+            &raw,
+            &applied_state(vec![StoredContextOperation::RangeSummary(legacy)]),
+        )
+        .expect("legacy projection");
+        let legacy_text = projection
+            .messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .find_map(|block| match block {
+                ContentBlock::Text { text, .. } if text.contains("legacy summary") => {
+                    Some(text.as_str())
+                }
+                _ => None,
+            })
+            .expect("legacy summary text");
+        assert!(legacy_text.contains("### Files changed in this range"));
+        assert!(legacy_text.contains("legacy/path.rs"));
+        assert!(!legacy_text.contains("Harness-generated file evidence"));
     }
 
     #[test]

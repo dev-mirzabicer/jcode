@@ -463,6 +463,7 @@ fn range_summary_operation(
         file_change_digest: "No changed files in fixture".to_string(),
         changed_files: Vec::new(),
         change_evidence_complete: true,
+        file_evidence: None,
         boundary_expansions: Vec::new(),
         generator: Some(context_test_generator()),
         source_token_estimate: 1_000,
