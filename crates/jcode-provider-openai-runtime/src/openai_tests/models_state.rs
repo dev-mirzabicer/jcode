@@ -37,6 +37,63 @@ fn test_openai_supports_codex_models() {
 }
 
 #[test]
+fn gpt_5_6_sol_1m_is_a_distinct_oauth_profile_over_the_same_wire_model() {
+    let _guard = jcode_base::storage::lock_test_env();
+    jcode_base::auth::codex::set_active_account_override(Some("sol-1m-profile".to_string()));
+    jcode_base::provider::populate_account_models(vec![
+        jcode_provider_core::GPT_5_6_SOL_MODEL.to_string(),
+    ]);
+
+    let provider = OpenAIProvider::new(CodexCredentials {
+        access_token: "test".to_string(),
+        refresh_token: String::new(),
+        id_token: None,
+        account_id: None,
+        expires_at: None,
+    });
+
+    let switching_models = provider.available_models_for_switching();
+    assert!(
+        switching_models.contains(&jcode_provider_core::GPT_5_6_SOL_MODEL.to_string())
+    );
+    assert!(
+        switching_models.contains(&jcode_provider_core::GPT_5_6_SOL_1M_MODEL.to_string())
+    );
+
+    provider
+        .set_model(jcode_provider_core::GPT_5_6_SOL_MODEL)
+        .unwrap();
+    let standard_budget = provider.context_request_budget();
+    assert_eq!(standard_budget.context_window, 372_000);
+    assert_eq!(standard_budget.safe_input_budget(), 367_904);
+    let standard_efforts = provider.available_efforts();
+
+    provider
+        .set_model(jcode_provider_core::GPT_5_6_SOL_1M_MODEL)
+        .unwrap();
+    let selected_model = provider.model();
+    assert_eq!(selected_model, jcode_provider_core::GPT_5_6_SOL_1M_MODEL);
+    assert_eq!(
+        jcode_provider_core::model_id::strip_long_context_suffix(&selected_model),
+        jcode_provider_core::GPT_5_6_SOL_MODEL
+    );
+    assert_eq!(provider.available_efforts(), standard_efforts);
+    assert!(provider.supports_image_input());
+
+    let long_budget = provider.context_request_budget();
+    assert_eq!(long_budget.context_window, 1_000_000);
+    assert_eq!(
+        long_budget.semantics,
+        jcode_provider_core::ContextWindowSemantics::InputOnly
+    );
+    assert_eq!(long_budget.requested_max_output_tokens, None);
+    assert_eq!(long_budget.estimator_margin_tokens, 4_096);
+    assert_eq!(long_budget.safe_input_budget(), 995_904);
+
+    jcode_base::auth::codex::set_active_account_override(None);
+}
+
+#[test]
 fn test_openai_switching_models_include_dynamic_catalog_entries() {
     let _guard = jcode_base::storage::lock_test_env();
     let dynamic_model = "gpt-5.9-switching-test";

@@ -241,7 +241,7 @@ fn globally_preferred_model_rank(model: &str) -> (u8, usize) {
     let claude_default = normalize_model_for_preference(jcode_provider_core::DEFAULT_CLAUDE_MODEL);
 
     if normalized == openai_default {
-        return (0, 0);
+        return (0, long_context_opt_in_rank(model));
     }
     // Some catalogs expose the clean release id instead of jcode's Sol route.
     if normalized == "gpt-5.6" {
@@ -254,13 +254,13 @@ fn globally_preferred_model_rank(model: &str) -> (u8, usize) {
         .iter()
         .position(|candidate| normalize_model_for_preference(candidate) == normalized)
     {
-        return (3, position);
+        return (3, position * 2 + long_context_opt_in_rank(model));
     }
     if let Some(position) = crate::provider::ALL_OPENAI_MODELS
         .iter()
         .position(|candidate| normalize_model_for_preference(candidate) == normalized)
     {
-        return (4, position);
+        return (4, position * 2 + long_context_opt_in_rank(model));
     }
 
     // Unknown provider families retain catalog order as the final fallback.
@@ -344,10 +344,22 @@ fn preferred_model_rank(orders: &[&[&str]], model: &str) -> usize {
             .iter()
             .position(|candidate| normalize_model_for_preference(candidate) == normalized)
         {
-            return tier * TIER_STRIDE + position;
+            return tier * TIER_STRIDE + position * 2 + long_context_opt_in_rank(model);
         }
     }
     usize::MAX
+}
+
+/// An explicit `[1m]` context profile is opt-in and must never silently replace
+/// the base profile as an authentication/onboarding default merely because a
+/// provider catalog happened to list the alias first.
+fn long_context_opt_in_rank(model: &str) -> usize {
+    usize::from(
+        model
+            .trim()
+            .to_ascii_lowercase()
+            .ends_with(jcode_provider_core::model_id::LONG_CONTEXT_SUFFIX),
+    )
 }
 
 /// Normalize a model id for flagship-preference comparison: lowercase, drop a
@@ -1855,6 +1867,7 @@ mod tests {
             expected_catalog_namespace: None,
         };
         let routes = vec![
+            route("gpt-5.6-sol[1m]", "OpenAI", "openai-api", true),
             route("gpt-5.1", "OpenAI", "openai-api", true),
             route("gpt-5.5", "OpenAI", "openai-api", true),
             route("gpt-5.6-sol", "OpenAI", "openai-api", true),
@@ -1869,6 +1882,7 @@ mod tests {
     #[test]
     fn global_default_route_prefers_gpt_5_6_over_fable_and_preserves_route() {
         let routes = vec![
+            route("gpt-5.6-sol[1m]", "OpenAI", "openai-oauth", true),
             route("gpt-5.5", "OpenAI", "openai-api-key", true),
             route("claude-fable-5", "Anthropic", "anthropic-api-key", true),
             route("gpt-5.6-sol", "OpenAI", "openai-oauth", true),

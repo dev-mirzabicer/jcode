@@ -1,7 +1,7 @@
 //! Canonical model-id normalization.
 //!
-//! Model ids arrive in many shapes: mixed case, with the Anthropic `[1m]`
-//! long-context suffix, with dated releases (`claude-haiku-4-5-20251001`),
+//! Model ids arrive in many shapes: mixed case, with the `[1m]` long-context
+//! suffix, with dated releases (`claude-haiku-4-5-20251001`),
 //! or provider-qualified (`openrouter/anthropic/claude-...`). Historically
 //! each subsystem (catalog, pricing, capability lookup, auth preferences,
 //! subscription matching) hand-rolled its own partial normalization, which
@@ -11,7 +11,7 @@
 //! still compose them differently (pricing keeps case, subscription
 //! matching splits `@`), but the primitive transforms live here.
 
-/// Anthropic long-context opt-in suffix.
+/// Explicit long-context profile suffix.
 pub const LONG_CONTEXT_SUFFIX: &str = "[1m]";
 
 /// Strip the `[1m]` long-context suffix, if present.

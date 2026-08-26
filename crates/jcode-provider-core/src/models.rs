@@ -2,7 +2,14 @@
 pub const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-5";
 
 /// Quality-first default for OpenAI-capable routes.
-pub const DEFAULT_OPENAI_MODEL: &str = "gpt-5.6-sol";
+pub const GPT_5_6_SOL_MODEL: &str = "gpt-5.6-sol";
+/// Explicit long-context picker identity for GPT-5.6 Sol. Provider runtimes
+/// preserve this identity in session/config state and strip only `[1m]` when
+/// constructing the upstream request, so both variants use the same model.
+pub const GPT_5_6_SOL_1M_MODEL: &str = "gpt-5.6-sol[1m]";
+pub const GPT_5_6_SOL_CONTEXT_WINDOW: usize = 372_000;
+pub const GPT_5_6_SOL_1M_CONTEXT_WINDOW: usize = 1_000_000;
+pub const DEFAULT_OPENAI_MODEL: &str = GPT_5_6_SOL_MODEL;
 
 /// Available Claude models used by model lists and provider routing.
 ///
@@ -58,6 +65,7 @@ pub fn is_openai_api_only_pro_model(model: &str) -> bool {
 
 pub const ALL_OPENAI_MODELS: &[&str] = &[
     DEFAULT_OPENAI_MODEL,
+    GPT_5_6_SOL_1M_MODEL,
     "gpt-5.6-pro",
     // ChatGPT web-only route. The `[web]` suffix is intentionally part of the
     // jcode model id so it can never be mistaken for an API/Codex model with
@@ -98,6 +106,7 @@ mod gpt_5_6_catalog_tests {
     fn openai_catalog_exposes_the_complete_gpt_5_6_family() {
         for model in [
             "gpt-5.6-sol",
+            "gpt-5.6-sol[1m]",
             "gpt-5.6-pro",
             "gpt-5.6-pro[web]",
             "gpt-5.6",
@@ -108,6 +117,30 @@ mod gpt_5_6_catalog_tests {
         }
         assert!(is_openai_api_only_pro_model("gpt-5.6-pro"));
         assert!(!is_openai_api_only_pro_model("gpt-5.6-sol"));
+        assert!(!is_openai_api_only_pro_model("gpt-5.6-sol[1m]"));
+    }
+
+    #[test]
+    fn gpt_5_6_sol_context_variants_are_explicit_and_cache_independent() {
+        let contradictory_catalog_limit = |_model: &str| Some(1_050_000);
+        assert_eq!(
+            context_limit_for_model_with_provider_and_cache(
+                GPT_5_6_SOL_MODEL,
+                Some("openai"),
+                contradictory_catalog_limit,
+            ),
+            Some(GPT_5_6_SOL_CONTEXT_WINDOW),
+        );
+
+        let contradictory_catalog_limit = |_model: &str| Some(372_000);
+        assert_eq!(
+            context_limit_for_model_with_provider_and_cache(
+                GPT_5_6_SOL_1M_MODEL,
+                Some("openai"),
+                contradictory_catalog_limit,
+            ),
+            Some(GPT_5_6_SOL_1M_CONTEXT_WINDOW),
+        );
     }
 }
 
@@ -239,6 +272,20 @@ pub fn context_limit_for_model_with_provider_and_cache(
         return Some(copilot_context_limit_for_model(model));
     }
 
+    // GPT-5.6 Sol has two deliberate client-side context profiles over the
+    // same upstream model slug. Keep the established default at 372K even when
+    // a provider catalog advertises the model's larger theoretical window, and
+    // expose 1M only through the explicit `[1m]` identity. This must precede
+    // the dynamic cache so a catalog refresh cannot silently collapse the two
+    // user-visible choices into one another.
+    if matches!(provider, Some("openai")) && model == GPT_5_6_SOL_MODEL {
+        return Some(if is_1m {
+            GPT_5_6_SOL_1M_CONTEXT_WINDOW
+        } else {
+            GPT_5_6_SOL_CONTEXT_WINDOW
+        });
+    }
+
     // Claude models: classify long-context behavior centrally. For generations
     // verified against the live API this is authoritative, because the live
     // catalog's `max_input_tokens` over-advertises 1M for models that are
@@ -284,7 +331,7 @@ pub fn context_limit_for_model_with_provider_and_cache(
     }
 
     if model.starts_with("gpt-5.6") {
-        return Some(372_000);
+        return Some(GPT_5_6_SOL_CONTEXT_WINDOW);
     }
 
     // Most GPT-5.x codex/reasoning models: 272k per Codex backend API.

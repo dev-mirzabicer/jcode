@@ -48,8 +48,9 @@ pub use fallback_pick::{
 pub use fingerprint::{log_provider_canonical_input, stable_hash_json, stable_hash_str};
 pub use models::{
     ALL_CLAUDE_MODELS, ALL_OPENAI_MODELS, CHATGPT_WEB_MODEL, DEFAULT_CLAUDE_MODEL,
-    DEFAULT_CONTEXT_LIMIT, DEFAULT_OPENAI_MODEL, ModelCapabilities, OPENAI_API_ONLY_PRO_MODELS,
-    context_limit_for_model, context_limit_for_model_with_provider,
+    DEFAULT_CONTEXT_LIMIT, DEFAULT_OPENAI_MODEL, GPT_5_6_SOL_1M_CONTEXT_WINDOW,
+    GPT_5_6_SOL_1M_MODEL, GPT_5_6_SOL_CONTEXT_WINDOW, GPT_5_6_SOL_MODEL, ModelCapabilities,
+    OPENAI_API_ONLY_PRO_MODELS, context_limit_for_model, context_limit_for_model_with_provider,
     context_limit_for_model_with_provider_and_cache, is_listable_model_name,
     is_openai_api_only_pro_model, normalize_copilot_model_name,
     provider_for_model as core_provider_for_model,

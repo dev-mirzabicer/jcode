@@ -353,6 +353,10 @@ mod tests {
     #[test]
     fn pretty_model_display_name_formats_common_models() {
         assert_eq!(pretty_model_display_name("gpt-5.5"), "GPT-5.5");
+        assert_eq!(
+            pretty_model_display_name("gpt-5.6-sol[1m]"),
+            "GPT-5.6 Sol (1M)"
+        );
         assert_eq!(pretty_model_display_name("gpt-5.1-codex"), "GPT-5.1 Codex");
         assert_eq!(
             pretty_model_display_name("gpt-5.1-codex-max"),

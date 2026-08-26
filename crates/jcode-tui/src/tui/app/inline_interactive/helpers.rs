@@ -282,6 +282,11 @@ mod tests {
                 "openai-oauth:gpt-5.5",
             ),
             (
+                "gpt-5.6-sol[1m]",
+                route("OpenAI", "openai-oauth"),
+                "openai-oauth:gpt-5.6-sol[1m]",
+            ),
+            (
                 "gpt-5.5",
                 route("OpenAI", "openai-api-key"),
                 "openai-api:gpt-5.5",

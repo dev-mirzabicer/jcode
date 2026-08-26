@@ -450,6 +450,16 @@ mod tests {
     #[test]
     fn gpt_5_6_sol_retains_the_long_input_price_discontinuity() {
         let estimate = openai_api_pricing("gpt-5.6-sol").expect("priced model");
+        assert_eq!(
+            openai_api_pricing("gpt-5.6-sol[1m]"),
+            Some(estimate.clone()),
+            "the 1M profile must reuse the same upstream model pricing"
+        );
+        assert_eq!(
+            openai_oauth_pricing("gpt-5.6-sol[1m]"),
+            openai_oauth_pricing("gpt-5.6-sol"),
+            "OAuth subscription semantics must not change with context profile"
+        );
         assert_eq!(estimate.input_price_per_mtok_micros, Some(5_000_000));
         assert_eq!(estimate.output_price_per_mtok_micros, Some(30_000_000));
         assert_eq!(estimate.cache_read_price_per_mtok_micros, Some(500_000));

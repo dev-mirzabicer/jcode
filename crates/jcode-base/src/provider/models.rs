@@ -295,9 +295,19 @@ fn model_ids_with_context_aliases(models: Vec<String>) -> Vec<String> {
 /// 4.6, Sonnet 4.6) get an alias. Native-1M models (Opus 4.8, 4.7) already use
 /// 1M by default, so a `[1m]` alias would be a redundant duplicate, and
 /// 200K-only models (Sonnet 4.5, which the live catalog wrongly advertises as
-/// 1M) get no alias. Unknown/future Claude ids and all non-Claude models keep
-/// the prior behavior: alias when the cached catalog limit is >= 1M.
+/// 1M) get no alias. GPT-5.6 Sol is an explicit dual-profile exception: its
+/// base entry remains 372K and its `[1m]` entry is always available. Other
+/// unknown/future Claude ids and non-Claude models keep the prior behavior:
+/// alias when the cached catalog limit is >= 1M.
 fn model_exposes_1m_alias(normalized_model: &str) -> bool {
+    // GPT-5.6 Sol deliberately keeps the existing 372K picker entry and exposes
+    // its documented larger window only through an explicit client-side alias.
+    // Do not make that choice depend on whether this account's live catalog
+    // happened to include context metadata during the latest refresh.
+    if normalized_model == jcode_provider_core::GPT_5_6_SOL_MODEL {
+        return true;
+    }
+
     if normalized_model.starts_with("claude-") {
         let mode = jcode_provider_core::anthropic_context_mode(normalized_model);
         // Only trust the classifier for models it actually recognizes; for

@@ -748,6 +748,13 @@ fn append_openrouter_alternative_routes(
     }
 
     for model in ALL_OPENAI_MODELS {
+        // `[1m]` is a jcode-side context profile over the direct OpenAI model,
+        // not an OpenRouter model slug. The base Sol route is already offered
+        // below when OpenRouter serves it; never fabricate
+        // `openai/gpt-5.6-sol[1m]` as a separate upstream model.
+        if *model == jcode_provider_core::GPT_5_6_SOL_1M_MODEL {
+            continue;
+        }
         let or_model = format!("openai/{}", model);
         if let Some((endpoints, _)) = openrouter::load_endpoints_disk_cache_public(&or_model) {
             stats.endpoint_cache_hits += 1;
@@ -1630,6 +1637,10 @@ mod tests {
                 .iter()
                 .any(|r| r.model == "gpt-5.3-codex-spark" && r.api_method == "openrouter"),
             "without a catalog cache the fallback route stays optimistic"
+        );
+        assert!(
+            !routes.iter().any(|r| r.model == "gpt-5.6-sol[1m]"),
+            "the direct OpenAI context profile is not an OpenRouter model slug"
         );
 
         // Fresh catalog listing codex but not spark: spark route is dropped.

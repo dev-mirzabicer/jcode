@@ -7,11 +7,22 @@ fn test_provider_for_model_claude() {
 
 #[test]
 fn test_provider_for_model_openai() {
+    assert_eq!(provider_for_model("gpt-5.6-sol"), Some("openai"));
+    assert_eq!(provider_for_model("gpt-5.6-sol[1m]"), Some("openai"));
     assert_eq!(provider_for_model("gpt-5.2-codex"), Some("openai"));
     assert_eq!(provider_for_model("gpt-5.5"), Some("openai"));
     assert_eq!(provider_for_model("gpt-5.4"), Some("openai"));
     assert_eq!(provider_for_model("gpt-5.4[1m]"), Some("openai"));
     assert_eq!(provider_for_model("gpt-5.4-pro"), Some("openai"));
+}
+
+#[test]
+fn test_context_limit_gpt_5_6_sol_profiles_remain_distinct() {
+    assert_eq!(context_limit_for_model("gpt-5.6-sol"), Some(372_000));
+    assert_eq!(
+        context_limit_for_model("gpt-5.6-sol[1m]"),
+        Some(1_000_000)
+    );
 }
 
 #[test]
@@ -1938,6 +1949,8 @@ fn test_merge_openai_model_ids_appends_dynamic_oauth_models() {
     ]);
 
     assert!(models.iter().any(|model| model == "gpt-5.4"));
+    assert!(models.iter().any(|model| model == "gpt-5.6-sol"));
+    assert!(models.iter().any(|model| model == "gpt-5.6-sol[1m]"));
     assert!(models.iter().any(|model| model == "gpt-5.4-fast-preview"));
     assert!(models.iter().any(|model| model == "gpt-5.5-experimental"));
     assert_eq!(

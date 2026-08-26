@@ -253,6 +253,10 @@ fn gpt_5_6_sol_defaults_to_low_reasoning_effort() {
     );
     // Long-context and cased variants resolve through canonicalization.
     assert_eq!(
+        OpenAIProvider::default_reasoning_effort_for_model("gpt-5.6-sol[1m]").as_deref(),
+        Some("low"),
+    );
+    assert_eq!(
         OpenAIProvider::default_reasoning_effort_for_model("GPT-5.6-Sol").as_deref(),
         Some("low"),
     );
