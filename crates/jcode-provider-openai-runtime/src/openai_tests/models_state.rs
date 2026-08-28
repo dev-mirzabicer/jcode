@@ -39,6 +39,7 @@ fn test_openai_supports_codex_models() {
 #[test]
 fn gpt_5_6_sol_1m_is_a_distinct_oauth_profile_over_the_same_wire_model() {
     let _guard = jcode_base::storage::lock_test_env();
+    let _runtime_provider = EnvVarGuard::set("JCODE_RUNTIME_PROVIDER", "openai-oauth");
     jcode_base::auth::codex::set_active_account_override(Some("sol-1m-profile".to_string()));
     jcode_base::provider::populate_account_models(vec![
         jcode_provider_core::GPT_5_6_SOL_MODEL.to_string(),

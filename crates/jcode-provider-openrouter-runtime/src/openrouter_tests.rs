@@ -3071,6 +3071,8 @@ fn named_profile_supports_reasoning_effort_config_override() {
 fn named_profile_construction_reads_openai_reasoning_effort_config() {
     let _lock = ENV_LOCK.lock();
     let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+    let _effort = EnvVarGuard::set("JCODE_OPENAI_REASONING_EFFORT", "high");
+    jcode_base::config::invalidate_config_cache();
 
     let config = jcode_base::config::NamedProviderConfig {
         base_url: "https://compat.example.test/v1".to_string(),
@@ -3082,21 +3084,15 @@ fn named_profile_construction_reads_openai_reasoning_effort_config() {
 
     let provider =
         OpenRouterProvider::new_named_openai_compatible("custom", &config).expect("provider");
-    // The config default is only applied when openai_reasoning_effort is set;
-    // with no config value the provider starts with no effort but still
-    // supports setting one.
-    let initial = provider.reasoning_effort();
-    let configured = jcode_base::config::config()
-        .provider
-        .openai_reasoning_effort
-        .clone();
-    match configured {
-        Some(_) => assert!(initial.is_some(), "configured effort must be honored"),
-        None => assert_eq!(initial, None),
-    }
+    assert_eq!(
+        provider.reasoning_effort(),
+        Some("high".to_string()),
+        "the isolated configured effort must be honored exactly"
+    );
     provider
         .set_reasoning_effort("max")
         .expect("explicitly-enabled profile accepts effort");
+    jcode_base::config::invalidate_config_cache();
 }
 
 /// Regression: when the shared interactive server boots an `OpenRouterProvider`

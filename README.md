@@ -345,6 +345,13 @@ jcode works with subscription-backed OAuth flows and many provider integrations,
 - **Ollama** (`jcode login --provider ollama`)
 - **Custom OpenAI-compatible endpoint** (`jcode login --provider openai-compatible`)
 
+Direct OpenAI routes expose two GPT-5.6 Sol context profiles. **GPT-5.6 Sol**
+(`gpt-5.6-sol`) remains the default 372,000-token profile with a 367,904-token OAuth
+safe-input budget. **GPT-5.6 Sol (1M)** (`gpt-5.6-sol[1m]`) is an explicit opt-in
+1,000,000-token profile with a 995,904-token OAuth safe-input budget. Both send the
+upstream model slug `gpt-5.6-sol`; `[1m]` is a Jcode picker/session/config identity,
+not an OpenRouter model slug and not an automatic-compaction mode.
+
 For custom OpenAI-compatible endpoints, jcode now prompts for the API base and supports local localhost servers without requiring an API key.
 
 ### Config-file setup for self-hosted endpoints and MCP
@@ -672,6 +679,43 @@ and hotkey-friendly dictation without requiring a bundled speech-to-text stack.
 
 ---
 
+## User-Controlled Context
+
+Jcode keeps one authoritative transcript and derives a persisted, reversible provider
+view from explicit context transactions. It never automatically compacts an interactive
+session, drops old messages, truncates tool results, or strips stored images to make a
+request fit.
+
+Use `/compact` or `/context edit` to open the Context Editor. It supports multiple
+structurally closed range summaries, provider-aware replayed-reasoning suppression, and
+strictly-below-20-percent tool-result distillation in one reviewed atomic transaction.
+`/context history`, `/context restore`, and `/context undo` inspect or reverse persisted
+transactions. `/context` reports the current budget, revision, transaction counts, and
+prompt composition.
+
+Range summarization and tool-result distillation use isolated curator calls, one semantic
+task per call, with complete source and inspectable effective prompts. Per-run route,
+model, effort, and instruction changes remain ephemeral unless the user explicitly saves
+the route selection as the default. Optional durable defaults use:
+
+```toml
+[context.curator]
+provider = "openai"
+route = "openai-oauth"
+model = "gpt-5.6-sol[1m]"
+effort = "high"
+```
+
+When a request cannot fit, Jcode preserves the prompt and attachments and requires a
+manual resend after context editing. Unattended emergency surgery remains blocked unless
+the session or one scheduled task carries explicit bounded authorization.
+
+See [Context Control and the Context Editor](docs/CONTEXT_CONTROL.md) for the complete
+workflow, cache economics, provider caveats, migration and lifecycle behavior, privacy
+rules, and maintainer invariants.
+
+---
+
 ## Browser Automation
 
 jcode includes a first-class built-in `browser` tool for browser control inside agent sessions.
@@ -721,6 +765,7 @@ Notes:
 - [jcode.sh/bench](https://jcode.sh/bench) — benchmark methodology and results
 - [Ambient Mode / OpenClaw](docs/AMBIENT_MODE.md)
 - [Browser Provider Protocol](docs/BROWSER_PROVIDER_PROTOCOL.md)
+- [Context Control and the Context Editor](docs/CONTEXT_CONTROL.md)
 - [Memory Architecture](docs/MEMORY_ARCHITECTURE.md)
 - [Swarm Architecture](docs/SWARM_ARCHITECTURE.md)
 - [Server Architecture](docs/SERVER_ARCHITECTURE.md)

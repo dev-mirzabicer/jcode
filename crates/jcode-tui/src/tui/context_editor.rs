@@ -5093,6 +5093,154 @@ mod tests {
         page
     }
 
+    fn phase17_measurement_snapshot_page() -> ContextEditorSnapshot {
+        let mut page = snapshot();
+        page.raw_message_count = 10_000;
+        page.transcript_digest = 17_000;
+        page.message_page_start = 0;
+        page.message_page_end = crate::protocol::CONTEXT_SNAPSHOT_MAX_PAGE_SIZE;
+        page.next_message_page_start = Some(crate::protocol::CONTEXT_SNAPSHOT_MAX_PAGE_SIZE);
+        page.messages = (0..crate::protocol::CONTEXT_SNAPSHOT_MAX_PAGE_SIZE)
+            .map(|index| {
+                message(
+                    index,
+                    &format!(
+                        "phase17 stable searchable editor row {index} bucket-{}",
+                        index % 10
+                    ),
+                )
+            })
+            .collect();
+        page
+    }
+
+    fn phase17_editor_for_measurement(page: &ContextEditorSnapshot) -> ContextEditor {
+        let mut editor = ContextEditor::new(ContextEditorOpenMode::Edit);
+        editor.apply_snapshot(page.clone());
+        assert_eq!(editor.phase(), ContextEditorPhase::Editing);
+        assert_eq!(
+            editor.rows.len(),
+            crate::protocol::CONTEXT_SNAPSHOT_MAX_PAGE_SIZE
+        );
+        editor
+    }
+
+    fn phase17_ui_duration_stats_with_setup<T>(
+        mut setup: impl FnMut() -> T,
+        mut operation: impl FnMut(&mut T),
+    ) -> serde_json::Value {
+        const WARMUPS: usize = 2;
+        const SAMPLES: usize = 7;
+        for _ in 0..WARMUPS {
+            let mut state = setup();
+            operation(&mut state);
+        }
+        let mut samples = Vec::with_capacity(SAMPLES);
+        for _ in 0..SAMPLES {
+            let mut state = setup();
+            let started = std::time::Instant::now();
+            operation(&mut state);
+            samples.push(u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX));
+        }
+        samples.sort_unstable();
+        serde_json::json!({
+            "warmups": WARMUPS,
+            "samples": SAMPLES,
+            "minimum_ns": samples[0],
+            "median_ns": samples[SAMPLES / 2],
+            "maximum_ns": samples[SAMPLES - 1],
+        })
+    }
+
+    #[test]
+    #[ignore = "manual Phase 17 maximum-page Context Editor search/scroll measurement; run explicitly with --ignored --nocapture"]
+    fn phase17_representative_context_editor_search_and_scroll() {
+        let page = phase17_measurement_snapshot_page();
+        let serialized_page_bytes = serde_json::to_vec(&page)
+            .expect("serialize representative Context Editor page")
+            .len();
+
+        let no_match_search = phase17_ui_duration_stats_with_setup(
+            || {
+                let mut editor = phase17_editor_for_measurement(&page);
+                editor.search_query = "not-present-in-phase17-page".to_string();
+                editor
+            },
+            |editor| {
+                let ids = editor.visible_message_ids();
+                assert!(ids.is_empty());
+                std::hint::black_box(ids);
+            },
+        );
+        let one_match_search = phase17_ui_duration_stats_with_setup(
+            || {
+                let mut editor = phase17_editor_for_measurement(&page);
+                editor.search_query = "message-997".to_string();
+                editor
+            },
+            |editor| {
+                let ids = editor.visible_message_ids();
+                assert_eq!(ids, vec!["message-997".to_string()]);
+                std::hint::black_box(ids);
+            },
+        );
+        let many_match_search = phase17_ui_duration_stats_with_setup(
+            || {
+                let mut editor = phase17_editor_for_measurement(&page);
+                editor.search_query = "bucket-3".to_string();
+                editor
+            },
+            |editor| {
+                let ids = editor.visible_message_ids();
+                assert_eq!(ids.len(), 100);
+                std::hint::black_box(ids);
+            },
+        );
+        let cursor_scroll = phase17_ui_duration_stats_with_setup(
+            || phase17_editor_for_measurement(&page),
+            |editor| {
+                for _ in 0..500 {
+                    let (close, action) = editor.handle_key(KeyCode::Down, KeyModifiers::NONE);
+                    assert!(!close);
+                    assert!(action.is_none());
+                }
+                assert_eq!(editor.cursor, 500);
+                for _ in 0..500 {
+                    let (close, action) = editor.handle_key(KeyCode::Up, KeyModifiers::NONE);
+                    assert!(!close);
+                    assert!(action.is_none());
+                }
+                assert_eq!(editor.cursor, 0);
+            },
+        );
+
+        let report = serde_json::json!({
+            "identity": {
+                "git_hash": jcode_build_meta::GIT_HASH,
+                "version": jcode_build_meta::VERSION,
+                "root_package_version": jcode_build_meta::PKG_VERSION,
+                "os": std::env::consts::OS,
+                "architecture": std::env::consts::ARCH,
+            },
+            "fixture": {
+                "authoritative_messages": page.raw_message_count,
+                "loaded_rows": page.messages.len(),
+                "serialized_page_bytes": serialized_page_bytes,
+                "scroll_key_events_per_sample": 1_000,
+            },
+            "timings": {
+                "search_no_match": no_match_search,
+                "search_one_match": one_match_search,
+                "search_many_matches": many_match_search,
+                "cursor_scroll_500_down_500_up": cursor_scroll,
+            },
+        });
+        println!(
+            "PHASE17_CONTEXT_EDITOR_PERFORMANCE={}",
+            serde_json::to_string_pretty(&report).expect("serialize editor performance report")
+        );
+    }
+
     fn economics(before: usize, after: usize) -> StoredContextEconomics {
         StoredContextEconomics {
             projected_tokens_before: before,

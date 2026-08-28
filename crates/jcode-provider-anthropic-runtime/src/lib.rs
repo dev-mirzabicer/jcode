@@ -2199,8 +2199,25 @@ fn anthropic_recommended_model_from_error(error_str: &str) -> Option<String> {
         .split("please use")
         .nth(1)
         .or_else(|| error_str.split("use ").nth(1))?;
-    // Take up to the next sentence boundary.
-    let hint = hint.split(['.', '!', '\n']).next().unwrap_or(hint).trim();
+    // Take up to the next sentence boundary, but preserve decimal version
+    // separators such as the dot in "Opus 4.8". Treating that dot as the end
+    // of the sentence collapses the hint to "Opus 4" and lets catalog order
+    // choose an arbitrary Opus 4.x model.
+    let mut previous = None;
+    let mut characters = hint.char_indices().peekable();
+    let mut sentence_end = hint.len();
+    while let Some((index, character)) = characters.next() {
+        let next = characters.peek().map(|(_, character)| *character);
+        let is_decimal_separator = character == '.'
+            && previous.is_some_and(|previous: char| previous.is_ascii_digit())
+            && next.is_some_and(|next| next.is_ascii_digit());
+        if matches!(character, '!' | '\n') || (character == '.' && !is_decimal_separator) {
+            sentence_end = index;
+            break;
+        }
+        previous = Some(character);
+    }
+    let hint = hint[..sentence_end].trim();
     if hint.is_empty() {
         return None;
     }

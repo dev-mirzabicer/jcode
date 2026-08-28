@@ -578,6 +578,7 @@ mod tests {
         ContextProviderFamily, ContextProviderValidationIdentity, ContextRequestBuilderValidation,
         context_projection_validation_report,
     };
+    use crate::session::Session;
     use anyhow::Result;
     use async_trait::async_trait;
     use chrono::Utc;
@@ -735,6 +736,468 @@ mod tests {
             curator_usage: Vec::new(),
             emergency_audit: None,
         }
+    }
+
+    fn phase17_measurement_messages() -> Vec<StoredMessage> {
+        (0usize..10_000)
+            .map(|index| {
+                let content = if index % 20 == 0 {
+                    vec![ContentBlock::ToolUse {
+                        id: format!("phase17-tool-{}", index / 20),
+                        name: "read".to_string(),
+                        input: serde_json::json!({
+                            "file_path": format!("src/phase17/file-{}.rs", index / 20)
+                        }),
+                        thought_signature: None,
+                    }]
+                } else if index % 20 == 1 {
+                    let pair_index = index / 20;
+                    let repetitions = if pair_index % 50 == 0 { 4_096 } else { 128 };
+                    vec![ContentBlock::ToolResult {
+                        tool_use_id: format!("phase17-tool-{pair_index}"),
+                        content: format!("phase17 exact tool result {pair_index} ")
+                            .repeat(repetitions),
+                        is_error: Some(false),
+                    }]
+                } else if index % 1_000 == 510 {
+                    vec![
+                        ContentBlock::Image {
+                            media_type: "image/png".to_string(),
+                            data: "phase17-image-payload".repeat(2_048),
+                        },
+                        ContentBlock::Text {
+                            text: format!("phase17 image label {index}"),
+                            cache_control: None,
+                        },
+                    ]
+                } else if index % 25 == 2 {
+                    vec![
+                        ContentBlock::Reasoning {
+                            text: format!("phase17 replayed reasoning {index} ").repeat(12),
+                        },
+                        ContentBlock::Text {
+                            text: format!("phase17 assistant conclusion {index}"),
+                            cache_control: None,
+                        },
+                    ]
+                } else {
+                    vec![ContentBlock::Text {
+                        text: format!(
+                            "phase17 representative message {index} with stable searchable content"
+                        ),
+                        cache_control: None,
+                    }]
+                };
+                stored(
+                    &format!("phase17-message-{index}"),
+                    if index % 20 == 0 || index % 25 == 2 {
+                        Role::Assistant
+                    } else if index % 20 == 1 || index.is_multiple_of(2) {
+                        Role::User
+                    } else {
+                        Role::Assistant
+                    },
+                    content,
+                )
+            })
+            .collect()
+    }
+
+    fn phase17_summary_operation(
+        messages: &[StoredMessage],
+        start: usize,
+        end: usize,
+        label: &str,
+    ) -> StoredContextOperation {
+        let source_range = jcode_context_core::build_message_range(messages, start, end)
+            .expect("representative summary range");
+        let source_token_estimate = messages[start..=end]
+            .iter()
+            .map(|message| estimate_message_tokens(&message.to_message()))
+            .sum::<usize>();
+        StoredContextOperation::RangeSummary(StoredRangeSummary {
+            source_range,
+            summary_text: format!(
+                "Representative lossless summary for {label}; exact decisions, paths, results, and unresolved work are preserved."
+            ),
+            file_change_digest: String::new(),
+            changed_files: Vec::new(),
+            change_evidence_complete: false,
+            file_evidence: None,
+            boundary_expansions: Vec::new(),
+            generator: None,
+            source_token_estimate,
+            replacement_token_estimate: 32,
+            warnings: Vec::new(),
+            created_at: Utc::now(),
+            legacy_coverage: None,
+        })
+    }
+
+    fn phase17_measurement_state(messages: &[StoredMessage]) -> StoredContextViewState {
+        let mut transactions = [
+            (100, 499),
+            (2_100, 2_499),
+            (4_100, 4_499),
+            (6_100, 6_499),
+            (8_100, 8_499),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(offset, (start, end))| {
+            transaction(
+                &format!("phase17-summary-{}", offset + 1),
+                (offset + 1) as u64,
+                vec![phase17_summary_operation(
+                    messages,
+                    start,
+                    end,
+                    &format!("messages {start} through {end}"),
+                )],
+            )
+        })
+        .collect::<Vec<_>>();
+
+        let reasoning_ranges = [1_002, 3_002, 5_002, 7_002, 9_002]
+            .into_iter()
+            .map(|index| {
+                jcode_context_core::build_message_range(messages, index, index)
+                    .expect("representative reasoning range")
+            })
+            .collect::<Vec<_>>();
+        let suppression = jcode_context_core::resolve_reasoning_suppression_for_ranges(
+            messages,
+            &reasoning_ranges,
+        )
+        .expect("representative reasoning suppression");
+        transactions.push(transaction(
+            "phase17-reasoning",
+            6,
+            vec![StoredContextOperation::ReasoningSuppression(suppression)],
+        ));
+
+        let target = jcode_context_core::build_content_target(messages, 9_001, 0)
+            .expect("representative tool-result target");
+        let original_token_estimate = estimate_content_block_tokens(&messages[9_001].content[0]);
+        let replacement_content =
+            "Representative distilled result retaining the exact finding and source path.";
+        let replacement_token_estimate = estimate_content_block_tokens(&ContentBlock::ToolResult {
+            tool_use_id: "phase17-tool-450".to_string(),
+            content: replacement_content.to_string(),
+            is_error: Some(false),
+        });
+        let replacement_ratio_millionths = u32::try_from(
+            (replacement_token_estimate as u128).saturating_mul(1_000_000)
+                / original_token_estimate as u128,
+        )
+        .unwrap_or(u32::MAX);
+        transactions.push(transaction(
+            "phase17-distillation",
+            7,
+            vec![StoredContextOperation::ToolResultDistillation(
+                StoredToolResultDistillation {
+                    target,
+                    tool_name: "read".to_string(),
+                    tool_call_id: "phase17-tool-450".to_string(),
+                    replacement_content: replacement_content.to_string(),
+                    original_token_estimate,
+                    replacement_token_estimate,
+                    replacement_ratio_millionths,
+                    preservation_rationale:
+                        "The replacement retains the exact result required by later work."
+                            .to_string(),
+                    uncertainties: Vec::new(),
+                    generator: StoredContextArtifactGenerator {
+                        provider: "phase17-measurement".to_string(),
+                        model: "phase17-measurement".to_string(),
+                        route: "synthetic".to_string(),
+                        prompt_version: "phase17-measurement-v1".to_string(),
+                        effort: None,
+                        role: None,
+                        selection_source: None,
+                        transaction_instructions: None,
+                        task_instructions: None,
+                    },
+                    created_at: Utc::now(),
+                },
+            )],
+        ));
+
+        StoredContextViewState {
+            revision: 7,
+            transactions,
+            ..StoredContextViewState::default()
+        }
+    }
+
+    fn phase17_revised_measurement_state(
+        messages: &[StoredMessage],
+        state: &StoredContextViewState,
+    ) -> StoredContextViewState {
+        let mut revised = state.clone();
+        revised.revision = 8;
+        revised.transactions.push(transaction(
+            "phase17-rebuild-summary",
+            8,
+            vec![phase17_summary_operation(
+                messages,
+                9_200,
+                9_399,
+                "messages 9200 through 9399",
+            )],
+        ));
+        revised
+    }
+
+    fn phase17_measurement_session(
+        messages: &[StoredMessage],
+        state: &StoredContextViewState,
+    ) -> Session {
+        let mut session = Session::create_with_id(
+            "phase17-representative-performance".to_string(),
+            None,
+            Some("Phase 17 representative performance".to_string()),
+        );
+        session.replace_messages(messages.to_vec());
+        session.context_view = state.clone();
+        session
+    }
+
+    fn phase17_duration_stats_with_setup<T>(
+        mut setup: impl FnMut() -> T,
+        mut operation: impl FnMut(&mut T),
+    ) -> serde_json::Value {
+        const WARMUPS: usize = 2;
+        const SAMPLES: usize = 7;
+        for _ in 0..WARMUPS {
+            let mut state = setup();
+            operation(&mut state);
+        }
+        let mut samples = Vec::with_capacity(SAMPLES);
+        for _ in 0..SAMPLES {
+            let mut state = setup();
+            let started = std::time::Instant::now();
+            operation(&mut state);
+            samples.push(u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX));
+        }
+        samples.sort_unstable();
+        serde_json::json!({
+            "warmups": WARMUPS,
+            "samples": SAMPLES,
+            "minimum_ns": samples[0],
+            "median_ns": samples[SAMPLES / 2],
+            "maximum_ns": samples[SAMPLES - 1],
+        })
+    }
+
+    #[test]
+    #[ignore = "manual Phase 17 representative large-session measurement; run explicitly with --ignored --nocapture"]
+    fn phase17_representative_large_session_projection_snapshot_cache_and_memory() {
+        let messages = phase17_measurement_messages();
+        let state = phase17_measurement_state(&messages);
+        let revised_state = phase17_revised_measurement_state(&messages, &state);
+        jcode_context_core::validate_context_state(&state)
+            .expect("representative state must be strictly valid");
+        jcode_context_core::validate_context_state(&revised_state)
+            .expect("representative revised state must be strictly valid");
+
+        let projection = phase17_duration_stats_with_setup(
+            || (),
+            |_| {
+                let projection = jcode_context_core::project_context(&messages, &state)
+                    .expect("representative projection");
+                std::hint::black_box(projection.messages.len());
+            },
+        );
+        let first_session_cache = phase17_duration_stats_with_setup(
+            || phase17_measurement_session(&messages, &state),
+            |session| {
+                let count = session
+                    .projected_provider_messages()
+                    .expect("initial projected cache")
+                    .len();
+                std::hint::black_box(count);
+            },
+        );
+
+        let mut reused_session = phase17_measurement_session(&messages, &state);
+        reused_session
+            .projected_provider_messages()
+            .expect("populate reusable projected cache");
+        let unchanged_cache_reuse = phase17_duration_stats_with_setup(
+            || (),
+            |_| {
+                let count = reused_session
+                    .projected_provider_messages()
+                    .expect("reuse projected cache")
+                    .len();
+                std::hint::black_box(count);
+            },
+        );
+
+        let append_fast_path = phase17_duration_stats_with_setup(
+            || {
+                let mut session = phase17_measurement_session(&messages, &state);
+                session
+                    .projected_provider_messages()
+                    .expect("populate projected cache before append");
+                session.append_stored_message(stored(
+                    "phase17-appended-message",
+                    Role::User,
+                    vec![ContentBlock::Text {
+                        text: "phase17 appended fast-path message".to_string(),
+                        cache_control: None,
+                    }],
+                ));
+                session
+            },
+            |session| {
+                let count = session
+                    .projected_provider_messages()
+                    .expect("append projected cache")
+                    .len();
+                std::hint::black_box(count);
+            },
+        );
+
+        let revision_rebuild = phase17_duration_stats_with_setup(
+            || {
+                let mut session = phase17_measurement_session(&messages, &state);
+                session
+                    .projected_provider_messages()
+                    .expect("populate projected cache before revision");
+                session.context_view = revised_state.clone();
+                session
+            },
+            |session| {
+                let count = session
+                    .projected_provider_messages()
+                    .expect("context-revision projected cache rebuild")
+                    .len();
+                std::hint::black_box(count);
+            },
+        );
+
+        let snapshot_construction = phase17_duration_stats_with_setup(
+            || (),
+            |_| {
+                let snapshot = build_context_editor_snapshot(ContextSnapshotInput {
+                    session_id: "phase17-representative-performance",
+                    messages: &messages,
+                    context_view: &state,
+                    processing: false,
+                    provider: &SnapshotProvider,
+                    route: "synthetic",
+                })
+                .expect("representative Context Editor snapshot");
+                std::hint::black_box(snapshot.messages.len());
+            },
+        );
+        let representative_snapshot = build_context_editor_snapshot(ContextSnapshotInput {
+            session_id: "phase17-representative-performance",
+            messages: &messages,
+            context_view: &state,
+            processing: false,
+            provider: &SnapshotProvider,
+            route: "synthetic",
+        })
+        .expect("representative Context Editor snapshot for payload measurements");
+        let snapshot_pagination = phase17_duration_stats_with_setup(
+            || Some(representative_snapshot.clone()),
+            |snapshot| {
+                let page = paginate_context_editor_snapshot(
+                    snapshot
+                        .take()
+                        .expect("representative snapshot setup must be present"),
+                    4_200,
+                    crate::protocol::CONTEXT_SNAPSHOT_MAX_PAGE_SIZE,
+                )
+                .expect("representative maximum snapshot page");
+                std::hint::black_box(page.messages.len());
+            },
+        );
+        let page = paginate_context_editor_snapshot(
+            representative_snapshot.clone(),
+            4_200,
+            crate::protocol::CONTEXT_SNAPSHOT_MAX_PAGE_SIZE,
+        )
+        .expect("representative maximum snapshot page");
+        assert_eq!(page.messages.len(), 1_000);
+        assert!(
+            page.messages
+                .iter()
+                .any(|message| message.summary_coverage.is_some())
+        );
+        assert!(
+            page.messages.iter().all(|message| {
+                message.preview.chars().count() <= MESSAGE_PREVIEW_MAX_CHARS + 1
+            })
+        );
+        assert!(
+            page.messages
+                .iter()
+                .flat_map(|message| &message.blocks)
+                .any(|block| block.has_image_payload)
+        );
+        let page_json = serde_json::to_vec(&page).expect("serialize representative page");
+        assert!(!String::from_utf8_lossy(&page_json).contains("phase17-image-payload"));
+
+        let mut memory_session = phase17_measurement_session(&messages, &state);
+        let memory_before_projection = memory_session.memory_profile_snapshot();
+        memory_session
+            .projected_provider_messages()
+            .expect("populate projected cache for memory profile");
+        let memory_after_projection = memory_session.memory_profile_snapshot();
+        memory_session.release_provider_messages_cache();
+        let memory_after_cache_release = memory_session.memory_profile_snapshot();
+        assert_eq!(
+            memory_after_cache_release.projected_provider_cache_message_count,
+            0
+        );
+        assert_eq!(
+            memory_after_cache_release.projected_provider_cache_json_bytes,
+            0
+        );
+
+        let report = serde_json::json!({
+            "identity": {
+                "git_hash": jcode_build_meta::GIT_HASH,
+                "version": jcode_build_meta::VERSION,
+                "root_package_version": jcode_build_meta::PKG_VERSION,
+                "os": std::env::consts::OS,
+                "architecture": std::env::consts::ARCH,
+            },
+            "fixture": {
+                "authoritative_messages": messages.len(),
+                "tool_pairs": 500,
+                "active_transactions": state.active_transaction_count(),
+                "active_range_summaries": 5,
+                "active_reasoning_suppressions": 1,
+                "active_tool_distillations": 1,
+                "image_messages": 10,
+                "context_state_json_bytes": serde_json::to_vec(&state).expect("serialize context state").len(),
+                "full_snapshot_json_bytes": serde_json::to_vec(&representative_snapshot).expect("serialize full snapshot").len(),
+                "paged_snapshot_json_bytes": page_json.len(),
+            },
+            "timings": {
+                "pure_projection": projection,
+                "first_session_projected_cache": first_session_cache,
+                "unchanged_cache_reuse": unchanged_cache_reuse,
+                "one_message_append_fast_path": append_fast_path,
+                "context_revision_cache_rebuild": revision_rebuild,
+                "full_context_editor_snapshot": snapshot_construction,
+                "maximum_page_pagination": snapshot_pagination,
+            },
+            "memory_profile": {
+                "before_projection": memory_before_projection,
+                "after_projection": memory_after_projection,
+                "after_cache_release": memory_after_cache_release,
+            },
+        });
+        println!(
+            "PHASE17_CONTEXT_PERFORMANCE={}",
+            serde_json::to_string_pretty(&report).expect("serialize performance report")
+        );
     }
 
     #[test]

@@ -7,7 +7,7 @@ This RFC describes a modular target architecture for jcode that matches the curr
 It is intentionally aligned with:
 
 - [`REFACTORING.md`](./REFACTORING.md)
-- [`COMPILE_PERFORMANCE_PLAN.md`](./COMPILE_PERFORMANCE_PLAN.md)
+- [`COMPILE_PERFORMANCE_PLAN.md`](./plans/COMPILE_PERFORMANCE_PLAN.md)
 - [`SERVER_ARCHITECTURE.md`](./SERVER_ARCHITECTURE.md)
 - [`MULTI_SESSION_CLIENT_ARCHITECTURE.md`](./MULTI_SESSION_CLIENT_ARCHITECTURE.md)
 
@@ -339,7 +339,7 @@ These own product behavior but should depend only downward on contracts/support 
 Target crates:
 
 - `jcode-provider`: provider composition, provider routing, streaming contract adapters, and concrete runtime implementations layered on the `jcode-provider-core` trait.
-- `jcode-agent`: turn loop, compaction orchestration, provider/tool interaction, recovery logic.
+- `jcode-agent`: turn loop, explicit context-transaction orchestration, provider/tool interaction, recovery logic.
 - `jcode-session`: session model, state transitions, persistence-facing session operations.
 - `jcode-server`: daemon lifecycle, client attachment, swarm/background coordination, service registries.
 - `jcode-tools` or narrower `jcode-tool-core` plus `jcode-tool-impl`: tool registry contracts and tool implementations.
@@ -572,7 +572,7 @@ Should contain:
 - turn-loop engine
 - stream handling and response recovery
 - tool execution orchestration
-- compaction integration
+- provider-context projection and explicit transaction integration
 - prompt assembly inputs that are agent-domain concerns
 
 Should not contain:
@@ -745,7 +745,7 @@ This is the recommended direction from the current tree, not a one-shot move lis
 |---|---|
 | `src/id.rs`, protocol/message/config primitives | `jcode-core` |
 | `src/session.rs`, parts of `storage`, restart snapshot concerns | `jcode-session` |
-| `src/agent/*`, parts of `compaction`, tool orchestration seams | `jcode-agent` |
+| `src/agent/*`, context projection/transaction orchestration seams, tool orchestration seams | `jcode-agent` |
 | `src/server/` + shrinking `src/server.rs` facade | `jcode-server` |
 | `src/provider/mod.rs` trait/contracts plus provider composition seams | `jcode-provider` |
 | existing provider helper crates | remain leaf/provider support crates |
