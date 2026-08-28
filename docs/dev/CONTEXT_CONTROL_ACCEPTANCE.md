@@ -35,8 +35,18 @@ e3681769d context: expose coverage and file evidence
 d8b1b2c73 provider: add GPT-5.6 Sol 1M profile
 ```
 
-The Phase 17 completion commit, final test observations, provider-probe status, performance
-results, and runtime build identity must be recorded here before delivery.
+Phase 17's immutable implementation boundary is:
+
+```text
+commit: 0ca9bc6e1f1d739a654d73174e06ffa52760abe0
+subject: context: complete final system acceptance
+staged/committed patch SHA-256: 1b576cda4607e28dce8ba38343d6d79f53964a48f12d18b19e5235d63e581958
+```
+
+The reviewed staged patch and `git show --format= --binary` committed patch were proven
+byte-identical. A documentation-only signoff commit records this immutable implementation
+identity; its own hash is intentionally recorded in the external chronological completion
+handoff rather than self-referenced inside its tree.
 
 ## Protected baseline
 
@@ -530,9 +540,9 @@ hidden in an aggregate count.
 Complete this section before Phase 17 delivery.
 
 ```text
-Phase 17 commit: pending
-Reviewed patch SHA-256: pending
-Committed patch SHA-256: pending
+Phase 17 implementation commit: 0ca9bc6e1f1d739a654d73174e06ffa52760abe0
+Reviewed staged patch SHA-256: 1b576cda4607e28dce8ba38343d6d79f53964a48f12d18b19e5235d63e581958
+Committed patch SHA-256: 1b576cda4607e28dce8ba38343d6d79f53964a48f12d18b19e5235d63e581958; byte-identical to staged patch
 Format: passed
 Whitespace: passed
 Strict lint: passed for every directly affected package/provider runtime and root jcode, all targets, -D warnings
@@ -540,13 +550,13 @@ Focused tests: 154 passed, 0 failed; two measurements passed when explicitly sel
 Broad tests: 5,971 passed, 0 failed, 49 enumerated ignored across 27 package suites
 Performance fixture: passed; exact observations recorded above
 Credentialed probes: user-ratified as non-blocking; extensive OpenAI production use accepted; no new quota-consuming probe; other provider live behavior not claimed
-Build: coordinated TUI build passed in 68.1 seconds before final root warning cleanup; fresh final-source build pending
-Reload: pending
-Canary: pending
-Visual acceptance: pending
-Hands-on acceptance: pending
-Protected path hashes: pending final recheck
-Final repository status: pending
+Build: exact implementation commit built successfully at 2026-08-28T16:19:06Z
+Reload: SocketReady at 2026-08-28T16:19:07.411955Z; request reload_1787933947192_9068933112790820627
+Canary: 0ca9bc6e1-dirty-da87b673964a passed; current/shared runtime matches
+Visual acceptance: complete >=35-fixture matrix plus exact wide, 72x24/extreme-narrow, coverage, provenance, evidence, curator, critical-status, pressure, privacy, and toolbar-overlap checks passed; live final-build tester fixture/state paths also passed
+Hands-on acceptance: Mirza ratified extensive real OpenAI use across approximately 20–30 sessions, including every Context Editor feature; no production context-control behavior changed after that accepted use
+Protected path hashes: scene.rs 6c237c3cb909d74dd52bdfeea93521597e357563914fbd55e62bce253a259743; actions.rs 6eb4999a7fc30641a14283074fccb97eabb3c1c22a8e4bcf7249650759a19903; unchanged
+Final repository status: only the five pre-existing protected desktop/.DS_Store paths remain; temporary testers and debug-control toggle removed
 ```
 
 No completion claim is valid while a required row remains `pending`, unless the row is
