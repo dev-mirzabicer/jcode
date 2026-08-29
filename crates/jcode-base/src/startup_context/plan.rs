@@ -8,6 +8,7 @@ use jcode_session_types::{StoredStartupFileSpec, StoredStartupProjectIdentity};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug)]
@@ -56,7 +57,7 @@ impl StartupPlanStore {
                 }
                 match self.read_and_decode(&backup_path, project.key()) {
                     Ok(plan) => {
-                        restore_backup(&backup_path, &path)?;
+                        restore_recovered_plan(&plan, &path)?;
                         Ok(LoadedStartupProjectPlan::new(
                             plan,
                             StartupPlanLoadSource::RecoveredBackup,
@@ -235,17 +236,103 @@ fn validate_unique_entries(entries: &[StartupFileSpec]) -> Result<(), StartupCon
     Ok(())
 }
 
-fn restore_backup(backup_path: &Path, primary_path: &Path) -> Result<(), StartupContextError> {
-    std::fs::copy(backup_path, primary_path).map_err(|error| StartupContextError::PlanStorage {
+fn restore_recovered_plan(
+    plan: &StartupProjectPlan,
+    primary_path: &Path,
+) -> Result<(), StartupContextError> {
+    let stored = StoredProjectPlan {
+        schema_version: STARTUP_PROJECT_PLAN_SCHEMA_VERSION,
+        revision: plan.revision(),
+        project: plan.project_key().to_stored()?,
+        entries: plan
+            .entries()
+            .iter()
+            .map(StartupFileSpec::to_stored)
+            .collect::<Result<Vec<_>, _>>()?,
+        updated_at: plan
+            .updated_at()
+            .ok_or_else(|| StartupContextError::InvalidStoredPlan {
+                detail: "a recovered stored plan is missing its update time".to_string(),
+            })?,
+    };
+    let bytes = serde_json::to_vec(&stored).map_err(|error| StartupContextError::PlanStorage {
         path: primary_path.to_path_buf(),
-        detail: format!("recovered plan but could not restore primary file: {error}"),
+        detail: format!("could not serialize recovered plan: {error}"),
     })?;
-    crate::platform::set_permissions_owner_only(primary_path).map_err(|error| {
-        StartupContextError::PlanStorage {
+    let parent = primary_path
+        .parent()
+        .ok_or_else(|| StartupContextError::PlanStorage {
             path: primary_path.to_path_buf(),
-            detail: format!("recovered plan but could not harden primary permissions: {error}"),
+            detail: "plan path has no parent directory".to_string(),
+        })?;
+    jcode_storage::ensure_dir(parent).map_err(|error| StartupContextError::PlanStorage {
+        path: primary_path.to_path_buf(),
+        detail: format!("could not prepare recovered plan directory: {error}"),
+    })?;
+    let filename = primary_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("startup-plan");
+    let temporary_path = parent.join(format!(
+        ".{filename}.recovery.{}.{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+
+    let result = (|| -> Result<(), StartupContextError> {
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary_path)
+            .map_err(|error| StartupContextError::PlanStorage {
+                path: primary_path.to_path_buf(),
+                detail: format!("could not create recovered plan temporary file: {error}"),
+            })?;
+        crate::platform::set_permissions_owner_only(&temporary_path).map_err(|error| {
+            StartupContextError::PlanStorage {
+                path: primary_path.to_path_buf(),
+                detail: format!("could not harden recovered plan temporary file: {error}"),
+            }
+        })?;
+        file.write_all(&bytes)
+            .and_then(|()| file.sync_all())
+            .map_err(|error| StartupContextError::PlanStorage {
+                path: primary_path.to_path_buf(),
+                detail: format!("could not durably write recovered plan: {error}"),
+            })?;
+
+        #[cfg(not(unix))]
+        if primary_path.exists() {
+            std::fs::remove_file(primary_path).map_err(|error| {
+                StartupContextError::PlanStorage {
+                    path: primary_path.to_path_buf(),
+                    detail: format!("could not replace corrupt recovered plan: {error}"),
+                }
+            })?;
         }
-    })
+        std::fs::rename(&temporary_path, primary_path).map_err(|error| {
+            StartupContextError::PlanStorage {
+                path: primary_path.to_path_buf(),
+                detail: format!("could not publish recovered plan atomically: {error}"),
+            }
+        })?;
+        crate::platform::set_permissions_owner_only(primary_path).map_err(|error| {
+            StartupContextError::PlanStorage {
+                path: primary_path.to_path_buf(),
+                detail: format!("could not harden recovered primary plan: {error}"),
+            }
+        })?;
+        #[cfg(unix)]
+        if let Ok(directory) = std::fs::File::open(parent) {
+            let _ = directory.sync_all();
+        }
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary_path);
+    }
+    result
 }
 
 #[cfg(test)]

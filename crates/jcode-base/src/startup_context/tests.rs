@@ -330,6 +330,36 @@ fn semantically_invalid_primary_recovers_valid_backup() {
         .expect("recover semantic corruption");
     assert_eq!(recovered.source(), StartupPlanLoadSource::RecoveredBackup);
     assert_eq!(recovered.plan().revision(), first.revision());
+    assert_eq!(
+        context
+            .load_project_plan(&project)
+            .expect("load restored primary")
+            .source(),
+        StartupPlanLoadSource::Primary
+    );
+}
+
+#[test]
+fn stored_file_spec_id_must_match_the_sha256_width() {
+    let temp = TempDir::new().expect("tempdir");
+    let root = temp.path().join("project");
+    let context = context(&temp);
+    let project = resolve_non_git(&context, &root);
+    write_file(&root.join("one.md"), "one");
+    let preview = context.preview_selection(&project, [StartupSelectionInput::new("one.md")]);
+    context
+        .save_project_plan(&project, 0, &preview)
+        .expect("save plan");
+    let path = plan::stored_plan_path(&context.plan_store, project.key());
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).unwrap()).expect("parse plan");
+    value["entries"][0]["id"] = serde_json::json!("a");
+    plan::write_raw_plan(&path, &value);
+
+    assert!(matches!(
+        context.load_project_plan(&project),
+        Err(StartupContextError::PlanStorage { .. })
+    ));
 }
 
 #[test]
@@ -512,6 +542,7 @@ fn external_targets_require_bound_approval_and_retargeting_requires_confirmation
     assert!(selected.spec().path().is_project_relative());
 
     fs::remove_file(&link).expect("remove old symlink");
+    fs::remove_file(&first).expect("remove old approved target");
     symlink(&second, &link).expect("retarget symlink");
     let outcome = context
         .prepare_selection(&project, 0, &approved, StartupFailurePolicy::Block)
@@ -519,7 +550,11 @@ fn external_targets_require_bound_approval_and_retargeting_requires_confirmation
     assert!(matches!(outcome, StartupPreparationOutcome::Blocked(_)));
     assert!(matches!(
         outcome.preparation().issues().next().unwrap().kind(),
-        StartupFileIssueKind::ExternalTargetChanged { .. }
+        StartupFileIssueKind::ExternalTargetChanged {
+            approved_target,
+            resolved_target,
+        } if approved_target == &required_target
+            && resolved_target == &second.canonicalize().unwrap()
     ));
 }
 

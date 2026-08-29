@@ -193,8 +193,6 @@ pub(super) fn resolve_existing_spec(
         project,
         spec.clone(),
         logical_absolute,
-        spec.external_approval()
-            .map(|approval| approval.approved_resolved_target()),
         max_batch_bytes,
         None,
     )
@@ -242,7 +240,6 @@ fn normalize_input(
         project,
         spec,
         logical_absolute,
-        input.approved_external_target(),
         max_batch_bytes,
         Some(input_index),
     )
@@ -252,7 +249,6 @@ fn resolve_target(
     project: &ActiveProject,
     spec: StartupFileSpec,
     logical_absolute: PathBuf,
-    approved_external_target: Option<&Path>,
     max_batch_bytes: u64,
     input_index: Option<usize>,
 ) -> Result<ResolvedStartupTarget, StartupFileIssue> {
@@ -271,11 +267,9 @@ fn resolve_target(
         StartupPathClassification::External
     };
     if classification == StartupPathClassification::External {
-        let approved = approved_external_target
-            .or_else(|| {
-                spec.external_approval()
-                    .map(|approval| approval.approved_resolved_target())
-            })
+        let approved = spec
+            .external_approval()
+            .map(|approval| approval.approved_resolved_target())
             .ok_or_else(|| {
                 issue_for(
                     &spec,
@@ -285,19 +279,12 @@ fn resolve_target(
                     },
                 )
             })?;
-        let approved = canonicalize_approval(approved).map_err(|detail| {
-            issue_for(
-                &spec,
-                input_index,
-                StartupFileIssueKind::InvalidExternalApproval { detail },
-            )
-        })?;
         if approved != resolved_path {
             return Err(issue_for(
                 &spec,
                 input_index,
                 StartupFileIssueKind::ExternalTargetChanged {
-                    approved_target: approved,
+                    approved_target: approved.to_path_buf(),
                     resolved_target: resolved_path,
                 },
             ));

@@ -106,12 +106,10 @@ impl StartupFileSpecId {
     }
 
     pub(super) fn from_stored(value: String) -> Result<Self, StartupContextError> {
-        if value.is_empty()
-            || value.len() > 128
-            || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
-        {
+        if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err(StartupContextError::InvalidStoredPlan {
-                detail: "startup file spec id must be 1 to 128 hexadecimal characters".to_string(),
+                detail: "startup file spec id must be exactly 64 hexadecimal characters"
+                    .to_string(),
             });
         }
         Ok(Self(value))
