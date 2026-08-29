@@ -196,6 +196,36 @@ fn missing_plan_is_empty_and_saved_plan_contains_no_file_contents() {
 }
 
 #[test]
+fn external_approval_round_trips_in_the_private_plan() {
+    let temp = TempDir::new().expect("tempdir");
+    let root = temp.path().join("project");
+    let external = temp.path().join("shared-plan.md");
+    write_file(&external, "shared plan");
+    let context = context(&temp);
+    let project = resolve_non_git(&context, &root);
+    let preview = context.preview_selection(
+        &project,
+        [StartupSelectionInput::new(&external).with_external_approval(&external)],
+    );
+    let saved = context
+        .save_project_plan(&project, 0, &preview)
+        .expect("save external plan");
+    let loaded = context
+        .load_project_plan(&project)
+        .expect("load external plan")
+        .into_plan();
+
+    assert_eq!(loaded.entries(), saved.entries());
+    assert_eq!(
+        loaded.entries()[0]
+            .external_approval()
+            .unwrap()
+            .approved_resolved_target(),
+        external.canonicalize().unwrap()
+    );
+}
+
+#[test]
 fn plan_revision_changes_only_for_ordered_default_changes() {
     let temp = TempDir::new().expect("tempdir");
     let root = temp.path().join("project");
@@ -326,6 +356,34 @@ fn unknown_plan_schema_fails_without_falling_back_to_older_backup() {
             schema_version: 99,
             ..
         })
+    ));
+}
+
+#[test]
+fn stored_project_identity_mismatch_is_reported_as_corrupt_state() {
+    let temp = TempDir::new().expect("tempdir");
+    let root = temp.path().join("project");
+    let other = temp.path().join("other-project");
+    let context = context(&temp);
+    let project = resolve_non_git(&context, &root);
+    fs::create_dir_all(&other).expect("create other project");
+    write_file(&root.join("one.md"), "one");
+    let preview = context.preview_selection(&project, [StartupSelectionInput::new("one.md")]);
+    context
+        .save_project_plan(&project, 0, &preview)
+        .expect("save plan");
+    let path = plan::stored_plan_path(&context.plan_store, project.key());
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).unwrap()).expect("parse plan");
+    value["project"] = serde_json::json!({
+        "kind": "directory",
+        "canonical_root": other.canonicalize().unwrap().to_str().unwrap(),
+    });
+    plan::write_raw_plan(&path, &value);
+
+    assert!(matches!(
+        context.load_project_plan(&project),
+        Err(StartupContextError::PlanStorage { .. })
     ));
 }
 
@@ -556,6 +614,28 @@ fn complete_capture_preserves_exact_empty_and_unicode_bytes() {
 }
 
 #[test]
+fn complete_capture_handles_large_bounded_text_without_truncation() {
+    let temp = TempDir::new().expect("tempdir");
+    let root = temp.path().join("project");
+    let text = "0123456789abcdef\n".repeat(65_536);
+    write_file(&root.join("large.md"), text.as_bytes());
+    let context = context(&temp);
+    let project = context.resolve_project(&root).expect("resolve project");
+    let preview = context.preview_selection(&project, [StartupSelectionInput::new("large.md")]);
+    let outcome = context
+        .prepare_selection(&project, 0, &preview, StartupFailurePolicy::Block)
+        .expect("capture large bounded text");
+    let captured = outcome.preparation().captured_files().next().unwrap();
+
+    assert_eq!(captured.bytes(), text.len() as u64);
+    assert_eq!(captured.text().as_bytes(), text.as_bytes());
+    assert_eq!(
+        captured.sha256(),
+        format!("{:x}", Sha256::digest(text.as_bytes()))
+    );
+}
+
+#[test]
 fn invalid_and_unsupported_sources_are_typed_and_never_captured() {
     let temp = TempDir::new().expect("tempdir");
     let root = temp.path().join("project");
@@ -563,6 +643,7 @@ fn invalid_and_unsupported_sources_are_typed_and_never_captured() {
     write_file(&root.join("document.pdf"), b"plain text despite extension");
     write_file(&root.join("image.bin"), b"\x89PNG\r\n\x1a\nrest");
     write_file(&root.join("binary.bin"), b"abc\0def");
+    write_file(&root.join("control.txt"), b"abc\x1bdef");
     write_file(&root.join("invalid-utf8.txt"), [0xf0, 0x28, 0x8c, 0x28]);
     let context = context(&temp);
     let project = context.resolve_project(&root).expect("resolve project");
@@ -574,6 +655,7 @@ fn invalid_and_unsupported_sources_are_typed_and_never_captured() {
             StartupSelectionInput::new("document.pdf"),
             StartupSelectionInput::new("image.bin"),
             StartupSelectionInput::new("binary.bin"),
+            StartupSelectionInput::new("control.txt"),
             StartupSelectionInput::new("invalid-utf8.txt"),
         ],
     );
@@ -613,6 +695,18 @@ fn invalid_and_unsupported_sources_are_typed_and_never_captured() {
             content: StartupUnsupportedContent::Binary
         }
     )));
+    assert_eq!(
+        kinds
+            .iter()
+            .filter(|kind| matches!(
+                kind,
+                StartupFileIssueKind::UnsupportedContent {
+                    content: StartupUnsupportedContent::Binary
+                }
+            ))
+            .count(),
+        2
+    );
     assert!(
         kinds
             .iter()

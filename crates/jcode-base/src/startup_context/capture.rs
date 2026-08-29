@@ -367,6 +367,17 @@ fn capture_attempt(
     }
     let text = String::from_utf8(bytes)
         .map_err(|_| StartupFileIssue::for_spec(&target.spec, StartupFileIssueKind::NonUtf8))?;
+    if text
+        .chars()
+        .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+    {
+        return Err(StartupFileIssue::for_spec(
+            &target.spec,
+            StartupFileIssueKind::UnsupportedContent {
+                content: StartupUnsupportedContent::Binary,
+            },
+        ));
+    }
     let sha256 = format!("{:x}", Sha256::digest(text.as_bytes()));
     let estimated_tokens = u64::try_from(crate::util::estimate_tokens(&text)).unwrap_or(u64::MAX);
     Ok(CapturedStartupFile::new(
