@@ -5,6 +5,8 @@ use std::collections::HashSet;
 
 mod context;
 pub use context::*;
+mod startup_context;
+pub use startup_context::*;
 
 /// Identifies a session to resume, across the agent backends jcode can import
 /// from. This is pure data (only ids/paths) with no UI dependency; it lives in
