@@ -2101,7 +2101,9 @@ pub(in crate::tui::app) fn handle_server_event(
         | ServerEvent::StartupContextSearchResults { .. }
         | ServerEvent::StartupContextSearchCanceled { .. }
         | ServerEvent::StartupContextFilePreview { .. }
-        | ServerEvent::StartupContextFileDetail { .. } => false,
+        | ServerEvent::StartupContextFileDetail { .. }
+        | ServerEvent::StartupContextSelectionPreview { .. }
+        | ServerEvent::StartupContextApplyStatus { .. } => false,
         ServerEvent::CompactedHistory {
             session_id,
             messages,

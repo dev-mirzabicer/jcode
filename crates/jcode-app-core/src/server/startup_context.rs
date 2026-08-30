@@ -53,6 +53,8 @@ const MAX_FAILURE_MESSAGE_CHARS: usize = 4 * 1024;
 const MAX_OWNER_METADATA_BYTES: u64 = 64 * 1024;
 const OWNER_METADATA_SCHEMA_VERSION: u32 = 1;
 
+pub(super) mod apply;
+
 #[derive(Clone)]
 pub(super) struct StartupContextCoordinator {
     inner: Arc<CoordinatorInner>,
@@ -61,6 +63,7 @@ pub(super) struct StartupContextCoordinator {
 struct CoordinatorInner {
     engine: StartupContext,
     ownership_dir: PathBuf,
+    transactions_dir: PathBuf,
     server_id: String,
     server_name: String,
     process_start_identity: String,
@@ -72,6 +75,8 @@ struct CoordinatorInner {
 struct CoordinatorState {
     leases: HashMap<String, EditorLeaseRecord>,
     searches: HashMap<(String, u64), Arc<AtomicBool>>,
+    active_applies: std::collections::HashSet<String>,
+    active_apply_projects: HashMap<String, usize>,
 }
 
 struct EditorLeaseRecord {
@@ -185,12 +190,19 @@ impl Drop for CrossProcessEditorGuard {
 
 impl StartupContextCoordinator {
     pub(super) fn new(identity: &ServerIdentity) -> Self {
-        Self::from_durable_state_dir(
+        let coordinator = Self::from_durable_state_dir(
             crate::storage::durable_state_dir(),
             identity.id.clone(),
             identity.name.clone(),
             Duration::from_secs(DEFAULT_EDITOR_LEASE_SECS),
-        )
+        );
+        let recovered = coordinator.recover_interrupted_transactions();
+        if recovered > 0 {
+            crate::logging::info(&format!(
+                "Recovered {recovered} interrupted Startup Context apply transaction(s)"
+            ));
+        }
+        coordinator
     }
 
     fn from_durable_state_dir(
@@ -206,6 +218,9 @@ impl StartupContextCoordinator {
                 ownership_dir: durable_state_dir
                     .join("startup-context")
                     .join("editor-leases"),
+                transactions_dir: durable_state_dir
+                    .join("startup-context")
+                    .join("apply-transactions"),
                 server_id,
                 server_name,
                 process_start_identity: current_process_start_identity(),
@@ -312,13 +327,18 @@ impl StartupContextCoordinator {
             }
         };
         let lease = self.lease_availability(&project);
-        compact_status_from_parts(
+        let pending_apply_count = self.pending_apply_count(&session.session_id);
+        let mut status = compact_status_from_parts(
             session.session_id,
             &project,
             loaded_plan.plan(),
             session.receipt.as_ref(),
             lease,
-        )
+        );
+        status.pending_update_count = status
+            .pending_update_count
+            .saturating_add(pending_apply_count);
+        status
     }
 
     pub(super) async fn status_snapshot(
@@ -1283,9 +1303,11 @@ fn owner_snapshot(metadata: &EditorOwnerMetadata) -> StartupContextLeaseOwnerSna
 
 fn expire_locked(state: &mut CoordinatorState, lease_duration: Duration) -> usize {
     let before = state.leases.len();
-    state
-        .leases
-        .retain(|_, lease| lease.renewed_instant.elapsed() < lease_duration);
+    let active_projects = &state.active_apply_projects;
+    state.leases.retain(|project_digest, lease| {
+        active_projects.contains_key(project_digest)
+            || lease.renewed_instant.elapsed() < lease_duration
+    });
     before.saturating_sub(state.leases.len())
 }
 

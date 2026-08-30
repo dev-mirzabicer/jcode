@@ -251,6 +251,43 @@ pub enum Request {
         max_chars: Option<usize>,
     },
 
+    /// Normalize and validate one complete ordered Startup Context selection.
+    #[serde(rename = "preview_startup_context_selection")]
+    PreviewStartupContextSelection {
+        id: u64,
+        lease_id: String,
+        project_key_digest: String,
+        expected_plan_revision: u64,
+        selection: Vec<StartupContextSelectionInput>,
+    },
+
+    /// Atomically apply one ordered selection to the session and optionally its project default.
+    #[serde(rename = "apply_startup_context_selection")]
+    ApplyStartupContextSelection {
+        id: u64,
+        operation_id: String,
+        lease_id: String,
+        project_key_digest: String,
+        expected_plan_revision: u64,
+        selection: Vec<StartupContextSelectionInput>,
+        #[serde(default)]
+        save_project_default: bool,
+    },
+
+    /// Cancel a queued Startup Context apply before it begins committing targets.
+    #[serde(rename = "cancel_startup_context_apply")]
+    CancelStartupContextApply {
+        id: u64,
+        operation_id: String,
+        lease_id: String,
+        project_key_digest: String,
+        expected_plan_revision: u64,
+    },
+
+    /// Inspect one durable Startup Context apply operation.
+    #[serde(rename = "get_startup_context_apply_status")]
+    GetStartupContextApplyStatus { id: u64, operation_id: String },
+
     /// Get one bounded page of the authoritative context-editor snapshot.
     #[serde(rename = "get_context_editor_snapshot")]
     GetContextEditorSnapshot {
@@ -1415,6 +1452,18 @@ pub enum ServerEvent {
     StartupContextFileDetail {
         id: u64,
         detail: StartupContextFileDetail,
+    },
+
+    #[serde(rename = "startup_context_selection_preview")]
+    StartupContextSelectionPreview {
+        id: u64,
+        preview: StartupContextSelectionPreview,
+    },
+
+    #[serde(rename = "startup_context_apply_status")]
+    StartupContextApplyStatus {
+        id: u64,
+        status: StartupContextApplyStatus,
     },
 
     #[serde(rename = "startup_context_failed")]

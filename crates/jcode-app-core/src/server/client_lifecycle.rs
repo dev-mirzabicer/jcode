@@ -1113,7 +1113,7 @@ pub(super) async fn handle_client(
                         info.current_tool_name = None;
                     }
                 }
-                start_processing_message(
+                start_processing_message_with_startup_context(
                     ProcessingMessage {
                         id,
                         content,
@@ -1131,6 +1131,7 @@ pub(super) async fn handle_client(
                     &client_event_tx,
                     &processing_done_tx,
                     active_terminal_env.clone(),
+                    &startup_context,
                     &SwarmStatusRefs {
                         members: &swarm_members,
                         swarms_by_id: &swarms_by_id,
@@ -1940,6 +1941,124 @@ pub(super) async fn handle_client(
                     let _ = client_event_tx.send(ServerEvent::StartupContextFailed { id, failure });
                 }
             },
+
+            Request::PreviewStartupContextSelection {
+                id,
+                lease_id,
+                project_key_digest,
+                expected_plan_revision,
+                selection,
+            } => {
+                let request = super::startup_context::lease_request(
+                    lease_id,
+                    project_key_digest,
+                    Some(expected_plan_revision),
+                    client_session_id.clone(),
+                    client_connection_id.clone(),
+                );
+                match startup_context.preview_selection(request, selection).await {
+                    Ok(preview) => {
+                        super::startup_context::emit_checked(
+                            &client_event_tx,
+                            id,
+                            crate::protocol::StartupContextOperation::PreviewSelection,
+                            ServerEvent::StartupContextSelectionPreview { id, preview },
+                        );
+                    }
+                    Err(failure) => {
+                        let _ =
+                            client_event_tx.send(ServerEvent::StartupContextFailed { id, failure });
+                    }
+                }
+            }
+
+            Request::ApplyStartupContextSelection {
+                id,
+                operation_id,
+                lease_id,
+                project_key_digest,
+                expected_plan_revision,
+                selection,
+                save_project_default,
+            } => {
+                let lease = super::startup_context::lease_request(
+                    lease_id,
+                    project_key_digest,
+                    Some(expected_plan_revision),
+                    client_session_id.clone(),
+                    client_connection_id.clone(),
+                );
+                let request = super::startup_context::apply::ApplySelectionRequest {
+                    lease,
+                    operation_id,
+                    selection,
+                    save_project_default,
+                };
+                match startup_context
+                    .apply_selection(request, Arc::clone(&agent), client_is_processing)
+                    .await
+                {
+                    Ok(status) => {
+                        super::startup_context::emit_checked(
+                            &client_event_tx,
+                            id,
+                            crate::protocol::StartupContextOperation::ApplySelection,
+                            ServerEvent::StartupContextApplyStatus { id, status },
+                        );
+                    }
+                    Err(failure) => {
+                        let _ =
+                            client_event_tx.send(ServerEvent::StartupContextFailed { id, failure });
+                    }
+                }
+            }
+
+            Request::CancelStartupContextApply {
+                id,
+                operation_id,
+                lease_id,
+                project_key_digest,
+                expected_plan_revision,
+            } => {
+                let lease = super::startup_context::lease_request(
+                    lease_id,
+                    project_key_digest,
+                    Some(expected_plan_revision),
+                    client_session_id.clone(),
+                    client_connection_id.clone(),
+                );
+                match startup_context.cancel_apply(lease, &operation_id) {
+                    Ok(status) => {
+                        super::startup_context::emit_checked(
+                            &client_event_tx,
+                            id,
+                            crate::protocol::StartupContextOperation::CancelApply,
+                            ServerEvent::StartupContextApplyStatus { id, status },
+                        );
+                    }
+                    Err(failure) => {
+                        let _ =
+                            client_event_tx.send(ServerEvent::StartupContextFailed { id, failure });
+                    }
+                }
+            }
+
+            Request::GetStartupContextApplyStatus { id, operation_id } => {
+                match startup_context.apply_status(&client_session_id, &operation_id) {
+                    Ok(status) => {
+                        super::startup_context::emit_checked(
+                            &client_event_tx,
+                            id,
+                            crate::protocol::StartupContextOperation::ApplyStatus,
+                            ServerEvent::StartupContextApplyStatus { id, status },
+                        );
+                    }
+                    Err(failure) => {
+                        let _ =
+                            client_event_tx.send(ServerEvent::StartupContextFailed { id, failure });
+                    }
+                }
+            }
 
             Request::GetContextEditorSnapshot {
                 id,
@@ -3426,7 +3545,7 @@ async fn append_context_message(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn start_processing_message(
+async fn start_processing_message_with_startup_context(
     message: ProcessingMessage,
     client_session_id: &str,
     state: &mut ProcessingState<'_>,
@@ -3434,6 +3553,7 @@ async fn start_processing_message(
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
     processing_done_tx: &mpsc::UnboundedSender<(u64, Result<()>, Option<String>)>,
     client_terminal_env: Vec<(String, String)>,
+    startup_context: &Arc<super::startup_context::StartupContextCoordinator>,
     swarm: &SwarmStatusRefs<'_>,
 ) {
     let ProcessingMessage {
@@ -3501,6 +3621,7 @@ async fn start_processing_message(
         client_event_tx.clone(),
     );
     let done_tx = processing_done_tx.clone();
+    let startup_context = Arc::clone(startup_context);
     crate::logging::info(&format!("Processing message id={} spawning task", id));
     *state.task = Some(tokio::spawn(async move {
         let event_tx = tx.clone();
@@ -3508,6 +3629,7 @@ async fn start_processing_message(
             client_terminal_env,
             process_message_streaming_mpsc_with_request_id(
                 agent,
+                startup_context,
                 id,
                 &content,
                 images,
@@ -3566,6 +3688,31 @@ async fn start_processing_message(
         let _ = tx.send(terminal_event);
         let _ = done_tx.send((id, result, completion_report));
     }));
+}
+
+#[cfg(test)]
+async fn start_processing_message(
+    message: ProcessingMessage,
+    client_session_id: &str,
+    state: &mut ProcessingState<'_>,
+    agent: &Arc<Mutex<Agent>>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    processing_done_tx: &mpsc::UnboundedSender<(u64, Result<()>, Option<String>)>,
+    client_terminal_env: Vec<(String, String)>,
+    swarm: &SwarmStatusRefs<'_>,
+) {
+    start_processing_message_with_startup_context(
+        message,
+        client_session_id,
+        state,
+        agent,
+        client_event_tx,
+        processing_done_tx,
+        client_terminal_env,
+        &super::startup_context::test_coordinator(),
+        swarm,
+    )
+    .await;
 }
 
 async fn cancel_processing_message(
@@ -3877,6 +4024,7 @@ pub(super) async fn process_message_streaming_mpsc(
 
 async fn process_message_streaming_mpsc_with_request_id(
     agent: Arc<Mutex<Agent>>,
+    startup_context: Arc<super::startup_context::StartupContextCoordinator>,
     request_id: u64,
     content: &str,
     images: Vec<(String, String)>,
@@ -3885,9 +4033,17 @@ async fn process_message_streaming_mpsc_with_request_id(
 ) -> Result<()> {
     let mut agent = agent.lock().await;
     let session_id = agent.session_id().to_string();
+    emit_startup_apply_drain_events(&startup_context, &mut agent, &event_tx);
     let result = agent
-        .run_once_streaming_mpsc_correlated(request_id, content, images, system_reminder, event_tx)
+        .run_once_streaming_mpsc_correlated(
+            request_id,
+            content,
+            images,
+            system_reminder,
+            event_tx.clone(),
+        )
         .await;
+    emit_startup_apply_drain_events(&startup_context, &mut agent, &event_tx);
     if result.is_ok() {
         crate::runtime_memory_log::emit_event(
             crate::runtime_memory_log::RuntimeMemoryLogEvent::new(
@@ -3903,6 +4059,21 @@ async fn process_message_streaming_mpsc_with_request_id(
         );
     }
     result
+}
+
+fn emit_startup_apply_drain_events(
+    startup_context: &super::startup_context::StartupContextCoordinator,
+    agent: &mut Agent,
+    event_tx: &tokio::sync::mpsc::UnboundedSender<ServerEvent>,
+) {
+    for status in startup_context.drain_pending_for_agent(agent) {
+        super::startup_context::emit_checked(
+            event_tx,
+            0,
+            crate::protocol::StartupContextOperation::ApplySelection,
+            ServerEvent::StartupContextApplyStatus { id: 0, status },
+        );
+    }
 }
 
 #[cfg(test)]

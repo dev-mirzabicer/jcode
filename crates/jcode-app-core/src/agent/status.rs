@@ -5,6 +5,10 @@ impl Agent {
         &self.session
     }
 
+    pub(crate) fn startup_context_session_mut(&mut self) -> &mut crate::session::Session {
+        &mut self.session
+    }
+
     pub fn session_memory_profile_snapshot(
         &mut self,
     ) -> crate::session::SessionMemoryProfileSnapshot {

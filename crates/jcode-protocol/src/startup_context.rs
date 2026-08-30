@@ -16,6 +16,7 @@ pub const STARTUP_CONTEXT_FILE_DETAIL_MAX_CHARS: usize = 64 * 1024;
 pub const STARTUP_CONTEXT_IDENTIFIER_MAX_CHARS: usize = 512;
 pub const STARTUP_CONTEXT_PATH_MAX_CHARS: usize = 16 * 1024;
 pub const STARTUP_CONTEXT_QUERY_MAX_CHARS: usize = 1_024;
+pub const STARTUP_CONTEXT_SELECTION_MAX_ENTRIES: usize = 1_024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -339,6 +340,91 @@ pub struct StartupContextFileDetail {
     pub content: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartupContextSelectionInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub existing_spec_id: Option<String>,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_external_target: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum StartupContextSelectionEntrySnapshot {
+    Selected {
+        input_index: usize,
+        spec_id: String,
+        logical_path: String,
+        resolved_path: String,
+        classification: StartupContextPathClassification,
+        bytes: u64,
+        estimated_tokens: u64,
+        requires_external_approval: bool,
+    },
+    Issue {
+        issue: StartupContextFileIssueSnapshot,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartupContextSelectionPreview {
+    pub project_key_digest: String,
+    pub plan_revision: u64,
+    pub entry_count: usize,
+    pub selected_count: usize,
+    pub issue_count: usize,
+    pub aggregate_bytes: u64,
+    pub aggregate_estimated_tokens: u64,
+    pub entries: Vec<StartupContextSelectionEntrySnapshot>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub batch_issues: Vec<StartupContextFileIssueSnapshot>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StartupContextApplyPhase {
+    Queued,
+    Applying,
+    RecoveryRequired,
+    Succeeded,
+    Failed,
+    Canceled,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum StartupContextApplyTargetState {
+    NotRequested,
+    Pending,
+    Unchanged,
+    Applied {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        revision: Option<u64>,
+    },
+    Failed {
+        message: String,
+        retryable: bool,
+    },
+    Canceled,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartupContextApplyStatus {
+    pub operation_id: String,
+    pub session_id: String,
+    pub phase: StartupContextApplyPhase,
+    pub session_target: StartupContextApplyTargetState,
+    pub project_default_target: StartupContextApplyTargetState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_id: Option<String>,
+    pub file_count: usize,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<StartupContextFailure>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StartupContextOperation {
@@ -351,6 +437,10 @@ pub enum StartupContextOperation {
     CancelSearch,
     PreviewFile,
     FileDetail,
+    PreviewSelection,
+    ApplySelection,
+    CancelApply,
+    ApplyStatus,
     HistoryProjection,
 }
 
@@ -373,6 +463,9 @@ pub enum StartupContextFailureKind {
     DigestMismatch,
     EventTooLarge,
     SearchCanceled,
+    ApplyNotFound,
+    OperationConflict,
+    Recovery,
     Internal,
 }
 

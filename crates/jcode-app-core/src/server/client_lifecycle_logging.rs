@@ -60,6 +60,8 @@ pub(super) fn request_type_is_read_only(kind: &str) -> bool {
             | "search_startup_context_files"
             | "preview_startup_context_file"
             | "get_startup_context_file_detail"
+            | "preview_startup_context_selection"
+            | "get_startup_context_apply_status"
             | "get_context_editor_snapshot"
             | "get_context_message_detail"
             | "get_context_draft_status"
@@ -105,6 +107,10 @@ pub(super) fn request_payload_summary(kind: &str, line: &str) -> Vec<(String, St
         if let Some(images) = value.get("images").and_then(|v| v.as_array()) {
             fields.push(("image_count".to_string(), images.len().to_string()));
         }
+        if let Some(selection) = value.get("selection").and_then(|v| v.as_array()) {
+            fields.push(("selection_count".to_string(), selection.len().to_string()));
+        }
+        bytes_chars("operation_id", &value, &mut fields);
         if let Some(session_id) = value.get("session_id").and_then(|v| v.as_str()) {
             fields.push(("request_session_id".to_string(), session_id.to_string()));
         }
