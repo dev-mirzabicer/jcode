@@ -5,12 +5,14 @@
 //! outcomes. It intentionally has no TUI, protocol, session-mutation, or
 //! provider-dispatch behavior.
 
+mod browser;
 mod capture;
 mod plan;
 mod project;
 mod selection;
 mod types;
 
+pub use browser::*;
 pub use types::*;
 
 use plan::StartupPlanStore;

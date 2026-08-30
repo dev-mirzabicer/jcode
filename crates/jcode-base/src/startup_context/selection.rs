@@ -503,7 +503,7 @@ fn unsupported_extension(path: &Path) -> Option<StartupUnsupportedContent> {
     None
 }
 
-fn natural_os_cmp(left: &OsStr, right: &OsStr) -> Ordering {
+pub(super) fn natural_os_cmp(left: &OsStr, right: &OsStr) -> Ordering {
     natural_bytes_cmp(left.as_encoded_bytes(), right.as_encoded_bytes())
 }
 

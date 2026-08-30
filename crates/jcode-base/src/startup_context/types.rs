@@ -47,6 +47,11 @@ impl ProjectKey {
         bytes
     }
 
+    pub fn digest(&self) -> String {
+        use sha2::{Digest, Sha256};
+        format!("{:x}", Sha256::digest(self.stable_bytes()))
+    }
+
     pub(crate) fn to_stored(&self) -> Result<StoredStartupProjectIdentity, StartupContextError> {
         match self {
             Self::Git {
