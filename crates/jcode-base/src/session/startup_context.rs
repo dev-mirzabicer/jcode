@@ -1154,6 +1154,45 @@ mod tests {
     }
 
     #[test]
+    fn startup_stub_replays_journal_metadata_without_deserializing_append_vectors() {
+        let _lock = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().expect("isolated Jcode home");
+        let _home = EnvRestore::set_path("JCODE_HOME", home.path());
+        let id = "session-startup-metadata-only-journal";
+        let mut session = Session::create_with_id(id.into(), None, None);
+        session.model = Some("snapshot-model".to_string());
+        session.save().expect("save metadata-only fixture snapshot");
+
+        session.model = Some("journal-model".to_string());
+        session.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "heavy appended transcript body ".repeat(2_000),
+                cache_control: None,
+            }],
+        );
+        session.save().expect("append metadata and message journal");
+
+        let journal_path = crate::session::session_journal_path(id).expect("journal path");
+        let line = std::fs::read_to_string(&journal_path).expect("read journal");
+        let mut value: serde_json::Value =
+            serde_json::from_str(line.trim()).expect("parse journal value");
+        value["append_messages"] = serde_json::json!([{"invalid": "stored message shape"}]);
+        std::fs::write(
+            &journal_path,
+            format!(
+                "{}\n",
+                serde_json::to_string(&value).expect("encode journal")
+            ),
+        )
+        .expect("write metadata-only journal fixture");
+
+        let stub = Session::load_startup_stub(id).expect("metadata-only startup stub load");
+        assert_eq!(stub.model.as_deref(), Some("journal-model"));
+        assert!(stub.messages.is_empty());
+    }
+
+    #[test]
     fn every_receipt_state_round_trips_through_session_snapshot_and_journal() {
         let _lock = crate::storage::lock_test_env();
         let home = tempfile::tempdir().expect("isolated Jcode home");

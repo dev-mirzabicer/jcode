@@ -52,6 +52,13 @@ pub(super) struct SessionJournalEntry {
     pub(super) append_replay_events: Vec<StoredReplayEvent>,
 }
 
+/// Metadata-only journal projection used by fast session startup stubs.
+/// Unknown append vectors are skipped by Serde without constructing their contents.
+#[derive(Debug, Deserialize)]
+pub(super) struct SessionJournalMetaEntry {
+    pub(super) meta: SessionJournalMeta,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) enum PersistVectorMode {
     #[default]

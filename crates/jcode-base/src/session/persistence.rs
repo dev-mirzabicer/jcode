@@ -1,10 +1,13 @@
 use anyhow::{Result, bail};
 use chrono::Utc;
+use serde::de::DeserializeOwned;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use super::journal::{PersistVectorMode, SessionJournalEntry, metadata_requires_snapshot};
+use super::journal::{
+    PersistVectorMode, SessionJournalEntry, SessionJournalMetaEntry, metadata_requires_snapshot,
+};
 use super::storage_paths::{file_len_or_zero, session_journal_path_from_snapshot, session_path};
 use super::{MAX_SESSION_JOURNAL_BYTES, RemoteStartupSessionSnapshot, Session, SessionStartupStub};
 use crate::storage;
@@ -32,7 +35,10 @@ impl JournalReplayStats {
 /// Serialized entries always begin with `{"meta":` (struct field order), so
 /// scan for candidate starts and stream-parse consecutive complete entries
 /// from the first position that yields any.
-fn salvage_glued_journal_entries(line: &str, mut apply: impl FnMut(SessionJournalEntry)) -> usize {
+fn salvage_glued_journal_entries<T: DeserializeOwned>(
+    line: &str,
+    mut apply: impl FnMut(T),
+) -> usize {
     const ENTRY_START: &str = "{\"meta\":";
     let mut salvaged = 0usize;
     let mut search_from = 0usize;
@@ -41,8 +47,8 @@ fn salvage_glued_journal_entries(line: &str, mut apply: impl FnMut(SessionJourna
         .and_then(|rest| rest.find(ENTRY_START))
     {
         let candidate_start = search_from + rel;
-        let mut stream = serde_json::Deserializer::from_str(&line[candidate_start..])
-            .into_iter::<SessionJournalEntry>();
+        let mut stream =
+            serde_json::Deserializer::from_str(&line[candidate_start..]).into_iter::<T>();
         let mut parsed = Vec::new();
         for item in &mut stream {
             match item {
@@ -73,9 +79,9 @@ fn salvage_glued_journal_entries(line: &str, mut apply: impl FnMut(SessionJourna
 /// line preserves the rest of the transcript; per-entry `meta` snapshots make
 /// later entries self-sufficient for metadata, and appended messages after a
 /// gap are far better than losing the whole tail.
-fn replay_journal_lines(
+fn replay_journal_lines_as<T: DeserializeOwned>(
     journal_path: &Path,
-    mut apply: impl FnMut(SessionJournalEntry),
+    mut apply: impl FnMut(T),
 ) -> Result<JournalReplayStats> {
     let mut stats = JournalReplayStats::default();
     if !journal_path.exists() {
@@ -90,7 +96,7 @@ fn replay_journal_lines(
         if trimmed.is_empty() {
             continue;
         }
-        match serde_json::from_str::<SessionJournalEntry>(trimmed) {
+        match serde_json::from_str::<T>(trimmed) {
             Ok(entry) => {
                 stats.entries += 1;
                 apply(entry);
@@ -126,6 +132,20 @@ fn replay_journal_lines(
     }
 
     Ok(stats)
+}
+
+fn replay_journal_lines(
+    journal_path: &Path,
+    apply: impl FnMut(SessionJournalEntry),
+) -> Result<JournalReplayStats> {
+    replay_journal_lines_as(journal_path, apply)
+}
+
+fn replay_journal_meta_lines(
+    journal_path: &Path,
+    mut apply: impl FnMut(super::journal::SessionJournalMeta),
+) -> Result<JournalReplayStats> {
+    replay_journal_lines_as::<SessionJournalMetaEntry>(journal_path, |entry| apply(entry.meta))
 }
 
 impl Session {
@@ -344,8 +364,8 @@ impl Session {
         let stub: SessionStartupStub = serde_json::from_reader(reader)?;
         let mut session = Self::session_from_startup_stub(stub);
         let journal_path = session_journal_path_from_snapshot(&path);
-        replay_journal_lines(&journal_path, |entry| {
-            session.apply_journal_meta(entry.meta);
+        replay_journal_meta_lines(&journal_path, |meta| {
+            session.apply_journal_meta(meta);
         })?;
         session.reset_persist_state(path.exists());
         Ok(session)
