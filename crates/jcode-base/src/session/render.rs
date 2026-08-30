@@ -5,7 +5,7 @@ pub use jcode_session_types::{
     RenderedCompactedHistoryInfo, RenderedImage, RenderedImageAnchor, RenderedImageSource,
     RenderedMessage,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Number of compacted historical messages shown by default in the UI.
 ///
@@ -339,9 +339,55 @@ pub fn render_messages_and_images(session: &Session) -> (Vec<RenderedMessage>, V
     (messages, images)
 }
 
+/// Render ordinary remote/optimistic chat history without duplicating raw
+/// receipt-owned Startup Context bodies into the client transcript.
+pub fn render_messages_and_images_for_remote_history(
+    session: &Session,
+) -> (Vec<RenderedMessage>, Vec<RenderedImage>) {
+    let hidden = startup_context_history_message_ids(session);
+    let (messages, images, _) = render_messages_and_images_with_compacted_history_inner(
+        session,
+        DEFAULT_VISIBLE_COMPACTED_HISTORY_MESSAGES,
+        &hidden,
+    );
+    (messages, images)
+}
+
+pub fn render_messages_and_images_with_compacted_history_for_remote_history(
+    session: &Session,
+    compacted_history_visible: usize,
+) -> (
+    Vec<RenderedMessage>,
+    Vec<RenderedImage>,
+    Option<RenderedCompactedHistoryInfo>,
+) {
+    let hidden = startup_context_history_message_ids(session);
+    render_messages_and_images_with_compacted_history_inner(
+        session,
+        compacted_history_visible,
+        &hidden,
+    )
+}
+
 pub fn render_messages_and_images_with_compacted_history(
     session: &Session,
     compacted_history_visible: usize,
+) -> (
+    Vec<RenderedMessage>,
+    Vec<RenderedImage>,
+    Option<RenderedCompactedHistoryInfo>,
+) {
+    render_messages_and_images_with_compacted_history_inner(
+        session,
+        compacted_history_visible,
+        &HashSet::new(),
+    )
+}
+
+fn render_messages_and_images_with_compacted_history_inner(
+    session: &Session,
+    compacted_history_visible: usize,
+    hidden_message_ids: &HashSet<&str>,
 ) -> (
     Vec<RenderedMessage>,
     Vec<RenderedImage>,
@@ -404,6 +450,9 @@ pub fn render_messages_and_images_with_compacted_history(
     }
 
     for (stored_index, msg) in session.messages.iter().enumerate().skip(render_start_idx) {
+        if hidden_message_ids.contains(msg.id.as_str()) {
+            continue;
+        }
         if is_internal_system_reminder(msg) {
             continue;
         }
@@ -578,4 +627,15 @@ pub fn render_messages_and_images_with_compacted_history(
     }
 
     (rendered, images, compacted_info)
+}
+
+fn startup_context_history_message_ids(session: &Session) -> HashSet<&str> {
+    let mut ids = HashSet::new();
+    if let Some(receipt) = session.startup_context.as_ref() {
+        for batch in &receipt.batches {
+            ids.insert(batch.control_message_id.as_str());
+            ids.extend(batch.files.iter().map(|file| file.message_id.as_str()));
+        }
+    }
+    ids
 }

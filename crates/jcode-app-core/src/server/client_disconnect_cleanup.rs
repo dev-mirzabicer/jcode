@@ -68,6 +68,7 @@ pub(super) async fn cleanup_client_connection(
     client_debug_id: &str,
     client_connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
     client_connection_id: &str,
+    startup_context: &super::startup_context::StartupContextCoordinator,
     shutdown_signals: &Arc<RwLock<HashMap<String, InterruptSignal>>>,
     soft_interrupt_queues: &SessionInterruptQueues,
     event_history: &Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
@@ -80,6 +81,13 @@ pub(super) async fn cleanup_client_connection(
             .map(|handle| !handle.is_finished())
             .unwrap_or(false);
     let disposition = disconnect_disposition(disconnected_while_processing);
+
+    let released_startup_leases = startup_context.release_connection(client_connection_id);
+    if released_startup_leases > 0 {
+        crate::logging::info(&format!(
+            "Released {released_startup_leases} Startup Context editor lease(s) for disconnected connection {client_connection_id}"
+        ));
+    }
 
     {
         let mut debug_state = client_debug_state.write().await;

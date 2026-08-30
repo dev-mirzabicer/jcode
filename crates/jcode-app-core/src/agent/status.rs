@@ -1,6 +1,10 @@
 use super::*;
 
 impl Agent {
+    pub(crate) fn startup_context_session(&self) -> &crate::session::Session {
+        &self.session
+    }
+
     pub fn session_memory_profile_snapshot(
         &mut self,
     ) -> crate::session::SessionMemoryProfileSnapshot {

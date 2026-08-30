@@ -66,6 +66,7 @@ use crate::bus::{Bus, BusEvent};
 use crate::id;
 use crate::protocol::{Request, ServerEvent, decode_request, encode_event};
 use crate::provider::Provider;
+use crate::session::Session;
 use crate::tool::Registry;
 use crate::transport::Stream;
 use anyhow::Result;
@@ -353,6 +354,7 @@ pub(super) async fn handle_client(
     _global_event_tx: broadcast::Sender<ServerEvent>,
     provider_template: Arc<dyn Provider>,
     context_transactions: Arc<crate::context::ContextTransactionService>,
+    startup_context: Arc<super::startup_context::StartupContextCoordinator>,
     _global_is_processing: Arc<RwLock<bool>>,
     global_session_id: Arc<RwLock<String>>,
     client_count: Arc<RwLock<usize>>,
@@ -1273,6 +1275,7 @@ pub(super) async fn handle_client(
                             &client_session_id,
                             client_is_processing,
                             &agent,
+                            &startup_context,
                             &provider,
                             &sessions,
                             &client_connections,
@@ -1337,6 +1340,7 @@ pub(super) async fn handle_client(
                             &client_session_id,
                             client_is_processing,
                             &agent,
+                            &startup_context,
                             &provider,
                             &sessions,
                             &client_connections,
@@ -1441,6 +1445,7 @@ pub(super) async fn handle_client(
                                 &mut client_session_id,
                                 &client_connection_id,
                                 &agent,
+                                &startup_context,
                                 &provider,
                                 &registry,
                                 &sessions,
@@ -1576,6 +1581,7 @@ pub(super) async fn handle_client(
                     &client_session_id,
                     client_is_processing,
                     &agent,
+                    &startup_context,
                     &provider,
                     &sessions,
                     &client_connections,
@@ -1602,9 +1608,16 @@ pub(super) async fn handle_client(
             }
 
             Request::GetModelCatalog { id } => {
-                if handle_get_model_catalog(id, &client_session_id, &agent, &provider, &writer)
-                    .await
-                    .is_err()
+                if handle_get_model_catalog(
+                    id,
+                    &client_session_id,
+                    &agent,
+                    &startup_context,
+                    &provider,
+                    &writer,
+                )
+                .await
+                .is_err()
                 {
                     break;
                 }
@@ -1630,6 +1643,303 @@ pub(super) async fn handle_client(
                     break;
                 }
             }
+
+            Request::GetStartupContextStatus {
+                id,
+                file_page_start,
+                file_page_size,
+                issue_page_start,
+                issue_page_size,
+            } => match startup_context_session_snapshot(&agent, &client_session_id) {
+                Ok(session) => {
+                    let snapshot = startup_context
+                        .status_snapshot(
+                            session,
+                            file_page_start,
+                            file_page_size,
+                            issue_page_start,
+                            issue_page_size,
+                        )
+                        .await;
+                    super::startup_context::emit_checked(
+                        &client_event_tx,
+                        id,
+                        crate::protocol::StartupContextOperation::Status,
+                        ServerEvent::StartupContextStatus { id, snapshot },
+                    );
+                }
+                Err(failure) => {
+                    let _ = client_event_tx.send(ServerEvent::StartupContextFailed { id, failure });
+                }
+            },
+
+            Request::OpenStartupContextEditor { id } => {
+                match startup_context_session_snapshot(&agent, &client_session_id) {
+                    Ok(session) => match session.working_dir {
+                        Some(working_dir) => match startup_context
+                            .open_editor(
+                                client_session_id.clone(),
+                                client_connection_id.clone(),
+                                working_dir,
+                            )
+                            .await
+                        {
+                            Ok(super::startup_context::OpenEditorOutcome::Opened(editor)) => {
+                                let release = super::startup_context::lease_request(
+                                    editor.lease.lease_id.clone(),
+                                    editor.project.key_digest.clone(),
+                                    None,
+                                    client_session_id.clone(),
+                                    client_connection_id.clone(),
+                                );
+                                if !super::startup_context::emit_checked(
+                                    &client_event_tx,
+                                    id,
+                                    crate::protocol::StartupContextOperation::OpenEditor,
+                                    ServerEvent::StartupContextEditorOpened { id, editor },
+                                ) {
+                                    let _ = startup_context.close_editor(release);
+                                }
+                            }
+                            Ok(super::startup_context::OpenEditorOutcome::Busy {
+                                project,
+                                owner,
+                            }) => {
+                                super::startup_context::emit_checked(
+                                    &client_event_tx,
+                                    id,
+                                    crate::protocol::StartupContextOperation::OpenEditor,
+                                    ServerEvent::StartupContextEditorBusy { id, project, owner },
+                                );
+                            }
+                            Err(failure) => {
+                                let _ = client_event_tx
+                                    .send(ServerEvent::StartupContextFailed { id, failure });
+                            }
+                        },
+                        None => {
+                            let _ = client_event_tx.send(ServerEvent::StartupContextFailed {
+                                id,
+                                failure: super::startup_context::failure(
+                                    crate::protocol::StartupContextOperation::OpenEditor,
+                                    crate::protocol::StartupContextFailureKind::ProjectIdentity,
+                                    "session has no bound working directory",
+                                    false,
+                                ),
+                            });
+                        }
+                    },
+                    Err(failure) => {
+                        let _ =
+                            client_event_tx.send(ServerEvent::StartupContextFailed { id, failure });
+                    }
+                }
+            }
+
+            Request::RenewStartupContextEditorLease {
+                id,
+                lease_id,
+                project_key_digest,
+                expected_plan_revision,
+            } => {
+                let request = super::startup_context::lease_request(
+                    lease_id,
+                    project_key_digest,
+                    Some(expected_plan_revision),
+                    client_session_id.clone(),
+                    client_connection_id.clone(),
+                );
+                match startup_context.renew_lease(request).await {
+                    Ok(lease) => {
+                        super::startup_context::emit_checked(
+                            &client_event_tx,
+                            id,
+                            crate::protocol::StartupContextOperation::RenewLease,
+                            ServerEvent::StartupContextEditorLeaseRenewed { id, lease },
+                        );
+                    }
+                    Err(failure) => {
+                        let _ =
+                            client_event_tx.send(ServerEvent::StartupContextFailed { id, failure });
+                    }
+                }
+            }
+
+            Request::CloseStartupContextEditor {
+                id,
+                lease_id,
+                project_key_digest,
+            } => {
+                let request = super::startup_context::lease_request(
+                    lease_id,
+                    project_key_digest,
+                    None,
+                    client_session_id.clone(),
+                    client_connection_id.clone(),
+                );
+                match startup_context.close_editor(request) {
+                    Ok(lease_id) => {
+                        super::startup_context::emit_checked(
+                            &client_event_tx,
+                            id,
+                            crate::protocol::StartupContextOperation::CloseEditor,
+                            ServerEvent::StartupContextEditorClosed { id, lease_id },
+                        );
+                    }
+                    Err(failure) => {
+                        let _ =
+                            client_event_tx.send(ServerEvent::StartupContextFailed { id, failure });
+                    }
+                }
+            }
+
+            Request::ListStartupContextDirectory {
+                id,
+                lease_id,
+                project_key_digest,
+                expected_plan_revision,
+                directory,
+                page_start,
+                page_size,
+            } => {
+                let request = super::startup_context::lease_request(
+                    lease_id,
+                    project_key_digest,
+                    Some(expected_plan_revision),
+                    client_session_id.clone(),
+                    client_connection_id.clone(),
+                );
+                match startup_context
+                    .list_directory(request, directory, page_start, page_size)
+                    .await
+                {
+                    Ok(page) => {
+                        super::startup_context::emit_checked(
+                            &client_event_tx,
+                            id,
+                            crate::protocol::StartupContextOperation::ListDirectory,
+                            ServerEvent::StartupContextDirectoryPage { id, page },
+                        );
+                    }
+                    Err(failure) => {
+                        let _ =
+                            client_event_tx.send(ServerEvent::StartupContextFailed { id, failure });
+                    }
+                }
+            }
+
+            Request::SearchStartupContextFiles {
+                id,
+                lease_id,
+                project_key_digest,
+                expected_plan_revision,
+                query,
+                max_results,
+            } => {
+                let request = super::startup_context::lease_request(
+                    lease_id,
+                    project_key_digest,
+                    Some(expected_plan_revision),
+                    client_session_id.clone(),
+                    client_connection_id.clone(),
+                );
+                if let Err(failure) = startup_context.start_search(
+                    id,
+                    request,
+                    query,
+                    max_results,
+                    client_event_tx.clone(),
+                ) {
+                    let _ = client_event_tx.send(ServerEvent::StartupContextFailed { id, failure });
+                }
+            }
+
+            Request::CancelStartupContextSearch {
+                id,
+                search_request_id,
+            } => {
+                let was_active =
+                    startup_context.cancel_search(&client_connection_id, search_request_id);
+                super::startup_context::emit_checked(
+                    &client_event_tx,
+                    id,
+                    crate::protocol::StartupContextOperation::CancelSearch,
+                    ServerEvent::StartupContextSearchCanceled {
+                        id,
+                        search_request_id,
+                        was_active,
+                    },
+                );
+            }
+
+            Request::PreviewStartupContextFile {
+                id,
+                lease_id,
+                project_key_digest,
+                expected_plan_revision,
+                path,
+                start_char,
+                max_chars,
+            } => {
+                let request = super::startup_context::lease_request(
+                    lease_id,
+                    project_key_digest,
+                    Some(expected_plan_revision),
+                    client_session_id.clone(),
+                    client_connection_id.clone(),
+                );
+                match startup_context
+                    .preview_file(request, path, start_char, max_chars)
+                    .await
+                {
+                    Ok(preview) => {
+                        super::startup_context::emit_checked(
+                            &client_event_tx,
+                            id,
+                            crate::protocol::StartupContextOperation::PreviewFile,
+                            ServerEvent::StartupContextFilePreview { id, preview },
+                        );
+                    }
+                    Err(failure) => {
+                        let _ =
+                            client_event_tx.send(ServerEvent::StartupContextFailed { id, failure });
+                    }
+                }
+            }
+
+            Request::GetStartupContextFileDetail {
+                id,
+                batch_id,
+                spec_id,
+                message_id,
+                expected_sha256,
+                start_char,
+                max_chars,
+            } => match startup_context_file_detail(
+                &startup_context,
+                &agent,
+                &client_session_id,
+                &batch_id,
+                &spec_id,
+                &message_id,
+                &expected_sha256,
+                start_char,
+                max_chars,
+            )
+            .await
+            {
+                Ok(detail) => {
+                    super::startup_context::emit_checked(
+                        &client_event_tx,
+                        id,
+                        crate::protocol::StartupContextOperation::FileDetail,
+                        ServerEvent::StartupContextFileDetail { id, detail },
+                    );
+                }
+                Err(failure) => {
+                    let _ = client_event_tx.send(ServerEvent::StartupContextFailed { id, failure });
+                }
+            },
 
             Request::GetContextEditorSnapshot {
                 id,
@@ -1860,6 +2170,7 @@ pub(super) async fn handle_client(
                         &mut client_session_id,
                         &client_connection_id,
                         &agent,
+                        &startup_context,
                         &provider,
                         &registry,
                         &sessions,
@@ -2983,6 +3294,7 @@ pub(super) async fn handle_client(
             &client_debug_id,
             &client_connections,
             &client_connection_id,
+            &startup_context,
             &shutdown_signals,
             &soft_interrupt_queues,
             &event_history,
@@ -2992,6 +3304,90 @@ pub(super) async fn handle_client(
     )
     .await?;
     Ok(())
+}
+
+fn startup_context_session_snapshot(
+    agent: &Arc<Mutex<Agent>>,
+    session_id: &str,
+) -> Result<
+    super::startup_context::StartupContextSessionSnapshot,
+    crate::protocol::StartupContextFailure,
+> {
+    if let Ok(agent) = agent.try_lock() {
+        return Ok(
+            super::startup_context::StartupContextSessionSnapshot::from_session(
+                agent.startup_context_session(),
+            ),
+        );
+    }
+    let session = Session::load_startup_stub(session_id).map_err(|error| {
+        super::startup_context::failure(
+            crate::protocol::StartupContextOperation::Status,
+            crate::protocol::StartupContextFailureKind::Io,
+            format!("could not load Startup Context session metadata: {error}"),
+            true,
+        )
+    })?;
+    Ok(super::startup_context::StartupContextSessionSnapshot::from_session(&session))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn startup_context_file_detail(
+    coordinator: &super::startup_context::StartupContextCoordinator,
+    agent: &Arc<Mutex<Agent>>,
+    session_id: &str,
+    batch_id: &str,
+    spec_id: &str,
+    message_id: &str,
+    expected_sha256: &str,
+    start_char: usize,
+    max_chars: Option<usize>,
+) -> Result<crate::protocol::StartupContextFileDetail, crate::protocol::StartupContextFailure> {
+    if let Ok(agent) = agent.try_lock() {
+        return coordinator.file_detail(
+            agent.startup_context_session(),
+            batch_id,
+            spec_id,
+            message_id,
+            expected_sha256,
+            start_char,
+            max_chars,
+        );
+    }
+    let coordinator = coordinator.clone();
+    let session_id = session_id.to_string();
+    let batch_id = batch_id.to_string();
+    let spec_id = spec_id.to_string();
+    let message_id = message_id.to_string();
+    let expected_sha256 = expected_sha256.to_string();
+    tokio::task::spawn_blocking(move || {
+        let session = Session::load_for_remote_startup(&session_id).map_err(|error| {
+            super::startup_context::failure(
+                crate::protocol::StartupContextOperation::FileDetail,
+                crate::protocol::StartupContextFailureKind::Io,
+                format!("could not load authoritative Startup Context history: {error}"),
+                true,
+            )
+        })?;
+        coordinator.file_detail(
+            &session,
+            &batch_id,
+            &spec_id,
+            &message_id,
+            &expected_sha256,
+            start_char,
+            max_chars,
+        )
+    })
+    .await
+    .map_err(|error| {
+        super::startup_context::failure(
+            crate::protocol::StartupContextOperation::FileDetail,
+            crate::protocol::StartupContextFailureKind::Internal,
+            format!("Startup Context detail task failed: {error}"),
+            true,
+        )
+    })?
 }
 
 async fn append_context_message(

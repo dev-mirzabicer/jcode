@@ -106,6 +106,7 @@ async fn handle_resume_session_allows_attach_from_different_client_instance() ->
         &mut client_session_id,
         "conn_new",
         &new_agent,
+        &crate::server::startup_context::test_coordinator(),
         &provider,
         &new_registry,
         &sessions,

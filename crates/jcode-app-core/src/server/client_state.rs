@@ -74,6 +74,26 @@ fn history_provider_name_from_session(session: &crate::session::Session) -> Opti
     Some(label)
 }
 
+fn startup_context_session_snapshot(
+    agent: &Arc<Mutex<Agent>>,
+    session_id: &str,
+) -> super::startup_context::StartupContextSessionSnapshot {
+    if let Ok(agent) = agent.try_lock() {
+        return super::startup_context::StartupContextSessionSnapshot::from_session(
+            agent.startup_context_session(),
+        );
+    }
+    Session::load_startup_stub(session_id)
+        .map(|session| {
+            super::startup_context::StartupContextSessionSnapshot::from_session(&session)
+        })
+        .unwrap_or_else(|_| super::startup_context::StartupContextSessionSnapshot {
+            session_id: session_id.to_string(),
+            working_dir: None,
+            receipt: None,
+        })
+}
+
 pub(super) async fn handle_get_state(
     id: u64,
     client_session_id: &str,
@@ -107,6 +127,7 @@ pub(super) async fn handle_get_history(
     client_session_id: &str,
     client_is_processing: bool,
     agent: &Arc<Mutex<Agent>>,
+    startup_context: &Arc<super::startup_context::StartupContextCoordinator>,
     provider: &Arc<dyn Provider>,
     sessions: &SessionAgents,
     client_connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
@@ -130,6 +151,7 @@ pub(super) async fn handle_get_history(
             id,
             client_session_id,
             provider,
+            startup_context,
             sessions,
             client_count,
             writer,
@@ -151,6 +173,7 @@ pub(super) async fn handle_get_history(
         id,
         client_session_id,
         agent,
+        startup_context,
         sessions,
         client_count,
         writer,
@@ -180,6 +203,7 @@ pub(super) async fn handle_get_model_catalog(
     id: u64,
     session_id: &str,
     agent: &Arc<Mutex<Agent>>,
+    startup_context: &Arc<super::startup_context::StartupContextCoordinator>,
     provider: &Arc<dyn Provider>,
     writer: &Arc<Mutex<WriteHalf>>,
 ) -> Result<()> {
@@ -223,6 +247,8 @@ pub(super) async fn handle_get_model_catalog(
         }
     };
     let build_ms = build_started.elapsed().as_millis();
+    let startup_snapshot = startup_context_session_snapshot(agent, session_id);
+    let startup_context = Some(startup_context.compact_status(startup_snapshot).await);
 
     let encode_started = Instant::now();
     let event = ServerEvent::History {
@@ -259,6 +285,7 @@ pub(super) async fn handle_get_model_catalog(
         context_revision: 0,
         activity: None,
         side_panel: Default::default(),
+        startup_context,
     };
     let json = encode_event(&event);
     let encode_ms = encode_started.elapsed().as_millis();
@@ -471,6 +498,7 @@ async fn send_history_from_persisted_session(
     id: u64,
     session_id: &str,
     provider: &Arc<dyn Provider>,
+    startup_context: &Arc<super::startup_context::StartupContextCoordinator>,
     sessions: &SessionAgents,
     client_count: &Arc<RwLock<usize>>,
     writer: &Arc<Mutex<WriteHalf>>,
@@ -482,7 +510,8 @@ async fn send_history_from_persisted_session(
     let session = crate::session::Session::load_for_remote_startup(session_id)
         .or_else(|_| crate::session::Session::load_startup_stub(session_id))?;
     let token_usage_totals = session.token_usage_totals();
-    let (rendered_messages, images) = crate::session::render_messages_and_images(&session);
+    let (rendered_messages, images) =
+        crate::session::render_messages_and_images_for_remote_history(&session);
     // Extract the small metadata fields we need, then drop the full Session
     // (including its message transcript) before building and serializing the
     // large History event, so we do not hold Session + rendered payload +
@@ -495,11 +524,14 @@ async fn send_history_from_persisted_session(
     let autojudge_enabled = session.autojudge_enabled;
     let is_canary = session.is_canary;
     let context_revision = session.context_view.revision;
+    let startup_snapshot =
+        super::startup_context::StartupContextSessionSnapshot::from_session(&session);
     let reasoning_effort = session
         .reasoning_effort
         .clone()
         .or_else(|| provider.reasoning_effort());
     drop(session);
+    let startup_context = Some(startup_context.compact_status(startup_snapshot).await);
 
     let messages = rendered_messages
         .into_iter()
@@ -549,6 +581,7 @@ async fn send_history_from_persisted_session(
         context_revision,
         activity,
         side_panel,
+        startup_context,
     };
 
     write_event(writer, &history_event).await
@@ -562,6 +595,7 @@ pub(super) async fn send_history(
     id: u64,
     session_id: &str,
     agent: &Arc<Mutex<Agent>>,
+    startup_context: &Arc<super::startup_context::StartupContextCoordinator>,
     sessions: &SessionAgents,
     client_count: &Arc<RwLock<usize>>,
     writer: &Arc<Mutex<WriteHalf>>,
@@ -595,6 +629,7 @@ pub(super) async fn send_history(
         service_tier,
         context_revision,
         token_usage_totals,
+        startup_snapshot,
         agent_lock_ms,
         history_snapshot_ms,
         image_render_ms,
@@ -670,6 +705,9 @@ pub(super) async fn send_history(
             service_tier,
             context_revision,
             agent_guard.token_usage_totals(),
+            super::startup_context::StartupContextSessionSnapshot::from_session(
+                agent_guard.startup_context_session(),
+            ),
             agent_lock_ms,
             history_snapshot_ms,
             image_render_ms,
@@ -683,6 +721,7 @@ pub(super) async fn send_history(
     };
 
     let side_panel_start = Instant::now();
+    let startup_context = Some(startup_context.compact_status(startup_snapshot).await);
     let side_panel = crate::side_panel::snapshot_for_session(session_id).unwrap_or_default();
     let side_panel_ms = side_panel_start.elapsed().as_millis();
 
@@ -763,6 +802,7 @@ pub(super) async fn send_history(
         context_revision,
         activity,
         side_panel,
+        startup_context,
     };
     let encode_start = Instant::now();
     let json = encode_event(&history_event);

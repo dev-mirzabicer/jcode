@@ -154,12 +154,14 @@ async fn handle_get_history_falls_back_to_persisted_snapshot_when_agent_is_busy(
     let (stream_a, mut stream_b) = crate::transport::stream_pair().expect("stream pair");
     let (_reader_a, writer_a) = stream_a.into_split();
     let writer = Arc::new(Mutex::new(writer_a));
+    let startup_context = crate::server::startup_context::test_coordinator();
 
     handle_get_history(
         42,
         session_id,
         true,
         &agent,
+        &startup_context,
         &provider,
         &sessions,
         &client_connections,
@@ -243,10 +245,11 @@ async fn handle_get_model_catalog_does_not_wait_for_busy_agent_lock() {
     let (stream_a, mut stream_b) = crate::transport::stream_pair().expect("stream pair");
     let (_reader_a, writer_a) = stream_a.into_split();
     let writer = Arc::new(Mutex::new(writer_a));
+    let startup_context = crate::server::startup_context::test_coordinator();
 
     tokio::time::timeout(
         std::time::Duration::from_millis(100),
-        handle_get_model_catalog(43, session_id, &agent, &provider, &writer),
+        handle_get_model_catalog(43, session_id, &agent, &startup_context, &provider, &writer),
     )
     .await
     .expect("model catalog must not wait for busy agent mutex")

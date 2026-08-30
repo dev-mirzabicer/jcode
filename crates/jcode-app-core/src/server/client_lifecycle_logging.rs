@@ -55,6 +55,11 @@ pub(super) fn request_type_is_read_only(kind: &str) -> bool {
             | "get_history"
             | "get_model_catalog"
             | "get_compacted_history"
+            | "get_startup_context_status"
+            | "list_startup_context_directory"
+            | "search_startup_context_files"
+            | "preview_startup_context_file"
+            | "get_startup_context_file_detail"
             | "get_context_editor_snapshot"
             | "get_context_message_detail"
             | "get_context_draft_status"
@@ -84,7 +89,16 @@ pub(super) fn request_payload_summary(kind: &str, line: &str) -> Vec<(String, St
                 }
             };
         for name in [
-            "content", "message", "prompt", "task", "command", "input", "value",
+            "content",
+            "message",
+            "prompt",
+            "task",
+            "command",
+            "input",
+            "value",
+            "query",
+            "path",
+            "directory",
         ] {
             bytes_chars(name, &value, &mut fields);
         }

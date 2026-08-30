@@ -106,6 +106,7 @@ async fn handle_resume_session_allows_reconnect_takeover_with_local_history() ->
         &mut client_session_id,
         "conn_new",
         &new_agent,
+        &crate::server::startup_context::test_coordinator(),
         &provider,
         &new_registry,
         &sessions,

@@ -44,6 +44,7 @@ mod reload_state;
 mod reload_trace;
 mod runtime;
 mod socket;
+mod startup_context;
 mod swarm;
 mod swarm_channels;
 mod swarm_mutation_state;
@@ -654,6 +655,8 @@ pub struct Server {
     /// Process-wide bounded context draft store. Drafts survive client reconnects
     /// for their TTL but are never persisted as active context state.
     context_transactions: Arc<crate::context::ContextTransactionService>,
+    /// Server-owned Startup Context status, browser, and editor-ownership service.
+    startup_context: Arc<startup_context::StartupContextCoordinator>,
     socket_path: PathBuf,
     debug_socket_path: PathBuf,
     gateway_config_override: Option<crate::gateway::GatewayConfig>,
@@ -762,6 +765,7 @@ impl Server {
         Self {
             provider,
             context_transactions: Arc::new(crate::context::ContextTransactionService::new()),
+            startup_context: Arc::new(startup_context::StartupContextCoordinator::new(&identity)),
             socket_path: socket_path(),
             debug_socket_path: debug_socket_path(),
             gateway_config_override: None,
@@ -1199,6 +1203,24 @@ impl Server {
         let registry_info = self.build_registry_info();
 
         let runtime = self.runtime();
+        let startup_context = Arc::clone(&self.startup_context);
+        runtime
+            .spawn_background_task(async move {
+                let mut interval = tokio::time::interval(
+                    startup_context::StartupContextCoordinator::reaper_interval(),
+                );
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    interval.tick().await;
+                    let expired = startup_context.expire_abandoned_leases();
+                    if expired > 0 {
+                        crate::logging::info(&format!(
+                            "Released {expired} expired Startup Context editor lease(s)"
+                        ));
+                    }
+                }
+            })
+            .await;
         let main_handle = runtime.spawn_main_accept_loop(main_listener);
         let debug_handle = runtime.spawn_debug_accept_loop(debug_listener, server_start_time);
 

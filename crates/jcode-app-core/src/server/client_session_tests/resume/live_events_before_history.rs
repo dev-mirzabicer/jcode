@@ -130,6 +130,7 @@ async fn handle_resume_session_registers_live_events_before_history_replay() -> 
                 &mut client_session_id,
                 "conn_restore",
                 &agent,
+                &crate::server::startup_context::test_coordinator(),
                 &provider,
                 &registry,
                 &sessions,

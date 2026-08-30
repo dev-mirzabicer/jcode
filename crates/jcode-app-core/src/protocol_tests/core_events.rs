@@ -141,7 +141,8 @@ fn test_generated_image_event_roundtrip() -> Result<()> {
         metadata_path,
         output_format,
         revised_prompt,
-    } = decoded else {
+    } = decoded
+    else {
         return Err(anyhow!("wrong event type"));
     };
     assert_eq!(id, "ig_123");
@@ -257,6 +258,7 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
                 updated_at_ms: 42,
             }],
         },
+        startup_context: None,
     };
     let json = encode_event(&event);
     assert!(json.contains("\"context_revision\":73"));

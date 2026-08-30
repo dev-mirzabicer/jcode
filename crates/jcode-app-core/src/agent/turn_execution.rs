@@ -980,7 +980,8 @@ impl Agent {
 
     /// Get conversation history for sync
     pub fn get_history(&self) -> Vec<HistoryMessage> {
-        crate::session::render_messages(&self.session)
+        crate::session::render_messages_and_images_for_remote_history(&self.session)
+            .0
             .into_iter()
             .map(|msg| HistoryMessage {
                 role: msg.role,
@@ -998,7 +999,8 @@ impl Agent {
     pub fn get_history_and_rendered_images(
         &self,
     ) -> (Vec<HistoryMessage>, Vec<crate::session::RenderedImage>) {
-        let (messages, images) = crate::session::render_messages_and_images(&self.session);
+        let (messages, images) =
+            crate::session::render_messages_and_images_for_remote_history(&self.session);
         let history = messages
             .into_iter()
             .map(|msg| HistoryMessage {
@@ -1024,7 +1026,7 @@ impl Agent {
         Option<crate::session::RenderedCompactedHistoryInfo>,
     ) {
         let (messages, images, compacted_info) =
-            crate::session::render_messages_and_images_with_compacted_history(
+            crate::session::render_messages_and_images_with_compacted_history_for_remote_history(
                 &self.session,
                 compacted_history_visible,
             );

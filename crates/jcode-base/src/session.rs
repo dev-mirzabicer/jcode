@@ -63,8 +63,9 @@ pub use model::{StoredReplayEvent, StoredReplayEventKind};
 pub use render::{
     RenderedCompactedHistoryInfo, RenderedImage, RenderedImageAnchor, RenderedImageSource,
     RenderedMessage, has_rendered_images, is_attached_image_label_text, render_images,
-    render_messages, render_messages_and_images, render_messages_and_images_with_compacted_history,
-    summarize_tool_calls,
+    render_messages, render_messages_and_images, render_messages_and_images_for_remote_history,
+    render_messages_and_images_with_compacted_history,
+    render_messages_and_images_with_compacted_history_for_remote_history, summarize_tool_calls,
 };
 pub use startup_context::{
     DurableStartupContextSessionPersistence, StartupContextAcceptanceOutcome,

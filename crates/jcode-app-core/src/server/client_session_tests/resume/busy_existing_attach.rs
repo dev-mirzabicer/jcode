@@ -111,6 +111,7 @@ async fn handle_resume_session_allows_live_attach_when_existing_agent_is_busy() 
         &mut client_session_id,
         "conn_new",
         &new_agent,
+        &crate::server::startup_context::test_coordinator(),
         &provider,
         &new_registry,
         &sessions,
