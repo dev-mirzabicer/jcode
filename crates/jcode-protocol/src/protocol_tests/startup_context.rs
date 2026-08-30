@@ -50,6 +50,41 @@ fn startup_context_requests_round_trip_with_bounded_fields() -> Result<()> {
             start_char: 16,
             max_chars: Some(1024),
         },
+        Request::PreviewStartupContextSelection {
+            id: 8,
+            lease_id: "lease".to_string(),
+            project_key_digest: "digest".to_string(),
+            expected_plan_revision: 7,
+            selection: vec![StartupContextSelectionInput {
+                existing_spec_id: None,
+                path: "docs/PLAN.md".to_string(),
+                approved_external_target: None,
+            }],
+        },
+        Request::ApplyStartupContextSelection {
+            id: 9,
+            operation_id: "operation".to_string(),
+            lease_id: "lease".to_string(),
+            project_key_digest: "digest".to_string(),
+            expected_plan_revision: 7,
+            selection: vec![StartupContextSelectionInput {
+                existing_spec_id: None,
+                path: "docs/PLAN.md".to_string(),
+                approved_external_target: None,
+            }],
+            save_project_default: true,
+        },
+        Request::CancelStartupContextApply {
+            id: 10,
+            operation_id: "operation".to_string(),
+            lease_id: "lease".to_string(),
+            project_key_digest: "digest".to_string(),
+            expected_plan_revision: 7,
+        },
+        Request::GetStartupContextApplyStatus {
+            id: 11,
+            operation_id: "operation".to_string(),
+        },
     ];
 
     for request in requests {
@@ -154,6 +189,26 @@ fn ordinary_startup_events_have_no_raw_content_field() -> Result<()> {
     };
     let encoded = serde_json::to_string(&status)?;
     assert!(!encoded.contains("content"));
+
+    let apply = ServerEvent::StartupContextApplyStatus {
+        id: 11,
+        status: StartupContextApplyStatus {
+            operation_id: "operation".to_string(),
+            session_id: "session".to_string(),
+            phase: StartupContextApplyPhase::Succeeded,
+            session_target: StartupContextApplyTargetState::Applied { revision: None },
+            project_default_target: StartupContextApplyTargetState::Applied {
+                revision: Some(8),
+            },
+            batch_id: Some("batch".to_string()),
+            file_count: 1,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            failure: None,
+        },
+    };
+    let apply_encoded = serde_json::to_string(&apply)?;
+    assert!(!apply_encoded.contains("content"));
 
     let explicit = ServerEvent::StartupContextFilePreview {
         id: 10,

@@ -3,7 +3,7 @@ use crate::message::{ContentBlock, Message, StreamEvent, ToolDefinition};
 use crate::provider::{EventStream, Provider};
 use async_trait::async_trait;
 use futures::stream;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 struct IsolatedRuntimeDir {
@@ -732,6 +732,50 @@ impl Provider for CompleteImmediatelyProvider {
 
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(Self)
+    }
+}
+
+#[derive(Clone)]
+struct StartupApplyBoundaryProvider {
+    calls: Arc<AtomicUsize>,
+    first_started: Arc<tokio::sync::Notify>,
+    release_first: Arc<tokio::sync::Notify>,
+    snapshots: Arc<std::sync::Mutex<Vec<Vec<Message>>>>,
+}
+
+#[async_trait]
+impl Provider for StartupApplyBoundaryProvider {
+    async fn complete(
+        &self,
+        messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        self.snapshots.lock().unwrap().push(messages.to_vec());
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        if call == 0 {
+            self.first_started.notify_waiters();
+            self.release_first.notified().await;
+        }
+        Ok(Box::pin(stream::iter(vec![
+            Ok(StreamEvent::TextDelta("turn complete".to_string())),
+            Ok(StreamEvent::MessageEnd {
+                stop_reason: Some("end_turn".to_string()),
+            }),
+        ])))
+    }
+
+    fn name(&self) -> &str {
+        "startup-apply-boundary"
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+
+    fn model(&self) -> String {
+        "startup-apply-boundary".to_string()
     }
 }
 
@@ -1824,24 +1868,92 @@ async fn startup_context_protocol_journey_uses_server_state_and_releases_editor(
     };
     assert_eq!(results.results[0].name, "PLAN.md");
 
+    let selection = vec![crate::protocol::StartupContextSelectionInput {
+        existing_spec_id: None,
+        path: "PLAN.md".to_string(),
+        approved_external_target: None,
+    }];
+    send_request(
+        &mut client_writer,
+        &Request::PreviewStartupContextSelection {
+            id: 7,
+            lease_id: editor.lease.lease_id.clone(),
+            project_key_digest: editor.project.key_digest.clone(),
+            expected_plan_revision: editor.plan_revision,
+            selection: selection.clone(),
+        },
+    )
+    .await;
+    let selection_preview = read_until(&mut client_reader, |event| {
+        matches!(
+            event,
+            ServerEvent::StartupContextSelectionPreview { id: 7, .. }
+        )
+    })
+    .await;
+    let ServerEvent::StartupContextSelectionPreview { preview, .. } = selection_preview else {
+        unreachable!();
+    };
+    assert_eq!(preview.selected_count, 1);
+    assert_eq!(preview.issue_count, 0);
+
+    let apply = Request::ApplyStartupContextSelection {
+        id: 8,
+        operation_id: "protocol-operation".to_string(),
+        lease_id: editor.lease.lease_id.clone(),
+        project_key_digest: editor.project.key_digest.clone(),
+        expected_plan_revision: editor.plan_revision,
+        selection: selection.clone(),
+        save_project_default: true,
+    };
+    send_request(&mut client_writer, &apply).await;
+    let applied = read_until(&mut client_reader, |event| {
+        matches!(event, ServerEvent::StartupContextApplyStatus { id: 8, .. })
+    })
+    .await;
+    let ServerEvent::StartupContextApplyStatus { status, .. } = applied else {
+        unreachable!();
+    };
+    assert_eq!(
+        status.phase,
+        crate::protocol::StartupContextApplyPhase::Succeeded
+    );
+    assert_eq!(status.file_count, 1);
+
+    // The exact duplicate replays its durable result even though saving the
+    // project default advanced the live plan revision from zero to one.
+    send_request(&mut client_writer, &apply).await;
+    let duplicate = read_until(&mut client_reader, |event| {
+        matches!(event, ServerEvent::StartupContextApplyStatus { id: 8, .. })
+    })
+    .await;
+    let ServerEvent::StartupContextApplyStatus {
+        status: duplicate_status,
+        ..
+    } = duplicate
+    else {
+        unreachable!();
+    };
+    assert_eq!(duplicate_status, status);
+
     send_request(
         &mut client_writer,
         &Request::CloseStartupContextEditor {
-            id: 7,
+            id: 9,
             lease_id: editor.lease.lease_id,
             project_key_digest: editor.project.key_digest,
         },
     )
     .await;
     let _closed = read_until(&mut client_reader, |event| {
-        matches!(event, ServerEvent::StartupContextEditorClosed { id: 7, .. })
+        matches!(event, ServerEvent::StartupContextEditorClosed { id: 9, .. })
     })
     .await;
 
     send_request(
         &mut client_writer,
         &Request::GetStartupContextStatus {
-            id: 8,
+            id: 10,
             file_page_start: 0,
             file_page_size: Some(10),
             issue_page_start: 0,
@@ -1850,7 +1962,7 @@ async fn startup_context_protocol_journey_uses_server_state_and_releases_editor(
     )
     .await;
     let status = read_until(&mut client_reader, |event| {
-        matches!(event, ServerEvent::StartupContextStatus { id: 8, .. })
+        matches!(event, ServerEvent::StartupContextStatus { id: 10, .. })
     })
     .await;
     let ServerEvent::StartupContextStatus { snapshot, .. } = status else {
@@ -1860,7 +1972,8 @@ async fn startup_context_protocol_journey_uses_server_state_and_releases_editor(
         snapshot.compact.lease,
         crate::protocol::StartupContextLeaseAvailability::Available
     ));
-    assert_eq!(snapshot.total_files, 0);
+    assert_eq!(snapshot.total_files, 1);
+    assert_eq!(snapshot.compact.plan_revision, 1);
 
     drop(client_writer);
     server_task
@@ -1868,6 +1981,218 @@ async fn startup_context_protocol_journey_uses_server_state_and_releases_editor(
         .expect("server task join")
         .expect("server task result");
     assert!(client_connections.read().await.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "the safe-boundary journey serializes process-global JCODE_HOME and JCODE_RUNTIME_DIR overrides"
+)]
+async fn busy_startup_apply_drains_after_active_turn_before_next_user_prompt() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    let project = tempfile::tempdir().expect("project");
+    std::fs::write(project.path().join("A.md"), "alpha").unwrap();
+    std::fs::write(project.path().join("B.md"), "queued-before-turn-end").unwrap();
+    let domain_state = tempfile::tempdir().expect("domain state");
+    let domain = jcode_base::startup_context::StartupContext::from_durable_state_dir(
+        domain_state.path().to_path_buf(),
+    );
+    let active_project = domain.resolve_project(project.path()).unwrap();
+    let initial_preview = domain.preview_selection(
+        &active_project,
+        [jcode_base::startup_context::StartupSelectionInput::new(
+            "A.md",
+        )],
+    );
+    let initial = domain
+        .prepare_selection(
+            &active_project,
+            0,
+            &initial_preview,
+            jcode_base::startup_context::StartupFailurePolicy::Block,
+        )
+        .unwrap();
+    let mut session = crate::session::Session::create_with_id(
+        "session-wp04-safe-boundary".to_string(),
+        None,
+        None,
+    );
+    session.working_dir = Some(project.path().to_string_lossy().into_owned());
+    session.install_prepared_startup_context(initial).unwrap();
+    session.mark_startup_context_dispatched().unwrap();
+    assert!(matches!(
+        session.mark_startup_context_provider_accepted(),
+        crate::session::StartupContextAcceptanceOutcome::Persisted { .. }
+    ));
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let first_started = Arc::new(tokio::sync::Notify::new());
+    let release_first = Arc::new(tokio::sync::Notify::new());
+    let snapshots = Arc::new(std::sync::Mutex::new(Vec::<Vec<Message>>::new()));
+    let provider: Arc<dyn Provider> = Arc::new(StartupApplyBoundaryProvider {
+        calls: Arc::clone(&calls),
+        first_started: Arc::clone(&first_started),
+        release_first: Arc::clone(&release_first),
+        snapshots: Arc::clone(&snapshots),
+    });
+    let registry = Registry::new(Arc::clone(&provider)).await;
+    let mut boundary_agent = Agent::new_with_session(provider, registry, session, None);
+    boundary_agent.set_memory_enabled(false);
+    let agent = Arc::new(Mutex::new(boundary_agent));
+    let coordinator = crate::server::startup_context::test_coordinator();
+    let editor = match coordinator
+        .open_editor(
+            "session-wp04-safe-boundary".to_string(),
+            "connection-safe-boundary".to_string(),
+            project.path().to_string_lossy().into_owned(),
+        )
+        .await
+        .unwrap()
+    {
+        crate::server::startup_context::OpenEditorOutcome::Opened(editor) => editor,
+        crate::server::startup_context::OpenEditorOutcome::Busy { .. } => {
+            panic!("safe-boundary test editor unexpectedly busy")
+        }
+    };
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let started = first_started.notified();
+    let first_turn = tokio::spawn(process_message_streaming_mpsc_with_request_id(
+        Arc::clone(&agent),
+        Arc::clone(&coordinator),
+        41,
+        "first prompt",
+        Vec::new(),
+        None,
+        event_tx.clone(),
+    ));
+    started.await;
+
+    let queued = coordinator
+        .apply_selection(
+            crate::server::startup_context::apply::ApplySelectionRequest {
+                lease: crate::server::startup_context::lease_request(
+                    editor.lease.lease_id.clone(),
+                    editor.project.key_digest.clone(),
+                    Some(editor.plan_revision),
+                    "session-wp04-safe-boundary".to_string(),
+                    "connection-safe-boundary".to_string(),
+                ),
+                operation_id: "safe-boundary-operation".to_string(),
+                selection: vec![
+                    crate::protocol::StartupContextSelectionInput {
+                        existing_spec_id: None,
+                        path: "A.md".to_string(),
+                        approved_external_target: None,
+                    },
+                    crate::protocol::StartupContextSelectionInput {
+                        existing_spec_id: None,
+                        path: "B.md".to_string(),
+                        approved_external_target: None,
+                    },
+                ],
+                save_project_default: false,
+            },
+            Arc::clone(&agent),
+            true,
+        )
+        .await
+        .expect("queue apply during active turn");
+    assert_eq!(
+        queued.phase,
+        crate::protocol::StartupContextApplyPhase::Queued
+    );
+    std::fs::write(project.path().join("B.md"), "captured-at-turn-boundary").unwrap();
+    release_first.notify_one();
+    first_turn
+        .await
+        .expect("first turn task join")
+        .expect("first turn completion");
+
+    let mut saw_applied = false;
+    while let Ok(event) = event_rx.try_recv() {
+        if matches!(
+            event,
+            ServerEvent::StartupContextApplyStatus {
+                status: crate::protocol::StartupContextApplyStatus {
+                    phase: crate::protocol::StartupContextApplyPhase::Succeeded,
+                    ..
+                },
+                ..
+            }
+        ) {
+            saw_applied = true;
+        }
+    }
+    assert!(
+        saw_applied,
+        "safe-boundary drain must publish final apply status"
+    );
+
+    process_message_streaming_mpsc_with_request_id(
+        Arc::clone(&agent),
+        Arc::clone(&coordinator),
+        42,
+        "second prompt",
+        Vec::new(),
+        None,
+        event_tx,
+    )
+    .await
+    .expect("second turn completion");
+
+    let snapshots = snapshots.lock().unwrap();
+    let first = snapshots
+        .iter()
+        .find(|messages| {
+            serde_json::to_string(messages)
+                .unwrap()
+                .contains("first prompt")
+        })
+        .expect("provider must receive the first user turn");
+    let second = snapshots
+        .iter()
+        .find(|messages| {
+            serde_json::to_string(messages)
+                .unwrap()
+                .contains("second prompt")
+        })
+        .expect("provider must receive the second user turn");
+    let first_payload = serde_json::to_string(first).unwrap();
+    assert!(!first_payload.contains("captured-at-turn-boundary"));
+    let late_control_index = second
+        .iter()
+        .position(|message| {
+            message.content.iter().any(|block| {
+                matches!(
+                    block,
+                    ContentBlock::Text { text, .. }
+                        if text.starts_with("<jcode_startup_context_update")
+                )
+            })
+        })
+        .expect("second request must contain the late control message");
+    let late_file_index = second
+        .iter()
+        .position(|message| {
+            message.content.iter().any(|block| {
+                matches!(
+                    block,
+                    ContentBlock::Text { text, .. } if text == "captured-at-turn-boundary"
+                )
+            })
+        })
+        .expect("second request must contain the exact boundary-time file capture");
+    let second_prompt_index = second
+        .iter()
+        .position(|message| {
+            message.content.iter().any(|block| {
+                matches!(block, ContentBlock::Text { text, .. } if text.contains("second prompt"))
+            })
+        })
+        .expect("second request must contain its user prompt");
+    assert!(late_control_index < late_file_index);
+    assert!(late_file_index < second_prompt_index);
 }
 
 fn decode_request_or_event(line: &str) -> ServerEvent {
