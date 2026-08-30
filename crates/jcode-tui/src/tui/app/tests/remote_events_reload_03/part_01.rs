@@ -169,6 +169,7 @@ fn test_handle_server_event_history_with_interruption_queues_continuation() {
             context_revision: 0,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
+            startup_context: None,
         },
         &mut remote,
     );
@@ -245,6 +246,7 @@ fn test_handle_server_event_history_uses_server_owned_reload_recovery_directive(
         context_revision: 0,
         activity: None,
         side_panel: crate::side_panel::SidePanelSnapshot::default(),
+            startup_context: None,
     };
 
     app.handle_server_event(event.clone(), &mut remote);
@@ -323,6 +325,7 @@ fn test_handle_server_event_history_without_interruption_does_not_queue() {
             context_revision: 0,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
+            startup_context: None,
         },
         &mut remote,
     );
@@ -386,6 +389,7 @@ fn test_handle_server_event_history_after_reload_reports_no_continuation_needed(
             context_revision: 0,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
+            startup_context: None,
         },
         &mut remote,
     );
@@ -687,6 +691,7 @@ fn test_handle_server_event_history_restores_side_panel_snapshot() {
             context_revision: 0,
             activity: None,
             side_panel: side_panel.clone(),
+            startup_context: None,
         },
         &mut remote,
     );
@@ -747,6 +752,7 @@ fn test_handle_server_event_history_restores_active_resume_processing_state() {
                 current_tool_name: Some("batch".to_string()),
             }),
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
+            startup_context: None,
         },
         &mut remote,
     );

@@ -1071,6 +1071,7 @@ fn stale_server_history_is_deferred_before_remote_state_is_applied() {
             context_revision: 0,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
+            startup_context: None,
         },
         &mut remote,
     );
@@ -1163,6 +1164,7 @@ fn deferred_stale_server_history_captures_session_id_for_reload_handoff() {
             context_revision: 0,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
+            startup_context: None,
         },
         &mut remote,
     );
@@ -1245,6 +1247,7 @@ fn ancient_server_history_is_deferred_via_client_side_release_check() {
             context_revision: 0,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
+            startup_context: None,
         },
         &mut remote,
     );
@@ -1327,6 +1330,7 @@ fn older_server_reporting_no_update_is_still_deferred_via_client_check() {
             context_revision: 0,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
+            startup_context: None,
         },
         &mut remote,
     );
@@ -1429,6 +1433,7 @@ fn older_server_history_repairs_stale_shared_server_channel_end_to_end() {
             context_revision: 0,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
+            startup_context: None,
         },
         &mut remote,
     );
@@ -1469,6 +1474,7 @@ fn current_release_server_history_is_not_deferred_by_client_check() {
 
     app.is_remote = true;
     app.remote_session_id = Some("session_existing".to_string());
+    assert!(app.remote_startup_context.is_none());
 
     let redraw = app.handle_server_event(
         crate::protocol::ServerEvent::History {
@@ -1505,6 +1511,23 @@ fn current_release_server_history_is_not_deferred_by_client_check() {
             context_revision: 0,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
+            startup_context: Some(crate::protocol::StartupContextCompactStatus {
+                protocol_version: crate::protocol::STARTUP_CONTEXT_PROTOCOL_VERSION,
+                session_id: "session_current".to_string(),
+                state: crate::protocol::StartupContextStatusState::Empty,
+                project: None,
+                plan_revision: 0,
+                plan_entry_count: 0,
+                receipt_plan_revision: Some(0),
+                receipt_file_count: 0,
+                captured_bytes: 0,
+                estimated_tokens: 0,
+                blocked_issue_count: 0,
+                pending_update_count: 0,
+                stale_file_count: 0,
+                lease: crate::protocol::StartupContextLeaseAvailability::Available,
+                error: None,
+            }),
         },
         &mut remote,
     );
@@ -1517,6 +1540,12 @@ fn current_release_server_history_is_not_deferred_by_client_check() {
     let _ = redraw;
     assert!(!app.pending_server_reload);
     assert_eq!(app.remote_session_id.as_deref(), Some("session_current"));
+    assert_eq!(
+        app.remote_startup_context
+            .as_ref()
+            .map(|status| status.state),
+        Some(crate::protocol::StartupContextStatusState::Empty)
+    );
 }
 
 #[test]

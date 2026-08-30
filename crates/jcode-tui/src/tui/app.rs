@@ -1216,6 +1216,9 @@ pub struct App {
     // Remote MCP servers and skills (set from server in remote mode)
     remote_mcp_servers: Vec<String>,
     remote_skills: Vec<String>,
+    /// `None` means the connected server predates Startup Context support.
+    /// New servers always send a bounded status, including for empty projects.
+    remote_startup_context: Option<crate::protocol::StartupContextCompactStatus>,
     // Total session token usage (from server in remote mode)
     remote_total_tokens: Option<(u64, u64)>,
     // Detailed persisted token/cache usage totals (from server in remote mode)

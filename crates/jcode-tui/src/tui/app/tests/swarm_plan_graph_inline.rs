@@ -564,6 +564,7 @@ fn history_event_for_session(session_id: &str) -> crate::protocol::ServerEvent {
         context_revision: 0,
         activity: None,
         side_panel: crate::side_panel::SidePanelSnapshot::default(),
+            startup_context: None,
     }
 }
 

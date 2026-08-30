@@ -546,6 +546,7 @@ impl App {
             pending_remote_model_refresh_snapshot: None,
             remote_mcp_servers: Vec::new(),
             remote_skills: Vec::new(),
+            remote_startup_context: None,
             remote_total_tokens: None,
             remote_token_usage_totals: None,
             remote_is_canary: None,
@@ -1004,6 +1005,7 @@ impl App {
             pending_remote_model_refresh_snapshot: None,
             remote_mcp_servers: Vec::new(),
             remote_skills: Vec::new(),
+            remote_startup_context: None,
             remote_total_tokens: None,
             remote_token_usage_totals: None,
             remote_is_canary: None,
@@ -1282,7 +1284,7 @@ impl App {
         // message buffers) drop before we strip and retain the session.
         {
             let (rendered_messages, rendered_images) =
-                crate::session::render_messages_and_images(&session);
+                crate::session::render_messages_and_images_for_remote_history(&session);
             let display_messages =
                 jcode_tui_messages::display_messages_from_rendered_messages(rendered_messages);
             self.replace_display_messages(display_messages);

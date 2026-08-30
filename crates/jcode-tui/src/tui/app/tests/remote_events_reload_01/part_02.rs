@@ -389,6 +389,7 @@ fn test_remote_rewind_completion_shows_undo_hint_after_history_refresh() {
             context_revision: 0,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
+            startup_context: None,
         },
         &mut remote,
     );

@@ -1569,6 +1569,7 @@ pub(in crate::tui::app) fn handle_server_event(
             activity,
             token_usage_totals,
             side_panel,
+            startup_context,
             ..
         } => {
             let prev_session_id = app.remote_session_id.clone();
@@ -1704,6 +1705,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.remote_side_pane_images.clear();
                 app.invalidate_side_pane_images_signature();
                 app.remote_swarm_members.clear();
+                app.remote_startup_context = None;
                 app.swarm_plan_items.clear();
                 app.swarm_plan_version = None;
                 app.swarm_plan_swarm_id = None;
@@ -1758,6 +1760,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.persist_remote_model_catalog_cache();
             }
             app.remote_skills = skills;
+            app.remote_startup_context = startup_context;
             app.invalidate_command_candidates_cache();
             app.remote_sessions = all_sessions;
             app.remote_client_count = client_count;
@@ -2082,6 +2085,23 @@ pub(in crate::tui::app) fn handle_server_event(
             // the new session does not appear stuck until another event arrives.
             true
         }
+        ServerEvent::StartupContextStatus { snapshot, .. } => {
+            app.remote_startup_context = Some(snapshot.compact);
+            false
+        }
+        ServerEvent::StartupContextFailed { failure, .. } => {
+            app.set_status_notice(format!("Startup context: {}", failure.message));
+            false
+        }
+        ServerEvent::StartupContextEditorOpened { .. }
+        | ServerEvent::StartupContextEditorBusy { .. }
+        | ServerEvent::StartupContextEditorLeaseRenewed { .. }
+        | ServerEvent::StartupContextEditorClosed { .. }
+        | ServerEvent::StartupContextDirectoryPage { .. }
+        | ServerEvent::StartupContextSearchResults { .. }
+        | ServerEvent::StartupContextSearchCanceled { .. }
+        | ServerEvent::StartupContextFilePreview { .. }
+        | ServerEvent::StartupContextFileDetail { .. } => false,
         ServerEvent::CompactedHistory {
             session_id,
             messages,
