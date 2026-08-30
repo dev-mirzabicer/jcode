@@ -116,6 +116,98 @@ fn raw_tool_fixture() -> Vec<StoredMessage> {
     ]
 }
 
+fn synthetic_startup_fixture() -> Vec<StoredMessage> {
+    vec![
+        text(
+            "startup-control",
+            Role::User,
+            "<synthetic_startup_control version=\"1\"/>",
+        ),
+        stored(
+            "startup-file",
+            Role::User,
+            vec![
+                ContentBlock::Text {
+                    text: "<synthetic_startup_file ordinal=\"2\" path=\"PLAN.md\"/>".to_string(),
+                    cache_control: None,
+                },
+                ContentBlock::Text {
+                    text: "exact synthetic UTF-8 file body: İstanbul 日本語 🧪\n".to_string(),
+                    cache_control: None,
+                },
+            ],
+        ),
+        text(
+            "dynamic-session-context",
+            Role::User,
+            "<system-reminder>synthetic dynamic session facts</system-reminder>",
+        ),
+        text(
+            "user-prompt",
+            Role::User,
+            "Proceed using the supplied context.",
+        ),
+    ]
+}
+
+#[test]
+fn synthetic_startup_messages_are_accepted_by_every_primary_structured_provider_builder() {
+    let messages = synthetic_startup_fixture()
+        .iter()
+        .map(StoredMessage::to_message)
+        .collect::<Vec<_>>();
+
+    jcode_provider_anthropic::validate_projected_messages(&messages, false)
+        .expect("Anthropic startup messages");
+    jcode_provider_openai::validate_projected_messages(&messages)
+        .expect("OpenAI Responses startup messages");
+    jcode_provider_openrouter::request::validate_projected_messages(&messages, false, false, true)
+        .expect("OpenRouter startup messages");
+    jcode_provider_gemini::validate_projected_messages(&messages).expect("Gemini startup messages");
+}
+
+#[test]
+fn explicit_range_summary_can_include_startup_messages_without_mutating_source() {
+    let raw = synthetic_startup_fixture();
+    let raw_before = serde_json::to_vec(&raw).expect("serialize startup source");
+    let summary = StoredRangeSummary {
+        source_range: build_message_range(&raw, 0, 1).expect("closed startup range"),
+        summary_text: "Synthetic startup context was supplied as complete file input.".to_string(),
+        file_change_digest: "No files were changed in this synthetic fixture.".to_string(),
+        changed_files: Vec::new(),
+        change_evidence_complete: true,
+        file_evidence: None,
+        boundary_expansions: Vec::new(),
+        generator: Some(generator()),
+        source_token_estimate: 500,
+        replacement_token_estimate: 40,
+        warnings: Vec::new(),
+        created_at: Utc::now(),
+        legacy_coverage: None,
+    };
+    let projection = project_context(
+        &raw,
+        &applied_state(vec![StoredContextOperation::RangeSummary(summary)]),
+    )
+    .expect("startup summary projection");
+
+    assert_eq!(serde_json::to_vec(&raw).unwrap(), raw_before);
+    assert_eq!(projection.messages.len(), 3);
+    jcode_provider_anthropic::validate_projected_messages(&projection.messages, false)
+        .expect("Anthropic startup summary");
+    jcode_provider_openai::validate_projected_messages(&projection.messages)
+        .expect("OpenAI startup summary");
+    jcode_provider_openrouter::request::validate_projected_messages(
+        &projection.messages,
+        false,
+        false,
+        true,
+    )
+    .expect("OpenRouter startup summary");
+    jcode_provider_gemini::validate_projected_messages(&projection.messages)
+        .expect("Gemini startup summary");
+}
+
 #[test]
 fn combined_real_projection_is_accepted_by_every_primary_structured_provider_builder() {
     let raw = raw_tool_fixture();
