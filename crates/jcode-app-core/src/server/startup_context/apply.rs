@@ -94,7 +94,18 @@ impl PersistedStartupApplyRecord {
         self.session_id == session_id && self.wire_request_fingerprint == fingerprint
     }
 
-    fn clear_sensitive_material(&mut self) {
+    fn clear_prepared_material(&mut self) {
+        self.prepared_session = None;
+    }
+
+    fn clear_recovery_material(&mut self) {
+        self.lease_id.clear();
+        self.owner_connection_id.clear();
+        self.project_active_root.clear();
+        self.project_key_digest.clear();
+        self.expected_plan_revision = 0;
+        self.selection.clear();
+        self.plan_transition = None;
         self.prepared_session = None;
     }
 }
@@ -392,7 +403,7 @@ impl StartupContextCoordinator {
 
         let Ok(mut guard) = agent.try_lock() else {
             record.phase = StartupContextApplyPhase::Queued;
-            record.clear_sensitive_material();
+            record.clear_prepared_material();
             record.updated_at = Utc::now();
             self.save_apply_record(&record)?;
             self.remove_apply_backup(&record.operation_id);
@@ -457,7 +468,7 @@ impl StartupContextCoordinator {
         } else {
             StartupContextApplyTargetState::NotRequested
         };
-        record.clear_sensitive_material();
+        record.clear_recovery_material();
         record.failure = None;
         record.updated_at = Utc::now();
         self.save_apply_record(&record)?;
@@ -820,7 +831,7 @@ impl StartupContextCoordinator {
                 StartupContextApplyTargetState::NotRequested
             };
             record.failure = Some(failure);
-            record.clear_sensitive_material();
+            record.clear_recovery_material();
             record.updated_at = Utc::now();
             self.save_apply_record(&record)?;
             self.remove_apply_backup(&record.operation_id);
@@ -866,7 +877,7 @@ impl StartupContextCoordinator {
                 StartupContextApplyTargetState::NotRequested
             };
             record.failure = Some(failure);
-            record.clear_sensitive_material();
+            record.clear_recovery_material();
             record.updated_at = Utc::now();
             self.save_apply_record(&record)?;
             self.remove_apply_backup(&record.operation_id);
@@ -965,7 +976,7 @@ impl StartupContextCoordinator {
                 let stale_session = matches!(&error, StartupContextSessionApplyError::StaleSession);
                 let session_failure = session_apply_failure(error);
                 record.phase = if stale_session {
-                    record.clear_sensitive_material();
+                    record.clear_prepared_material();
                     StartupContextApplyPhase::Queued
                 } else {
                     StartupContextApplyPhase::RecoveryRequired
@@ -987,7 +998,7 @@ impl StartupContextCoordinator {
         }
         record.failure = None;
         self.advance_live_lease_revision(record);
-        record.clear_sensitive_material();
+        record.clear_recovery_material();
         record.updated_at = Utc::now();
         self.save_apply_record(record)?;
         self.remove_apply_backup(&record.operation_id);

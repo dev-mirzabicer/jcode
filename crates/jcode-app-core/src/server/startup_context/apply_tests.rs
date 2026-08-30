@@ -401,6 +401,9 @@ async fn idle_combined_apply_is_atomic_idempotent_and_cleans_sensitive_recovery_
     let record_path = coordinator.apply_record_path("operation-idle-combined");
     let record_text = std::fs::read_to_string(&record_path).unwrap();
     assert!(!record_text.contains("WP04_SECRET_BETA_AT_APPLY"));
+    assert!(!record_text.contains("A.md"));
+    assert!(!record_text.contains("B.md"));
+    assert!(!record_text.contains(env.project.path().to_string_lossy().as_ref()));
     assert!(!record_path.with_extension("bak").exists());
     std::fs::write(
         record_path.with_extension("bak"),
