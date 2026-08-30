@@ -189,6 +189,10 @@ fn apply_request(
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "the transaction test serializes process-global JCODE_HOME and JCODE_RUNTIME_DIR overrides"
+)]
 async fn idle_combined_apply_is_atomic_idempotent_and_cleans_sensitive_recovery_material() {
     let _lock = crate::storage::lock_test_env();
     let env = TestEnv::new();
@@ -382,6 +386,10 @@ async fn idle_combined_apply_is_atomic_idempotent_and_cleans_sensitive_recovery_
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "the transaction test serializes process-global JCODE_HOME and JCODE_RUNTIME_DIR overrides"
+)]
 async fn busy_apply_captures_at_drain_and_cancel_or_capture_failure_preserves_session() {
     let _lock = crate::storage::lock_test_env();
     let env = TestEnv::new();
@@ -528,6 +536,10 @@ async fn busy_apply_captures_at_drain_and_cancel_or_capture_failure_preserves_se
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "the recovery test serializes process-global JCODE_HOME and JCODE_RUNTIME_DIR overrides"
+)]
 async fn restart_recovery_converges_from_queued_prepared_plan_and_session_commit_stages() {
     let _lock = crate::storage::lock_test_env();
     let env = TestEnv::new();
@@ -617,6 +629,10 @@ async fn restart_recovery_converges_from_queued_prepared_plan_and_session_commit
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "the ownership test serializes process-global JCODE_HOME and JCODE_RUNTIME_DIR overrides"
+)]
 async fn apply_claim_pins_live_lease_and_recovery_guard_serializes_named_coordinators() {
     let _lock = crate::storage::lock_test_env();
     let env = TestEnv::new();

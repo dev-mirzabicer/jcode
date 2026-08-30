@@ -973,6 +973,7 @@ fn reload_starting_rejects_new_turn_without_spawning_processing_task() {
             &client_event_tx,
             &processing_done_tx,
             Vec::new(),
+            &crate::server::startup_context::test_coordinator(),
             &SwarmStatusRefs {
                 members: &swarm_members,
                 swarms_by_id: &swarms_by_id,
@@ -1083,6 +1084,7 @@ async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attac
         &origin_tx,
         &processing_done_tx,
         Vec::new(),
+        &crate::server::startup_context::test_coordinator(),
         &SwarmStatusRefs {
             members: &swarm_members,
             swarms_by_id: &swarms_by_id,
@@ -1207,6 +1209,7 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
             &client_event_tx,
             &processing_done_tx,
             Vec::new(),
+            &crate::server::startup_context::test_coordinator(),
             &SwarmStatusRefs {
                 members: &swarm_members,
                 swarms_by_id: &swarms_by_id,
@@ -1306,6 +1309,7 @@ fn reload_starting_rejects_new_turns_for_multiple_sessions() {
                 &client_event_tx,
                 &processing_done_tx,
                 Vec::new(),
+                &crate::server::startup_context::test_coordinator(),
                 &SwarmStatusRefs {
                     members: &swarm_members,
                     swarms_by_id: &swarms_by_id,

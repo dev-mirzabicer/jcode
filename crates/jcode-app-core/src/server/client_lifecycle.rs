@@ -1113,7 +1113,7 @@ pub(super) async fn handle_client(
                         info.current_tool_name = None;
                     }
                 }
-                start_processing_message_with_startup_context(
+                start_processing_message(
                     ProcessingMessage {
                         id,
                         content,
@@ -3545,7 +3545,7 @@ async fn append_context_message(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn start_processing_message_with_startup_context(
+async fn start_processing_message(
     message: ProcessingMessage,
     client_session_id: &str,
     state: &mut ProcessingState<'_>,
@@ -3688,31 +3688,6 @@ async fn start_processing_message_with_startup_context(
         let _ = tx.send(terminal_event);
         let _ = done_tx.send((id, result, completion_report));
     }));
-}
-
-#[cfg(test)]
-async fn start_processing_message(
-    message: ProcessingMessage,
-    client_session_id: &str,
-    state: &mut ProcessingState<'_>,
-    agent: &Arc<Mutex<Agent>>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
-    processing_done_tx: &mpsc::UnboundedSender<(u64, Result<()>, Option<String>)>,
-    client_terminal_env: Vec<(String, String)>,
-    swarm: &SwarmStatusRefs<'_>,
-) {
-    start_processing_message_with_startup_context(
-        message,
-        client_session_id,
-        state,
-        agent,
-        client_event_tx,
-        processing_done_tx,
-        client_terminal_env,
-        &super::startup_context::test_coordinator(),
-        swarm,
-    )
-    .await;
 }
 
 async fn cancel_processing_message(
