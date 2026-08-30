@@ -1471,6 +1471,70 @@ mod tests {
     }
 
     #[test]
+    fn prepared_session_apply_can_replace_unsent_startup_context_with_empty_atomically() {
+        let fixture = prepared_fixture(&[("A.md", "alpha")], &["A.md"]);
+        let persistence = TestPersistence::default();
+        let mut session =
+            Session::create_with_id("session-startup-empty-replacement".into(), None, None);
+        session.working_dir = Some(fixture.root_path.display().to_string());
+        session
+            .install_prepared_startup_context_with(
+                fixture.outcome,
+                "<synthetic_initial_control/>",
+                &persistence,
+            )
+            .expect("install prepared startup context");
+        assert_eq!(session.startup_context_accounting().file_count, 1);
+        assert_eq!(text_block(&session.messages[1], 1), "alpha");
+
+        let startup = StartupContext::from_durable_state_dir(fixture.root_path.join("empty-state"));
+        let project = startup.resolve_project(&fixture.root_path).unwrap();
+        let empty_preview = startup.preview_selection(&project, std::iter::empty());
+        let empty = startup
+            .prepare_selection(&project, 8, &empty_preview, StartupFailurePolicy::Block)
+            .unwrap();
+        let transition = session
+            .prepare_startup_context_session_apply_with(
+                "operation-empty-replacement",
+                empty,
+                "<synthetic_initial_control/>",
+                "<synthetic_late_control/>",
+            )
+            .expect("prepare empty replacement");
+        let outcome = session
+            .apply_prepared_startup_context_session_with(&transition, &persistence)
+            .expect("apply empty replacement");
+
+        assert!(matches!(
+            outcome,
+            StartupContextSessionApplyOutcome::Applied {
+                batch_id: None,
+                file_count: 0
+            }
+        ));
+        assert_eq!(
+            session.startup_context.as_ref().unwrap().state,
+            StoredStartupContextState::Empty
+        );
+        assert_eq!(
+            session
+                .startup_context
+                .as_ref()
+                .unwrap()
+                .last_apply_operation_id
+                .as_deref(),
+            Some("operation-empty-replacement")
+        );
+        assert_eq!(session.messages.len(), 1);
+        assert!(is_session_context_stored_message(&session.messages[0]));
+        assert!(
+            !serde_json::to_string(&session.messages)
+                .unwrap()
+                .contains("alpha")
+        );
+    }
+
+    #[test]
     fn blocked_install_persists_issues_and_refuses_dispatch() {
         let fixture = prepared_fixture(&[], &["missing.md"]);
         let persistence = TestPersistence::default();
