@@ -40,6 +40,8 @@ use std::fs::{File, OpenOptions};
 #[cfg(any(not(unix), test))]
 use std::io::Write;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
@@ -69,6 +71,8 @@ struct CoordinatorInner {
     process_start_identity: String,
     lease_duration: Duration,
     state: StdMutex<CoordinatorState>,
+    #[cfg(test)]
+    apply_record_fail_after: AtomicUsize,
 }
 
 #[derive(Default)]
@@ -226,6 +230,8 @@ impl StartupContextCoordinator {
                 process_start_identity: current_process_start_identity(),
                 lease_duration,
                 state: StdMutex::new(CoordinatorState::default()),
+                #[cfg(test)]
+                apply_record_fail_after: AtomicUsize::new(0),
             }),
         }
     }

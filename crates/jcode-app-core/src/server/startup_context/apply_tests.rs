@@ -9,6 +9,14 @@ use std::ffi::OsString;
 
 struct MockProvider;
 
+struct FailingSessionPersistence;
+
+impl StartupContextSessionPersistence for FailingSessionPersistence {
+    fn persist(&self, _session: &mut Session) -> Result<()> {
+        anyhow::bail!("injected WP-04 session persistence failure")
+    }
+}
+
 #[async_trait]
 impl Provider for MockProvider {
     async fn complete(
@@ -186,6 +194,36 @@ fn apply_request(
         selection,
         save_project_default,
     }
+}
+
+fn editor_at_revision(
+    editor: &StartupContextEditorSnapshot,
+    revision: u64,
+) -> StartupContextEditorSnapshot {
+    let mut editor = editor.clone();
+    editor.plan_revision = revision;
+    editor.lease.plan_revision = revision;
+    editor
+}
+
+fn project_plan_revision(coordinator: &StartupContextCoordinator, root: &Path) -> u64 {
+    let project = coordinator.inner.engine.resolve_project(root).unwrap();
+    coordinator
+        .inner
+        .engine
+        .load_project_plan(&project)
+        .unwrap()
+        .plan()
+        .revision()
+}
+
+fn exact_text_occurrences(session: &Session, expected: &str) -> usize {
+    session
+        .messages
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .filter(|block| matches!(block, ContentBlock::Text { text, .. } if text == expected))
+        .count()
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -723,4 +761,393 @@ async fn apply_claim_pins_live_lease_and_recovery_guard_serializes_named_coordin
     };
     assert_eq!(drained.len(), 1);
     assert_eq!(drained[0].phase, StartupContextApplyPhase::Succeeded);
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "the persistence matrix serializes process-global JCODE_HOME and JCODE_RUNTIME_DIR overrides"
+)]
+async fn persistence_failure_matrix_converges_without_silent_partial_success() {
+    let _lock = crate::storage::lock_test_env();
+    let env = TestEnv::new();
+    for (name, text) in [
+        ("A.md", "alpha"),
+        ("B.md", "record-preparation"),
+        ("C.md", "plan-record-stage"),
+        ("D.md", "session-write-stage"),
+        ("E.md", "plan-write-stage"),
+        ("F.md", "final-record-stage"),
+    ] {
+        std::fs::write(env.project.path().join(name), text).unwrap();
+    }
+    let coordinator = env.coordinator();
+    let session = install_dispatched_session(
+        &coordinator,
+        env.project.path(),
+        "session-wp04-failure-matrix",
+        &["A.md"],
+    );
+    let agent = agent_for(session).await;
+    let editor = opened_editor(
+        &coordinator,
+        "session-wp04-failure-matrix",
+        "connection-failure-matrix",
+        env.working_dir(),
+    )
+    .await;
+
+    // Recovery intent write failure happens before any target is touched.
+    let before_intent = serde_json::to_vec(agent.lock().await.startup_context_session()).unwrap();
+    coordinator.fail_apply_record_save_on_nth(1);
+    let intent_error = coordinator
+        .apply_selection(
+            apply_request(
+                &editor,
+                "session-wp04-failure-matrix",
+                "connection-failure-matrix",
+                "operation-intent-write-failure",
+                wire_selection(&["A.md", "B.md"]),
+                false,
+            ),
+            Arc::clone(&agent),
+            false,
+        )
+        .await
+        .expect_err("intent persistence failure must reject the apply");
+    assert_eq!(intent_error.kind, StartupContextFailureKind::Recovery);
+    assert!(
+        !coordinator
+            .apply_record_path("operation-intent-write-failure")
+            .exists()
+    );
+    assert_eq!(
+        serde_json::to_vec(agent.lock().await.startup_context_session()).unwrap(),
+        before_intent
+    );
+    assert_eq!(project_plan_revision(&coordinator, env.project.path()), 0);
+
+    // A failure while persisting complete prepared material leaves only the
+    // path-only queued intent. A later drain recaptures and completes safely.
+    coordinator
+        .apply_selection(
+            apply_request(
+                &editor,
+                "session-wp04-failure-matrix",
+                "connection-failure-matrix",
+                "operation-prepared-record-failure",
+                wire_selection(&["A.md", "B.md"]),
+                false,
+            ),
+            Arc::clone(&agent),
+            true,
+        )
+        .await
+        .unwrap();
+    coordinator.fail_apply_record_save_on_nth(1);
+    let first_prepared_drain = {
+        let mut guard = agent.lock().await;
+        coordinator.drain_pending_for_agent(&mut guard)
+    };
+    assert!(first_prepared_drain.is_empty());
+    let queued = coordinator
+        .load_apply_record("operation-prepared-record-failure")
+        .unwrap();
+    assert_eq!(queued.phase, StartupContextApplyPhase::Queued);
+    assert!(queued.prepared_session.is_none());
+    let prepared_retry = {
+        let mut guard = agent.lock().await;
+        coordinator.drain_pending_for_agent(&mut guard)
+    };
+    assert_eq!(prepared_retry[0].phase, StartupContextApplyPhase::Succeeded);
+    assert_eq!(
+        exact_text_occurrences(
+            agent.lock().await.startup_context_session(),
+            "record-preparation"
+        ),
+        1
+    );
+
+    // Crash/failure after the plan write but before its target-state record is
+    // recoverable because the plan transition itself is idempotent.
+    coordinator
+        .apply_selection(
+            apply_request(
+                &editor,
+                "session-wp04-failure-matrix",
+                "connection-failure-matrix",
+                "operation-plan-record-failure",
+                wire_selection(&["A.md", "B.md", "C.md"]),
+                true,
+            ),
+            Arc::clone(&agent),
+            true,
+        )
+        .await
+        .unwrap();
+    let mut plan_record = coordinator
+        .load_apply_record("operation-plan-record-failure")
+        .unwrap();
+    let snapshot = agent.lock().await.startup_context_session().clone();
+    plan_record = coordinator
+        .prepare_record_for_session(plan_record, &snapshot)
+        .unwrap();
+    let before_plan_record_batches = snapshot.startup_context.as_ref().unwrap().batches.len();
+    coordinator.fail_apply_record_save_on_nth(1);
+    assert_eq!(
+        coordinator
+            .commit_record(
+                &mut plan_record,
+                agent.lock().await.startup_context_session_mut(),
+            )
+            .expect_err("plan target-state record failure must remain recoverable")
+            .kind,
+        StartupContextFailureKind::Recovery
+    );
+    assert_eq!(project_plan_revision(&coordinator, env.project.path()), 1);
+    assert_eq!(
+        agent
+            .lock()
+            .await
+            .startup_context_session()
+            .startup_context
+            .as_ref()
+            .unwrap()
+            .batches
+            .len(),
+        before_plan_record_batches
+    );
+    let plan_record_retry = {
+        let mut guard = agent.lock().await;
+        coordinator.drain_pending_for_agent(&mut guard)
+    };
+    assert_eq!(
+        plan_record_retry[0].phase,
+        StartupContextApplyPhase::Succeeded
+    );
+    assert_eq!(
+        exact_text_occurrences(
+            agent.lock().await.startup_context_session(),
+            "plan-record-stage"
+        ),
+        1
+    );
+
+    // Session save failure after the project default commits reports both
+    // target states truthfully and completes forward on retry.
+    let editor_v1 = editor_at_revision(&editor, 1);
+    coordinator
+        .apply_selection(
+            apply_request(
+                &editor_v1,
+                "session-wp04-failure-matrix",
+                "connection-failure-matrix",
+                "operation-session-write-failure",
+                wire_selection(&["A.md", "B.md", "C.md", "D.md"]),
+                true,
+            ),
+            Arc::clone(&agent),
+            true,
+        )
+        .await
+        .unwrap();
+    let mut session_record = coordinator
+        .load_apply_record("operation-session-write-failure")
+        .unwrap();
+    let snapshot = agent.lock().await.startup_context_session().clone();
+    session_record = coordinator
+        .prepare_record_for_session(session_record, &snapshot)
+        .unwrap();
+    let before_session_failure = serde_json::to_vec(&snapshot).unwrap();
+    let session_error = coordinator
+        .commit_record_with(
+            &mut session_record,
+            agent.lock().await.startup_context_session_mut(),
+            &FailingSessionPersistence,
+        )
+        .expect_err("session persistence failure must remain recoverable");
+    assert_eq!(session_error.kind, StartupContextFailureKind::Recovery);
+    assert_eq!(project_plan_revision(&coordinator, env.project.path()), 2);
+    assert_eq!(
+        serde_json::to_vec(agent.lock().await.startup_context_session()).unwrap(),
+        before_session_failure
+    );
+    assert!(matches!(
+        session_record.project_default_target,
+        StartupContextApplyTargetState::Applied { revision: Some(2) }
+    ));
+    assert!(matches!(
+        session_record.session_target,
+        StartupContextApplyTargetState::Failed { .. }
+    ));
+    coordinator
+        .commit_record(
+            &mut session_record,
+            agent.lock().await.startup_context_session_mut(),
+        )
+        .unwrap();
+    assert_eq!(
+        exact_text_occurrences(
+            agent.lock().await.startup_context_session(),
+            "session-write-stage"
+        ),
+        1
+    );
+
+    // Final recovery-record failure occurs after the session target is durable.
+    // Replaying the old prepared record recognizes the operation identity and
+    // never appends the late batch twice.
+    let editor_v2 = editor_at_revision(&editor, 2);
+    coordinator
+        .apply_selection(
+            apply_request(
+                &editor_v2,
+                "session-wp04-failure-matrix",
+                "connection-failure-matrix",
+                "operation-final-record-failure",
+                wire_selection(&["A.md", "B.md", "C.md", "D.md", "E.md", "F.md"]),
+                false,
+            ),
+            Arc::clone(&agent),
+            true,
+        )
+        .await
+        .unwrap();
+    let mut final_record = coordinator
+        .load_apply_record("operation-final-record-failure")
+        .unwrap();
+    let snapshot = agent.lock().await.startup_context_session().clone();
+    final_record = coordinator
+        .prepare_record_for_session(final_record, &snapshot)
+        .unwrap();
+    coordinator.fail_apply_record_save_on_nth(1);
+    assert_eq!(
+        coordinator
+            .commit_record(
+                &mut final_record,
+                agent.lock().await.startup_context_session_mut(),
+            )
+            .expect_err("final record failure must remain recoverable")
+            .kind,
+        StartupContextFailureKind::Recovery
+    );
+    assert_eq!(
+        exact_text_occurrences(
+            agent.lock().await.startup_context_session(),
+            "final-record-stage"
+        ),
+        1
+    );
+    let mut replay = coordinator
+        .load_apply_record("operation-final-record-failure")
+        .unwrap();
+    coordinator
+        .commit_record(
+            &mut replay,
+            agent.lock().await.startup_context_session_mut(),
+        )
+        .unwrap();
+    assert_eq!(replay.phase, StartupContextApplyPhase::Succeeded);
+    assert_eq!(
+        exact_text_occurrences(
+            agent.lock().await.startup_context_session(),
+            "final-record-stage"
+        ),
+        1
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "the plan-write test serializes process-global JCODE_HOME and JCODE_RUNTIME_DIR overrides"
+)]
+async fn project_plan_write_failure_is_a_session_noop_and_retries_forward() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _lock = crate::storage::lock_test_env();
+    let env = TestEnv::new();
+    std::fs::write(env.project.path().join("A.md"), "alpha").unwrap();
+    std::fs::write(env.project.path().join("B.md"), "plan-write-retry").unwrap();
+    let coordinator = env.coordinator();
+    let session = install_dispatched_session(
+        &coordinator,
+        env.project.path(),
+        "session-wp04-plan-write",
+        &["A.md"],
+    );
+    let agent = agent_for(session).await;
+    let editor = opened_editor(
+        &coordinator,
+        "session-wp04-plan-write",
+        "connection-plan-write",
+        env.working_dir(),
+    )
+    .await;
+    coordinator
+        .apply_selection(
+            apply_request(
+                &editor,
+                "session-wp04-plan-write",
+                "connection-plan-write",
+                "operation-plan-write",
+                wire_selection(&["A.md", "B.md"]),
+                true,
+            ),
+            Arc::clone(&agent),
+            true,
+        )
+        .await
+        .unwrap();
+    let mut record = coordinator
+        .load_apply_record("operation-plan-write")
+        .unwrap();
+    let snapshot = agent.lock().await.startup_context_session().clone();
+    record = coordinator
+        .prepare_record_for_session(record, &snapshot)
+        .unwrap();
+    let before = serde_json::to_vec(&snapshot).unwrap();
+
+    let startup_root = env.state.path().join("startup-context");
+    assert!(!startup_root.join("projects").exists());
+    let original_mode = std::fs::metadata(&startup_root)
+        .unwrap()
+        .permissions()
+        .mode();
+    std::fs::set_permissions(&startup_root, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let result = coordinator.commit_record(
+        &mut record,
+        agent.lock().await.startup_context_session_mut(),
+    );
+    std::fs::set_permissions(
+        &startup_root,
+        std::fs::Permissions::from_mode(original_mode),
+    )
+    .unwrap();
+
+    assert_eq!(
+        result
+            .expect_err("project plan write must fail under an unwritable private namespace")
+            .kind,
+        StartupContextFailureKind::Recovery
+    );
+    assert_eq!(project_plan_revision(&coordinator, env.project.path()), 0);
+    assert_eq!(
+        serde_json::to_vec(agent.lock().await.startup_context_session()).unwrap(),
+        before
+    );
+    let retry = {
+        let mut guard = agent.lock().await;
+        coordinator.drain_pending_for_agent(&mut guard)
+    };
+    assert_eq!(retry[0].phase, StartupContextApplyPhase::Succeeded);
+    assert_eq!(project_plan_revision(&coordinator, env.project.path()), 1);
+    assert_eq!(
+        exact_text_occurrences(
+            agent.lock().await.startup_context_session(),
+            "plan-write-retry"
+        ),
+        1
+    );
 }

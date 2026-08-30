@@ -7,8 +7,9 @@ use crate::protocol::{
     StartupContextSelectionInput, StartupContextSelectionPreview,
 };
 use crate::session::{
-    PreparedStartupContextSessionApply, Session, StartupContextSessionApplyError,
-    StartupContextSessionApplyOutcome,
+    DurableStartupContextSessionPersistence, PreparedStartupContextSessionApply, Session,
+    StartupContextSessionApplyError, StartupContextSessionApplyOutcome,
+    StartupContextSessionPersistence,
 };
 use jcode_base::startup_context::{
     ActiveProject, PreparedStartupEntry, StartupFailurePolicy, StartupFileSpecId,
@@ -888,6 +889,15 @@ impl StartupContextCoordinator {
         record: &mut PersistedStartupApplyRecord,
         session: &mut Session,
     ) -> Result<(), StartupContextFailure> {
+        self.commit_record_with(record, session, &DurableStartupContextSessionPersistence)
+    }
+
+    fn commit_record_with(
+        &self,
+        record: &mut PersistedStartupApplyRecord,
+        session: &mut Session,
+        persistence: &dyn StartupContextSessionPersistence,
+    ) -> Result<(), StartupContextFailure> {
         let project = self.resolve_record_project(record)?;
         if let Some(transition) = record.plan_transition.as_ref()
             && !matches!(
@@ -933,7 +943,7 @@ impl StartupContextCoordinator {
                 true,
             )
         })?;
-        match session.apply_prepared_startup_context_session(transition) {
+        match session.apply_prepared_startup_context_session_with(transition, persistence) {
             Ok(StartupContextSessionApplyOutcome::Applied {
                 batch_id,
                 file_count,
@@ -1101,6 +1111,27 @@ impl StartupContextCoordinator {
         &self,
         record: &PersistedStartupApplyRecord,
     ) -> Result<(), StartupContextFailure> {
+        #[cfg(test)]
+        {
+            let remaining = self
+                .inner
+                .apply_record_fail_after
+                .load(AtomicOrdering::SeqCst);
+            if remaining > 0
+                && self
+                    .inner
+                    .apply_record_fail_after
+                    .fetch_sub(1, AtomicOrdering::SeqCst)
+                    == 1
+            {
+                return Err(failure(
+                    StartupContextOperation::ApplySelection,
+                    StartupContextFailureKind::Recovery,
+                    "injected Startup Context apply recovery-record persistence failure",
+                    true,
+                ));
+            }
+        }
         let path = self.apply_record_path(&record.operation_id);
         crate::storage::write_json_secret(&path, record).map_err(|error| {
             failure(
@@ -1197,6 +1228,13 @@ impl StartupContextCoordinator {
     fn remove_apply_backup(&self, operation_id: &str) {
         let path = self.apply_record_path(operation_id);
         let _ = std::fs::remove_file(path.with_extension("bak"));
+    }
+
+    #[cfg(test)]
+    fn fail_apply_record_save_on_nth(&self, save_number: usize) {
+        self.inner
+            .apply_record_fail_after
+            .store(save_number, AtomicOrdering::SeqCst);
     }
 }
 
