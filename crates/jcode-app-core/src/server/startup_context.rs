@@ -122,6 +122,15 @@ pub(super) struct LeaseRequest {
     owner_connection_id: String,
 }
 
+pub(super) struct FileDetailRequest<'a> {
+    pub(super) batch_id: &'a str,
+    pub(super) spec_id: &'a str,
+    pub(super) message_id: &'a str,
+    pub(super) expected_sha256: &'a str,
+    pub(super) start_char: usize,
+    pub(super) max_chars: Option<usize>,
+}
+
 #[derive(Clone)]
 struct LeaseContext {
     project: ActiveProject,
@@ -819,13 +828,16 @@ impl StartupContextCoordinator {
     pub(super) fn file_detail(
         &self,
         session: &Session,
-        batch_id: &str,
-        spec_id: &str,
-        message_id: &str,
-        expected_sha256: &str,
-        start_char: usize,
-        max_chars: Option<usize>,
+        request: FileDetailRequest<'_>,
     ) -> Result<StartupContextFileDetail, StartupContextFailure> {
+        let FileDetailRequest {
+            batch_id,
+            spec_id,
+            message_id,
+            expected_sha256,
+            start_char,
+            max_chars,
+        } = request;
         for (label, value) in [
             ("batch ID", batch_id),
             ("file specification ID", spec_id),
@@ -992,7 +1004,7 @@ impl StartupContextCoordinator {
         match CrossProcessEditorGuard::probe(&paths) {
             GuardProbeOutcome::Available => StartupContextLeaseAvailability::Available,
             GuardProbeOutcome::Busy(owner) => StartupContextLeaseAvailability::Busy {
-                owner: owner.as_ref().map(owner_snapshot),
+                owner: owner.as_ref().as_ref().map(owner_snapshot),
             },
         }
     }
@@ -1076,7 +1088,7 @@ enum GuardAcquireOutcome {
 
 enum GuardProbeOutcome {
     Available,
-    Busy(Option<EditorOwnerMetadata>),
+    Busy(Box<Option<EditorOwnerMetadata>>),
 }
 
 impl CrossProcessEditorGuard {
@@ -1117,11 +1129,11 @@ impl CrossProcessEditorGuard {
                 ownership_io_failure(StartupContextOperation::OpenEditor, error)
             })?;
             write_owner_metadata(&paths.owner, metadata, StartupContextOperation::OpenEditor)?;
-            return Ok(GuardAcquireOutcome::Acquired(Self {
+            Ok(GuardAcquireOutcome::Acquired(Self {
                 _file: file,
                 owner_path: paths.owner.clone(),
                 lease_id: metadata.lease_id.clone(),
-            }));
+            }))
         }
 
         #[cfg(not(unix))]
@@ -1159,14 +1171,14 @@ impl CrossProcessEditorGuard {
                 .truncate(false)
                 .open(&paths.lock)
             else {
-                return GuardProbeOutcome::Busy(read_owner_metadata(&paths.owner));
+                return GuardProbeOutcome::Busy(Box::new(read_owner_metadata(&paths.owner)));
             };
             let _ = crate::platform::set_permissions_owner_only(&paths.lock);
             let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
             if result == 0 {
                 GuardProbeOutcome::Available
             } else {
-                GuardProbeOutcome::Busy(read_owner_metadata(&paths.owner))
+                GuardProbeOutcome::Busy(Box::new(read_owner_metadata(&paths.owner)))
             }
         }
 
@@ -1176,7 +1188,7 @@ impl CrossProcessEditorGuard {
                 Some(owner)
                     if process_identity_matches(owner.pid, &owner.process_start_identity) =>
                 {
-                    GuardProbeOutcome::Busy(Some(owner))
+                    GuardProbeOutcome::Busy(Box::new(Some(owner)))
                 }
                 _ => GuardProbeOutcome::Available,
             }

@@ -248,7 +248,9 @@ pub(super) async fn handle_get_model_catalog(
     };
     let build_ms = build_started.elapsed().as_millis();
     let startup_snapshot = startup_context_session_snapshot(agent, session_id);
-    let startup_context = Some(startup_context.compact_status(startup_snapshot).await);
+    let startup_context = Some(Box::new(
+        startup_context.compact_status(startup_snapshot).await,
+    ));
 
     let encode_started = Instant::now();
     let event = ServerEvent::History {
@@ -531,7 +533,9 @@ async fn send_history_from_persisted_session(
         .clone()
         .or_else(|| provider.reasoning_effort());
     drop(session);
-    let startup_context = Some(startup_context.compact_status(startup_snapshot).await);
+    let startup_context = Some(Box::new(
+        startup_context.compact_status(startup_snapshot).await,
+    ));
 
     let messages = rendered_messages
         .into_iter()
@@ -721,7 +725,9 @@ pub(super) async fn send_history(
     };
 
     let side_panel_start = Instant::now();
-    let startup_context = Some(startup_context.compact_status(startup_snapshot).await);
+    let startup_context = Some(Box::new(
+        startup_context.compact_status(startup_snapshot).await,
+    ));
     let side_panel = crate::side_panel::snapshot_for_session(session_id).unwrap_or_default();
     let side_panel_ms = side_panel_start.elapsed().as_millis();
 

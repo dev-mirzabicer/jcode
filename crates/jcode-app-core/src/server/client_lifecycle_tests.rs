@@ -1604,6 +1604,10 @@ async fn legacy_compaction_wire_requests_reject_without_mutating_live_session_as
 }
 
 #[tokio::test]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "the real shared-server journey must serialize process-global JCODE_HOME and JCODE_RUNTIME_DIR overrides"
+)]
 async fn startup_context_protocol_journey_uses_server_state_and_releases_editor() {
     let _lock = crate::storage::lock_test_env();
     let _env = IsolatedReloadRecoveryEnv::new();

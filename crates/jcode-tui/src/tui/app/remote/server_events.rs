@@ -1760,7 +1760,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.persist_remote_model_catalog_cache();
             }
             app.remote_skills = skills;
-            app.remote_startup_context = startup_context;
+            app.remote_startup_context = startup_context.map(|status| *status);
             app.invalidate_command_candidates_cache();
             app.remote_sessions = all_sessions;
             app.remote_client_count = client_count;

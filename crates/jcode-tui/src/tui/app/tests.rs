@@ -1511,7 +1511,7 @@ fn current_release_server_history_is_not_deferred_by_client_check() {
             context_revision: 0,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
-            startup_context: Some(crate::protocol::StartupContextCompactStatus {
+            startup_context: Some(Box::new(crate::protocol::StartupContextCompactStatus {
                 protocol_version: crate::protocol::STARTUP_CONTEXT_PROTOCOL_VERSION,
                 session_id: "session_current".to_string(),
                 state: crate::protocol::StartupContextStatusState::Empty,
@@ -1527,7 +1527,7 @@ fn current_release_server_history_is_not_deferred_by_client_check() {
                 stale_file_count: 0,
                 lease: crate::protocol::StartupContextLeaseAvailability::Available,
                 error: None,
-            }),
+            })),
         },
         &mut remote,
     );

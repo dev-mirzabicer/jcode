@@ -3346,12 +3346,14 @@ async fn startup_context_file_detail(
     if let Ok(agent) = agent.try_lock() {
         return coordinator.file_detail(
             agent.startup_context_session(),
-            batch_id,
-            spec_id,
-            message_id,
-            expected_sha256,
-            start_char,
-            max_chars,
+            super::startup_context::FileDetailRequest {
+                batch_id,
+                spec_id,
+                message_id,
+                expected_sha256,
+                start_char,
+                max_chars,
+            },
         );
     }
     let coordinator = coordinator.clone();
@@ -3371,12 +3373,14 @@ async fn startup_context_file_detail(
         })?;
         coordinator.file_detail(
             &session,
-            &batch_id,
-            &spec_id,
-            &message_id,
-            &expected_sha256,
-            start_char,
-            max_chars,
+            super::startup_context::FileDetailRequest {
+                batch_id: &batch_id,
+                spec_id: &spec_id,
+                message_id: &message_id,
+                expected_sha256: &expected_sha256,
+                start_char,
+                max_chars,
+            },
         )
     })
     .await

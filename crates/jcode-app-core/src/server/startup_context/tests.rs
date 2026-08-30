@@ -407,12 +407,14 @@ async fn status_and_lazy_detail_are_receipt_owned_exact_bounded_and_stale_safe()
     let detail = coordinator
         .file_detail(
             &session,
-            &file.batch_id,
-            &file.spec_id,
-            &file.message_id,
-            &file.sha256,
-            0,
-            Some(usize::MAX),
+            FileDetailRequest {
+                batch_id: &file.batch_id,
+                spec_id: &file.spec_id,
+                message_id: &file.message_id,
+                expected_sha256: &file.sha256,
+                start_char: 0,
+                max_chars: Some(usize::MAX),
+            },
         )
         .expect("first detail chunk");
     assert_eq!(
@@ -426,12 +428,14 @@ async fn status_and_lazy_detail_are_receipt_owned_exact_bounded_and_stale_safe()
     let second = coordinator
         .file_detail(
             &session,
-            &file.batch_id,
-            &file.spec_id,
-            &file.message_id,
-            &file.sha256,
-            detail.next_start_char.unwrap(),
-            None,
+            FileDetailRequest {
+                batch_id: &file.batch_id,
+                spec_id: &file.spec_id,
+                message_id: &file.message_id,
+                expected_sha256: &file.sha256,
+                start_char: detail.next_start_char.unwrap(),
+                max_chars: None,
+            },
         )
         .expect("second detail chunk");
     assert_eq!(format!("{}{}", detail.content, second.content), text);
@@ -440,12 +444,14 @@ async fn status_and_lazy_detail_are_receipt_owned_exact_bounded_and_stale_safe()
         coordinator
             .file_detail(
                 &session,
-                &file.batch_id,
-                &file.spec_id,
-                &file.message_id,
-                "stale-digest",
-                0,
-                None,
+                FileDetailRequest {
+                    batch_id: &file.batch_id,
+                    spec_id: &file.spec_id,
+                    message_id: &file.message_id,
+                    expected_sha256: "stale-digest",
+                    start_char: 0,
+                    max_chars: None,
+                },
             )
             .expect_err("stale digest must fail")
             .kind,
@@ -455,12 +461,14 @@ async fn status_and_lazy_detail_are_receipt_owned_exact_bounded_and_stale_safe()
         coordinator
             .file_detail(
                 &session,
-                &file.batch_id,
-                &file.spec_id,
-                "wrong-message",
-                &file.sha256,
-                0,
-                None,
+                FileDetailRequest {
+                    batch_id: &file.batch_id,
+                    spec_id: &file.spec_id,
+                    message_id: "wrong-message",
+                    expected_sha256: &file.sha256,
+                    start_char: 0,
+                    max_chars: None,
+                },
             )
             .expect_err("wrong message identity must fail")
             .kind,

@@ -1354,7 +1354,7 @@ pub enum ServerEvent {
         /// Bounded server-owned Startup Context status. Absence means the server
         /// predates the capability, not that the active project has an empty plan.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        startup_context: Option<StartupContextCompactStatus>,
+        startup_context: Option<Box<StartupContextCompactStatus>>,
     },
 
     #[serde(rename = "startup_context_status")]
