@@ -246,6 +246,19 @@ impl App {
                 .take()
                 .expect("prepared local invocation owns a memory reservation guard");
 
+            if let crate::session::StartupContextRepairOutcome::StillRequired { error } =
+                self.session.retry_startup_context_metadata_repair()
+            {
+                crate::logging::warn(&format!(
+                    "Startup Context receipt metadata repair remains pending for session {}: {}",
+                    self.session.id, error
+                ));
+            }
+            if let Err(error) = self.session.mark_startup_context_dispatched() {
+                memory_pending.restore_now();
+                return Err(anyhow::anyhow!(error));
+            }
+
             // Make API call non-blocking - poll it in select! so we can handle input while waiting
             let mut api_future = std::pin::pin!(invocation.invoke());
 
@@ -365,6 +378,7 @@ impl App {
             let mut current_tool_input = String::new();
             let mut generated_image_contexts: Vec<Vec<ContentBlock>> = Vec::new();
             let mut first_event = true;
+            let mut startup_acceptance_observed = false;
             let mut saw_message_end = false;
             let mut call_output_tokens_seen: u64 = 0;
             let mut interleaved = false; // Track if we interleaved a message mid-stream
@@ -606,18 +620,32 @@ impl App {
                                 if first_event {
                                     first_event = false;
                                 }
-                                if stream_event_confirms_request_acceptance(&event)
-                                    && let Some(memory) = memory_pending.take_for_commit()
-                                {
-                                    crate::memory::commit_reserved_memory(&self.session.id, &memory);
-                                    let age_ms = memory.computed_at.elapsed().as_millis() as u64;
-                                    self.show_injected_memory_context(
-                                        &memory.prompt,
-                                        memory.display_prompt.as_deref(),
-                                        memory.count,
-                                        age_ms,
-                                        memory.memory_ids,
-                                    );
+                                if stream_event_confirms_request_acceptance(&event) {
+                                    if !startup_acceptance_observed {
+                                        startup_acceptance_observed = true;
+                                        if let crate::session::StartupContextAcceptanceOutcome::MetadataRepairRequired { error } =
+                                            self.session.mark_startup_context_provider_accepted()
+                                        {
+                                            crate::logging::warn(&format!(
+                                                "Provider accepted Startup Context for session {}, but receipt metadata persistence requires repair: {}",
+                                                self.session.id, error
+                                            ));
+                                            self.push_display_message(DisplayMessage::error(
+                                                "Startup Context was accepted by the provider, but its delivery receipt needs metadata repair. Jcode will retry safely.",
+                                            ));
+                                        }
+                                    }
+                                    if let Some(memory) = memory_pending.take_for_commit() {
+                                        crate::memory::commit_reserved_memory(&self.session.id, &memory);
+                                        let age_ms = memory.computed_at.elapsed().as_millis() as u64;
+                                        self.show_injected_memory_context(
+                                            &memory.prompt,
+                                            memory.display_prompt.as_deref(),
+                                            memory.count,
+                                            age_ms,
+                                            memory.memory_ids,
+                                        );
+                                    }
                                 }
                                 if stream_event_is_provider_output(&event) {
                                     self.mark_pending_provider_output_started();

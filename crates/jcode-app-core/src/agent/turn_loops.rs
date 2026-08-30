@@ -125,6 +125,11 @@ impl Agent {
                 return Err(self.block_for_preflight(preflight, None)?);
             }
 
+            if let Err(error) = self.prepare_startup_context_provider_dispatch() {
+                memory_pending.restore_now();
+                return Err(error);
+            }
+
             // Check for client-side cache violations before memory injection.
             // Memory is an ephemeral suffix that changes each turn; tracking it would cause
             // false-positive violations every turn (prior turn's memory ≠ current history prefix).
@@ -218,6 +223,7 @@ impl Agent {
             let mut text_content = String::new();
             let mut tool_calls: Vec<ToolCall> = Vec::new();
             let mut current_tool: Option<ToolCall> = None;
+            let mut startup_acceptance_observed = false;
             let mut current_tool_input = String::new();
             let mut generated_image_contexts: Vec<Vec<ContentBlock>> = Vec::new();
             let mut usage_input: Option<u64> = None;
@@ -287,10 +293,14 @@ impl Agent {
                     }
                 };
 
-                if super::preflight::stream_event_confirms_request_acceptance(&event)
-                    && let Some(memory) = memory_pending.take_for_commit()
-                {
-                    self.commit_reserved_memory_for_request(memory, None);
+                if super::preflight::stream_event_confirms_request_acceptance(&event) {
+                    if !startup_acceptance_observed {
+                        startup_acceptance_observed = true;
+                        self.record_startup_context_provider_acceptance();
+                    }
+                    if let Some(memory) = memory_pending.take_for_commit() {
+                        self.commit_reserved_memory_for_request(memory, None);
+                    }
                 }
                 if super::preflight::stream_event_is_provider_output(&event) {
                     self.mark_provider_output_started();

@@ -36,7 +36,10 @@ use crate::protocol::{
     ContextPendingInputMetadata, ContextPreflightReport, HistoryMessage, ServerEvent,
 };
 use crate::provider::{NativeToolResult, Provider, ProviderRuntimeState};
-use crate::session::{GitState, Session, SessionStatus, StoredDisplayRole, StoredMessage};
+use crate::session::{
+    DurableStartupContextSessionPersistence, GitState, Session, SessionStatus,
+    StartupContextSessionPersistence, StoredDisplayRole, StoredMessage,
+};
 use crate::skill::SkillRegistry;
 use crate::tool::{Registry, ToolContext, ToolExecutionMode};
 use anyhow::Result;
@@ -231,6 +234,8 @@ pub struct Agent {
     /// Exact pending-turn boundary used only for prompt-safe preflight and
     /// pre-output provider rejection rollback.
     active_turn_context: Option<ActiveTurnContext>,
+    /// Narrow persistence boundary for startup dispatch and acceptance metadata.
+    startup_context_persistence: Arc<dyn StartupContextSessionPersistence>,
     /// Tool call ids observed in the current session transcript.
     tool_call_ids: HashSet<String>,
     /// Tool result ids observed in the current session transcript.
@@ -318,6 +323,7 @@ impl Agent {
             pending_alerts: Vec::new(),
             current_turn_system_reminder: None,
             active_turn_context: None,
+            startup_context_persistence: Arc::new(DurableStartupContextSessionPersistence),
             tool_call_ids: HashSet::new(),
             tool_result_ids: HashSet::new(),
             tool_output_scan_index: 0,

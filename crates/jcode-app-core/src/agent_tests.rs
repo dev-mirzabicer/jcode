@@ -17,11 +17,148 @@ use jcode_session_types::{
     StoredContextEmergencyRetryOutcome, StoredContextEmergencyTriggerKind, StoredContextOperation,
     StoredContextStatusEvent, StoredContextTransaction, StoredContextTransactionStatusKind,
     StoredContextViewState, StoredRangeSummary, StoredReasoningSelection,
-    StoredReasoningSuppression, StoredToolResultDistillation, StoredUnattendedContextAuthorization,
+    StoredReasoningSuppression, StoredStartupBatchDeliveryState, StoredStartupBatchKind,
+    StoredStartupContextBatch, StoredStartupContextReceipt, StoredStartupContextState,
+    StoredStartupFileObservation, StoredStartupFileReceipt, StoredStartupObservedState,
+    StoredStartupPathClassification, StoredStartupProjectIdentity, StoredToolResultDistillation,
+    StoredUnattendedContextAuthorization,
 };
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::ffi::OsString;
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio_stream::wrappers::ReceiverStream;
+
+struct AgentTestEnvRestore {
+    key: &'static str,
+    previous: Option<OsString>,
+}
+
+impl AgentTestEnvRestore {
+    fn set_path(key: &'static str, value: &Path) -> Self {
+        let previous = std::env::var_os(key);
+        crate::env::set_var(key, value);
+        Self { key, previous }
+    }
+}
+
+impl Drop for AgentTestEnvRestore {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.take() {
+            crate::env::set_var(self.key, previous);
+        } else {
+            crate::env::remove_var(self.key);
+        }
+    }
+}
+
+#[derive(Default)]
+struct AgentTestStartupPersistence {
+    calls: AtomicUsize,
+    fail: AtomicBool,
+}
+
+impl AgentTestStartupPersistence {
+    fn failing() -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            fail: AtomicBool::new(true),
+        }
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl crate::session::StartupContextSessionPersistence for AgentTestStartupPersistence {
+    fn persist(&self, _session: &mut Session) -> Result<()> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.fail.load(Ordering::SeqCst) {
+            anyhow::bail!("injected startup dispatch persistence failure");
+        }
+        Ok(())
+    }
+}
+
+fn synthetic_startup_session(id: &str) -> Session {
+    let now = chrono::Utc::now();
+    let control_id = format!("{id}-startup-control");
+    let file_id = format!("{id}-startup-file");
+    let mut session = Session::create_with_id(id.to_string(), None, None);
+    session.append_stored_message(StoredMessage {
+        id: control_id.clone(),
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: "<synthetic_startup_control/>".to_string(),
+            cache_control: None,
+        }],
+        display_role: Some(StoredDisplayRole::System),
+        timestamp: None,
+        tool_duration_ms: None,
+        token_usage: None,
+    });
+    session.append_stored_message(StoredMessage {
+        id: file_id.clone(),
+        role: Role::User,
+        content: vec![
+            ContentBlock::Text {
+                text: "<synthetic_startup_file path=\"PLAN.md\"/>".to_string(),
+                cache_control: None,
+            },
+            ContentBlock::Text {
+                text: "exact synthetic startup body\n".to_string(),
+                cache_control: None,
+            },
+        ],
+        display_role: Some(StoredDisplayRole::System),
+        timestamp: None,
+        tool_duration_ms: None,
+        token_usage: None,
+    });
+    session.startup_context = Some(StoredStartupContextReceipt {
+        schema_version: 1,
+        project: StoredStartupProjectIdentity::Directory {
+            canonical_root: "/synthetic/project".to_string(),
+        },
+        plan_revision: 3,
+        state: StoredStartupContextState::Prepared,
+        batches: vec![StoredStartupContextBatch {
+            id: format!("{id}-batch"),
+            kind: StoredStartupBatchKind::Initial,
+            control_message_id: control_id,
+            files: vec![StoredStartupFileReceipt {
+                spec_id: format!("{id}-spec"),
+                message_id: file_id,
+                ordinal: 2,
+                logical_path: "PLAN.md".to_string(),
+                resolved_path: "/synthetic/project/PLAN.md".to_string(),
+                classification: StoredStartupPathClassification::Project,
+                sha256: "a".repeat(64),
+                bytes: 29,
+                estimated_tokens: 8,
+                latest_observation: StoredStartupFileObservation {
+                    observed_at: now,
+                    state: StoredStartupObservedState::Current,
+                },
+                last_notified_observation: None,
+                notification_count: 0,
+            }],
+            appended_at: now,
+            delivery_state: StoredStartupBatchDeliveryState::Captured,
+            first_dispatched_at: None,
+            first_provider_accepted_at: None,
+        }],
+        blocked_issues: Vec::new(),
+        pending_updates: Vec::new(),
+        prepared_at: now,
+        first_dispatched_at: None,
+        first_provider_accepted_at: None,
+        metadata_repair: None,
+    });
+    session.ensure_initial_session_context_message_after_startup();
+    session
+}
 
 struct DelayedProvider {
     open_delay: Duration,
@@ -2291,6 +2428,134 @@ async fn context_budget_rewind_undo_and_repair_reseed_exactly_and_clear_observat
         serde_json::to_vec(&agent.session.context_view).unwrap(),
         context_before_repair
     );
+}
+
+#[tokio::test]
+async fn wp02_dispatch_persistence_failure_prevents_provider_invocation() {
+    let _lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().expect("isolated Jcode home");
+    let _home = AgentTestEnvRestore::set_path("JCODE_HOME", home.path());
+    let provider = ProjectedRequestProvider::new(1_000_000);
+    let provider_handle = provider.clone();
+    let provider: Arc<dyn Provider> = Arc::new(provider);
+    let mut agent = Agent::new_with_session(
+        provider,
+        Registry::empty(),
+        synthetic_startup_session("session-wp02-dispatch-failure"),
+        None,
+    );
+    agent.memory_enabled = false;
+    let persistence = Arc::new(AgentTestStartupPersistence::failing());
+    agent.startup_context_persistence = persistence.clone();
+
+    let error = agent
+        .run_once_capture("provider must not receive this")
+        .await
+        .expect_err("dispatch persistence must fail closed");
+
+    assert!(error.to_string().contains("startup dispatch persistence"));
+    assert_eq!(persistence.calls(), 1);
+    assert!(provider_handle.requests().is_empty());
+    assert_eq!(
+        agent
+            .session
+            .startup_context
+            .as_ref()
+            .map(|receipt| &receipt.state),
+        Some(&StoredStartupContextState::Prepared)
+    );
+    assert_eq!(
+        agent
+            .session
+            .startup_context
+            .as_ref()
+            .map(|receipt| receipt.batches[0].delivery_state),
+        Some(StoredStartupBatchDeliveryState::Captured)
+    );
+}
+
+#[tokio::test]
+async fn wp02_blocking_and_mpsc_turns_mark_first_provider_acceptance() {
+    let _lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().expect("isolated Jcode home");
+    let _home = AgentTestEnvRestore::set_path("JCODE_HOME", home.path());
+
+    let blocking_provider = ProjectedRequestProvider::new(1_000_000);
+    let blocking_handle = blocking_provider.clone();
+    let mut blocking_agent = Agent::new_with_session(
+        Arc::new(blocking_provider),
+        Registry::empty(),
+        synthetic_startup_session("session-wp02-blocking-acceptance"),
+        None,
+    );
+    blocking_agent.memory_enabled = false;
+    let response = blocking_agent
+        .run_once_capture("blocking acceptance")
+        .await
+        .expect("blocking provider turn");
+    assert_eq!(response, "projected response");
+    assert_eq!(blocking_handle.requests().len(), 1);
+    assert!(matches!(
+        &blocking_handle.requests()[0][0].content[0],
+        ContentBlock::Text { text, cache_control: None }
+            if text == "<synthetic_startup_control/>"
+    ));
+    assert!(matches!(
+        blocking_agent
+            .session
+            .startup_context
+            .as_ref()
+            .map(|receipt| &receipt.state),
+        Some(StoredStartupContextState::ProviderAccepted)
+    ));
+    assert!(matches!(
+        Session::load("session-wp02-blocking-acceptance")
+            .expect("reload blocking acceptance")
+            .startup_context
+            .as_ref()
+            .map(|receipt| &receipt.state),
+        Some(StoredStartupContextState::ProviderAccepted)
+    ));
+
+    let mpsc_provider = ProjectedRequestProvider::new(1_000_000);
+    let mpsc_handle = mpsc_provider.clone();
+    let mut mpsc_agent = Agent::new_with_session(
+        Arc::new(mpsc_provider),
+        Registry::empty(),
+        synthetic_startup_session("session-wp02-mpsc-acceptance"),
+        None,
+    );
+    mpsc_agent.memory_enabled = false;
+    let (event_tx, _event_rx) = tokio_mpsc::unbounded_channel();
+    mpsc_agent
+        .run_once_streaming_mpsc_correlated(902, "MPSC acceptance", Vec::new(), None, event_tx)
+        .await
+        .expect("MPSC provider turn");
+    assert_eq!(mpsc_handle.requests().len(), 1);
+    assert!(matches!(
+        mpsc_agent
+            .session
+            .startup_context
+            .as_ref()
+            .map(|receipt| &receipt.state),
+        Some(StoredStartupContextState::ProviderAccepted)
+    ));
+    assert_eq!(
+        mpsc_agent
+            .session
+            .startup_context
+            .as_ref()
+            .map(|receipt| receipt.batches[0].delivery_state),
+        Some(StoredStartupBatchDeliveryState::ProviderAccepted)
+    );
+    assert!(matches!(
+        Session::load("session-wp02-mpsc-acceptance")
+            .expect("reload MPSC acceptance")
+            .startup_context
+            .as_ref()
+            .map(|receipt| &receipt.state),
+        Some(StoredStartupContextState::ProviderAccepted)
+    ));
 }
 
 #[tokio::test]

@@ -11,9 +11,17 @@ impl Agent {
         let system_tokens = split.estimated_tokens();
         let tool_tokens = ToolDefinition::aggregate_prompt_token_estimate(tools);
         let prefix_tokens = system_tokens + tool_tokens;
+        let startup = self.session.startup_context_accounting();
         logging::info(&format!(
-            "Prompt prefix estimate: total={} tokens (system={} tools={})",
-            prefix_tokens, system_tokens, tool_tokens
+            "Prompt prefix estimate: total={} tokens (system={} tools={}); startup context: files={} bytes={} estimated_file_tokens={} state={:?} batch_delivery={:?}",
+            prefix_tokens,
+            system_tokens,
+            tool_tokens,
+            startup.file_count,
+            startup.captured_bytes,
+            startup.estimated_tokens,
+            startup.state,
+            startup.batch_delivery,
         ));
     }
 

@@ -2,6 +2,67 @@ use super::*;
 use crate::protocol::{ContextActionRequiredReason, ContextPayloadPressure, ContextPressureLevel};
 
 impl Agent {
+    pub(super) fn prepare_startup_context_provider_dispatch(&mut self) -> Result<()> {
+        match self
+            .session
+            .retry_startup_context_metadata_repair_with(self.startup_context_persistence.as_ref())
+        {
+            crate::session::StartupContextRepairOutcome::NotNeeded
+            | crate::session::StartupContextRepairOutcome::Persisted => {}
+            crate::session::StartupContextRepairOutcome::StillRequired { error } => {
+                logging::warn(&format!(
+                    "Startup Context receipt metadata repair remains pending for session {}: {}",
+                    self.session.id, error
+                ));
+            }
+        }
+
+        let outcome = self
+            .session
+            .mark_startup_context_dispatched_with(self.startup_context_persistence.as_ref())
+            .map_err(|error| anyhow::anyhow!(error))?;
+        if let crate::session::StartupContextDispatchOutcome::Persisted { batches_marked } = outcome
+        {
+            let accounting = self.session.startup_context_accounting();
+            logging::event_info(
+                "STARTUP_CONTEXT_DISPATCHED",
+                vec![
+                    ("session_id", self.session.id.clone()),
+                    ("batches", batches_marked.to_string()),
+                    ("files", accounting.file_count.to_string()),
+                    ("bytes", accounting.captured_bytes.to_string()),
+                    ("estimated_tokens", accounting.estimated_tokens.to_string()),
+                ],
+            );
+        }
+        Ok(())
+    }
+
+    pub(super) fn record_startup_context_provider_acceptance(&mut self) {
+        match self
+            .session
+            .mark_startup_context_provider_accepted_with(self.startup_context_persistence.as_ref())
+        {
+            crate::session::StartupContextAcceptanceOutcome::Persisted { batches_marked } => {
+                logging::event_info(
+                    "STARTUP_CONTEXT_PROVIDER_ACCEPTED",
+                    vec![
+                        ("session_id", self.session.id.clone()),
+                        ("batches", batches_marked.to_string()),
+                    ],
+                );
+            }
+            crate::session::StartupContextAcceptanceOutcome::MetadataRepairRequired { error } => {
+                logging::warn(&format!(
+                    "Provider accepted Startup Context for session {}, but receipt metadata persistence requires repair: {}",
+                    self.session.id, error
+                ));
+            }
+            crate::session::StartupContextAcceptanceOutcome::NotApplicable
+            | crate::session::StartupContextAcceptanceOutcome::Unchanged => {}
+        }
+    }
+
     pub(super) fn begin_pending_turn(
         &mut self,
         request_id: Option<u64>,
