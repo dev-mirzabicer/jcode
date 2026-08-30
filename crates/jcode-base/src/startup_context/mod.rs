@@ -15,6 +15,7 @@ mod types;
 pub use browser::*;
 pub use types::*;
 
+use jcode_session_types::StoredStartupFileSpec;
 use plan::StartupPlanStore;
 use std::path::{Path, PathBuf};
 
@@ -87,6 +88,52 @@ impl StartupContext {
         )
     }
 
+    /// Revalidate a durable queued selection through the same normalization
+    /// path as an interactive request. No file content is accepted from the
+    /// stored shape; complete capture still happens separately at drain time.
+    pub fn preview_stored_selection(
+        &self,
+        project: &ActiveProject,
+        specs: &[StoredStartupFileSpec],
+    ) -> Result<StartupSelectionPreview, StartupContextError> {
+        let inputs = specs
+            .iter()
+            .cloned()
+            .map(StartupFileSpec::from_stored)
+            .map(|spec| {
+                spec.map(|spec| {
+                    let mut input = StartupSelectionInput::existing(
+                        spec.id().clone(),
+                        spec.path().as_path().to_path_buf(),
+                    );
+                    if let Some(approval) = spec.external_approval() {
+                        input = input.with_external_approval(
+                            approval.approved_resolved_target().to_path_buf(),
+                        );
+                    }
+                    input
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(self.preview_selection(project, inputs))
+    }
+
+    /// Project a valid preview to the durable path-only queue representation.
+    pub fn store_selection(
+        &self,
+        preview: &StartupSelectionPreview,
+    ) -> Result<Vec<StoredStartupFileSpec>, StartupContextError> {
+        if !preview.is_valid() {
+            return Err(StartupContextError::InvalidSelection {
+                issue_count: preview.issue_count(),
+            });
+        }
+        preview
+            .selected()
+            .map(|selected| selected.spec().to_stored())
+            .collect()
+    }
+
     pub fn expand_directory(
         &self,
         project: &ActiveProject,
@@ -107,6 +154,24 @@ impl StartupContext {
         preview: &StartupSelectionPreview,
     ) -> Result<StartupProjectPlan, StartupContextError> {
         self.plan_store.save(project, expected_revision, preview)
+    }
+
+    pub fn prepare_project_plan_transition(
+        &self,
+        project: &ActiveProject,
+        expected_revision: u64,
+        preview: &StartupSelectionPreview,
+    ) -> Result<StartupProjectPlanTransition, StartupContextError> {
+        self.plan_store
+            .prepare_transition(project, expected_revision, preview)
+    }
+
+    pub fn commit_project_plan_transition(
+        &self,
+        project: &ActiveProject,
+        transition: &StartupProjectPlanTransition,
+    ) -> Result<StartupProjectPlanCommitOutcome, StartupContextError> {
+        self.plan_store.commit_transition(project, transition)
     }
 
     pub fn prepare_project_plan(

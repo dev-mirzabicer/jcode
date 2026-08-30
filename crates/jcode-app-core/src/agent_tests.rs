@@ -151,6 +151,7 @@ fn synthetic_startup_session(id: &str) -> Session {
         }],
         blocked_issues: Vec::new(),
         pending_updates: Vec::new(),
+        last_apply_operation_id: None,
         prepared_at: now,
         first_dispatched_at: None,
         first_provider_accepted_at: None,

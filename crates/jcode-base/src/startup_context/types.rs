@@ -4,6 +4,7 @@ use jcode_session_types::{
     StoredStartupFileSpec, StoredStartupPathClassification, StoredStartupProjectIdentity,
     StoredStartupSelectedPath, StoredStartupTargetType, StoredStartupUnsupportedContent,
 };
+use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -109,6 +110,10 @@ pub struct StartupFileSpecId(String);
 impl StartupFileSpecId {
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    pub fn parse(value: impl Into<String>) -> Result<Self, StartupContextError> {
+        Self::from_stored(value.into())
     }
 
     pub(super) fn from_stored(value: String) -> Result<Self, StartupContextError> {
@@ -541,6 +546,77 @@ impl LoadedStartupProjectPlan {
     pub fn source(&self) -> StartupPlanLoadSource {
         self.source
     }
+}
+
+/// Opaque, durable description of one validated project-plan transition.
+///
+/// The transition contains path specifications and revisions only. It never
+/// contains captured file content, so app-core can persist it in an apply
+/// recovery record without duplicating source text.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartupProjectPlanTransition {
+    project: StoredStartupProjectIdentity,
+    previous_revision: u64,
+    proposed_revision: u64,
+    previous_entries: Vec<StoredStartupFileSpec>,
+    proposed_entries: Vec<StoredStartupFileSpec>,
+    updated_at: DateTime<Utc>,
+}
+
+impl StartupProjectPlanTransition {
+    pub(super) fn new(
+        project: StoredStartupProjectIdentity,
+        previous_revision: u64,
+        proposed_revision: u64,
+        previous_entries: Vec<StoredStartupFileSpec>,
+        proposed_entries: Vec<StoredStartupFileSpec>,
+        updated_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            project,
+            previous_revision,
+            proposed_revision,
+            previous_entries,
+            proposed_entries,
+            updated_at,
+        }
+    }
+
+    pub fn previous_revision(&self) -> u64 {
+        self.previous_revision
+    }
+
+    pub fn proposed_revision(&self) -> u64 {
+        self.proposed_revision
+    }
+
+    pub fn changes_plan(&self) -> bool {
+        self.previous_revision != self.proposed_revision
+            || self.previous_entries != self.proposed_entries
+    }
+
+    pub(super) fn project(&self) -> &StoredStartupProjectIdentity {
+        &self.project
+    }
+
+    pub(super) fn previous_entries(&self) -> &[StoredStartupFileSpec] {
+        &self.previous_entries
+    }
+
+    pub(super) fn proposed_entries(&self) -> &[StoredStartupFileSpec] {
+        &self.proposed_entries
+    }
+
+    pub(super) fn updated_at(&self) -> DateTime<Utc> {
+        self.updated_at
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StartupProjectPlanCommitOutcome {
+    Unchanged,
+    Applied,
+    AlreadyApplied,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1005,6 +1081,7 @@ pub enum StartupContextError {
     PlanProjectMismatch,
     SelectionProjectMismatch,
     InvalidSelection { issue_count: usize },
+    InvalidPlanTransition { detail: String },
     StalePlanRevision { expected: u64, actual: u64 },
     PlanRevisionOverflow,
 }
@@ -1047,6 +1124,12 @@ impl fmt::Display for StartupContextError {
                 formatter,
                 "startup-context selection has {issue_count} unresolved issue(s)"
             ),
+            Self::InvalidPlanTransition { detail } => {
+                write!(
+                    formatter,
+                    "invalid startup-context plan transition: {detail}"
+                )
+            }
             Self::StalePlanRevision { expected, actual } => write!(
                 formatter,
                 "startup-context plan revision is stale: expected {expected}, current revision is {actual}"

@@ -68,10 +68,11 @@ pub use render::{
     render_messages_and_images_with_compacted_history_for_remote_history, summarize_tool_calls,
 };
 pub use startup_context::{
-    DurableStartupContextSessionPersistence, StartupContextAcceptanceOutcome,
-    StartupContextAccounting, StartupContextDispatchError, StartupContextDispatchOutcome,
-    StartupContextInstallError, StartupContextInstallOutcome, StartupContextRepairOutcome,
-    StartupContextSessionPersistence,
+    DurableStartupContextSessionPersistence, PreparedStartupContextSessionApply,
+    StartupContextAcceptanceOutcome, StartupContextAccounting, StartupContextDispatchError,
+    StartupContextDispatchOutcome, StartupContextInstallError, StartupContextInstallOutcome,
+    StartupContextRepairOutcome, StartupContextSessionApplyError,
+    StartupContextSessionApplyOutcome, StartupContextSessionPersistence,
 };
 pub use storage_paths::session_journal_path_from_snapshot;
 #[cfg(test)]

@@ -243,6 +243,13 @@ pub struct StoredStartupContextReceipt {
     pub blocked_issues: Vec<StoredStartupFileIssue>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_updates: Vec<StoredPendingStartupUpdate>,
+    /// Most recent apply operation durably reflected in this receipt.
+    ///
+    /// This is metadata only. It lets crash recovery distinguish an operation
+    /// that persisted its session target from one that has not yet done so,
+    /// including empty or future-only applies that add no transcript batch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_apply_operation_id: Option<String>,
     pub prepared_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_dispatched_at: Option<DateTime<Utc>>,
@@ -327,6 +334,7 @@ mod tests {
                 }],
                 blocked_issues: Vec::new(),
                 pending_updates: Vec::new(),
+                last_apply_operation_id: None,
                 prepared_at: timestamp,
                 first_dispatched_at: None,
                 first_provider_accepted_at: None,

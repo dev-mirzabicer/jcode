@@ -1,7 +1,7 @@
 use super::types::{
     ActiveProject, LoadedStartupProjectPlan, ProjectKey, STARTUP_PROJECT_PLAN_SCHEMA_VERSION,
     StartupContextError, StartupFileSpec, StartupPlanLoadSource, StartupProjectPlan,
-    StartupSelectionPreview,
+    StartupProjectPlanCommitOutcome, StartupProjectPlanTransition, StartupSelectionPreview,
 };
 use chrono::{DateTime, Utc};
 use jcode_session_types::{StoredStartupFileSpec, StoredStartupProjectIdentity};
@@ -88,6 +88,17 @@ impl StartupPlanStore {
         expected_revision: u64,
         preview: &StartupSelectionPreview,
     ) -> Result<StartupProjectPlan, StartupContextError> {
+        let transition = self.prepare_transition(project, expected_revision, preview)?;
+        let _ = self.commit_transition(project, &transition)?;
+        self.load(project).map(LoadedStartupProjectPlan::into_plan)
+    }
+
+    pub(super) fn prepare_transition(
+        &self,
+        project: &ActiveProject,
+        expected_revision: u64,
+        preview: &StartupSelectionPreview,
+    ) -> Result<StartupProjectPlanTransition, StartupContextError> {
         if preview.project_key() != project.key() {
             return Err(StartupContextError::SelectionProjectMismatch);
         }
@@ -111,38 +122,109 @@ impl StartupPlanStore {
             .map(|selected| selected.spec().clone())
             .collect::<Vec<_>>();
         validate_unique_entries(&entries)?;
-        if entries == current.entries() {
-            return Ok(current.clone());
-        }
-
-        let revision = current
-            .revision()
-            .checked_add(1)
-            .ok_or(StartupContextError::PlanRevisionOverflow)?;
+        let revision = if entries == current.entries() {
+            current.revision()
+        } else {
+            current
+                .revision()
+                .checked_add(1)
+                .ok_or(StartupContextError::PlanRevisionOverflow)?
+        };
         let updated_at = Utc::now();
-        let stored = StoredProjectPlan {
-            schema_version: STARTUP_PROJECT_PLAN_SCHEMA_VERSION,
+        Ok(StartupProjectPlanTransition::new(
+            project.key().to_stored()?,
+            current.revision(),
             revision,
-            project: project.key().to_stored()?,
-            entries: entries
+            current
+                .entries()
+                .iter()
+                .map(StartupFileSpec::to_stored)
+                .collect::<Result<Vec<_>, _>>()?,
+            entries
                 .iter()
                 .map(StartupFileSpec::to_stored)
                 .collect::<Result<Vec<_>, _>>()?,
             updated_at,
+        ))
+    }
+
+    pub(super) fn commit_transition(
+        &self,
+        project: &ActiveProject,
+        transition: &StartupProjectPlanTransition,
+    ) -> Result<StartupProjectPlanCommitOutcome, StartupContextError> {
+        let expected_project = project.key().to_stored()?;
+        if transition.project() != &expected_project {
+            return Err(StartupContextError::PlanProjectMismatch);
+        }
+        let previous_entries = decode_transition_entries(transition.previous_entries())?;
+        let proposed_entries = decode_transition_entries(transition.proposed_entries())?;
+        validate_unique_entries(&previous_entries)?;
+        validate_unique_entries(&proposed_entries)?;
+
+        let expected_proposed_revision = if previous_entries == proposed_entries {
+            transition.previous_revision()
+        } else {
+            transition
+                .previous_revision()
+                .checked_add(1)
+                .ok_or(StartupContextError::PlanRevisionOverflow)?
         };
-        let path = self.path_for(project.key());
-        jcode_storage::write_json_secret(&path, &stored).map_err(|error| {
+        if transition.proposed_revision() != expected_proposed_revision {
+            return Err(StartupContextError::InvalidPlanTransition {
+                detail: format!(
+                    "proposed revision {} does not follow previous revision {}",
+                    transition.proposed_revision(),
+                    transition.previous_revision()
+                ),
+            });
+        }
+
+        let current = self.load(project)?.into_plan();
+        if current.revision() == transition.proposed_revision()
+            && current.entries() == proposed_entries
+        {
+            return Ok(if transition.changes_plan() {
+                StartupProjectPlanCommitOutcome::AlreadyApplied
+            } else {
+                StartupProjectPlanCommitOutcome::Unchanged
+            });
+        }
+        if current.revision() != transition.previous_revision()
+            || current.entries() != previous_entries
+        {
+            return Err(StartupContextError::StalePlanRevision {
+                expected: transition.previous_revision(),
+                actual: current.revision(),
+            });
+        }
+        if !transition.changes_plan() {
+            return Ok(StartupProjectPlanCommitOutcome::Unchanged);
+        }
+
+        let stored = StoredProjectPlan {
+            schema_version: STARTUP_PROJECT_PLAN_SCHEMA_VERSION,
+            revision: transition.proposed_revision(),
+            project: expected_project,
+            entries: transition.proposed_entries().to_vec(),
+            updated_at: transition.updated_at(),
+        };
+        self.write_stored_plan(project.key(), &stored)?;
+        Ok(StartupProjectPlanCommitOutcome::Applied)
+    }
+
+    fn write_stored_plan(
+        &self,
+        project_key: &ProjectKey,
+        stored: &StoredProjectPlan,
+    ) -> Result<(), StartupContextError> {
+        let path = self.path_for(project_key);
+        jcode_storage::write_json_secret(&path, stored).map_err(|error| {
             StartupContextError::PlanStorage {
                 path,
                 detail: error.to_string(),
             }
-        })?;
-        Ok(StartupProjectPlan::stored(
-            project.key().clone(),
-            revision,
-            entries,
-            updated_at,
-        ))
+        })
     }
 
     pub(super) fn path_for(&self, project_key: &ProjectKey) -> PathBuf {
@@ -199,6 +281,16 @@ impl StartupPlanStore {
             stored.updated_at,
         ))
     }
+}
+
+fn decode_transition_entries(
+    entries: &[StoredStartupFileSpec],
+) -> Result<Vec<StartupFileSpec>, StartupContextError> {
+    entries
+        .iter()
+        .cloned()
+        .map(StartupFileSpec::from_stored)
+        .collect()
 }
 
 enum StoredPlanReadError {

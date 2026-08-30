@@ -268,6 +268,47 @@ fn plan_revision_changes_only_for_ordered_default_changes() {
 }
 
 #[test]
+fn prepared_plan_transition_is_serializable_and_idempotent() {
+    let temp = TempDir::new().expect("tempdir");
+    let root = temp.path().join("project");
+    let context = context(&temp);
+    let project = resolve_non_git(&context, &root);
+    write_file(&root.join("one.md"), "one");
+
+    let preview = context.preview_selection(&project, [StartupSelectionInput::new("one.md")]);
+    let transition = context
+        .prepare_project_plan_transition(&project, 0, &preview)
+        .expect("prepare plan transition");
+    let encoded = serde_json::to_vec(&transition).expect("serialize transition");
+    assert!(!String::from_utf8_lossy(&encoded).contains("one\n"));
+    let decoded: StartupProjectPlanTransition =
+        serde_json::from_slice(&encoded).expect("deserialize transition");
+
+    assert_eq!(decoded.previous_revision(), 0);
+    assert_eq!(decoded.proposed_revision(), 1);
+    assert_eq!(
+        context
+            .commit_project_plan_transition(&project, &decoded)
+            .expect("first transition commit"),
+        StartupProjectPlanCommitOutcome::Applied
+    );
+    assert_eq!(
+        context
+            .commit_project_plan_transition(&project, &decoded)
+            .expect("idempotent transition replay"),
+        StartupProjectPlanCommitOutcome::AlreadyApplied
+    );
+    assert_eq!(
+        context
+            .load_project_plan(&project)
+            .unwrap()
+            .plan()
+            .revision(),
+        1
+    );
+}
+
+#[test]
 fn corrupt_primary_recovers_backup_and_double_corruption_fails() {
     let temp = TempDir::new().expect("tempdir");
     let root = temp.path().join("project");
