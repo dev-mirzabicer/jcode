@@ -12,10 +12,12 @@ use serde::{Deserialize, Serialize};
 mod comm_format;
 mod context;
 mod notifications;
+mod startup_context;
 
 pub use comm_format::*;
 pub use context::*;
 pub use notifications::{FeatureToggle, NotificationType};
+pub use startup_context::*;
 
 use jcode_batch_types::BatchProgress;
 use jcode_message_types::{InputShellResult, ToolCall};
@@ -580,6 +582,15 @@ impl Request {
             Request::GetHistory { id } => *id,
             Request::GetModelCatalog { id } => *id,
             Request::GetCompactedHistory { id, .. } => *id,
+            Request::GetStartupContextStatus { id, .. } => *id,
+            Request::OpenStartupContextEditor { id } => *id,
+            Request::RenewStartupContextEditorLease { id, .. } => *id,
+            Request::CloseStartupContextEditor { id, .. } => *id,
+            Request::ListStartupContextDirectory { id, .. } => *id,
+            Request::SearchStartupContextFiles { id, .. } => *id,
+            Request::CancelStartupContextSearch { id, .. } => *id,
+            Request::PreviewStartupContextFile { id, .. } => *id,
+            Request::GetStartupContextFileDetail { id, .. } => *id,
             Request::GetContextEditorSnapshot { id, .. } => *id,
             Request::GetContextMessageDetail { id, .. } => *id,
             Request::PreviewContextRanges { id, .. } => *id,

@@ -158,6 +158,99 @@ pub enum Request {
         visible_messages: usize,
     },
 
+    /// Get one bounded page of authoritative Startup Context receipt state.
+    #[serde(rename = "get_startup_context_status")]
+    GetStartupContextStatus {
+        id: u64,
+        #[serde(default)]
+        file_page_start: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file_page_size: Option<usize>,
+        #[serde(default)]
+        issue_page_start: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        issue_page_size: Option<usize>,
+    },
+
+    /// Acquire the one editable Startup Context lease for the active project.
+    #[serde(rename = "open_startup_context_editor")]
+    OpenStartupContextEditor { id: u64 },
+
+    /// Renew a live Startup Context editor lease.
+    #[serde(rename = "renew_startup_context_editor_lease")]
+    RenewStartupContextEditorLease {
+        id: u64,
+        lease_id: String,
+        project_key_digest: String,
+        expected_plan_revision: u64,
+    },
+
+    /// Explicitly close a live Startup Context editor lease.
+    #[serde(rename = "close_startup_context_editor")]
+    CloseStartupContextEditor {
+        id: u64,
+        lease_id: String,
+        project_key_digest: String,
+    },
+
+    /// List one bounded project-rooted directory page for the Startup Context editor.
+    #[serde(rename = "list_startup_context_directory")]
+    ListStartupContextDirectory {
+        id: u64,
+        lease_id: String,
+        project_key_digest: String,
+        expected_plan_revision: u64,
+        directory: String,
+        #[serde(default)]
+        page_start: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        page_size: Option<usize>,
+    },
+
+    /// Start one bounded, cancellable project-file-name search.
+    #[serde(rename = "search_startup_context_files")]
+    SearchStartupContextFiles {
+        id: u64,
+        lease_id: String,
+        project_key_digest: String,
+        expected_plan_revision: u64,
+        query: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_results: Option<usize>,
+    },
+
+    /// Cancel an active Startup Context search from this client connection.
+    #[serde(rename = "cancel_startup_context_search")]
+    CancelStartupContextSearch { id: u64, search_request_id: u64 },
+
+    /// Preview the complete current UTF-8 file through one bounded character chunk.
+    #[serde(rename = "preview_startup_context_file")]
+    PreviewStartupContextFile {
+        id: u64,
+        lease_id: String,
+        project_key_digest: String,
+        expected_plan_revision: u64,
+        path: String,
+        #[serde(default)]
+        start_char: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_chars: Option<usize>,
+    },
+
+    /// Retrieve one bounded exact chunk from a receipt-owned captured file message.
+    #[serde(rename = "get_startup_context_file_detail")]
+    GetStartupContextFileDetail {
+        id: u64,
+        batch_id: String,
+        spec_id: String,
+        message_id: String,
+        expected_sha256: String,
+        #[serde(default)]
+        start_char: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_chars: Option<usize>,
+    },
+
     /// Get one bounded page of the authoritative context-editor snapshot.
     #[serde(rename = "get_context_editor_snapshot")]
     GetContextEditorSnapshot {
@@ -1258,6 +1351,76 @@ pub enum ServerEvent {
         /// Session-scoped side panel pages and active focus state
         #[serde(default, skip_serializing_if = "snapshot_is_empty")]
         side_panel: SidePanelSnapshot,
+        /// Bounded server-owned Startup Context status. Absence means the server
+        /// predates the capability, not that the active project has an empty plan.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        startup_context: Option<StartupContextCompactStatus>,
+    },
+
+    #[serde(rename = "startup_context_status")]
+    StartupContextStatus {
+        id: u64,
+        snapshot: StartupContextStatusSnapshot,
+    },
+
+    #[serde(rename = "startup_context_editor_opened")]
+    StartupContextEditorOpened {
+        id: u64,
+        editor: StartupContextEditorSnapshot,
+    },
+
+    #[serde(rename = "startup_context_editor_busy")]
+    StartupContextEditorBusy {
+        id: u64,
+        project: StartupContextProjectSnapshot,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner: Option<StartupContextLeaseOwnerSnapshot>,
+    },
+
+    #[serde(rename = "startup_context_editor_lease_renewed")]
+    StartupContextEditorLeaseRenewed {
+        id: u64,
+        lease: StartupContextLeaseSnapshot,
+    },
+
+    #[serde(rename = "startup_context_editor_closed")]
+    StartupContextEditorClosed { id: u64, lease_id: String },
+
+    #[serde(rename = "startup_context_directory_page")]
+    StartupContextDirectoryPage {
+        id: u64,
+        page: StartupContextDirectoryPage,
+    },
+
+    #[serde(rename = "startup_context_search_results")]
+    StartupContextSearchResults {
+        id: u64,
+        results: StartupContextSearchResults,
+    },
+
+    #[serde(rename = "startup_context_search_canceled")]
+    StartupContextSearchCanceled {
+        id: u64,
+        search_request_id: u64,
+        was_active: bool,
+    },
+
+    #[serde(rename = "startup_context_file_preview")]
+    StartupContextFilePreview {
+        id: u64,
+        preview: StartupContextFilePreview,
+    },
+
+    #[serde(rename = "startup_context_file_detail")]
+    StartupContextFileDetail {
+        id: u64,
+        detail: StartupContextFileDetail,
+    },
+
+    #[serde(rename = "startup_context_failed")]
+    StartupContextFailed {
+        id: u64,
+        failure: StartupContextFailure,
     },
 
     /// Expanded compacted-history window (response to GetCompactedHistory).
