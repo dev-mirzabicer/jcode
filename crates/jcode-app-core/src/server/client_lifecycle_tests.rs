@@ -1603,6 +1603,269 @@ async fn legacy_compaction_wire_requests_reject_without_mutating_live_session_as
     assert!(client_connections.read().await.is_empty());
 }
 
+#[tokio::test]
+async fn startup_context_protocol_journey_uses_server_state_and_releases_editor() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    let project = tempfile::tempdir().expect("project");
+    std::fs::write(project.path().join("PLAN.md"), "protocol-secret-plan")
+        .expect("write project file");
+    std::fs::create_dir(project.path().join("docs")).expect("create docs directory");
+
+    let (server_stream, client_stream) = crate::transport::stream_pair().expect("stream pair");
+    let sessions = Arc::new(RwLock::new(HashMap::new()));
+    let global_session_id = Arc::new(RwLock::new(String::new()));
+    let client_count = Arc::new(RwLock::new(1usize));
+    let client_connections = Arc::new(RwLock::new(HashMap::new()));
+    let swarm_members = Arc::new(RwLock::new(HashMap::new()));
+    let swarms_by_id = Arc::new(RwLock::new(HashMap::new()));
+    let shared_context = Arc::new(RwLock::new(HashMap::new()));
+    let swarm_plans = Arc::new(RwLock::new(HashMap::new()));
+    let swarm_coordinators = Arc::new(RwLock::new(HashMap::new()));
+    let file_touch = FileTouchService::new();
+    let channel_subscriptions = Arc::new(RwLock::new(HashMap::new()));
+    let channel_subscriptions_by_session = Arc::new(RwLock::new(HashMap::new()));
+    let client_debug_state = Arc::new(RwLock::new(ClientDebugState::default()));
+    let (debug_response_tx, _) = broadcast::channel(8);
+    let event_history = Arc::new(RwLock::new(std::collections::VecDeque::new()));
+    let event_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let (swarm_event_tx, _) = broadcast::channel(8);
+    let (global_event_tx, _) = broadcast::channel(8);
+    let shutdown_signals = Arc::new(RwLock::new(HashMap::new()));
+    let soft_interrupt_queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
+    let mcp_pool = Arc::new(crate::mcp::SharedMcpPool::from_default_config());
+    let startup_context = crate::server::startup_context::test_coordinator();
+    let provider_template: Arc<dyn Provider> = Arc::new(CompleteImmediatelyProvider);
+
+    let server_task = tokio::spawn(handle_client(
+        server_stream,
+        Arc::clone(&sessions),
+        global_event_tx,
+        provider_template,
+        Arc::new(crate::context::ContextTransactionService::new()),
+        Arc::clone(&startup_context),
+        Arc::new(RwLock::new(false)),
+        global_session_id,
+        client_count,
+        Arc::clone(&client_connections),
+        swarm_members,
+        swarms_by_id,
+        shared_context,
+        swarm_plans,
+        swarm_coordinators,
+        file_touch,
+        channel_subscriptions,
+        channel_subscriptions_by_session,
+        client_debug_state,
+        debug_response_tx,
+        event_history,
+        event_counter,
+        swarm_event_tx,
+        "jcode-test".to_string(),
+        "🧪".to_string(),
+        mcp_pool,
+        shutdown_signals,
+        soft_interrupt_queues,
+        AwaitMembersRuntime::default(),
+        SwarmMutationRuntime::default(),
+    ));
+
+    let (client_reader, mut client_writer) = client_stream.into_split();
+    let mut client_reader = BufReader::new(client_reader);
+
+    async fn send_request(writer: &mut crate::transport::WriteHalf, request: &Request) {
+        let payload = serde_json::to_string(request).expect("serialize request") + "\n";
+        writer
+            .write_all(payload.as_bytes())
+            .await
+            .expect("write request");
+    }
+
+    async fn read_until(
+        reader: &mut BufReader<crate::transport::ReadHalf>,
+        mut accept: impl FnMut(&ServerEvent) -> bool,
+    ) -> ServerEvent {
+        loop {
+            let mut line = String::new();
+            tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line))
+                .await
+                .expect("server event timeout")
+                .expect("read server event");
+            assert!(!line.is_empty(), "server closed before expected event");
+            let event = decode_request_or_event(&line);
+            if accept(&event) {
+                return event;
+            }
+        }
+    }
+
+    send_request(
+        &mut client_writer,
+        &subscribe_request(Some(project.path().to_string_lossy().as_ref())),
+    )
+    .await;
+    let _session = read_until(&mut client_reader, |event| {
+        matches!(event, ServerEvent::SessionId { .. })
+    })
+    .await;
+    send_request(&mut client_writer, &Request::GetHistory { id: 2 }).await;
+    let history = read_until(&mut client_reader, |event| {
+        matches!(event, ServerEvent::History { id: 2, .. })
+    })
+    .await;
+    let ServerEvent::History {
+        startup_context: Some(status),
+        messages,
+        ..
+    } = history
+    else {
+        panic!("new server History must carry Startup Context capability state");
+    };
+    assert_eq!(
+        status.state,
+        crate::protocol::StartupContextStatusState::Unprepared
+    );
+    assert!(
+        messages
+            .iter()
+            .all(|message| !message.content.contains("protocol-secret-plan"))
+    );
+
+    send_request(
+        &mut client_writer,
+        &Request::OpenStartupContextEditor { id: 3 },
+    )
+    .await;
+    let opened = read_until(&mut client_reader, |event| {
+        matches!(event, ServerEvent::StartupContextEditorOpened { id: 3, .. })
+    })
+    .await;
+    let ServerEvent::StartupContextEditorOpened { editor, .. } = opened else {
+        unreachable!();
+    };
+
+    send_request(
+        &mut client_writer,
+        &Request::ListStartupContextDirectory {
+            id: 4,
+            lease_id: editor.lease.lease_id.clone(),
+            project_key_digest: editor.project.key_digest.clone(),
+            expected_plan_revision: editor.plan_revision,
+            directory: String::new(),
+            page_start: 0,
+            page_size: Some(10),
+        },
+    )
+    .await;
+    let page = read_until(&mut client_reader, |event| {
+        matches!(
+            event,
+            ServerEvent::StartupContextDirectoryPage { id: 4, .. }
+        )
+    })
+    .await;
+    let ServerEvent::StartupContextDirectoryPage { page, .. } = page else {
+        unreachable!();
+    };
+    assert!(page.entries.iter().any(|entry| entry.name == "PLAN.md"));
+    assert!(
+        page.entries
+            .iter()
+            .any(|entry| entry.name == "docs" && entry.navigable)
+    );
+
+    send_request(
+        &mut client_writer,
+        &Request::PreviewStartupContextFile {
+            id: 5,
+            lease_id: editor.lease.lease_id.clone(),
+            project_key_digest: editor.project.key_digest.clone(),
+            expected_plan_revision: editor.plan_revision,
+            path: "PLAN.md".to_string(),
+            start_char: 0,
+            max_chars: Some(64),
+        },
+    )
+    .await;
+    let preview = read_until(&mut client_reader, |event| {
+        matches!(event, ServerEvent::StartupContextFilePreview { id: 5, .. })
+    })
+    .await;
+    let ServerEvent::StartupContextFilePreview { preview, .. } = preview else {
+        unreachable!();
+    };
+    assert_eq!(preview.content, "protocol-secret-plan");
+
+    send_request(
+        &mut client_writer,
+        &Request::SearchStartupContextFiles {
+            id: 6,
+            lease_id: editor.lease.lease_id.clone(),
+            project_key_digest: editor.project.key_digest.clone(),
+            expected_plan_revision: editor.plan_revision,
+            query: "plan".to_string(),
+            max_results: Some(10),
+        },
+    )
+    .await;
+    let search = read_until(&mut client_reader, |event| {
+        matches!(
+            event,
+            ServerEvent::StartupContextSearchResults { id: 6, .. }
+        )
+    })
+    .await;
+    let ServerEvent::StartupContextSearchResults { results, .. } = search else {
+        unreachable!();
+    };
+    assert_eq!(results.results[0].name, "PLAN.md");
+
+    send_request(
+        &mut client_writer,
+        &Request::CloseStartupContextEditor {
+            id: 7,
+            lease_id: editor.lease.lease_id,
+            project_key_digest: editor.project.key_digest,
+        },
+    )
+    .await;
+    let _closed = read_until(&mut client_reader, |event| {
+        matches!(event, ServerEvent::StartupContextEditorClosed { id: 7, .. })
+    })
+    .await;
+
+    send_request(
+        &mut client_writer,
+        &Request::GetStartupContextStatus {
+            id: 8,
+            file_page_start: 0,
+            file_page_size: Some(10),
+            issue_page_start: 0,
+            issue_page_size: Some(10),
+        },
+    )
+    .await;
+    let status = read_until(&mut client_reader, |event| {
+        matches!(event, ServerEvent::StartupContextStatus { id: 8, .. })
+    })
+    .await;
+    let ServerEvent::StartupContextStatus { snapshot, .. } = status else {
+        unreachable!();
+    };
+    assert!(matches!(
+        snapshot.compact.lease,
+        crate::protocol::StartupContextLeaseAvailability::Available
+    ));
+    assert_eq!(snapshot.total_files, 0);
+
+    drop(client_writer);
+    server_task
+        .await
+        .expect("server task join")
+        .expect("server task result");
+    assert!(client_connections.read().await.is_empty());
+}
+
 fn decode_request_or_event(line: &str) -> ServerEvent {
     serde_json::from_str(line.trim()).expect("decode server event")
 }

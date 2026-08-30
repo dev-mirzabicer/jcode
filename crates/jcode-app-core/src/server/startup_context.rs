@@ -560,7 +560,7 @@ impl StartupContextCoordinator {
         page_start: usize,
         page_size: Option<usize>,
     ) -> Result<StartupContextDirectoryPage, StartupContextFailure> {
-        validate_bounded_text(
+        validate_max_chars(
             &directory,
             STARTUP_CONTEXT_PATH_MAX_CHARS,
             StartupContextOperation::ListDirectory,
@@ -1915,6 +1915,23 @@ fn validate_bounded_text(
             operation,
             StartupContextFailureKind::InvalidRequest,
             format!("{label} must contain between 1 and {max_chars} characters"),
+            false,
+        ));
+    }
+    Ok(())
+}
+
+fn validate_max_chars(
+    value: &str,
+    max_chars: usize,
+    operation: StartupContextOperation,
+    label: &str,
+) -> Result<(), StartupContextFailure> {
+    if value.chars().count() > max_chars {
+        return Err(failure(
+            operation,
+            StartupContextFailureKind::InvalidRequest,
+            format!("{label} must contain at most {max_chars} characters"),
             false,
         ));
     }
