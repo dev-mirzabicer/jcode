@@ -342,7 +342,13 @@ impl Session {
         let path = session_path(session_id)?;
         let reader = BufReader::new(std::fs::File::open(&path)?);
         let stub: SessionStartupStub = serde_json::from_reader(reader)?;
-        Ok(Self::session_from_startup_stub(stub))
+        let mut session = Self::session_from_startup_stub(stub);
+        let journal_path = session_journal_path_from_snapshot(&path);
+        replay_journal_lines(&journal_path, |entry| {
+            session.apply_journal_meta(entry.meta);
+        })?;
+        session.reset_persist_state(path.exists());
+        Ok(session)
     }
 
     pub fn load_for_remote_startup(session_id: &str) -> Result<Self> {

@@ -41,6 +41,7 @@ mod memory_profile;
 mod model;
 mod persistence;
 mod render;
+mod startup_context;
 mod storage_paths;
 pub use crash::{
     CrashedSessionsInfo, detect_crashed_sessions, find_recent_crashed_sessions,
@@ -49,7 +50,7 @@ pub use crash::{
 pub use jcode_session_types::{
     EnvSnapshot, GitState, SessionImproveMode, SessionStatus, StoredCompactionState,
     StoredContextViewState, StoredDisplayRole, StoredMemoryInjection, StoredMessage,
-    StoredTokenUsage,
+    StoredStartupContextReceipt, StoredTokenUsage,
 };
 use journal::{PersistVectorMode, SessionJournalMeta, SessionPersistState};
 pub use maintenance::prune_old_session_backups;
@@ -64,6 +65,12 @@ pub use render::{
     RenderedMessage, has_rendered_images, is_attached_image_label_text, render_images,
     render_messages, render_messages_and_images, render_messages_and_images_with_compacted_history,
     summarize_tool_calls,
+};
+pub use startup_context::{
+    DurableStartupContextSessionPersistence, StartupContextAcceptanceOutcome,
+    StartupContextAccounting, StartupContextDispatchError, StartupContextDispatchOutcome,
+    StartupContextInstallError, StartupContextInstallOutcome, StartupContextRepairOutcome,
+    StartupContextSessionPersistence,
 };
 pub use storage_paths::session_journal_path_from_snapshot;
 #[cfg(test)]
@@ -112,6 +119,9 @@ pub struct Session {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub messages: Vec<StoredMessage>,
+    /// Persisted Startup Context receipt. Exact captured contents live only in `messages`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_context: Option<StoredStartupContextReceipt>,
     /// Persisted compacted-view state so reload/resume can continue using the
     /// active summary + recent tail instead of re-sending the full transcript.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -226,6 +236,8 @@ struct SessionStartupStub {
     updated_at: DateTime<Utc>,
     #[serde(default)]
     compaction: Option<StoredCompactionState>,
+    #[serde(default)]
+    startup_context: Option<StoredStartupContextReceipt>,
     #[serde(default)]
     context_view: StoredContextViewState,
     #[serde(default)]
@@ -379,6 +391,7 @@ impl Session {
     /// history, but never reuses provider-native continuation state from the parent process.
     pub fn inherit_continuation_state_from(&mut self, parent: &Session) {
         self.replace_messages(parent.messages.clone());
+        self.startup_context = parent.startup_context.clone();
         self.compaction = parent.compaction.clone();
         self.context_view = parent.context_view.clone();
         self.provider_session_id = None;
@@ -404,6 +417,7 @@ impl Session {
         session.custom_title = stub.custom_title;
         session.created_at = stub.created_at;
         session.updated_at = stub.updated_at;
+        session.startup_context = stub.startup_context;
         session.compaction = stub.compaction;
         session.context_view = stub.context_view;
         session.provider_session_id = stub.provider_session_id;
@@ -440,6 +454,7 @@ impl Session {
         session.created_at = snapshot.created_at;
         session.updated_at = snapshot.updated_at;
         session.messages = snapshot.messages;
+        session.startup_context = snapshot.startup_context;
         session.compaction = snapshot.compaction;
         session.context_view = snapshot.context_view;
         session.provider_session_id = snapshot.provider_session_id;
@@ -611,6 +626,7 @@ impl Session {
             custom_title: self.custom_title.clone(),
             updated_at: self.updated_at,
             compaction: self.compaction.clone(),
+            startup_context: self.startup_context.clone(),
             context_view: self.context_view.clone(),
             provider_session_id: self.provider_session_id.clone(),
             provider_key: self.provider_key.clone(),
@@ -892,6 +908,7 @@ impl Session {
         self.custom_title = meta.custom_title;
         self.updated_at = meta.updated_at;
         self.compaction = meta.compaction;
+        self.startup_context = meta.startup_context;
         self.context_view = meta.context_view;
         self.provider_session_id = meta.provider_session_id;
         self.provider_key = meta.provider_key;
@@ -1125,6 +1142,7 @@ impl Session {
             created_at: now,
             updated_at: now,
             messages: Vec::new(),
+            startup_context: None,
             compaction: None,
             context_view: StoredContextViewState::default(),
             provider_session_id: None,
@@ -1185,6 +1203,7 @@ impl Session {
             created_at: now,
             updated_at: now,
             messages: Vec::new(),
+            startup_context: None,
             compaction: None,
             context_view: StoredContextViewState::default(),
             provider_session_id: None,
@@ -1311,6 +1330,10 @@ impl Session {
             return false;
         }
 
+        self.append_initial_session_context_message()
+    }
+
+    fn append_initial_session_context_message(&mut self) -> bool {
         // Preserve an explicitly bound session directory. Shared-server clients
         // provide their cwd before this message is created, and replacing it with
         // the daemon process cwd would leak the directory that launched the server.
@@ -1330,6 +1353,16 @@ impl Session {
             Some(StoredDisplayRole::System),
         );
         true
+    }
+
+    /// Append the dynamic session facts after already-installed stable startup messages.
+    pub fn ensure_initial_session_context_message_after_startup(&mut self) -> bool {
+        if self.has_session_context_message()
+            || self.messages.iter().any(is_visible_conversation_message)
+        {
+            return false;
+        }
+        self.append_initial_session_context_message()
     }
 
     /// Refresh the initial immutable session-context message if the session has
@@ -2170,6 +2203,8 @@ struct RemoteStartupSessionSnapshot {
     updated_at: DateTime<Utc>,
     #[serde(default)]
     messages: Vec<StoredMessage>,
+    #[serde(default)]
+    startup_context: Option<StoredStartupContextReceipt>,
     #[serde(default)]
     compaction: Option<StoredCompactionState>,
     #[serde(default)]

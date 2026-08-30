@@ -1,7 +1,8 @@
 use chrono::{DateTime, Utc};
 use jcode_session_types::{
-    StoredStartupExternalApproval, StoredStartupFileSpec, StoredStartupProjectIdentity,
-    StoredStartupSelectedPath,
+    StoredStartupExternalApproval, StoredStartupFileIssue, StoredStartupFileIssueKind,
+    StoredStartupFileSpec, StoredStartupPathClassification, StoredStartupProjectIdentity,
+    StoredStartupSelectedPath, StoredStartupTargetType, StoredStartupUnsupportedContent,
 };
 use std::error::Error;
 use std::fmt;
@@ -46,7 +47,7 @@ impl ProjectKey {
         bytes
     }
 
-    pub(super) fn to_stored(&self) -> Result<StoredStartupProjectIdentity, StartupContextError> {
+    pub(crate) fn to_stored(&self) -> Result<StoredStartupProjectIdentity, StartupContextError> {
         match self {
             Self::Git {
                 canonical_common_dir,
@@ -332,6 +333,15 @@ pub enum StartupPathClassification {
     External,
 }
 
+impl StartupPathClassification {
+    pub(crate) fn to_stored(self) -> StoredStartupPathClassification {
+        match self {
+            Self::Project => StoredStartupPathClassification::Project,
+            Self::External => StoredStartupPathClassification::External,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ValidatedStartupSelection {
     input_index: usize,
@@ -541,11 +551,31 @@ pub enum StartupTargetType {
     DeviceOrSpecial,
 }
 
+impl StartupTargetType {
+    fn to_stored(self) -> StoredStartupTargetType {
+        match self {
+            Self::Directory => StoredStartupTargetType::Directory,
+            Self::SymlinkToDirectory => StoredStartupTargetType::SymlinkToDirectory,
+            Self::DeviceOrSpecial => StoredStartupTargetType::DeviceOrSpecial,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StartupUnsupportedContent {
     Binary,
     Pdf,
     Image,
+}
+
+impl StartupUnsupportedContent {
+    fn to_stored(self) -> StoredStartupUnsupportedContent {
+        match self {
+            Self::Binary => StoredStartupUnsupportedContent::Binary,
+            Self::Pdf => StoredStartupUnsupportedContent::Pdf,
+            Self::Image => StoredStartupUnsupportedContent::Image,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -656,6 +686,111 @@ impl StartupFileIssue {
 
     pub fn kind(&self) -> &StartupFileIssueKind {
         &self.kind
+    }
+
+    pub(crate) fn to_stored(&self) -> Result<StoredStartupFileIssue, StartupContextError> {
+        let input_index = self
+            .input_index
+            .map(|value| stored_u32(value, "startup issue input index"))
+            .transpose()?;
+        let logical_path = self
+            .logical_path
+            .as_deref()
+            .map(|path| utf8_path(path, "startup issue logical path"))
+            .transpose()?;
+        let kind = match &self.kind {
+            StartupFileIssueKind::EmptyPath => StoredStartupFileIssueKind::EmptyPath,
+            StartupFileIssueKind::InvalidPathEncoding => {
+                StoredStartupFileIssueKind::InvalidPathEncoding
+            }
+            StartupFileIssueKind::PathTraversal => StoredStartupFileIssueKind::PathTraversal,
+            StartupFileIssueKind::Missing => StoredStartupFileIssueKind::Missing,
+            StartupFileIssueKind::BrokenSymlink => StoredStartupFileIssueKind::BrokenSymlink,
+            StartupFileIssueKind::Unreadable { detail } => StoredStartupFileIssueKind::Unreadable {
+                detail: detail.clone(),
+            },
+            StartupFileIssueKind::UnsupportedTarget { target_type } => {
+                StoredStartupFileIssueKind::UnsupportedTarget {
+                    target_type: target_type.to_stored(),
+                }
+            }
+            StartupFileIssueKind::UnsupportedContent { content } => {
+                StoredStartupFileIssueKind::UnsupportedContent {
+                    content: content.to_stored(),
+                }
+            }
+            StartupFileIssueKind::NonUtf8 => StoredStartupFileIssueKind::NonUtf8,
+            StartupFileIssueKind::ExternalApprovalRequired { resolved_target } => {
+                StoredStartupFileIssueKind::ExternalApprovalRequired {
+                    resolved_target: utf8_path(
+                        resolved_target,
+                        "startup issue external resolved target",
+                    )?,
+                }
+            }
+            StartupFileIssueKind::ExternalTargetChanged {
+                approved_target,
+                resolved_target,
+            } => StoredStartupFileIssueKind::ExternalTargetChanged {
+                approved_target: utf8_path(
+                    approved_target,
+                    "startup issue approved external target",
+                )?,
+                resolved_target: utf8_path(
+                    resolved_target,
+                    "startup issue changed external target",
+                )?,
+            },
+            StartupFileIssueKind::InvalidExternalApproval { detail } => {
+                StoredStartupFileIssueKind::InvalidExternalApproval {
+                    detail: detail.clone(),
+                }
+            }
+            StartupFileIssueKind::DuplicateSelection { first_input_index } => {
+                StoredStartupFileIssueKind::DuplicateSelection {
+                    first_input_index: stored_u32(
+                        *first_input_index,
+                        "duplicate startup selection index",
+                    )?,
+                }
+            }
+            StartupFileIssueKind::TooManyEntries { count, limit } => {
+                StoredStartupFileIssueKind::TooManyEntries {
+                    count: stored_u32(*count, "startup selection count")?,
+                    limit: stored_u32(*limit, "startup selection limit")?,
+                }
+            }
+            StartupFileIssueKind::FileTooLarge { bytes, limit } => {
+                StoredStartupFileIssueKind::FileTooLarge {
+                    bytes: *bytes,
+                    limit: *limit,
+                }
+            }
+            StartupFileIssueKind::BatchTooLarge { bytes, limit } => {
+                StoredStartupFileIssueKind::BatchTooLarge {
+                    bytes: *bytes,
+                    limit: *limit,
+                }
+            }
+            StartupFileIssueKind::ChangedDuringCapture => {
+                StoredStartupFileIssueKind::ChangedDuringCapture
+            }
+            StartupFileIssueKind::DirectoryOutsideProject => {
+                StoredStartupFileIssueKind::DirectoryOutsideProject
+            }
+            StartupFileIssueKind::DirectoryReadFailed { detail } => {
+                StoredStartupFileIssueKind::DirectoryReadFailed {
+                    detail: detail.clone(),
+                }
+            }
+        };
+
+        Ok(StoredStartupFileIssue {
+            input_index,
+            spec_id: self.spec_id.as_ref().map(ToString::to_string),
+            logical_path,
+            kind,
+        })
     }
 }
 
@@ -926,6 +1061,12 @@ pub(super) fn utf8_path(path: &Path, label: &str) -> Result<String, StartupConte
         .ok_or_else(|| StartupContextError::InvalidStoredPlan {
             detail: format!("{label} is not valid UTF-8: {}", path.display()),
         })
+}
+
+fn stored_u32(value: usize, label: &str) -> Result<u32, StartupContextError> {
+    u32::try_from(value).map_err(|_| StartupContextError::InvalidStoredPlan {
+        detail: format!("{label} exceeds the durable u32 range: {value}"),
+    })
 }
 
 pub(super) fn validate_absolute_utf8_path(

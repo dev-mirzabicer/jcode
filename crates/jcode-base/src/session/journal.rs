@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     EnvSnapshot, SessionImproveMode, SessionStatus, StoredCompactionState, StoredContextViewState,
-    StoredMemoryInjection, StoredMessage, StoredReplayEvent,
+    StoredMemoryInjection, StoredMessage, StoredReplayEvent, StoredStartupContextReceipt,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -14,6 +14,8 @@ pub(super) struct SessionJournalMeta {
     pub(super) custom_title: Option<String>,
     pub(super) updated_at: DateTime<Utc>,
     pub(super) compaction: Option<StoredCompactionState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) startup_context: Option<StoredStartupContextReceipt>,
     #[serde(default, skip_serializing_if = "StoredContextViewState::is_default")]
     pub(super) context_view: StoredContextViewState,
     pub(super) provider_session_id: Option<String>,
