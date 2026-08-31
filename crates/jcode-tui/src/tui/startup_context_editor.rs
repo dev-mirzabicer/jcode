@@ -288,6 +288,7 @@ enum RowAction {
     StartExternal,
     ToggleReceipt,
     DisabledApply,
+    CloseEditor,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1285,6 +1286,10 @@ impl StartupContextEditor {
                     "Apply actions are intentionally disabled in the WP-07 editor foundation"
                         .to_string(),
                 );
+            }
+            RowAction::CloseEditor => {
+                self.close();
+                return true;
             }
         }
         false
@@ -2439,9 +2444,10 @@ impl StartupContextEditor {
     ) {
         let consequence = self.consequence_text(status);
         let buttons = "[ Use in this session ] [ Use in this session + save as project default ]";
+        let foundation = "WP-07 foundation · Apply disabled until WP-08 · [ Close editor ]";
         let mut lines = vec![
             Line::from(Span::styled(
-                "WP-07 foundation · Apply disabled until WP-08",
+                foundation,
                 Style::default().fg(Color::Rgb(105, 110, 125)),
             )),
             Line::from(Span::styled(
@@ -2454,6 +2460,17 @@ impl StartupContextEditor {
             lines[2] = Line::from(Span::styled(notice.clone(), warn));
         }
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+        if let Some(start) = foundation.find("[ Close editor ]") {
+            self.hit_regions.push(HitRegion {
+                rect: Rect::new(
+                    area.x.saturating_add(start as u16),
+                    area.y,
+                    "[ Close editor ]".len() as u16,
+                    1,
+                ),
+                action: RowAction::CloseEditor,
+            });
+        }
         if area.height >= 2 {
             self.hit_regions.push(HitRegion {
                 rect: Rect::new(area.x, area.y + 1, area.width, 1),
@@ -3267,5 +3284,130 @@ mod tests {
             .map(|entry| entry.input.path.clone())
             .collect::<Vec<_>>();
         assert_eq!(mouse_paths, keyboard_paths);
+    }
+
+    #[test]
+    fn foundation_mouse_targets_match_keyboard_transitions() {
+        fn render(editor: &mut StartupContextEditor, width: u16) {
+            let backend = ratatui::backend::TestBackend::new(width, 30);
+            let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+            terminal
+                .draw(|frame| editor.render(frame, frame.area(), None, None))
+                .expect("render editor");
+        }
+
+        fn click(editor: &mut StartupContextEditor, action: RowAction) -> bool {
+            let rect = editor
+                .hit_regions
+                .iter()
+                .find(|region| region.action == action)
+                .map(|region| region.rect)
+                .unwrap_or_else(|| panic!("missing hit region for {action:?}"));
+            editor.handle_mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: rect.x,
+                row: rect.y,
+                modifiers: KeyModifiers::NONE,
+            })
+        }
+
+        let mut keyboard = ready_editor();
+        keyboard.handle_key(KeyCode::Char('/'), KeyModifiers::NONE);
+        let mut mouse = ready_editor();
+        render(&mut mouse, 120);
+        click(&mut mouse, RowAction::StartSearch);
+        assert!(matches!(
+            keyboard.input_mode,
+            Some(InputMode::Search { .. })
+        ));
+        assert!(matches!(mouse.input_mode, Some(InputMode::Search { .. })));
+
+        let mut keyboard = ready_editor();
+        keyboard.handle_key(KeyCode::Char('a'), KeyModifiers::NONE);
+        let mut mouse = ready_editor();
+        render(&mut mouse, 120);
+        click(&mut mouse, RowAction::StartExternal);
+        assert!(matches!(
+            keyboard.input_mode,
+            Some(InputMode::ExternalPath { .. })
+        ));
+        assert!(matches!(
+            mouse.input_mode,
+            Some(InputMode::ExternalPath { .. })
+        ));
+
+        let mut keyboard = ready_editor();
+        keyboard.active_pane = StartupContextEditorPane::Selection;
+        keyboard.handle_key(KeyCode::Char('r'), KeyModifiers::NONE);
+        let mut mouse = ready_editor();
+        mouse.active_pane = StartupContextEditorPane::Selection;
+        render(&mut mouse, 120);
+        click(&mut mouse, RowAction::ToggleReceipt);
+        assert_eq!(keyboard.selection_view, mouse.selection_view);
+
+        let mut keyboard = ready_editor();
+        keyboard.active_pane = StartupContextEditorPane::Selection;
+        keyboard.handle_key(KeyCode::Char('J'), KeyModifiers::NONE);
+        let keyboard_ids = keyboard
+            .draft
+            .iter()
+            .map(|entry| entry.local_id)
+            .collect::<Vec<_>>();
+        let mut mouse = ready_editor();
+        mouse.active_pane = StartupContextEditorPane::Selection;
+        render(&mut mouse, 120);
+        click(&mut mouse, RowAction::MoveDraftDown(0));
+        assert_eq!(
+            mouse
+                .draft
+                .iter()
+                .map(|entry| entry.local_id)
+                .collect::<Vec<_>>(),
+            keyboard_ids
+        );
+
+        let mut keyboard = ready_editor();
+        keyboard.active_pane = StartupContextEditorPane::Selection;
+        keyboard.handle_key(KeyCode::Delete, KeyModifiers::NONE);
+        let mut mouse = ready_editor();
+        mouse.active_pane = StartupContextEditorPane::Selection;
+        render(&mut mouse, 120);
+        click(&mut mouse, RowAction::RemoveDraft(0));
+        assert_eq!(mouse.draft.len(), keyboard.draft.len());
+
+        let mut keyboard = ready_editor();
+        keyboard.handle_key(KeyCode::Tab, KeyModifiers::NONE);
+        let mut mouse = ready_editor();
+        render(&mut mouse, 72);
+        click(
+            &mut mouse,
+            RowAction::FocusPane(StartupContextEditorPane::Selection),
+        );
+        assert_eq!(keyboard.active_pane, mouse.active_pane);
+
+        let mut keyboard = ready_editor();
+        keyboard.browser.cursor = 0;
+        keyboard.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        let mut mouse = ready_editor();
+        render(&mut mouse, 120);
+        click(&mut mouse, RowAction::OpenDirectory(0));
+        assert!(matches!(
+            keyboard.take_action(),
+            Some(StartupContextEditorAction::ListDirectory { bulk: false, .. })
+        ));
+        assert!(matches!(
+            mouse.take_action(),
+            Some(StartupContextEditorAction::ListDirectory { bulk: false, .. })
+        ));
+
+        let mut mouse = ready_editor();
+        render(&mut mouse, 120);
+        click(&mut mouse, RowAction::DisabledApply);
+        assert!(mouse.notice.as_deref().unwrap().contains("disabled"));
+
+        let mut mouse = ready_editor();
+        render(&mut mouse, 120);
+        assert!(click(&mut mouse, RowAction::CloseEditor));
+        assert!(!mouse.visible);
     }
 }
