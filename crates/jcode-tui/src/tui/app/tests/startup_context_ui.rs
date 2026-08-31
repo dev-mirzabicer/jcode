@@ -187,6 +187,100 @@ fn startup_context_editor_remote_transport_correlates_before_open_browse_preview
 }
 
 #[test]
+fn startup_context_editor_physical_remote_q_and_escape_close_and_release_the_lease() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    for code in [KeyCode::Char('q'), KeyCode::Esc] {
+        let mut app = create_test_app();
+        app.apply_startup_context_debug_fixture("editor-populated")
+            .expect("editor fixture");
+        let runtime = tokio::runtime::Runtime::new().expect("keyboard runtime");
+        runtime.block_on(async move {
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            let peer = remote.take_dummy_peer().expect("dummy peer");
+            let (reader, _writer) = peer.into_split();
+            let mut reader = BufReader::new(reader);
+            super::remote::handle_remote_key_event(
+                &mut app,
+                KeyEvent::new_with_kind(code, KeyModifiers::NONE, KeyEventKind::Press),
+                &mut remote,
+            )
+            .await
+            .expect("physical remote close key");
+
+            assert!(app.startup_context_overlay_scroll().is_none());
+            assert!(app.startup_context_editor().is_none());
+            assert!(app.input.is_empty(), "modal close key must not enter composer");
+
+            let mut line = String::new();
+            reader.read_line(&mut line).await.expect("read close request");
+            assert!(matches!(
+                serde_json::from_str::<crate::protocol::Request>(line.trim())
+                    .expect("decode close request"),
+                crate::protocol::Request::CloseStartupContextEditor { .. }
+            ));
+        });
+    }
+}
+
+#[test]
+fn startup_context_editor_physical_remote_shortcuts_own_navigation_search_and_ordering() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+
+    let mut app = create_test_app();
+    app.apply_startup_context_debug_fixture("editor-populated")
+        .expect("editor fixture");
+    let runtime = tokio::runtime::Runtime::new().expect("keyboard runtime");
+    runtime.block_on(async move {
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        macro_rules! press {
+            ($code:expr, $label:literal) => {
+                super::remote::handle_remote_key_event(
+                    &mut app,
+                    KeyEvent::new_with_kind(
+                        $code,
+                        KeyModifiers::NONE,
+                        KeyEventKind::Press,
+                    ),
+                    &mut remote,
+                )
+                .await
+                .expect($label)
+            };
+        }
+
+        press!(KeyCode::Down, "navigate browser");
+        assert_eq!(app.startup_context_debug_summary()["editor"]["browser_cursor"], 1);
+        assert!(app.input.is_empty());
+
+        press!(KeyCode::Char('/'), "open search");
+        assert_eq!(
+            app.startup_context_debug_summary()["editor"]["input_mode"],
+            "search"
+        );
+        assert!(app.input.is_empty());
+
+        press!(KeyCode::Esc, "unwind search");
+        assert!(app.startup_context_debug_summary()["editor"]["input_mode"].is_null());
+        assert!(app.startup_context_editor().is_some());
+
+        press!(KeyCode::Tab, "focus selection pane");
+        assert_eq!(
+            app.startup_context_debug_summary()["editor"]["pane"],
+            "Selection"
+        );
+
+        press!(KeyCode::Char('J'), "reorder draft");
+        assert_eq!(
+            app.startup_context_debug_summary()["editor"]["draft_paths"],
+            serde_json::json!(["docs/PROGRESS.md", "docs/PLAN.md"])
+        );
+        assert!(app.input.is_empty());
+    });
+}
+
+#[test]
 fn startup_context_strip_mouse_and_slash_routes_preserve_composer_and_selection() {
     let mut app = create_test_app();
     app.apply_startup_context_debug_fixture("ready")

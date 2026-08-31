@@ -294,6 +294,17 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
 
+    // Remote input has its own async key path so modal actions can dispatch
+    // protocol requests immediately. Keep Startup Context beside the existing
+    // Context Editor owner, before chat/global handling. Omitting it here lets
+    // physical keys leak behind the full-screen editor into the composer while
+    // mouse input still works through navigation.rs.
+    if app.startup_context_overlay_scroll().is_some() {
+        app.handle_startup_context_details_key(code, modifiers);
+        app.dispatch_remote_startup_context_request(remote).await;
+        return Ok(());
+    }
+
     if app.prompt_history_search.is_some() {
         app.handle_prompt_history_search_key(code, modifiers);
         return Ok(());
