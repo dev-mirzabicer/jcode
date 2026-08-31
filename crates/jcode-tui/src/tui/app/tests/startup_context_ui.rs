@@ -295,3 +295,97 @@ fn startup_context_debug_commands_and_help_are_registered_and_content_safe() {
     assert!(help.contains("blocking issues"));
     assert!(super::registered_command_entries().any(|(command, _)| command == "/startup"));
 }
+
+#[test]
+fn startup_context_and_context_pressure_use_distinct_rows_without_moving_the_cursor() {
+    let mut app = create_test_app();
+    app.apply_startup_context_debug_fixture("queued")
+        .expect("queued fixture");
+    app.input = "draft with cursor".to_string();
+    app.cursor_pos = 5;
+    app.context_pressure = Some(phase10_pressure_report(
+        app.session.context_view.revision,
+        100_000,
+        96_000,
+    ));
+    app.context_pressure_session_id = app.remote_session_id.clone();
+
+    for (width, height) in [(120, 30), (72, 24), (38, 12)] {
+        let rendered = render_startup_context_fixture(&app, width, height);
+        assert!(rendered.contains("Startup"));
+        let startup = crate::tui::ui::last_startup_context_area().expect("startup row");
+        let pressure = crate::tui::ui::last_context_pressure_area().expect("pressure row");
+        let input = crate::tui::ui::last_layout_snapshot()
+            .and_then(|layout| layout.input_area)
+            .expect("input area");
+        assert_ne!(startup.y, pressure.y);
+        assert_ne!(startup.y, input.y);
+        assert_ne!(pressure.y, input.y);
+        assert_eq!(app.input, "draft with cursor");
+        assert_eq!(app.cursor_pos, 5);
+    }
+}
+
+#[test]
+fn startup_context_session_change_stays_loading_until_matching_history_arrives() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.begin_remote_startup_context_session("session-a");
+    assert_eq!(
+        app.startup_context_availability(),
+        crate::tui::StartupContextAvailability::Loading
+    );
+    assert!(app.startup_context_compact_status().is_none());
+
+    app.apply_startup_context_debug_fixture("none")
+        .expect("empty history fixture");
+    assert_eq!(
+        app.startup_context_compact_status().unwrap().state,
+        crate::protocol::StartupContextStatusState::Empty
+    );
+    let stale = app.startup_context_detail().expect("stale detail").clone();
+    app.begin_remote_startup_context_session("session-b");
+    assert_eq!(
+        app.startup_context_availability(),
+        crate::tui::StartupContextAvailability::Loading
+    );
+    assert!(app.startup_context_compact_status().is_none());
+    assert!(!app.accept_remote_startup_context_status(91, stale, None));
+    assert_eq!(
+        app.startup_context_availability(),
+        crate::tui::StartupContextAvailability::Loading
+    );
+
+    let mut status = crate::protocol::StartupContextCompactStatus {
+        protocol_version: crate::protocol::STARTUP_CONTEXT_PROTOCOL_VERSION,
+        session_id: "session-b".to_string(),
+        state: crate::protocol::StartupContextStatusState::Prepared,
+        project: None,
+        plan_revision: 1,
+        plan_entry_count: 1,
+        receipt_plan_revision: Some(1),
+        receipt_file_count: 1,
+        captured_bytes: 4,
+        estimated_tokens: 1,
+        blocked_issue_count: 0,
+        pending_update_count: 0,
+        stale_file_count: 0,
+        lease: crate::protocol::StartupContextLeaseAvailability::Available,
+        error: None,
+    };
+    app.accept_remote_startup_context_history("session-b", Some(status.clone()));
+    assert_eq!(
+        app.startup_context_availability(),
+        crate::tui::StartupContextAvailability::Available
+    );
+    assert_eq!(
+        app.startup_context_compact_status().unwrap().state,
+        crate::protocol::StartupContextStatusState::Prepared
+    );
+    status.state = crate::protocol::StartupContextStatusState::ProviderAccepted;
+    app.accept_remote_startup_context_history("session-b", Some(status));
+    assert_eq!(
+        app.startup_context_compact_status().unwrap().state,
+        crate::protocol::StartupContextStatusState::ProviderAccepted
+    );
+}

@@ -51,7 +51,8 @@ impl Agent {
                     crate::protocol::StartupContextActionKind::DispatchPersistence
                 }
             };
-        let dispatch_detail = dispatch_error.to_string();
+        let dispatch_detail = crate::util::truncate_str(&dispatch_error.to_string(), 1_024)
+            .to_string();
         let (prompt_disposition, pending_input, detail) = match self
             .rollback_pending_turn_before_output()
         {
@@ -66,7 +67,8 @@ impl Agent {
                 crate::protocol::StartupContextPromptDisposition::Retained,
                 None,
                 format!(
-                    "Request not sent: {dispatch_detail}. Durable prompt rollback failed, so the unanswered turn remains in authoritative history and must not be resubmitted: {rollback_error}"
+                    "Request not sent: {dispatch_detail}. Durable prompt rollback failed, so the unanswered turn remains in authoritative history and must not be resubmitted: {}",
+                    crate::util::truncate_str(&rollback_error.to_string(), 1_024)
                 ),
             ),
         };
