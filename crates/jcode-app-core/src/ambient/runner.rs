@@ -465,7 +465,7 @@ impl AmbientRunnerHandle {
             registry.register_selfdev_tools().await;
         }
 
-        let mut agent = Agent::new(cycle_provider, registry);
+        let mut agent = Agent::new_with_disabled_startup_context(cycle_provider, registry, None);
         agent.set_debug(session.is_debug);
         agent.restore_session(session_id)?;
 
@@ -549,7 +549,12 @@ impl AmbientRunnerHandle {
             registry.register_selfdev_tools().await;
         }
 
-        let mut agent = Agent::new_with_session(cycle_provider, registry, child, None);
+        let mut agent = Agent::new_with_session_and_disabled_startup_context(
+            cycle_provider,
+            registry,
+            child,
+            None,
+        );
         agent.set_debug(child_is_debug);
         if item.working_dir.is_some() {
             agent.set_working_dir_for_pending_context(item.working_dir.clone());
@@ -625,7 +630,7 @@ impl AmbientRunnerHandle {
         let cycle_provider = provider.fork();
         let registry = tool::Registry::new(cycle_provider.clone()).await;
         registry.register_ambient_tools().await;
-        let mut agent = Agent::new(cycle_provider, registry);
+        let mut agent = Agent::new_with_disabled_startup_context(cycle_provider, registry, None);
         agent.set_debug(true);
         let reminder = ambient::format_scheduled_session_message(item);
         let turn_result = agent
@@ -1074,7 +1079,8 @@ impl AmbientRunnerHandle {
         let registry = tool::Registry::new(cycle_provider.clone()).await;
         registry.register_ambient_tools().await;
 
-        let mut agent = Agent::new(cycle_provider.clone(), registry);
+        let mut agent =
+            Agent::new_with_disabled_startup_context(cycle_provider.clone(), registry, None);
         agent.set_debug(true);
         agent.set_system_prompt(&system_prompt);
         let ambient_session_id = agent.session_id().to_string();

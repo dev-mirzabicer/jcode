@@ -6,9 +6,9 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use jcode_session_types::{
     StoredStartupBatchDeliveryState, StoredStartupBatchKind, StoredStartupContextBatch,
-    StoredStartupContextReceipt, StoredStartupContextState, StoredStartupFileObservation,
-    StoredStartupFileReceipt, StoredStartupMetadataRepair, StoredStartupMetadataRepairTarget,
-    StoredStartupObservedState,
+    StoredStartupContextBlock, StoredStartupContextReceipt, StoredStartupContextState,
+    StoredStartupFileObservation, StoredStartupFileReceipt, StoredStartupMetadataRepair,
+    StoredStartupMetadataRepairTarget, StoredStartupObservedState,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -288,6 +288,20 @@ pub enum StartupContextRepairOutcome {
 }
 
 impl Session {
+    pub fn install_startup_context_block(
+        &mut self,
+        block: StoredStartupContextBlock,
+    ) -> Result<()> {
+        let previous = self.clone();
+        self.startup_context = None;
+        self.startup_context_block = Some(block);
+        if let Err(error) = self.save() {
+            *self = previous;
+            return Err(error);
+        }
+        Ok(())
+    }
+
     pub fn install_prepared_startup_context(
         &mut self,
         outcome: StartupPreparationOutcome,
@@ -341,6 +355,7 @@ impl Session {
             .collect::<Vec<_>>();
 
         self.startup_context = Some(receipt);
+        self.startup_context_block = None;
         self.replace_messages(startup_messages);
         self.ensure_initial_session_context_message_after_startup();
         for message in retained_hidden_messages {
@@ -562,6 +577,7 @@ impl Session {
                 (None, 0, true)
             }
         };
+        self.startup_context_block = None;
 
         if let Err(error) = jcode_context_core::project_context(&self.messages, &self.context_view)
         {
@@ -595,6 +611,9 @@ impl Session {
         &mut self,
         persistence: &dyn StartupContextSessionPersistence,
     ) -> std::result::Result<StartupContextDispatchOutcome, StartupContextDispatchError> {
+        if self.startup_context_block.is_some() {
+            return Err(StartupContextDispatchError::Blocked);
+        }
         let Some(receipt) = self.startup_context.as_mut() else {
             return Ok(StartupContextDispatchOutcome::NotApplicable);
         };
@@ -878,6 +897,7 @@ fn startup_apply_state_sha256(
         &session.messages,
         &session.context_view,
         &session.startup_context,
+        &session.startup_context_block,
     ))
     .map_err(
         |error| StartupContextSessionApplyError::InvalidExistingReceipt {
@@ -1818,6 +1838,36 @@ mod tests {
             serde_json::to_value(&split.messages).expect("serialize split messages"),
             serde_json::to_value(&loaded.messages).expect("serialize loaded messages")
         );
+    }
+
+    #[test]
+    fn preparation_block_round_trips_snapshot_journal_stub_remote_and_split() {
+        let _lock = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().expect("isolated Jcode home");
+        let _home = EnvRestore::set_path("JCODE_HOME", home.path());
+        let id = "session-startup-preparation-block";
+        let mut session = Session::create_with_id(id.into(), None, None);
+        session.ensure_initial_session_context_message();
+        session
+            .install_startup_context_block(StoredStartupContextBlock {
+                kind: jcode_session_types::StoredStartupContextBlockKind::PlanStorage,
+                message: "synthetic durable plan failure".to_string(),
+                blocked_at: Utc::now(),
+            })
+            .expect("install preparation block");
+        session.save().expect("journal preparation block metadata");
+
+        let loaded = Session::load(id).expect("load authoritative session");
+        assert_eq!(loaded.startup_context_block, session.startup_context_block);
+        assert!(loaded.clone().mark_startup_context_dispatched().is_err());
+        let stub = Session::load_startup_stub(id).expect("load startup stub");
+        assert_eq!(stub.startup_context_block, session.startup_context_block);
+        let remote = Session::load_for_remote_startup(id).expect("load remote startup");
+        assert_eq!(remote.startup_context_block, session.startup_context_block);
+
+        let mut split = Session::create_with_id("session-startup-block-split".into(), None, None);
+        split.inherit_continuation_state_from(&loaded);
+        assert_eq!(split.startup_context_block, loaded.startup_context_block);
     }
 
     #[test]

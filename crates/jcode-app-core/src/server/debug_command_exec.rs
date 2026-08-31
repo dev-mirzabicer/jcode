@@ -364,7 +364,7 @@ pub(super) async fn execute_debug_command(
 
     if trimmed == "clear" || trimmed == "clear_history" {
         let mut agent = agent.lock().await;
-        agent.clear();
+        agent.clear()?;
         return Ok(serde_json::json!({
             "status": "cleared",
             "message": "Conversation history cleared"

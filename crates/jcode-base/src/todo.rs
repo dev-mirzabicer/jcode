@@ -773,6 +773,14 @@ pub fn save_todos(session_id: &str, todos: &[TodoItem]) -> Result<()> {
     storage::write_json_fast(&path, todos)
 }
 
+/// Remove todo state for a session creation that failed before publication.
+pub fn remove_todos(session_id: &str) {
+    if let Ok(path) = todo_path(session_id) {
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("bak"));
+    }
+}
+
 fn todo_path(session_id: &str) -> Result<PathBuf> {
     let base = storage::jcode_dir()?;
     Ok(base.join("todos").join(format!("{}.json", session_id)))

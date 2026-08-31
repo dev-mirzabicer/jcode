@@ -367,14 +367,16 @@ impl Agent {
     }
 
     /// Clear conversation history
-    pub fn clear(&mut self) {
+    pub fn clear(
+        &mut self,
+    ) -> std::result::Result<
+        crate::agent::StartupContextActivationOutcome,
+        crate::agent::StartupContextActivationError,
+    > {
         let preserve_canary = self.session.is_canary;
         let preserve_testing_build = self.session.testing_build.clone();
         let preserve_debug = self.session.is_debug;
         let preserve_working_dir = self.session.working_dir.clone();
-
-        self.session.mark_closed();
-        self.persist_session_best_effort("pre-clear session close state");
 
         let mut new_session = Session::create(None, None);
         new_session.mark_active();
@@ -386,6 +388,35 @@ impl Agent {
         new_session.working_dir = preserve_working_dir;
         new_session.ensure_initial_session_context_message();
 
+        let activation = if preserve_debug {
+            crate::agent::StartupContextActivation::Disabled
+        } else {
+            crate::agent::StartupContextActivation::primary(
+                crate::agent::StartupContextCaller::Clear,
+            )
+        };
+        let startup_outcome = match super::startup_context::activate_session_startup_context(
+            &mut new_session,
+            activation,
+        ) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let caller = error.caller();
+                let activation_error = error.to_string();
+                new_session.mark_closed();
+                if let Err(source) = crate::session::remove_unpublished_session(&new_session.id) {
+                    return Err(crate::agent::StartupContextActivationError::Cleanup {
+                        caller,
+                        activation_error,
+                        source,
+                    });
+                }
+                return Err(error);
+            }
+        };
+
+        self.session.mark_closed();
+        self.persist_session_best_effort("pre-clear session close state");
         self.session = new_session;
         self.reconcile_explicit_provider_pin_route();
         self.reset_runtime_state_for_session_change();
@@ -399,6 +430,7 @@ impl Agent {
                 error
             ));
         }
+        Ok(startup_outcome)
     }
 
     /// Clear provider session so the next turn sends full context.
@@ -1087,8 +1119,10 @@ impl Agent {
             }
 
             if input == "clear" {
-                self.clear();
-                println!("Conversation cleared.");
+                match self.clear() {
+                    Ok(_) => println!("Conversation cleared."),
+                    Err(error) => eprintln!("Unable to clear conversation: {error}"),
+                }
                 continue;
             }
 

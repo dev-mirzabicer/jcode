@@ -2774,7 +2774,7 @@ async fn new_agent_registers_active_pid_and_clear_swaps_it() {
         "fresh agent session should be tracked as active"
     );
 
-    agent.clear();
+    let _ = agent.clear();
 
     let second_session_id = agent.session_id().to_string();
     let active = crate::session::active_session_ids();
@@ -2929,7 +2929,7 @@ async fn clear_resets_runtime_interrupt_and_queue_state() {
     assert!(agent.background_tool_signal().is_set());
     assert!(agent.graceful_shutdown_signal().is_set());
 
-    agent.clear();
+    let _ = agent.clear();
 
     assert_eq!(agent.soft_interrupt_count(), 0);
     assert!(!agent.background_tool_signal().is_set());

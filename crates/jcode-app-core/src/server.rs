@@ -935,9 +935,11 @@ impl Server {
                 )
                 .await;
 
-            let agent = Arc::new(Mutex::new(Agent::new_with_session(
-                provider, registry, session, None,
-            )));
+            let agent = Arc::new(Mutex::new(
+                Agent::new_with_session_and_disabled_startup_context(
+                    provider, registry, session, None,
+                ),
+            ));
 
             {
                 let mut sessions = self.sessions.write().await;

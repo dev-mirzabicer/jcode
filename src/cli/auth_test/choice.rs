@@ -289,7 +289,7 @@ async fn run_provider_tool_smoke_for_choice(
             .await;
 
         let allowed_tools = HashSet::from([AUTH_TEST_TOOL_NAME.to_string()]);
-        let mut agent = crate::agent::Agent::new_with_session(
+        let mut agent = crate::agent::Agent::new_with_session_and_disabled_startup_context(
             provider,
             registry,
             crate::session::Session::create(None, None),

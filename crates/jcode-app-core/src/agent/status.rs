@@ -9,6 +9,26 @@ impl Agent {
         &mut self.session
     }
 
+    pub fn startup_context_blocked_issues(&self) -> &[jcode_session_types::StoredStartupFileIssue] {
+        self.session
+            .startup_context
+            .as_ref()
+            .map(|receipt| receipt.blocked_issues.as_slice())
+            .unwrap_or(&[])
+    }
+
+    pub fn startup_context_preparation_block(
+        &self,
+    ) -> Option<&jcode_session_types::StoredStartupContextBlock> {
+        self.session.startup_context_block.as_ref()
+    }
+
+    pub fn startup_context_receipt(
+        &self,
+    ) -> Option<&jcode_session_types::StoredStartupContextReceipt> {
+        self.session.startup_context.as_ref()
+    }
+
     pub fn session_memory_profile_snapshot(
         &mut self,
     ) -> crate::session::SessionMemoryProfileSnapshot {

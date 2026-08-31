@@ -47,3 +47,30 @@ pub fn session_exists(session_id: &str) -> bool {
         .map(|path| path.exists())
         .unwrap_or(false)
 }
+
+/// Remove the private artifacts of a session that failed before publication.
+///
+/// Ordinary user deletion is intentionally not exposed through this function.
+/// Callers use it only while they still exclusively own a newly-created session
+/// that never became usable.
+pub fn remove_unpublished_session(session_id: &str) -> Result<()> {
+    storage::unregister_active_pid(session_id);
+    let snapshot = session_path(session_id)?;
+    let journal = session_journal_path_from_snapshot(&snapshot);
+    for path in [
+        snapshot.clone(),
+        snapshot.with_extension("bak"),
+        journal.clone(),
+        journal.with_extension("bak"),
+    ] {
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error.into());
+            }
+        }
+    }
+    crate::todo::remove_todos(session_id);
+    Ok(())
+}

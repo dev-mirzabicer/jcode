@@ -258,7 +258,8 @@ async fn run_supervisor(
         registry.register_selfdev_tools().await;
     }
 
-    let mut agent = Agent::new_with_session(provider, registry, child, None);
+    let mut agent =
+        Agent::new_with_session_and_disabled_startup_context(provider, registry, child, None);
     let mut next_prompt = build_coordinator_prompt(&manifest, &preflight);
     let mut handoff_notice_sent = false;
     let mut morning_report_prompt_sent = false;

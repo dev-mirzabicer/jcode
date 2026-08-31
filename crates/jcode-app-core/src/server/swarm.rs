@@ -1580,7 +1580,12 @@ pub(super) async fn run_swarm_task(
         .tools
         .apply_to_allowed_set(&mut allowed);
 
-    let mut worker = Agent::new_with_session(provider, registry, session, Some(allowed));
+    let mut worker = Agent::new_with_session_and_disabled_startup_context(
+        provider,
+        registry,
+        session,
+        Some(allowed),
+    );
     match worker.run_once_capture(prompt).await {
         Ok(output) => {
             log_swarm_lifecycle(

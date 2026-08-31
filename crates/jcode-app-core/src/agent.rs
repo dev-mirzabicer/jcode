@@ -10,6 +10,7 @@ mod preflight;
 mod prompting;
 mod provider;
 mod response_recovery;
+mod startup_context;
 mod status;
 mod streaming;
 mod tools;
@@ -56,6 +57,11 @@ use interrupts::{NoToolCallOutcome, PostToolInterruptOutcome};
 pub use jcode_agent_runtime::{
     BackgroundToolSignal, GracefulShutdownSignal, InterruptSignal, SoftInterruptMessage,
     SoftInterruptQueue, SoftInterruptSource, StreamError,
+};
+pub(crate) use startup_context::activate_session_startup_context;
+pub use startup_context::{
+    StartupContextActivation, StartupContextActivationError, StartupContextActivationOutcome,
+    StartupContextCaller, startup_file_issue_code, stored_startup_file_issue_code,
 };
 
 const JCODE_NATIVE_TOOLS: &[&str] = &["selfdev", "communicate"];
@@ -381,7 +387,16 @@ impl Agent {
     }
 
     pub fn new(provider: Arc<dyn Provider>, registry: Registry) -> Self {
-        Self::new_with_initial_working_dir(provider, registry, None)
+        Self::new_with_disabled_startup_context(provider, registry, None)
+    }
+
+    /// Construct a fresh non-primary Agent with Startup Context explicitly off.
+    pub fn new_with_disabled_startup_context(
+        provider: Arc<dyn Provider>,
+        registry: Registry,
+        working_dir: Option<&str>,
+    ) -> Self {
+        Self::new_with_initial_working_dir(provider, registry, working_dir)
     }
 
     pub(crate) fn new_with_initial_working_dir(
@@ -416,6 +431,38 @@ impl Agent {
             false,
         );
         agent
+    }
+
+    /// Create a fresh Agent with an explicit Startup Context activation policy.
+    ///
+    /// Production callers should prefer this constructor over relying on the
+    /// disabled compatibility constructor. The explicit activation makes it
+    /// impossible for an internal worker to inherit primary-session behavior
+    /// merely because it has a working directory.
+    pub fn new_with_startup_context(
+        provider: Arc<dyn Provider>,
+        registry: Registry,
+        working_dir: Option<&str>,
+        activation: StartupContextActivation,
+    ) -> std::result::Result<(Self, StartupContextActivationOutcome), StartupContextActivationError>
+    {
+        let mut agent = Self::new_with_initial_working_dir(provider, registry, working_dir);
+        match agent.activate_startup_context(activation) {
+            Ok(outcome) => Ok((agent, outcome)),
+            Err(error) => {
+                let caller = error.caller();
+                let activation_error = error.to_string();
+                agent.session.mark_closed();
+                if let Err(source) = crate::session::remove_unpublished_session(&agent.session.id) {
+                    return Err(StartupContextActivationError::Cleanup {
+                        caller,
+                        activation_error,
+                        source,
+                    });
+                }
+                Err(error)
+            }
+        }
     }
 
     pub fn new_with_session(
@@ -496,6 +543,17 @@ impl Agent {
             false,
         );
         agent
+    }
+
+    /// Restore an existing or internally-created session with Startup Context
+    /// activation explicitly disabled for this runtime construction.
+    pub fn new_with_session_and_disabled_startup_context(
+        provider: Arc<dyn Provider>,
+        registry: Registry,
+        session: Session,
+        allowed_tools: Option<HashSet<String>>,
+    ) -> Self {
+        Self::new_with_session(provider, registry, session, allowed_tools)
     }
 
     fn reseed_context_runtime_from_session(&mut self) {

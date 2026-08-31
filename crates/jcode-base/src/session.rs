@@ -50,7 +50,7 @@ pub use crash::{
 pub use jcode_session_types::{
     EnvSnapshot, GitState, SessionImproveMode, SessionStatus, StoredCompactionState,
     StoredContextViewState, StoredDisplayRole, StoredMemoryInjection, StoredMessage,
-    StoredStartupContextReceipt, StoredTokenUsage,
+    StoredStartupContextBlock, StoredStartupContextReceipt, StoredTokenUsage,
 };
 use journal::{PersistVectorMode, SessionJournalMeta, SessionPersistState};
 pub use maintenance::prune_old_session_backups;
@@ -74,10 +74,10 @@ pub use startup_context::{
     StartupContextRepairOutcome, StartupContextSessionApplyError,
     StartupContextSessionApplyOutcome, StartupContextSessionPersistence,
 };
-pub use storage_paths::session_journal_path_from_snapshot;
 #[cfg(test)]
 pub(crate) use storage_paths::session_path_in_dir;
 use storage_paths::{estimate_json_bytes, persist_vector_mode_label};
+pub use storage_paths::{remove_unpublished_session, session_journal_path_from_snapshot};
 pub use storage_paths::{session_exists, session_journal_path, session_path};
 
 fn stored_messages_to_messages(messages: &[StoredMessage]) -> Vec<Message> {
@@ -124,6 +124,9 @@ pub struct Session {
     /// Persisted Startup Context receipt. Exact captured contents live only in `messages`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub startup_context: Option<StoredStartupContextReceipt>,
+    /// Persisted initial preparation failure when no truthful receipt could be built.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_context_block: Option<StoredStartupContextBlock>,
     /// Persisted compacted-view state so reload/resume can continue using the
     /// active summary + recent tail instead of re-sending the full transcript.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -240,6 +243,8 @@ struct SessionStartupStub {
     compaction: Option<StoredCompactionState>,
     #[serde(default)]
     startup_context: Option<StoredStartupContextReceipt>,
+    #[serde(default)]
+    startup_context_block: Option<StoredStartupContextBlock>,
     #[serde(default)]
     context_view: StoredContextViewState,
     #[serde(default)]
@@ -394,6 +399,7 @@ impl Session {
     pub fn inherit_continuation_state_from(&mut self, parent: &Session) {
         self.replace_messages(parent.messages.clone());
         self.startup_context = parent.startup_context.clone();
+        self.startup_context_block = parent.startup_context_block.clone();
         self.compaction = parent.compaction.clone();
         self.context_view = parent.context_view.clone();
         self.provider_session_id = None;
@@ -420,6 +426,7 @@ impl Session {
         session.created_at = stub.created_at;
         session.updated_at = stub.updated_at;
         session.startup_context = stub.startup_context;
+        session.startup_context_block = stub.startup_context_block;
         session.compaction = stub.compaction;
         session.context_view = stub.context_view;
         session.provider_session_id = stub.provider_session_id;
@@ -457,6 +464,7 @@ impl Session {
         session.updated_at = snapshot.updated_at;
         session.messages = snapshot.messages;
         session.startup_context = snapshot.startup_context;
+        session.startup_context_block = snapshot.startup_context_block;
         session.compaction = snapshot.compaction;
         session.context_view = snapshot.context_view;
         session.provider_session_id = snapshot.provider_session_id;
@@ -629,6 +637,7 @@ impl Session {
             updated_at: self.updated_at,
             compaction: self.compaction.clone(),
             startup_context: self.startup_context.clone(),
+            startup_context_block: self.startup_context_block.clone(),
             context_view: self.context_view.clone(),
             provider_session_id: self.provider_session_id.clone(),
             provider_key: self.provider_key.clone(),
@@ -911,6 +920,7 @@ impl Session {
         self.updated_at = meta.updated_at;
         self.compaction = meta.compaction;
         self.startup_context = meta.startup_context;
+        self.startup_context_block = meta.startup_context_block;
         self.context_view = meta.context_view;
         self.provider_session_id = meta.provider_session_id;
         self.provider_key = meta.provider_key;
@@ -1145,6 +1155,7 @@ impl Session {
             updated_at: now,
             messages: Vec::new(),
             startup_context: None,
+            startup_context_block: None,
             compaction: None,
             context_view: StoredContextViewState::default(),
             provider_session_id: None,
@@ -1206,6 +1217,7 @@ impl Session {
             updated_at: now,
             messages: Vec::new(),
             startup_context: None,
+            startup_context_block: None,
             compaction: None,
             context_view: StoredContextViewState::default(),
             provider_session_id: None,
@@ -2207,6 +2219,8 @@ struct RemoteStartupSessionSnapshot {
     messages: Vec<StoredMessage>,
     #[serde(default)]
     startup_context: Option<StoredStartupContextReceipt>,
+    #[serde(default)]
+    startup_context_block: Option<StoredStartupContextBlock>,
     #[serde(default)]
     compaction: Option<StoredCompactionState>,
     #[serde(default)]

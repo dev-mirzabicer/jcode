@@ -54,6 +54,22 @@ pub enum StoredStartupContextState {
     },
 }
 
+/// Initial primary-session preparation failure that must continue blocking
+/// provider dispatch even when no project receipt could be constructed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StoredStartupContextBlockKind {
+    ProjectIdentity,
+    PlanStorage,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredStartupContextBlock {
+    pub kind: StoredStartupContextBlockKind,
+    pub message: String,
+    pub blocked_at: DateTime<Utc>,
+}
+
 /// The durable lifecycle transition that must be repaired after a save failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
