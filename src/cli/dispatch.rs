@@ -289,7 +289,35 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             let (provider, registry) =
                 provider_init::init_provider_and_registry(&args.provider, args.model.as_deref())
                     .await?;
-            let mut agent = agent::Agent::new(provider, registry);
+            let (mut agent, outcome) = agent::Agent::new_with_startup_context(
+                provider,
+                registry,
+                None,
+                agent::StartupContextActivation::primary(
+                    agent::StartupContextCaller::InteractiveRepl,
+                ),
+            )?;
+            if outcome.is_blocked() {
+                if let Some(block) = agent.startup_context_preparation_block() {
+                    eprintln!(
+                        "Startup Context could not be prepared: {}. Repair the project state, then type `clear` to recapture before sending work.",
+                        block.message
+                    );
+                } else {
+                    eprintln!(
+                        "Startup Context is blocked by {} required file issue(s). Repair the files or project plan, then type `clear` to recapture before sending work.",
+                        outcome.issue_count()
+                    );
+                }
+                for issue in agent.startup_context_blocked_issues() {
+                    let path = issue.logical_path.as_deref().unwrap_or("<selection>");
+                    eprintln!(
+                        "  - {path}: {} ({:?})",
+                        agent::stored_startup_file_issue_code(&issue.kind),
+                        issue.kind
+                    );
+                }
+            }
             agent.repl().await?;
         }
         Some(Command::Update) => {

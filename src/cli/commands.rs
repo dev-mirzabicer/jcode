@@ -2398,8 +2398,30 @@ pub async fn run_single_message_command(
         // the agent runs. Warm runs skip this entirely and stay instant. (#390)
         wait_for_cold_cache_mcp_tools(&registry).await;
     }
-    let mut agent = crate::agent::Agent::new(provider.clone(), registry);
-    restore_agent_session_if_requested(&mut agent, resume_session)?;
+    let mut agent = if resume_session.is_some() {
+        let mut agent = crate::agent::Agent::new_with_disabled_startup_context(
+            provider.clone(),
+            registry,
+            None,
+        );
+        restore_agent_session_if_requested(&mut agent, resume_session)?;
+        agent
+    } else {
+        match crate::agent::Agent::new_with_startup_context(
+            provider.clone(),
+            registry,
+            None,
+            crate::agent::StartupContextActivation::primary(
+                crate::agent::StartupContextCaller::RunCommand,
+            ),
+        ) {
+            Ok((agent, _)) => agent,
+            Err(error) => {
+                emit_run_startup_context_error(&error, emit_json, emit_ndjson)?;
+                return Err(error.into());
+            }
+        }
+    };
 
     if emit_json {
         let text = run_single_message_command_capture_with_auto_poke(&mut agent, message).await?;
@@ -2417,6 +2439,73 @@ pub async fn run_single_message_command(
         run_single_message_command_plain_with_auto_poke(&mut agent, message).await?;
     }
 
+    Ok(())
+}
+
+fn emit_run_startup_context_error(
+    error: &crate::agent::StartupContextActivationError,
+    emit_json: bool,
+    emit_ndjson: bool,
+) -> Result<()> {
+    let mut stdout = std::io::stdout().lock();
+    let mut stderr = std::io::stderr().lock();
+    write_run_startup_context_error(error, emit_json, emit_ndjson, &mut stdout, &mut stderr)
+}
+
+fn write_run_startup_context_error(
+    error: &crate::agent::StartupContextActivationError,
+    emit_json: bool,
+    emit_ndjson: bool,
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+) -> Result<()> {
+    let issues = error
+        .issues()
+        .into_iter()
+        .map(|issue| {
+            serde_json::json!({
+                "path": issue.logical_path().map(|path| path.to_string_lossy().into_owned()),
+                "code": crate::agent::startup_file_issue_code(issue.kind()),
+                "detail": format!("{:?}", issue.kind()),
+            })
+        })
+        .collect::<Vec<_>>();
+    let body = serde_json::json!({
+        "code": "startup_context",
+        "caller": error.caller().label(),
+        "message": error.to_string(),
+        "issues": issues,
+    });
+
+    if emit_ndjson {
+        write_json_line(
+            stdout,
+            &serde_json::json!({
+                "type": "error",
+                "error": body,
+            }),
+        )?;
+    } else if emit_json {
+        writeln!(
+            stdout,
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({ "error": body }))?
+        )?;
+    } else {
+        writeln!(stderr, "{}", error)?;
+        for issue in error.issues() {
+            let path = issue
+                .logical_path()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "<selection>".to_string());
+            writeln!(
+                stderr,
+                "  - {path}: {} ({:?})",
+                crate::agent::startup_file_issue_code(issue.kind()),
+                issue.kind()
+            )?;
+        }
+    }
     Ok(())
 }
 

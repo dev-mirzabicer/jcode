@@ -1254,18 +1254,45 @@ fn version_command_plain_output_includes_core_fields() {
 #[tokio::test]
 async fn restore_agent_session_if_requested_restores_resumed_session() {
     let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().expect("test home");
+    let previous_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", home.path());
+    let project = home.path().join("project");
+    std::fs::create_dir(&project).expect("create project");
+    std::fs::write(
+        project.join("required.txt"),
+        "new default after session creation",
+    )
+    .expect("write required file");
 
     let provider: Arc<dyn Provider> = Arc::new(TestProvider);
     let registry = Registry::new(provider.clone()).await;
-    let mut original = crate::agent::Agent::new(provider.clone(), registry);
+    let mut original = crate::agent::Agent::new_with_disabled_startup_context(
+        provider.clone(),
+        registry,
+        Some(project.to_string_lossy().as_ref()),
+    );
     let original_session_id = original.session_id().to_string();
     original
         .run_once_capture("seed session for resume test")
         .await
         .expect("seed session");
 
+    let startup = crate::startup_context::StartupContext::new();
+    let active = startup.resolve_project(&project).expect("resolve project");
+    let preview = startup.preview_selection(
+        &active,
+        [crate::startup_context::StartupSelectionInput::new(
+            "required.txt",
+        )],
+    );
+    startup
+        .save_project_plan(&active, 0, &preview)
+        .expect("save default after original session was established");
+
     let registry = Registry::new(provider.clone()).await;
-    let mut resumed = crate::agent::Agent::new(provider, registry);
+    let mut resumed =
+        crate::agent::Agent::new_with_disabled_startup_context(provider, registry, None);
     let fresh_session_id = resumed.session_id().to_string();
     assert_ne!(fresh_session_id, original_session_id);
 
@@ -1273,4 +1300,53 @@ async fn restore_agent_session_if_requested_restores_resumed_session() {
         .expect("restore session");
 
     assert_eq!(resumed.session_id(), original_session_id);
+    assert!(
+        resumed.startup_context_receipt().is_none(),
+        "run --resume must reuse the established session rather than capture the new default"
+    );
+    if let Some(previous_home) = previous_home {
+        crate::env::set_var("JCODE_HOME", previous_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[test]
+fn run_startup_context_failure_preserves_plain_json_and_ndjson_contracts() {
+    let error = crate::agent::StartupContextActivationError::Domain {
+        caller: crate::agent::StartupContextCaller::RunCommand,
+        source: crate::startup_context::StartupContextError::ProjectIdentity {
+            path: std::path::PathBuf::from("/synthetic/project"),
+            detail: "synthetic identity failure".to_string(),
+        },
+    };
+
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    write_run_startup_context_error(&error, false, false, &mut stdout, &mut stderr)
+        .expect("plain output");
+    assert!(stdout.is_empty());
+    let plain = String::from_utf8(stderr).expect("plain utf8");
+    assert!(plain.contains("Startup Context preparation failed"));
+    assert!(plain.contains("synthetic identity failure"));
+
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    write_run_startup_context_error(&error, true, false, &mut stdout, &mut stderr)
+        .expect("json output");
+    assert!(stderr.is_empty());
+    let json: serde_json::Value = serde_json::from_slice(&stdout).expect("valid JSON");
+    assert_eq!(json["error"]["code"], "startup_context");
+    assert_eq!(json["error"]["caller"], "run_command");
+
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    write_run_startup_context_error(&error, false, true, &mut stdout, &mut stderr)
+        .expect("ndjson output");
+    assert!(stderr.is_empty());
+    let lines = String::from_utf8(stdout).expect("ndjson utf8");
+    assert_eq!(lines.lines().count(), 1);
+    let event: serde_json::Value = serde_json::from_str(lines.trim()).expect("valid NDJSON");
+    assert_eq!(event["type"], "error");
+    assert_eq!(event["error"]["code"], "startup_context");
 }
