@@ -167,7 +167,7 @@ pub enum StartupContextActivationError {
     },
     Blocked {
         caller: StartupContextCaller,
-        preparation: StartupPreparation,
+        preparation: Box<StartupPreparation>,
     },
     Install {
         caller: StartupContextCaller,
@@ -199,7 +199,7 @@ impl StartupContextActivationError {
 
     pub fn preparation(&self) -> Option<&StartupPreparation> {
         match self {
-            Self::Blocked { preparation, .. } => Some(preparation),
+            Self::Blocked { preparation, .. } => Some(preparation.as_ref()),
             Self::Domain { .. } | Self::Install { .. } | Self::Cleanup { .. } => None,
         }
     }
@@ -326,7 +326,7 @@ fn activate_session_startup_context_with_engine(
     {
         return Err(StartupContextActivationError::Blocked {
             caller,
-            preparation: prepared.into_preparation(),
+            preparation: Box::new(prepared.into_preparation()),
         });
     }
 
