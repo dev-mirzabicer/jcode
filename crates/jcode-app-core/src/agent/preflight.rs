@@ -51,8 +51,8 @@ impl Agent {
                     crate::protocol::StartupContextActionKind::DispatchPersistence
                 }
             };
-        let dispatch_detail = crate::util::truncate_str(&dispatch_error.to_string(), 1_024)
-            .to_string();
+        let dispatch_detail =
+            crate::util::truncate_str(&dispatch_error.to_string(), 1_024).to_string();
         let (prompt_disposition, pending_input, detail) = match self
             .rollback_pending_turn_before_output()
         {
