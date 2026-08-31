@@ -174,6 +174,14 @@ pub(crate) fn hash_rendered_image_signature_fields(
 /// workspace, diagram pane, diff pane, side panel, inline, overlay, copy
 /// selection, onboarding, misc). See `docs/TUISTATE_TRAIT_DECOMPOSITION.md` for
 /// the incremental plan to split these into composable sub-traits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StartupContextAvailability {
+    Hidden,
+    Loading,
+    Unsupported,
+    Available,
+}
+
 pub trait TuiState {
     // ---- Transcript ----
     fn display_messages(&self) -> &[DisplayMessage];
@@ -228,6 +236,23 @@ pub trait TuiState {
         None
     }
     fn context_payload_pressure(&self) -> Option<&crate::protocol::ContextPayloadPressure> {
+        None
+    }
+    fn startup_context_availability(&self) -> StartupContextAvailability {
+        StartupContextAvailability::Hidden
+    }
+    fn startup_context_status(&self) -> Option<&crate::protocol::StartupContextCompactStatus> {
+        None
+    }
+    fn startup_context_detail(&self) -> Option<&crate::protocol::StartupContextStatusSnapshot> {
+        None
+    }
+    fn startup_context_action_required(
+        &self,
+    ) -> Option<&crate::protocol::StartupContextActionRequired> {
+        None
+    }
+    fn startup_context_overlay_scroll(&self) -> Option<usize> {
         None
     }
 

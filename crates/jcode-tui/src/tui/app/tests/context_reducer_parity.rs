@@ -502,6 +502,7 @@ fn prepare_context_parity_app(app: &mut App, event: &crate::protocol::ServerEven
             app.pending_composer_input = Some(PendingComposerInput {
                 request_id: Some(*id),
                 raw_input: "parity input".to_string(),
+                cursor_pos: usize::MAX,
                 expanded: "parity input".to_string(),
                 pasted_contents: Vec::new(),
                 pending_input_tokens: 3,

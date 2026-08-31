@@ -2,6 +2,7 @@
 include!("tests/support_failover/part_01.rs");
 include!("tests/support_failover/part_02.rs");
 include!("tests/context_budget.rs");
+include!("tests/startup_context_ui.rs");
 include!("tests/context_reducer_parity.rs");
 include!("tests/commands_accounts_01/part_01.rs");
 include!("tests/commands_accounts_01/part_02.rs");
@@ -1474,7 +1475,7 @@ fn current_release_server_history_is_not_deferred_by_client_check() {
 
     app.is_remote = true;
     app.remote_session_id = Some("session_existing".to_string());
-    assert!(app.remote_startup_context.is_none());
+    assert!(app.startup_context_compact_status().is_none());
 
     let redraw = app.handle_server_event(
         crate::protocol::ServerEvent::History {
@@ -1541,8 +1542,7 @@ fn current_release_server_history_is_not_deferred_by_client_check() {
     assert!(!app.pending_server_reload);
     assert_eq!(app.remote_session_id.as_deref(), Some("session_current"));
     assert_eq!(
-        app.remote_startup_context
-            .as_ref()
+        app.startup_context_compact_status()
             .map(|status| status.state),
         Some(crate::protocol::StartupContextStatusState::Empty)
     );

@@ -21,6 +21,17 @@ pub(super) struct PreparedRemoteContextRequest {
 
 impl App {
     pub(super) fn handle_context_editor_command(&mut self, command: &str) -> bool {
+        if command == "/startup" {
+            self.open_startup_context_details();
+            return true;
+        }
+        if command.starts_with("/startup ") {
+            self.push_display_message(DisplayMessage::error(
+                "Usage: /startup. This opens the Startup Context status and resolution view."
+                    .to_string(),
+            ));
+            return true;
+        }
         let mode = match command {
             "/compact" | "/context edit" => Some(ContextEditorOpenMode::Edit),
             "/context history" => Some(ContextEditorOpenMode::History),

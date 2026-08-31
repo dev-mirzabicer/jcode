@@ -716,7 +716,10 @@ impl App {
         }
     }
 
-    fn restore_blocked_composer_input(&mut self, images: Vec<(String, String)>) -> bool {
+    pub(in crate::tui::app) fn restore_blocked_composer_input(
+        &mut self,
+        images: Vec<(String, String)>,
+    ) -> bool {
         if let Some(pending) = self.pending_composer_input.as_mut()
             && !images.is_empty()
         {
@@ -735,7 +738,10 @@ impl App {
             return false;
         };
         self.input = pending.raw_input;
-        self.cursor_pos = self.input.len();
+        self.cursor_pos = pending.cursor_pos.min(self.input.len());
+        while !self.input.is_char_boundary(self.cursor_pos) {
+            self.cursor_pos = self.cursor_pos.saturating_sub(1);
+        }
         self.pasted_contents = pending.pasted_contents;
         self.pending_images = pending.restoration_images.take().unwrap_or_default();
         self.blocked_composer_restore_pending = false;

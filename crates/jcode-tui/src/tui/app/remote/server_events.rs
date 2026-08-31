@@ -5,6 +5,19 @@ use crate::tui::app as app_mod;
 use crate::tui::app::remote::swarm_plan_core::RemoteSwarmPlanSnapshot;
 use crate::tui::app::remote::swarm_status_core::swarm_status_transition_notice;
 
+fn server_event_confirms_provider_acceptance(event: &ServerEvent) -> bool {
+    match event {
+        ServerEvent::TextDelta { .. }
+        | ServerEvent::ReasoningDelta { .. }
+        | ServerEvent::ToolStart { .. }
+        | ServerEvent::ToolDone { .. }
+        | ServerEvent::GeneratedImage { .. }
+        | ServerEvent::MessageEnd { .. } => true,
+        ServerEvent::ConnectionPhase { phase } => phase == "streaming",
+        _ => false,
+    }
+}
+
 fn allow_runtime_identity_mismatch() -> bool {
     std::env::var_os("JCODE_ALLOW_SERVER_VERSION_MISMATCH").is_some()
 }
@@ -553,6 +566,10 @@ pub(in crate::tui::app) fn handle_server_event(
         Err(event) => *event,
     };
 
+    if app.is_processing && server_event_confirms_provider_acceptance(&event) {
+        app.mark_startup_context_provider_accepted();
+    }
+
     let eager_stream_redraw = !crate::perf::tui_policy().enable_decorative_animations;
     if app.is_processing {
         app.last_stream_activity = Some(Instant::now());
@@ -936,6 +953,7 @@ pub(in crate::tui::app) fn handle_server_event(
             ephemeral_chars,
             ephemeral_message_count,
         } => {
+            app.mark_startup_context_dispatched();
             remote.reset_call_output_tokens_seen();
             app.begin_remote_kv_cache_request(app_mod::KvCacheRequestSignature {
                 system_static_hash,
@@ -1206,6 +1224,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.thinking_buffer.clear();
                 remote.clear_pending();
                 remote.reset_call_output_tokens_seen();
+                app.queue_startup_context_status_refresh();
                 app.note_runtime_memory_event_force("turn_completed", "remote_turn_finished");
                 crate::process_memory::release_retained_heap_debounced(
                     "client_turn_completed",
@@ -1239,6 +1258,14 @@ pub(in crate::tui::app) fn handle_server_event(
             message,
             retry_after_secs,
         } => {
+            if app.consume_startup_context_terminal_error(id) {
+                remote.clear_pending();
+                remote.reset_call_output_tokens_seen();
+                return true;
+            }
+            if app.current_message_id == Some(id) {
+                app.queue_startup_context_status_refresh();
+            }
             if app.context_action_request_id == Some(id) {
                 app.context_action_request_id = None;
                 app.is_processing = false;
@@ -1441,6 +1468,11 @@ pub(in crate::tui::app) fn handle_server_event(
             false
         }
         ServerEvent::SessionId { session_id } => {
+            if app.remote_session_id.as_deref() != Some(session_id.as_str())
+                || !remote.has_loaded_history()
+            {
+                app.begin_remote_startup_context_session(&session_id);
+            }
             remote.set_session_id(session_id.clone());
             app.remote_session_id = Some(session_id.clone());
             crate::set_current_session(&session_id);
@@ -1705,7 +1737,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.remote_side_pane_images.clear();
                 app.invalidate_side_pane_images_signature();
                 app.remote_swarm_members.clear();
-                app.remote_startup_context = None;
+                app.begin_remote_startup_context_session(&session_id);
                 app.swarm_plan_items.clear();
                 app.swarm_plan_version = None;
                 app.swarm_plan_swarm_id = None;
@@ -1760,7 +1792,10 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.persist_remote_model_catalog_cache();
             }
             app.remote_skills = skills;
-            app.remote_startup_context = startup_context.map(|status| *status);
+            app.accept_remote_startup_context_history(
+                &session_id,
+                startup_context.map(|status| *status),
+            );
             app.invalidate_command_candidates_cache();
             app.remote_sessions = all_sessions;
             app.remote_client_count = client_count;
@@ -2085,13 +2120,21 @@ pub(in crate::tui::app) fn handle_server_event(
             // the new session does not appear stuck until another event arrives.
             true
         }
-        ServerEvent::StartupContextStatus { snapshot, .. } => {
-            app.remote_startup_context = Some(snapshot.compact);
-            false
+        ServerEvent::StartupContextStatus {
+            id,
+            snapshot,
+            action_required,
+        } => {
+            let is_action = action_required.is_some();
+            let accepted = app.accept_remote_startup_context_status(id, snapshot, action_required);
+            if accepted && is_action {
+                remote.clear_pending();
+                remote.reset_call_output_tokens_seen();
+            }
+            accepted
         }
-        ServerEvent::StartupContextFailed { failure, .. } => {
-            app.set_status_notice(format!("Startup context: {}", failure.message));
-            false
+        ServerEvent::StartupContextFailed { id, failure } => {
+            app.accept_remote_startup_context_failure(id, failure)
         }
         ServerEvent::StartupContextEditorOpened { .. }
         | ServerEvent::StartupContextEditorBusy { .. }
@@ -2102,8 +2145,11 @@ pub(in crate::tui::app) fn handle_server_event(
         | ServerEvent::StartupContextSearchCanceled { .. }
         | ServerEvent::StartupContextFilePreview { .. }
         | ServerEvent::StartupContextFileDetail { .. }
-        | ServerEvent::StartupContextSelectionPreview { .. }
-        | ServerEvent::StartupContextApplyStatus { .. } => false,
+        | ServerEvent::StartupContextSelectionPreview { .. } => false,
+        ServerEvent::StartupContextApplyStatus { .. } => {
+            app.queue_startup_context_status_refresh();
+            true
+        }
         ServerEvent::CompactedHistory {
             session_id,
             messages,

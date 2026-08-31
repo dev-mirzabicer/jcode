@@ -65,7 +65,10 @@ pub(in crate::tui::app) fn restore_prepared_remote_input(
     prepared: input::PreparedInput,
 ) {
     app.input = prepared.raw_input;
-    app.cursor_pos = app.input.len();
+    app.cursor_pos = prepared.cursor_pos.min(app.input.len());
+    while !app.input.is_char_boundary(app.cursor_pos) {
+        app.cursor_pos = app.cursor_pos.saturating_sub(1);
+    }
     app.pending_images = prepared.images;
     app.pasted_contents = prepared.pasted_contents;
 }
@@ -127,6 +130,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_input(
     // fails (e.g. "token refresh needed"), instead of dropping it.
     let input::PreparedInput {
         raw_input,
+        cursor_pos,
         expanded,
         images,
         pasted_contents,
@@ -135,6 +139,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_input(
     app.pending_composer_input = Some(super::super::PendingComposerInput {
         request_id: None,
         raw_input: raw_input.clone(),
+        cursor_pos,
         expanded: expanded.clone(),
         pasted_contents: pasted_contents.clone(),
         pending_input_tokens: crate::context::estimate_pending_input_tokens(
@@ -179,6 +184,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_input(
                 app,
                 input::PreparedInput {
                     raw_input,
+                    cursor_pos,
                     expanded,
                     images,
                     pasted_contents,
@@ -270,6 +276,7 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
         remote,
         input::PreparedInput {
             raw_input: prepared.raw_input,
+            cursor_pos: prepared.cursor_pos,
             expanded: expanded_prompt,
             images: prepared.images,
             pasted_contents: prepared.pasted_contents,
@@ -287,6 +294,7 @@ pub(in crate::tui::app) async fn route_prepared_input_to_new_remote_session(
     app.pending_split_startup_message = None;
     app.pending_split_prompt = Some(PendingSplitPrompt {
         content: prepared.expanded,
+        cursor_pos: prepared.cursor_pos,
         images: prepared.images,
         pasted_contents: prepared.pasted_contents,
     });
@@ -304,6 +312,7 @@ pub(in crate::tui::app) async fn route_prepared_input_to_new_remote_session(
                 .take()
                 .map(|prompt| input::PreparedInput {
                     raw_input: prepared.raw_input,
+                    cursor_pos: prompt.cursor_pos,
                     expanded: prompt.content,
                     images: prompt.images,
                     pasted_contents: prompt.pasted_contents,
@@ -327,6 +336,7 @@ pub(in crate::tui::app) async fn route_prepared_input_to_new_remote_session(
             .take()
             .map(|prompt| input::PreparedInput {
                 raw_input: prepared.raw_input,
+                cursor_pos: prompt.cursor_pos,
                 expanded: prompt.content,
                 images: prompt.images,
                 pasted_contents: prompt.pasted_contents,

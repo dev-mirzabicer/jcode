@@ -363,6 +363,7 @@ fn phase10_remote_action_restores_exact_prompt_pastes_and_images_only_for_matchi
     app.pending_composer_input = Some(PendingComposerInput {
         request_id: Some(700),
         raw_input: raw.clone(),
+        cursor_pos: 7,
         expanded: expanded.clone(),
         pasted_contents: vec!["exact pasted body 🦀".to_string()],
         pending_input_tokens: 42,
@@ -414,6 +415,7 @@ fn phase10_remote_action_restores_exact_prompt_pastes_and_images_only_for_matchi
     };
     assert!(app.reduce_context_server_event(event).unwrap());
     assert_eq!(app.input, raw);
+    assert_eq!(app.cursor_pos, 7);
     assert_eq!(app.pasted_contents, vec!["exact pasted body 🦀"]);
     assert_eq!(app.pending_images, images);
     assert!(app.rate_limit_pending_message.is_none());
@@ -437,6 +439,7 @@ fn phase10_blocked_prompt_waits_for_an_occupied_composer_and_cannot_be_bypassed(
     app.pending_composer_input = Some(PendingComposerInput {
         request_id: Some(707),
         raw_input: "blocked [paste 1]".to_string(),
+        cursor_pos: usize::MAX,
         expanded: "blocked exact paste".to_string(),
         pasted_contents: vec!["exact paste".to_string()],
         pending_input_tokens: 8,
@@ -506,6 +509,7 @@ fn phase10_post_output_remote_action_preserves_turn_and_suppresses_terminal_erro
     app.pending_composer_input = Some(PendingComposerInput {
         request_id: Some(702),
         raw_input: "authoritative prompt".to_string(),
+        cursor_pos: usize::MAX,
         expanded: "authoritative prompt".to_string(),
         pasted_contents: Vec::new(),
         pending_input_tokens: 12,
@@ -594,6 +598,7 @@ fn phase10_missing_pending_metadata_retains_authoritative_turn_without_composer_
     app.pending_composer_input = Some(PendingComposerInput {
         request_id: Some(703),
         raw_input: "retained authoritative prompt".to_string(),
+        cursor_pos: usize::MAX,
         expanded: "retained authoritative prompt".to_string(),
         pasted_contents: Vec::new(),
         pending_input_tokens: 16,
@@ -710,6 +715,7 @@ fn phase10_legacy_pending_fingerprint_fails_closed_without_inexact_restoration()
     app.pending_composer_input = Some(PendingComposerInput {
         request_id: Some(706),
         raw_input: "legacy correlated prompt".to_string(),
+        cursor_pos: usize::MAX,
         expanded: "legacy correlated prompt".to_string(),
         pasted_contents: Vec::new(),
         pending_input_tokens: 8,
@@ -764,6 +770,7 @@ fn phase10_local_partial_output_persistence_failure_is_explicit_and_terminal() {
     app.pending_composer_input = Some(PendingComposerInput {
         request_id: Some(705),
         raw_input: "authoritative local prompt".to_string(),
+        cursor_pos: usize::MAX,
         expanded: "authoritative local prompt".to_string(),
         pasted_contents: Vec::new(),
         pending_input_tokens: 8,
@@ -804,6 +811,7 @@ fn phase10_incomplete_remote_output_retains_authoritative_turn_without_false_pre
     app.pending_composer_input = Some(PendingComposerInput {
         request_id: Some(708),
         raw_input: "authoritative prompt".to_string(),
+        cursor_pos: usize::MAX,
         expanded: "authoritative prompt".to_string(),
         pasted_contents: Vec::new(),
         pending_input_tokens: 8,
@@ -875,6 +883,7 @@ fn phase10_local_payload_rejection_restores_exact_turn_and_manual_resend_appends
     app.pending_composer_input = Some(PendingComposerInput {
         request_id: Some(704),
         raw_input: raw.clone(),
+        cursor_pos: usize::MAX,
         expanded: expanded.clone(),
         pasted_contents: pasted.clone(),
         pending_input_tokens: crate::context::estimate_pending_input_tokens(&expanded, 1),

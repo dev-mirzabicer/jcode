@@ -565,6 +565,32 @@ impl crate::tui::TuiState for App {
             .and_then(|action| action.payload.as_ref())
     }
 
+    fn startup_context_availability(&self) -> crate::tui::StartupContextAvailability {
+        if self.is_remote {
+            self.startup_context_availability()
+        } else {
+            crate::tui::StartupContextAvailability::Hidden
+        }
+    }
+
+    fn startup_context_status(&self) -> Option<&crate::protocol::StartupContextCompactStatus> {
+        self.startup_context_compact_status()
+    }
+
+    fn startup_context_detail(&self) -> Option<&crate::protocol::StartupContextStatusSnapshot> {
+        self.startup_context_detail()
+    }
+
+    fn startup_context_action_required(
+        &self,
+    ) -> Option<&crate::protocol::StartupContextActionRequired> {
+        self.startup_context_action_required()
+    }
+
+    fn startup_context_overlay_scroll(&self) -> Option<usize> {
+        self.startup_context_overlay_scroll()
+    }
+
     fn display_messages(&self) -> &[DisplayMessage] {
         &self.display_messages
     }

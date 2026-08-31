@@ -1706,6 +1706,7 @@ async fn handle_remote_key_internal(
                     }
                     let prepared = input::PreparedInput {
                         raw_input: prompt.to_string(),
+                        cursor_pos: prompt.len(),
                         expanded: prompt.to_string(),
                         images: vec![],
                         pasted_contents: vec![],

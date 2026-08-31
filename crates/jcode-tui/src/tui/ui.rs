@@ -238,6 +238,7 @@ thread_local! {
     static TEST_LAST_LAYOUT: RefCell<Option<LayoutSnapshot>> = const { RefCell::new(None) };
     static TEST_LAST_STATUS_AREA: RefCell<Option<Rect>> = const { RefCell::new(None) };
     static TEST_LAST_CONTEXT_PRESSURE_AREA: RefCell<Option<Rect>> = const { RefCell::new(None) };
+    static TEST_LAST_STARTUP_CONTEXT_AREA: RefCell<Option<Rect>> = const { RefCell::new(None) };
     static TEST_VISIBLE_COPY_TARGETS: RefCell<Vec<VisibleCopyTarget>> = RefCell::new(Vec::new());
     static TEST_VISIBLE_EXPAND_EDIT_BADGE: Cell<bool> = const { Cell::new(false) };
     static TEST_VISIBLE_EXPAND_EDIT_BADGE_LINE: Cell<Option<usize>> = const { Cell::new(None) };
@@ -1312,6 +1313,9 @@ static LAST_STATUS_AREA: OnceLock<Mutex<Option<Rect>>> = OnceLock::new();
 static LAST_CONTEXT_PRESSURE_AREA: OnceLock<Mutex<Option<Rect>>> = OnceLock::new();
 
 #[cfg(not(test))]
+static LAST_STARTUP_CONTEXT_AREA: OnceLock<Mutex<Option<Rect>>> = OnceLock::new();
+
+#[cfg(not(test))]
 fn last_status_area_state() -> &'static Mutex<Option<Rect>> {
     LAST_STATUS_AREA.get_or_init(|| Mutex::new(None))
 }
@@ -1319,6 +1323,11 @@ fn last_status_area_state() -> &'static Mutex<Option<Rect>> {
 #[cfg(not(test))]
 fn last_context_pressure_area_state() -> &'static Mutex<Option<Rect>> {
     LAST_CONTEXT_PRESSURE_AREA.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(not(test))]
+fn last_startup_context_area_state() -> &'static Mutex<Option<Rect>> {
+    LAST_STARTUP_CONTEXT_AREA.get_or_init(|| Mutex::new(None))
 }
 
 pub(crate) fn record_status_area(area: Rect) {
@@ -1375,6 +1384,36 @@ pub(crate) fn last_context_pressure_area() -> Option<Rect> {
     #[cfg(not(test))]
     {
         last_context_pressure_area_state()
+            .lock()
+            .ok()
+            .and_then(|snapshot| *snapshot)
+    }
+}
+
+pub(crate) fn record_startup_context_area(area: Option<Rect>) {
+    #[cfg(test)]
+    {
+        TEST_LAST_STARTUP_CONTEXT_AREA.with(|snapshot| {
+            *snapshot.borrow_mut() = area;
+        });
+        return;
+    }
+    #[cfg(not(test))]
+    {
+        if let Ok(mut snapshot) = last_startup_context_area_state().lock() {
+            *snapshot = area;
+        }
+    }
+}
+
+pub(crate) fn last_startup_context_area() -> Option<Rect> {
+    #[cfg(test)]
+    {
+        return TEST_LAST_STARTUP_CONTEXT_AREA.with(|snapshot| *snapshot.borrow());
+    }
+    #[cfg(not(test))]
+    {
+        last_startup_context_area_state()
             .lock()
             .ok()
             .and_then(|snapshot| *snapshot)
@@ -1564,6 +1603,9 @@ fn clear_test_render_state_locked() {
         *snapshot.borrow_mut() = None;
     });
     TEST_LAST_CONTEXT_PRESSURE_AREA.with(|snapshot| {
+        *snapshot.borrow_mut() = None;
+    });
+    TEST_LAST_STARTUP_CONTEXT_AREA.with(|snapshot| {
         *snapshot.borrow_mut() = None;
     });
     set_visible_copy_targets(Vec::new());
@@ -2683,6 +2725,18 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         return;
     }
 
+    if let Some(scroll) = app.startup_context_overlay_scroll() {
+        overlays::draw_startup_context_overlay(frame, area, scroll, app);
+        finalize_frame_metrics(
+            app,
+            total_start,
+            Duration::ZERO,
+            total_start.elapsed(),
+            None,
+        );
+        return;
+    }
+
     if let Some(scroll) = app.changelog_scroll() {
         overlays::draw_changelog_overlay(frame, area, scroll, app);
         finalize_frame_metrics(
@@ -3070,6 +3124,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let donut_height: u16 = idle_donut_reserved_height(show_donut, input_height);
     let notification_height: u16 = if app.has_notification() { 1 } else { 0 };
     let context_pressure_height: u16 = u16::from(input_ui::context_pressure_visible(app));
+    let startup_context_height: u16 = u16::from(input_ui::startup_context_visible(app));
     // Elastic overscroll status line revealed when the user scrolls past the
     // bottom of the transcript. Rendered directly below the input line.
     let overscroll_height: u16 = if app.chat_overscroll_active() { 1 } else { 0 };
@@ -3078,6 +3133,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         + swarm_strip_height
         + notification_height
         + context_pressure_height
+        + startup_context_height
         + inline_block_height
         + inline_ui_gap_height
         + input_height
@@ -3187,7 +3243,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let use_packed = terminal_clear_collapsed
         || (!swarm_page_active && content_height + fixed_height <= available_height);
 
-    // Layout: messages, queued, swarm, status, notification, pressure, inline UI, gap, input, overscroll, donut.
+    // Layout: messages, queued, swarm, status, notification, pressure, startup context, inline UI, gap, input, overscroll, donut.
     // All vertical chunks are within the chat_area (left column).
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -3203,11 +3259,12 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
                 Constraint::Length(1),             // 3 Status line
                 Constraint::Length(notification_height), // 4 Notification line
                 Constraint::Length(context_pressure_height), // 5 Context pressure
-                Constraint::Length(inline_block_height), // 6 Inline UI
-                Constraint::Length(inline_ui_gap_height), // 7 Inline UI/input spacing
-                Constraint::Length(input_height),  // 8 Input
-                Constraint::Length(overscroll_height), // 9 Overscroll status line
-                Constraint::Length(donut_height),  // 10 Donut animation
+                Constraint::Length(startup_context_height), // 6 Startup context
+                Constraint::Length(inline_block_height), // 7 Inline UI
+                Constraint::Length(inline_ui_gap_height), // 8 Inline UI/input spacing
+                Constraint::Length(input_height),  // 9 Input
+                Constraint::Length(overscroll_height), // 10 Overscroll status line
+                Constraint::Length(donut_height),  // 11 Donut animation
             ]
         } else {
             vec![
@@ -3217,16 +3274,18 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
                 Constraint::Length(1),                       // 3 Status line
                 Constraint::Length(notification_height),     // 4 Notification line
                 Constraint::Length(context_pressure_height), // 5 Context pressure
-                Constraint::Length(inline_block_height),     // 6 Inline UI
-                Constraint::Length(inline_ui_gap_height),    // 7 Inline UI/input spacing
-                Constraint::Length(input_height),            // 8 Input
-                Constraint::Length(overscroll_height),       // 9 Overscroll status line
-                Constraint::Length(donut_height),            // 10 Donut animation
+                Constraint::Length(startup_context_height),  // 6 Startup context
+                Constraint::Length(inline_block_height),     // 7 Inline UI
+                Constraint::Length(inline_ui_gap_height),    // 8 Inline UI/input spacing
+                Constraint::Length(input_height),            // 9 Input
+                Constraint::Length(overscroll_height),       // 10 Overscroll status line
+                Constraint::Length(donut_height),            // 11 Donut animation
             ]
         })
         .split(chat_area);
     record_status_area(chunks[3]);
     record_context_pressure_area((context_pressure_height > 0).then_some(chunks[5]));
+    record_startup_context_area((startup_context_height > 0).then_some(chunks[6]));
 
     // Draw the inline swarm strip directly above the status line if present.
     if swarm_strip_height > 0 {
@@ -3243,7 +3302,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             capture.layout.queued_area = Some(chunks[1].into());
         }
         capture.layout.status_area = Some(chunks[3].into());
-        capture.layout.input_area = Some(chunks[8].into());
+        capture.layout.input_area = Some(chunks[9].into());
         capture.layout.input_lines_raw = app.input().lines().count().max(1);
         capture.layout.input_lines_wrapped = base_input_height as usize;
 
@@ -3462,28 +3521,31 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     if context_pressure_height > 0 {
         input_ui::draw_context_pressure(frame, app, chunks[5]);
     }
+    if startup_context_height > 0 {
+        input_ui::draw_startup_context_status(frame, app, chunks[6]);
+    }
     if let Some(ref mut capture) = debug_capture {
         capture.render_order.push("draw_input".to_string());
     }
     // Draw inline UI if active
     if inline_block_height > 0 {
-        draw_inline_ui(frame, app, chunks[6]);
+        draw_inline_ui(frame, app, chunks[7]);
     }
 
     let input_cursor = input_ui::draw_input(
         frame,
         app,
-        chunks[8],
+        chunks[9],
         user_count + pending_count + 1,
         &mut debug_capture,
     );
 
     if overscroll_height > 0 {
-        input_ui::draw_overscroll_status(frame, app, chunks[9]);
+        input_ui::draw_overscroll_status(frame, app, chunks[10]);
     }
 
     if donut_height > 0 {
-        animations::draw_idle_animation(frame, app, chunks[10]);
+        animations::draw_idle_animation(frame, app, chunks[11]);
     }
     let chrome_elapsed = chrome_start.elapsed();
 

@@ -97,6 +97,7 @@ mod split_view;
 mod state_ui;
 mod state_ui_input_helpers;
 pub(crate) use state_ui_input_helpers::registered_command_entries;
+mod startup_context_ui;
 mod state_ui_maintenance;
 mod state_ui_messages;
 mod state_ui_runtime;
@@ -145,6 +146,7 @@ struct PendingRemoteMessage {
 struct PendingComposerInput {
     request_id: Option<u64>,
     raw_input: String,
+    cursor_pos: usize,
     expanded: String,
     pasted_contents: Vec<String>,
     pending_input_tokens: usize,
@@ -160,6 +162,7 @@ struct PendingComposerInput {
 #[derive(Debug, Clone)]
 struct PendingSplitPrompt {
     content: String,
+    cursor_pos: usize,
     images: Vec<(String, String)>,
     pasted_contents: Vec<String>,
 }
@@ -1218,7 +1221,7 @@ pub struct App {
     remote_skills: Vec<String>,
     /// `None` means the connected server predates Startup Context support.
     /// New servers always send a bounded status, including for empty projects.
-    remote_startup_context: Option<crate::protocol::StartupContextCompactStatus>,
+    startup_context_ui: startup_context_ui::StartupContextUiState,
     // Total session token usage (from server in remote mode)
     remote_total_tokens: Option<(u64, u64)>,
     // Detailed persisted token/cache usage totals (from server in remote mode)

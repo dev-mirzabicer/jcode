@@ -130,6 +130,36 @@ impl App {
             }))
             .unwrap_or_else(|_| "{}".to_string());
         }
+        if cmd == "startup-context-state" {
+            return serde_json::to_string_pretty(&self.startup_context_debug_summary())
+                .unwrap_or_else(|_| "{}".to_string());
+        }
+        if cmd == "startup-context-fixtures" {
+            return serde_json::to_string_pretty(&serde_json::json!({
+                "fixtures": Self::startup_context_debug_fixture_names(),
+            }))
+            .unwrap_or_else(|_| "{}".to_string());
+        }
+        if let Some(fixture) = cmd
+            .strip_prefix("startup-context-fixture:")
+            .or_else(|| cmd.strip_prefix("startup-context-fixture "))
+            .map(str::trim)
+        {
+            return match self.apply_startup_context_debug_fixture(fixture) {
+                Ok(()) => serde_json::to_string_pretty(&serde_json::json!({
+                    "ok": true,
+                    "fixture": fixture,
+                    "state": self.startup_context_debug_summary(),
+                }))
+                .unwrap_or_else(|_| "{}".to_string()),
+                Err(error) => serde_json::to_string_pretty(&serde_json::json!({
+                    "ok": false,
+                    "error": error,
+                    "fixtures": Self::startup_context_debug_fixture_names(),
+                }))
+                .unwrap_or_else(|_| "{}".to_string()),
+            };
+        }
         if cmd == "context-pressure-fixtures" {
             return serde_json::to_string_pretty(&serde_json::json!({
                 "fixtures": Self::context_pressure_debug_fixture_names(),

@@ -431,6 +431,7 @@ fn submit_prepared_remote_input_defers_until_history_loads() {
 
     let prepared = crate::tui::app::input::PreparedInput {
         raw_input: "hi".to_string(),
+        cursor_pos: usize::MAX,
         expanded: "hi".to_string(),
         images: vec![],
         pasted_contents: Vec::new(),
@@ -501,6 +502,7 @@ fn remote_skill_invocation_with_prompt_sends_remote_turn() {
         &mut remote,
         crate::tui::app::input::PreparedInput {
             raw_input: "/remote-skill explain the change".to_string(),
+            cursor_pos: usize::MAX,
             expanded: "/remote-skill explain the change".to_string(),
             images: vec![],
             pasted_contents: Vec::new(),
@@ -1106,6 +1108,7 @@ fn remote_dropped_file_path_is_sent_as_a_prompt_not_a_slash_command() {
         &mut remote,
         crate::tui::app::input::PreparedInput {
             raw_input: dropped.clone(),
+            cursor_pos: usize::MAX,
             expanded: dropped.clone(),
             images: vec![],
             pasted_contents: Vec::new(),

@@ -180,6 +180,7 @@ fn spawn_input_shell_command(session_id: String, command: String, cwd: Option<St
 
 pub(super) struct PreparedInput {
     pub raw_input: String,
+    pub cursor_pos: usize,
     pub expanded: String,
     pub images: Vec<(String, String)>,
     pub pasted_contents: Vec<String>,
@@ -2488,6 +2489,11 @@ pub(super) fn handle_modal_key(
         return Ok(true);
     }
 
+    if app.startup_context_overlay_scroll().is_some() {
+        app.handle_startup_context_details_key(code);
+        return Ok(true);
+    }
+
     if app.prompt_history_search.is_some() {
         app.handle_prompt_history_search_key(code, modifiers);
         return Ok(true);
@@ -2745,6 +2751,7 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
 }
 
 pub(super) fn take_prepared_input(app: &mut App) -> PreparedInput {
+    let cursor_pos = app.cursor_pos;
     let raw_input = std::mem::take(&mut app.input);
     app.record_prompt_history(&raw_input);
     let expanded = expand_paste_placeholders(app, &raw_input);
@@ -2754,6 +2761,7 @@ pub(super) fn take_prepared_input(app: &mut App) -> PreparedInput {
     app.clear_input_undo_history();
     PreparedInput {
         raw_input,
+        cursor_pos,
         expanded,
         images,
         pasted_contents,
@@ -3592,6 +3600,7 @@ impl App {
             return;
         }
 
+        let submitted_cursor_pos = self.cursor_pos;
         let raw_input = std::mem::take(&mut self.input);
         // Persist to cross-session prompt history (no-op for slash/shell
         // commands, secret-intercept inputs, and oversized pastes).
@@ -3751,6 +3760,7 @@ impl App {
         self.pending_composer_input = Some(super::PendingComposerInput {
             request_id: pending_request_id,
             raw_input: raw_input.clone(),
+            cursor_pos: submitted_cursor_pos,
             expanded: input.clone(),
             pasted_contents: submitted_pasted_contents,
             pending_input_tokens: crate::context::estimate_pending_input_tokens(
@@ -3877,6 +3887,7 @@ impl App {
             self.pending_composer_input = Some(PendingComposerInput {
                 request_id: Some(self.next_local_context_request_id()),
                 raw_input: combined.clone(),
+                cursor_pos: combined.len(),
                 expanded: combined.clone(),
                 pasted_contents: Vec::new(),
                 pending_input_tokens: crate::context::estimate_pending_input_tokens(&combined, 0),

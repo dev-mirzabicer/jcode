@@ -1087,6 +1087,159 @@ pub(super) fn context_pressure_visible(app: &dyn TuiState) -> bool {
             .is_some_and(|report| report.pressure != crate::protocol::ContextPressureLevel::Normal)
 }
 
+pub(super) fn startup_context_visible(app: &dyn TuiState) -> bool {
+    app.startup_context_availability() != crate::tui::StartupContextAvailability::Hidden
+}
+
+pub(super) fn draw_startup_context_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
+    use crate::protocol::{
+        StartupContextFailureKind, StartupContextLeaseAvailability, StartupContextStatusState,
+    };
+    use crate::tui::StartupContextAvailability;
+
+    let compact = area.width < 72;
+    let extreme = area.width < 42;
+    let availability = app.startup_context_availability();
+    let status = app.startup_context_status();
+
+    let (state_label, state_color) = match (availability, status) {
+        (StartupContextAvailability::Loading, _) => ("Loading", dim_color()),
+        (StartupContextAvailability::Unsupported, _) => ("Unsupported server", rgb(255, 193, 7)),
+        (StartupContextAvailability::Available, Some(status)) => {
+            if let Some(error) = status.error.as_ref() {
+                let label = match error.kind {
+                    StartupContextFailureKind::PlanStorage => "Storage error",
+                    StartupContextFailureKind::ProjectIdentity => "Project error",
+                    StartupContextFailureKind::Unsupported => "Unsupported",
+                    _ => "Error",
+                };
+                (label, rgb(244, 67, 54))
+            } else if status.blocked_issue_count > 0
+                || status.state == StartupContextStatusState::Blocked
+            {
+                ("Blocked", rgb(244, 67, 54))
+            } else if status.state == StartupContextStatusState::MetadataRepair {
+                ("Metadata repair", rgb(255, 193, 7))
+            } else if status.stale_file_count > 0 {
+                ("Stale", rgb(255, 193, 7))
+            } else if status.pending_update_count > 0 {
+                ("Queued", rgb(255, 193, 7))
+            } else {
+                match status.state {
+                    StartupContextStatusState::Unprepared => ("Preparing", dim_color()),
+                    StartupContextStatusState::Empty => ("none", dim_color()),
+                    StartupContextStatusState::Prepared => ("Captured", rgb(120, 200, 255)),
+                    StartupContextStatusState::Dispatched => ("Dispatched", rgb(120, 200, 255)),
+                    StartupContextStatusState::ProviderAccepted => ("Accepted", rgb(100, 210, 140)),
+                    StartupContextStatusState::Blocked => ("Blocked", rgb(244, 67, 54)),
+                    StartupContextStatusState::MetadataRepair => {
+                        ("Metadata repair", rgb(255, 193, 7))
+                    }
+                    StartupContextStatusState::Error => ("Error", rgb(244, 67, 54)),
+                }
+            }
+        }
+        _ => ("Loading", dim_color()),
+    };
+
+    let mut spans = Vec::new();
+    spans.push(Span::styled(
+        if extreme {
+            "Startup "
+        } else if compact {
+            "Startup context "
+        } else {
+            "Startup context  "
+        },
+        Style::default().fg(dim_color()),
+    ));
+
+    if let Some(status) = status
+        && !extreme
+        && status.receipt_file_count > 0
+    {
+        let file_label = if compact {
+            status.receipt_file_count.to_string()
+        } else {
+            format!(
+                "{} file{}",
+                status.receipt_file_count,
+                if status.receipt_file_count == 1 {
+                    ""
+                } else {
+                    "s"
+                }
+            )
+        };
+        spans.push(Span::styled(
+            file_label,
+            Style::default().fg(rgb(190, 190, 190)),
+        ));
+        if status.estimated_tokens > 0 {
+            spans.push(Span::styled(
+                format!(
+                    " · {}{}",
+                    format_context_tokens(status.estimated_tokens.min(usize::MAX as u64) as usize),
+                    if compact { "" } else { " tokens" }
+                ),
+                Style::default().fg(dim_color()),
+            ));
+        }
+        spans.push(Span::styled(" · ", Style::default().fg(dim_color())));
+    }
+    spans.push(Span::styled(state_label, Style::default().fg(state_color)));
+
+    if let Some(status) = status {
+        let mut details = Vec::new();
+        if status.blocked_issue_count > 0 {
+            details.push(format!(
+                "{} issue{}",
+                status.blocked_issue_count,
+                if status.blocked_issue_count == 1 {
+                    ""
+                } else {
+                    "s"
+                }
+            ));
+        }
+        if status.pending_update_count > 0 {
+            details.push(format!(
+                "{} update{}",
+                status.pending_update_count,
+                if status.pending_update_count == 1 {
+                    ""
+                } else {
+                    "s"
+                }
+            ));
+        }
+        if status.stale_file_count > 0 {
+            details.push(format!("{} stale", status.stale_file_count));
+        }
+        if matches!(status.lease, StartupContextLeaseAvailability::Busy { .. }) {
+            details.push("editor busy".to_string());
+        }
+        if !details.is_empty() {
+            spans.push(Span::styled(
+                format!(" · {}", details.join(" · ")),
+                Style::default().fg(dim_color()),
+            ));
+        }
+    }
+
+    if !extreme {
+        spans.push(Span::styled(
+            if compact {
+                " · /startup"
+            } else {
+                " · Open /startup"
+            },
+            Style::default().fg(rgb(120, 200, 255)),
+        ));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
 pub(super) fn draw_context_pressure(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     use crate::protocol::{ContextActionRequiredReason, ContextPressureLevel};
     let compact = area.width < 80;

@@ -165,6 +165,9 @@ impl App {
             "context" => {
                 "/context\nShow the full session context snapshot, including authoritative context-view revision and transaction counts.\n\n/context edit\nOpen the Context Editor.\n\n/context history\nReview transaction provenance.\n\n/context restore\nReview active transformations in history.\n\n/context undo\nSelect the latest active transaction and require confirmation before reverting it."
             }
+            "startup" => {
+                "/startup\nInspect authoritative Startup Context readiness, captured receipt metadata, queued state, and exact blocking issues. The compact composer strip and this detail view never load raw file bodies.\n\nWhen startup blocks a request, the view opens automatically after the unanswered prompt and attachments are restored. Repair the listed file on disk, then use /clear to recapture. The full file-selection editor is not active in this build."
+            }
             "usage" => {
                 "/usage\nFetch and display usage limits for connected providers. This command only reports real connected-provider usage windows and reset times."
             }

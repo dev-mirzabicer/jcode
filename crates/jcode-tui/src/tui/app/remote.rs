@@ -88,6 +88,7 @@ pub(super) enum RemoteEventOutcome {
 
 pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) -> bool {
     app.dispatch_remote_context_editor_actions(remote).await;
+    app.dispatch_remote_startup_context_request(remote).await;
     crate::tui::ui::set_frame_input_attribution(crate::tui::ui::FrameInputAttribution {
         event: Some("tick".to_string()),
         scroll_delta: None,

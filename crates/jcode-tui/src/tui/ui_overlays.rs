@@ -7,7 +7,7 @@ use crate::tui::TuiState;
 use crate::tui::info_widget::WidgetPlacement;
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Paragraph, Wrap},
 };
 
 use super::selection_highlight::highlight_line_selection;
@@ -699,6 +699,302 @@ pub(super) fn draw_model_status_overlay(
                 .borders(Borders::ALL)
                 .title(" /provider-test-coverage "),
         )
+        .scroll((scroll.min(u16::MAX as usize) as u16, 0));
+    frame.render_widget(paragraph, area);
+}
+
+pub(super) fn draw_startup_context_overlay(
+    frame: &mut Frame,
+    area: Rect,
+    scroll: usize,
+    app: &dyn TuiState,
+) {
+    use crate::protocol::{
+        StartupContextBatchKind, StartupContextDeliveryState, StartupContextFileIssueKind,
+        StartupContextLeaseAvailability, StartupContextObservedState, StartupContextStatusState,
+    };
+    use crate::tui::StartupContextAvailability;
+
+    clear_area(frame, area);
+    let title_style = Style::default()
+        .fg(accent_color())
+        .add_modifier(Modifier::BOLD);
+    let text_style = Style::default().fg(rgb(215, 215, 225));
+    let dim_style = Style::default().fg(dim_color());
+    let good_style = Style::default().fg(rgb(120, 220, 150));
+    let warn_style = Style::default().fg(rgb(235, 190, 105));
+    let error_style = Style::default().fg(rgb(240, 110, 110));
+
+    let mut lines: Vec<Line<'static>> = vec![
+        Line::from(Span::styled("  Startup Context", title_style)),
+        Line::from(Span::styled(
+            "  Required project files captured by Jcode before provider work",
+            dim_style,
+        )),
+        Line::from(""),
+    ];
+
+    match app.startup_context_availability() {
+        StartupContextAvailability::Hidden => {
+            lines.push(Line::from(Span::styled(
+                "  Startup Context is unavailable in this runtime.",
+                warn_style,
+            )));
+        }
+        StartupContextAvailability::Loading => {
+            lines.push(Line::from(Span::styled(
+                "  Loading authoritative server status…",
+                dim_style,
+            )));
+        }
+        StartupContextAvailability::Unsupported => {
+            lines.push(Line::from(Span::styled(
+                "  The connected server predates Startup Context status support.",
+                warn_style,
+            )));
+            lines.push(Line::from(Span::styled(
+                "  Reload or update the server before relying on this capability.",
+                dim_style,
+            )));
+        }
+        StartupContextAvailability::Available => {
+            if let Some(status) = app.startup_context_status() {
+                let state = match status.state {
+                    StartupContextStatusState::Unprepared => "Preparing",
+                    StartupContextStatusState::Empty => "None",
+                    StartupContextStatusState::Prepared => "Captured",
+                    StartupContextStatusState::Blocked => "Blocked",
+                    StartupContextStatusState::Dispatched => "Dispatched",
+                    StartupContextStatusState::ProviderAccepted => "Provider accepted",
+                    StartupContextStatusState::MetadataRepair => "Metadata repair required",
+                    StartupContextStatusState::Error => "Error",
+                };
+                let state_style = match status.state {
+                    StartupContextStatusState::Blocked | StartupContextStatusState::Error => {
+                        error_style
+                    }
+                    StartupContextStatusState::MetadataRepair => warn_style,
+                    StartupContextStatusState::ProviderAccepted => good_style,
+                    _ => text_style,
+                };
+                lines.push(Line::from(vec![
+                    Span::styled("  State  ", dim_style),
+                    Span::styled(state.to_string(), state_style),
+                ]));
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "  {} selected · {} captured · {} bytes · ~{} tokens",
+                        status.plan_entry_count,
+                        status.receipt_file_count,
+                        status.captured_bytes,
+                        status.estimated_tokens,
+                    ),
+                    text_style,
+                )));
+                if status.pending_update_count > 0 {
+                    lines.push(Line::from(Span::styled(
+                        format!(
+                            "  {} queued update(s) not yet appended",
+                            status.pending_update_count
+                        ),
+                        warn_style,
+                    )));
+                }
+                if status.stale_file_count > 0 {
+                    lines.push(Line::from(Span::styled(
+                        format!(
+                            "  {} captured file(s) currently stale",
+                            status.stale_file_count
+                        ),
+                        warn_style,
+                    )));
+                }
+                match &status.lease {
+                    StartupContextLeaseAvailability::Available => {}
+                    StartupContextLeaseAvailability::Busy { owner } => {
+                        let owner = owner
+                            .as_ref()
+                            .map(|owner| format!(" on {}", owner.server_name))
+                            .unwrap_or_default();
+                        lines.push(Line::from(Span::styled(
+                            format!("  Editor busy{owner}"),
+                            warn_style,
+                        )));
+                    }
+                }
+                if let Some(error) = status.error.as_ref() {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled("  Status error", error_style)));
+                    lines.push(Line::from(Span::styled(
+                        format!("  {}", error.message),
+                        error_style,
+                    )));
+                }
+            }
+        }
+    }
+
+    if let Some(action) = app.startup_context_action_required() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled("  Request not sent", error_style)));
+        lines.push(Line::from(Span::styled(
+            format!("  {}", action.detail),
+            error_style,
+        )));
+    }
+
+    if let Some(detail) = app.startup_context_detail() {
+        if detail.total_issues > 0 {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                format!("  Resolution required · {} issue(s)", detail.total_issues),
+                error_style.add_modifier(Modifier::BOLD),
+            )));
+            for issue in &detail.issues {
+                let path = issue.logical_path.as_deref().unwrap_or("<project>");
+                let explanation = match &issue.kind {
+                    StartupContextFileIssueKind::EmptyPath => "empty path".to_string(),
+                    StartupContextFileIssueKind::InvalidPathEncoding => {
+                        "invalid path encoding".to_string()
+                    }
+                    StartupContextFileIssueKind::PathTraversal => {
+                        "path escapes the project".to_string()
+                    }
+                    StartupContextFileIssueKind::Missing => "file is missing".to_string(),
+                    StartupContextFileIssueKind::BrokenSymlink => "broken symlink".to_string(),
+                    StartupContextFileIssueKind::Unreadable { detail } => {
+                        format!("unreadable: {detail}")
+                    }
+                    StartupContextFileIssueKind::UnsupportedTarget { target_type } => {
+                        format!("unsupported target: {target_type:?}")
+                    }
+                    StartupContextFileIssueKind::UnsupportedContent { content } => {
+                        format!("unsupported content: {content:?}")
+                    }
+                    StartupContextFileIssueKind::NonUtf8 => "not UTF-8".to_string(),
+                    StartupContextFileIssueKind::ExternalApprovalRequired { resolved_target } => {
+                        format!("external target needs confirmation: {resolved_target}")
+                    }
+                    StartupContextFileIssueKind::ExternalTargetChanged {
+                        approved_target,
+                        resolved_target,
+                    } => format!(
+                        "external target changed from {approved_target} to {resolved_target}"
+                    ),
+                    StartupContextFileIssueKind::InvalidExternalApproval { detail } => {
+                        format!("invalid external approval: {detail}")
+                    }
+                    StartupContextFileIssueKind::DuplicateSelection { .. } => {
+                        "duplicate selection".to_string()
+                    }
+                    StartupContextFileIssueKind::TooManyEntries { count, limit } => {
+                        format!("too many entries: {count} exceeds {limit}")
+                    }
+                    StartupContextFileIssueKind::FileTooLarge { bytes, limit } => {
+                        format!("file too large: {bytes} bytes exceeds {limit}")
+                    }
+                    StartupContextFileIssueKind::BatchTooLarge { bytes, limit } => {
+                        format!("batch too large: {bytes} bytes exceeds {limit}")
+                    }
+                    StartupContextFileIssueKind::ChangedDuringCapture => {
+                        "changed repeatedly during capture".to_string()
+                    }
+                    StartupContextFileIssueKind::DirectoryOutsideProject => {
+                        "directory is outside the project".to_string()
+                    }
+                    StartupContextFileIssueKind::DirectoryReadFailed { detail } => {
+                        format!("directory read failed: {detail}")
+                    }
+                };
+                lines.push(Line::from(vec![
+                    Span::styled("  • ", error_style),
+                    Span::styled(path.to_string(), text_style.add_modifier(Modifier::BOLD)),
+                    Span::styled(format!(" · {explanation}"), error_style),
+                ]));
+            }
+            if detail.issues.len() < detail.total_issues {
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "  Loading remaining issues… ({}/{})",
+                        detail.issues.len(),
+                        detail.total_issues
+                    ),
+                    dim_style,
+                )));
+            }
+        }
+
+        if detail.total_files > 0 {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                format!("  Receipt · {} file(s)", detail.total_files),
+                title_style,
+            )));
+            for file in &detail.files {
+                let kind = match file.batch_kind {
+                    StartupContextBatchKind::Initial => "initial",
+                    StartupContextBatchKind::Late => "late",
+                };
+                let delivery = match file.delivery_state {
+                    StartupContextDeliveryState::Captured => "captured",
+                    StartupContextDeliveryState::Dispatched => "dispatched",
+                    StartupContextDeliveryState::ProviderAccepted => "accepted",
+                };
+                let observation = match file.latest_observation {
+                    StartupContextObservedState::Current => String::new(),
+                    StartupContextObservedState::Changed { .. } => " · changed".to_string(),
+                    StartupContextObservedState::Missing => " · missing".to_string(),
+                    StartupContextObservedState::Unreadable => " · unreadable".to_string(),
+                    StartupContextObservedState::Unsupported => " · unsupported".to_string(),
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(format!("  {:>3}. ", file.ordinal), dim_style),
+                    Span::styled(file.logical_path.clone(), text_style),
+                    Span::styled(
+                        format!(
+                            " · {} bytes · ~{} tokens · {kind}/{delivery}{observation}",
+                            file.bytes, file.estimated_tokens
+                        ),
+                        dim_style,
+                    ),
+                ]));
+            }
+            if detail.files.len() < detail.total_files {
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "  Loading remaining receipt entries… ({}/{})",
+                        detail.files.len(),
+                        detail.total_files
+                    ),
+                    dim_style,
+                )));
+            }
+        }
+    } else if app.startup_context_availability() == StartupContextAvailability::Available {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  Loading receipt and resolution details…",
+            dim_style,
+        )));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  Repair the listed file on disk, then use /clear to recapture. The full file-selection editor is not active in this build.",
+        dim_style,
+    )));
+    lines.push(Line::from(Span::styled(
+        "  r refresh · e editor route · ↑/↓ or mouse wheel scroll · q/Esc close",
+        dim_style,
+    )));
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(accent_color()))
+        .title(" /startup ");
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false })
         .scroll((scroll.min(u16::MAX as usize) as u16, 0));
     frame.render_widget(paragraph, area);
 }

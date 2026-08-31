@@ -1340,6 +1340,15 @@ impl App {
             finish_mouse_event!(is_mouse_scroll_kind(mouse.kind), "context_editor_overlay");
         }
 
+        if self.startup_context_overlay_scroll().is_some() {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => self.scroll_startup_context_details(-3),
+                MouseEventKind::ScrollDown => self.scroll_startup_context_details(3),
+                _ => {}
+            }
+            finish_mouse_event!(is_mouse_scroll_kind(mouse.kind), "startup_context_overlay");
+        }
+
         if self.changelog_scroll.is_some() {
             match mouse.kind {
                 MouseEventKind::ScrollUp => {
@@ -1426,6 +1435,14 @@ impl App {
         if let Some(ref picker_cell) = self.account_picker_overlay {
             picker_cell.borrow_mut().handle_overlay_mouse(mouse);
             finish_mouse_event!(false, "account_picker_overlay");
+        }
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && super::super::ui::last_startup_context_area().is_some_and(|area| {
+                super::super::layout_utils::point_in_rect(mouse.column, mouse.row, area)
+            })
+        {
+            self.open_startup_context_details();
+            finish_mouse_event!(false, "startup_context_open_details");
         }
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             && super::super::ui::last_context_pressure_area().is_some_and(|area| {

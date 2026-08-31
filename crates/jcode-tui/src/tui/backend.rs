@@ -673,6 +673,36 @@ impl RemoteConnection {
         id
     }
 
+    /// Reserve an ID before installing Startup Context response correlation.
+    pub fn reserve_startup_context_request_id(&mut self) -> u64 {
+        let id = self.next_request_id;
+        self.next_request_id = self.next_request_id.wrapping_add(1).max(1);
+        id
+    }
+
+    /// Send a Startup Context request whose ID was reserved and correlated first.
+    pub async fn send_reserved_startup_context_request(&self, request: Request) -> Result<()> {
+        if !matches!(
+            &request,
+            Request::GetStartupContextStatus { .. }
+                | Request::OpenStartupContextEditor { .. }
+                | Request::RenewStartupContextEditorLease { .. }
+                | Request::CloseStartupContextEditor { .. }
+                | Request::ListStartupContextDirectory { .. }
+                | Request::SearchStartupContextFiles { .. }
+                | Request::CancelStartupContextSearch { .. }
+                | Request::PreviewStartupContextFile { .. }
+                | Request::GetStartupContextFileDetail { .. }
+                | Request::PreviewStartupContextSelection { .. }
+                | Request::ApplyStartupContextSelection { .. }
+                | Request::CancelStartupContextApply { .. }
+                | Request::GetStartupContextApplyStatus { .. }
+        ) {
+            anyhow::bail!("reserved Startup Context sender received a non-startup request");
+        }
+        self.send_request(request).await
+    }
+
     /// Send a context-control request whose ID was reserved and correlated first.
     pub async fn send_reserved_context_request(&self, request: Request) -> Result<()> {
         if !matches!(
