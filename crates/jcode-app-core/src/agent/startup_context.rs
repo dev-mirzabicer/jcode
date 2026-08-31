@@ -8,6 +8,19 @@ use jcode_session_types::{StoredStartupContextBlock, StoredStartupContextBlockKi
 use std::error::Error;
 use std::fmt;
 
+#[derive(Clone, Debug)]
+pub(crate) struct StartupContextActionRequiredError {
+    pub(crate) action: crate::protocol::StartupContextActionRequired,
+}
+
+impl fmt::Display for StartupContextActionRequiredError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.action.detail)
+    }
+}
+
+impl Error for StartupContextActionRequiredError {}
+
 pub fn startup_file_issue_code(
     kind: &crate::startup_context::StartupFileIssueKind,
 ) -> &'static str {

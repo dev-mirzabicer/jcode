@@ -254,6 +254,42 @@ pub struct StartupContextStatusSnapshot {
     pub issues: Vec<StartupContextFileIssueSnapshot>,
 }
 
+/// Why a user-initiated provider request stopped at the Startup Context gate.
+///
+/// This value is carried only inside the optional action metadata on a status
+/// response. Existing clients can ignore that additive field while newer TUI
+/// clients use it to present the correct recovery workflow.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StartupContextActionKind {
+    RequirementsUnresolved,
+    DispatchPersistence,
+}
+
+/// Durable disposition of the unanswered user turn after Startup Context
+/// prevented provider dispatch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StartupContextPromptDisposition {
+    /// The unanswered turn was removed from authoritative history. The client
+    /// may restore its correlated composer snapshot for a manual resend.
+    RolledBack,
+    /// Durable rollback failed, so the authoritative turn remains in history
+    /// and must not be resubmitted.
+    Retained,
+}
+
+/// Prompt-safe recovery metadata attached to the status response that follows
+/// a blocked user dispatch.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartupContextActionRequired {
+    pub kind: StartupContextActionKind,
+    pub prompt_disposition: StartupContextPromptDisposition,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_input: Option<crate::ContextPendingInputMetadata>,
+    pub detail: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StartupContextPlanEntrySnapshot {
     pub spec_id: String,

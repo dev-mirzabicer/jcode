@@ -38,6 +38,49 @@ impl Agent {
         Ok(())
     }
 
+    pub(super) fn block_for_startup_context_dispatch(
+        &mut self,
+        dispatch_error: anyhow::Error,
+    ) -> anyhow::Error {
+        let kind =
+            match dispatch_error.downcast_ref::<crate::session::StartupContextDispatchError>() {
+                Some(crate::session::StartupContextDispatchError::Blocked) => {
+                    crate::protocol::StartupContextActionKind::RequirementsUnresolved
+                }
+                Some(crate::session::StartupContextDispatchError::Persistence(_)) | None => {
+                    crate::protocol::StartupContextActionKind::DispatchPersistence
+                }
+            };
+        let dispatch_detail = dispatch_error.to_string();
+        let (prompt_disposition, pending_input, detail) = match self
+            .rollback_pending_turn_before_output()
+        {
+            Ok(pending_input) => (
+                crate::protocol::StartupContextPromptDisposition::RolledBack,
+                pending_input,
+                format!(
+                    "Request not sent: {dispatch_detail}. The unanswered prompt was removed from authoritative history and preserved for manual resubmission."
+                ),
+            ),
+            Err(rollback_error) => (
+                crate::protocol::StartupContextPromptDisposition::Retained,
+                None,
+                format!(
+                    "Request not sent: {dispatch_detail}. Durable prompt rollback failed, so the unanswered turn remains in authoritative history and must not be resubmitted: {rollback_error}"
+                ),
+            ),
+        };
+
+        anyhow::Error::new(crate::agent::StartupContextActionRequiredError {
+            action: crate::protocol::StartupContextActionRequired {
+                kind,
+                prompt_disposition,
+                pending_input,
+                detail,
+            },
+        })
+    }
+
     pub(super) fn record_startup_context_provider_acceptance(&mut self) {
         match self
             .session

@@ -1114,6 +1114,176 @@ async fn fresh_shared_primary_matrix_activates_or_blocks_before_use() {
     assert!(session.clone().mark_startup_context_dispatched().is_err());
 }
 
+#[tokio::test]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "the real blocked-startup stream-pair journey serializes JCODE_HOME and runtime state"
+)]
+async fn blocked_shared_startup_emits_prompt_safe_action_and_rolls_back_unanswered_turn() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    let project = tempfile::tempdir().expect("blocked project");
+    let selected_path = project.path().join("required.txt");
+    std::fs::write(&selected_path, "remove before startup").expect("seed required file");
+    let startup = crate::startup_context::StartupContext::new();
+    let active = startup
+        .resolve_project(project.path())
+        .expect("resolve blocked project");
+    let preview = startup.preview_selection(
+        &active,
+        [crate::startup_context::StartupSelectionInput::new(
+            "required.txt",
+        )],
+    );
+    startup
+        .save_project_plan(&active, 0, &preview)
+        .expect("save blocked plan");
+    std::fs::remove_file(&selected_path).expect("remove selected file");
+
+    let (server_stream, client_stream) = crate::transport::stream_pair().expect("stream pair");
+    let sessions = Arc::new(RwLock::new(HashMap::new()));
+    let client_connections = Arc::new(RwLock::new(HashMap::new()));
+    let (debug_response_tx, _) = broadcast::channel(8);
+    let (swarm_event_tx, _) = broadcast::channel(8);
+    let (global_event_tx, _) = broadcast::channel(8);
+    let server_task = tokio::spawn(handle_client(
+        server_stream,
+        Arc::clone(&sessions),
+        global_event_tx,
+        Arc::new(CompleteImmediatelyProvider),
+        Arc::new(crate::context::ContextTransactionService::new()),
+        crate::server::startup_context::test_coordinator(),
+        Arc::new(RwLock::new(false)),
+        Arc::new(RwLock::new(String::new())),
+        Arc::new(RwLock::new(1usize)),
+        Arc::clone(&client_connections),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        FileTouchService::new(),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(ClientDebugState::default())),
+        debug_response_tx,
+        Arc::new(RwLock::new(std::collections::VecDeque::new())),
+        Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        swarm_event_tx,
+        "jcode-test".to_string(),
+        "🧪".to_string(),
+        Arc::new(crate::mcp::SharedMcpPool::from_default_config()),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        AwaitMembersRuntime::default(),
+        SwarmMutationRuntime::default(),
+    ));
+    let (client_reader, mut client_writer) = client_stream.into_split();
+    let mut reader = BufReader::new(client_reader);
+    let subscribe = subscribe_request(Some(project.path().to_string_lossy().as_ref()));
+    client_writer
+        .write_all(
+            (serde_json::to_string(&subscribe).expect("serialize subscribe") + "\n").as_bytes(),
+        )
+        .await
+        .expect("write subscribe");
+    let session_id = loop {
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line))
+            .await
+            .expect("subscribe timeout")
+            .expect("read subscribe event");
+        assert!(!line.is_empty(), "server closed before SessionId");
+        if let ServerEvent::SessionId { session_id } = decode_request_or_event(&line) {
+            break session_id;
+        }
+    };
+
+    let prompt = "preserve this exact unanswered prompt";
+    let request = Request::Message {
+        id: 3,
+        content: prompt.to_string(),
+        images: vec![("image/png".to_string(), "synthetic-image".to_string())],
+        system_reminder: None,
+        no_reply: false,
+    };
+    client_writer
+        .write_all((serde_json::to_string(&request).expect("serialize message") + "\n").as_bytes())
+        .await
+        .expect("write message");
+
+    let mut action_observed = false;
+    let mut terminal_error_observed = false;
+    while !terminal_error_observed {
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line))
+            .await
+            .expect("blocked action timeout")
+            .expect("read blocked action event");
+        assert!(!line.is_empty(), "server closed before blocked action");
+        match decode_request_or_event(&line) {
+            ServerEvent::StartupContextStatus {
+                id: 3,
+                snapshot,
+                action_required: Some(action),
+            } => {
+                action_observed = true;
+                assert_eq!(
+                    snapshot.compact.state,
+                    crate::protocol::StartupContextStatusState::Blocked
+                );
+                assert_eq!(snapshot.total_issues, 1);
+                assert!(matches!(
+                    snapshot.issues[0].kind,
+                    crate::protocol::StartupContextFileIssueKind::Missing
+                ));
+                assert_eq!(
+                    action.kind,
+                    crate::protocol::StartupContextActionKind::RequirementsUnresolved
+                );
+                assert_eq!(
+                    action.prompt_disposition,
+                    crate::protocol::StartupContextPromptDisposition::RolledBack
+                );
+                let pending = action
+                    .pending_input
+                    .as_ref()
+                    .expect("correlated pending input metadata");
+                assert_eq!(pending.request_id, 3);
+                assert_eq!(pending.image_count, 1);
+                let encoded = serde_json::to_string(&action).expect("encode action");
+                assert!(!encoded.contains(prompt));
+                assert!(!encoded.contains("synthetic-image"));
+            }
+            ServerEvent::Error { id: 3, message, .. } => {
+                assert!(
+                    action_observed,
+                    "prompt-safe action must precede the terminal generic error"
+                );
+                assert!(message.contains("Request not sent"));
+                terminal_error_observed = true;
+            }
+            _ => {}
+        }
+    }
+
+    let persisted = crate::session::Session::load(&session_id).expect("load blocked session");
+    let serialized = serde_json::to_string(&persisted.messages).expect("serialize messages");
+    assert!(!serialized.contains(prompt));
+    assert!(!serialized.contains("synthetic-image"));
+    assert_eq!(
+        persisted.startup_context.as_ref().unwrap().state,
+        jcode_session_types::StoredStartupContextState::Blocked
+    );
+
+    drop(client_writer);
+    server_task
+        .await
+        .expect("server task join")
+        .expect("server task result");
+    assert!(client_connections.read().await.is_empty());
+}
+
 #[test]
 fn initial_subscribe_requires_an_absolute_client_working_dir() {
     for invalid in [None, Some(""), Some("relative/project")] {

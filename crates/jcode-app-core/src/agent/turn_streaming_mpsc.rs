@@ -192,7 +192,7 @@ impl Agent {
 
             if let Err(error) = self.prepare_startup_context_provider_dispatch() {
                 memory_pending.restore_now();
-                return Err(error);
+                return Err(self.block_for_startup_context_dispatch(error));
             }
 
             // No side effect above this boundary survives a blocked request.

@@ -58,7 +58,9 @@ pub use jcode_agent_runtime::{
     BackgroundToolSignal, GracefulShutdownSignal, InterruptSignal, SoftInterruptMessage,
     SoftInterruptQueue, SoftInterruptSource, StreamError,
 };
-pub(crate) use startup_context::activate_session_startup_context;
+pub(crate) use startup_context::{
+    StartupContextActionRequiredError, activate_session_startup_context,
+};
 pub use startup_context::{
     StartupContextActivation, StartupContextActivationError, StartupContextActivationOutcome,
     StartupContextCaller, startup_file_issue_code, stored_startup_file_issue_code,

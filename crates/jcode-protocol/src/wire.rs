@@ -1400,6 +1400,11 @@ pub enum ServerEvent {
     StartupContextStatus {
         id: u64,
         snapshot: StartupContextStatusSnapshot,
+        /// Present only when this status response is the prompt-safe recovery
+        /// signal for a blocked user dispatch. The additive field preserves
+        /// compatibility with clients that already understand status events.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        action_required: Option<StartupContextActionRequired>,
     },
 
     #[serde(rename = "startup_context_editor_opened")]

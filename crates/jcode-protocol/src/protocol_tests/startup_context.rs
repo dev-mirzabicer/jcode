@@ -186,6 +186,7 @@ fn ordinary_startup_events_have_no_raw_content_field() -> Result<()> {
             next_issue_page_start: None,
             issues: Vec::new(),
         },
+        action_required: None,
     };
     let encoded = serde_json::to_string(&status)?;
     assert!(!encoded.contains("content"));
@@ -197,9 +198,7 @@ fn ordinary_startup_events_have_no_raw_content_field() -> Result<()> {
             session_id: "session".to_string(),
             phase: StartupContextApplyPhase::Succeeded,
             session_target: StartupContextApplyTargetState::Applied { revision: None },
-            project_default_target: StartupContextApplyTargetState::Applied {
-                revision: Some(8),
-            },
+            project_default_target: StartupContextApplyTargetState::Applied { revision: Some(8) },
             batch_id: Some("batch".to_string()),
             file_count: 1,
             created_at: chrono::Utc::now(),
@@ -231,5 +230,63 @@ fn ordinary_startup_events_have_no_raw_content_field() -> Result<()> {
         },
     };
     assert!(serde_json::to_string(&explicit)?.contains("secret"));
+    Ok(())
+}
+
+#[test]
+fn startup_context_action_required_round_trips_without_raw_prompt_content() -> Result<()> {
+    let mut status = compact_startup_status();
+    status.state = StartupContextStatusState::Blocked;
+    status.blocked_issue_count = 1;
+    let event = ServerEvent::StartupContextStatus {
+        id: 44,
+        snapshot: StartupContextStatusSnapshot {
+            compact: status,
+            total_files: 0,
+            file_page_start: 0,
+            file_page_end: 0,
+            next_file_page_start: None,
+            files: Vec::new(),
+            total_issues: 1,
+            issue_page_start: 0,
+            issue_page_end: 1,
+            next_issue_page_start: None,
+            issues: vec![StartupContextFileIssueSnapshot {
+                input_index: Some(0),
+                spec_id: Some("spec".to_string()),
+                logical_path: Some("docs/MISSING.md".to_string()),
+                kind: StartupContextFileIssueKind::Missing,
+            }],
+        },
+        action_required: Some(StartupContextActionRequired {
+            kind: StartupContextActionKind::RequirementsUnresolved,
+            prompt_disposition: StartupContextPromptDisposition::RolledBack,
+            pending_input: Some(ContextPendingInputMetadata::new(
+                44,
+                "synthetic secret prompt body",
+                2,
+            )),
+            detail: "request was not sent".to_string(),
+        }),
+    };
+    let encoded = serde_json::to_string(&event)?;
+    assert!(!encoded.contains("synthetic secret prompt body"));
+    assert!(!encoded.contains("content\":"));
+    let decoded: ServerEvent = serde_json::from_str(&encoded)?;
+    let ServerEvent::StartupContextStatus {
+        id,
+        snapshot,
+        action_required: Some(action),
+    } = decoded
+    else {
+        panic!("expected Startup Context action response");
+    };
+    assert_eq!(id, 44);
+    assert_eq!(snapshot.total_issues, 1);
+    assert_eq!(
+        action.prompt_disposition,
+        StartupContextPromptDisposition::RolledBack
+    );
+    assert_eq!(action.pending_input.unwrap().request_id, 44);
     Ok(())
 }

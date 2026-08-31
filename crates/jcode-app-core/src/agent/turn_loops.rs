@@ -127,7 +127,7 @@ impl Agent {
 
             if let Err(error) = self.prepare_startup_context_provider_dispatch() {
                 memory_pending.restore_now();
-                return Err(error);
+                return Err(self.block_for_startup_context_dispatch(error));
             }
 
             // Check for client-side cache violations before memory injection.

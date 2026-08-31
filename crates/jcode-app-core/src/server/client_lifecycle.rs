@@ -1792,7 +1792,11 @@ pub(super) async fn handle_client(
                         &client_event_tx,
                         id,
                         crate::protocol::StartupContextOperation::Status,
-                        ServerEvent::StartupContextStatus { id, snapshot },
+                        ServerEvent::StartupContextStatus {
+                            id,
+                            snapshot,
+                            action_required: None,
+                        },
                     );
                 }
                 Err(failure) => {
@@ -4145,6 +4149,38 @@ async fn process_message_streaming_mpsc_with_request_id(
         )
         .await;
     emit_startup_apply_drain_events(&startup_context, &mut agent, &event_tx);
+    let startup_action = result
+        .as_ref()
+        .err()
+        .and_then(|error| error.downcast_ref::<crate::agent::StartupContextActionRequiredError>())
+        .map(|error| error.action.clone());
+    let startup_session = startup_action.as_ref().map(|_| {
+        super::startup_context::StartupContextSessionSnapshot::from_session(
+            agent.startup_context_session(),
+        )
+    });
+    drop(agent);
+    if let (Some(action_required), Some(session)) = (startup_action, startup_session) {
+        let snapshot = startup_context
+            .status_snapshot(
+                session,
+                0,
+                Some(crate::protocol::STARTUP_CONTEXT_STATUS_MAX_PAGE_SIZE),
+                0,
+                Some(crate::protocol::STARTUP_CONTEXT_STATUS_MAX_PAGE_SIZE),
+            )
+            .await;
+        super::startup_context::emit_checked(
+            &event_tx,
+            request_id,
+            crate::protocol::StartupContextOperation::Status,
+            ServerEvent::StartupContextStatus {
+                id: request_id,
+                snapshot,
+                action_required: Some(action_required),
+            },
+        );
+    }
     if result.is_ok() {
         crate::runtime_memory_log::emit_event(
             crate::runtime_memory_log::RuntimeMemoryLogEvent::new(
