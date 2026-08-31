@@ -2395,6 +2395,7 @@ pub(super) async fn handle_client(
                 client_has_local_history,
                 allow_session_takeover,
             } => {
+                let previous_session_id = client_session_id.clone();
                 let resume_working_dir = {
                     let agent_guard = agent.lock().await;
                     agent_guard.working_dir().map(str::to_string)
@@ -2446,6 +2447,9 @@ pub(super) async fn handle_client(
                     ),
                 )
                 .await?;
+                if client_session_id != previous_session_id {
+                    startup_context.release_connection(&client_connection_id);
+                }
                 session_control = refresh_session_control_handle(
                     &client_session_id,
                     &agent,
