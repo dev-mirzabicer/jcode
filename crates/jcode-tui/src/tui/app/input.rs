@@ -2490,7 +2490,7 @@ pub(super) fn handle_modal_key(
     }
 
     if app.startup_context_overlay_scroll().is_some() {
-        app.handle_startup_context_details_key(code);
+        app.handle_startup_context_details_key(code, modifiers);
         return Ok(true);
     }
 

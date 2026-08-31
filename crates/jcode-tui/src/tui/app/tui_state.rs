@@ -591,6 +591,23 @@ impl crate::tui::TuiState for App {
         self.startup_context_overlay_scroll()
     }
 
+    fn draw_startup_context_editor(
+        &self,
+        frame: &mut ratatui::prelude::Frame,
+        area: ratatui::layout::Rect,
+    ) -> bool {
+        let Some(editor) = self.startup_context_editor() else {
+            return false;
+        };
+        editor.borrow_mut().render(
+            frame,
+            area,
+            self.startup_context_detail(),
+            self.startup_context_action_required(),
+        );
+        true
+    }
+
     fn display_messages(&self) -> &[DisplayMessage] {
         &self.display_messages
     }

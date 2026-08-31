@@ -166,7 +166,7 @@ impl App {
                 "/context\nShow the full session context snapshot, including authoritative context-view revision and transaction counts.\n\n/context edit\nOpen the Context Editor.\n\n/context history\nReview transaction provenance.\n\n/context restore\nReview active transformations in history.\n\n/context undo\nSelect the latest active transaction and require confirmation before reverting it."
             }
             "startup" => {
-                "/startup\nInspect authoritative Startup Context readiness, captured receipt metadata, queued state, and exact blocking issues. The compact composer strip and this detail view never load raw file bodies.\n\nWhen startup blocks a request, the view opens automatically after the unanswered prompt and attachments are restored. Repair the listed file on disk, then use /clear to recapture. The full file-selection editor is not active in this build."
+                "/startup\nOpen the authoritative Startup Context editor. Browse or search the active project, add files or one exact external path, bulk-select a directory's direct non-directory children, reorder the unsaved draft, inspect current bounded previews, and lazily read every exact captured receipt chunk.\n\nThe header keeps the saved project default, persisted session receipt, and unsaved draft distinct. Apply actions are visible but intentionally disabled in this editor foundation until WP-08 wires their transaction consequences. Esc unwinds search, receipt, preview, and browser-directory layers before closing; q closes directly."
             }
             "usage" => {
                 "/usage\nFetch and display usage limits for connected providers. This command only reports real connected-provider usage windows and reset times."

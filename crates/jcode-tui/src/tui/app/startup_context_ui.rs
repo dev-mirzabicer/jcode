@@ -6,8 +6,14 @@ use crate::protocol::{
 };
 use crate::tui::StartupContextAvailability;
 use crate::tui::backend::RemoteConnection;
-use crossterm::event::KeyCode;
+use crate::tui::startup_context_editor::{
+    STARTUP_CONTEXT_EDITOR_PREVIEW_PAGE_CHARS, StartupContextEditor, StartupContextEditorAction,
+    StartupContextPendingRequest,
+};
+use crossterm::event::{KeyCode, KeyModifiers, MouseEvent};
 use jcode_tui_messages::DisplayMessage;
+use std::cell::RefCell;
+use std::time::Instant;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct StartupContextStatusPageRequest {
@@ -27,6 +33,7 @@ pub(super) struct StartupContextUiState {
     pending_page: Option<StartupContextStatusPageRequest>,
     outstanding_request: Option<(u64, String)>,
     action_request_id: Option<u64>,
+    editor: Option<RefCell<StartupContextEditor>>,
 }
 
 impl Default for StartupContextUiState {
@@ -41,6 +48,7 @@ impl Default for StartupContextUiState {
             pending_page: None,
             outstanding_request: None,
             action_request_id: None,
+            editor: None,
         }
     }
 }
@@ -56,11 +64,19 @@ impl StartupContextUiState {
         self.pending_page = None;
         self.outstanding_request = None;
         self.action_request_id = None;
+        self.editor = None;
     }
 
     fn accept_history(&mut self, session_id: &str, status: Option<StartupContextCompactStatus>) {
-        if self.session_id.as_deref() != Some(session_id) {
+        let same_session = self.session_id.as_deref() == Some(session_id);
+        if !same_session {
             self.begin_session(session_id);
+        } else if let Some(editor) = self.editor.as_ref() {
+            if editor.borrow().is_visible() {
+                editor.borrow_mut().restart_after_reconnect();
+            } else {
+                self.editor = None;
+            }
         }
         self.availability = if status.is_some() {
             StartupContextAvailability::Available
@@ -158,9 +174,18 @@ impl StartupContextUiState {
             self.action_required = Some(action);
             self.action_request_id = Some(id);
             self.overlay_scroll = Some(0);
+            if self.editor.is_none() {
+                self.editor = Some(RefCell::new(StartupContextEditor::new(
+                    session_id.clone(),
+                    self.detail.as_ref(),
+                )));
+            }
         }
         if self.overlay_scroll.is_some() {
             self.queue_continuation();
+        }
+        if let (Some(editor), Some(detail)) = (self.editor.as_ref(), self.detail.as_ref()) {
+            editor.borrow_mut().refresh_receipt(detail);
         }
         true
     }
@@ -182,6 +207,12 @@ impl App {
             "unsupported",
             "metadata-repair",
             "storage-error",
+            "editor-loading",
+            "editor-empty",
+            "editor-populated",
+            "editor-invalid",
+            "editor-external",
+            "editor-busy",
         ]
     }
 
@@ -336,6 +367,33 @@ impl App {
                     issues: Vec::new(),
                 });
             }
+            "editor-loading" => {
+                compact.state = StartupContextStatusState::Unprepared;
+                compact.receipt_file_count = 0;
+                compact.captured_bytes = 0;
+                compact.estimated_tokens = 0;
+                files.clear();
+            }
+            "editor-empty" => {
+                compact.state = StartupContextStatusState::Empty;
+                compact.plan_entry_count = 0;
+                compact.receipt_file_count = 0;
+                compact.captured_bytes = 0;
+                compact.estimated_tokens = 0;
+                files.clear();
+            }
+            "editor-busy" => {
+                compact.lease = StartupContextLeaseAvailability::Busy {
+                    owner: Some(StartupContextLeaseOwnerSnapshot {
+                        server_name: "fixture-server".to_string(),
+                        session_id: "fixture-owner".to_string(),
+                        acquired_at: now,
+                        renewed_at: now,
+                        expires_at: now + chrono::Duration::minutes(2),
+                    }),
+                };
+            }
+            "editor-populated" | "editor-invalid" | "editor-external" => {}
             "loading" | "unsupported" => unreachable!(),
             _ => return Err(format!("unhandled Startup Context fixture {name:?}")),
         }
@@ -355,6 +413,18 @@ impl App {
             next_issue_page_start: None,
             issues,
         });
+        if name.starts_with("editor-") {
+            let receipt = self
+                .startup_context_ui
+                .detail
+                .as_ref()
+                .map(|detail| detail.files.clone())
+                .unwrap_or_default();
+            self.startup_context_ui.editor = Some(RefCell::new(
+                StartupContextEditor::debug_fixture(name, session_id, receipt),
+            ));
+            self.startup_context_ui.overlay_scroll = Some(0);
+        }
         if name == "blocked-action" {
             self.startup_context_ui.action_required = Some(StartupContextActionRequired {
                 kind: StartupContextActionKind::RequirementsUnresolved,
@@ -386,18 +456,53 @@ impl App {
             self.set_status_notice("Startup Context details require the shared-server TUI");
             return;
         }
+        let Some(session_id) = self.active_client_session_id().map(str::to_string) else {
+            self.set_status_notice("Startup Context editor requires an active session");
+            return;
+        };
         self.startup_context_ui.overlay_scroll = Some(0);
         self.startup_context_ui.queue_full_status();
+        match self.startup_context_ui.editor.as_ref() {
+            Some(editor) if editor.borrow().session_id() == session_id => {
+                editor.borrow_mut().reopen();
+            }
+            _ => {
+                let editor = if self.startup_context_ui.availability
+                    == StartupContextAvailability::Unsupported
+                {
+                    StartupContextEditor::unsupported(session_id)
+                } else {
+                    StartupContextEditor::new(session_id, self.startup_context_ui.detail.as_ref())
+                };
+                self.startup_context_ui.editor = Some(RefCell::new(editor));
+            }
+        }
         self.force_full_redraw = true;
     }
 
     pub(in crate::tui::app) fn close_startup_context_details(&mut self) {
+        if let Some(editor) = self.startup_context_ui.editor.as_ref() {
+            editor.borrow_mut().close();
+        }
         self.startup_context_ui.overlay_scroll = None;
         self.startup_context_ui.action_required = None;
         self.force_full_redraw = true;
     }
 
-    pub(in crate::tui::app) fn handle_startup_context_details_key(&mut self, code: KeyCode) {
+    pub(in crate::tui::app) fn handle_startup_context_details_key(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+    ) {
+        if let Some(editor) = self.startup_context_ui.editor.as_ref() {
+            let close = editor.borrow_mut().handle_key(code, modifiers);
+            if close {
+                self.startup_context_ui.overlay_scroll = None;
+                self.startup_context_ui.action_required = None;
+            }
+            self.force_full_redraw = true;
+            return;
+        }
         let scroll = self.startup_context_ui.overlay_scroll.unwrap_or(0);
         match code {
             KeyCode::Esc | KeyCode::Char('q') => self.close_startup_context_details(),
@@ -415,6 +520,21 @@ impl App {
             ),
             _ => self.set_startup_context_details_scroll(scroll),
         }
+    }
+
+    pub(in crate::tui::app) fn handle_startup_context_editor_mouse(
+        &mut self,
+        mouse: MouseEvent,
+    ) -> bool {
+        let Some(editor) = self.startup_context_ui.editor.as_ref() else {
+            return false;
+        };
+        let close = editor.borrow_mut().handle_mouse(mouse);
+        if close {
+            self.startup_context_ui.overlay_scroll = None;
+        }
+        self.force_full_redraw = true;
+        true
     }
 
     pub(in crate::tui::app) fn refresh_startup_context_details(&mut self) {
@@ -487,28 +607,192 @@ impl App {
         &mut self,
         remote: &mut RemoteConnection,
     ) {
-        if self.startup_context_ui.outstanding_request.is_some() {
-            return;
+        if self.startup_context_ui.outstanding_request.is_none()
+            && let Some(page) = self.startup_context_ui.pending_page.take()
+            && let Some(session_id) = self.startup_context_ui.session_id.clone()
+        {
+            let id = remote.reserve_startup_context_request_id();
+            self.startup_context_ui.outstanding_request = Some((id, session_id));
+            let request = Request::GetStartupContextStatus {
+                id,
+                file_page_start: page.file_page_start,
+                file_page_size: Some(page.page_size),
+                issue_page_start: page.issue_page_start,
+                issue_page_size: Some(page.page_size),
+            };
+            if let Err(error) = remote.send_reserved_startup_context_request(request).await {
+                self.startup_context_ui.outstanding_request = None;
+                self.startup_context_ui.pending_page = Some(page);
+                self.set_status_notice(format!("Startup Context status request failed: {error}"));
+            }
         }
-        let Some(page) = self.startup_context_ui.pending_page.take() else {
-            return;
-        };
-        let Some(session_id) = self.startup_context_ui.session_id.clone() else {
-            return;
-        };
-        let id = remote.reserve_startup_context_request_id();
-        self.startup_context_ui.outstanding_request = Some((id, session_id));
-        let request = Request::GetStartupContextStatus {
-            id,
-            file_page_start: page.file_page_start,
-            file_page_size: Some(page.page_size),
-            issue_page_start: page.issue_page_start,
-            issue_page_size: Some(page.page_size),
-        };
-        if let Err(error) = remote.send_reserved_startup_context_request(request).await {
-            self.startup_context_ui.outstanding_request = None;
-            self.startup_context_ui.pending_page = Some(page);
-            self.set_status_notice(format!("Startup Context status request failed: {error}"));
+
+        if let Some(editor) = self.startup_context_ui.editor.as_ref() {
+            editor.borrow_mut().tick(Instant::now());
+        }
+        loop {
+            let (action, session_id) = {
+                let Some(editor) = self.startup_context_ui.editor.as_ref() else {
+                    break;
+                };
+                let mut editor = editor.borrow_mut();
+                (editor.take_action(), editor.session_id().to_string())
+            };
+            let Some(action) = action else {
+                break;
+            };
+            let id = remote.reserve_startup_context_request_id();
+            let (request, pending) = match action.clone() {
+                StartupContextEditorAction::Open => (
+                    Request::OpenStartupContextEditor { id },
+                    StartupContextPendingRequest::Open { session_id },
+                ),
+                StartupContextEditorAction::Renew { lease } => (
+                    Request::RenewStartupContextEditorLease {
+                        id,
+                        lease_id: lease.lease_id.clone(),
+                        project_key_digest: lease.project_key_digest,
+                        expected_plan_revision: lease.plan_revision,
+                    },
+                    StartupContextPendingRequest::Renew {
+                        lease_id: lease.lease_id,
+                    },
+                ),
+                StartupContextEditorAction::Close {
+                    lease_id,
+                    project_key_digest,
+                } => (
+                    Request::CloseStartupContextEditor {
+                        id,
+                        lease_id: lease_id.clone(),
+                        project_key_digest,
+                    },
+                    StartupContextPendingRequest::Close { lease_id },
+                ),
+                StartupContextEditorAction::ListDirectory {
+                    lease,
+                    directory,
+                    page_start,
+                    generation,
+                    bulk,
+                } => (
+                    Request::ListStartupContextDirectory {
+                        id,
+                        lease_id: lease.lease_id.clone(),
+                        project_key_digest: lease.project_key_digest,
+                        expected_plan_revision: lease.plan_revision,
+                        directory: directory.clone(),
+                        page_start,
+                        page_size: Some(crate::protocol::STARTUP_CONTEXT_DIRECTORY_MAX_PAGE_SIZE),
+                    },
+                    StartupContextPendingRequest::Directory {
+                        lease_id: lease.lease_id,
+                        directory,
+                        page_start,
+                        generation,
+                        bulk,
+                    },
+                ),
+                StartupContextEditorAction::Search {
+                    lease,
+                    query,
+                    generation,
+                } => (
+                    Request::SearchStartupContextFiles {
+                        id,
+                        lease_id: lease.lease_id.clone(),
+                        project_key_digest: lease.project_key_digest,
+                        expected_plan_revision: lease.plan_revision,
+                        query: query.clone(),
+                        max_results: Some(crate::protocol::STARTUP_CONTEXT_SEARCH_MAX_RESULTS),
+                    },
+                    StartupContextPendingRequest::Search {
+                        lease_id: lease.lease_id,
+                        query,
+                        generation,
+                    },
+                ),
+                StartupContextEditorAction::CancelSearch { search_request_id } => (
+                    Request::CancelStartupContextSearch {
+                        id,
+                        search_request_id,
+                    },
+                    StartupContextPendingRequest::CancelSearch { search_request_id },
+                ),
+                StartupContextEditorAction::PreviewFile {
+                    lease,
+                    path,
+                    start_char,
+                    generation,
+                } => (
+                    Request::PreviewStartupContextFile {
+                        id,
+                        lease_id: lease.lease_id.clone(),
+                        project_key_digest: lease.project_key_digest,
+                        expected_plan_revision: lease.plan_revision,
+                        path: path.clone(),
+                        start_char,
+                        max_chars: Some(STARTUP_CONTEXT_EDITOR_PREVIEW_PAGE_CHARS),
+                    },
+                    StartupContextPendingRequest::Preview {
+                        lease_id: lease.lease_id,
+                        path,
+                        start_char,
+                        generation,
+                    },
+                ),
+                StartupContextEditorAction::FileDetail {
+                    receipt,
+                    start_char,
+                    generation,
+                } => (
+                    Request::GetStartupContextFileDetail {
+                        id,
+                        batch_id: receipt.batch_id.clone(),
+                        spec_id: receipt.spec_id.clone(),
+                        message_id: receipt.message_id,
+                        expected_sha256: receipt.sha256,
+                        start_char,
+                        max_chars: Some(STARTUP_CONTEXT_EDITOR_PREVIEW_PAGE_CHARS),
+                    },
+                    StartupContextPendingRequest::Detail {
+                        batch_id: receipt.batch_id,
+                        spec_id: receipt.spec_id,
+                        start_char,
+                        generation,
+                    },
+                ),
+                StartupContextEditorAction::PreviewSelection {
+                    lease,
+                    selection,
+                    generation,
+                } => (
+                    Request::PreviewStartupContextSelection {
+                        id,
+                        lease_id: lease.lease_id.clone(),
+                        project_key_digest: lease.project_key_digest,
+                        expected_plan_revision: lease.plan_revision,
+                        selection,
+                    },
+                    StartupContextPendingRequest::Selection {
+                        lease_id: lease.lease_id,
+                        generation,
+                    },
+                ),
+            };
+            let Some(editor) = self.startup_context_ui.editor.as_ref() else {
+                break;
+            };
+            editor.borrow_mut().register_pending(id, pending);
+            if let Err(error) = remote.send_reserved_startup_context_request(request).await {
+                editor.borrow_mut().reject_transport(
+                    id,
+                    format!("Startup Context editor request failed before confirmation: {error}"),
+                );
+                editor.borrow_mut().requeue_front(action);
+                self.set_status_notice(format!("Startup Context editor transport failed: {error}"));
+                break;
+            }
         }
     }
 
@@ -533,6 +817,15 @@ impl App {
         failure: crate::protocol::StartupContextFailure,
     ) -> bool {
         use crate::protocol::{StartupContextFailureKind, StartupContextOperation};
+        if self
+            .startup_context_ui
+            .editor
+            .as_ref()
+            .is_some_and(|editor| editor.borrow_mut().accept_failure(id, failure.clone()))
+        {
+            self.set_status_notice(format!("Startup Context: {}", failure.message));
+            return true;
+        }
         if failure.operation != StartupContextOperation::Status {
             self.set_status_notice(format!("Startup Context: {}", failure.message));
             return true;
@@ -556,6 +849,120 @@ impl App {
         }
         self.set_status_notice(format!("Startup Context: {}", failure.message));
         true
+    }
+
+    pub(in crate::tui::app) fn accept_startup_context_editor_opened(
+        &mut self,
+        id: u64,
+        editor: crate::protocol::StartupContextEditorSnapshot,
+    ) -> bool {
+        self.startup_context_ui
+            .editor
+            .as_ref()
+            .is_some_and(|state| state.borrow_mut().accept_opened(id, editor))
+    }
+
+    pub(in crate::tui::app) fn accept_startup_context_editor_busy(
+        &mut self,
+        id: u64,
+        owner: Option<crate::protocol::StartupContextLeaseOwnerSnapshot>,
+    ) -> bool {
+        self.startup_context_ui
+            .editor
+            .as_ref()
+            .is_some_and(|state| state.borrow_mut().accept_busy(id, owner))
+    }
+
+    pub(in crate::tui::app) fn accept_startup_context_editor_renewed(
+        &mut self,
+        id: u64,
+        lease: crate::protocol::StartupContextLeaseSnapshot,
+    ) -> bool {
+        self.startup_context_ui
+            .editor
+            .as_ref()
+            .is_some_and(|state| state.borrow_mut().accept_renewed(id, lease))
+    }
+
+    pub(in crate::tui::app) fn accept_startup_context_editor_closed(
+        &mut self,
+        id: u64,
+        lease_id: &str,
+    ) -> bool {
+        self.startup_context_ui
+            .editor
+            .as_ref()
+            .is_some_and(|state| state.borrow_mut().accept_closed(id, lease_id))
+    }
+
+    pub(in crate::tui::app) fn accept_startup_context_directory_page(
+        &mut self,
+        id: u64,
+        page: crate::protocol::StartupContextDirectoryPage,
+    ) -> bool {
+        self.startup_context_ui
+            .editor
+            .as_ref()
+            .is_some_and(|state| state.borrow_mut().accept_directory(id, page))
+    }
+
+    pub(in crate::tui::app) fn accept_startup_context_search_results(
+        &mut self,
+        id: u64,
+        results: crate::protocol::StartupContextSearchResults,
+    ) -> bool {
+        self.startup_context_ui
+            .editor
+            .as_ref()
+            .is_some_and(|state| state.borrow_mut().accept_search(id, results))
+    }
+
+    pub(in crate::tui::app) fn accept_startup_context_search_canceled(
+        &mut self,
+        id: u64,
+        search_request_id: u64,
+    ) -> bool {
+        self.startup_context_ui
+            .editor
+            .as_ref()
+            .is_some_and(|state| {
+                state
+                    .borrow_mut()
+                    .accept_search_canceled(id, search_request_id)
+            })
+    }
+
+    pub(in crate::tui::app) fn accept_startup_context_file_preview(
+        &mut self,
+        id: u64,
+        preview: crate::protocol::StartupContextFilePreview,
+    ) -> bool {
+        self.startup_context_ui
+            .editor
+            .as_ref()
+            .is_some_and(|state| state.borrow_mut().accept_preview(id, preview))
+    }
+
+    pub(in crate::tui::app) fn accept_startup_context_file_detail(
+        &mut self,
+        id: u64,
+        detail: crate::protocol::StartupContextFileDetail,
+    ) -> bool {
+        self.startup_context_ui
+            .editor
+            .as_ref()
+            .is_some_and(|state| state.borrow_mut().accept_detail(id, detail))
+    }
+
+    pub(in crate::tui::app) fn accept_startup_context_selection_preview(
+        &mut self,
+        id: u64,
+        preview: crate::protocol::StartupContextSelectionPreview,
+    ) -> bool {
+        self.startup_context_ui
+            .editor
+            .as_ref()
+            .is_some_and(|state| state.borrow_mut().accept_selection(id, preview))
     }
 
     fn accept_startup_context_action_required(
@@ -675,6 +1082,15 @@ impl App {
         self.startup_context_ui.overlay_scroll
     }
 
+    pub(in crate::tui::app) fn startup_context_editor(
+        &self,
+    ) -> Option<&RefCell<StartupContextEditor>> {
+        self.startup_context_ui
+            .editor
+            .as_ref()
+            .filter(|editor| editor.borrow().is_visible())
+    }
+
     pub(in crate::tui::app) fn startup_context_debug_summary(&self) -> serde_json::Value {
         serde_json::json!({
             "availability": format!("{:?}", self.startup_context_ui.availability),
@@ -686,6 +1102,7 @@ impl App {
             "detail_files": self.startup_context_ui.detail.as_ref().map(|detail| detail.files.len()),
             "detail_issues": self.startup_context_ui.detail.as_ref().map(|detail| detail.issues.len()),
             "action_required": self.startup_context_ui.action_required.as_ref().map(|action| action.kind),
+            "editor": self.startup_context_ui.editor.as_ref().map(|editor| editor.borrow().debug_summary()),
         })
     }
 

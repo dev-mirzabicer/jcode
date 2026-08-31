@@ -1341,6 +1341,9 @@ impl App {
         }
 
         if self.startup_context_overlay_scroll().is_some() {
+            if self.handle_startup_context_editor_mouse(mouse) {
+                finish_mouse_event!(is_mouse_scroll_kind(mouse.kind), "startup_context_editor");
+            }
             match mouse.kind {
                 MouseEventKind::ScrollUp => self.scroll_startup_context_details(-3),
                 MouseEventKind::ScrollDown => self.scroll_startup_context_details(3),

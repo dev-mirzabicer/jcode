@@ -2725,6 +2725,17 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         return;
     }
 
+    if app.draw_startup_context_editor(frame, area) {
+        finalize_frame_metrics(
+            app,
+            total_start,
+            Duration::ZERO,
+            total_start.elapsed(),
+            None,
+        );
+        return;
+    }
+
     if let Some(scroll) = app.startup_context_overlay_scroll() {
         overlays::draw_startup_context_overlay(frame, area, scroll, app);
         finalize_frame_metrics(

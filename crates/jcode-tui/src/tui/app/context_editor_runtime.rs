@@ -27,7 +27,7 @@ impl App {
         }
         if command.starts_with("/startup ") {
             self.push_display_message(DisplayMessage::error(
-                "Usage: /startup. This opens the Startup Context status and resolution view."
+                "Usage: /startup. This opens the Startup Context browser, ordered draft, preview, and receipt editor."
                     .to_string(),
             ));
             return true;

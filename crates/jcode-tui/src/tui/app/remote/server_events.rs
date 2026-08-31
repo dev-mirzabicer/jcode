@@ -2136,16 +2136,38 @@ pub(in crate::tui::app) fn handle_server_event(
         ServerEvent::StartupContextFailed { id, failure } => {
             app.accept_remote_startup_context_failure(id, failure)
         }
-        ServerEvent::StartupContextEditorOpened { .. }
-        | ServerEvent::StartupContextEditorBusy { .. }
-        | ServerEvent::StartupContextEditorLeaseRenewed { .. }
-        | ServerEvent::StartupContextEditorClosed { .. }
-        | ServerEvent::StartupContextDirectoryPage { .. }
-        | ServerEvent::StartupContextSearchResults { .. }
-        | ServerEvent::StartupContextSearchCanceled { .. }
-        | ServerEvent::StartupContextFilePreview { .. }
-        | ServerEvent::StartupContextFileDetail { .. }
-        | ServerEvent::StartupContextSelectionPreview { .. } => false,
+        ServerEvent::StartupContextEditorOpened { id, editor } => {
+            app.accept_startup_context_editor_opened(id, editor)
+        }
+        ServerEvent::StartupContextEditorBusy { id, owner, .. } => {
+            app.accept_startup_context_editor_busy(id, owner)
+        }
+        ServerEvent::StartupContextEditorLeaseRenewed { id, lease } => {
+            app.accept_startup_context_editor_renewed(id, lease)
+        }
+        ServerEvent::StartupContextEditorClosed { id, lease_id } => {
+            app.accept_startup_context_editor_closed(id, &lease_id)
+        }
+        ServerEvent::StartupContextDirectoryPage { id, page } => {
+            app.accept_startup_context_directory_page(id, page)
+        }
+        ServerEvent::StartupContextSearchResults { id, results } => {
+            app.accept_startup_context_search_results(id, results)
+        }
+        ServerEvent::StartupContextSearchCanceled {
+            id,
+            search_request_id,
+            ..
+        } => app.accept_startup_context_search_canceled(id, search_request_id),
+        ServerEvent::StartupContextFilePreview { id, preview } => {
+            app.accept_startup_context_file_preview(id, preview)
+        }
+        ServerEvent::StartupContextFileDetail { id, detail } => {
+            app.accept_startup_context_file_detail(id, detail)
+        }
+        ServerEvent::StartupContextSelectionPreview { id, preview } => {
+            app.accept_startup_context_selection_preview(id, preview)
+        }
         ServerEvent::StartupContextApplyStatus { .. } => {
             app.queue_startup_context_status_refresh();
             true

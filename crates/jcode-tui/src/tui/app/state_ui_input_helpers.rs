@@ -131,7 +131,7 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/compact", "Open the Context Editor"),
     RegisteredCommand::public(
         "/startup",
-        "Inspect Startup Context readiness, receipt, and blocking issues",
+        "Browse, order, preview, and inspect Startup Context files",
     ),
     RegisteredCommand::public("/fix", "Recover when the model cannot continue"),
     RegisteredCommand::public("/dictate", "Run configured external dictation command"),

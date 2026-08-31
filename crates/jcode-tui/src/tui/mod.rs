@@ -45,6 +45,7 @@ mod remote_diff;
 pub mod screenshot;
 pub(crate) mod session_facts;
 pub mod session_picker;
+pub(crate) mod startup_context_editor;
 mod stream_buffer;
 pub mod terminal_setup;
 pub mod test_harness;
@@ -254,6 +255,13 @@ pub trait TuiState {
     }
     fn startup_context_overlay_scroll(&self) -> Option<usize> {
         None
+    }
+    fn draw_startup_context_editor(
+        &self,
+        _frame: &mut Frame,
+        _area: ratatui::layout::Rect,
+    ) -> bool {
+        false
     }
 
     // ---- Scroll ----
