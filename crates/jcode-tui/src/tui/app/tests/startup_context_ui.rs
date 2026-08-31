@@ -51,6 +51,142 @@ fn startup_context_compact_status_renders_every_required_state_at_wide_and_narro
 }
 
 #[test]
+fn startup_context_editor_foundation_renders_wide_and_narrow_states() {
+    let cases = [
+        ("editor-loading", "Acquiring the project editor lease"),
+        ("editor-empty", "Draft 0"),
+        ("editor-populated", "Saved default 2"),
+        ("editor-invalid", "missing"),
+        ("editor-external", "confirm external"),
+        ("editor-busy", "Editor busy"),
+    ];
+    for (fixture, expected) in cases {
+        let mut app = create_test_app();
+        app.apply_startup_context_debug_fixture(fixture)
+            .expect("apply editor fixture");
+        for (width, height) in [(120, 30), (72, 24)] {
+            let rendered = render_startup_context_fixture(&app, width, height);
+            assert!(rendered.contains("Startup Context editor"));
+            assert!(
+                rendered.contains(expected),
+                "{fixture} at {width}x{height} should show {expected:?}\n{rendered}"
+            );
+            assert!(rendered.contains("WP-07 foundation"));
+            assert!(rendered.contains("Use in this session"));
+            assert!(!rendered.contains("[package]\nname"));
+        }
+        let extreme = render_startup_context_fixture(&app, 38, 12);
+        assert!(extreme.contains("Startup Context"));
+        assert!(extreme.contains("WP-07"));
+    }
+}
+
+#[test]
+fn startup_context_editor_remote_transport_correlates_before_open_browse_preview_and_close() {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    macro_rules! read_request {
+        ($reader:expr) => {{
+            let mut line = String::new();
+            $reader.read_line(&mut line).await.expect("read request");
+            serde_json::from_str::<crate::protocol::Request>(line.trim())
+                .expect("decode request")
+        }};
+    }
+
+    let mut app = create_test_app();
+    app.apply_startup_context_debug_fixture("ready")
+        .expect("ready fixture");
+    app.open_startup_context_details();
+
+    let runtime = tokio::runtime::Runtime::new().expect("transport runtime");
+    runtime.block_on(async move {
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        let peer = remote.take_dummy_peer().expect("dummy peer");
+        let (reader, _writer) = peer.into_split();
+        let mut reader = BufReader::new(reader);
+        app.dispatch_remote_startup_context_request(&mut remote)
+            .await;
+
+        let first = read_request!(&mut reader);
+        let second = read_request!(&mut reader);
+        let open_id = match (&first, &second) {
+        (
+            crate::protocol::Request::GetStartupContextStatus { .. },
+            crate::protocol::Request::OpenStartupContextEditor { id },
+        ) => *id,
+        other => panic!("unexpected initial request sequence: {other:?}"),
+        };
+
+        let now = chrono::Utc::now();
+        let lease = crate::protocol::StartupContextLeaseSnapshot {
+        lease_id: "transport-lease".to_string(),
+        project_key_digest: "fixture-project".to_string(),
+        owner_session_id: app.remote_session_id.clone().expect("session"),
+        acquired_at: now,
+        renewed_at: now,
+        expires_at: now + chrono::Duration::minutes(2),
+        plan_revision: 7,
+        };
+        assert!(app.handle_server_event(
+        crate::protocol::ServerEvent::StartupContextEditorOpened {
+            id: open_id,
+            editor: crate::protocol::StartupContextEditorSnapshot {
+                lease: lease.clone(),
+                project: crate::protocol::StartupContextProjectSnapshot {
+                    key_digest: "fixture-project".to_string(),
+                    kind: crate::protocol::StartupContextProjectKind::Git,
+                    active_root: "/fixture/project".to_string(),
+                },
+                plan_revision: 7,
+                plan_entries: vec![crate::protocol::StartupContextPlanEntrySnapshot {
+                    spec_id: "plan-spec".to_string(),
+                    logical_path: "docs/PLAN.md".to_string(),
+                    approved_external_target: None,
+                }],
+            },
+        },
+        &mut remote,
+        ));
+
+        app.dispatch_remote_startup_context_request(&mut remote)
+            .await;
+        let browse = read_request!(&mut reader);
+        let preview = read_request!(&mut reader);
+        assert!(matches!(
+        browse,
+        crate::protocol::Request::ListStartupContextDirectory {
+            directory,
+            page_start: 0,
+            ..
+        } if directory.is_empty()
+        ));
+        assert!(matches!(
+        preview,
+        crate::protocol::Request::PreviewStartupContextSelection { ref selection, .. }
+            if selection.len() == 1 && selection[0].path == "docs/PLAN.md"
+        ));
+
+        super::input::handle_modal_key(
+        &mut app,
+        crossterm::event::KeyCode::Esc,
+        crossterm::event::KeyModifiers::NONE,
+    )
+        .expect("close editor");
+        app.dispatch_remote_startup_context_request(&mut remote)
+            .await;
+        assert!(matches!(
+        read_request!(&mut reader),
+        crate::protocol::Request::CloseStartupContextEditor {
+            lease_id,
+            project_key_digest,
+            ..
+        } if lease_id == lease.lease_id && project_key_digest == lease.project_key_digest
+        ));
+    });
+}
+
+#[test]
 fn startup_context_strip_mouse_and_slash_routes_preserve_composer_and_selection() {
     let mut app = create_test_app();
     app.apply_startup_context_debug_fixture("ready")
@@ -100,8 +236,8 @@ fn startup_context_strip_mouse_and_slash_routes_preserve_composer_and_selection(
     );
 
     let overlay = render_startup_context_fixture(&app, 72, 24);
-    assert!(overlay.contains("/startup"));
-    assert!(overlay.contains("docs/PLAN.md"));
+    assert!(overlay.contains("Startup Context editor"));
+    assert!(overlay.contains("Acquiring the project editor lease"));
     super::input::handle_modal_key(
         &mut app,
         crossterm::event::KeyCode::Esc,
@@ -279,6 +415,11 @@ fn startup_context_debug_commands_and_help_are_registered_and_content_safe() {
         "queued",
         "unsupported",
         "accepted",
+        "editor-empty",
+        "editor-populated",
+        "editor-invalid",
+        "editor-external",
+        "editor-busy",
     ] {
         assert!(listed.contains(fixture));
     }
@@ -292,7 +433,8 @@ fn startup_context_debug_commands_and_help_are_registered_and_content_safe() {
 
     let help = app.command_help("startup").expect("Startup Context help");
     assert!(help.starts_with("/startup"));
-    assert!(help.contains("blocking issues"));
+    assert!(help.contains("unsaved draft"));
+    assert!(help.contains("disabled"));
     assert!(super::registered_command_entries().any(|(command, _)| command == "/startup"));
 
     assert!(super::debug::handle_debug_command(
@@ -396,5 +538,22 @@ fn startup_context_session_change_stays_loading_until_matching_history_arrives()
     assert_eq!(
         app.startup_context_compact_status().unwrap().state,
         crate::protocol::StartupContextStatusState::ProviderAccepted
+    );
+}
+
+#[test]
+fn startup_context_session_change_discards_editor_draft_and_pending_identity() {
+    let mut app = create_test_app();
+    app.apply_startup_context_debug_fixture("editor-populated")
+        .expect("editor fixture");
+    assert_eq!(
+        app.startup_context_debug_summary()["editor"]["open"],
+        serde_json::Value::Bool(true)
+    );
+    app.begin_remote_startup_context_session("different-session");
+    assert!(app.startup_context_editor().is_none());
+    assert_eq!(
+        app.startup_context_availability(),
+        crate::tui::StartupContextAvailability::Loading
     );
 }
