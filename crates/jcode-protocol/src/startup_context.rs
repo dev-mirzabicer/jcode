@@ -18,6 +18,19 @@ pub const STARTUP_CONTEXT_PATH_MAX_CHARS: usize = 16 * 1024;
 pub const STARTUP_CONTEXT_QUERY_MAX_CHARS: usize = 1_024;
 pub const STARTUP_CONTEXT_SELECTION_MAX_ENTRIES: usize = 1_024;
 
+/// Primary caller identity supplied during shared-server session creation.
+///
+/// Absence on the wire preserves compatibility and means the ordinary
+/// interactive TUI path. Harness API creation opts in explicitly so the server
+/// can reject blocked creation instead of registering a repairable TUI session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StartupContextPrimaryCaller {
+    InteractiveTui,
+    HarnessApiCreate,
+    HarnessApiAttach,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StartupContextProjectKind {

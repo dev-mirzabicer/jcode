@@ -5,6 +5,21 @@ use anyhow::{Result, anyhow};
 async fn handle_clear_session_replaces_runtime_handles_and_updates_shutdown_registration()
 -> Result<()> {
     let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().expect("test home");
+    let previous_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", home.path());
+    let project = home.path().join("project");
+    std::fs::create_dir(&project)?;
+    std::fs::write(project.join("required.txt"), "clear startup snapshot")?;
+    let startup = crate::startup_context::StartupContext::new();
+    let active = startup.resolve_project(&project)?;
+    let preview = startup.preview_selection(
+        &active,
+        [crate::startup_context::StartupSelectionInput::new(
+            "required.txt",
+        )],
+    );
+    startup.save_project_plan(&active, 0, &preview)?;
 
     let old_session_id = "session_before_clear";
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
@@ -15,6 +30,10 @@ async fn handle_clear_session_replaces_runtime_handles_and_updates_shutdown_regi
         old_session_id,
         Vec::new(),
     )));
+    agent
+        .lock()
+        .await
+        .set_working_dir_for_pending_context(Some(project.to_string_lossy().into_owned()));
 
     let old_queue = {
         let guard = agent.lock().await;
@@ -157,6 +176,14 @@ async fn handle_clear_session_replaces_runtime_handles_and_updates_shutdown_regi
     assert!(!new_background_signal.is_set());
     assert!(!new_cancel_signal.is_set());
     assert!(!agent.lock().await.has_soft_interrupts());
+    let startup_receipt = agent
+        .lock()
+        .await
+        .startup_context_session()
+        .startup_context
+        .clone()
+        .expect("clear should recapture Startup Context");
+    assert_eq!(startup_receipt.batches[0].files.len(), 1);
 
     let queue_map = soft_interrupt_queues.read().await;
     assert!(!queue_map.contains_key(old_session_id));
@@ -183,5 +210,10 @@ async fn handle_clear_session_replaces_runtime_handles_and_updates_shutdown_regi
         .await
         .ok_or_else(|| anyhow!("done event"))?;
     assert!(matches!(second, ServerEvent::Done { id: 7 }));
+    if let Some(previous_home) = previous_home {
+        crate::env::set_var("JCODE_HOME", previous_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
     Ok(())
 }

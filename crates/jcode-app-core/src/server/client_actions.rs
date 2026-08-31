@@ -684,17 +684,6 @@ fn create_transfer_child_session(
     child.messages.clear();
     child.compaction = None;
     child.context_view = Default::default();
-    match summary {
-        Some(summary) => {
-            if !child.append_transfer_handoff(parent_session_id, &summary) {
-                anyhow::bail!("transfer summary was empty; refusing to create a contextless child");
-            }
-        }
-        None if !parent.messages.is_empty() => {
-            anyhow::bail!("transfer produced no readable summary for a non-empty parent session");
-        }
-        None => {}
-    }
     child.working_dir = parent.working_dir.clone();
     child.model = parent.model.clone();
     child.provider_key = parent.provider_key.clone();
@@ -707,9 +696,57 @@ fn create_transfer_child_session(
     child.testing_build = parent.testing_build.clone();
     child.provider_session_id = None;
     child.status = crate::session::SessionStatus::Closed;
-    child.save()?;
-    crate::todo::save_todos(&child.id, &todos)?;
+
+    let child_id = child.id.clone();
+    let transfer_activation = if parent.is_debug {
+        crate::agent::StartupContextActivation::Disabled
+    } else {
+        crate::agent::StartupContextActivation::primary(
+            crate::agent::StartupContextCaller::Transfer,
+        )
+    };
+    if let Err(error) =
+        crate::agent::activate_session_startup_context(&mut child, transfer_activation)
+    {
+        if let Err(cleanup) = remove_failed_transfer_child(&child_id) {
+            anyhow::bail!(
+                "transfer Startup Context failed ({error}); unpublished child cleanup also failed: {cleanup}"
+            );
+        }
+        return Err(error.into());
+    }
+
+    let handoff_result = match summary {
+        Some(summary) => {
+            if child.append_transfer_handoff(parent_session_id, &summary) {
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!(
+                    "transfer summary was empty; refusing to create a contextless child"
+                ))
+            }
+        }
+        None if !parent.messages.is_empty() => Err(anyhow::anyhow!(
+            "transfer produced no readable summary for a non-empty parent session"
+        )),
+        None => Ok(()),
+    };
+    if let Err(error) = handoff_result
+        .and_then(|()| child.save())
+        .and_then(|()| crate::todo::save_todos(&child.id, &todos))
+    {
+        if let Err(cleanup) = remove_failed_transfer_child(&child_id) {
+            anyhow::bail!(
+                "transfer child creation failed ({error}); unpublished child cleanup also failed: {cleanup}"
+            );
+        }
+        return Err(error);
+    }
     Ok((child.id.clone(), child.display_name().to_string()))
+}
+
+fn remove_failed_transfer_child(session_id: &str) -> anyhow::Result<()> {
+    crate::session::remove_unpublished_session(session_id)
 }
 
 pub(super) async fn handle_split(

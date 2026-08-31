@@ -2,6 +2,12 @@
 async fn handle_resume_session_allows_attach_without_local_history() -> Result<()> {
     let _guard = crate::storage::lock_test_env();
     let (_runtime, prev_runtime) = setup_runtime_dir()?;
+    let home = tempfile::tempdir()?;
+    let previous_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", home.path());
+    let project = home.path().join("project");
+    std::fs::create_dir(&project)?;
+    std::fs::write(project.join("required.txt"), "new default after session start")?;
 
     let target_session_id = "session_existing_live_takeover_rejected";
     let temp_session_id = "session_temp_connecting_takeover_rejected";
@@ -11,7 +17,18 @@ async fn handle_resume_session_allows_attach_without_local_history() -> Result<(
         None,
         Some("Reconnect Takeover Rejected".to_string()),
     );
+    persisted.working_dir = Some(project.to_string_lossy().into_owned());
     persisted.save()?;
+
+    let startup = crate::startup_context::StartupContext::new();
+    let active = startup.resolve_project(&project)?;
+    let preview = startup.preview_selection(
+        &active,
+        [crate::startup_context::StartupSelectionInput::new(
+            "required.txt",
+        )],
+    );
+    startup.save_project_plan(&active, 0, &preview)?;
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let existing_registry = Registry::new(provider.clone()).await;
@@ -21,6 +38,10 @@ async fn handle_resume_session_allows_attach_without_local_history() -> Result<(
         target_session_id,
         Vec::new(),
     )));
+    existing_agent
+        .lock()
+        .await
+        .set_working_dir_for_pending_context(Some(project.to_string_lossy().into_owned()));
 
     let new_registry = Registry::new(provider.clone()).await;
     let new_agent = Arc::new(Mutex::new(build_test_agent_with_id(
@@ -169,7 +190,17 @@ async fn handle_resume_session_allows_attach_without_local_history() -> Result<(
         &existing_agent
     ));
     assert!(!sessions_guard.contains_key(temp_session_id));
+    drop(sessions_guard);
+    assert!(
+        existing_agent.lock().await.startup_context_receipt().is_none(),
+        "live attach must reuse established state instead of capturing a newly saved default"
+    );
 
     restore_runtime_dir(prev_runtime);
+    if let Some(previous_home) = previous_home {
+        crate::env::set_var("JCODE_HOME", previous_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
     Ok(())
 }

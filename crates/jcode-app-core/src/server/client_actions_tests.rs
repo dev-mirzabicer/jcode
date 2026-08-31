@@ -142,6 +142,11 @@ fn clone_split_session_uses_persisted_session_state() {
     parent.autoreview_enabled = Some(true);
     parent.autojudge_enabled = Some(true);
     parent.provider_session_id = Some("must-not-transfer".to_string());
+    parent.startup_context_block = Some(jcode_session_types::StoredStartupContextBlock {
+        kind: jcode_session_types::StoredStartupContextBlockKind::PlanStorage,
+        message: "synthetic inherited block".to_string(),
+        blocked_at: chrono::Utc::now(),
+    });
     parent.add_message(
         Role::User,
         vec![ContentBlock::Text {
@@ -187,6 +192,10 @@ fn clone_split_session_uses_persisted_session_state() {
     );
     assert!(child.compaction.is_none());
     assert_eq!(child.context_view, migrated_parent.context_view);
+    assert_eq!(
+        child.startup_context_block,
+        migrated_parent.startup_context_block
+    );
     assert_eq!(child.working_dir, parent.working_dir);
     assert_eq!(child.model, parent.model);
     assert_eq!(child.provider_key, parent.provider_key);
@@ -234,12 +243,28 @@ fn transfer_child_uses_authoritative_handoff_instead_of_invalid_legacy_compactio
     let prev_home = std::env::var_os("JCODE_HOME");
     crate::env::set_var("JCODE_HOME", temp.path());
 
+    let project = temp.path().join("project");
+    std::fs::create_dir(&project).expect("create project");
+    std::fs::write(project.join("required.txt"), "transfer startup snapshot")
+        .expect("write startup file");
+    let startup = crate::startup_context::StartupContext::new();
+    let active = startup.resolve_project(&project).expect("resolve project");
+    let preview = startup.preview_selection(
+        &active,
+        [crate::startup_context::StartupSelectionInput::new(
+            "required.txt",
+        )],
+    );
+    startup
+        .save_project_plan(&active, 0, &preview)
+        .expect("save startup plan");
+
     let mut parent = crate::session::Session::create_with_id(
         "session_parent_transfer_test".to_string(),
         None,
         None,
     );
-    parent.working_dir = Some("/tmp/jcode-transfer-test".to_string());
+    parent.working_dir = Some(project.to_string_lossy().into_owned());
     parent.model = Some("gpt-test".to_string());
     parent.provider_key = Some("provider-test".to_string());
     parent.route_api_method = Some("route-test".to_string());
@@ -262,13 +287,19 @@ fn transfer_child_uses_authoritative_handoff_instead_of_invalid_legacy_compactio
     let child = crate::session::Session::load(&child_id).expect("load transfer child");
 
     assert_eq!(child.parent_id.as_deref(), Some(parent.id.as_str()));
-    assert_eq!(child.messages.len(), 1);
+    assert_eq!(
+        child.startup_context.as_ref().unwrap().batches[0]
+            .files
+            .len(),
+        1
+    );
+    assert_eq!(child.messages.len(), 4);
     assert!(child.compaction.is_none());
     assert_eq!(child.context_view, Default::default());
     assert_eq!(child.provider_key, parent.provider_key);
     assert_eq!(child.route_api_method, parent.route_api_method);
     assert!(child.provider_session_id.is_none());
-    let handoff = child.messages.first().expect("authoritative handoff");
+    let handoff = child.messages.last().expect("authoritative handoff");
     assert_eq!(
         handoff.display_role,
         Some(crate::session::StoredDisplayRole::System)
@@ -277,11 +308,78 @@ fn transfer_child_uses_authoritative_handoff_instead_of_invalid_legacy_compactio
     assert!(handoff_text.contains("Readable transfer summary"));
     assert!(handoff_text.contains(parent.id.as_str()));
     assert!(!handoff_text.contains("raw parent transcript must not be copied"));
+    assert!(child.messages.iter().any(|message| {
+        message
+            .content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::Text { text, .. } if text == "transfer startup snapshot"))
+    }));
     assert_eq!(
         serde_json::to_vec(&crate::session::Session::load(&parent.id).unwrap())
             .expect("serialize parent"),
         parent_before
     );
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[test]
+fn transfer_capture_failure_leaves_no_child_session_or_todo_sidecar() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    let project = temp.path().join("project");
+    std::fs::create_dir(&project).expect("create project");
+    let required = project.join("required.txt");
+    std::fs::write(&required, "will disappear").expect("write startup file");
+    let startup = crate::startup_context::StartupContext::new();
+    let active = startup.resolve_project(&project).expect("resolve project");
+    let preview = startup.preview_selection(
+        &active,
+        [crate::startup_context::StartupSelectionInput::new(
+            "required.txt",
+        )],
+    );
+    startup
+        .save_project_plan(&active, 0, &preview)
+        .expect("save startup plan");
+    std::fs::remove_file(required).expect("remove required file");
+
+    let mut parent = crate::session::Session::create_with_id(
+        "session_parent_transfer_failure".to_string(),
+        None,
+        None,
+    );
+    parent.working_dir = Some(project.to_string_lossy().into_owned());
+    parent.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "parent".to_string(),
+            cache_control: None,
+        }],
+    );
+    parent.save().expect("save parent");
+    let sessions_dir = temp.path().join("sessions");
+    let before = std::fs::read_dir(&sessions_dir)
+        .expect("sessions dir")
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name())
+        .collect::<std::collections::HashSet<_>>();
+
+    assert!(
+        create_transfer_child_session(&parent.id, &parent, Some("handoff".to_string())).is_err()
+    );
+    let after = std::fs::read_dir(&sessions_dir)
+        .expect("sessions dir")
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name())
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(after, before);
 
     if let Some(prev_home) = prev_home {
         crate::env::set_var("JCODE_HOME", prev_home);

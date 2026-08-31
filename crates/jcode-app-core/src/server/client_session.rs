@@ -173,16 +173,36 @@ pub(super) async fn handle_clear_session(
         )
     };
 
-    {
-        let mut agent_guard = agent.lock().await;
-        agent_guard.mark_closed();
-    }
-
-    let mut new_agent = Agent::new_with_initial_working_dir(
+    let clear_activation = if preserve_debug {
+        crate::agent::StartupContextActivation::Disabled
+    } else {
+        crate::agent::StartupContextActivation::primary(crate::agent::StartupContextCaller::Clear)
+    };
+    let (mut new_agent, _) = match Agent::new_with_startup_context(
         Arc::clone(provider),
         registry.clone(),
         working_dir.as_deref(),
-    );
+        clear_activation,
+    ) {
+        Ok(result) => result,
+        Err(error) => {
+            let _ = client_event_tx.send(ServerEvent::StartupContextFailed {
+                id,
+                failure: super::startup_context::primary_activation_failure(&error),
+            });
+            crate::logging::event_warn(
+                "SESSION_LIFECYCLE",
+                vec![
+                    ("phase", "clear_startup_context_failed".to_string()),
+                    ("request_id", id.to_string()),
+                    ("session_id", old_session_id),
+                    ("error", error.to_string()),
+                    ("elapsed_ms", clear_start.elapsed().as_millis().to_string()),
+                ],
+            );
+            return;
+        }
+    };
     let new_id = new_agent.session_id().to_string();
 
     if client_selfdev {
@@ -190,6 +210,11 @@ pub(super) async fn handle_clear_session(
     }
     if preserve_debug {
         new_agent.set_debug(true);
+    }
+
+    {
+        let mut agent_guard = agent.lock().await;
+        agent_guard.mark_closed();
     }
 
     let mut agent_guard = agent.lock().await;

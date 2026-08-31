@@ -62,6 +62,7 @@ fn test_protocol_request_roundtrip_randomized_samples() -> Result<()> {
             working_dir: working_dir.clone(),
             selfdev,
             target_session_id: target_session_id.clone(),
+            startup_context_caller: None,
             client_instance_id: client_instance_id.clone(),
             client_has_local_history,
             allow_session_takeover,
@@ -73,6 +74,7 @@ fn test_protocol_request_roundtrip_randomized_samples() -> Result<()> {
             working_dir: decoded_working_dir,
             selfdev: decoded_selfdev,
             target_session_id: decoded_target_session_id,
+            startup_context_caller: decoded_startup_context_caller,
             client_instance_id: decoded_client_instance_id,
             client_has_local_history: decoded_client_has_local_history,
             allow_session_takeover: decoded_allow_session_takeover,
@@ -85,6 +87,7 @@ fn test_protocol_request_roundtrip_randomized_samples() -> Result<()> {
         assert_eq!(decoded_working_dir, working_dir);
         assert_eq!(decoded_selfdev, selfdev);
         assert_eq!(decoded_target_session_id, target_session_id);
+        assert_eq!(decoded_startup_context_caller, None);
         assert_eq!(decoded_client_instance_id, client_instance_id);
         assert_eq!(decoded_client_has_local_history, client_has_local_history);
         assert_eq!(decoded_allow_session_takeover, allow_session_takeover);

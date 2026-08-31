@@ -358,6 +358,7 @@ impl RemoteConnection {
             working_dir,
             selfdev,
             target_session_id: resume_target.clone(),
+            startup_context_caller: None,
             client_instance_id: conn.client_instance_id.clone(),
             client_has_local_history,
             allow_session_takeover,

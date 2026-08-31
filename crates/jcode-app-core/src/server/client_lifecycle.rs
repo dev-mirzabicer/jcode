@@ -116,6 +116,42 @@ fn initial_subscribe_terminal_env(request: &Request) -> Vec<(String, String)> {
     }
 }
 
+fn initial_subscribe_target_session(request: &Request) -> Option<&str> {
+    match request {
+        Request::Subscribe {
+            target_session_id, ..
+        } => target_session_id.as_deref(),
+        _ => None,
+    }
+}
+
+fn initial_subscribe_startup_caller(request: &Request) -> crate::agent::StartupContextCaller {
+    match request {
+        Request::Subscribe {
+            startup_context_caller:
+                Some(
+                    crate::protocol::StartupContextPrimaryCaller::HarnessApiCreate
+                    | crate::protocol::StartupContextPrimaryCaller::HarnessApiAttach,
+                ),
+            ..
+        } => crate::agent::StartupContextCaller::HarnessApi,
+        Request::Subscribe { .. } => crate::agent::StartupContextCaller::InteractiveTui,
+        _ => crate::agent::StartupContextCaller::InteractiveTui,
+    }
+}
+
+fn initial_subscribe_allows_fresh_fallback(request: &Request) -> bool {
+    !matches!(
+        request,
+        Request::Subscribe {
+            startup_context_caller: Some(
+                crate::protocol::StartupContextPrimaryCaller::HarnessApiAttach
+            ),
+            ..
+        }
+    )
+}
+
 struct ProcessingMessage {
     id: u64,
     content: String,
@@ -490,17 +526,75 @@ pub(super) async fn handle_client(
     let mut last_available_models_snapshot: Option<String> = None;
     const MAX_LIVE_AVAILABLE_MODELS_UPDATE_BYTES: usize = 64 * 1024;
 
-    // Create a new session for this client
+    // Create a provisional session for this client. Target-aware subscribes are
+    // always born with Startup Context disabled, then either restore their target
+    // unchanged or activate the provisional session as a fresh primary fallback.
     let t0 = std::time::Instant::now();
     let mut new_agent =
         crate::hooks::with_client_terminal_env(active_terminal_env.clone(), async {
-            Agent::new_with_initial_working_dir(
+            Agent::new_with_disabled_startup_context(
                 Arc::clone(&provider),
                 registry.clone(),
                 Some(&initial_working_dir),
             )
         })
         .await;
+    let requested_target = initial_subscribe_target_session(&initial_request);
+    let target_available = requested_target.is_some_and(crate::session::session_exists);
+    let initial_startup_caller = initial_subscribe_startup_caller(&initial_request);
+    let allow_fresh_fallback = initial_subscribe_allows_fresh_fallback(&initial_request);
+    if requested_target.is_some() && !target_available && !allow_fresh_fallback {
+        let provisional_session_id = new_agent.session_id().to_string();
+        new_agent.mark_closed();
+        let cleanup_error = crate::session::remove_unpublished_session(&provisional_session_id)
+            .err()
+            .map(|error| format!("; provisional session cleanup failed: {error}"))
+            .unwrap_or_default();
+        write_direct_event(
+            &writer,
+            &ServerEvent::Error {
+                id: initial_request.id(),
+                message: format!(
+                    "Target session is unavailable; attach did not create a replacement session{cleanup_error}"
+                ),
+                retry_after_secs: None,
+            },
+        )
+        .await?;
+        return Ok(());
+    }
+    let mut client_primary_startup_activated = false;
+    if requested_target.is_none() || !target_available {
+        match new_agent.activate_startup_context(crate::agent::StartupContextActivation::primary(
+            initial_startup_caller,
+        )) {
+            Ok(_) => client_primary_startup_activated = true,
+            Err(error) => {
+                let caller = error.caller();
+                let activation_error = error.to_string();
+                let provisional_session_id = new_agent.session_id().to_string();
+                new_agent.mark_closed();
+                let error =
+                    match crate::session::remove_unpublished_session(&provisional_session_id) {
+                        Ok(()) => error,
+                        Err(source) => crate::agent::StartupContextActivationError::Cleanup {
+                            caller,
+                            activation_error,
+                            source,
+                        },
+                    };
+                write_direct_event(
+                    &writer,
+                    &ServerEvent::StartupContextFailed {
+                        id: initial_request.id(),
+                        failure: super::startup_context::primary_activation_failure(&error),
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
+        }
+    }
     let agent_new_ms = t0.elapsed().as_millis();
 
     new_agent.set_memory_enabled(crate::config::config().features.memory);
@@ -1403,6 +1497,7 @@ pub(super) async fn handle_client(
                 working_dir: subscribe_working_dir,
                 selfdev,
                 target_session_id,
+                startup_context_caller: _,
                 client_instance_id,
                 client_has_local_history,
                 allow_session_takeover,
@@ -1517,6 +1612,35 @@ pub(super) async fn handle_client(
                             break;
                         }
                     } else {
+                        if !allow_fresh_fallback {
+                            let _ = client_event_tx.send(ServerEvent::Error {
+                                id,
+                                message: "Target session became unavailable; attach did not create a replacement session"
+                                    .to_string(),
+                                retry_after_secs: None,
+                            });
+                            break;
+                        }
+                        if !client_primary_startup_activated {
+                            let activation = {
+                                let mut agent_guard = agent.lock().await;
+                                agent_guard.activate_startup_context(
+                                    crate::agent::StartupContextActivation::primary(
+                                        initial_startup_caller,
+                                    ),
+                                )
+                            };
+                            if let Err(error) = activation {
+                                let _ = client_event_tx.send(ServerEvent::StartupContextFailed {
+                                    id,
+                                    failure: super::startup_context::primary_activation_failure(
+                                        &error,
+                                    ),
+                                });
+                                break;
+                            }
+                            client_primary_startup_activated = true;
+                        }
                         handle_subscribe(
                             id,
                             subscribe_working_dir,

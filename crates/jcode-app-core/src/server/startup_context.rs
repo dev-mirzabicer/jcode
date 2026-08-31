@@ -102,6 +102,7 @@ pub(super) struct StartupContextSessionSnapshot {
     pub(super) session_id: String,
     pub(super) working_dir: Option<String>,
     pub(super) receipt: Option<StoredStartupContextReceipt>,
+    pub(super) preparation_block: Option<jcode_session_types::StoredStartupContextBlock>,
 }
 
 impl StartupContextSessionSnapshot {
@@ -110,6 +111,7 @@ impl StartupContextSessionSnapshot {
             session_id: session.id.clone(),
             working_dir: session.working_dir.clone(),
             receipt: session.startup_context.clone(),
+            preparation_block: session.startup_context_block.clone(),
         }
     }
 }
@@ -302,6 +304,25 @@ impl StartupContextCoordinator {
         &self,
         session: StartupContextSessionSnapshot,
     ) -> StartupContextCompactStatus {
+        if let Some(block) = session.preparation_block.as_ref() {
+            let kind = match block.kind {
+                jcode_session_types::StoredStartupContextBlockKind::ProjectIdentity => {
+                    StartupContextFailureKind::ProjectIdentity
+                }
+                jcode_session_types::StoredStartupContextBlockKind::PlanStorage => {
+                    StartupContextFailureKind::PlanStorage
+                }
+            };
+            return error_compact_status(
+                session.session_id,
+                failure(
+                    StartupContextOperation::Status,
+                    kind,
+                    block.message.clone(),
+                    true,
+                ),
+            );
+        }
         let Some(working_dir) = session.working_dir.as_deref() else {
             return error_compact_status(
                 session.session_id,
@@ -1696,7 +1717,7 @@ fn stored_issue_kind(kind: &StoredStartupFileIssueKind) -> StartupContextFileIss
     }
 }
 
-fn domain_issue_snapshot(issue: &StartupFileIssue) -> StartupContextFileIssueSnapshot {
+pub(super) fn domain_issue_snapshot(issue: &StartupFileIssue) -> StartupContextFileIssueSnapshot {
     StartupContextFileIssueSnapshot {
         input_index: issue
             .input_index()
@@ -1706,6 +1727,50 @@ fn domain_issue_snapshot(issue: &StartupFileIssue) -> StartupContextFileIssueSna
             .logical_path()
             .map(|path| path.to_string_lossy().into_owned()),
         kind: domain_issue_kind(issue.kind()),
+    }
+}
+
+pub(super) fn primary_activation_failure(
+    error: &crate::agent::StartupContextActivationError,
+) -> StartupContextFailure {
+    use crate::agent::StartupContextActivationError;
+
+    let (kind, retryable) = match error {
+        StartupContextActivationError::Domain { source, .. } => match source {
+            StartupContextError::ProjectIdentity { .. } => {
+                (StartupContextFailureKind::ProjectIdentity, false)
+            }
+            StartupContextError::PlanStorage { .. }
+            | StartupContextError::UnsupportedPlanSchema { .. }
+            | StartupContextError::InvalidStoredPlan { .. } => {
+                (StartupContextFailureKind::PlanStorage, true)
+            }
+            _ => (StartupContextFailureKind::InvalidRequest, false),
+        },
+        StartupContextActivationError::Blocked { .. } => {
+            (StartupContextFailureKind::InvalidRequest, false)
+        }
+        StartupContextActivationError::Cleanup { .. } => {
+            (StartupContextFailureKind::Internal, true)
+        }
+        StartupContextActivationError::Install { source, .. } => match source {
+            crate::session::StartupContextInstallError::Persistence(_) => {
+                (StartupContextFailureKind::Io, true)
+            }
+            _ => (StartupContextFailureKind::Internal, false),
+        },
+    };
+
+    StartupContextFailure {
+        operation: StartupContextOperation::Status,
+        kind,
+        message: bounded_string(&error.to_string(), MAX_FAILURE_MESSAGE_CHARS),
+        retryable,
+        issues: error
+            .issues()
+            .into_iter()
+            .map(domain_issue_snapshot)
+            .collect(),
     }
 }
 

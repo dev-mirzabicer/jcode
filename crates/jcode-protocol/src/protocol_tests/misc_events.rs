@@ -307,6 +307,7 @@ fn test_subscribe_request_roundtrip_preserves_session_takeover_flags() -> Result
         working_dir: Some("/tmp/project".to_string()),
         selfdev: Some(true),
         target_session_id: Some("sess_target".to_string()),
+        startup_context_caller: Some(StartupContextPrimaryCaller::HarnessApiCreate),
         client_instance_id: Some("client-123".to_string()),
         client_has_local_history: true,
         allow_session_takeover: true,
@@ -320,6 +321,7 @@ fn test_subscribe_request_roundtrip_preserves_session_takeover_flags() -> Result
         working_dir,
         selfdev,
         target_session_id,
+        startup_context_caller,
         client_instance_id,
         client_has_local_history,
         allow_session_takeover,
@@ -332,6 +334,10 @@ fn test_subscribe_request_roundtrip_preserves_session_takeover_flags() -> Result
     assert_eq!(working_dir.as_deref(), Some("/tmp/project"));
     assert_eq!(selfdev, Some(true));
     assert_eq!(target_session_id.as_deref(), Some("sess_target"));
+    assert_eq!(
+        startup_context_caller,
+        Some(StartupContextPrimaryCaller::HarnessApiCreate)
+    );
     assert_eq!(client_instance_id.as_deref(), Some("client-123"));
     assert!(client_has_local_history);
     assert!(allow_session_takeover);
@@ -351,6 +357,7 @@ fn test_subscribe_request_defaults_optional_flags() -> Result<()> {
         working_dir,
         selfdev,
         target_session_id,
+        startup_context_caller,
         client_instance_id,
         client_has_local_history,
         allow_session_takeover,
@@ -363,6 +370,7 @@ fn test_subscribe_request_defaults_optional_flags() -> Result<()> {
     assert_eq!(working_dir, None);
     assert_eq!(selfdev, None);
     assert_eq!(target_session_id, None);
+    assert_eq!(startup_context_caller, None);
     assert_eq!(client_instance_id, None);
     assert!(!client_has_local_history);
     assert!(!allow_session_takeover);

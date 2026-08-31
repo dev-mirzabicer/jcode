@@ -91,6 +91,7 @@ fn startup_context_session_snapshot(
             session_id: session_id.to_string(),
             working_dir: None,
             receipt: None,
+            preparation_block: None,
         })
 }
 

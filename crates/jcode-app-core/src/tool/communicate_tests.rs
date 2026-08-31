@@ -1403,6 +1403,7 @@ impl RawClient {
             working_dir: Some(working_dir.display().to_string()),
             selfdev: None,
             target_session_id: None,
+            startup_context_caller: None,
             client_instance_id: None,
             client_has_local_history: false,
             allow_session_takeover: false,

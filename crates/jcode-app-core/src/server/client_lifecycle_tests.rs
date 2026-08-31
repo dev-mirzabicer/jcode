@@ -851,11 +851,267 @@ fn subscribe_request(working_dir: Option<&str>) -> Request {
         working_dir: working_dir.map(str::to_string),
         selfdev: None,
         target_session_id: None,
+        startup_context_caller: None,
         client_instance_id: None,
         client_has_local_history: false,
         allow_session_takeover: false,
         terminal_env: Vec::new(),
     }
+}
+
+async fn fresh_shared_startup_session(
+    project: &std::path::Path,
+    target_session_id: Option<&str>,
+) -> (
+    String,
+    crate::protocol::StartupContextStatusState,
+    crate::session::Session,
+) {
+    let (server_stream, client_stream) = crate::transport::stream_pair().expect("stream pair");
+    let sessions = Arc::new(RwLock::new(HashMap::new()));
+    let client_connections = Arc::new(RwLock::new(HashMap::new()));
+    let (debug_response_tx, _) = broadcast::channel(8);
+    let (swarm_event_tx, _) = broadcast::channel(8);
+    let (global_event_tx, _) = broadcast::channel(8);
+    let startup_context = crate::server::startup_context::test_coordinator();
+    let server_task = tokio::spawn(handle_client(
+        server_stream,
+        Arc::clone(&sessions),
+        global_event_tx,
+        Arc::new(CompleteImmediatelyProvider),
+        Arc::new(crate::context::ContextTransactionService::new()),
+        startup_context,
+        Arc::new(RwLock::new(false)),
+        Arc::new(RwLock::new(String::new())),
+        Arc::new(RwLock::new(1usize)),
+        Arc::clone(&client_connections),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        FileTouchService::new(),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(ClientDebugState::default())),
+        debug_response_tx,
+        Arc::new(RwLock::new(std::collections::VecDeque::new())),
+        Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        swarm_event_tx,
+        "jcode-test".to_string(),
+        "🧪".to_string(),
+        Arc::new(crate::mcp::SharedMcpPool::from_default_config()),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        AwaitMembersRuntime::default(),
+        SwarmMutationRuntime::default(),
+    ));
+    let (client_reader, mut client_writer) = client_stream.into_split();
+    let mut reader = BufReader::new(client_reader);
+    let mut request = subscribe_request(Some(project.to_string_lossy().as_ref()));
+    if let Request::Subscribe {
+        target_session_id: target,
+        ..
+    } = &mut request
+    {
+        *target = target_session_id.map(str::to_string);
+    }
+    client_writer
+        .write_all(
+            (serde_json::to_string(&request).expect("serialize subscribe") + "\n").as_bytes(),
+        )
+        .await
+        .expect("write subscribe");
+    let mut session_id = None;
+    while session_id.is_none() {
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line))
+            .await
+            .expect("subscribe timeout")
+            .expect("read subscribe event");
+        assert!(!line.is_empty(), "server closed before SessionId");
+        if let ServerEvent::SessionId { session_id: id } = decode_request_or_event(&line) {
+            session_id = Some(id);
+        }
+    }
+    let get_history = Request::GetHistory { id: 2 };
+    client_writer
+        .write_all(
+            (serde_json::to_string(&get_history).expect("serialize history") + "\n").as_bytes(),
+        )
+        .await
+        .expect("write history");
+    let state = loop {
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line))
+            .await
+            .expect("history timeout")
+            .expect("read history event");
+        assert!(!line.is_empty(), "server closed before History");
+        if let ServerEvent::History {
+            id: 2,
+            startup_context: Some(status),
+            ..
+        } = decode_request_or_event(&line)
+        {
+            break status.state;
+        }
+    };
+    let session_id = session_id.unwrap();
+    let persisted = crate::session::Session::load(&session_id).expect("load fresh session");
+    drop(client_writer);
+    server_task
+        .await
+        .expect("server task join")
+        .expect("server task result");
+    assert!(client_connections.read().await.is_empty());
+    (session_id, state, persisted)
+}
+
+#[tokio::test]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "the shared-server matrix serializes JCODE_HOME and runtime state across real connections"
+)]
+async fn fresh_shared_primary_matrix_activates_or_blocks_before_use() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    let root = tempfile::tempdir().expect("matrix root");
+    let startup = crate::startup_context::StartupContext::new();
+
+    let empty = root.path().join("empty");
+    std::fs::create_dir(&empty).expect("empty project");
+    let (_, state, session) = fresh_shared_startup_session(&empty, None).await;
+    assert_eq!(state, crate::protocol::StartupContextStatusState::Empty);
+    assert_eq!(
+        session.startup_context.as_ref().unwrap().state,
+        jcode_session_types::StoredStartupContextState::Empty
+    );
+
+    let valid = root.path().join("valid");
+    std::fs::create_dir(&valid).expect("valid project");
+    std::fs::write(valid.join("required.txt"), "valid shared startup").expect("valid file");
+    let active = startup.resolve_project(&valid).expect("resolve valid");
+    let preview = startup.preview_selection(
+        &active,
+        [crate::startup_context::StartupSelectionInput::new(
+            "required.txt",
+        )],
+    );
+    startup
+        .save_project_plan(&active, 0, &preview)
+        .expect("save valid plan");
+    let (_, state, session) = fresh_shared_startup_session(&valid, None).await;
+    assert_eq!(state, crate::protocol::StartupContextStatusState::Prepared);
+    assert_eq!(
+        session.startup_context.as_ref().unwrap().batches[0]
+            .files
+            .len(),
+        1
+    );
+    let (_, state, fallback) =
+        fresh_shared_startup_session(&valid, Some("session_missing_target_for_startup_fallback"))
+            .await;
+    assert_eq!(state, crate::protocol::StartupContextStatusState::Prepared);
+    assert_eq!(
+        fallback.startup_context.as_ref().unwrap().batches[0]
+            .files
+            .len(),
+        1
+    );
+
+    let missing = root.path().join("missing");
+    std::fs::create_dir(&missing).expect("missing project");
+    let missing_file = missing.join("required.txt");
+    std::fs::write(&missing_file, "remove me").expect("missing seed");
+    let active = startup.resolve_project(&missing).expect("resolve missing");
+    let preview = startup.preview_selection(
+        &active,
+        [crate::startup_context::StartupSelectionInput::new(
+            "required.txt",
+        )],
+    );
+    startup
+        .save_project_plan(&active, 0, &preview)
+        .expect("save missing plan");
+    std::fs::remove_file(missing_file).expect("remove selected file");
+    let (_, state, session) = fresh_shared_startup_session(&missing, None).await;
+    assert_eq!(state, crate::protocol::StartupContextStatusState::Blocked);
+    assert_eq!(
+        session
+            .startup_context
+            .as_ref()
+            .unwrap()
+            .blocked_issues
+            .len(),
+        1
+    );
+    assert!(session.clone().mark_startup_context_dispatched().is_err());
+
+    let oversized = root.path().join("oversized");
+    std::fs::create_dir(&oversized).expect("oversized project");
+    let oversized_file = oversized.join("required.txt");
+    std::fs::write(&oversized_file, "small first").expect("oversized seed");
+    let active = startup
+        .resolve_project(&oversized)
+        .expect("resolve oversized");
+    let preview = startup.preview_selection(
+        &active,
+        [crate::startup_context::StartupSelectionInput::new(
+            "required.txt",
+        )],
+    );
+    startup
+        .save_project_plan(&active, 0, &preview)
+        .expect("save oversized plan");
+    let file = std::fs::File::create(&oversized_file).expect("reopen oversized");
+    file.set_len(crate::startup_context::DEFAULT_MAX_STARTUP_BATCH_BYTES + 1)
+        .expect("enlarge selected file");
+    let (_, state, session) = fresh_shared_startup_session(&oversized, None).await;
+    assert_eq!(state, crate::protocol::StartupContextStatusState::Blocked);
+    assert_eq!(
+        session
+            .startup_context
+            .as_ref()
+            .unwrap()
+            .blocked_issues
+            .len(),
+        1
+    );
+
+    let corrupt = root.path().join("corrupt");
+    std::fs::create_dir(&corrupt).expect("corrupt project");
+    std::fs::write(corrupt.join("required.txt"), "corrupt plan seed").expect("corrupt seed");
+    let active = startup.resolve_project(&corrupt).expect("resolve corrupt");
+    let preview = startup.preview_selection(
+        &active,
+        [crate::startup_context::StartupSelectionInput::new(
+            "required.txt",
+        )],
+    );
+    startup
+        .save_project_plan(&active, 0, &preview)
+        .expect("save corrupt plan");
+    let plans_dir = crate::storage::durable_state_dir()
+        .join("startup-context")
+        .join("projects");
+    let plan_path = plans_dir.join(format!("{}.json", active.key().digest()));
+    std::fs::write(&plan_path, b"bad json").expect("corrupt primary");
+    std::fs::write(plan_path.with_extension("bak"), b"bad backup").expect("corrupt backup");
+    assert!(
+        startup.load_project_plan(&active).is_err(),
+        "corrupt primary and backup must be a real storage failure before subscribe"
+    );
+    let (_, state, session) = fresh_shared_startup_session(&corrupt, None).await;
+    assert_eq!(state, crate::protocol::StartupContextStatusState::Error);
+    assert!(matches!(
+        session.startup_context_block,
+        Some(jcode_session_types::StoredStartupContextBlock {
+            kind: jcode_session_types::StoredStartupContextBlockKind::PlanStorage,
+            ..
+        })
+    ));
+    assert!(session.clone().mark_startup_context_dispatched().is_err());
 }
 
 #[test]
@@ -1551,6 +1807,7 @@ async fn legacy_compaction_wire_requests_reject_without_mutating_live_session_as
         working_dir: Some(working_dir.to_string_lossy().into_owned()),
         selfdev: Some(false),
         target_session_id: None,
+        startup_context_caller: None,
         client_instance_id: Some("legacy-context-wire-test".to_string()),
         client_has_local_history: false,
         allow_session_takeover: false,
@@ -1775,7 +2032,7 @@ async fn startup_context_protocol_journey_uses_server_state_and_releases_editor(
     };
     assert_eq!(
         status.state,
-        crate::protocol::StartupContextStatusState::Unprepared
+        crate::protocol::StartupContextStatusState::Empty
     );
     assert!(
         messages

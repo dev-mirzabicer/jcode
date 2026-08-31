@@ -130,6 +130,8 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target_session_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        startup_context_caller: Option<StartupContextPrimaryCaller>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         client_instance_id: Option<String>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         client_has_local_history: bool,

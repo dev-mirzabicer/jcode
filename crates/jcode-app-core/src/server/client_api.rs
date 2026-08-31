@@ -84,6 +84,7 @@ impl Client {
             working_dir: Some(working_dir),
             selfdev,
             target_session_id,
+            startup_context_caller: None,
             client_instance_id: None,
             client_has_local_history,
             allow_session_takeover,
