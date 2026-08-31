@@ -570,6 +570,15 @@ mod debug_profile;
 mod debug_script;
 
 pub(super) fn handle_debug_command(app: &mut App, trimmed: &str) -> bool {
+    if let Some(fixture) = trimmed.strip_prefix("/debug-fixture startup-context ") {
+        match app.apply_startup_context_debug_fixture(fixture.trim()) {
+            Ok(()) => {
+                app.set_status_notice(format!("Startup Context debug fixture: {}", fixture.trim()))
+            }
+            Err(error) => app.push_display_message(DisplayMessage::error(error)),
+        }
+        return true;
+    }
     if trimmed == "/debug-fixture gmail-draft" {
         app.handle_debug_command("gmail-draft-fixture");
         return true;

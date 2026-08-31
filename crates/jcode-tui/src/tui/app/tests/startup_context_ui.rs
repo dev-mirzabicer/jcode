@@ -294,6 +294,15 @@ fn startup_context_debug_commands_and_help_are_registered_and_content_safe() {
     assert!(help.starts_with("/startup"));
     assert!(help.contains("blocking issues"));
     assert!(super::registered_command_entries().any(|(command, _)| command == "/startup"));
+
+    assert!(super::debug::handle_debug_command(
+        &mut app,
+        "/debug-fixture startup-context accepted"
+    ));
+    assert_eq!(
+        app.startup_context_compact_status().unwrap().state,
+        crate::protocol::StartupContextStatusState::ProviderAccepted
+    );
 }
 
 #[test]
