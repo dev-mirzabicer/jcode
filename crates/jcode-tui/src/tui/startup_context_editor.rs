@@ -866,9 +866,21 @@ impl StartupContextEditor {
                     .filter(|entry| entry.kind != StartupContextDirectoryEntryKind::Directory)
                     .map(|entry| entry.project_relative_path.clone())
                     .collect::<Vec<_>>();
+                let candidate_count = paths.len();
+                let prior_draft_count = self.draft.len();
+                let completed_directory = directory.clone();
                 self.bulk_directory = None;
                 self.bulk_entries.clear();
                 self.add_paths(paths);
+                let added_count = self.draft.len().saturating_sub(prior_draft_count);
+                let duplicate_count = candidate_count.saturating_sub(added_count);
+                self.notice = Some(if duplicate_count == 0 {
+                    format!("Added {added_count} direct file(s) from {completed_directory}")
+                } else {
+                    format!(
+                        "Added {added_count} direct file(s) from {completed_directory}; ignored {duplicate_count} duplicate(s)"
+                    )
+                });
             }
             return true;
         }

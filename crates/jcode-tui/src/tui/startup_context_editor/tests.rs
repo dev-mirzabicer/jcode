@@ -142,6 +142,10 @@ fn directory_bulk_selection_uses_every_direct_non_directory_child_in_server_orde
         .collect::<Vec<_>>();
     assert!(paths.ends_with(&["docs/01-first.md", "docs/02-special"]));
     assert!(!paths.contains(&"docs/nested"));
+    assert_eq!(
+        editor.notice.as_deref(),
+        Some("Added 2 direct file(s) from docs")
+    );
 }
 
 #[test]
