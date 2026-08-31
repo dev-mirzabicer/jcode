@@ -2168,9 +2168,13 @@ pub(in crate::tui::app) fn handle_server_event(
         ServerEvent::StartupContextSelectionPreview { id, preview } => {
             app.accept_startup_context_selection_preview(id, preview)
         }
-        ServerEvent::StartupContextApplyStatus { .. } => {
-            app.queue_startup_context_status_refresh();
-            true
+        ServerEvent::StartupContextApplyStatus { id, status } => {
+            let active_session = app.active_client_session_id() == Some(status.session_id.as_str());
+            let accepted = app.accept_startup_context_apply_status(id, status);
+            if active_session {
+                app.queue_startup_context_status_refresh();
+            }
+            accepted || active_session
         }
         ServerEvent::CompactedHistory {
             session_id,

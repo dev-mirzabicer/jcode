@@ -35,10 +35,11 @@ impl StartupContextEditor {
             return;
         }
 
+        let compact_height = inner.height < 14;
         let vertical = Layout::vertical([
-            Constraint::Length(3),
-            Constraint::Min(5),
-            Constraint::Length(4),
+            Constraint::Length(if compact_height { 2 } else { 3 }),
+            Constraint::Min(1),
+            Constraint::Length(if compact_height { 3 } else { 4 }),
         ])
         .split(inner);
         self.render_header(frame, vertical[0], status, styles);
@@ -79,7 +80,11 @@ impl StartupContextEditor {
 
         self.render_footer(frame, vertical[2], status, dim, accent, warn);
         if let Some(mode) = &self.input_mode {
+            self.hit_regions.clear();
             self.render_input_modal(frame, area, mode, text, dim, accent);
+        } else if let Some(overlay) = self.apply_overlay.clone() {
+            self.hit_regions.clear();
+            self.render_apply_overlay(frame, area, status, &overlay, styles);
         }
     }
 
@@ -742,42 +747,440 @@ impl StartupContextEditor {
         accent: Color,
         warn: Style,
     ) {
+        let ready = matches!(self.phase, EditorPhase::Ready);
+        let non_terminal_apply = self
+            .apply_tracking
+            .as_ref()
+            .is_some_and(ApplyTracking::is_non_terminal);
+        let (session_button, save_button) = if area.width >= 88 {
+            (
+                "[u Use in this session]",
+                "[p Use in this session + save as project default]",
+            )
+        } else {
+            ("[u This session]", "[p + Save default]")
+        };
+        let action_line = if ready && !non_terminal_apply {
+            format!("{session_button} {save_button}")
+        } else if ready && self.apply_tracking.is_some() {
+            let queued = self.tracked_status().is_some_and(|status| {
+                status.phase == crate::protocol::StartupContextApplyPhase::Queued
+            });
+            if queued {
+                "[s View apply status] [c Cancel queued]".to_string()
+            } else {
+                "[s View apply status]".to_string()
+            }
+        } else {
+            "Startup Context editor is not ready to apply".to_string()
+        };
         let consequence = self.consequence_text(status);
-        let buttons = "[ Use in this session ] [ Use in this session + save as project default ]";
-        let foundation = "WP-07 foundation · Apply disabled until WP-08 · [ Close editor ]";
-        let mut lines = vec![
+        let close_line = if ready {
+            if area.width >= 58 {
+                "[/ search] [a external] [r receipt] [ Close editor ]"
+            } else {
+                "[/][a][r] [Close]"
+            }
+        } else {
+            "[Close]"
+        };
+        let detail = self.notice.as_deref().unwrap_or(consequence);
+        let lines = vec![
             Line::from(Span::styled(
-                foundation,
-                Style::default().fg(Color::Rgb(105, 110, 125)),
+                action_line.clone(),
+                if ready {
+                    Style::default().fg(accent)
+                } else {
+                    dim
+                },
             )),
             Line::from(Span::styled(
-                buttons,
-                Style::default().fg(Color::Rgb(105, 110, 125)),
+                detail.to_string(),
+                if self.notice.is_some() { warn } else { dim },
             )),
-            Line::from(Span::styled(consequence, dim)),
+            Line::from(Span::styled(close_line, dim)),
         ];
-        if let Some(notice) = &self.notice {
-            lines[2] = Line::from(Span::styled(notice.clone(), warn));
-        }
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
-        if let Some(start) = foundation.find("[ Close editor ]") {
+
+        if ready && !non_terminal_apply {
+            self.hit_regions.push(HitRegion {
+                rect: Rect::new(
+                    area.x,
+                    area.y,
+                    session_button.len().min(area.width as usize) as u16,
+                    1,
+                ),
+                action: RowAction::ApplySession,
+            });
+            let save_x = area.x.saturating_add(session_button.len() as u16 + 1);
+            if save_x < area.right() {
+                self.hit_regions.push(HitRegion {
+                    rect: Rect::new(
+                        save_x,
+                        area.y,
+                        save_button
+                            .len()
+                            .min(area.right().saturating_sub(save_x) as usize)
+                            as u16,
+                        1,
+                    ),
+                    action: RowAction::ApplyAndSave,
+                });
+            }
+        } else if ready && self.apply_tracking.is_some() {
+            let view = "[s View apply status]";
+            self.hit_regions.push(HitRegion {
+                rect: Rect::new(
+                    area.x,
+                    area.y,
+                    view.len().min(area.width as usize) as u16,
+                    1,
+                ),
+                action: RowAction::ApplyShowStatus,
+            });
+            if self.tracked_status().is_some_and(|status| {
+                status.phase == crate::protocol::StartupContextApplyPhase::Queued
+            }) {
+                let cancel = "[c Cancel queued]";
+                let cancel_x = area.x.saturating_add(view.len() as u16 + 1);
+                if cancel_x < area.right() {
+                    self.hit_regions.push(HitRegion {
+                        rect: Rect::new(
+                            cancel_x,
+                            area.y,
+                            cancel
+                                .len()
+                                .min(area.right().saturating_sub(cancel_x) as usize)
+                                as u16,
+                            1,
+                        ),
+                        action: RowAction::ApplyCancelQueued,
+                    });
+                }
+            }
+        }
+        let close_label = if close_line.contains("[ Close editor ]") {
+            "[ Close editor ]"
+        } else {
+            "[Close]"
+        };
+        if let Some(start) = close_line.find(close_label) {
             self.hit_regions.push(HitRegion {
                 rect: Rect::new(
                     area.x.saturating_add(start as u16),
-                    area.y,
-                    "[ Close editor ]".len() as u16,
+                    area.y.saturating_add(2),
+                    close_label
+                        .len()
+                        .min(area.width.saturating_sub(start as u16) as usize)
+                        as u16,
                     1,
                 ),
                 action: RowAction::CloseEditor,
             });
         }
-        if area.height >= 2 {
-            self.hit_regions.push(HitRegion {
-                rect: Rect::new(area.x, area.y + 1, area.width, 1),
-                action: RowAction::DisabledApply,
-            });
+    }
+
+    fn render_apply_overlay(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        status: Option<&StartupContextStatusSnapshot>,
+        overlay: &ApplyOverlay,
+        styles: EditorStyles,
+    ) {
+        let EditorStyles {
+            text,
+            dim,
+            accent,
+            warn,
+            error,
+            good,
+        } = styles;
+        let width = area.width.saturating_sub(2).clamp(1, 92);
+        let desired_height = match overlay {
+            ApplyOverlay::ConfirmExternal { targets, .. } => {
+                10u16.saturating_add(targets.len().min(8) as u16)
+            }
+            ApplyOverlay::Review(_) => 13,
+            ApplyOverlay::Status => 14,
+            _ => 10,
+        };
+        let height = desired_height
+            .min(area.height.saturating_sub(2))
+            .max(7.min(area.height));
+        let modal = centered_rect(width, height, area);
+        frame.render_widget(Clear, modal);
+        let title = match overlay {
+            ApplyOverlay::Previewing { .. } => " Authoritative apply preview ",
+            ApplyOverlay::ConfirmExternal { .. } => " Confirm exact external targets ",
+            ApplyOverlay::Review(_) => " Review Startup Context apply ",
+            ApplyOverlay::PreviewFailed { .. } => " Apply preview failed ",
+            ApplyOverlay::ValidationIssues { .. } => " Resolve selection issues ",
+            ApplyOverlay::Status => " Startup Context apply status ",
+        };
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(accent))
+            .title(title);
+        let inner = block.inner(modal);
+        frame.render_widget(block, modal);
+
+        let mut lines = Vec::new();
+        let mut actions: Vec<(&str, RowAction)> = Vec::new();
+        match overlay {
+            ApplyOverlay::Previewing { intent } => {
+                lines.push(Line::from(Span::styled(intent.label(), text)));
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "Validating and completely recapturing the exact ordered draft on the authoritative server…",
+                    dim,
+                )));
+                lines.push(Line::from(Span::styled(
+                    "No apply request is sent until this preview returns and you confirm the review.",
+                    dim,
+                )));
+                actions.push(("[Esc Back]", RowAction::ApplyCancelLayer));
+            }
+            ApplyOverlay::ConfirmExternal {
+                intent, targets, ..
+            } => {
+                lines.push(Line::from(Span::styled(intent.label(), text)));
+                lines.push(Line::from(Span::styled(
+                    "Confirm the exact server-resolved targets. Approval is bound to each target; retargeting requires confirmation again.",
+                    warn,
+                )));
+                for target in targets.iter().take(inner.height.saturating_sub(5) as usize) {
+                    lines.push(Line::from(vec![
+                        Span::styled("• ", warn),
+                        Span::styled(target.logical_path.clone(), text),
+                    ]));
+                    if let Some(previous) = target.approved_target.as_ref() {
+                        lines.push(Line::from(Span::styled(
+                            format!("  previous: {previous}"),
+                            error,
+                        )));
+                    }
+                    lines.push(Line::from(Span::styled(
+                        format!("  resolved: {}", target.resolved_target),
+                        good,
+                    )));
+                }
+                actions.push(("[Enter Confirm targets]", RowAction::ApplyConfirm));
+                actions.push(("[Esc Back]", RowAction::ApplyCancelLayer));
+            }
+            ApplyOverlay::Review(review) => {
+                lines.push(Line::from(Span::styled(review.intent.label(), text)));
+                lines.push(Line::from(vec![
+                    Span::styled(format!("{} files", review.selected_count), good),
+                    Span::styled(" · ", dim),
+                    Span::styled(format_bytes(review.aggregate_bytes), text),
+                    Span::styled(" · ", dim),
+                    Span::styled(
+                        format!("~{} tokens", review.aggregate_estimated_tokens),
+                        text,
+                    ),
+                    Span::styled(" · ", dim),
+                    Span::styled(format!("{} external", review.external_count), warn),
+                ]));
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "Complete selected contents will be sent to the active model route and persisted in authoritative session history.",
+                    warn,
+                )));
+                lines.push(Line::from(Span::styled(
+                    self.consequence_text(status),
+                    text,
+                )));
+                if review.intent.save_project_default() {
+                    lines.push(Line::from(Span::styled(
+                        "The same exact ordered selection will also become the private project default.",
+                        good,
+                    )));
+                } else if matches!(
+                    status.map(|status| status.compact.state),
+                    Some(StartupContextStatusState::Dispatched)
+                        | Some(StartupContextStatusState::ProviderAccepted)
+                        | Some(StartupContextStatusState::MetadataRepair)
+                ) {
+                    lines.push(Line::from(Span::styled(
+                        "Current-session only: removals and reordering cannot rewrite established history; only new files can append.",
+                        dim,
+                    )));
+                }
+                actions.push(("[Enter Confirm apply]", RowAction::ApplyConfirm));
+                actions.push(("[Esc Back]", RowAction::ApplyCancelLayer));
+            }
+            ApplyOverlay::PreviewFailed { intent, failure } => {
+                lines.push(Line::from(Span::styled(intent.label(), text)));
+                lines.push(Line::from(Span::styled(failure.message.clone(), error)));
+                for issue in failure
+                    .issues
+                    .iter()
+                    .take(inner.height.saturating_sub(5) as usize)
+                {
+                    lines.push(Line::from(Span::styled(
+                        format!(
+                            "• {} · {}",
+                            issue.logical_path.as_deref().unwrap_or("<selection>"),
+                            issue_label(&issue.kind)
+                        ),
+                        error,
+                    )));
+                }
+                if failure.retryable {
+                    actions.push(("[Enter Retry preview]", RowAction::ApplyConfirm));
+                }
+                actions.push(("[Esc Back]", RowAction::ApplyCancelLayer));
+            }
+            ApplyOverlay::ValidationIssues { intent } => {
+                lines.push(Line::from(Span::styled(intent.label(), text)));
+                lines.push(Line::from(Span::styled(
+                    "The authoritative preview found unresolved entries. The draft is preserved; return to fix or remove them.",
+                    warn,
+                )));
+                for entry in self
+                    .draft
+                    .iter()
+                    .filter(|entry| entry.issue.is_some())
+                    .take(inner.height.saturating_sub(5) as usize)
+                {
+                    let issue = entry.issue.as_ref().expect("filtered issue");
+                    lines.push(Line::from(Span::styled(
+                        format!("• {} · {}", entry.logical_path, issue_label(&issue.kind)),
+                        error,
+                    )));
+                }
+                for issue in self.batch_issues.iter().take(2) {
+                    lines.push(Line::from(Span::styled(
+                        format!("• batch · {}", issue_label(&issue.kind)),
+                        error,
+                    )));
+                }
+                actions.push(("[Enter Recheck]", RowAction::ApplyConfirm));
+                actions.push(("[Esc Edit draft]", RowAction::ApplyCancelLayer));
+            }
+            ApplyOverlay::Status => {
+                let tracking = self.apply_tracking.as_ref();
+                let operation_id = tracking
+                    .map(|tracking| tracking.operation_id.as_str())
+                    .unwrap_or("unknown");
+                lines.push(Line::from(vec![
+                    Span::styled("Operation ", dim),
+                    Span::styled(truncate_middle(operation_id, 44), text),
+                ]));
+                if let Some(status) = self.tracked_status() {
+                    let (phase, phase_style) = match status.phase {
+                        crate::protocol::StartupContextApplyPhase::Queued => ("Queued", warn),
+                        crate::protocol::StartupContextApplyPhase::Applying => ("Applying", text),
+                        crate::protocol::StartupContextApplyPhase::RecoveryRequired => {
+                            ("Recovery required", error)
+                        }
+                        crate::protocol::StartupContextApplyPhase::Succeeded => ("Succeeded", good),
+                        crate::protocol::StartupContextApplyPhase::Failed => ("Failed", error),
+                        crate::protocol::StartupContextApplyPhase::Canceled => ("Canceled", dim),
+                    };
+                    lines.push(Line::from(Span::styled(phase, phase_style)));
+                    lines.push(Line::from(Span::styled(
+                        format!(
+                            "Session: {}",
+                            StartupContextEditor::target_state_label(&status.session_target)
+                        ),
+                        text,
+                    )));
+                    lines.push(Line::from(Span::styled(
+                        format!(
+                            "Project default: {}",
+                            StartupContextEditor::target_state_label(
+                                &status.project_default_target
+                            )
+                        ),
+                        text,
+                    )));
+                    if status.phase == crate::protocol::StartupContextApplyPhase::Queued {
+                        lines.push(Line::from(Span::styled(
+                            "Queued behind the active turn. It will capture and apply at the next safe idle boundary without interrupting the turn.",
+                            warn,
+                        )));
+                        actions.push(("[c Cancel queued]", RowAction::ApplyCancelQueued));
+                    }
+                    if status.phase == crate::protocol::StartupContextApplyPhase::RecoveryRequired {
+                        lines.push(Line::from(Span::styled(
+                            "The server is preserving truthful per-target state and will converge through durable recovery.",
+                            warn,
+                        )));
+                    }
+                    if status.phase == crate::protocol::StartupContextApplyPhase::Succeeded
+                        && matches!(
+                            status.session_target,
+                            crate::protocol::StartupContextApplyTargetState::Unchanged
+                        )
+                    {
+                        lines.push(Line::from(Span::styled(
+                            "Established session history was not rewritten; the requested current-session change was future-only.",
+                            dim,
+                        )));
+                    }
+                    if let Some(failure) = status.failure.as_ref() {
+                        lines.push(Line::from(Span::styled(failure.message.clone(), error)));
+                    }
+                    if status.phase == crate::protocol::StartupContextApplyPhase::Failed {
+                        actions.push(("[r Retry with fresh preview]", RowAction::ApplyRetry));
+                    } else if !matches!(
+                        status.phase,
+                        crate::protocol::StartupContextApplyPhase::Succeeded
+                            | crate::protocol::StartupContextApplyPhase::Canceled
+                    ) {
+                        actions.push(("[r Refresh]", RowAction::ApplyRefreshStatus));
+                    }
+                } else if let Some(failure) = self.tracked_failure() {
+                    lines.push(Line::from(Span::styled("Request failed", error)));
+                    lines.push(Line::from(Span::styled(failure.message.clone(), error)));
+                    if failure.retryable
+                        || failure.kind == crate::protocol::StartupContextFailureKind::ApplyNotFound
+                    {
+                        actions.push(("[r Retry]", RowAction::ApplyRetry));
+                    } else {
+                        actions.push(("[r Check status]", RowAction::ApplyRefreshStatus));
+                    }
+                } else {
+                    lines.push(Line::from(Span::styled(
+                        "Submitting the exact reviewed draft to the recoverable server transaction…",
+                        dim,
+                    )));
+                    actions.push(("[r Check status]", RowAction::ApplyRefreshStatus));
+                }
+                actions.push(("[Esc Back to editor]", RowAction::ApplyCancelLayer));
+            }
         }
-        let _ = accent;
+
+        let action_y = inner.bottom().saturating_sub(1);
+        let body_height = action_y.saturating_sub(inner.y);
+        frame.render_widget(
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .scroll((0, 0)),
+            Rect::new(inner.x, inner.y, inner.width, body_height),
+        );
+        let mut action_x = inner.x;
+        for (label, action) in actions {
+            if action_x >= inner.right() {
+                break;
+            }
+            let width = label
+                .len()
+                .min(inner.right().saturating_sub(action_x) as usize)
+                as u16;
+            if width == 0 {
+                continue;
+            }
+            let rect = Rect::new(action_x, action_y, width, 1);
+            frame.render_widget(
+                Paragraph::new(Span::styled(label, Style::default().fg(accent))),
+                rect,
+            );
+            self.hit_regions.push(HitRegion { rect, action });
+            action_x = action_x.saturating_add(width).saturating_add(1);
+        }
     }
 
     fn render_input_modal(
@@ -845,6 +1248,17 @@ impl StartupContextEditor {
             "preview_chars": self.preview.content.chars().count(),
             "preview_exact_receipt": self.preview.exact_receipt,
             "pending_requests": self.pending.len(),
+            "apply_overlay": self.apply_overlay.as_ref().map(|overlay| match overlay {
+                ApplyOverlay::Previewing { .. } => "previewing",
+                ApplyOverlay::ConfirmExternal { .. } => "external_confirmation",
+                ApplyOverlay::Review(_) => "review",
+                ApplyOverlay::PreviewFailed { .. } => "preview_failed",
+                ApplyOverlay::ValidationIssues { .. } => "validation_issues",
+                ApplyOverlay::Status => "status",
+            }),
+            "apply_phase": self.tracked_status().map(|status| format!("{:?}", status.phase)),
+            "apply_session_target": self.tracked_status().map(|status| StartupContextEditor::target_state_label(&status.session_target)),
+            "apply_project_target": self.tracked_status().map(|status| StartupContextEditor::target_state_label(&status.project_default_target)),
         })
     }
 }

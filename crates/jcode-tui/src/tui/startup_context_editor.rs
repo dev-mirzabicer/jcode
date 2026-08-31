@@ -1,8 +1,8 @@
 use crate::protocol::{
-    StartupContextDirectoryEntry, StartupContextDirectoryEntryKind, StartupContextDirectoryPage,
-    StartupContextEditorSnapshot, StartupContextFailure, StartupContextFileDetail,
-    StartupContextFileIssueKind, StartupContextFileIssueSnapshot, StartupContextFilePreview,
-    StartupContextFileReceiptSnapshot, StartupContextLeaseOwnerSnapshot,
+    StartupContextApplyStatus, StartupContextDirectoryEntry, StartupContextDirectoryEntryKind,
+    StartupContextDirectoryPage, StartupContextEditorSnapshot, StartupContextFailure,
+    StartupContextFileDetail, StartupContextFileIssueKind, StartupContextFileIssueSnapshot,
+    StartupContextFilePreview, StartupContextFileReceiptSnapshot, StartupContextLeaseOwnerSnapshot,
     StartupContextLeaseSnapshot, StartupContextObservedState, StartupContextPathClassification,
     StartupContextSearchResults, StartupContextSelectionEntrySnapshot,
     StartupContextSelectionInput, StartupContextSelectionPreview, StartupContextStatusSnapshot,
@@ -16,7 +16,12 @@ use ratatui::{
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
+mod apply;
 mod render;
+
+use apply::{
+    ApplyIntent, ApplyOverlay, ApplySelectionPurpose, ApplyTracking, EditorAuthorityRefresh,
+};
 
 const LEASE_RENEW_INTERVAL: Duration = Duration::from_secs(30);
 pub(crate) const STARTUP_CONTEXT_EDITOR_PREVIEW_PAGE_CHARS: usize = 16 * 1024;
@@ -92,6 +97,22 @@ pub(crate) enum StartupContextEditorAction {
         lease: StartupContextLeaseSnapshot,
         selection: Vec<StartupContextSelectionInput>,
         generation: u64,
+        draft_generation: u64,
+        purpose: ApplySelectionPurpose,
+    },
+    ApplySelection {
+        lease: StartupContextLeaseSnapshot,
+        operation_id: String,
+        selection: Vec<StartupContextSelectionInput>,
+        save_project_default: bool,
+        draft_generation: u64,
+    },
+    CancelApply {
+        lease: StartupContextLeaseSnapshot,
+        operation_id: String,
+    },
+    GetApplyStatus {
+        operation_id: String,
     },
 }
 
@@ -135,7 +156,24 @@ pub(crate) enum StartupContextPendingRequest {
     },
     Selection {
         lease_id: String,
+        project_key_digest: String,
+        expected_plan_revision: u64,
         generation: u64,
+        draft_generation: u64,
+        purpose: ApplySelectionPurpose,
+    },
+    Apply {
+        operation_id: String,
+        lease_id: String,
+        project_key_digest: String,
+        expected_plan_revision: u64,
+        draft_generation: u64,
+    },
+    CancelApply {
+        operation_id: String,
+    },
+    ApplyStatus {
+        operation_id: String,
     },
 }
 
@@ -289,7 +327,14 @@ enum RowAction {
     StartSearch,
     StartExternal,
     ToggleReceipt,
-    DisabledApply,
+    ApplySession,
+    ApplyAndSave,
+    ApplyConfirm,
+    ApplyCancelLayer,
+    ApplyCancelQueued,
+    ApplyRetry,
+    ApplyRefreshStatus,
+    ApplyShowStatus,
     CloseEditor,
 }
 
@@ -331,8 +376,12 @@ pub(crate) struct StartupContextEditor {
     input_mode: Option<InputMode>,
     notice: Option<String>,
     batch_issues: Vec<StartupContextFileIssueSnapshot>,
+    draft_generation: u64,
     selection_generation: u64,
     preview_generation: u64,
+    apply_overlay: Option<ApplyOverlay>,
+    apply_tracking: Option<ApplyTracking>,
+    authority_refresh: EditorAuthorityRefresh,
     renew_due: Option<Instant>,
     pending: HashMap<u64, StartupContextPendingRequest>,
     queued: VecDeque<StartupContextEditorAction>,
@@ -363,8 +412,12 @@ impl StartupContextEditor {
             input_mode: None,
             notice: None,
             batch_issues: Vec::new(),
+            draft_generation: 0,
             selection_generation: 0,
             preview_generation: 0,
+            apply_overlay: None,
+            apply_tracking: None,
+            authority_refresh: EditorAuthorityRefresh::None,
             renew_due: None,
             pending: HashMap::new(),
             queued: VecDeque::new(),
@@ -525,7 +578,7 @@ impl StartupContextEditor {
             value.draft_cursor = value.draft.len() - 1;
             value.active_pane = StartupContextEditorPane::Selection;
             value.queue_preview_for_focus();
-        } else if name == "editor-external" {
+        } else if matches!(name, "editor-external" | "editor-apply-external") {
             let id = value.alloc_local_id();
             let mut external = DraftEntry::pending(id, "/Users/mirza/private/NOTES.md".to_string());
             external.resolved_path = Some("/Users/mirza/private/NOTES.md".to_string());
@@ -544,6 +597,7 @@ impl StartupContextEditor {
             value.active_pane = StartupContextEditorPane::Selection;
             value.queue_preview_for_focus();
         }
+        value.install_debug_apply_fixture(name);
         value
     }
 
@@ -606,6 +660,8 @@ impl StartupContextEditor {
     pub(crate) fn close(&mut self) {
         self.visible = false;
         self.input_mode = None;
+        self.apply_overlay = None;
+        self.authority_refresh = EditorAuthorityRefresh::None;
         let active_searches = self
             .pending
             .iter()
@@ -614,7 +670,19 @@ impl StartupContextEditor {
                     .then_some(*request_id)
             })
             .collect::<Vec<_>>();
-        self.queued.clear();
+        let durable_apply_actions = self
+            .queued
+            .drain(..)
+            .filter(|action| {
+                matches!(
+                    action,
+                    StartupContextEditorAction::ApplySelection { .. }
+                        | StartupContextEditorAction::CancelApply { .. }
+                        | StartupContextEditorAction::GetApplyStatus { .. }
+                )
+            })
+            .collect::<VecDeque<_>>();
+        self.queued = durable_apply_actions;
         for search_request_id in active_searches {
             self.queued
                 .push_back(StartupContextEditorAction::CancelSearch { search_request_id });
@@ -630,14 +698,24 @@ impl StartupContextEditor {
 
     pub(crate) fn reopen(&mut self) {
         self.visible = true;
-        if matches!(self.phase, EditorPhase::Closing) {
+        if matches!(self.phase, EditorPhase::Opening) && self.editor.is_none() {
             self.phase = EditorPhase::Opening;
-            self.queued.push_back(StartupContextEditorAction::Open);
+            if !self
+                .pending
+                .values()
+                .any(|pending| matches!(pending, StartupContextPendingRequest::Open { .. }))
+                && !self
+                    .queued
+                    .iter()
+                    .any(|action| matches!(action, StartupContextEditorAction::Open))
+            {
+                self.queued.push_back(StartupContextEditorAction::Open);
+            }
         }
     }
 
     pub(crate) fn restart_after_reconnect(&mut self) {
-        self.visible = true;
+        let was_visible = self.visible;
         self.phase = EditorPhase::Opening;
         self.editor = None;
         self.browser = BrowserState::default();
@@ -646,8 +724,12 @@ impl StartupContextEditor {
         self.pending.clear();
         self.queued.clear();
         self.renew_due = None;
-        self.queued.push_back(StartupContextEditorAction::Open);
-        self.notice = Some("Reacquiring editor lease after reconnect…".to_string());
+        self.authority_refresh = EditorAuthorityRefresh::None;
+        if was_visible {
+            self.queued.push_back(StartupContextEditorAction::Open);
+            self.notice = Some("Reacquiring editor lease after reconnect…".to_string());
+        }
+        self.reconnect_apply_status();
     }
 
     pub(crate) fn accept_opened(&mut self, id: u64, editor: StartupContextEditorSnapshot) -> bool {
@@ -669,9 +751,11 @@ impl StartupContextEditor {
                     DraftEntry::from_plan(id, entry)
                 })
                 .collect();
+            self.draft_generation = self.draft_generation.saturating_add(1);
         }
         self.editor = Some(editor);
         self.phase = EditorPhase::Ready;
+        self.authority_refresh = EditorAuthorityRefresh::None;
         self.renew_due = Some(Instant::now() + LEASE_RENEW_INTERVAL);
         self.browser = BrowserState::default();
         self.queue_directory(String::new(), 0, true);
@@ -724,6 +808,12 @@ impl StartupContextEditor {
         }
         self.phase = EditorPhase::Opening;
         self.editor = None;
+        if self.visible {
+            self.authority_refresh = EditorAuthorityRefresh::ReopenQueued;
+            self.queued.push_back(StartupContextEditorAction::Open);
+        } else {
+            self.authority_refresh = EditorAuthorityRefresh::None;
+        }
         true
     }
 
@@ -913,17 +1003,51 @@ impl StartupContextEditor {
     ) -> bool {
         let Some(StartupContextPendingRequest::Selection {
             lease_id,
+            project_key_digest,
+            expected_plan_revision,
             generation,
+            draft_generation,
+            purpose,
         }) = self.pending.remove(&id)
         else {
             return false;
         };
-        if self.lease().map(|lease| lease.lease_id.as_str()) != Some(lease_id.as_str())
-            || generation != self.selection_generation
-            || preview.entry_count != self.draft.len()
-        {
+        let Some(lease) = self.lease() else {
+            return false;
+        };
+        if generation != self.selection_generation || draft_generation != self.draft_generation {
             return false;
         }
+        if lease.lease_id != lease_id
+            || lease.project_key_digest != project_key_digest
+            || lease.plan_revision != expected_plan_revision
+            || preview.project_key_digest != project_key_digest
+            || preview.plan_revision != expected_plan_revision
+        {
+            if let ApplySelectionPurpose::Apply(intent) = purpose {
+                let failure = StartupContextFailure {
+                    operation: crate::protocol::StartupContextOperation::PreviewSelection,
+                    kind: crate::protocol::StartupContextFailureKind::StalePlanRevision,
+                    message: "Authoritative apply preview no longer matches the editor lease or project revision"
+                        .to_string(),
+                    retryable: true,
+                    issues: Vec::new(),
+                };
+                self.apply_overlay = Some(ApplyOverlay::PreviewFailed { intent, failure });
+                self.request_authority_refresh();
+            }
+            return false;
+        }
+        if preview.entry_count != self.draft.len() {
+            if let ApplySelectionPurpose::Apply(intent) = purpose {
+                self.apply_overlay = Some(ApplyOverlay::ValidationIssues { intent });
+            }
+            return false;
+        }
+        let selected_count = preview.selected_count;
+        let issue_count = preview.issue_count;
+        let aggregate_bytes = preview.aggregate_bytes;
+        let aggregate_estimated_tokens = preview.aggregate_estimated_tokens;
         let mut selected_by_index = HashMap::new();
         let mut issues_by_index = HashMap::new();
         for entry in preview.entries {
@@ -1004,11 +1128,22 @@ impl StartupContextEditor {
         self.batch_issues = preview.batch_issues;
         self.draft_cursor = self.draft_cursor.min(self.draft.len().saturating_sub(1));
         if ignored_duplicates > 0 {
+            self.draft_generation = self.draft_generation.saturating_add(1);
             self.notice = Some(format!(
                 "Ignored {ignored_duplicates} duplicate selection(s) after server normalization"
             ));
         }
         self.queue_preview_for_focus();
+        if let ApplySelectionPurpose::Apply(intent) = purpose {
+            self.finish_apply_preview(
+                intent,
+                selected_count,
+                issue_count,
+                aggregate_bytes,
+                aggregate_estimated_tokens,
+                ignored_duplicates,
+            );
+        }
         true
     }
 
@@ -1016,9 +1151,42 @@ impl StartupContextEditor {
         let Some(pending) = self.pending.remove(&id) else {
             return false;
         };
+        if self.accept_apply_failure(pending.clone(), failure.clone()) {
+            return true;
+        }
         match pending {
             StartupContextPendingRequest::Open { .. } => self.phase = EditorPhase::Error(failure),
+            StartupContextPendingRequest::Renew { .. }
+                if matches!(
+                    failure.kind,
+                    crate::protocol::StartupContextFailureKind::StalePlanRevision
+                        | crate::protocol::StartupContextFailureKind::LeaseExpired
+                        | crate::protocol::StartupContextFailureKind::LeaseNotFound
+                ) =>
+            {
+                self.notice = Some(failure.message);
+                self.request_authority_refresh();
+            }
             StartupContextPendingRequest::Renew { .. } => self.phase = EditorPhase::Error(failure),
+            StartupContextPendingRequest::Close { .. }
+                if matches!(self.authority_refresh, EditorAuthorityRefresh::CloseQueued)
+                    && matches!(
+                        failure.kind,
+                        crate::protocol::StartupContextFailureKind::LeaseExpired
+                            | crate::protocol::StartupContextFailureKind::LeaseNotFound
+                    ) =>
+            {
+                self.editor = None;
+                self.phase = EditorPhase::Opening;
+                self.authority_refresh = EditorAuthorityRefresh::ReopenQueued;
+                if self.visible {
+                    self.queued.push_back(StartupContextEditorAction::Open);
+                }
+                self.notice = Some(
+                    "Previous editor lease was already gone; reacquiring authoritative state"
+                        .to_string(),
+                );
+            }
             StartupContextPendingRequest::Close { .. } => {
                 self.notice = Some(format!("Could not close editor lease: {}", failure.message));
             }
@@ -1036,8 +1204,13 @@ impl StartupContextEditor {
                 self.browser.loading = false;
                 self.notice = Some(failure.message);
             }
-            StartupContextPendingRequest::Selection { generation, .. }
-                if generation == self.selection_generation =>
+            StartupContextPendingRequest::Selection {
+                generation,
+                draft_generation,
+                purpose: ApplySelectionPurpose::DraftValidation,
+                ..
+            } if generation == self.selection_generation
+                && draft_generation == self.draft_generation =>
             {
                 self.notice = Some(failure.message);
             }
@@ -1046,7 +1219,10 @@ impl StartupContextEditor {
             | StartupContextPendingRequest::Detail { .. }
             | StartupContextPendingRequest::Directory { .. }
             | StartupContextPendingRequest::Search { .. }
-            | StartupContextPendingRequest::Selection { .. } => return false,
+            | StartupContextPendingRequest::Selection { .. }
+            | StartupContextPendingRequest::Apply { .. }
+            | StartupContextPendingRequest::CancelApply { .. }
+            | StartupContextPendingRequest::ApplyStatus { .. } => return false,
         }
         true
     }
@@ -1089,6 +1265,20 @@ impl StartupContextEditor {
                 _ => {}
             }
             return false;
+        }
+
+        if let Some(close) = self.handle_apply_key(code) {
+            return close;
+        }
+
+        if !matches!(self.phase, EditorPhase::Ready) {
+            return match code {
+                KeyCode::Char('q') | KeyCode::Esc => {
+                    self.close();
+                    true
+                }
+                _ => false,
+            };
         }
 
         match code {
@@ -1137,6 +1327,18 @@ impl StartupContextEditor {
                 self.input_mode = Some(InputMode::ExternalPath {
                     value: String::new(),
                 });
+                false
+            }
+            KeyCode::Char('u') => {
+                self.begin_apply(ApplyIntent::SessionOnly);
+                false
+            }
+            KeyCode::Char('p') => {
+                self.begin_apply(ApplyIntent::SessionAndProjectDefault);
+                false
+            }
+            KeyCode::Char('s') if self.has_tracked_apply() => {
+                self.show_apply_status();
                 false
             }
             KeyCode::Char('r') => {
@@ -1207,6 +1409,11 @@ impl StartupContextEditor {
     }
 
     pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent) -> bool {
+        if (self.input_mode.is_some() || self.apply_overlay.is_some())
+            && !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+        {
+            return false;
+        }
         match mouse.kind {
             MouseEventKind::ScrollUp => {
                 self.move_cursor(-3);
@@ -1228,6 +1435,12 @@ impl StartupContextEditor {
         let Some(action) = action else {
             return false;
         };
+        if !self.row_action_allowed_while_layered(action) {
+            return false;
+        }
+        if let Some(close) = self.handle_apply_row_action(action) {
+            return close;
+        }
         match action {
             RowAction::FocusBrowser(index) => {
                 self.active_pane = StartupContextEditorPane::Browser;
@@ -1283,16 +1496,18 @@ impl StartupContextEditor {
                 self.active_pane = StartupContextEditorPane::Selection;
                 self.queue_preview_for_focus();
             }
-            RowAction::DisabledApply => {
-                self.notice = Some(
-                    "Apply actions are intentionally disabled in the WP-07 editor foundation"
-                        .to_string(),
-                );
-            }
             RowAction::CloseEditor => {
                 self.close();
                 return true;
             }
+            RowAction::ApplySession
+            | RowAction::ApplyAndSave
+            | RowAction::ApplyConfirm
+            | RowAction::ApplyCancelLayer
+            | RowAction::ApplyCancelQueued
+            | RowAction::ApplyRetry
+            | RowAction::ApplyRefreshStatus
+            | RowAction::ApplyShowStatus => unreachable!("apply row action handled above"),
         }
         false
     }
@@ -1368,6 +1583,10 @@ impl StartupContextEditor {
     }
 
     fn queue_selection_preview(&mut self) {
+        self.queue_selection_preview_for(ApplySelectionPurpose::DraftValidation);
+    }
+
+    fn queue_selection_preview_for(&mut self, purpose: ApplySelectionPurpose) {
         let Some(lease) = self.lease().cloned() else {
             return;
         };
@@ -1378,11 +1597,14 @@ impl StartupContextEditor {
                 lease,
                 selection,
                 generation: self.selection_generation,
+                draft_generation: self.draft_generation,
+                purpose,
             });
     }
 
     fn add_paths(&mut self, paths: impl IntoIterator<Item = String>) {
         let mut exact_duplicates = 0usize;
+        let mut added = 0usize;
         for path in paths {
             if self.draft.iter().any(|entry| entry.input.path == path) {
                 exact_duplicates += 1;
@@ -1390,6 +1612,7 @@ impl StartupContextEditor {
             }
             let id = self.alloc_local_id();
             self.draft.push(DraftEntry::pending(id, path));
+            added += 1;
         }
         self.draft_cursor = self.draft.len().saturating_sub(1);
         self.selection_view = SelectionView::Draft;
@@ -1399,8 +1622,11 @@ impl StartupContextEditor {
                 "Ignored {exact_duplicates} duplicate path selection(s)"
             ));
         }
-        self.queue_selection_preview();
-        self.queue_preview_for_focus();
+        if added > 0 {
+            self.note_draft_mutation();
+            self.queue_selection_preview();
+            self.queue_preview_for_focus();
+        }
     }
 
     fn select_current_browser_entry(&mut self) {
@@ -1533,6 +1759,7 @@ impl StartupContextEditor {
         }
         self.draft.swap(self.draft_cursor, target);
         self.draft_cursor = target;
+        self.note_draft_mutation();
         self.queue_selection_preview();
     }
 
@@ -1542,6 +1769,7 @@ impl StartupContextEditor {
         }
         self.draft.remove(index);
         self.draft_cursor = self.draft_cursor.min(self.draft.len().saturating_sub(1));
+        self.note_draft_mutation();
         self.queue_selection_preview();
         self.queue_preview_for_focus();
     }
@@ -1558,6 +1786,13 @@ impl StartupContextEditor {
             _ => StartupContextEditorPane::Preview,
         };
         self.queue_preview_for_focus();
+    }
+
+    fn note_draft_mutation(&mut self) {
+        self.draft_generation = self.draft_generation.saturating_add(1);
+        if !matches!(self.apply_overlay, Some(ApplyOverlay::Status)) {
+            self.apply_overlay = None;
+        }
     }
 
     fn queue_preview_for_focus(&mut self) {

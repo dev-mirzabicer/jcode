@@ -53,14 +53,18 @@ fn startup_context_compact_status_renders_every_required_state_at_wide_and_narro
 #[test]
 fn startup_context_editor_foundation_renders_wide_and_narrow_states() {
     let cases = [
-        ("editor-loading", "Acquiring the project editor lease"),
-        ("editor-empty", "Draft 0"),
-        ("editor-populated", "Saved default 2"),
-        ("editor-invalid", "missing"),
-        ("editor-external", "confirm external"),
-        ("editor-busy", "Editor busy"),
+        (
+            "editor-loading",
+            "Acquiring the project editor lease",
+            false,
+        ),
+        ("editor-empty", "Draft 0", true),
+        ("editor-populated", "Saved default 2", true),
+        ("editor-invalid", "missing", true),
+        ("editor-external", "confirm external", true),
+        ("editor-busy", "Editor busy", false),
     ];
-    for (fixture, expected) in cases {
+    for (fixture, expected, apply_ready) in cases {
         let mut app = create_test_app();
         app.apply_startup_context_debug_fixture(fixture)
             .expect("apply editor fixture");
@@ -71,13 +75,56 @@ fn startup_context_editor_foundation_renders_wide_and_narrow_states() {
                 rendered.contains(expected),
                 "{fixture} at {width}x{height} should show {expected:?}\n{rendered}"
             );
-            assert!(rendered.contains("WP-07 foundation"));
-            assert!(rendered.contains("Use in this session"));
+            if apply_ready {
+                assert!(
+                    rendered.contains("Use in this session") || rendered.contains("This session")
+                );
+                assert!(rendered.contains("Save default") || rendered.contains("project default"));
+            } else {
+                assert!(rendered.contains("not ready"));
+            }
             assert!(!rendered.contains("[package]\nname"));
         }
         let extreme = render_startup_context_fixture(&app, 38, 12);
         assert!(extreme.contains("Startup Context"));
-        assert!(extreme.contains("WP-07"));
+        assert!(
+            extreme.contains("This session")
+                || extreme.contains("not ready")
+                || extreme.contains("Use in this")
+        );
+    }
+}
+
+#[test]
+fn startup_context_editor_apply_workflow_renders_responsively() {
+    let cases = [
+        ("editor-apply-review", "Review Startup Context apply"),
+        ("editor-apply-review-late", "Review Startup Context apply"),
+        ("editor-apply-external", "Confirm exact external targets"),
+        ("editor-apply-queued", "Queued"),
+        ("editor-apply-applying", "Applying"),
+        ("editor-apply-recovery", "Recovery required"),
+        ("editor-apply-success", "Succeeded"),
+        ("editor-apply-partial", "Recovery required"),
+        ("editor-apply-failed", "Failed"),
+        ("editor-apply-canceled", "Canceled"),
+    ];
+    for (fixture, expected) in cases {
+        let mut app = create_test_app();
+        app.apply_startup_context_debug_fixture(fixture)
+            .expect("apply workflow fixture");
+        for (width, height) in [(120, 30), (72, 24), (38, 12)] {
+            let rendered = render_startup_context_fixture(&app, width, height);
+            assert!(rendered.contains("Startup Context editor"), "{fixture}");
+            assert!(
+                rendered.contains(expected),
+                "{fixture} at {width}x{height} should show {expected:?}\n{rendered}"
+            );
+            assert!(!rendered.contains("[package]\nname"));
+            if fixture == "editor-apply-review-late" && width == 120 {
+                assert!(rendered.contains("After first dispatch"));
+            }
+        }
     }
 }
 
@@ -89,8 +136,7 @@ fn startup_context_editor_remote_transport_correlates_before_open_browse_preview
         ($reader:expr) => {{
             let mut line = String::new();
             $reader.read_line(&mut line).await.expect("read request");
-            serde_json::from_str::<crate::protocol::Request>(line.trim())
-                .expect("decode request")
+            serde_json::from_str::<crate::protocol::Request>(line.trim()).expect("decode request")
         }};
     }
 
@@ -111,42 +157,42 @@ fn startup_context_editor_remote_transport_correlates_before_open_browse_preview
         let first = read_request!(&mut reader);
         let second = read_request!(&mut reader);
         let open_id = match (&first, &second) {
-        (
-            crate::protocol::Request::GetStartupContextStatus { .. },
-            crate::protocol::Request::OpenStartupContextEditor { id },
-        ) => *id,
-        other => panic!("unexpected initial request sequence: {other:?}"),
+            (
+                crate::protocol::Request::GetStartupContextStatus { .. },
+                crate::protocol::Request::OpenStartupContextEditor { id },
+            ) => *id,
+            other => panic!("unexpected initial request sequence: {other:?}"),
         };
 
         let now = chrono::Utc::now();
         let lease = crate::protocol::StartupContextLeaseSnapshot {
-        lease_id: "transport-lease".to_string(),
-        project_key_digest: "fixture-project".to_string(),
-        owner_session_id: app.remote_session_id.clone().expect("session"),
-        acquired_at: now,
-        renewed_at: now,
-        expires_at: now + chrono::Duration::minutes(2),
-        plan_revision: 7,
+            lease_id: "transport-lease".to_string(),
+            project_key_digest: "fixture-project".to_string(),
+            owner_session_id: app.remote_session_id.clone().expect("session"),
+            acquired_at: now,
+            renewed_at: now,
+            expires_at: now + chrono::Duration::minutes(2),
+            plan_revision: 7,
         };
         assert!(app.handle_server_event(
-        crate::protocol::ServerEvent::StartupContextEditorOpened {
-            id: open_id,
-            editor: crate::protocol::StartupContextEditorSnapshot {
-                lease: lease.clone(),
-                project: crate::protocol::StartupContextProjectSnapshot {
-                    key_digest: "fixture-project".to_string(),
-                    kind: crate::protocol::StartupContextProjectKind::Git,
-                    active_root: "/fixture/project".to_string(),
+            crate::protocol::ServerEvent::StartupContextEditorOpened {
+                id: open_id,
+                editor: crate::protocol::StartupContextEditorSnapshot {
+                    lease: lease.clone(),
+                    project: crate::protocol::StartupContextProjectSnapshot {
+                        key_digest: "fixture-project".to_string(),
+                        kind: crate::protocol::StartupContextProjectKind::Git,
+                        active_root: "/fixture/project".to_string(),
+                    },
+                    plan_revision: 7,
+                    plan_entries: vec![crate::protocol::StartupContextPlanEntrySnapshot {
+                        spec_id: "plan-spec".to_string(),
+                        logical_path: "docs/PLAN.md".to_string(),
+                        approved_external_target: None,
+                    }],
                 },
-                plan_revision: 7,
-                plan_entries: vec![crate::protocol::StartupContextPlanEntrySnapshot {
-                    spec_id: "plan-spec".to_string(),
-                    logical_path: "docs/PLAN.md".to_string(),
-                    approved_external_target: None,
-                }],
             },
-        },
-        &mut remote,
+            &mut remote,
         ));
 
         app.dispatch_remote_startup_context_request(&mut remote)
@@ -168,10 +214,10 @@ fn startup_context_editor_remote_transport_correlates_before_open_browse_preview
         ));
 
         super::input::handle_modal_key(
-        &mut app,
-        crossterm::event::KeyCode::Esc,
-        crossterm::event::KeyModifiers::NONE,
-    )
+            &mut app,
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        )
         .expect("close editor");
         app.dispatch_remote_startup_context_request(&mut remote)
             .await;
@@ -211,10 +257,16 @@ fn startup_context_editor_physical_remote_q_and_escape_close_and_release_the_lea
 
             assert!(app.startup_context_overlay_scroll().is_none());
             assert!(app.startup_context_editor().is_none());
-            assert!(app.input.is_empty(), "modal close key must not enter composer");
+            assert!(
+                app.input.is_empty(),
+                "modal close key must not enter composer"
+            );
 
             let mut line = String::new();
-            reader.read_line(&mut line).await.expect("read close request");
+            reader
+                .read_line(&mut line)
+                .await
+                .expect("read close request");
             assert!(matches!(
                 serde_json::from_str::<crate::protocol::Request>(line.trim())
                     .expect("decode close request"),
@@ -222,6 +274,322 @@ fn startup_context_editor_physical_remote_q_and_escape_close_and_release_the_lea
             ));
         });
     }
+}
+
+#[test]
+fn startup_context_editor_physical_remote_apply_shortcuts_preview_exact_intents() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    for (key, save_project_default) in [('u', false), ('p', true)] {
+        let mut app = create_test_app();
+        app.apply_startup_context_debug_fixture("editor-populated")
+            .expect("editor fixture");
+        let runtime = tokio::runtime::Runtime::new().expect("apply key runtime");
+        runtime.block_on(async move {
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            let peer = remote.take_dummy_peer().expect("dummy peer");
+            let (reader, _writer) = peer.into_split();
+            let mut reader = BufReader::new(reader);
+            super::remote::handle_remote_key_event(
+                &mut app,
+                KeyEvent::new_with_kind(
+                    KeyCode::Char(key),
+                    KeyModifiers::NONE,
+                    KeyEventKind::Press,
+                ),
+                &mut remote,
+            )
+            .await
+            .expect("physical remote apply key");
+
+            assert!(
+                app.input.is_empty(),
+                "apply key must not enter the composer"
+            );
+            assert!(app.startup_context_editor().is_some());
+            let mut line = String::new();
+            reader
+                .read_line(&mut line)
+                .await
+                .expect("read preview request");
+            assert!(matches!(
+                serde_json::from_str::<crate::protocol::Request>(line.trim())
+                    .expect("decode preview request"),
+                crate::protocol::Request::PreviewStartupContextSelection { ref selection, .. }
+                    if selection.len() == 2
+                        && selection[0].path == "docs/PLAN.md"
+                        && selection[1].path == "docs/PROGRESS.md"
+            ));
+            let editor = app
+                .startup_context_editor()
+                .expect("editor after preview key");
+            let editor = editor.borrow();
+            assert_eq!(
+                editor.apply_preview_saves_default_for_test(),
+                Some(save_project_default)
+            );
+        });
+    }
+}
+
+#[test]
+fn startup_context_editor_remote_apply_review_queue_and_cancel_are_correlated() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    let mut app = create_test_app();
+    app.apply_startup_context_debug_fixture("editor-populated")
+        .expect("editor fixture");
+    let runtime = tokio::runtime::Runtime::new().expect("apply transport runtime");
+    runtime.block_on(async move {
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        let peer = remote.take_dummy_peer().expect("dummy peer");
+        let (reader, _writer) = peer.into_split();
+        let mut reader = BufReader::new(reader);
+
+        super::remote::handle_remote_key_event(
+            &mut app,
+            KeyEvent::new_with_kind(KeyCode::Char('p'), KeyModifiers::NONE, KeyEventKind::Press),
+            &mut remote,
+        )
+        .await
+        .expect("open combined apply preview");
+        let mut line = String::new();
+        reader
+            .read_line(&mut line)
+            .await
+            .expect("read preview request");
+        let preview_id = match serde_json::from_str::<crate::protocol::Request>(line.trim())
+            .expect("decode preview request")
+        {
+            crate::protocol::Request::PreviewStartupContextSelection { id, .. } => id,
+            other => panic!("unexpected preview request: {other:?}"),
+        };
+        assert!(app.handle_server_event(
+            crate::protocol::ServerEvent::StartupContextSelectionPreview {
+                id: preview_id,
+                preview: crate::protocol::StartupContextSelectionPreview {
+                    project_key_digest: "fixture-project".to_string(),
+                    plan_revision: 7,
+                    entry_count: 2,
+                    selected_count: 2,
+                    issue_count: 0,
+                    aggregate_bytes: 10_240,
+                    aggregate_estimated_tokens: 2_500,
+                    entries: vec![
+                        crate::protocol::StartupContextSelectionEntrySnapshot::Selected {
+                            input_index: 0,
+                            spec_id: "fixture-plan-spec".to_string(),
+                            logical_path: "docs/PLAN.md".to_string(),
+                            resolved_path: "/fixture/project/docs/PLAN.md".to_string(),
+                            classification:
+                                crate::protocol::StartupContextPathClassification::Project,
+                            bytes: 4_096,
+                            estimated_tokens: 1_000,
+                            requires_external_approval: false,
+                        },
+                        crate::protocol::StartupContextSelectionEntrySnapshot::Selected {
+                            input_index: 1,
+                            spec_id: "fixture-progress-spec".to_string(),
+                            logical_path: "docs/PROGRESS.md".to_string(),
+                            resolved_path: "/fixture/project/docs/PROGRESS.md".to_string(),
+                            classification:
+                                crate::protocol::StartupContextPathClassification::Project,
+                            bytes: 6_144,
+                            estimated_tokens: 1_500,
+                            requires_external_approval: false,
+                        },
+                    ],
+                    batch_issues: Vec::new(),
+                },
+            },
+            &mut remote,
+        ));
+        let review = render_startup_context_fixture(&app, 72, 24);
+        assert!(review.contains("Review Startup Context apply"));
+        assert!(review.contains("active model route"));
+
+        super::remote::handle_remote_key_event(
+            &mut app,
+            KeyEvent::new_with_kind(KeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Press),
+            &mut remote,
+        )
+        .await
+        .expect("confirm combined apply");
+        line.clear();
+        reader
+            .read_line(&mut line)
+            .await
+            .expect("read apply request");
+        let (apply_id, operation_id) =
+            match serde_json::from_str::<crate::protocol::Request>(line.trim())
+                .expect("decode apply request")
+            {
+                crate::protocol::Request::ApplyStartupContextSelection {
+                    id,
+                    operation_id,
+                    save_project_default: true,
+                    selection,
+                    expected_plan_revision: 7,
+                    ..
+                } if selection.len() == 2 => (id, operation_id),
+                other => panic!("unexpected apply request: {other:?}"),
+            };
+        let now = chrono::Utc::now();
+        assert!(app.handle_server_event(
+            crate::protocol::ServerEvent::StartupContextApplyStatus {
+                id: apply_id,
+                status: crate::protocol::StartupContextApplyStatus {
+                    operation_id: operation_id.clone(),
+                    session_id: app.remote_session_id.clone().expect("session"),
+                    phase: crate::protocol::StartupContextApplyPhase::Queued,
+                    session_target: crate::protocol::StartupContextApplyTargetState::Pending,
+                    project_default_target:
+                        crate::protocol::StartupContextApplyTargetState::Pending,
+                    batch_id: None,
+                    file_count: 2,
+                    created_at: now,
+                    updated_at: now,
+                    failure: None,
+                },
+            },
+            &mut remote,
+        ));
+        let queued = render_startup_context_fixture(&app, 120, 30);
+        assert!(queued.contains("Queued"));
+        assert!(queued.contains("next safe idle boundary"));
+
+        super::remote::handle_remote_key_event(
+            &mut app,
+            KeyEvent::new_with_kind(KeyCode::Char('c'), KeyModifiers::NONE, KeyEventKind::Press),
+            &mut remote,
+        )
+        .await
+        .expect("cancel queued apply");
+        let mut found_cancel = false;
+        for _ in 0..2 {
+            line.clear();
+            reader
+                .read_line(&mut line)
+                .await
+                .expect("read queued request");
+            if matches!(
+                serde_json::from_str::<crate::protocol::Request>(line.trim())
+                    .expect("decode queued request"),
+                crate::protocol::Request::CancelStartupContextApply {
+                    operation_id: ref actual,
+                    expected_plan_revision: 7,
+                    ..
+                } if actual == &operation_id
+            ) {
+                found_cancel = true;
+                break;
+            }
+        }
+        assert!(found_cancel, "queued apply cancellation was not dispatched");
+        assert!(app.input.is_empty());
+    });
+}
+
+#[test]
+fn startup_context_editor_partial_recovery_event_is_truthful_and_refreshes_status() {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    let mut app = create_test_app();
+    app.apply_startup_context_debug_fixture("editor-apply-applying")
+        .expect("applying fixture");
+    let runtime = tokio::runtime::Runtime::new().expect("partial status runtime");
+    runtime.block_on(async move {
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        let peer = remote.take_dummy_peer().expect("dummy peer");
+        let (reader, _writer) = peer.into_split();
+        let mut reader = BufReader::new(reader);
+        let now = chrono::Utc::now();
+        assert!(
+            app.handle_server_event(
+                crate::protocol::ServerEvent::StartupContextApplyStatus {
+                    id: 0,
+                    status: crate::protocol::StartupContextApplyStatus {
+                        operation_id: "fixture-startup-apply".to_string(),
+                        session_id: app.remote_session_id.clone().expect("session"),
+                        phase: crate::protocol::StartupContextApplyPhase::RecoveryRequired,
+                        session_target: crate::protocol::StartupContextApplyTargetState::Failed {
+                            message: "session persistence will retry".to_string(),
+                            retryable: true,
+                        },
+                        project_default_target:
+                            crate::protocol::StartupContextApplyTargetState::Applied {
+                                revision: Some(8),
+                            },
+                        batch_id: None,
+                        file_count: 2,
+                        created_at: now,
+                        updated_at: now,
+                        failure: Some(crate::protocol::StartupContextFailure {
+                            operation: crate::protocol::StartupContextOperation::ApplySelection,
+                            kind: crate::protocol::StartupContextFailureKind::Recovery,
+                            message:
+                                "Project default committed; session target remains recoverable"
+                                    .to_string(),
+                            retryable: true,
+                            issues: Vec::new(),
+                        }),
+                    },
+                },
+                &mut remote,
+            )
+        );
+        let rendered = render_startup_context_fixture(&app, 120, 30);
+        assert!(rendered.contains("Recovery required"));
+        assert!(rendered.contains("Session: failed"));
+        assert!(rendered.contains("Project default: applied · revision 8"));
+        assert!(!rendered.contains("Succeeded"));
+
+        app.dispatch_remote_startup_context_request(&mut remote)
+            .await;
+        let mut saw_status = false;
+        for _ in 0..3 {
+            let mut line = String::new();
+            reader
+                .read_line(&mut line)
+                .await
+                .expect("read refresh request");
+            if matches!(
+                serde_json::from_str::<crate::protocol::Request>(line.trim())
+                    .expect("decode refresh request"),
+                crate::protocol::Request::GetStartupContextStatus { .. }
+            ) {
+                saw_status = true;
+                break;
+            }
+        }
+        assert!(saw_status, "partial outcome did not refresh compact status");
+    });
+}
+
+#[test]
+fn startup_context_editor_draft_survives_model_switch() {
+    let mut app = create_test_app();
+    app.apply_startup_context_debug_fixture("editor-apply-review")
+        .expect("apply review fixture");
+    let before = app.startup_context_debug_summary()["editor"].clone();
+    let runtime = tokio::runtime::Runtime::new().expect("model switch runtime");
+    let _guard = runtime.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    assert!(!app.handle_server_event(
+        crate::protocol::ServerEvent::ModelChanged {
+            id: 77,
+            model: "fixture/model-after-switch".to_string(),
+            provider_name: Some("fixture-provider".to_string()),
+            error: None,
+        },
+        &mut remote,
+    ));
+    let after = app.startup_context_debug_summary()["editor"].clone();
+    assert_eq!(after["draft_paths"], before["draft_paths"]);
+    assert_eq!(after["dirty"], before["dirty"]);
+    assert_eq!(after["apply_overlay"], before["apply_overlay"]);
 }
 
 #[test]
@@ -238,11 +606,7 @@ fn startup_context_editor_physical_remote_shortcuts_own_navigation_search_and_or
             ($code:expr, $label:literal) => {
                 super::remote::handle_remote_key_event(
                     &mut app,
-                    KeyEvent::new_with_kind(
-                        $code,
-                        KeyModifiers::NONE,
-                        KeyEventKind::Press,
-                    ),
+                    KeyEvent::new_with_kind($code, KeyModifiers::NONE, KeyEventKind::Press),
                     &mut remote,
                 )
                 .await
@@ -251,7 +615,10 @@ fn startup_context_editor_physical_remote_shortcuts_own_navigation_search_and_or
         }
 
         press!(KeyCode::Down, "navigate browser");
-        assert_eq!(app.startup_context_debug_summary()["editor"]["browser_cursor"], 1);
+        assert_eq!(
+            app.startup_context_debug_summary()["editor"]["browser_cursor"],
+            1
+        );
         assert!(app.input.is_empty());
 
         press!(KeyCode::Char('/'), "open search");
@@ -514,6 +881,16 @@ fn startup_context_debug_commands_and_help_are_registered_and_content_safe() {
         "editor-invalid",
         "editor-external",
         "editor-busy",
+        "editor-apply-review",
+        "editor-apply-review-late",
+        "editor-apply-external",
+        "editor-apply-queued",
+        "editor-apply-applying",
+        "editor-apply-recovery",
+        "editor-apply-success",
+        "editor-apply-partial",
+        "editor-apply-failed",
+        "editor-apply-canceled",
     ] {
         assert!(listed.contains(fixture));
     }
@@ -528,7 +905,8 @@ fn startup_context_debug_commands_and_help_are_registered_and_content_safe() {
     let help = app.command_help("startup").expect("Startup Context help");
     assert!(help.starts_with("/startup"));
     assert!(help.contains("unsaved draft"));
-    assert!(help.contains("disabled"));
+    assert!(help.contains("authoritative preview"));
+    assert!(help.contains("resolved target"));
     assert!(super::registered_command_entries().any(|(command, _)| command == "/startup"));
 
     assert!(super::debug::handle_debug_command(

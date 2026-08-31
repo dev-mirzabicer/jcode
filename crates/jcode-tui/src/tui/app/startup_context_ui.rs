@@ -72,7 +72,7 @@ impl StartupContextUiState {
         if !same_session {
             self.begin_session(session_id);
         } else if let Some(editor) = self.editor.as_ref() {
-            if editor.borrow().is_visible() {
+            if editor.borrow().is_visible() || editor.borrow().has_tracked_apply() {
                 editor.borrow_mut().restart_after_reconnect();
             } else {
                 self.editor = None;
@@ -213,6 +213,16 @@ impl App {
             "editor-invalid",
             "editor-external",
             "editor-busy",
+            "editor-apply-review",
+            "editor-apply-review-late",
+            "editor-apply-external",
+            "editor-apply-queued",
+            "editor-apply-applying",
+            "editor-apply-recovery",
+            "editor-apply-success",
+            "editor-apply-partial",
+            "editor-apply-failed",
+            "editor-apply-canceled",
         ]
     }
 
@@ -393,7 +403,35 @@ impl App {
                     }),
                 };
             }
-            "editor-populated" | "editor-invalid" | "editor-external" => {}
+            "editor-populated"
+            | "editor-invalid"
+            | "editor-external"
+            | "editor-apply-review"
+            | "editor-apply-external" => {}
+            "editor-apply-review-late" => {
+                compact.state = StartupContextStatusState::ProviderAccepted;
+                files[0].delivery_state = StartupContextDeliveryState::ProviderAccepted;
+            }
+            "editor-apply-queued" | "editor-apply-applying" => {
+                compact.state = StartupContextStatusState::ProviderAccepted;
+                compact.pending_update_count = 1;
+                files[0].delivery_state = StartupContextDeliveryState::ProviderAccepted;
+            }
+            "editor-apply-recovery" | "editor-apply-partial" => {
+                compact.state = StartupContextStatusState::ProviderAccepted;
+                compact.plan_revision = 8;
+                compact.pending_update_count = 1;
+                files[0].delivery_state = StartupContextDeliveryState::ProviderAccepted;
+            }
+            "editor-apply-success" => {
+                compact.state = StartupContextStatusState::ProviderAccepted;
+                compact.plan_revision = 8;
+                files[0].delivery_state = StartupContextDeliveryState::ProviderAccepted;
+            }
+            "editor-apply-failed" | "editor-apply-canceled" => {
+                compact.state = StartupContextStatusState::ProviderAccepted;
+                files[0].delivery_state = StartupContextDeliveryState::ProviderAccepted;
+            }
             "loading" | "unsupported" => unreachable!(),
             _ => return Err(format!("unhandled Startup Context fixture {name:?}")),
         }
@@ -766,18 +804,68 @@ impl App {
                     lease,
                     selection,
                     generation,
+                    draft_generation,
+                    purpose,
                 } => (
                     Request::PreviewStartupContextSelection {
                         id,
                         lease_id: lease.lease_id.clone(),
-                        project_key_digest: lease.project_key_digest,
+                        project_key_digest: lease.project_key_digest.clone(),
                         expected_plan_revision: lease.plan_revision,
                         selection,
                     },
                     StartupContextPendingRequest::Selection {
                         lease_id: lease.lease_id,
+                        project_key_digest: lease.project_key_digest,
+                        expected_plan_revision: lease.plan_revision,
                         generation,
+                        draft_generation,
+                        purpose,
                     },
+                ),
+                StartupContextEditorAction::ApplySelection {
+                    lease,
+                    operation_id,
+                    selection,
+                    save_project_default,
+                    draft_generation,
+                } => (
+                    Request::ApplyStartupContextSelection {
+                        id,
+                        operation_id: operation_id.clone(),
+                        lease_id: lease.lease_id.clone(),
+                        project_key_digest: lease.project_key_digest.clone(),
+                        expected_plan_revision: lease.plan_revision,
+                        selection,
+                        save_project_default,
+                    },
+                    StartupContextPendingRequest::Apply {
+                        operation_id,
+                        lease_id: lease.lease_id,
+                        project_key_digest: lease.project_key_digest,
+                        expected_plan_revision: lease.plan_revision,
+                        draft_generation,
+                    },
+                ),
+                StartupContextEditorAction::CancelApply {
+                    lease,
+                    operation_id,
+                } => (
+                    Request::CancelStartupContextApply {
+                        id,
+                        operation_id: operation_id.clone(),
+                        lease_id: lease.lease_id,
+                        project_key_digest: lease.project_key_digest,
+                        expected_plan_revision: lease.plan_revision,
+                    },
+                    StartupContextPendingRequest::CancelApply { operation_id },
+                ),
+                StartupContextEditorAction::GetApplyStatus { operation_id } => (
+                    Request::GetStartupContextApplyStatus {
+                        id,
+                        operation_id: operation_id.clone(),
+                    },
+                    StartupContextPendingRequest::ApplyStatus { operation_id },
                 ),
             };
             let Some(editor) = self.startup_context_ui.editor.as_ref() else {
@@ -963,6 +1051,17 @@ impl App {
             .editor
             .as_ref()
             .is_some_and(|state| state.borrow_mut().accept_selection(id, preview))
+    }
+
+    pub(in crate::tui::app) fn accept_startup_context_apply_status(
+        &mut self,
+        id: u64,
+        status: crate::protocol::StartupContextApplyStatus,
+    ) -> bool {
+        self.startup_context_ui
+            .editor
+            .as_ref()
+            .is_some_and(|state| state.borrow_mut().accept_apply_status(id, status))
     }
 
     fn accept_startup_context_action_required(
