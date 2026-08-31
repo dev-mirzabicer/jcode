@@ -698,7 +698,12 @@ impl StartupContextEditor {
 
     pub(crate) fn reopen(&mut self) {
         self.visible = true;
-        if matches!(self.phase, EditorPhase::Opening) && self.editor.is_none() {
+        if self.editor.is_none()
+            && matches!(
+                self.phase,
+                EditorPhase::Opening | EditorPhase::Busy { .. } | EditorPhase::Error(_)
+            )
+        {
             self.phase = EditorPhase::Opening;
             if !self
                 .pending

@@ -1391,6 +1391,22 @@ fn editor_reopens_after_close_and_expired_refresh_without_losing_the_draft() {
 }
 
 #[test]
+fn reopening_a_busy_editor_retries_authoritative_ownership() {
+    let mut editor =
+        StartupContextEditor::debug_fixture("editor-busy", "session".to_string(), Vec::new());
+    editor.close();
+    assert!(!editor.visible);
+    assert!(matches!(editor.phase, EditorPhase::Busy { .. }));
+    editor.reopen();
+    assert!(editor.visible);
+    assert!(matches!(editor.phase, EditorPhase::Opening));
+    assert!(matches!(
+        editor.take_action(),
+        Some(StartupContextEditorAction::Open)
+    ));
+}
+
+#[test]
 fn terminal_apply_refreshes_saved_default_authoritatively_without_losing_draft_identity() {
     let mut editor = ready_editor();
     editor.active_pane = StartupContextEditorPane::Selection;
