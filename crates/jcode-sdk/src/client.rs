@@ -612,11 +612,26 @@ impl JcodeClient {
     }
 
     pub fn create_session(&self, working_dir: Option<String>) -> Result<SessionInfo> {
-        match self
-            .request_ok(ApiRequest::CreateSession { working_dir })?
-            .event
-        {
+        if !self.supports("startup_context_creation_errors") {
+            let error = jcode_harness_api::StartupContextCreateError {
+                kind: jcode_harness_api::StartupContextCreateErrorKind::Unsupported,
+                message: "the connected Harness server predates mandatory Startup Context creation support"
+                    .to_string(),
+                issues: Vec::new(),
+            };
+            return Err(Error::new(
+                ErrorKind::StartupContext(error.clone()),
+                error.message,
+            ));
+        }
+        let frame = self.request(ApiRequest::CreateSession { working_dir })?;
+        match frame.event {
             ApiEvent::Attached { session } => Ok(session),
+            ApiEvent::StartupContextCreationFailed { error } => Err(Error::new(
+                ErrorKind::StartupContext(error.clone()),
+                error.message,
+            )),
+            ApiEvent::Error { code, message } => Err(Error::new(ErrorKind::Harness(code), message)),
             other => Err(unexpected("attached", &other)),
         }
     }

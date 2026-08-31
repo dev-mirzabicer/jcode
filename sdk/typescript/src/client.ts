@@ -434,11 +434,22 @@ export class JcodeClient extends EventEmitter {
   }
 
   async createSession(workingDir?: string): Promise<SessionInfo> {
-    const frame = await this.expectReply(
-      { req: "create_session", working_dir: workingDir },
-      "attached",
-    );
-    return frame.session;
+    if (!this.supports("startup_context_creation_errors")) {
+      throw new HarnessError(
+        "startup_context",
+        "the connected Harness server predates mandatory Startup Context creation support",
+        { kind: "unsupported", issues: [] },
+      );
+    }
+    const frame = await this.requestOk({ req: "create_session", working_dir: workingDir });
+    if (frame.ev === "startup_context_creation_failed") {
+      const failure = frame.error as import("./protocol.js").StartupContextCreateError;
+      throw new HarnessError("startup_context", failure.message, failure);
+    }
+    if (frame.ev !== "attached") {
+      throw new HarnessError("unexpected_reply", `expected attached, got ${frame.ev}`);
+    }
+    return (frame as unknown as Extract<ApiEvent, { ev: "attached" }>).session;
   }
 
   async attachSession(sessionId: string): Promise<SessionInfo> {

@@ -3,7 +3,8 @@
 
 use crate::background_progress::parse_background_notification;
 use jcode_harness_api::{
-    ApiEvent, ErrorCode, HistoryMessage, ModelRouteInfo, ServerFrame, SessionInfo, TextMatch,
+    ApiEvent, ErrorCode, HistoryMessage, ModelRouteInfo, ServerFrame, SessionInfo,
+    StartupContextCreateError, StartupContextCreateErrorKind, StartupContextCreateIssue, TextMatch,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
@@ -93,8 +94,8 @@ pub struct BridgeState {
     /// Legacy and API ids for a context-only message. Its daemon completion
     /// event is a request reply, not a model turn boundary.
     pending_no_reply_message_id: Option<(u64, u64)>,
-    /// Legacy id of an in-flight `create/attach` subscribe.
-    pending_attach_id: Option<(u64, u64)>,
+    /// Legacy ids and API identity of an in-flight `create/attach` subscribe.
+    pending_attach: Option<PendingAttach>,
     /// Legacy id of the unsolicited model-catalog probe sent after attach. Its
     /// reply becomes a `model_info` event rather than a request reply, so it is
     /// tracked apart from `pending_simple`.
@@ -147,6 +148,20 @@ enum SimpleKind {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingAttachKind {
+    Create,
+    Attach,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PendingAttach {
+    subscribe_id: u64,
+    state_id: u64,
+    api_id: u64,
+    kind: PendingAttachKind,
+}
+
 impl BridgeState {
     fn legacy_id(&mut self) -> u64 {
         self.next_legacy_id += 1;
@@ -165,12 +180,12 @@ impl BridgeState {
         // that mistypes a session id loses every other session it was
         // streaming, and the SDK reports a bare EPIPE. Answer locally instead,
         // with the code that actually says what went wrong.
-        // `pending_attach_id` means a subscribe is already on the wire, so the
+        // `pending_attach` means a subscribe is already on the wire, so the
         // daemon will have a session by the time this arrives: a client that
         // pipelines `create_session` and `send_message` without awaiting must
         // still work. Only a connection that never asked to attach is refused.
         if self.session_id.is_none()
-            && self.pending_attach_id.is_none()
+            && self.pending_attach.is_none()
             && REQUIRES_ATTACH.contains(&req)
         {
             let requested = request["session_id"].as_str().unwrap_or("");
@@ -272,10 +287,29 @@ impl BridgeState {
                 }
             }
             "create_session" | "attach_session" => {
+                if req == "attach_session" {
+                    let target = request["session_id"].as_str().unwrap_or_default();
+                    if Self::session_record_path(target).is_none_or(|path| !path.is_file()) {
+                        return Self::error_reply(
+                            api_id,
+                            ErrorCode::UnknownSession,
+                            "session does not exist",
+                        );
+                    }
+                }
                 let id = self.legacy_id();
                 let state_id = self.legacy_id();
                 let catalog_id = self.legacy_id();
-                self.pending_attach_id = Some((state_id, api_id));
+                self.pending_attach = Some(PendingAttach {
+                    subscribe_id: id,
+                    state_id,
+                    api_id,
+                    kind: if req == "create_session" {
+                        PendingAttachKind::Create
+                    } else {
+                        PendingAttachKind::Attach
+                    },
+                });
                 self.pending_model_probe = Some(catalog_id);
                 let working_dir =
                     request["working_dir"]
@@ -306,6 +340,9 @@ impl BridgeState {
                     && let Some(target) = request["session_id"].as_str()
                 {
                     subscribe["target_session_id"] = json!(target);
+                    subscribe["startup_context_caller"] = json!("harness_api_attach");
+                } else {
+                    subscribe["startup_context_caller"] = json!("harness_api_create");
                 }
                 // The daemon assigns the session during subscribe but reports
                 // the id via `state`, so chase the subscribe with get_state.
@@ -732,12 +769,12 @@ impl BridgeState {
                     self.session_id = Some(session_id.clone());
                 }
                 let id = event["id"].as_u64().unwrap_or(0);
-                if let Some((state_id, api_id)) = self.pending_attach_id
-                    && state_id == id
+                if let Some(pending) = self.pending_attach
+                    && pending.state_id == id
                 {
-                    self.pending_attach_id = None;
+                    self.pending_attach = None;
                     return vec![ServerFrame::reply(
-                        api_id,
+                        pending.api_id,
                         ApiEvent::Attached {
                             session: SessionInfo {
                                 transcript_bytes: Self::transcript_bytes(&session_id),
@@ -756,6 +793,70 @@ impl BridgeState {
                     )];
                 }
                 vec![]
+            }
+            "startup_context_failed" => {
+                let id = event["id"].as_u64().unwrap_or(0);
+                let Some(pending) = self
+                    .pending_attach
+                    .filter(|pending| pending.subscribe_id == id)
+                else {
+                    return vec![];
+                };
+                self.pending_attach = None;
+                self.pending_model_probe = None;
+                let failure = &event["failure"];
+                if pending.kind == PendingAttachKind::Create {
+                    let issues: Vec<StartupContextCreateIssue> = failure["issues"]
+                        .as_array()
+                        .map(|issues| {
+                            issues
+                                .iter()
+                                .map(|issue| StartupContextCreateIssue {
+                                    logical_path: issue["logical_path"]
+                                        .as_str()
+                                        .map(str::to_string),
+                                    code: issue["kind"]["kind"]
+                                        .as_str()
+                                        .unwrap_or("unknown")
+                                        .to_string(),
+                                    detail: issue["kind"].to_string(),
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let kind = match failure["kind"].as_str().unwrap_or("") {
+                        "project_identity" => StartupContextCreateErrorKind::ProjectIdentity,
+                        "plan_storage" => StartupContextCreateErrorKind::PlanStorage,
+                        "io" => StartupContextCreateErrorKind::Persistence,
+                        "invalid_request" if !issues.is_empty() => {
+                            StartupContextCreateErrorKind::InvalidFiles
+                        }
+                        _ => StartupContextCreateErrorKind::Internal,
+                    };
+                    return vec![ServerFrame::reply(
+                        pending.api_id,
+                        ApiEvent::StartupContextCreationFailed {
+                            error: StartupContextCreateError {
+                                kind,
+                                message: failure["message"]
+                                    .as_str()
+                                    .unwrap_or("Startup Context creation failed")
+                                    .to_string(),
+                                issues,
+                            },
+                        },
+                    )];
+                }
+                vec![ServerFrame::reply(
+                    pending.api_id,
+                    ApiEvent::Error {
+                        code: ErrorCode::InvalidRequest,
+                        message: failure["message"]
+                            .as_str()
+                            .unwrap_or("session attach failed")
+                            .to_string(),
+                    },
+                )]
             }
             "text_delta" => vec![ServerFrame::event(ApiEvent::TextDelta {
                 session_id: session(self),
@@ -1003,6 +1104,14 @@ impl BridgeState {
             "error" => {
                 let id = event["id"].as_u64().unwrap_or(0);
                 let message = event["message"].as_str().unwrap_or("").to_string();
+                let attach_api_id = self
+                    .pending_attach
+                    .filter(|pending| pending.subscribe_id == id)
+                    .map(|pending| pending.api_id);
+                if attach_api_id.is_some() {
+                    self.pending_attach = None;
+                    self.pending_model_probe = None;
+                }
                 // A turn that fails ends with `error` *instead of* `done`, so
                 // the turn is over: forget the pending message, or a later
                 // unrelated `done` carrying the same id would be reported as
@@ -1018,7 +1127,7 @@ impl BridgeState {
                     self.pending_no_reply_message_id = None;
                 }
                 // Route to a pending request when possible, else stream it.
-                let reply_to = no_reply_api_id.or_else(|| {
+                let reply_to = attach_api_id.or(no_reply_api_id).or_else(|| {
                     self.pending_simple
                         .iter()
                         .position(|(legacy_id, _, _)| *legacy_id == id)

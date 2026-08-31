@@ -379,6 +379,7 @@ try {
 | `unknown_session` | The session no longer exists, is not available to this instance, or the connection is not attached where attachment is required. | Refresh `listSessions()`, use the right private/shared instance, and attach when the method requires it. |
 | `invalid_request` | Arguments or current state violate the operation's contract (for example an invalid model, retry count, path, or route selection). | Correct the caller input. The message contains the rejected constraint; do not blindly retry. |
 | `invalid_option` | A client-only option is outside its allowed range. | Correct the named option, such as `discoveryIntervalMs` or `maxBufferedEvents`. |
+| `startup_context` | `createSession()` could not establish mandatory Startup Context, or the connected server predates typed Startup Context creation support. `HarnessError.details` contains the structured creation failure and per-file issues when available. | Repair the listed project plan or required files, choose a supported server, then create a new session. The rejected creation leaves no attached session to reuse. |
 | `internal` | The bridge or daemon failed unexpectedly while handling a valid request. | Preserve the message and jcode logs, retry once if safe, then report it if reproducible. |
 
 ### Streaming and structured-output errors

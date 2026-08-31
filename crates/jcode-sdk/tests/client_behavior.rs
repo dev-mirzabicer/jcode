@@ -8,9 +8,10 @@
 
 use jcode_harness_api::{
     API_VERSION_MAJOR, ApiEvent, ApiRequest, ClientFrame, ModelRouteInfo, ServerFrame, SessionInfo,
-    TextMatch, read_frame, write_frame,
+    StartupContextCreateError, StartupContextCreateErrorKind, StartupContextCreateIssue, TextMatch,
+    read_frame, write_frame,
 };
-use jcode_sdk::{ConnectOptions, JcodeClient, SearchTextOptions, Transport};
+use jcode_sdk::{ConnectOptions, ErrorKind, JcodeClient, SearchTextOptions, Transport};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::mpsc::channel;
@@ -44,6 +45,19 @@ fn session(id: &str) -> SessionInfo {
 /// Start a fake harness on one end of a socket pair. `handle` is called for
 /// every client frame with a writer for replies.
 fn fake_harness(handle: impl Fn(&ClientFrame, &mut dyn Write) + Send + 'static) -> JcodeClient {
+    fake_harness_with_capabilities(
+        vec![
+            "sessions".to_string(),
+            "startup_context_creation_errors".to_string(),
+        ],
+        handle,
+    )
+}
+
+fn fake_harness_with_capabilities(
+    capabilities: Vec<String>,
+    handle: impl Fn(&ClientFrame, &mut dyn Write) + Send + 'static,
+) -> JcodeClient {
     let (ours, theirs) = UnixStream::pair().expect("socket pair");
     std::thread::spawn(move || {
         let mut reader = BufReader::new(theirs.try_clone().expect("clone"));
@@ -57,7 +71,7 @@ fn fake_harness(handle: impl Fn(&ClientFrame, &mut dyn Write) + Send + 'static) 
                     event: ApiEvent::HelloOk {
                         version: API_VERSION_MAJOR,
                         server: "fake-harness/1.0".to_string(),
-                        capabilities: vec!["sessions".to_string()],
+                        capabilities: capabilities.clone(),
                     },
                 };
                 write_frame(&mut writer, &reply).expect("hello reply");
@@ -106,6 +120,59 @@ fn the_handshake_reports_the_server_and_its_capabilities() {
         !client.supports("permissions"),
         "a capability the server did not advertise must not be claimed"
     );
+}
+
+#[test]
+fn create_session_preserves_typed_startup_context_failure() {
+    let client = fake_harness(|frame, writer| {
+        if matches!(frame.request, ApiRequest::CreateSession { .. }) {
+            reply(
+                frame,
+                ApiEvent::StartupContextCreationFailed {
+                    error: StartupContextCreateError {
+                        kind: StartupContextCreateErrorKind::InvalidFiles,
+                        message: "synthetic blocked creation".to_string(),
+                        issues: vec![StartupContextCreateIssue {
+                            logical_path: Some("docs/missing.md".to_string()),
+                            code: "missing".to_string(),
+                            detail: "synthetic issue".to_string(),
+                        }],
+                    },
+                },
+                writer,
+            );
+        }
+    });
+
+    let error = client
+        .create_session(Some("/tmp/project".to_string()))
+        .expect_err("blocked Startup Context must reject creation");
+    match &error.kind {
+        ErrorKind::StartupContext(failure) => {
+            assert_eq!(failure.kind, StartupContextCreateErrorKind::InvalidFiles);
+            assert_eq!(failure.issues[0].code, "missing");
+        }
+        other => panic!("unexpected error kind: {other:?}"),
+    }
+    assert_eq!(error.code(), "startup_context");
+}
+
+#[test]
+fn create_session_rejects_a_server_without_startup_context_capability() {
+    let client = fake_harness_with_capabilities(vec!["sessions".to_string()], |_, _| {
+        panic!("unsupported create must fail before sending the request")
+    });
+    let error = client
+        .create_session(Some("/tmp/project".to_string()))
+        .expect_err("old server must not be interpreted as an empty Startup Context plan");
+    assert_eq!(error.code(), "startup_context");
+    assert!(matches!(
+        error.kind,
+        ErrorKind::StartupContext(StartupContextCreateError {
+            kind: StartupContextCreateErrorKind::Unsupported,
+            ..
+        })
+    ));
 }
 
 /// GA session-management, runtime, credential, and file methods must preserve
@@ -196,7 +263,10 @@ fn ga_runtime_and_file_methods_map_requests_and_typed_replies() {
     let runtime = client.get_runtime_info("s1").expect("runtime info");
     assert_eq!(runtime.server, "fake-harness/1.0");
     assert_eq!(runtime.protocol_version, API_VERSION_MAJOR);
-    assert_eq!(runtime.capabilities, ["sessions"]);
+    assert_eq!(
+        runtime.capabilities,
+        ["sessions", "startup_context_creation_errors"]
+    );
     assert!(runtime.healthy);
     assert_eq!(runtime.session_id, "s1");
     assert_eq!(runtime.provider.as_deref(), Some("anthropic"));

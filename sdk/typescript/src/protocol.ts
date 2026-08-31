@@ -51,6 +51,26 @@ export interface HistoryMessage {
   content: string;
 }
 
+export type StartupContextCreateErrorKind =
+  | "unsupported"
+  | "project_identity"
+  | "plan_storage"
+  | "invalid_files"
+  | "persistence"
+  | "internal";
+
+export interface StartupContextCreateIssue {
+  logical_path?: string;
+  code: string;
+  detail: string;
+}
+
+export interface StartupContextCreateError {
+  kind: StartupContextCreateErrorKind;
+  message: string;
+  issues?: StartupContextCreateIssue[];
+}
+
 /** Base64 image attachment: [mediaType, base64Data]. */
 export type ImageAttachment = [string, string];
 
@@ -108,6 +128,7 @@ export type ApiEvent =
   | { ev: "error"; code: ErrorCode; message: string }
   | { ev: "sessions"; sessions: SessionInfo[] }
   | { ev: "attached"; session: SessionInfo }
+  | { ev: "startup_context_creation_failed"; error: StartupContextCreateError }
   | { ev: "history"; session_id: string; messages: HistoryMessage[] }
   | { ev: "pong" }
   | { ev: "text_delta"; session_id: string; text: string }
@@ -223,6 +244,7 @@ export const KNOWN_EVENT_KINDS = [
   "error",
   "sessions",
   "attached",
+  "startup_context_creation_failed",
   "history",
   "pong",
   "text_delta",

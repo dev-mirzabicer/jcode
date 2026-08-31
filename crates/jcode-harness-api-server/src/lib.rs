@@ -225,6 +225,7 @@ async fn handle_api_client(stream: Stream, legacy_socket: PathBuf) -> Result<()>
                 "session_archive",
                 "session_retention",
                 "session_files",
+                "startup_context_creation_errors",
             ]
             .into_iter()
             .map(str::to_string)

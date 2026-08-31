@@ -28,6 +28,10 @@ pub enum ApiEvent {
     /// Reply to `CreateSession` / `AttachSession`.
     Attached { session: SessionInfo },
 
+    /// `CreateSession` could not establish its mandatory Startup Context.
+    /// Additive and skippable under the protocol-v1 event compatibility model.
+    StartupContextCreationFailed { error: StartupContextCreateError },
+
     /// Reply to `GetHistory`.
     History {
         session_id: String,
@@ -226,6 +230,33 @@ pub enum ErrorCode {
     UnknownSession,
     InvalidRequest,
     Internal,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StartupContextCreateErrorKind {
+    Unsupported,
+    ProjectIdentity,
+    PlanStorage,
+    InvalidFiles,
+    Persistence,
+    Internal,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StartupContextCreateIssue {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logical_path: Option<String>,
+    pub code: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StartupContextCreateError {
+    pub kind: StartupContextCreateErrorKind,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub issues: Vec<StartupContextCreateIssue>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

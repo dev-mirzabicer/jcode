@@ -91,6 +91,69 @@ fn create_session_maps_to_subscribe() {
     };
     assert_eq!(value["type"], "subscribe");
     assert!(value["working_dir"].is_string());
+    assert_eq!(value["startup_context_caller"], "harness_api_create");
+}
+
+#[test]
+fn startup_context_failure_answers_create_with_typed_error() {
+    let mut state = BridgeState::default();
+    let out = state.api_request_to_legacy(&json!({"req": "create_session", "id": 17}));
+    let Outbound::Legacy(subscribe) = &out[0] else {
+        panic!("expected legacy subscribe");
+    };
+    let subscribe_id = subscribe["id"].as_u64().unwrap();
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "startup_context_failed",
+        "id": subscribe_id,
+        "failure": {
+            "operation": "status",
+            "kind": "invalid_request",
+            "message": "synthetic blocked creation",
+            "retryable": false,
+            "issues": [{
+                "logical_path": "docs/missing.md",
+                "kind": {"kind": "missing"}
+            }]
+        }
+    }));
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].reply_to, Some(17));
+    match &frames[0].event {
+        ApiEvent::StartupContextCreationFailed { error } => {
+            assert_eq!(
+                error.kind,
+                jcode_harness_api::StartupContextCreateErrorKind::InvalidFiles
+            );
+            assert_eq!(error.issues.len(), 1);
+            assert_eq!(error.issues[0].code, "missing");
+            assert_eq!(
+                error.issues[0].logical_path.as_deref(),
+                Some("docs/missing.md")
+            );
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn missing_attach_is_rejected_without_fresh_session_fallback() {
+    let mut state = BridgeState::default();
+    let out = state.api_request_to_legacy(&json!({
+        "req": "attach_session",
+        "id": 19,
+        "session_id": "session_that_does_not_exist_wp05"
+    }));
+    let Outbound::Reply(frame) = &out[0] else {
+        panic!("missing attach must be answered locally");
+    };
+    assert_eq!(frame.reply_to, Some(19));
+    assert!(matches!(
+        frame.event,
+        ApiEvent::Error {
+            code: ErrorCode::UnknownSession,
+            ..
+        }
+    ));
 }
 
 #[test]

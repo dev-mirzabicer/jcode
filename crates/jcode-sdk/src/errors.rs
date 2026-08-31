@@ -21,6 +21,9 @@ pub enum ErrorKind {
     UnexpectedReply,
     /// The harness answered with an error frame. Carries the wire code.
     Harness(jcode_harness_api::ErrorCode),
+    /// A new session was rejected because its mandatory Startup Context could
+    /// not be established. Carries the structured creation failure.
+    StartupContext(jcode_harness_api::StartupContextCreateError),
     /// I/O or JSON trouble on the transport.
     Transport,
     /// Starting a runtime (daemon or bridge) failed.
@@ -60,6 +63,7 @@ impl ErrorKind {
             Self::InvalidOption => "invalid_option",
             Self::UnsupportedTransport => "unsupported_transport",
             Self::EventBufferOverflow => "event_buffer_overflow",
+            Self::StartupContext(_) => "startup_context",
             Self::Harness(code) => match code {
                 jcode_harness_api::ErrorCode::UnsupportedVersion => "unsupported_version",
                 jcode_harness_api::ErrorCode::UnknownRequest => "unknown_request",

@@ -8,9 +8,11 @@
 /** A failure with a stable `code`, so callers branch on cause not message text. */
 export class HarnessError extends Error {
   readonly code: string;
-  constructor(code: string, message: string) {
+  readonly details?: unknown;
+  constructor(code: string, message: string, details?: unknown) {
     super(`${code}: ${message}`);
     this.code = code;
+    this.details = details;
     this.name = "HarnessError";
   }
 }
