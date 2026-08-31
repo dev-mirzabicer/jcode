@@ -774,10 +774,23 @@ pub fn save_todos(session_id: &str, todos: &[TodoItem]) -> Result<()> {
 }
 
 /// Remove todo state for a session creation that failed before publication.
-pub fn remove_todos(session_id: &str) {
-    if let Ok(path) = todo_path(session_id) {
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(path.with_extension("bak"));
+pub fn remove_todos(session_id: &str) -> Result<()> {
+    let path = todo_path(session_id)?;
+    let mut failures = Vec::new();
+    for candidate in [path.clone(), path.with_extension("bak")] {
+        match std::fs::remove_file(&candidate) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => failures.push(format!("{}: {error}", candidate.display())),
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "could not remove unpublished todo state: {}",
+            failures.join("; ")
+        )
     }
 }
 

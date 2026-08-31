@@ -57,6 +57,7 @@ pub fn remove_unpublished_session(session_id: &str) -> Result<()> {
     storage::unregister_active_pid(session_id);
     let snapshot = session_path(session_id)?;
     let journal = session_journal_path_from_snapshot(&snapshot);
+    let mut failures = Vec::new();
     for path in [
         snapshot.clone(),
         snapshot.with_extension("bak"),
@@ -66,13 +67,20 @@ pub fn remove_unpublished_session(session_id: &str) -> Result<()> {
         match std::fs::remove_file(&path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(error.into());
-            }
+            Err(error) => failures.push(format!("{}: {error}", path.display())),
         }
     }
-    crate::todo::remove_todos(session_id);
-    Ok(())
+    if let Err(error) = crate::todo::remove_todos(session_id) {
+        failures.push(error.to_string());
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "could not completely remove unpublished session {session_id}: {}",
+            failures.join("; ")
+        )
+    }
 }
 
 #[cfg(test)]
