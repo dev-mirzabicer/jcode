@@ -453,6 +453,7 @@ impl Agent {
                 let caller = error.caller();
                 let activation_error = error.to_string();
                 agent.session.mark_closed();
+                crate::tool::clear_session_tool_policy(&agent.session.id);
                 if let Err(source) = crate::session::remove_unpublished_session(&agent.session.id) {
                     return Err(StartupContextActivationError::Cleanup {
                         caller,

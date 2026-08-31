@@ -415,9 +415,16 @@ impl Agent {
             }
         };
 
+        let previous_session_id = self.session.id.clone();
         self.session.mark_closed();
         self.persist_session_best_effort("pre-clear session close state");
+        crate::tool::clear_session_tool_policy(&previous_session_id);
         self.session = new_session;
+        crate::tool::set_session_tool_policy(
+            &self.session.id,
+            self.allowed_tools.clone(),
+            self.disabled_tools.clone(),
+        );
         self.reconcile_explicit_provider_pin_route();
         self.reset_runtime_state_for_session_change();
         if let Err(error) = self.after_provider_context_changed(

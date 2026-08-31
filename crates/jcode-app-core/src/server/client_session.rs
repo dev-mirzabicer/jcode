@@ -215,6 +215,7 @@ pub(super) async fn handle_clear_session(
     {
         let mut agent_guard = agent.lock().await;
         agent_guard.mark_closed();
+        crate::tool::clear_session_tool_policy(&old_session_id);
     }
 
     let mut agent_guard = agent.lock().await;

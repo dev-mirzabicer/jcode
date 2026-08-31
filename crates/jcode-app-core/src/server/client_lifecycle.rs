@@ -546,6 +546,7 @@ pub(super) async fn handle_client(
     if requested_target.is_some() && !target_available && !allow_fresh_fallback {
         let provisional_session_id = new_agent.session_id().to_string();
         new_agent.mark_closed();
+        crate::tool::clear_session_tool_policy(&provisional_session_id);
         let cleanup_error = crate::session::remove_unpublished_session(&provisional_session_id)
             .err()
             .map(|error| format!("; provisional session cleanup failed: {error}"))
@@ -574,6 +575,7 @@ pub(super) async fn handle_client(
                 let activation_error = error.to_string();
                 let provisional_session_id = new_agent.session_id().to_string();
                 new_agent.mark_closed();
+                crate::tool::clear_session_tool_policy(&provisional_session_id);
                 let error =
                     match crate::session::remove_unpublished_session(&provisional_session_id) {
                         Ok(()) => error,
