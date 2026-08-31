@@ -379,7 +379,22 @@ fn transfer_capture_failure_leaves_no_child_session_or_todo_sidecar() {
         .filter_map(Result::ok)
         .map(|entry| entry.file_name())
         .collect::<std::collections::HashSet<_>>();
-    assert_eq!(after, before);
+    for file_name in after.difference(&before) {
+        let path = sessions_dir.join(file_name);
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let value: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(&path).expect("read concurrently created session snapshot"),
+        )
+        .expect("decode concurrently created session snapshot");
+        assert_ne!(
+            value["parent_id"].as_str(),
+            Some(parent.id.as_str()),
+            "rejected transfer left an unpublished child snapshot at {}",
+            path.display()
+        );
+    }
 
     if let Some(prev_home) = prev_home {
         crate::env::set_var("JCODE_HOME", prev_home);

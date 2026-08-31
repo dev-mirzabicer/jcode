@@ -74,3 +74,49 @@ pub fn remove_unpublished_session(session_id: &str) -> Result<()> {
     crate::todo::remove_todos(session_id);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unpublished_session_cleanup_removes_snapshot_journal_backup_todo_and_presence() {
+        let _lock = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().expect("test home");
+        let previous = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", home.path());
+        let id = "session-unpublished-cleanup";
+        let mut session = crate::session::Session::create_with_id(id.to_string(), None, None);
+        session.ensure_initial_session_context_message();
+        session.mark_active();
+        session.save().expect("save unpublished session");
+
+        let snapshot = session_path(id).expect("snapshot path");
+        let journal = session_journal_path_from_snapshot(&snapshot);
+        std::fs::write(snapshot.with_extension("bak"), b"snapshot backup")
+            .expect("write snapshot backup");
+        std::fs::write(&journal, b"journal").expect("write journal");
+        std::fs::write(journal.with_extension("bak"), b"journal backup")
+            .expect("write journal backup");
+        let todo = home.path().join("todos").join(format!("{id}.json"));
+        std::fs::create_dir_all(todo.parent().unwrap()).expect("create todo dir");
+        std::fs::write(&todo, b"[]").expect("write todo sidecar");
+
+        remove_unpublished_session(id).expect("remove unpublished session");
+        assert!(!snapshot.exists());
+        assert!(!snapshot.with_extension("bak").exists());
+        assert!(!journal.exists());
+        assert!(!journal.with_extension("bak").exists());
+        assert!(!todo.exists());
+        assert!(
+            !crate::session::active_session_ids()
+                .iter()
+                .any(|active| active == id)
+        );
+
+        match previous {
+            Some(value) => crate::env::set_var("JCODE_HOME", value),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+    }
+}
