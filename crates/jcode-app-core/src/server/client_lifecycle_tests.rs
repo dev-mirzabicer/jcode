@@ -2781,11 +2781,13 @@ async fn busy_startup_apply_drains_after_active_turn_before_next_user_prompt() {
     let first_turn = tokio::spawn(process_message_streaming_mpsc_with_request_id(
         Arc::clone(&agent),
         Arc::clone(&coordinator),
-        41,
-        "first prompt",
-        Vec::new(),
-        None,
-        true,
+        ProcessingMessage {
+            id: 41,
+            content: "first prompt".to_string(),
+            images: Vec::new(),
+            system_reminder: None,
+            observe_startup_context: true,
+        },
         event_tx.clone(),
     ));
     started.await;
@@ -2854,11 +2856,13 @@ async fn busy_startup_apply_drains_after_active_turn_before_next_user_prompt() {
     process_message_streaming_mpsc_with_request_id(
         Arc::clone(&agent),
         Arc::clone(&coordinator),
-        42,
-        "second prompt",
-        Vec::new(),
-        None,
-        true,
+        ProcessingMessage {
+            id: 42,
+            content: "second prompt".to_string(),
+            images: Vec::new(),
+            system_reminder: None,
+            observe_startup_context: true,
+        },
         event_tx,
     )
     .await

@@ -3768,11 +3768,13 @@ async fn start_processing_message(
             process_message_streaming_mpsc_with_request_id(
                 agent,
                 startup_context,
-                id,
-                &content,
-                images,
-                system_reminder,
-                observe_startup_context,
+                ProcessingMessage {
+                    id,
+                    content,
+                    images,
+                    system_reminder,
+                    observe_startup_context,
+                },
                 event_tx,
             ),
         ))
@@ -4139,13 +4141,16 @@ pub(super) async fn process_message_streaming_mpsc(
 async fn process_message_streaming_mpsc_with_request_id(
     agent: Arc<Mutex<Agent>>,
     startup_context: Arc<super::startup_context::StartupContextCoordinator>,
-    request_id: u64,
-    content: &str,
-    images: Vec<(String, String)>,
-    system_reminder: Option<String>,
-    observe_startup_context: bool,
+    message: ProcessingMessage,
     event_tx: tokio::sync::mpsc::UnboundedSender<ServerEvent>,
 ) -> Result<()> {
+    let ProcessingMessage {
+        id: request_id,
+        content,
+        images,
+        system_reminder,
+        observe_startup_context,
+    } = message;
     let mut agent = agent.lock().await;
     let session_id = agent.session_id().to_string();
     emit_startup_apply_drain_events(&startup_context, &mut agent, &event_tx);
@@ -4185,7 +4190,7 @@ async fn process_message_streaming_mpsc_with_request_id(
     let result = agent
         .run_once_streaming_mpsc_correlated(
             request_id,
-            content,
+            &content,
             images,
             system_reminder,
             event_tx.clone(),
