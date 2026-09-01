@@ -71,8 +71,9 @@ pub use startup_context::{
     DurableStartupContextSessionPersistence, PreparedStartupContextSessionApply,
     StartupContextAcceptanceOutcome, StartupContextAccounting, StartupContextDispatchError,
     StartupContextDispatchOutcome, StartupContextInstallError, StartupContextInstallOutcome,
-    StartupContextRepairOutcome, StartupContextSessionApplyError,
-    StartupContextSessionApplyOutcome, StartupContextSessionPersistence,
+    StartupContextObservationError, StartupContextObservationOutcome, StartupContextRepairOutcome,
+    StartupContextSessionApplyError, StartupContextSessionApplyOutcome,
+    StartupContextSessionPersistence,
 };
 #[cfg(test)]
 pub(crate) use storage_paths::session_path_in_dir;

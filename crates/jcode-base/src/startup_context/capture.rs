@@ -221,7 +221,7 @@ fn prepare_inputs(
     )
 }
 
-fn capture_stable_file(
+pub(super) fn capture_stable_file(
     project: &ActiveProject,
     initial_target: ResolvedStartupTarget,
     max_bytes: u64,
@@ -287,10 +287,11 @@ fn capture_attempt(
     let bounded_read = max_bytes.saturating_add(1);
     let capacity = usize::try_from(before.len().min(max_bytes)).unwrap_or(usize::MAX);
     let mut bytes = Vec::with_capacity(capacity);
-    file.by_ref()
-        .take(bounded_read)
-        .read_to_end(&mut bytes)
-        .map_err(|error| {
+    let mut digest = Sha256::new();
+    let mut bounded = file.by_ref().take(bounded_read);
+    let mut chunk = [0u8; 64 * 1024];
+    loop {
+        let read = bounded.read(&mut chunk).map_err(|error| {
             StartupFileIssue::for_spec(
                 &target.spec,
                 StartupFileIssueKind::Unreadable {
@@ -298,6 +299,13 @@ fn capture_attempt(
                 },
             )
         })?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&chunk[..read]);
+        bytes.extend_from_slice(&chunk[..read]);
+    }
+    drop(bounded);
     if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_bytes {
         return Err(StartupFileIssue::for_spec(
             &target.spec,
@@ -378,7 +386,7 @@ fn capture_attempt(
             },
         ));
     }
-    let sha256 = format!("{:x}", Sha256::digest(text.as_bytes()));
+    let sha256 = format!("{:x}", digest.finalize());
     let estimated_tokens = u64::try_from(crate::util::estimate_tokens(&text)).unwrap_or(u64::MAX);
     Ok(CapturedStartupFile::new(
         target.spec.id().clone(),

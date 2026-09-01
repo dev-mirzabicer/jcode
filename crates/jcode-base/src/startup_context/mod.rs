@@ -7,6 +7,7 @@
 
 mod browser;
 mod capture;
+mod observation;
 mod plan;
 mod project;
 mod selection;
@@ -201,6 +202,21 @@ impl StartupContext {
             plan_revision,
             preview,
             failure_policy,
+            self.max_batch_bytes,
+            self.max_capture_attempts,
+        )
+    }
+
+    /// Observe one previously captured receipt file using the same path,
+    /// external-target, stability, size, and UTF-8 support rules as capture.
+    pub(crate) fn observe_receipt_file(
+        &self,
+        project: &ActiveProject,
+        file: &jcode_session_types::StoredStartupFileReceipt,
+    ) -> StartupObservedState {
+        observation::observe_receipt_file(
+            project,
+            file,
             self.max_batch_bytes,
             self.max_capture_attempts,
         )

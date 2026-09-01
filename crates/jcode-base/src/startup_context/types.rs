@@ -14,6 +14,16 @@ pub const DEFAULT_MAX_STARTUP_PLAN_ENTRIES: usize = 1_024;
 pub const DEFAULT_MAX_STARTUP_BATCH_BYTES: u64 = 32 * 1024 * 1024;
 pub(super) const DEFAULT_MAX_CAPTURE_ATTEMPTS: usize = 2;
 
+/// Current supported disk state for one immutable startup snapshot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StartupObservedState {
+    Current,
+    Changed { sha256: String, bytes: u64 },
+    Missing,
+    Unreadable,
+    Unsupported,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ProjectKey {
     Git { canonical_common_dir: PathBuf },

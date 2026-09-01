@@ -138,6 +138,11 @@ pub struct StoredStartupFileReceipt {
     pub last_notified_observation: Option<StoredStartupObservedState>,
     #[serde(default)]
     pub notification_count: u8,
+    /// Stable transcript identities for the bounded stale markers emitted for
+    /// this file. The IDs let History and future export projections recognize
+    /// marker messages structurally without parsing agent-facing prose.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stale_marker_message_ids: Vec<String>,
 }
 
 /// One atomic control-message plus ordered file-message group.
@@ -342,6 +347,7 @@ mod tests {
                         },
                         last_notified_observation: None,
                         notification_count: 0,
+                        stale_marker_message_ids: Vec::new(),
                     }],
                     appended_at: timestamp,
                     delivery_state: StoredStartupBatchDeliveryState::Captured,

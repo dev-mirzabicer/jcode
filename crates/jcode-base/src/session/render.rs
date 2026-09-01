@@ -634,7 +634,10 @@ fn startup_context_history_message_ids(session: &Session) -> HashSet<&str> {
     if let Some(receipt) = session.startup_context.as_ref() {
         for batch in &receipt.batches {
             ids.insert(batch.control_message_id.as_str());
-            ids.extend(batch.files.iter().map(|file| file.message_id.as_str()));
+            for file in &batch.files {
+                ids.insert(file.message_id.as_str());
+                ids.extend(file.stale_marker_message_ids.iter().map(String::as_str));
+            }
         }
     }
     ids
