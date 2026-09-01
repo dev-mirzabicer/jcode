@@ -278,6 +278,34 @@ impl Agent {
         }
         Ok(outcome)
     }
+
+    /// Observe immutable Startup Context snapshots immediately before a real
+    /// user turn. Callers must not use this for tool continuations, provider
+    /// retries, redraws, or background-only activity.
+    pub fn observe_startup_context_before_user_turn(
+        &mut self,
+    ) -> Result<
+        crate::session::StartupContextObservationOutcome,
+        crate::session::StartupContextObservationError,
+    > {
+        self.observe_startup_context_before_user_turn_with(&StartupContext::new())
+    }
+
+    pub(crate) fn observe_startup_context_before_user_turn_with(
+        &mut self,
+        engine: &StartupContext,
+    ) -> Result<
+        crate::session::StartupContextObservationOutcome,
+        crate::session::StartupContextObservationError,
+    > {
+        let outcome = self
+            .session
+            .observe_startup_context_before_user_turn(engine)?;
+        if outcome.provider_history_changed() {
+            self.reseed_context_runtime_from_session();
+        }
+        Ok(outcome)
+    }
 }
 
 pub(crate) fn activate_session_startup_context(

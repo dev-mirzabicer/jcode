@@ -6,6 +6,7 @@ fn test_request_roundtrip() -> Result<()> {
         images: vec![],
         system_reminder: None,
         no_reply: false,
+        observe_startup_context: true,
     };
     let json = serde_json::to_string(&req)?;
     let decoded = parse_request_json(&json)?;

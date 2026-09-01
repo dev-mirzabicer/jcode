@@ -192,6 +192,31 @@ impl StartupContextUiState {
 }
 
 impl App {
+    pub(in crate::tui::app) fn observe_local_startup_context_before_user_turn(&mut self) {
+        if self.is_remote {
+            return;
+        }
+        match self
+            .session
+            .observe_startup_context_before_user_turn(&crate::startup_context::StartupContext::new())
+        {
+            Ok(outcome) => {
+                if outcome.provider_history_changed() {
+                    self.reseed_context_runtime_from_provider_messages();
+                }
+            }
+            Err(error) => {
+                crate::logging::warn(&format!(
+                    "STARTUP_CONTEXT_STALE_OBSERVATION_FAILED session={} error={}",
+                    self.session.id, error
+                ));
+                self.set_status_notice(format!(
+                    "Startup Context warning: observation was not saved; the turn will continue without a stale marker · {error}"
+                ));
+            }
+        }
+    }
+
     pub(in crate::tui::app) fn startup_context_debug_fixture_names() -> &'static [&'static str] {
         &[
             "loading",
@@ -210,6 +235,7 @@ impl App {
             "editor-loading",
             "editor-empty",
             "editor-populated",
+            "editor-stale",
             "editor-invalid",
             "editor-external",
             "editor-busy",
@@ -346,6 +372,7 @@ impl App {
                     sha256: "fedcba9876543210".repeat(4),
                     bytes: 91_240,
                 };
+                files[0].notification_count = 2;
             }
             "busy" => {
                 compact.lease = StartupContextLeaseAvailability::Busy {
@@ -404,6 +431,7 @@ impl App {
                 };
             }
             "editor-populated"
+            | "editor-stale"
             | "editor-invalid"
             | "editor-external"
             | "editor-apply-review"
@@ -434,6 +462,17 @@ impl App {
             }
             "loading" | "unsupported" => unreachable!(),
             _ => return Err(format!("unhandled Startup Context fixture {name:?}")),
+        }
+
+        if name == "editor-stale" {
+            compact.state = StartupContextStatusState::ProviderAccepted;
+            compact.stale_file_count = 1;
+            files[0].delivery_state = StartupContextDeliveryState::ProviderAccepted;
+            files[0].latest_observation = StartupContextObservedState::Changed {
+                sha256: "fedcba9876543210".repeat(4),
+                bytes: 91_240,
+            };
+            files[0].notification_count = 2;
         }
 
         self.startup_context_ui.availability = StartupContextAvailability::Available;

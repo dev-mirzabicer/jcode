@@ -3751,6 +3751,8 @@ impl App {
         // Leaving the preview should happen as soon as the user acts on it.
         self.onboarding_preview_mode = false;
 
+        self.observe_local_startup_context_before_user_turn();
+
         // Add user message to display (show placeholder to user, not full paste)
         // Remember the typed prompt so we can restore it to the input box if this
         // turn fails (e.g. "token refresh needed"), instead of dropping it.
@@ -3914,6 +3916,9 @@ impl App {
                 merge_turn_reminders(reminder, mission_turn_reminder(&self.session.id));
 
             if has_combined {
+                if !preserve_visible_turn {
+                    self.observe_local_startup_context_before_user_turn();
+                }
                 self.add_provider_message(Message::user(&combined));
                 self.session.add_message(
                     Role::User,

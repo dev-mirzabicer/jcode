@@ -2423,6 +2423,12 @@ pub async fn run_single_message_command(
         }
     };
 
+    if let Err(error) = agent.observe_startup_context_before_user_turn() {
+        eprintln!(
+            "Startup Context warning: the latest file observation could not be saved, so no stale marker was claimed: {error}"
+        );
+    }
+
     if emit_json {
         let text = run_single_message_command_capture_with_auto_poke(&mut agent, message).await?;
         let report = RunCommandReport {

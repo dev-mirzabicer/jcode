@@ -157,6 +157,7 @@ struct ProcessingMessage {
     content: String,
     images: Vec<(String, String)>,
     system_reminder: Option<String>,
+    observe_startup_context: bool,
 }
 
 struct ProcessingState<'a> {
@@ -1188,6 +1189,7 @@ pub(super) async fn handle_client(
                 images,
                 system_reminder,
                 no_reply,
+                observe_startup_context,
             } => {
                 if no_reply {
                     append_context_message(
@@ -1215,6 +1217,7 @@ pub(super) async fn handle_client(
                         content,
                         images,
                         system_reminder,
+                        observe_startup_context,
                     },
                     &client_session_id,
                     &mut ProcessingState {
@@ -3695,6 +3698,7 @@ async fn start_processing_message(
         content,
         images,
         system_reminder,
+        observe_startup_context,
     } = message;
     if server_reload_starting() {
         crate::logging::info(&format!(
@@ -3768,6 +3772,7 @@ async fn start_processing_message(
                 &content,
                 images,
                 system_reminder,
+                observe_startup_context,
                 event_tx,
             ),
         ))
@@ -4138,11 +4143,45 @@ async fn process_message_streaming_mpsc_with_request_id(
     content: &str,
     images: Vec<(String, String)>,
     system_reminder: Option<String>,
+    observe_startup_context: bool,
     event_tx: tokio::sync::mpsc::UnboundedSender<ServerEvent>,
 ) -> Result<()> {
     let mut agent = agent.lock().await;
     let session_id = agent.session_id().to_string();
     emit_startup_apply_drain_events(&startup_context, &mut agent, &event_tx);
+    match observe_startup_context
+        .then(|| startup_context.observe_before_user_turn(&mut agent))
+        .transpose()
+    {
+        Ok(None) => {}
+        Ok(Some(outcome)) if outcome.receipt_changed => {
+            crate::logging::info(&format!(
+                "STARTUP_CONTEXT_STALE_OBSERVED session={} observed_files={} stale_files={} markers_appended={}",
+                session_id,
+                outcome.observed_file_count,
+                outcome.stale_file_count,
+                outcome.marker_count
+            ));
+        }
+        Ok(Some(_)) => {}
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "STARTUP_CONTEXT_STALE_OBSERVATION_FAILED session={} error={}",
+                session_id, error
+            ));
+            let _ = event_tx.send(ServerEvent::StartupContextFailed {
+                id: 0,
+                failure: super::startup_context::failure(
+                    crate::protocol::StartupContextOperation::Observe,
+                    crate::protocol::StartupContextFailureKind::Io,
+                    format!(
+                        "Could not save the latest Startup Context file observation. The turn will continue without claiming that a stale marker was delivered: {error}"
+                    ),
+                    true,
+                ),
+            });
+        }
+    }
     let result = agent
         .run_once_streaming_mpsc_correlated(
             request_id,

@@ -32,6 +32,10 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum LegacyContextCommand {
     #[default]
@@ -56,6 +60,11 @@ pub enum Request {
         /// acknowledges it without starting a model turn.
         #[serde(default, skip_serializing_if = "is_false")]
         no_reply: bool,
+        /// Observe captured Startup Context files before this turn. Older
+        /// clients omit the field and retain ordinary real-user semantics.
+        /// Synthetic continuations and provider retries set it to false.
+        #[serde(default = "default_true", skip_serializing_if = "is_true")]
+        observe_startup_context: bool,
     },
 
     /// Cancel current generation

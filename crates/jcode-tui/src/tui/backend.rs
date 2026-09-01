@@ -561,6 +561,22 @@ impl RemoteConnection {
         images: Vec<(String, String)>,
         system_reminder: Option<String>,
     ) -> Result<u64> {
+        self.send_message_with_images_reminder_and_startup_observation(
+            content,
+            images,
+            system_reminder,
+            true,
+        )
+        .await
+    }
+
+    pub async fn send_message_with_images_reminder_and_startup_observation(
+        &mut self,
+        content: String,
+        images: Vec<(String, String)>,
+        system_reminder: Option<String>,
+        observe_startup_context: bool,
+    ) -> Result<u64> {
         // Output token usage snapshots are cumulative within a single API call.
         // Reset per-call watermark before sending the next user request.
         self.reset_call_output_tokens_seen();
@@ -572,6 +588,7 @@ impl RemoteConnection {
             images,
             system_reminder,
             no_reply: false,
+            observe_startup_context,
         };
         self.next_request_id += 1;
         self.send_request(request).await?;

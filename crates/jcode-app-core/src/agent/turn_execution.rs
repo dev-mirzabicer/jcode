@@ -1143,6 +1143,11 @@ impl Agent {
                     println!("{}\n", skill.description);
                     self.active_skill = Some(invocation.name.to_string());
                     if let Some(prompt) = invocation.prompt {
+                        if let Err(error) = self.observe_startup_context_before_user_turn() {
+                            eprintln!(
+                                "\nStartup Context warning: the latest file observation could not be saved, so no stale marker was claimed: {error}\n"
+                            );
+                        }
                         if let Err(e) = self.run_once(prompt).await {
                             eprintln!("\nError: {}\n", e);
                         }
@@ -1164,6 +1169,11 @@ impl Agent {
                 }
             }
 
+            if let Err(error) = self.observe_startup_context_before_user_turn() {
+                eprintln!(
+                    "\nStartup Context warning: the latest file observation could not be saved, so no stale marker was claimed: {error}\n"
+                );
+            }
             if let Err(e) = self.run_once(input).await {
                 eprintln!("\nError: {}\n", e);
             }

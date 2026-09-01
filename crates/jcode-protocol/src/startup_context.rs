@@ -478,6 +478,7 @@ pub struct StartupContextApplyStatus {
 #[serde(rename_all = "snake_case")]
 pub enum StartupContextOperation {
     Status,
+    Observe,
     OpenEditor,
     RenewLease,
     CloseEditor,

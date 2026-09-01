@@ -565,6 +565,11 @@ impl StartupContextEditor {
             generation: 1,
             scroll: 0,
         };
+        if name == "editor-stale" {
+            value.active_pane = StartupContextEditorPane::Selection;
+            value.selection_view = SelectionView::Receipt;
+            value.receipt_cursor = 0;
+        }
         if name == "editor-invalid" {
             let id = value.alloc_local_id();
             let mut invalid = DraftEntry::pending(id, "docs/MISSING.md".to_string());

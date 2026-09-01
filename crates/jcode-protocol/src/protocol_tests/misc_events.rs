@@ -211,7 +211,8 @@ fn test_set_route_deserializes_as_set_model_compat_alias() -> Result<()> {
 }
 
 #[test]
-fn obsolete_compaction_commands_decode_only_to_non_executable_compatibility_envelopes() -> Result<()> {
+fn obsolete_compaction_commands_decode_only_to_non_executable_compatibility_envelopes() -> Result<()>
+{
     for (json, expected_id, expected_command) in [
         (
             r#"{"type":"compact","id":42}"#,
@@ -223,11 +224,7 @@ fn obsolete_compaction_commands_decode_only_to_non_executable_compatibility_enve
             43,
             LegacyContextCommand::SetCompactionMode,
         ),
-        (
-            r#"{"type":"compact"}"#,
-            0,
-            LegacyContextCommand::Compact,
-        ),
+        (r#"{"type":"compact"}"#, 0, LegacyContextCommand::Compact),
     ] {
         let decoded = decode_request(json)?;
         let Request::LegacyContextCommand { id, command } = decoded else {
@@ -454,6 +451,7 @@ fn test_message_request_roundtrip_preserves_images_and_system_reminder() -> Resu
         ],
         system_reminder: Some("be concise".to_string()),
         no_reply: true,
+        observe_startup_context: false,
     };
     let json = serde_json::to_string(&req)?;
     let decoded = parse_request_json(&json)?;
@@ -463,6 +461,7 @@ fn test_message_request_roundtrip_preserves_images_and_system_reminder() -> Resu
         images,
         system_reminder,
         no_reply,
+        observe_startup_context,
     } = decoded
     else {
         return Err(anyhow!("expected Message"));
@@ -474,6 +473,17 @@ fn test_message_request_roundtrip_preserves_images_and_system_reminder() -> Resu
     assert_eq!(images[1].0, "image/jpeg");
     assert_eq!(system_reminder.as_deref(), Some("be concise"));
     assert!(no_reply);
+    assert!(!observe_startup_context);
+
+    let legacy =
+        parse_request_json(r#"{"type":"message","id":89,"content":"legacy","no_reply":false}"#)?;
+    assert!(matches!(
+        legacy,
+        Request::Message {
+            observe_startup_context: true,
+            ..
+        }
+    ));
     Ok(())
 }
 
@@ -497,9 +507,7 @@ fn test_provider_guardrail_event_roundtrip() -> Result<()> {
     assert_eq!(message, "Provider guardrail stopped the response");
 
     // stop_reason is optional on the wire.
-    let decoded = parse_event_json(
-        r#"{"type":"provider_guardrail","message":"blocked"}"#,
-    )?;
+    let decoded = parse_event_json(r#"{"type":"provider_guardrail","message":"blocked"}"#)?;
     let ServerEvent::ProviderGuardrail { stop_reason, .. } = decoded else {
         return Err(anyhow!("expected ProviderGuardrail event"));
     };

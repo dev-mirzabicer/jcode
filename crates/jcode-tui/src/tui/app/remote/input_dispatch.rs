@@ -16,10 +16,11 @@ pub(in crate::tui::app) async fn begin_remote_send(
     retry_attempts: u8,
 ) -> Result<u64> {
     let msg_id = remote
-        .send_message_with_images_and_reminder(
+        .send_message_with_images_reminder_and_startup_observation(
             content.clone(),
             images.clone(),
             system_reminder.clone(),
+            !is_system && retry_attempts == 0,
         )
         .await?;
     app.current_message_id = Some(msg_id);

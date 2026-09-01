@@ -1,4 +1,5 @@
 use super::ServerIdentity;
+use crate::agent::Agent;
 use crate::message::ContentBlock;
 use crate::protocol::{
     STARTUP_CONTEXT_DIRECTORY_DEFAULT_PAGE_SIZE, STARTUP_CONTEXT_DIRECTORY_MAX_PAGE_SIZE,
@@ -278,6 +279,16 @@ impl StartupContextCoordinator {
             .leases
             .retain(|_, lease| lease.owner_connection_id != connection_id);
         before.saturating_sub(state.leases.len())
+    }
+
+    pub(super) fn observe_before_user_turn(
+        &self,
+        agent: &mut Agent,
+    ) -> Result<
+        crate::session::StartupContextObservationOutcome,
+        crate::session::StartupContextObservationError,
+    > {
+        agent.observe_startup_context_before_user_turn_with(&self.inner.engine)
     }
 
     pub(super) async fn compact_status(

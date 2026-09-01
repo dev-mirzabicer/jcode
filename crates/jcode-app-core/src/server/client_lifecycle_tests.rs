@@ -735,6 +735,35 @@ impl Provider for CompleteImmediatelyProvider {
     }
 }
 
+#[derive(Clone, Default)]
+struct RecordingImmediateProvider {
+    snapshots: Arc<std::sync::Mutex<Vec<Vec<Message>>>>,
+}
+
+#[async_trait]
+impl Provider for RecordingImmediateProvider {
+    async fn complete(
+        &self,
+        messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        self.snapshots.lock().unwrap().push(messages.to_vec());
+        Ok(Box::pin(stream::iter(vec![Ok(StreamEvent::MessageEnd {
+            stop_reason: Some("end_turn".to_string()),
+        })])))
+    }
+
+    fn name(&self) -> &str {
+        "recording-immediate"
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
 #[derive(Clone)]
 struct StartupApplyBoundaryProvider {
     calls: Arc<AtomicUsize>,
@@ -1206,6 +1235,7 @@ async fn blocked_shared_startup_emits_prompt_safe_action_and_rolls_back_unanswer
         images: vec![("image/png".to_string(), "synthetic-image".to_string())],
         system_reminder: None,
         no_reply: false,
+        observe_startup_context: true,
     };
     client_writer
         .write_all((serde_json::to_string(&request).expect("serialize message") + "\n").as_bytes())
@@ -1281,6 +1311,262 @@ async fn blocked_shared_startup_emits_prompt_safe_action_and_rolls_back_unanswer
         .await
         .expect("server task join")
         .expect("server task result");
+    assert!(client_connections.read().await.is_empty());
+}
+
+#[tokio::test]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "the real staleness stream-pair journey serializes JCODE_HOME and runtime state"
+)]
+async fn later_real_user_turn_observes_staleness_before_prompt_and_continues() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    let project = tempfile::tempdir().expect("stale project");
+    let selected_path = project.path().join("required.txt");
+    let startup_body = "WP09_SYNTHETIC_STARTUP_BODY";
+    std::fs::write(&selected_path, startup_body).expect("seed selected file");
+    let startup = crate::startup_context::StartupContext::new();
+    let active = startup
+        .resolve_project(project.path())
+        .expect("resolve stale project");
+    let preview = startup.preview_selection(
+        &active,
+        [crate::startup_context::StartupSelectionInput::new(
+            "required.txt",
+        )],
+    );
+    startup
+        .save_project_plan(&active, 0, &preview)
+        .expect("save stale plan");
+
+    let provider = RecordingImmediateProvider::default();
+    let snapshots = Arc::clone(&provider.snapshots);
+    let (server_stream, client_stream) = crate::transport::stream_pair().expect("stream pair");
+    let sessions = Arc::new(RwLock::new(HashMap::new()));
+    let client_connections = Arc::new(RwLock::new(HashMap::new()));
+    let (debug_response_tx, _) = broadcast::channel(8);
+    let (swarm_event_tx, _) = broadcast::channel(8);
+    let (global_event_tx, _) = broadcast::channel(8);
+    let server_task = tokio::spawn(handle_client(
+        server_stream,
+        Arc::clone(&sessions),
+        global_event_tx,
+        Arc::new(provider),
+        Arc::new(crate::context::ContextTransactionService::new()),
+        crate::server::startup_context::test_coordinator(),
+        Arc::new(RwLock::new(false)),
+        Arc::new(RwLock::new(String::new())),
+        Arc::new(RwLock::new(1usize)),
+        Arc::clone(&client_connections),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        FileTouchService::new(),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(ClientDebugState::default())),
+        debug_response_tx,
+        Arc::new(RwLock::new(std::collections::VecDeque::new())),
+        Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        swarm_event_tx,
+        "jcode-test".to_string(),
+        "🧪".to_string(),
+        Arc::new(crate::mcp::SharedMcpPool::from_default_config()),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        AwaitMembersRuntime::default(),
+        SwarmMutationRuntime::default(),
+    ));
+    let (client_reader, mut client_writer) = client_stream.into_split();
+    let mut reader = BufReader::new(client_reader);
+    let subscribe = subscribe_request(Some(project.path().to_string_lossy().as_ref()));
+    client_writer
+        .write_all(
+            (serde_json::to_string(&subscribe).expect("serialize subscribe") + "\n").as_bytes(),
+        )
+        .await
+        .expect("write subscribe");
+    let session_id = loop {
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line))
+            .await
+            .expect("subscribe timeout")
+            .expect("read subscribe event");
+        assert!(!line.is_empty(), "server closed before SessionId");
+        if let ServerEvent::SessionId { session_id } = decode_request_or_event(&line) {
+            break session_id;
+        }
+    };
+
+    for (id, prompt, observe_startup_context) in [
+        (3, "first real user turn", true),
+        (4, "synthetic continuation", false),
+        (5, "later real user turn", true),
+    ] {
+        if id == 4 {
+            std::fs::write(&selected_path, "WP09_SYNTHETIC_CHANGED_BODY")
+                .expect("change selected file before later turn");
+        }
+        let request = Request::Message {
+            id,
+            content: prompt.to_string(),
+            images: Vec::new(),
+            system_reminder: None,
+            no_reply: false,
+            observe_startup_context,
+        };
+        client_writer
+            .write_all(
+                (serde_json::to_string(&request).expect("serialize message") + "\n").as_bytes(),
+            )
+            .await
+            .expect("write message");
+        loop {
+            let mut line = String::new();
+            tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line))
+                .await
+                .expect("turn timeout")
+                .expect("read turn event");
+            assert!(!line.is_empty(), "server closed before Done");
+            if matches!(decode_request_or_event(&line), ServerEvent::Done { id: done } if done == id)
+            {
+                break;
+            }
+        }
+    }
+
+    let status_request = Request::GetStartupContextStatus {
+        id: 6,
+        file_page_start: 0,
+        file_page_size: Some(8),
+        issue_page_start: 0,
+        issue_page_size: Some(8),
+    };
+    client_writer
+        .write_all(
+            (serde_json::to_string(&status_request).expect("serialize status") + "\n").as_bytes(),
+        )
+        .await
+        .expect("write status");
+    let status = loop {
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line))
+            .await
+            .expect("status timeout")
+            .expect("read status event");
+        assert!(!line.is_empty(), "server closed before status");
+        if let ServerEvent::StartupContextStatus {
+            id: 6, snapshot, ..
+        } = decode_request_or_event(&line)
+        {
+            break snapshot;
+        }
+    };
+    assert_eq!(status.compact.stale_file_count, 1);
+    assert_eq!(status.files[0].notification_count, 1);
+    assert!(matches!(
+        status.files[0].latest_observation,
+        crate::protocol::StartupContextObservedState::Changed { .. }
+    ));
+    let status_json = serde_json::to_string(&status).unwrap();
+    assert!(!status_json.contains(startup_body));
+    assert!(!status_json.contains("WP09_SYNTHETIC_CHANGED_BODY"));
+
+    drop(client_writer);
+    server_task
+        .await
+        .expect("server task join")
+        .expect("server task result");
+    let persisted = crate::session::Session::load(&session_id).expect("load stale session");
+    let file = &persisted.startup_context.as_ref().unwrap().batches[0].files[0];
+    assert_eq!(file.notification_count, 1);
+    assert_eq!(file.stale_marker_message_ids.len(), 1);
+    let marker_id = &file.stale_marker_message_ids[0];
+    let marker_index = persisted
+        .messages
+        .iter()
+        .position(|message| &message.id == marker_id)
+        .expect("persisted stale marker");
+    let later_prompt_index = persisted
+        .messages
+        .iter()
+        .position(|message| {
+            message.content.iter().any(
+                |block| matches!(block, ContentBlock::Text { text, .. } if text.contains("later real user turn")),
+            )
+        })
+        .expect("persisted later prompt");
+    assert_eq!(marker_index + 1, later_prompt_index);
+    let synthetic_prompt_index = persisted
+        .messages
+        .iter()
+        .position(|message| {
+            message.content.iter().any(
+                |block| matches!(block, ContentBlock::Text { text, .. } if text.contains("synthetic continuation")),
+            )
+        })
+        .expect("persisted synthetic continuation");
+    assert!(synthetic_prompt_index < marker_index);
+
+    let snapshots = snapshots.lock().unwrap();
+    let marker_message = persisted.messages[marker_index].to_message();
+    let marker_value = serde_json::to_value(&marker_message).unwrap();
+    let first_snapshot = snapshots
+        .iter()
+        .find(|snapshot| {
+            snapshot.iter().any(|message| {
+                message.content.iter().any(
+                    |block| matches!(block, ContentBlock::Text { text, .. } if text.contains("first real user turn")),
+                )
+            })
+        })
+        .expect("provider snapshot for first real turn");
+    let later_snapshot = snapshots
+        .iter()
+        .find(|snapshot| {
+            snapshot.iter().any(|message| {
+                message.content.iter().any(
+                    |block| matches!(block, ContentBlock::Text { text, .. } if text.contains("later real user turn")),
+                )
+            })
+        })
+        .expect("provider snapshot for later real turn");
+    let synthetic_snapshot = snapshots
+        .iter()
+        .find(|snapshot| {
+            snapshot.iter().any(|message| {
+                message.content.iter().any(
+                    |block| matches!(block, ContentBlock::Text { text, .. } if text.contains("synthetic continuation")),
+                )
+            })
+        })
+        .expect("provider snapshot for synthetic continuation");
+    assert!(
+        !first_snapshot
+            .iter()
+            .any(|message| serde_json::to_value(message).unwrap() == marker_value)
+    );
+    assert!(
+        !synthetic_snapshot
+            .iter()
+            .any(|message| serde_json::to_value(message).unwrap() == marker_value)
+    );
+    let provider_marker_index = later_snapshot
+        .iter()
+        .position(|message| serde_json::to_value(message).unwrap() == marker_value)
+        .expect("provider received stale marker");
+    let provider_prompt_index = later_snapshot
+        .iter()
+        .position(|message| {
+            message.content.iter().any(
+                |block| matches!(block, ContentBlock::Text { text, .. } if text.contains("later real user turn")),
+            )
+        })
+        .expect("provider received later prompt");
+    assert_eq!(provider_marker_index + 1, provider_prompt_index);
     assert!(client_connections.read().await.is_empty());
 }
 
@@ -1387,6 +1673,7 @@ fn reload_starting_rejects_new_turn_without_spawning_processing_task() {
                 content: "do not start during reload".to_string(),
                 images: Vec::new(),
                 system_reminder: None,
+                observe_startup_context: true,
             },
             "session_guard",
             &mut ProcessingState {
@@ -1498,6 +1785,7 @@ async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attac
             content: "stream to every attachment".to_string(),
             images: Vec::new(),
             system_reminder: None,
+            observe_startup_context: true,
         },
         session_id,
         &mut ProcessingState {
@@ -1623,6 +1911,7 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
                 content: "continue after reload".to_string(),
                 images: Vec::new(),
                 system_reminder: Some(continuation.to_string()),
+                observe_startup_context: false,
             },
             session_id,
             &mut ProcessingState {
@@ -1723,6 +2012,7 @@ fn reload_starting_rejects_new_turns_for_multiple_sessions() {
                     content: format!("do not start {session_id} during reload"),
                     images: Vec::new(),
                     system_reminder: None,
+                    observe_startup_context: true,
                 },
                 session_id,
                 &mut ProcessingState {
@@ -2495,6 +2785,7 @@ async fn busy_startup_apply_drains_after_active_turn_before_next_user_prompt() {
         "first prompt",
         Vec::new(),
         None,
+        true,
         event_tx.clone(),
     ));
     started.await;
@@ -2567,6 +2858,7 @@ async fn busy_startup_apply_drains_after_active_turn_before_next_user_prompt() {
         "second prompt",
         Vec::new(),
         None,
+        true,
         event_tx,
     )
     .await

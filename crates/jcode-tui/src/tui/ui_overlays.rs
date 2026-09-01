@@ -947,13 +947,16 @@ pub(super) fn draw_startup_context_overlay(
                     StartupContextObservedState::Unreadable => " · unreadable".to_string(),
                     StartupContextObservedState::Unsupported => " · unsupported".to_string(),
                 };
+                let notices = (file.notification_count > 0)
+                    .then(|| format!(" · notices {}/2", file.notification_count))
+                    .unwrap_or_default();
                 lines.push(Line::from(vec![
                     Span::styled(format!("  {:>3}. ", file.ordinal), dim_style),
                     Span::styled(file.logical_path.clone(), text_style),
                     Span::styled(
                         format!(
-                            " · {} bytes · ~{} tokens · {kind}/{delivery}{observation}",
-                            file.bytes, file.estimated_tokens
+                            " · {} bytes · ~{} tokens · {kind}/{delivery}{observation}{notices}",
+                            file.bytes, file.estimated_tokens,
                         ),
                         dim_style,
                     ),

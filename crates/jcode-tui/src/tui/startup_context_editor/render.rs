@@ -583,12 +583,15 @@ impl StartupContextEditor {
                         StartupContextObservedState::Unreadable => "unreadable",
                         StartupContextObservedState::Unsupported => "unsupported",
                     };
+                    let notices = (receipt.notification_count > 0)
+                        .then(|| format!(" · {}/2 notices", receipt.notification_count))
+                        .unwrap_or_default();
                     let label = truncate_middle(
                         &format!(
-                            "{:>3}. {} · {} · {observation}",
+                            "{observation} · {:>3}. {} · {}{notices}",
                             receipt.ordinal,
                             receipt.logical_path,
-                            format_bytes(receipt.bytes)
+                            format_bytes(receipt.bytes),
                         ),
                         rect.width as usize,
                     );

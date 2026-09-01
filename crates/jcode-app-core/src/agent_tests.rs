@@ -143,6 +143,7 @@ fn synthetic_startup_session(id: &str) -> Session {
                 },
                 last_notified_observation: None,
                 notification_count: 0,
+                stale_marker_message_ids: Vec::new(),
             }],
             appended_at: now,
             delivery_state: StoredStartupBatchDeliveryState::Captured,

@@ -51,6 +51,22 @@ fn startup_context_compact_status_renders_every_required_state_at_wide_and_narro
 }
 
 #[test]
+fn startup_context_stale_receipt_shows_marker_limit_without_raw_content() {
+    let mut app = create_test_app();
+    app.apply_startup_context_debug_fixture("editor-stale")
+        .expect("apply stale fixture");
+    for (width, height) in [(120, 30), (72, 24)] {
+        let rendered = render_startup_context_fixture(&app, width, height);
+        assert!(rendered.contains("changed"), "{width}x{height}\n{rendered}");
+        assert!(
+            rendered.contains("2/2 notices"),
+            "{width}x{height}\n{rendered}"
+        );
+        assert!(!rendered.contains("fixture receipt body"));
+    }
+}
+
+#[test]
 fn startup_context_editor_foundation_renders_wide_and_narrow_states() {
     let cases = [
         (
