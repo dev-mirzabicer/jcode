@@ -128,7 +128,9 @@ pub fn memory_sidecar_enabled() -> bool {
 ///
 /// Re-evaluated live so login add/remove is reflected without a restart.
 pub fn memory_llm_judge_available() -> bool {
-    memory_sidecar_enabled() && crate::sidecar::Sidecar::llm_backend_available()
+    crate::config::config().features.memory
+        && memory_sidecar_enabled()
+        && crate::sidecar::Sidecar::llm_backend_available()
 }
 
 /// Whether memory should do anything at all this moment.
@@ -143,6 +145,9 @@ pub fn memory_llm_judge_available() -> bool {
 /// reachable" (e.g. logged out / lost access): rather than silently degrading
 /// to the low-precision no-LLM path, memory goes dormant until a login returns.
 pub fn memory_runtime_active() -> bool {
+    if !crate::config::config().features.memory {
+        return false;
+    }
     if !memory_sidecar_enabled() {
         // Explicit opt-out: user chose the no-LLM hybrid path on purpose.
         return true;

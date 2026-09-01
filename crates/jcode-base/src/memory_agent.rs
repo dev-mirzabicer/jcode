@@ -166,6 +166,9 @@ fn manager_for_working_dir(working_dir: Option<&str>) -> MemoryManager {
 }
 
 async fn run_final_extraction(transcript: String, session_id: String, working_dir: Option<String>) {
+    if !crate::config::config().features.memory {
+        return;
+    }
     crate::logging::info(&format!(
         "Final extraction starting for session {} ({} chars)",
         session_id,
@@ -1822,6 +1825,9 @@ pub fn update_context_sync_with_dir(
     messages: Arc<[crate::message::Message]>,
     working_dir: Option<String>,
 ) {
+    if !crate::config::config().features.memory {
+        return;
+    }
     if let Some(handle) = get() {
         handle.update_context_sync_with_dir(session_id, messages, working_dir);
     } else {
@@ -1855,6 +1861,9 @@ pub fn trigger_final_extraction_with_dir(
     session_id: String,
     working_dir: Option<String>,
 ) {
+    if !crate::config::config().features.memory {
+        return;
+    }
     if transcript.len() < 200 {
         return;
     }

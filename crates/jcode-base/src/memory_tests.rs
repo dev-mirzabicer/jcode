@@ -1,6 +1,31 @@
 use super::*;
 
 #[test]
+fn global_disable_closes_memory_runtime_and_sidecar_paths() {
+    let _guard = crate::storage::lock_test_env();
+    let previous_memory = std::env::var_os("JCODE_MEMORY_ENABLED");
+    let previous_sidecar = std::env::var_os("JCODE_MEMORY_SIDECAR_ENABLED");
+    crate::env::set_var("JCODE_MEMORY_ENABLED", "false");
+    crate::env::set_var("JCODE_MEMORY_SIDECAR_ENABLED", "false");
+    crate::config::invalidate_config_cache();
+
+    assert!(!memory_runtime_active());
+    assert!(!memory_llm_judge_available());
+
+    if let Some(previous_memory) = previous_memory {
+        crate::env::set_var("JCODE_MEMORY_ENABLED", previous_memory);
+    } else {
+        crate::env::remove_var("JCODE_MEMORY_ENABLED");
+    }
+    if let Some(previous_sidecar) = previous_sidecar {
+        crate::env::set_var("JCODE_MEMORY_SIDECAR_ENABLED", previous_sidecar);
+    } else {
+        crate::env::remove_var("JCODE_MEMORY_SIDECAR_ENABLED");
+    }
+    crate::config::invalidate_config_cache();
+}
+
+#[test]
 fn manager_without_project_dir_does_not_use_process_cwd() {
     assert!(MemoryManager::new().get_project_dir().is_none());
 }
