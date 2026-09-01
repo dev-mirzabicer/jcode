@@ -583,9 +583,11 @@ impl StartupContextEditor {
                         StartupContextObservedState::Unreadable => "unreadable",
                         StartupContextObservedState::Unsupported => "unsupported",
                     };
-                    let notices = (receipt.notification_count > 0)
-                        .then(|| format!(" · {}/2 notices", receipt.notification_count))
-                        .unwrap_or_default();
+                    let notices = if receipt.notification_count > 0 {
+                        format!(" · {}/2 notices", receipt.notification_count)
+                    } else {
+                        String::new()
+                    };
                     let label = truncate_middle(
                         &format!(
                             "{observation} · {:>3}. {} · {}{notices}",

@@ -947,9 +947,11 @@ pub(super) fn draw_startup_context_overlay(
                     StartupContextObservedState::Unreadable => " · unreadable".to_string(),
                     StartupContextObservedState::Unsupported => " · unsupported".to_string(),
                 };
-                let notices = (file.notification_count > 0)
-                    .then(|| format!(" · notices {}/2", file.notification_count))
-                    .unwrap_or_default();
+                let notices = if file.notification_count > 0 {
+                    format!(" · notices {}/2", file.notification_count)
+                } else {
+                    String::new()
+                };
                 lines.push(Line::from(vec![
                     Span::styled(format!("  {:>3}. ", file.ordinal), dim_style),
                     Span::styled(file.logical_path.clone(), text_style),
