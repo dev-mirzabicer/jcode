@@ -410,6 +410,15 @@ pub(super) async fn handle_set_feature(
 ) {
     match feature {
         FeatureToggle::Memory => {
+            if enabled && !crate::config::config().features.memory {
+                let _ = client_event_tx.send(ServerEvent::Error {
+                    id,
+                    message: "Memory is disabled by global configuration and cannot be enabled for this session."
+                        .to_string(),
+                    retry_after_secs: None,
+                });
+                return;
+            }
             let mut agent_guard = agent.lock().await;
             agent_guard.set_memory_enabled(enabled);
             drop(agent_guard);

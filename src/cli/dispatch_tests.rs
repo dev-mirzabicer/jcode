@@ -2,6 +2,27 @@ use super::*;
 use crate::transport::Listener;
 
 #[test]
+fn memory_cli_is_unavailable_when_globally_disabled() {
+    let _lock = crate::storage::lock_test_env();
+    let previous = std::env::var_os("JCODE_MEMORY_ENABLED");
+    crate::env::set_var("JCODE_MEMORY_ENABLED", "false");
+    crate::config::invalidate_config_cache();
+
+    let error = ensure_memory_available().expect_err("disabled memory must reject CLI access");
+    assert_eq!(
+        error.to_string(),
+        "memory is disabled by global configuration"
+    );
+
+    if let Some(previous) = previous {
+        crate::env::set_var("JCODE_MEMORY_ENABLED", previous);
+    } else {
+        crate::env::remove_var("JCODE_MEMORY_ENABLED");
+    }
+    crate::config::invalidate_config_cache();
+}
+
+#[test]
 fn only_file_controlled_debug_clients_need_parent_lifetime_binding() {
     let _lock = crate::storage::lock_test_env();
     let previous = std::env::var_os("JCODE_DEBUG_CMD_PATH");

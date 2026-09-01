@@ -3178,6 +3178,9 @@ async fn restore_session_rehydrates_injected_memory_ids() {
 #[tokio::test]
 async fn build_memory_prompt_nonblocking_defers_pending_memory_during_tool_loop() {
     let _guard = crate::storage::lock_test_env();
+    let previous_memory = std::env::var_os("JCODE_MEMORY_ENABLED");
+    crate::env::set_var("JCODE_MEMORY_ENABLED", "true");
+    crate::config::invalidate_config_cache();
     crate::memory::clear_all_pending_memory();
 
     let provider: Arc<dyn Provider> = Arc::new(ImmediateEmptyProvider);
@@ -3221,6 +3224,33 @@ async fn build_memory_prompt_nonblocking_defers_pending_memory_during_tool_loop(
     assert!(!crate::memory::has_pending_memory(&session_id));
 
     crate::memory::clear_all_pending_memory();
+    if let Some(previous_memory) = previous_memory {
+        crate::env::set_var("JCODE_MEMORY_ENABLED", previous_memory);
+    } else {
+        crate::env::remove_var("JCODE_MEMORY_ENABLED");
+    }
+    crate::config::invalidate_config_cache();
+}
+
+#[tokio::test]
+async fn session_memory_cannot_override_global_disablement() {
+    let _guard = crate::storage::lock_test_env();
+    let previous = std::env::var_os("JCODE_MEMORY_ENABLED");
+    crate::env::set_var("JCODE_MEMORY_ENABLED", "false");
+    crate::config::invalidate_config_cache();
+
+    let provider: Arc<dyn Provider> = Arc::new(ImmediateEmptyProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    agent.set_memory_enabled(true);
+    assert!(!agent.memory_enabled());
+
+    if let Some(previous) = previous {
+        crate::env::set_var("JCODE_MEMORY_ENABLED", previous);
+    } else {
+        crate::env::remove_var("JCODE_MEMORY_ENABLED");
+    }
+    crate::config::invalidate_config_cache();
 }
 
 #[tokio::test]

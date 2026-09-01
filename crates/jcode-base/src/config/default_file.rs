@@ -261,8 +261,9 @@ prompt_entry_animation = true
 # error = "#ff6464"
 
 [features]
-# Memory: retrieval + extraction sidecar features
-memory = true
+# Memory is a global availability gate. When false, recall, extraction,
+# memory tools, memory CLI operations, and ambient memory work are unavailable.
+memory = false
 # Swarm: multi-session coordination features
 swarm = true
 # Mermaid: render Mermaid code blocks and tell the model that diagrams are supported
@@ -687,7 +688,10 @@ mod tests {
     #[test]
     fn default_config_template_parses() {
         let template = Config::default_config_file_contents();
-        toml::from_str::<Config>(&template).expect("the shipped config template must parse");
+        let config =
+            toml::from_str::<Config>(&template).expect("the shipped config template must parse");
+        assert!(!config.features.memory);
+        assert!(template.contains("memory = false"));
     }
 
     /// Colors are only discoverable if the template mentions them, since most

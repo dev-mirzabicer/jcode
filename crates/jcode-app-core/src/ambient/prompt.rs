@@ -19,6 +19,12 @@ pub struct MemoryGraphHealth {
     pub last_consolidation: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct AmbientMemoryContext {
+    pub graph_health: MemoryGraphHealth,
+    pub feedback: Vec<String>,
+}
+
 /// Summary of a recent session for the ambient prompt.
 #[derive(Debug, Clone)]
 pub struct RecentSessionInfo {
@@ -276,9 +282,8 @@ pub fn gather_recent_sessions(since: Option<DateTime<Utc>>) -> Vec<RecentSession
 pub fn build_ambient_system_prompt(
     state: &AmbientState,
     queue: &[ScheduledItem],
-    graph_health: &MemoryGraphHealth,
+    memory: Option<&AmbientMemoryContext>,
     recent_sessions: &[RecentSessionInfo],
-    feedback_memories: &[String],
     budget: &ResourceBudget,
     active_user_sessions: usize,
 ) -> String {
@@ -382,50 +387,51 @@ pub fn build_ambient_system_prompt(
     }
     prompt.push('\n');
 
-    // --- Memory Graph Health ---
-    prompt.push_str("## Memory Graph Health\n");
-    prompt.push_str(&format!(
-        "- Total memories: {} ({} active, {} inactive)\n",
-        graph_health.total, graph_health.active, graph_health.inactive,
-    ));
-    prompt.push_str(&format!(
-        "- Memories with confidence < 0.1: {}\n",
-        graph_health.low_confidence,
-    ));
-    prompt.push_str(&format!(
-        "- Unresolved contradictions: {}\n",
-        graph_health.contradictions,
-    ));
-    prompt.push_str(&format!(
-        "- Memories without embeddings: {}\n",
-        graph_health.missing_embeddings,
-    ));
-    if graph_health.duplicate_candidates > 0 {
+    if let Some(memory) = memory {
+        let graph_health = &memory.graph_health;
+        prompt.push_str("## Memory Graph Health\n");
         prompt.push_str(&format!(
-            "- Duplicate candidates (similarity > 0.95): {}\n",
-            graph_health.duplicate_candidates,
+            "- Total memories: {} ({} active, {} inactive)\n",
+            graph_health.total, graph_health.active, graph_health.inactive,
         ));
-    } else {
-        prompt.push_str("- Duplicate candidates: run embedding scan to detect\n");
-    }
-    if let Some(ts) = graph_health.last_consolidation {
-        let ago = format_duration_rough(Utc::now() - ts);
-        prompt.push_str(&format!("- Last consolidation: {} ago\n", ago));
-    } else {
-        prompt.push_str("- Last consolidation: never\n");
-    }
-    prompt.push('\n');
-
-    // --- User Feedback History ---
-    prompt.push_str("## User Feedback History\n");
-    if feedback_memories.is_empty() {
-        prompt.push_str("No feedback memories found about ambient mode yet.\n");
-    } else {
-        for mem in feedback_memories {
-            prompt.push_str(&format!("- {}\n", mem));
+        prompt.push_str(&format!(
+            "- Memories with confidence < 0.1: {}\n",
+            graph_health.low_confidence,
+        ));
+        prompt.push_str(&format!(
+            "- Unresolved contradictions: {}\n",
+            graph_health.contradictions,
+        ));
+        prompt.push_str(&format!(
+            "- Memories without embeddings: {}\n",
+            graph_health.missing_embeddings,
+        ));
+        if graph_health.duplicate_candidates > 0 {
+            prompt.push_str(&format!(
+                "- Duplicate candidates (similarity > 0.95): {}\n",
+                graph_health.duplicate_candidates,
+            ));
+        } else {
+            prompt.push_str("- Duplicate candidates: run embedding scan to detect\n");
         }
+        if let Some(ts) = graph_health.last_consolidation {
+            let ago = format_duration_rough(Utc::now() - ts);
+            prompt.push_str(&format!("- Last consolidation: {} ago\n", ago));
+        } else {
+            prompt.push_str("- Last consolidation: never\n");
+        }
+        prompt.push('\n');
+
+        prompt.push_str("## User Feedback History\n");
+        if memory.feedback.is_empty() {
+            prompt.push_str("No feedback memories found about ambient mode yet.\n");
+        } else {
+            for item in &memory.feedback {
+                prompt.push_str(&format!("- {}\n", item));
+            }
+        }
+        prompt.push('\n');
     }
-    prompt.push('\n');
 
     // --- Resource Budget ---
     prompt.push_str("## Resource Budget\n");
@@ -475,23 +481,16 @@ pub fn build_ambient_system_prompt(
          - `schedule_ambient` — schedule your next wake time.\n\
          - `request_permission` — get approval before any code change.\n\
          - `send_message` — keep the user informed.\n\
-         Standard tools (`bash`, `read`, `write`, `edit`, `memory`, etc.) are \
+         Standard tools (`bash`, `read`, `write`, `edit`, etc.) are \
          also available.\n\n\
          Start by using the `todo` tool to plan what you'll do this cycle.\n\n\
          Priority order:\n\
          1. Execute any scheduled queue items first.\n\
-         2. Garden the memory graph -- consolidate duplicates, resolve \
-            contradictions, prune dead memories, verify stale facts, \
-            extract from missed sessions.\n\
-         3. Scout for proactive work (only if enabled and past cold start) -- \
+         2. Scout for proactive work (only if enabled and past cold start) -- \
             look at recent sessions and git history to identify useful work \
             the user would appreciate.\n\n\
-         For gardening: focus on highest-value maintenance first. Duplicates \
-         and contradictions before pruning. Verify stale facts only if you \
-         have budget left.\n\n\
          For proactive work: be conservative. A bad surprise is worse than \
-         no surprise. Check the user feedback memories -- if they've rejected \
-         similar work before, don't do it. Code changes must go on a worktree \
+         no surprise. Code changes must go on a worktree \
          branch with a PR via request_permission.\n\n\
          Every request_permission call must be reviewer-ready. Include:\n\
          - description: concise summary of what you are about to do\n\
@@ -516,6 +515,12 @@ pub fn build_ambient_system_prompt(
          without opening jcode. You can optionally target a specific channel \
          (e.g. telegram, discord) or omit channel to send to all.\n",
     );
+
+    if memory.is_some() {
+        prompt.push_str(
+            "\nMemory is enabled for this cycle. Garden the memory graph after scheduled work: consolidate duplicates, resolve contradictions, prune dead memories, verify stale facts, and extract from missed sessions. Check feedback memories before proposing similar proactive work.\n",
+        );
+    }
 
     prompt
 }

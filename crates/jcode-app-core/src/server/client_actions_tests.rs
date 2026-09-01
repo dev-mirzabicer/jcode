@@ -504,6 +504,57 @@ async fn enabling_swarm_does_not_auto_elect_coordinator() {
 }
 
 #[tokio::test]
+async fn remote_memory_enable_is_rejected_when_globally_disabled() {
+    let _guard = crate::storage::lock_test_env();
+    let previous = std::env::var_os("JCODE_MEMORY_ENABLED");
+    crate::env::set_var("JCODE_MEMORY_ENABLED", "false");
+    crate::config::invalidate_config_cache();
+
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let agent = Arc::new(Mutex::new(Agent::new(provider, registry)));
+    let mut swarm_enabled = false;
+    let swarm_members = Arc::new(RwLock::new(HashMap::new()));
+    let swarms_by_id = Arc::new(RwLock::new(HashMap::new()));
+    let swarm_coordinators = Arc::new(RwLock::new(HashMap::new()));
+    let channel_subscriptions = Arc::new(RwLock::new(HashMap::new()));
+    let channel_subscriptions_by_session = Arc::new(RwLock::new(HashMap::new()));
+    let swarm_plans = Arc::new(RwLock::new(HashMap::new()));
+    let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
+
+    handle_set_feature(
+        43,
+        FeatureToggle::Memory,
+        true,
+        &agent,
+        "session_memory_disabled",
+        &None,
+        &mut swarm_enabled,
+        &swarm_members,
+        &swarms_by_id,
+        &swarm_coordinators,
+        &channel_subscriptions,
+        &channel_subscriptions_by_session,
+        &swarm_plans,
+        &client_event_tx,
+    )
+    .await;
+
+    assert!(!agent.lock().await.memory_enabled());
+    assert!(matches!(
+        client_event_rx.try_recv(),
+        Ok(ServerEvent::Error { id: 43, .. })
+    ));
+
+    if let Some(previous) = previous {
+        crate::env::set_var("JCODE_MEMORY_ENABLED", previous);
+    } else {
+        crate::env::remove_var("JCODE_MEMORY_ENABLED");
+    }
+    crate::config::invalidate_config_cache();
+}
+
+#[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn rename_session_event_uses_agent_session_id_even_when_client_id_is_stale() {
     let _guard = crate::storage::lock_test_env();

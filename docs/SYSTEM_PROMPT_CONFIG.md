@@ -34,7 +34,9 @@ The first non-empty file wins; otherwise the built-in default is used. An empty 
 whitespace-only file falls back to the default, so you cannot accidentally ship an
 empty prompt.
 
-This replaces only the base prompt. AGENTS.md, overlays, skills, and memory still apply.
+This replaces only the base prompt. `AGENTS.md`, overlays, and skills still apply. Agent memory
+would remain a separate dynamic source when globally enabled, but Mirza's downstream disables it.
+See [`MEMORY_POLICY.md`](MEMORY_POLICY.md).
 
 ## Notes
 

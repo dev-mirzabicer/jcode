@@ -604,8 +604,8 @@ impl Agent {
 
     /// Enable or disable memory features for this session.
     pub fn set_memory_enabled(&mut self, enabled: bool) {
-        self.memory_enabled = enabled;
-        if !enabled {
+        self.memory_enabled = enabled && crate::config::config().features.memory;
+        if !self.memory_enabled {
             crate::memory::clear_pending_memory(&self.session.id);
         }
     }
@@ -638,7 +638,7 @@ impl Agent {
 
     /// Check whether memory features are enabled for this session.
     pub fn memory_enabled(&self) -> bool {
-        self.memory_enabled
+        self.memory_enabled && crate::config::config().features.memory
     }
 
     /// Set the stdin request channel for interactive stdin forwarding
@@ -1190,7 +1190,7 @@ impl Agent {
     /// Extract memories from the session transcript
     /// Returns the number of memories extracted, or 0 if none/skipped
     pub async fn extract_session_memories(&self) -> usize {
-        if !self.memory_enabled {
+        if !self.memory_enabled() {
             return 0;
         }
 

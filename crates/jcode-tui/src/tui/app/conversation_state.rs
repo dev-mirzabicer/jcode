@@ -215,9 +215,13 @@ impl App {
         self.remote_history_recovery_last_attempt = None;
     }
 
+    pub(super) fn memory_feature_enabled(&self) -> bool {
+        self.memory_enabled && crate::config::config().features.memory
+    }
+
     pub(super) fn set_memory_feature_enabled(&mut self, enabled: bool) {
-        self.memory_enabled = enabled;
-        if !enabled {
+        self.memory_enabled = enabled && crate::config::config().features.memory;
+        if !self.memory_enabled {
             crate::memory::clear_pending_memory(&self.session.id);
             crate::memory::clear_activity();
             crate::memory_agent::reset();
@@ -237,7 +241,7 @@ impl App {
 
     pub(super) fn trigger_save_memory_extraction(&self) {
         let provider_messages = self.materialized_provider_messages();
-        if self.is_remote || !self.memory_enabled || provider_messages.len() < 4 {
+        if self.is_remote || !self.memory_feature_enabled() || provider_messages.len() < 4 {
             return;
         }
 

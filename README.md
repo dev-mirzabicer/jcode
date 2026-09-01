@@ -14,10 +14,6 @@ The most intelligent harness
 
 <a href="https://trendshift.io/repositories/25042?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-25042" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/25042" alt="1jehuang/jcode | Trendshift" width="250" height="55"></a>
 
-<a href="https://github.com/1jehuang/jcode/releases/download/readme-assets/jcode-memory-demo.mp4">
-  <img src="https://github.com/1jehuang/jcode/releases/download/readme-assets/jcode-memory-demo.webp" alt="jcode memory demonstration" width="800">
-</a>
-
 <br>
 
 [Website](https://jcode.sh) · [Docs](https://jcode.sh/docs) · [SDK](https://jcode.sh/sdk) · [Benchmarks](https://jcode.sh/bench) · [Features](#features) · [Install](#installation) · [Quick Start](#quick-start) · [Further Reading](#further-reading) · [Contributing](CONTRIBUTING.md)
@@ -267,25 +263,14 @@ versions tested for this corrected memory rerun:
 
 ## Memory (Agent memory)
 
-Jcode embeds each turn/response as a semantic vector. Every turn does queries a graph of memories to efficiently find related memory entries via a cosine similarity check. The embedding hits are fed into the conversation, or optionally uses a memory sideagent which verifies the memories are relevant, and potentially does more work for information retreival before injecting into the conversation. This results in a human like memory system which allows the agent to automatically recall relevant information to the conversation without actively calling memory tools or being a token burner. 
-ot 
-To have memories which are retrieved, they must also be extracted and stored. Every so often (semantic drift, K turns since last extraction, session end, etc), memories are extracted via a memory sideagent, and put into the memory graph. 
+Mirza's downstream disables agent memory globally. Jcode does not automatically retrieve,
+inject, extract, store, or maintain memories, and the agent does not receive the memory tool.
+The retained implementation and existing data remain dormant and unchanged.
 
-The harness also provides explicit memory tools to allow the agent to actively search or store the memory without relying on a passive background process. The harness also provides session search for traditional RAG on previous sessions. 
-
-Memories are automatically consolidated every so often via the ambient mode. This reorganizes, checks for staleness and conflicts, etc
-
-<div align="center">
-
-  <a href="https://github.com/1jehuang/jcode/releases/download/readme-assets/jcode-memory-demo.mp4">
-    <img src="https://github.com/1jehuang/jcode/releases/download/readme-assets/jcode-memory-demo.webp" alt="jcode memory demonstration" width="900">
-  </a>
-
-  <p><em>jcode memory demonstration</em></p>
-
-</div>
-
-<!-- Memory demo media is hosted in the readme-assets release. -->
+Startup Context, project instructions, skills, explicit session search, and Context Editor
+projection are separate capabilities and remain available. See
+[Memory policy](docs/MEMORY_POLICY.md) for exact behavior, data preservation, cache effects,
+and reactivation boundaries.
 
 ---
 
@@ -790,7 +775,8 @@ Notes:
 - [Browser Provider Protocol](docs/BROWSER_PROVIDER_PROTOCOL.md)
 - [Context Control and the Context Editor](docs/CONTEXT_CONTROL.md)
 - [Startup Context](docs/STARTUP_CONTEXT.md)
-- [Memory Architecture](docs/MEMORY_ARCHITECTURE.md)
+- [Memory Policy](docs/MEMORY_POLICY.md)
+- [Dormant Memory Architecture](docs/MEMORY_ARCHITECTURE.md)
 - [Swarm Architecture](docs/SWARM_ARCHITECTURE.md)
 - [Server Architecture](docs/SERVER_ARCHITECTURE.md)
 - [Safety System](docs/SAFETY_SYSTEM.md)

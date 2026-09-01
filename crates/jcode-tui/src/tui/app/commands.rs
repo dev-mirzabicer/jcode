@@ -1853,9 +1853,15 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
 
     if trimmed == "/memory status" {
         let default_enabled = crate::config::config().features.memory;
+        if !default_enabled {
+            app.push_display_message(DisplayMessage::system(
+                "Memory is disabled by global configuration.".to_string(),
+            ));
+            return true;
+        }
         app.push_display_message(DisplayMessage::system(format!(
             "Memory feature: {} (config default: {})",
-            if app.memory_enabled {
+            if app.memory_feature_enabled() {
                 "enabled"
             } else {
                 "disabled"
@@ -1870,7 +1876,14 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
     }
 
     if trimmed == "/memory" {
-        let new_state = !app.memory_enabled;
+        if !crate::config::config().features.memory {
+            app.push_display_message(DisplayMessage::error(
+                "Memory is disabled by global configuration and cannot be enabled for this session."
+                    .to_string(),
+            ));
+            return true;
+        }
+        let new_state = !app.memory_feature_enabled();
         app.set_memory_feature_enabled(new_state);
         let label = if new_state { "ON" } else { "OFF" };
         app.set_status_notice(format!("Memory: {}", label));
@@ -1882,6 +1895,13 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
     }
 
     if trimmed == "/memory on" {
+        if !crate::config::config().features.memory {
+            app.push_display_message(DisplayMessage::error(
+                "Memory is disabled by global configuration and cannot be enabled for this session."
+                    .to_string(),
+            ));
+            return true;
+        }
         app.set_memory_feature_enabled(true);
         app.set_status_notice("Memory: ON");
         app.push_display_message(DisplayMessage::system(
@@ -3237,10 +3257,23 @@ pub(super) fn handle_agents_command(app: &mut App, trimmed: &str) -> bool {
         return true;
     }
 
-    let Some(target) = parse_agents_target(rest) else {
+    if matches!(rest, "memory" | "memories" | "sidecar") && !crate::config::config().features.memory
+    {
         app.push_display_message(DisplayMessage::error(
-            "Usage: /agents or /agents <swarm|review|judge|memory|ambient>".to_string(),
+            "Memory is disabled by global configuration.".to_string(),
         ));
+        return true;
+    }
+
+    let Some(target) = parse_agents_target(rest) else {
+        let targets = if crate::config::config().features.memory {
+            "swarm|review|judge|memory|ambient"
+        } else {
+            "swarm|review|judge|ambient"
+        };
+        app.push_display_message(DisplayMessage::error(format!(
+            "Usage: /agents or /agents <{targets}>"
+        )));
         return true;
     };
 

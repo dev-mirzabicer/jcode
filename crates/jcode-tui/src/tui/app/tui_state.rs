@@ -1351,7 +1351,10 @@ impl crate::tui::TuiState for App {
             }
         });
 
-        let memory_info = gather_memory_info(self.memory_enabled, self.session.working_dir.clone());
+        let memory_info = gather_memory_info(
+            self.memory_feature_enabled(),
+            self.session.working_dir.clone(),
+        );
 
         // Gather swarm info
         let swarm_info = if self.swarm_enabled {

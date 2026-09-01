@@ -380,7 +380,9 @@ export, and privacy behavior.
 ## Context pressure, safe budgets, and prompt preservation
 
 Jcode computes preflight after assembling the actual system prompts, tools, projected
-history, memory, pending user input, and provider request-budget semantics.
+history, any enabled dynamic context sources, pending user input, and provider request-budget
+semantics. Agent memory is globally disabled in Mirza's downstream; see
+[`MEMORY_POLICY.md`](MEMORY_POLICY.md).
 
 Provider budgets distinguish:
 

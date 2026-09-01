@@ -945,26 +945,27 @@ impl AmbientRunnerHandle {
                     // Send notifications (fire-and-forget)
                     self.inner.notifier.dispatch_cycle_summary(&transcript);
 
-                    // Post-cycle memory consolidation (fire-and-forget)
-                    tokio::spawn(async move {
-                        let manager = MemoryManager::new();
-                        match manager.backfill_embeddings() {
-                            Ok((backfilled, _failed)) => {
-                                if backfilled > 0 {
-                                    logging::info(&format!(
-                                        "Ambient: backfilled {} embeddings",
-                                        backfilled
+                    if config().features.memory {
+                        tokio::spawn(async move {
+                            let manager = MemoryManager::new();
+                            match manager.backfill_embeddings() {
+                                Ok((backfilled, _failed)) => {
+                                    if backfilled > 0 {
+                                        logging::info(&format!(
+                                            "Ambient: backfilled {} embeddings",
+                                            backfilled
+                                        ));
+                                    }
+                                }
+                                Err(e) => {
+                                    logging::error(&format!(
+                                        "Ambient: embedding backfill failed: {}",
+                                        e
                                     ));
                                 }
                             }
-                            Err(e) => {
-                                logging::error(&format!(
-                                    "Ambient: embedding backfill failed: {}",
-                                    e
-                                ));
-                            }
-                        }
-                    });
+                        });
+                    }
                 }
                 Err(e) => {
                     logging::error(&format!("Ambient cycle failed: {}", e));
@@ -1027,10 +1028,14 @@ impl AmbientRunnerHandle {
         let mgr = AmbientManager::new()?;
         let queue_items: Vec<_> = mgr.queue().items().to_vec();
 
-        let memory_manager = MemoryManager::new();
-        let graph_health = ambient::gather_memory_graph_health(&memory_manager);
         let recent_sessions = ambient::gather_recent_sessions(state.last_run);
-        let feedback_memories = ambient::gather_feedback_memories(&memory_manager);
+        let memory = config().features.memory.then(|| {
+            let memory_manager = MemoryManager::new();
+            ambient::AmbientMemoryContext {
+                graph_health: ambient::gather_memory_graph_health(&memory_manager),
+                feedback: ambient::gather_feedback_memories(&memory_manager),
+            }
+        });
 
         let budget = ambient::ResourceBudget {
             provider: provider.name().to_string(),
@@ -1045,14 +1050,18 @@ impl AmbientRunnerHandle {
         let system_prompt = ambient::build_ambient_system_prompt(
             &state,
             &queue_items,
-            &graph_health,
+            memory.as_ref(),
             &recent_sessions,
-            &feedback_memories,
             &budget,
             active_sessions,
         );
 
-        let initial_message = "Begin your ambient cycle. Check the scheduled queue, assess memory graph health, and plan your work using the `todo` tool.".to_string();
+        let initial_message = if memory.is_some() {
+            "Begin your ambient cycle. Check the scheduled queue, assess memory graph health, and plan your work using the `todo` tool."
+        } else {
+            "Begin your ambient cycle. Check the scheduled queue and plan your work using the `todo` tool."
+        }
+        .to_string();
 
         Ok((system_prompt, initial_message))
     }

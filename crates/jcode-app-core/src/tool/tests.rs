@@ -76,6 +76,31 @@ async fn test_tool_definitions_are_sorted() {
     );
 }
 
+#[tokio::test]
+async fn memory_tool_is_absent_when_globally_disabled() {
+    let _guard = crate::storage::lock_test_env();
+    let previous = std::env::var_os("JCODE_MEMORY_ENABLED");
+    crate::env::set_var("JCODE_MEMORY_ENABLED", "false");
+    crate::config::invalidate_config_cache();
+
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider).await;
+    assert!(
+        !registry
+            .tool_names()
+            .await
+            .iter()
+            .any(|name| name == "memory")
+    );
+
+    if let Some(previous) = previous {
+        crate::env::set_var("JCODE_MEMORY_ENABLED", previous);
+    } else {
+        crate::env::remove_var("JCODE_MEMORY_ENABLED");
+    }
+    crate::config::invalidate_config_cache();
+}
+
 #[test]
 fn test_resolve_skill_aliases_to_skill_manage() {
     assert_eq!(Registry::resolve_tool_name("skill"), "skill_manage");

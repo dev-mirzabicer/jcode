@@ -1117,9 +1117,10 @@ pub(super) fn gather_memory_info(
     static CACHE: Mutex<Option<(Instant, Option<MemoryInfo>, bool)>> = Mutex::new(None);
     const TTL: Duration = Duration::from_secs(2);
 
-    // When memory is disabled we still surface the stored counts (with a
-    // DISABLED badge) so the user can see they have memories but recall is off.
-    // Live activity and the sidecar model are suppressed in that case.
+    if !memory_enabled {
+        return None;
+    }
+
     let activity = if memory_enabled {
         crate::memory::get_activity()
     } else {
@@ -1183,6 +1184,9 @@ fn fallback_memory_info(
     activity: &Option<crate::memory_types::MemoryActivity>,
     sidecar_model: &Option<String>,
 ) -> Option<MemoryInfo> {
+    if !memory_enabled {
+        return None;
+    }
     // No cached counts yet. Show whatever live signal we have.
     if activity.is_none() && sidecar_model.is_none() && memory_enabled {
         return None;

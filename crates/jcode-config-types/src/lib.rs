@@ -1004,7 +1004,7 @@ fn default_true() -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FeatureConfig {
-    /// Enable memory retrieval/extraction features (default: true)
+    /// Globally enable memory retrieval, extraction, tools, and maintenance (default: false)
     pub memory: bool,
     /// Enable swarm coordination features (default: true)
     pub swarm: bool,
@@ -1033,7 +1033,7 @@ pub struct FeatureConfig {
 impl Default for FeatureConfig {
     fn default() -> Self {
         Self {
-            memory: true,
+            memory: false,
             swarm: true,
             mermaid: true,
             auto_poke: true,

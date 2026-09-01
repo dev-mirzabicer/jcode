@@ -343,9 +343,11 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     lines.push(separator());
     lines.push(Line::from(""));
 
-    lines.push(Line::from(Span::styled("  Memory & Swarm", section_style)));
+    lines.push(Line::from(Span::styled("  Automation", section_style)));
     lines.push(Line::from(""));
-    lines.push(help_entry("/memory [on|off]", "Toggle memory features"));
+    if crate::config::config().features.memory {
+        lines.push(help_entry("/memory [on|off]", "Toggle memory features"));
+    }
     lines.push(help_entry(
         "/test [claim]",
         "Run layered verification and produce proof",

@@ -30,7 +30,7 @@ impl Agent {
         messages: std::sync::Arc<[Message]>,
         _memory_event_tx: Option<crate::memory::MemoryEventSink>,
     ) -> Option<crate::memory::PendingMemory> {
-        if !self.memory_enabled {
+        if !self.memory_enabled() {
             return None;
         }
 

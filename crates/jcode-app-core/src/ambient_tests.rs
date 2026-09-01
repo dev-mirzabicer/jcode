@@ -606,8 +606,11 @@ fn test_build_ambient_system_prompt_minimal() {
         cycle_budget_desc: "stay under 50k tokens".into(),
     };
 
-    let prompt =
-        build_ambient_system_prompt(&state, &queue, &health, &sessions, &feedback, &budget, 0);
+    let memory = AmbientMemoryContext {
+        graph_health: health,
+        feedback,
+    };
+    let prompt = build_ambient_system_prompt(&state, &queue, Some(&memory), &sessions, &budget, 0);
 
     assert!(prompt.contains("ambient agent for jcode"));
     assert!(prompt.contains("## Current State"));
@@ -683,8 +686,11 @@ fn test_build_ambient_system_prompt_with_data() {
         cycle_budget_desc: "stay under 15k tokens".into(),
     };
 
-    let prompt =
-        build_ambient_system_prompt(&state, &queue, &health, &sessions, &feedback, &budget, 2);
+    let memory = AmbientMemoryContext {
+        graph_health: health,
+        feedback,
+    };
+    let prompt = build_ambient_system_prompt(&state, &queue, Some(&memory), &sessions, &budget, 2);
 
     assert!(prompt.contains("15m ago"));
     assert!(prompt.contains("Active user sessions: 2"));
@@ -706,6 +712,26 @@ fn test_build_ambient_system_prompt_with_data() {
     assert!(prompt.contains("Files: src/main.rs"));
     assert!(prompt.contains("Branch: main"));
     assert!(prompt.contains("Tests were flaky yesterday"));
+}
+
+#[test]
+fn ambient_prompt_omits_memory_when_globally_unavailable() {
+    let state = AmbientState::default();
+    let queue = vec![];
+    let sessions = vec![];
+    let budget = ResourceBudget {
+        provider: "test".into(),
+        tokens_remaining_desc: "unknown".into(),
+        window_resets_desc: "unknown".into(),
+        user_usage_rate_desc: "unknown".into(),
+        cycle_budget_desc: "small".into(),
+    };
+
+    let prompt = build_ambient_system_prompt(&state, &queue, None, &sessions, &budget, 0);
+    assert!(!prompt.contains("## Memory Graph Health"));
+    assert!(!prompt.contains("## User Feedback History"));
+    assert!(!prompt.contains("`memory`"));
+    assert!(!prompt.contains("Garden the memory graph"));
 }
 
 #[test]

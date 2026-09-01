@@ -1607,9 +1607,15 @@ async fn handle_remote_key_internal(
 
                 if trimmed == "/memory status" {
                     let default_enabled = crate::config::config().features.memory;
+                    if !default_enabled {
+                        app.push_display_message(DisplayMessage::system(
+                            "Memory is disabled by global configuration.".to_string(),
+                        ));
+                        return Ok(());
+                    }
                     app.push_display_message(DisplayMessage::system(format!(
                         "Memory feature: {} (config default: {})",
-                        if app.memory_enabled {
+                        if app.memory_feature_enabled() {
                             "enabled"
                         } else {
                             "disabled"
@@ -1624,7 +1630,14 @@ async fn handle_remote_key_internal(
                 }
 
                 if trimmed == "/memory" {
-                    let new_state = !app.memory_enabled;
+                    if !crate::config::config().features.memory {
+                        app.push_display_message(DisplayMessage::error(
+                            "Memory is disabled by global configuration and cannot be enabled for this session."
+                                .to_string(),
+                        ));
+                        return Ok(());
+                    }
+                    let new_state = !app.memory_feature_enabled();
                     remote
                         .set_feature(crate::protocol::FeatureToggle::Memory, new_state)
                         .await?;
@@ -1639,6 +1652,13 @@ async fn handle_remote_key_internal(
                 }
 
                 if trimmed == "/memory on" {
+                    if !crate::config::config().features.memory {
+                        app.push_display_message(DisplayMessage::error(
+                            "Memory is disabled by global configuration and cannot be enabled for this session."
+                                .to_string(),
+                        ));
+                        return Ok(());
+                    }
                     remote
                         .set_feature(crate::protocol::FeatureToggle::Memory, true)
                         .await?;
@@ -1841,7 +1861,7 @@ async fn handle_remote_key_internal(
                         return Ok(());
                     }
                     crate::tui::session_picker::invalidate_session_list_cache();
-                    if app.memory_enabled
+                    if app.memory_feature_enabled()
                         && let Err(err) = remote.trigger_memory_extraction().await
                     {
                         crate::logging::info(&format!(

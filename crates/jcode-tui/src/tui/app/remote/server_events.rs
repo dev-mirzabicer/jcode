@@ -2577,7 +2577,7 @@ pub(in crate::tui::app) fn handle_server_event(
             prompt_chars: _,
             computed_age_ms,
         } => {
-            if app.memory_enabled {
+            if app.memory_feature_enabled() {
                 let plural = if count == 1 { "memory" } else { "memories" };
                 let display_prompt = if let Some(display_prompt) = display_prompt {
                     display_prompt.clone()
@@ -2598,7 +2598,7 @@ pub(in crate::tui::app) fn handle_server_event(
             false
         }
         ServerEvent::MemoryActivity { activity } => {
-            if app.memory_enabled {
+            if app.memory_feature_enabled() {
                 crate::memory::apply_remote_activity_snapshot(&activity);
             }
             false

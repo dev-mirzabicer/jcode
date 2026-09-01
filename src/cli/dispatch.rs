@@ -21,6 +21,13 @@ use super::{
 };
 use provider_init::ProviderChoice;
 
+fn ensure_memory_available() -> Result<()> {
+    if !crate::config::config().features.memory {
+        anyhow::bail!("memory is disabled by global configuration");
+    }
+    Ok(())
+}
+
 #[cfg(any(test, target_os = "linux"))]
 fn is_file_controlled_debug_client() -> bool {
     std::env::var_os("JCODE_DEBUG_CMD_PATH").is_some()
@@ -399,6 +406,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             }
         },
         Some(Command::Memory(subcmd)) => {
+            ensure_memory_available()?;
             commands::run_memory_command(map_memory_subcommand(subcmd))?;
         }
         Some(Command::Session(subcmd)) => match subcmd {

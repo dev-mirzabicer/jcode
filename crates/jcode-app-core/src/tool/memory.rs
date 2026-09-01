@@ -129,6 +129,10 @@ impl Tool for MemoryTool {
         use crate::memory;
         use crate::memory_types::{MemoryEventKind, MemoryState};
 
+        if !crate::config::config().features.memory {
+            anyhow::bail!("memory is disabled by global configuration");
+        }
+
         let input: MemoryInput = serde_json::from_value(input)?;
         let action_label = input.action.clone();
         let session_id = ctx.session_id.clone();
@@ -512,7 +516,10 @@ mod tests {
         let home = tempfile::tempdir().expect("home");
         let project = tempfile::tempdir().expect("project");
         let prev_home = std::env::var_os("JCODE_HOME");
+        let prev_memory = std::env::var_os("JCODE_MEMORY_ENABLED");
         crate::env::set_var("JCODE_HOME", home.path());
+        crate::env::set_var("JCODE_MEMORY_ENABLED", "true");
+        crate::config::invalidate_config_cache();
 
         let tool = MemoryTool::new();
         let remember = tool
@@ -546,6 +553,12 @@ mod tests {
         } else {
             crate::env::remove_var("JCODE_HOME");
         }
+        if let Some(prev_memory) = prev_memory {
+            crate::env::set_var("JCODE_MEMORY_ENABLED", prev_memory);
+        } else {
+            crate::env::remove_var("JCODE_MEMORY_ENABLED");
+        }
+        crate::config::invalidate_config_cache();
     }
 
     /// Issue #729 regression, behavioral rather than structural.
@@ -575,7 +588,10 @@ mod tests {
         let home = tempfile::tempdir().expect("home");
         let project = tempfile::tempdir().expect("project");
         let prev_home = std::env::var_os("JCODE_HOME");
+        let prev_memory = std::env::var_os("JCODE_MEMORY_ENABLED");
         crate::env::set_var("JCODE_HOME", home.path());
+        crate::env::set_var("JCODE_MEMORY_ENABLED", "true");
+        crate::config::invalidate_config_cache();
 
         // The session that spawns a worker records something project-scoped.
         let spawner = MemoryTool::new();
@@ -628,5 +644,11 @@ mod tests {
         } else {
             crate::env::remove_var("JCODE_HOME");
         }
+        if let Some(prev_memory) = prev_memory {
+            crate::env::set_var("JCODE_MEMORY_ENABLED", prev_memory);
+        } else {
+            crate::env::remove_var("JCODE_MEMORY_ENABLED");
+        }
+        crate::config::invalidate_config_cache();
     }
 }

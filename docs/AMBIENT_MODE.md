@@ -3,6 +3,11 @@
 > **Status:** Design
 > **Updated:** 2026-02-08
 
+> **Current downstream note:** Agent memory is globally disabled. Ambient cycles omit memory
+> graph reads, feedback-memory prompt sections, memory tools, memory-gardening instructions, and
+> post-cycle embedding maintenance. The scheduling and proactive-work design remains separate.
+> See [`MEMORY_POLICY.md`](MEMORY_POLICY.md).
+
 A proactive, always-on agent mode that works autonomously without user prompting. Like a brain consolidating memories during sleep, ambient mode tends to the memory graph, identifies useful work, and acts on the user's behalf — all while staying within resource limits.
 
 ## Overview

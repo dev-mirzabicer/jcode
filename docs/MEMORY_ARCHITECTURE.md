@@ -1,9 +1,13 @@
 # Memory Architecture Design
 
-> **Status:** Implemented (Core), Planned (Graph-Based Hybrid)
-> **Updated:** 2026-01-27
+> **Status:** Retained dormant implementation. Agent memory is globally disabled in Mirza's downstream.
+> **Current policy:** [`MEMORY_POLICY.md`](MEMORY_POLICY.md)
+> **Architecture last updated:** 2026-01-27
 
-Local embeddings + lightweight sidecar (GPT-5.3 Codex Spark) are implemented and running in production. This document describes both the current implementation and the planned graph-based hybrid architecture.
+Local embeddings, graph storage, tools, and a sidecar pipeline remain implemented. The global
+memory gate prevents production retrieval, injection, extraction, tool access, CLI access, and
+ambient maintenance while disabled. This document preserves the dormant implementation shape and
+historical plans. It is not the current behavior entry point.
 
 ## Overview
 

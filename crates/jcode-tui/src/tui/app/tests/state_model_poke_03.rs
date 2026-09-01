@@ -2156,6 +2156,29 @@ fn test_autojudge_command_toggles_session_preference() {
 }
 
 #[test]
+fn memory_command_cannot_override_global_disablement() {
+    let _guard = crate::storage::lock_test_env();
+    let previous = std::env::var_os("JCODE_MEMORY_ENABLED");
+    crate::env::set_var("JCODE_MEMORY_ENABLED", "false");
+    crate::config::invalidate_config_cache();
+
+    let mut app = create_test_app();
+    app.memory_enabled = true;
+    assert!(super::commands::handle_session_command(
+        &mut app,
+        "/memory on"
+    ));
+    assert!(!app.memory_feature_enabled());
+
+    if let Some(previous) = previous {
+        crate::env::set_var("JCODE_MEMORY_ENABLED", previous);
+    } else {
+        crate::env::remove_var("JCODE_MEMORY_ENABLED");
+    }
+    crate::config::invalidate_config_cache();
+}
+
+#[test]
 fn test_transcript_path_command_reports_current_session_file() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();

@@ -1903,7 +1903,11 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
         info.push_str(&format!("CWD: {}\n", cwd));
         info.push_str(&format!(
             "Features: memory={}, swarm={}\n",
-            if app.memory_enabled { "on" } else { "off" },
+            if app.memory_feature_enabled() {
+                "on"
+            } else {
+                "off"
+            },
             if app.swarm_enabled { "on" } else { "off" }
         ));
 
@@ -2175,7 +2179,11 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
         context_report.push_str(&format!("- terminal: {}\n", terminal_size));
         context_report.push_str(&format!(
             "- features: memory={}, swarm={}\n",
-            if app.memory_enabled { "on" } else { "off" },
+            if app.memory_feature_enabled() {
+                "on"
+            } else {
+                "off"
+            },
             if app.swarm_enabled { "on" } else { "off" }
         ));
         context_report.push_str(&format!(

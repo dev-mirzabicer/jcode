@@ -313,6 +313,9 @@ impl Registry {
         });
         // Clone the Arc entries (cheap refcount bumps, not deep copies)
         let mut tools = base.clone();
+        if !crate::config::config().features.memory {
+            tools.remove("memory");
+        }
         // SkillTool needs the skills registry reference (shared across sessions)
         Self::insert_tool(
             &mut tools,
@@ -420,6 +423,12 @@ impl Registry {
     /// Enable test mode for memory tools (isolated storage)
     /// Called when session is marked as debug
     pub async fn enable_memory_test_mode(&self) {
+        if !crate::config::config().features.memory {
+            crate::logging::info(
+                "Memory test mode not enabled because memory is globally unavailable",
+            );
+            return;
+        }
         let mut tools = self.tools.write().await;
 
         // Replace memory tool with test version

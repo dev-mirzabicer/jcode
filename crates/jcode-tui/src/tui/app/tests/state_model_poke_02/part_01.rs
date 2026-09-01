@@ -1164,10 +1164,27 @@ fn test_nested_command_suggestions_filter_partial_suffixes() {
     }
 
     let suggestions = app.get_suggestions_for("/memory st");
-    assert_eq!(
-        suggestions.first().map(|(cmd, _)| cmd.as_str()),
-        Some("/memory status")
-    );
+    if crate::config::config().features.memory {
+        assert_eq!(
+            suggestions.first().map(|(cmd, _)| cmd.as_str()),
+            Some("/memory status")
+        );
+    } else {
+        assert!(
+            suggestions.is_empty(),
+            "globally disabled memory must not be advertised: {suggestions:?}"
+        );
+        assert!(
+            !super::registered_command_entries().any(|(command, _)| command == "/memory")
+        );
+        let agent_suggestions = app.get_suggestions_for("/agents mem");
+        assert!(
+            agent_suggestions
+                .iter()
+                .all(|(command, _)| command != "/agents memory"),
+            "disabled memory model picker leaked into suggestions: {agent_suggestions:?}"
+        );
+    }
 
     let suggestions = app.get_suggestions_for("/improve st");
     assert!(

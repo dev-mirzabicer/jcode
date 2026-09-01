@@ -103,7 +103,7 @@ impl App {
         &self,
         messages: &[Message],
     ) -> Option<crate::memory::PendingMemory> {
-        if self.is_remote || !self.memory_enabled {
+        if self.is_remote || !self.memory_feature_enabled() {
             return None;
         }
 
@@ -137,7 +137,7 @@ impl App {
     pub(super) async fn extract_session_memories(&self) {
         // Skip if remote mode or not enough messages
         let provider_messages = self.materialized_provider_messages();
-        if self.is_remote || !self.memory_enabled || provider_messages.len() < 4 {
+        if self.is_remote || !self.memory_feature_enabled() || provider_messages.len() < 4 {
             return;
         }
 

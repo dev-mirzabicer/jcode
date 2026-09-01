@@ -10,51 +10,54 @@ use crate::tui::{
 
 impl App {
     pub(crate) fn open_agents_picker(&mut self) {
-        let models = [
+        let mut targets = vec![
             AgentModelTarget::Swarm,
             AgentModelTarget::Review,
             AgentModelTarget::Judge,
-            AgentModelTarget::Memory,
             AgentModelTarget::Ambient,
-        ]
-        .into_iter()
-        .map(|target| {
-            let configured = load_agent_model_override(target);
-            let summary = configured
-                .clone()
-                .unwrap_or_else(|| agent_model_default_summary(target, self));
-            PickerEntry {
-                name: agent_model_target_label(target).to_string(),
-                options: vec![PickerOption {
-                    provider: summary,
-                    api_method: agent_model_target_config_path(target).to_string(),
-                    available: true,
-                    detail: if target == AgentModelTarget::Swarm {
-                        "/agents swarm · routing: /swarm-prompt".to_string()
-                    } else {
-                        format!("/agents {}", agent_model_target_slug(target))
-                    },
-                    estimated_reference_cost_micros: None,
-                }],
-                action: PickerAction::AgentTarget(target),
-                selected_option: 0,
-                is_current: false,
-                is_default: configured.is_some(),
-                is_favorite: false,
-                recommended: false,
-                recommendation_rank: usize::MAX,
-                usage_score: 0,
-                old: false,
-                created_date: None,
-                effort: None,
-            }
-        })
-        .collect();
+        ];
+        if crate::config::config().features.memory {
+            targets.insert(3, AgentModelTarget::Memory);
+        }
+        let models: Vec<PickerEntry> = targets
+            .into_iter()
+            .map(|target| {
+                let configured = load_agent_model_override(target);
+                let summary = configured
+                    .clone()
+                    .unwrap_or_else(|| agent_model_default_summary(target, self));
+                PickerEntry {
+                    name: agent_model_target_label(target).to_string(),
+                    options: vec![PickerOption {
+                        provider: summary,
+                        api_method: agent_model_target_config_path(target).to_string(),
+                        available: true,
+                        detail: if target == AgentModelTarget::Swarm {
+                            "/agents swarm · routing: /swarm-prompt".to_string()
+                        } else {
+                            format!("/agents {}", agent_model_target_slug(target))
+                        },
+                        estimated_reference_cost_micros: None,
+                    }],
+                    action: PickerAction::AgentTarget(target),
+                    selected_option: 0,
+                    is_current: false,
+                    is_default: configured.is_some(),
+                    is_favorite: false,
+                    recommended: false,
+                    recommendation_rank: usize::MAX,
+                    usage_score: 0,
+                    old: false,
+                    created_date: None,
+                    effort: None,
+                }
+            })
+            .collect();
 
         self.inline_view_state = None;
         self.inline_interactive_state = Some(InlineInteractiveState {
             kind: PickerKind::Model,
-            filtered: (0..5).collect(),
+            filtered: (0..models.len()).collect(),
             entries: models,
             selected: 0,
             column: 0,

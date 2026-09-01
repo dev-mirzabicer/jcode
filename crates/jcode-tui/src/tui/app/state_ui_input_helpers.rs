@@ -237,6 +237,7 @@ pub(crate) fn registered_command_entries() -> impl Iterator<Item = (&'static str
     REGISTERED_COMMANDS
         .iter()
         .filter(|command| !command.hidden)
+        .filter(|command| command.name != "/memory" || crate::config::config().features.memory)
         .map(|command| (command.name, command.help))
 }
 
@@ -370,6 +371,7 @@ impl App {
         let mut commands: Vec<(String, &'static str)> = REGISTERED_COMMANDS
             .iter()
             .filter(|command| !command.hidden)
+            .filter(|command| command.name != "/memory" || crate::config::config().features.memory)
             .filter_map(|command| {
                 let name = command.name.to_string();
                 seen.insert(name.clone()).then_some((name, command.help))
@@ -540,16 +542,19 @@ impl App {
         }
 
         if prefix.starts_with("/agents ") {
-            return self.rank_suggestions(
-                input,
-                vec![
-                    ("/agents swarm".into(), "Configure swarm/subagent model"),
-                    ("/agents review".into(), "Configure code review model"),
-                    ("/agents judge".into(), "Configure judge model"),
+            let mut suggestions = vec![
+                ("/agents swarm".into(), "Configure swarm/subagent model"),
+                ("/agents review".into(), "Configure code review model"),
+                ("/agents judge".into(), "Configure judge model"),
+                ("/agents ambient".into(), "Configure ambient model"),
+            ];
+            if crate::config::config().features.memory {
+                suggestions.insert(
+                    3,
                     ("/agents memory".into(), "Configure memory sidecar model"),
-                    ("/agents ambient".into(), "Configure ambient model"),
-                ],
-            );
+                );
+            }
+            return self.rank_suggestions(input, suggestions);
         }
 
         if prefix.starts_with("/subagent-model ") {
@@ -905,6 +910,9 @@ impl App {
         }
 
         if prefix.starts_with("/memory ") {
+            if !crate::config::config().features.memory {
+                return Vec::new();
+            }
             return self.rank_suggestions(
                 input,
                 vec![

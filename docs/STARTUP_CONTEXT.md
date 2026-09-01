@@ -30,6 +30,10 @@ This design provides four distinct sources of truth:
 The TUI keeps these sources visibly separate. It never treats an unsaved draft or path
 selection as proof that a complete read occurred.
 
+Startup Context is not agent memory. It remains available when agent memory is globally disabled
+and does not infer, duplicate, or reactivate memory behavior. See
+[`MEMORY_POLICY.md`](MEMORY_POLICY.md).
+
 ## Quick workflow
 
 The production TUI shows a compact `Startup context` row above the composer. It reports

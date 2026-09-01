@@ -31,6 +31,13 @@ fn test_openai_fast_mode_defaults_to_priority() {
 }
 
 #[test]
+fn memory_is_globally_disabled_by_default() {
+    assert!(!Config::default().features.memory);
+    let config: Config = toml::from_str("").expect("empty config should use defaults");
+    assert!(!config.features.memory);
+}
+
+#[test]
 fn obsolete_compaction_config_keys_are_ignored_and_never_serialized() {
     let config: Config = toml::from_str(
         r#"

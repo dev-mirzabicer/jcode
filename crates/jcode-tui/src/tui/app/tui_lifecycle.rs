@@ -111,6 +111,10 @@ impl App {
         self.open_resume_key = keybind::load_open_resume_key();
         self.fallback_switch_key = keybind::load_fallback_switch_key();
         self.scroll_keys = keybind::load_scroll_keys();
+        self.invalidate_command_candidates_cache();
+        if !crate::config::config().features.memory {
+            self.set_memory_feature_enabled(false);
+        }
         crate::logging::info("KEYBINDINGS: reloaded from config change");
         // Confirm the pickup to the user. Without this, an edit that is
         // already live is indistinguishable from one that silently did
