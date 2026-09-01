@@ -344,7 +344,7 @@ pub fn render_messages_and_images(session: &Session) -> (Vec<RenderedMessage>, V
 pub fn render_messages_and_images_for_remote_history(
     session: &Session,
 ) -> (Vec<RenderedMessage>, Vec<RenderedImage>) {
-    let hidden = startup_context_history_message_ids(session);
+    let hidden = session.startup_context_message_ids();
     let (messages, images, _) = render_messages_and_images_with_compacted_history_inner(
         session,
         DEFAULT_VISIBLE_COMPACTED_HISTORY_MESSAGES,
@@ -361,7 +361,7 @@ pub fn render_messages_and_images_with_compacted_history_for_remote_history(
     Vec<RenderedImage>,
     Option<RenderedCompactedHistoryInfo>,
 ) {
-    let hidden = startup_context_history_message_ids(session);
+    let hidden = session.startup_context_message_ids();
     render_messages_and_images_with_compacted_history_inner(
         session,
         compacted_history_visible,
@@ -627,18 +627,4 @@ fn render_messages_and_images_with_compacted_history_inner(
     }
 
     (rendered, images, compacted_info)
-}
-
-fn startup_context_history_message_ids(session: &Session) -> HashSet<&str> {
-    let mut ids = HashSet::new();
-    if let Some(receipt) = session.startup_context.as_ref() {
-        for batch in &receipt.batches {
-            ids.insert(batch.control_message_id.as_str());
-            for file in &batch.files {
-                ids.insert(file.message_id.as_str());
-                ids.extend(file.stale_marker_message_ids.iter().map(String::as_str));
-            }
-        }
-    }
-    ids
 }

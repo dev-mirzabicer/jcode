@@ -2016,4 +2016,87 @@ mod tests {
         .expect_err("ambiguous stable ID must fail");
         assert!(ambiguous.to_string().contains("ambiguous"));
     }
+
+    #[test]
+    fn startup_context_messages_are_native_authoritative_snapshot_and_detail_source() {
+        let mut messages = vec![
+            stored(
+                "startup-control",
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "SYNTHETIC_STARTUP_CONTROL".to_string(),
+                    cache_control: None,
+                }],
+            ),
+            stored(
+                "startup-file",
+                Role::User,
+                vec![
+                    ContentBlock::Text {
+                        text: "synthetic file metadata".to_string(),
+                        cache_control: None,
+                    },
+                    ContentBlock::Text {
+                        text: "exact startup body: İstanbul 日本語 🧪".to_string(),
+                        cache_control: None,
+                    },
+                ],
+            ),
+            stored(
+                "startup-stale",
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "SYNTHETIC_STALE_MARKER".to_string(),
+                    cache_control: None,
+                }],
+            ),
+        ];
+        for message in &mut messages {
+            message.display_role = Some(jcode_session_types::StoredDisplayRole::System);
+            message.timestamp = None;
+        }
+        let context_view = StoredContextViewState::default();
+        let provider = SnapshotProvider;
+        let snapshot = build_context_editor_snapshot(ContextSnapshotInput {
+            session_id: "startup-snapshot-session",
+            messages: &messages,
+            context_view: &context_view,
+            processing: false,
+            provider: &provider,
+            route: "snapshot-route",
+        })
+        .expect("Startup Context snapshot");
+
+        assert_eq!(snapshot.raw_message_count, 3);
+        assert_eq!(
+            snapshot
+                .messages
+                .iter()
+                .map(|message| message.message_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["startup-control", "startup-file", "startup-stale"]
+        );
+        assert!(snapshot.messages.iter().all(|message| {
+            message.display_role == Some(jcode_session_types::StoredDisplayRole::System)
+        }));
+
+        let detail = build_context_message_detail(ContextMessageDetailInput {
+            session_id: "startup-snapshot-session",
+            messages: &messages,
+            context_view: &context_view,
+            expected_context_revision: snapshot.context_revision,
+            expected_transcript_digest: snapshot.transcript_digest,
+            message_id: "startup-file",
+            block_ordinal: 1,
+            start_char: 0,
+            max_chars: CONTEXT_MESSAGE_DETAIL_MAX_CHARS,
+        })
+        .expect("exact Startup Context file detail");
+        assert_eq!(
+            detail.content.text,
+            "exact startup body: İstanbul 日本語 🧪"
+        );
+        assert_eq!(detail.message_id, "startup-file");
+        assert_eq!(detail.block_ordinal, 1);
+    }
 }

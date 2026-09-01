@@ -938,6 +938,110 @@ fn test_new_for_remote_uses_startup_stub_without_loading_full_transcript() {
     }
 }
 
+#[test]
+fn remote_optimistic_history_omits_receipt_owned_startup_and_stale_bodies() {
+    let _guard = crate::storage::lock_test_env();
+    let temp_home = tempfile::TempDir::new().expect("create temp home");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp_home.path());
+
+    let session_id = "session_wp10_remote_privacy";
+    let now = chrono::Utc::now();
+    let mut session = crate::session::Session::create_with_id(
+        session_id.to_string(),
+        None,
+        Some("remote Startup Context privacy".to_string()),
+    );
+    let startup_message = |id: &str, body: &str| crate::session::StoredMessage {
+        id: id.to_string(),
+        role: crate::message::Role::User,
+        content: vec![crate::message::ContentBlock::Text {
+            text: body.to_string(),
+            cache_control: None,
+        }],
+        display_role: Some(crate::session::StoredDisplayRole::System),
+        timestamp: None,
+        tool_duration_ms: None,
+        token_usage: None,
+    };
+    session.append_stored_message(startup_message(
+        "wp10-optimistic-control",
+        "WP10_OPTIMISTIC_CONTROL_SECRET",
+    ));
+    session.append_stored_message(startup_message(
+        "wp10-optimistic-file",
+        "WP10_OPTIMISTIC_FILE_SECRET",
+    ));
+    session.append_stored_message(startup_message(
+        "wp10-optimistic-stale",
+        "WP10_OPTIMISTIC_STALE_SECRET",
+    ));
+    session.startup_context = Some(jcode_session_types::StoredStartupContextReceipt {
+        schema_version: 1,
+        project: jcode_session_types::StoredStartupProjectIdentity::Directory {
+            canonical_root: "/synthetic/project".to_string(),
+        },
+        plan_revision: 1,
+        state: jcode_session_types::StoredStartupContextState::ProviderAccepted,
+        batches: vec![jcode_session_types::StoredStartupContextBatch {
+            id: "wp10-optimistic-batch".to_string(),
+            kind: jcode_session_types::StoredStartupBatchKind::Initial,
+            control_message_id: "wp10-optimistic-control".to_string(),
+            files: vec![jcode_session_types::StoredStartupFileReceipt {
+                spec_id: "wp10-optimistic-spec".to_string(),
+                message_id: "wp10-optimistic-file".to_string(),
+                ordinal: 2,
+                logical_path: "PLAN.md".to_string(),
+                resolved_path: "/synthetic/project/PLAN.md".to_string(),
+                classification: jcode_session_types::StoredStartupPathClassification::Project,
+                sha256: "a".repeat(64),
+                bytes: 29,
+                estimated_tokens: 8,
+                latest_observation: jcode_session_types::StoredStartupFileObservation {
+                    observed_at: now,
+                    state: jcode_session_types::StoredStartupObservedState::Missing,
+                },
+                last_notified_observation: Some(
+                    jcode_session_types::StoredStartupObservedState::Missing,
+                ),
+                notification_count: 1,
+                stale_marker_message_ids: vec!["wp10-optimistic-stale".to_string()],
+            }],
+            appended_at: now,
+            delivery_state:
+                jcode_session_types::StoredStartupBatchDeliveryState::ProviderAccepted,
+            first_dispatched_at: Some(now),
+            first_provider_accepted_at: Some(now),
+        }],
+        blocked_issues: Vec::new(),
+        pending_updates: Vec::new(),
+        last_apply_operation_id: None,
+        prepared_at: now,
+        first_dispatched_at: Some(now),
+        first_provider_accepted_at: Some(now),
+        metadata_repair: None,
+    });
+    session.save().expect("save remote Startup Context session");
+
+    let app = App::new_for_remote(Some(session_id.to_string()));
+    let rendered = app
+        .display_messages()
+        .iter()
+        .map(|message| message.content.as_str())
+        .collect::<String>();
+    assert!(!rendered.contains("WP10_OPTIMISTIC_CONTROL_SECRET"));
+    assert!(!rendered.contains("WP10_OPTIMISTIC_FILE_SECRET"));
+    assert!(!rendered.contains("WP10_OPTIMISTIC_STALE_SECRET"));
+    assert!(app.display_messages().is_empty());
+    assert!(app.session.messages.is_empty());
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
 /// Run `f` with the shared env lock held and `JCODE_MODEL`/`JCODE_PROVIDER`
 /// neutralized. Remote header tests assert on startup-phase labels, which are
 /// only shown when no model hint is known; a sibling test that persisted a

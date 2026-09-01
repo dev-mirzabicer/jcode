@@ -884,7 +884,11 @@ mod tests {
         StoredContextArtifactGenerator, StoredContextAuthorization, StoredContextCuratorUsage,
         StoredContextEmergencyAudit, StoredContextEmergencyOperationKind,
         StoredContextEmergencyRetryOutcome, StoredContextEmergencyTriggerKind,
-        StoredContextOperation, StoredRangeSummary, StoredToolResultDistillation,
+        StoredContextOperation, StoredDisplayRole, StoredMessage, StoredRangeSummary,
+        StoredStartupBatchDeliveryState, StoredStartupBatchKind, StoredStartupContextBatch,
+        StoredStartupContextReceipt, StoredStartupContextState, StoredStartupFileObservation,
+        StoredStartupFileReceipt, StoredStartupObservedState, StoredStartupPathClassification,
+        StoredStartupProjectIdentity, StoredToolResultDistillation,
     };
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Barrier, Mutex as StdMutex};
@@ -1346,6 +1350,201 @@ mod tests {
         (service, session, provider, direct_persistence, raw_before)
     }
 
+    fn startup_context_direct_fixture() -> (
+        ContextTransactionService,
+        Session,
+        TestProvider,
+        Arc<TestDirectSessionPersistence>,
+        Vec<u8>,
+        Vec<u8>,
+    ) {
+        let provider = TestProvider::new(true);
+        let now = Utc::now();
+        let stored = |id: &str, content: Vec<ContentBlock>| StoredMessage {
+            id: id.to_string(),
+            role: Role::User,
+            content,
+            display_role: Some(StoredDisplayRole::System),
+            timestamp: None,
+            tool_duration_ms: None,
+            token_usage: None,
+        };
+        let mut source = Session::create_with_id(
+            "session-startup-context-transaction".to_string(),
+            None,
+            None,
+        );
+        source.append_stored_message(stored(
+            "startup-transaction-control",
+            vec![text("SYNTHETIC_TRANSACTION_STARTUP_CONTROL")],
+        ));
+        source.append_stored_message(stored(
+            "startup-transaction-file",
+            vec![
+                text("synthetic startup metadata"),
+                text("SYNTHETIC_TRANSACTION_STARTUP_FILE_BODY"),
+            ],
+        ));
+        source.append_stored_message(stored(
+            "startup-transaction-stale",
+            vec![text("SYNTHETIC_TRANSACTION_STALE_MARKER")],
+        ));
+        source.append_stored_message(stored(
+            "startup-transaction-user",
+            vec![text("ordinary user prompt after Startup Context")],
+        ));
+        source.startup_context = Some(StoredStartupContextReceipt {
+            schema_version: 1,
+            project: StoredStartupProjectIdentity::Directory {
+                canonical_root: "/synthetic/context-project".to_string(),
+            },
+            plan_revision: 9,
+            state: StoredStartupContextState::ProviderAccepted,
+            batches: vec![StoredStartupContextBatch {
+                id: "startup-transaction-batch".to_string(),
+                kind: StoredStartupBatchKind::Initial,
+                control_message_id: "startup-transaction-control".to_string(),
+                files: vec![StoredStartupFileReceipt {
+                    spec_id: "startup-transaction-spec".to_string(),
+                    message_id: "startup-transaction-file".to_string(),
+                    ordinal: 2,
+                    logical_path: "PLAN.md".to_string(),
+                    resolved_path: "/synthetic/context-project/PLAN.md".to_string(),
+                    classification: StoredStartupPathClassification::Project,
+                    sha256: "e".repeat(64),
+                    bytes: 39,
+                    estimated_tokens: 10,
+                    latest_observation: StoredStartupFileObservation {
+                        observed_at: now,
+                        state: StoredStartupObservedState::Changed {
+                            sha256: "f".repeat(64),
+                            bytes: 40,
+                        },
+                    },
+                    last_notified_observation: Some(StoredStartupObservedState::Changed {
+                        sha256: "f".repeat(64),
+                        bytes: 40,
+                    }),
+                    notification_count: 1,
+                    stale_marker_message_ids: vec!["startup-transaction-stale".to_string()],
+                }],
+                appended_at: now,
+                delivery_state: StoredStartupBatchDeliveryState::ProviderAccepted,
+                first_dispatched_at: Some(now),
+                first_provider_accepted_at: Some(now),
+            }],
+            blocked_issues: Vec::new(),
+            pending_updates: Vec::new(),
+            last_apply_operation_id: None,
+            prepared_at: now,
+            first_dispatched_at: Some(now),
+            first_provider_accepted_at: Some(now),
+            metadata_repair: None,
+        });
+
+        let agent = Agent::new_with_session(
+            Arc::new(provider.clone()),
+            Registry::empty(),
+            source.clone(),
+            None,
+        );
+        let route = agent.context_route_identity();
+        source.provider_key = Some(route.clone());
+        source.model = Some(provider.model());
+        let authorization = StoredContextAuthorization::Manual {
+            initiated_by: Some("startup-context-transaction-test".to_string()),
+        };
+        let operation = StoredContextOperation::RangeSummary(StoredRangeSummary {
+            source_range: build_message_range(agent.messages(), 0, 2)
+                .expect("Startup Context source range"),
+            summary_text: "Synthetic Startup Context summary".to_string(),
+            file_change_digest: "Synthetic fixture changed no files".to_string(),
+            changed_files: Vec::new(),
+            change_evidence_complete: true,
+            file_evidence: None,
+            boundary_expansions: Vec::new(),
+            generator: Some(generator()),
+            source_token_estimate: agent.messages()[0..=2]
+                .iter()
+                .map(|message| estimate_message_tokens(&message.to_message()))
+                .sum(),
+            replacement_token_estimate: 12,
+            warnings: Vec::new(),
+            created_at: now,
+            legacy_coverage: None,
+        });
+        let operations = vec![operation];
+        let preview = build_preview(ContextDraftPreviewInput {
+            provider: &provider,
+            messages: agent.messages(),
+            base_state: agent.context_view_state(),
+            transaction_id: "draft-startup-context",
+            proposed_revision: 1,
+            authorization: authorization.clone(),
+            operations: &operations,
+            pricing: None,
+            estimated_total_request_tokens_before: agent.current_context_request_token_estimate(),
+            notices: Vec::new(),
+            ranges: &[],
+            proposals: &[],
+        })
+        .expect("Startup Context summary preview");
+        let draft = ContextDraft {
+            identity: ContextDraftIdentity {
+                draft_id: "draft-startup-context".to_string(),
+                session_id: source.id.clone(),
+                base_context_revision: 0,
+                raw_message_count: source.messages.len(),
+                transcript_digest: authoritative_transcript_digest(&source.messages),
+                provider_name: provider.name().to_string(),
+                model: provider.model(),
+                route,
+                created_at: now,
+                expires_at: now + chrono::Duration::minutes(30),
+            },
+            authorization,
+            required_operations: operations,
+            distillation_proposals: Vec::new(),
+            ineligible_distillations: Vec::new(),
+            preview,
+            curator_usage: Vec::new(),
+        };
+        let direct_persistence = Arc::new(TestDirectSessionPersistence::default());
+        let service = ContextTransactionService::with_persistence_boundaries(
+            ContextServiceLimits::default(),
+            Arc::new(TestPersistence::default()),
+            direct_persistence.clone(),
+        );
+        let reserved_bytes = serde_json::to_vec(&draft).expect("draft bytes").len();
+        service.lock_store().entries.insert(
+            draft.identity.draft_id.clone(),
+            ContextDraftEntry {
+                identity: draft.identity.clone(),
+                progress: ContextDraftProgress {
+                    phase: ContextDraftPhase::Ready,
+                    completed_items: 1,
+                    total_items: 1,
+                },
+                state: DraftEntryState::Ready(draft),
+                cancellation: CancellationToken::new(),
+                notify: Arc::new(Notify::new()),
+                reserved_bytes,
+                generation_in_flight: false,
+            },
+        );
+        let raw_before = serde_json::to_vec(&source.messages).expect("raw Startup Context");
+        let receipt_before =
+            serde_json::to_vec(&source.startup_context).expect("Startup Context receipt");
+        (
+            service,
+            source,
+            provider,
+            direct_persistence,
+            raw_before,
+            receipt_before,
+        )
+    }
+
     #[test]
     fn direct_session_apply_revert_reapply_change_projection_without_mutating_raw_transcript() {
         let (service, mut session, provider, persistence, raw_before) =
@@ -1430,6 +1629,90 @@ mod tests {
             persistence.observed_provider_session_ids(),
             vec![None, None, None]
         );
+    }
+
+    #[test]
+    fn startup_context_summary_revert_and_reapply_preserve_source_receipt_and_cache_semantics() {
+        let (service, mut session, provider, persistence, raw_before, receipt_before) =
+            startup_context_direct_fixture();
+        let route = session.provider_key.clone().expect("provider route");
+        let original_projection = session
+            .projected_messages_for_provider()
+            .expect("original Startup Context provider view");
+
+        session.provider_session_id = Some("startup-before-apply".to_string());
+        let applied = service
+            .apply_draft_to_session(
+                &mut session,
+                &provider,
+                &route,
+                None,
+                "draft-startup-context",
+                None,
+                false,
+            )
+            .expect("apply Startup Context summary");
+        let applied_projection = session
+            .projected_messages_for_provider()
+            .expect("applied Startup Context provider view");
+        let applied_json = serde_json::to_string(&applied_projection).unwrap();
+        assert!(applied_json.contains("Synthetic Startup Context summary"));
+        assert!(!applied_json.contains("SYNTHETIC_TRANSACTION_STARTUP_CONTROL"));
+        assert!(!applied_json.contains("SYNTHETIC_TRANSACTION_STARTUP_FILE_BODY"));
+        assert!(!applied_json.contains("SYNTHETIC_TRANSACTION_STALE_MARKER"));
+        assert_eq!(session.provider_session_id, None);
+        assert_eq!(provider.invalidation_count(), 1);
+
+        session.provider_session_id = Some("startup-before-revert".to_string());
+        service
+            .revert_transaction_in_session(
+                &mut session,
+                &provider,
+                &route,
+                None,
+                &applied.result.transaction.id,
+                false,
+            )
+            .expect("revert Startup Context summary");
+        assert_eq!(
+            serde_json::to_vec(
+                &session
+                    .projected_messages_for_provider()
+                    .expect("reverted Startup Context provider view")
+            )
+            .unwrap(),
+            serde_json::to_vec(&original_projection).unwrap()
+        );
+        assert_eq!(session.provider_session_id, None);
+
+        session.provider_session_id = Some("startup-before-reapply".to_string());
+        service
+            .reapply_transaction_in_session(
+                &mut session,
+                &provider,
+                &route,
+                None,
+                &applied.result.transaction.id,
+                false,
+            )
+            .expect("reapply Startup Context summary");
+        assert_eq!(
+            serde_json::to_vec(
+                &session
+                    .projected_messages_for_provider()
+                    .expect("reapplied Startup Context provider view")
+            )
+            .unwrap(),
+            serde_json::to_vec(&applied_projection).unwrap()
+        );
+        assert_eq!(session.provider_session_id, None);
+        assert_eq!(provider.invalidation_count(), 1);
+        assert_eq!(serde_json::to_vec(&session.messages).unwrap(), raw_before);
+        assert_eq!(
+            serde_json::to_vec(&session.startup_context).unwrap(),
+            receipt_before
+        );
+        assert_eq!(persistence.calls(), 3);
     }
 
     #[test]

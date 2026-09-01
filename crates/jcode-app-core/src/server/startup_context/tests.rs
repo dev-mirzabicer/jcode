@@ -481,11 +481,31 @@ fn remote_history_projection_omits_receipt_owned_secret_bodies_without_mutating_
     let fixture = Fixture::new();
     let coordinator = fixture.coordinator("server");
     let secret = "WP03_SYNTHETIC_HISTORY_SECRET";
-    let session = installed_session(&coordinator, fixture.project.path(), secret);
+    let stale_secret = "WP10_SYNTHETIC_STALE_HISTORY_SECRET";
+    let mut session = installed_session(&coordinator, fixture.project.path(), secret);
+    session.append_stored_message(crate::session::StoredMessage {
+        id: "wp10-stale-marker".to_string(),
+        role: crate::message::Role::User,
+        content: vec![crate::message::ContentBlock::Text {
+            text: stale_secret.to_string(),
+            cache_control: None,
+        }],
+        display_role: Some(crate::session::StoredDisplayRole::System),
+        timestamp: None,
+        tool_duration_ms: None,
+        token_usage: None,
+    });
+    let file = &mut session.startup_context.as_mut().unwrap().batches[0].files[0];
+    file.latest_observation.state = jcode_session_types::StoredStartupObservedState::Missing;
+    file.last_notified_observation = Some(jcode_session_types::StoredStartupObservedState::Missing);
+    file.notification_count = 1;
+    file.stale_marker_message_ids
+        .push("wp10-stale-marker".to_string());
     let source = serde_json::to_value(&session.messages).unwrap();
     let (rendered, _) = crate::session::render_messages_and_images_for_remote_history(&session);
     let payload = serde_json::to_string(&rendered).unwrap();
     assert!(!payload.contains(secret));
+    assert!(!payload.contains(stale_secret));
     assert_eq!(serde_json::to_value(&session.messages).unwrap(), source);
     assert_eq!(
         session.startup_context.as_ref().unwrap().batches[0]
