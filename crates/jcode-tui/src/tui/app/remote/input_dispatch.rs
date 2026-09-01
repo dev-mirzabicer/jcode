@@ -1,6 +1,10 @@
 use super::super::{PendingRemoteMessage, PendingSplitPrompt};
 use super::*;
 
+fn should_observe_startup_context(is_system: bool, retry_attempts: u8) -> bool {
+    !is_system && retry_attempts == 0
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "remote send needs explicit message payload, reminders, retry metadata, and image attachments"
@@ -20,7 +24,7 @@ pub(in crate::tui::app) async fn begin_remote_send(
             content.clone(),
             images.clone(),
             system_reminder.clone(),
-            !is_system && retry_attempts == 0,
+            should_observe_startup_context(is_system, retry_attempts),
         )
         .await?;
     app.current_message_id = Some(msg_id);
@@ -59,6 +63,19 @@ pub(in crate::tui::app) async fn begin_remote_send(
     app.autojudge_after_current_turn = !is_system;
     remote.reset_call_output_tokens_seen();
     Ok(msg_id)
+}
+
+#[cfg(test)]
+mod startup_context_observation_tests {
+    use super::should_observe_startup_context;
+
+    #[test]
+    fn only_first_attempt_real_user_messages_request_startup_observation() {
+        assert!(should_observe_startup_context(false, 0));
+        assert!(!should_observe_startup_context(false, 1));
+        assert!(!should_observe_startup_context(true, 0));
+        assert!(!should_observe_startup_context(true, 1));
+    }
 }
 
 pub(in crate::tui::app) fn restore_prepared_remote_input(
