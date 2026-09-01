@@ -288,24 +288,25 @@ fn capture_attempt(
     let capacity = usize::try_from(before.len().min(max_bytes)).unwrap_or(usize::MAX);
     let mut bytes = Vec::with_capacity(capacity);
     let mut digest = Sha256::new();
-    let mut bounded = file.by_ref().take(bounded_read);
-    let mut chunk = [0u8; 64 * 1024];
-    loop {
-        let read = bounded.read(&mut chunk).map_err(|error| {
-            StartupFileIssue::for_spec(
-                &target.spec,
-                StartupFileIssueKind::Unreadable {
-                    detail: error.to_string(),
-                },
-            )
-        })?;
-        if read == 0 {
-            break;
+    {
+        let mut bounded = file.by_ref().take(bounded_read);
+        let mut chunk = [0u8; 64 * 1024];
+        loop {
+            let read = bounded.read(&mut chunk).map_err(|error| {
+                StartupFileIssue::for_spec(
+                    &target.spec,
+                    StartupFileIssueKind::Unreadable {
+                        detail: error.to_string(),
+                    },
+                )
+            })?;
+            if read == 0 {
+                break;
+            }
+            digest.update(&chunk[..read]);
+            bytes.extend_from_slice(&chunk[..read]);
         }
-        digest.update(&chunk[..read]);
-        bytes.extend_from_slice(&chunk[..read]);
     }
-    drop(bounded);
     if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_bytes {
         return Err(StartupFileIssue::for_spec(
             &target.spec,
