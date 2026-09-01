@@ -593,6 +593,31 @@ fn run_ndjson_subcommand_parses() {
 }
 
 #[test]
+fn replay_full_startup_context_flag_parses() {
+    let args = Args::try_parse_from([
+        "jcode",
+        "replay",
+        "session-test",
+        "--export",
+        "--include-startup-context",
+    ])
+    .expect("replay full Startup Context flag should parse");
+
+    let Some(Command::Replay {
+        session,
+        export,
+        include_startup_context,
+        ..
+    }) = args.command
+    else {
+        panic!("expected replay command");
+    };
+    assert_eq!(session, "session-test");
+    assert!(export);
+    assert!(include_startup_context);
+}
+
+#[test]
 fn version_subcommand_parses() {
     let args = Args::try_parse_from(["jcode", "version", "--json"]).unwrap();
     match args.command {

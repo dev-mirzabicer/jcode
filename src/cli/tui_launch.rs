@@ -210,6 +210,7 @@ pub async fn run_replay_command(
     session_id_or_path: &str,
     swarm: bool,
     export: bool,
+    include_startup_context: bool,
     auto_edit: bool,
     speed: f64,
     timeline_path: Option<&str>,
@@ -219,8 +220,21 @@ pub async fn run_replay_command(
     fps: u32,
     centered_override: Option<bool>,
 ) -> Result<()> {
+    let export_policy = if include_startup_context {
+        crate::session::StartupContextExportPolicy::IncludeContents
+    } else {
+        crate::session::StartupContextExportPolicy::ReceiptsOnly
+    };
+    if let Some(warning) = export_policy.warning() {
+        eprintln!("Warning: {warning}");
+    }
+
     if swarm {
-        let swarm_sessions = replay::load_swarm_sessions(session_id_or_path, auto_edit)?;
+        let swarm_sessions = replay::load_swarm_sessions_with_export_policy(
+            session_id_or_path,
+            auto_edit,
+            export_policy,
+        )?;
         if export {
             let timelines: Vec<_> = swarm_sessions
                 .iter()
@@ -335,7 +349,7 @@ pub async fn run_replay_command(
         return Ok(());
     }
 
-    let session = replay::load_session(session_id_or_path)?;
+    let source_session = replay::load_session(session_id_or_path)?;
 
     let mut timeline = if let Some(path) = timeline_path {
         let data = std::fs::read_to_string(path)
@@ -343,8 +357,9 @@ pub async fn run_replay_command(
         serde_json::from_str::<Vec<replay::TimelineEvent>>(&data)
             .with_context(|| format!("Failed to parse timeline JSON: {}", path))?
     } else {
-        replay::export_timeline(&session)
+        replay::export_timeline_with_policy(&source_session, export_policy)
     };
+    let session = source_session.redacted_for_export_with_policy(export_policy);
 
     if auto_edit {
         timeline = replay::auto_edit_timeline(&timeline, &replay::AutoEditOpts::default());

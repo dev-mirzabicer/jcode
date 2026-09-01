@@ -1065,11 +1065,26 @@ impl Agent {
 
     /// Export the full conversation as a markdown transcript.
     pub fn export_conversation_markdown(&self) -> String {
+        self.export_conversation_markdown_with_policy(
+            crate::session::StartupContextExportPolicy::ReceiptsOnly,
+        )
+    }
+
+    pub fn export_conversation_markdown_with_policy(
+        &self,
+        policy: crate::session::StartupContextExportPolicy,
+    ) -> String {
+        let session = self.session.redacted_for_export_with_policy(policy);
+        let startup_message_ids = session.startup_context_message_ids();
         let mut md = String::new();
-        for msg in &self.session.messages {
-            let role_label = match msg.role {
-                Role::User => "User",
-                Role::Assistant => "Assistant",
+        for msg in &session.messages {
+            let role_label = if startup_message_ids.contains(msg.id.as_str()) {
+                "Startup Context"
+            } else {
+                match msg.role {
+                    Role::User => "User",
+                    Role::Assistant => "Assistant",
+                }
             };
             md.push_str(&format!("### {}\n\n", role_label));
             for block in &msg.content {

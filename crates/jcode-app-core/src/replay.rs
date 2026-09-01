@@ -136,9 +136,25 @@ fn cap_initial_replay_idle(events: &mut [TimelineEvent]) {
 /// Memory injections from `session.memory_injections` are inserted at the
 /// correct positions based on their `before_message` index.
 pub fn export_timeline(session: &Session) -> Vec<TimelineEvent> {
+    export_timeline_with_policy(
+        session,
+        crate::session::StartupContextExportPolicy::ReceiptsOnly,
+    )
+}
+
+pub fn export_timeline_with_policy(
+    session: &Session,
+    policy: crate::session::StartupContextExportPolicy,
+) -> Vec<TimelineEvent> {
+    let projected = session.redacted_for_export_with_policy(policy);
+    export_projected_timeline(&projected)
+}
+
+fn export_projected_timeline(session: &Session) -> Vec<TimelineEvent> {
     let mut events = Vec::new();
     let mut t: u64 = 0;
     let session_start = session.created_at;
+    let startup_message_ids = session.startup_context_message_ids();
 
     // Track tool IDs for pairing ToolUse → ToolResult
     let mut pending_tools: Vec<(String, String, serde_json::Value)> = Vec::new(); // (id, name, input)
@@ -181,6 +197,21 @@ pub fn export_timeline(session: &Session) -> Vec<TimelineEvent> {
 
         match msg.role {
             Role::User => {
+                if startup_message_ids.contains(msg.id.as_str()) {
+                    let content = extract_text(&msg.content);
+                    if !content.is_empty() {
+                        events.push(TimelineEvent {
+                            t,
+                            kind: TimelineEventKind::DisplayMessage {
+                                role: "system".to_string(),
+                                title: Some("Startup Context".to_string()),
+                                content,
+                            },
+                        });
+                        t += 300;
+                    }
+                    continue;
+                }
                 // Check if this is a tool result
                 let mut has_tool_result = false;
                 for block in &msg.content {
@@ -616,6 +647,18 @@ pub fn load_swarm_sessions(
     seed_id_or_path: &str,
     auto_edit: bool,
 ) -> Result<Vec<SwarmReplaySession>> {
+    load_swarm_sessions_with_export_policy(
+        seed_id_or_path,
+        auto_edit,
+        crate::session::StartupContextExportPolicy::ReceiptsOnly,
+    )
+}
+
+pub fn load_swarm_sessions_with_export_policy(
+    seed_id_or_path: &str,
+    auto_edit: bool,
+    policy: crate::session::StartupContextExportPolicy,
+) -> Result<Vec<SwarmReplaySession>> {
     let seed = load_session(seed_id_or_path)?;
     let seed_working_dir = seed.working_dir.clone();
     let lower_bound = seed.created_at - Duration::hours(6);
@@ -623,9 +666,10 @@ pub fn load_swarm_sessions(
 
     let sessions_dir = crate::storage::jcode_dir()?.join("sessions");
     if !sessions_dir.exists() {
+        let timeline = maybe_auto_edit(&seed, auto_edit, policy);
         return Ok(vec![SwarmReplaySession {
-            timeline: maybe_auto_edit(&seed, auto_edit),
-            session: seed,
+            timeline,
+            session: seed.redacted_for_export_with_policy(policy),
         }]);
     }
 
@@ -684,14 +728,19 @@ pub fn load_swarm_sessions(
     Ok(selected
         .into_iter()
         .map(|session| {
-            let timeline = maybe_auto_edit(&session, auto_edit);
+            let timeline = maybe_auto_edit(&session, auto_edit, policy);
+            let session = session.redacted_for_export_with_policy(policy);
             SwarmReplaySession { session, timeline }
         })
         .collect())
 }
 
-fn maybe_auto_edit(session: &Session, auto_edit: bool) -> Vec<TimelineEvent> {
-    let timeline = export_timeline(session);
+fn maybe_auto_edit(
+    session: &Session,
+    auto_edit: bool,
+    policy: crate::session::StartupContextExportPolicy,
+) -> Vec<TimelineEvent> {
+    let timeline = export_timeline_with_policy(session, policy);
     if auto_edit {
         auto_edit_timeline(&timeline, &AutoEditOpts::default())
     } else {

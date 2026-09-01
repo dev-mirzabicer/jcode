@@ -1181,6 +1181,75 @@ fn projected_request_defaults_to_raw_history_without_mutating_transcript() {
 }
 
 #[test]
+fn startup_context_markdown_export_is_receipt_only_unless_contents_are_explicitly_requested() {
+    let provider: Arc<dyn Provider> = Arc::new(ProjectedRequestProvider::new(10_000));
+    let mut session = synthetic_startup_session("session-markdown-export");
+    let file_message_id = session.startup_context.as_ref().unwrap().batches[0].files[0]
+        .message_id
+        .clone();
+    let file_body =
+        "MARKDOWN_FILE_SENTINEL\nOPENROUTER_API_KEY=sk-or-v1-abcdefghijklmnopqrstuvwxyz0123456789";
+    {
+        let file_message = session
+            .messages
+            .iter_mut()
+            .find(|message| message.id == file_message_id)
+            .expect("startup file message");
+        let ContentBlock::Text { text, .. } = &mut file_message.content[1] else {
+            panic!("expected raw startup file text");
+        };
+        *text = file_body.to_string();
+    }
+    session.append_stored_message(StoredMessage {
+        id: "session-markdown-export-stale".to_string(),
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: "MARKDOWN_STALE_SENTINEL".to_string(),
+            cache_control: None,
+        }],
+        display_role: Some(StoredDisplayRole::System),
+        timestamp: None,
+        tool_duration_ms: None,
+        token_usage: None,
+    });
+    let file_receipt = &mut session.startup_context.as_mut().unwrap().batches[0].files[0];
+    file_receipt.bytes = file_body.len() as u64;
+    file_receipt.latest_observation.state = StoredStartupObservedState::Changed {
+        sha256: "d".repeat(64),
+        bytes: 17,
+    };
+    file_receipt.last_notified_observation = Some(file_receipt.latest_observation.state.clone());
+    file_receipt.notification_count = 1;
+    file_receipt
+        .stale_marker_message_ids
+        .push("session-markdown-export-stale".to_string());
+    let agent = Agent::new_with_session(provider, Registry::empty(), session, None);
+    let source_before = serde_json::to_vec(&agent.session).expect("source session");
+
+    let default_markdown = agent.export_conversation_markdown();
+    assert!(!default_markdown.contains("MARKDOWN_FILE_SENTINEL"));
+    assert!(!default_markdown.contains("MARKDOWN_STALE_SENTINEL"));
+    assert!(default_markdown.contains("### Startup Context"));
+    assert!(default_markdown.contains("PLAN.md"));
+    assert!(default_markdown.contains("/synthetic/project/PLAN.md"));
+    assert!(default_markdown.contains(&"a".repeat(64)));
+    assert!(default_markdown.contains("initial"));
+    assert!(default_markdown.contains("captured"));
+
+    let full_markdown = agent.export_conversation_markdown_with_policy(
+        crate::session::StartupContextExportPolicy::IncludeContents,
+    );
+    assert!(full_markdown.contains("MARKDOWN_FILE_SENTINEL"));
+    assert!(full_markdown.contains("MARKDOWN_STALE_SENTINEL"));
+    assert!(full_markdown.contains("OPENROUTER_API_KEY=[REDACTED_SECRET]"));
+    assert!(!full_markdown.contains("sk-or-v1-abcdefghijklmnopqrstuvwxyz0123456789"));
+    assert_eq!(
+        serde_json::to_vec(&agent.session).expect("source after export"),
+        source_before
+    );
+}
+
+#[test]
 fn projected_request_applies_selected_summary_at_the_original_position() {
     let provider: Arc<dyn Provider> = Arc::new(ProjectedRequestProvider::new(10_000));
     let mut session = Session::create(None, None);

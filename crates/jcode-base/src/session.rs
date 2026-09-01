@@ -34,6 +34,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::Path;
 mod crash;
+mod export;
 mod journal;
 mod load_telemetry;
 mod maintenance;
@@ -47,6 +48,7 @@ pub use crash::{
     CrashedSessionsInfo, detect_crashed_sessions, find_recent_crashed_sessions,
     find_session_by_name_or_id, recover_crashed_sessions, recover_crashed_sessions_by_ids,
 };
+pub use export::{STARTUP_CONTEXT_FULL_EXPORT_WARNING, StartupContextExportPolicy};
 pub use jcode_session_types::{
     EnvSnapshot, GitState, SessionImproveMode, SessionStatus, StoredCompactionState,
     StoredContextViewState, StoredDisplayRole, StoredMemoryInjection, StoredMessage,
@@ -1586,7 +1588,12 @@ request in this new forked session, using the inherited conversation only as con
     }
 
     pub fn redacted_for_export(&self) -> Self {
+        self.redacted_for_export_with_policy(StartupContextExportPolicy::ReceiptsOnly)
+    }
+
+    pub fn redacted_for_export_with_policy(&self, policy: StartupContextExportPolicy) -> Self {
         let mut redacted = self.clone();
+        export::project_startup_context_messages(&mut redacted, policy);
         if let Some(title) = redacted.title.as_mut() {
             *title = crate::message::redact_secrets(title);
         }

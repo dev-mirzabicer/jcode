@@ -1,12 +1,148 @@
 use super::*;
 use crate::plan::PlanItem;
 use crate::protocol::SwarmMemberStatus;
-use crate::session::{StoredReplayEvent, StoredReplayEventKind};
+use crate::session::{StartupContextExportPolicy, StoredReplayEvent, StoredReplayEventKind};
 use chrono::{Duration, Utc};
+use jcode_session_types::{
+    StoredDisplayRole, StoredMessage, StoredStartupBatchDeliveryState, StoredStartupBatchKind,
+    StoredStartupContextBatch, StoredStartupContextReceipt, StoredStartupContextState,
+    StoredStartupFileObservation, StoredStartupFileReceipt, StoredStartupObservedState,
+    StoredStartupPathClassification, StoredStartupProjectIdentity,
+};
 use std::ffi::OsString;
 
 fn lock_env() -> std::sync::MutexGuard<'static, ()> {
     crate::storage::lock_test_env()
+}
+
+fn startup_export_session() -> Session {
+    let now = Utc::now();
+    let mut session = Session::create_with_id("replay-startup-export".to_string(), None, None);
+    let stored = |id: &str, text: &str| StoredMessage {
+        id: id.to_string(),
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: text.to_string(),
+            cache_control: None,
+        }],
+        display_role: Some(StoredDisplayRole::System),
+        timestamp: None,
+        tool_duration_ms: None,
+        token_usage: None,
+    };
+    session.append_stored_message(stored("replay-startup-control", "REPLAY_CONTROL_SENTINEL"));
+    session.append_stored_message(StoredMessage {
+        id: "replay-startup-file".to_string(),
+        role: Role::User,
+        content: vec![
+            ContentBlock::Text {
+                text: "synthetic metadata".to_string(),
+                cache_control: None,
+            },
+            ContentBlock::Text {
+                text: "REPLAY_FILE_SENTINEL\nOPENROUTER_API_KEY=sk-or-v1-abcdefghijklmnopqrstuvwxyz0123456789"
+                    .to_string(),
+                cache_control: None,
+            },
+        ],
+        display_role: Some(StoredDisplayRole::System),
+        timestamp: None,
+        tool_duration_ms: None,
+        token_usage: None,
+    });
+    session.append_stored_message(stored("replay-startup-stale", "REPLAY_STALE_SENTINEL"));
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "ordinary user prompt".to_string(),
+            cache_control: None,
+        }],
+    );
+    session.startup_context = Some(StoredStartupContextReceipt {
+        schema_version: 1,
+        project: StoredStartupProjectIdentity::Directory {
+            canonical_root: "/replay/project".to_string(),
+        },
+        plan_revision: 4,
+        state: StoredStartupContextState::ProviderAccepted,
+        batches: vec![StoredStartupContextBatch {
+            id: "replay-batch".to_string(),
+            kind: StoredStartupBatchKind::Initial,
+            control_message_id: "replay-startup-control".to_string(),
+            files: vec![StoredStartupFileReceipt {
+                spec_id: "replay-spec".to_string(),
+                message_id: "replay-startup-file".to_string(),
+                ordinal: 2,
+                logical_path: "docs/PLAN.md".to_string(),
+                resolved_path: "/replay/project/docs/PLAN.md".to_string(),
+                classification: StoredStartupPathClassification::Project,
+                sha256: "c".repeat(64),
+                bytes: 87,
+                estimated_tokens: 22,
+                latest_observation: StoredStartupFileObservation {
+                    observed_at: now,
+                    state: StoredStartupObservedState::Missing,
+                },
+                last_notified_observation: Some(StoredStartupObservedState::Missing),
+                notification_count: 1,
+                stale_marker_message_ids: vec!["replay-startup-stale".to_string()],
+            }],
+            appended_at: now,
+            delivery_state: StoredStartupBatchDeliveryState::ProviderAccepted,
+            first_dispatched_at: Some(now),
+            first_provider_accepted_at: Some(now),
+        }],
+        blocked_issues: Vec::new(),
+        pending_updates: Vec::new(),
+        last_apply_operation_id: None,
+        prepared_at: now,
+        first_dispatched_at: Some(now),
+        first_provider_accepted_at: Some(now),
+        metadata_repair: None,
+    });
+    session
+}
+
+#[test]
+fn startup_context_replay_is_receipt_only_by_default_and_full_only_by_explicit_policy() {
+    let session = startup_export_session();
+    let source_before = serde_json::to_vec(&session).expect("source session");
+
+    let default_timeline = export_timeline(&session);
+    let default_json = serde_json::to_string(&default_timeline).expect("default timeline");
+    assert!(!default_json.contains("REPLAY_CONTROL_SENTINEL"));
+    assert!(!default_json.contains("REPLAY_FILE_SENTINEL"));
+    assert!(!default_json.contains("REPLAY_STALE_SENTINEL"));
+    assert!(default_json.contains("docs/PLAN.md"));
+    assert!(default_json.contains("/replay/project/docs/PLAN.md"));
+    assert!(default_json.contains(&"c".repeat(64)));
+    assert!(default_json.contains("provider_accepted"));
+    assert_eq!(
+        default_timeline
+            .iter()
+            .filter(|event| matches!(event.kind, TimelineEventKind::DisplayMessage { .. }))
+            .count(),
+        3
+    );
+    assert!(default_timeline.iter().all(|event| {
+        !matches!(
+            &event.kind,
+            TimelineEventKind::UserMessage { text } if text.contains("startup_context_")
+        )
+    }));
+
+    let full_timeline =
+        export_timeline_with_policy(&session, StartupContextExportPolicy::IncludeContents);
+    let full_json = serde_json::to_string(&full_timeline).expect("full timeline");
+    assert!(full_json.contains("REPLAY_CONTROL_SENTINEL"));
+    assert!(full_json.contains("REPLAY_FILE_SENTINEL"));
+    assert!(full_json.contains("REPLAY_STALE_SENTINEL"));
+    assert!(full_json.contains("OPENROUTER_API_KEY=[REDACTED_SECRET]"));
+    assert!(!full_json.contains("sk-or-v1-abcdefghijklmnopqrstuvwxyz0123456789"));
+    assert_eq!(
+        serde_json::to_vec(&session).expect("source after exports"),
+        source_before
+    );
 }
 
 struct EnvVarGuard {

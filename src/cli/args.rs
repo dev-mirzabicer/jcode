@@ -386,6 +386,10 @@ pub(crate) enum Command {
         #[arg(long)]
         export: bool,
 
+        /// Include complete Startup Context bodies after redaction (prints a privacy warning)
+        #[arg(long)]
+        include_startup_context: bool,
+
         /// Playback speed multiplier (default: 1.0)
         #[arg(long, default_value = "1.0")]
         speed: f64,
