@@ -471,4 +471,5 @@ Before changing Startup Context:
 10. Keep exact content behind explicit detail or warned full-export routes.
 11. Verify prompt-safe restoration and no automatic resend after blocked preflight.
 12. Verify context summaries, revert, and reapply without source or receipt mutation.
-13. Run the focused and integration verification commands before accepting a change.
+13. Run the focused and integration commands in
+    [`dev/STARTUP_CONTEXT_ACCEPTANCE.md`](dev/STARTUP_CONTEXT_ACCEPTANCE.md).
