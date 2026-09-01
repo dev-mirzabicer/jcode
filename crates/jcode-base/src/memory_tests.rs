@@ -11,6 +11,9 @@ fn global_disable_closes_memory_runtime_and_sidecar_paths() {
 
     assert!(!memory_runtime_active());
     assert!(!memory_llm_judge_available());
+    let manager = MemoryManager::new();
+    assert!(manager.load_global_graph().is_err());
+    assert!(manager.save_global_graph(&MemoryGraph::new()).is_err());
 
     if let Some(previous_memory) = previous_memory {
         crate::env::set_var("JCODE_MEMORY_ENABLED", previous_memory);

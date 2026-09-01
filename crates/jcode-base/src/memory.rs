@@ -200,6 +200,13 @@ pub struct MemoryManager {
 }
 
 impl MemoryManager {
+    fn ensure_available(&self) -> Result<()> {
+        if !crate::config::config().features.memory {
+            anyhow::bail!("memory is disabled by global configuration");
+        }
+        Ok(())
+    }
+
     pub fn new() -> Self {
         Self {
             project_dir: None,
@@ -239,6 +246,7 @@ impl MemoryManager {
 
     /// Clear all test memories (only works in test mode)
     pub fn clear_test_storage(&self) -> Result<()> {
+        self.ensure_available()?;
         if !self.test_mode {
             anyhow::bail!("clear_test_storage only allowed in test mode");
         }
@@ -368,6 +376,7 @@ impl MemoryManager {
     }
 
     pub fn load_project(&self) -> Result<MemoryStore> {
+        self.ensure_available()?;
         match self.project_memory_path()? {
             Some(path) if path.exists() => storage::read_json(&path),
             _ => Ok(MemoryStore::new()),
@@ -375,6 +384,7 @@ impl MemoryManager {
     }
 
     pub fn load_global(&self) -> Result<MemoryStore> {
+        self.ensure_available()?;
         let path = self.global_memory_path()?;
         if path.exists() {
             storage::read_json(&path)
@@ -384,6 +394,7 @@ impl MemoryManager {
     }
 
     pub fn save_project(&self, store: &MemoryStore) -> Result<()> {
+        self.ensure_available()?;
         if let Some(path) = self.project_memory_path()? {
             storage::write_json(&path, store)?;
         }
@@ -391,6 +402,7 @@ impl MemoryManager {
     }
 
     pub fn save_global(&self, store: &MemoryStore) -> Result<()> {
+        self.ensure_available()?;
         let path = self.global_memory_path()?;
         storage::write_json(&path, store)
     }
@@ -1662,6 +1674,7 @@ impl MemoryManager {
 
     /// Load project memories as a MemoryGraph with automatic migration
     pub fn load_project_graph(&self) -> Result<MemoryGraph> {
+        self.ensure_available()?;
         let Some(path) = self.project_memory_path()? else {
             return Ok(MemoryGraph::new());
         };
@@ -1727,6 +1740,7 @@ impl MemoryManager {
 
     /// Load global memories as a MemoryGraph with automatic migration
     pub fn load_global_graph(&self) -> Result<MemoryGraph> {
+        self.ensure_available()?;
         let path = self.global_memory_path()?;
         if !self.test_mode
             && let Some(mut graph) = cached_graph(&path)
@@ -1782,6 +1796,7 @@ impl MemoryManager {
 
     /// Save project memories as a MemoryGraph
     pub fn save_project_graph(&self, graph: &MemoryGraph) -> Result<()> {
+        self.ensure_available()?;
         if let Some(path) = self.project_memory_path()? {
             storage::write_json(&path, graph)?;
             if !self.test_mode {
@@ -1793,6 +1808,7 @@ impl MemoryManager {
 
     /// Save global memories as a MemoryGraph
     pub fn save_global_graph(&self, graph: &MemoryGraph) -> Result<()> {
+        self.ensure_available()?;
         let path = self.global_memory_path()?;
         storage::write_json(&path, graph)?;
         if !self.test_mode {
