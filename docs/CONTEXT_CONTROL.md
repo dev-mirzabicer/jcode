@@ -360,6 +360,23 @@ the substantive contents and findings of file reads, not merely filenames.
 The projected summary keeps curator prose and harness evidence distinct so the continuing
 agent can distinguish model-authored memory from auditable structured provenance.
 
+## Startup Context source messages
+
+Startup Context control, exact file, late-update, and stale-marker messages are ordinary
+authoritative `Session.messages` source. `/context` and the Context Editor read those
+messages directly, not the receipt-only remote History or export projection. Exact content
+remains inspectable through the normal bounded message-detail path.
+
+A normal explicit range summary may include Startup Context messages. Applying the
+summary changes only the provider-facing context view. It does not mutate the original
+messages, the immutable captured file bodies, or their receipt-owned structural IDs.
+Revert and reapply use the same validation, revision, provenance, continuation-reset, and
+cache-transition behavior as every other context transaction. There is no Startup
+Context-specific closure rule or second projection system.
+
+See [`STARTUP_CONTEXT.md`](STARTUP_CONTEXT.md) for capture, receipt, lifecycle, History,
+export, and privacy behavior.
+
 ## Context pressure, safe budgets, and prompt preservation
 
 Jcode computes preflight after assembling the actual system prompts, tools, projected

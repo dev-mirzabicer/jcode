@@ -679,6 +679,29 @@ and hotkey-friendly dictation without requiring a bundled speech-to-text stack.
 
 ---
 
+## Startup Context
+
+Jcode can capture an ordered project-specific set of required startup files before a new
+primary session begins work. Use `/startup` to browse, search, select, reorder, preview,
+and apply files for this session, with an equally prominent option to save the same order
+as the private project default.
+
+Captured files become exact hidden user-authority messages in the authoritative session
+transcript. Missing or unsupported required files block the first provider request without
+losing the composer. Resume and split reuse the existing snapshot, while clear and
+transfer capture again. Later file changes preserve the original snapshot and add bounded
+stale guidance rather than silently rereading or rewriting history.
+
+Default exports omit Startup Context bodies while retaining receipt metadata. The replay
+CLI includes complete redacted bodies only with the warned `--include-startup-context`
+option.
+
+See [Startup Context](docs/STARTUP_CONTEXT.md) for the complete editor workflow, project
+identity and worktree behavior, lifecycle, cache ordering, privacy, recovery, and
+maintainer ownership.
+
+---
+
 ## User-Controlled Context
 
 Jcode keeps one authoritative transcript and derives a persisted, reversible provider
@@ -766,6 +789,7 @@ Notes:
 - [Ambient Mode / OpenClaw](docs/AMBIENT_MODE.md)
 - [Browser Provider Protocol](docs/BROWSER_PROVIDER_PROTOCOL.md)
 - [Context Control and the Context Editor](docs/CONTEXT_CONTROL.md)
+- [Startup Context](docs/STARTUP_CONTEXT.md)
 - [Memory Architecture](docs/MEMORY_ARCHITECTURE.md)
 - [Swarm Architecture](docs/SWARM_ARCHITECTURE.md)
 - [Server Architecture](docs/SERVER_ARCHITECTURE.md)
