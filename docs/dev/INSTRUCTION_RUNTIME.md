@@ -1,197 +1,179 @@
 # Instruction runtime foundation
 
-Phase 3 WP-01 adds the typed, file-backed instruction runtime under `jcode-base::instruction`. It is a foundation for later Phase 3 packages. No production prompt caller uses it yet.
+**Status:** Phase 3 WP-01 typed foundation. Production prompt callers have not migrated yet.
 
-## Ownership
+**Source module:** `crates/jcode-base/src/instruction/`
 
-The runtime owns:
+**Inventory:** [`INSTRUCTION_INVENTORY.md`](INSTRUCTION_INVENTORY.md)
 
-- Stable instruction IDs
-- Global and project scope
-- Managed resource discovery
-- YAML frontmatter parsing
-- Project-first and explicit-scope resolution
-- Plain and restricted Handlebars modes
-- Module dependency and reverse-consumer graphs
-- Complete rendering
-- Agent metadata and activation availability validation
-- Typed registered-consumer rendering
-- Dedicated global and project `AGENTS.md` reads
-- Typed errors for missing, invalid, ambiguous, empty, and cyclic resources
+## Purpose and boundary
 
-It does not own:
+The instruction runtime is the one typed authority for managed instruction discovery, resource identity, global/project specificity, document parsing, dependency validation, and complete rendering.
 
-- Git repositories, history, drafts, or mutation
-- Session activation or frozen prompt persistence
-- Message roles, structural tags, timestamps, receipts, or queueing
-- Provider request framing or continuation state
-- Startup Context selection or context-control operations
-- Tool schemas or permissions
-- TUI presentation
+It deliberately does not own:
 
-## Resource layout
+- Git repositories, commits, branches, remotes, locking, or editing
+- Session activation, freezing, switching, persistence, or exports
+- System versus user-message delivery
+- Display roles, timestamps, XML tags, receipts, tool schemas, or provider framing
+- Prompt-quality judgment
 
-An `InstructionSources` value names the global store and optional project store. The current discovery layout is:
+Those behaviors remain with their current domain owners. Later Phase 3 packages call this runtime for finished text instead of reproducing its internal stages.
 
-```text
-system/*.md
-agents/*.md
-addenda/*.md
-modules/*.md
-notifications/*.md
-tools/*.md
-skills/<name>/SKILL.md
-```
+WP-01 does not initialize `~/.jcode/instructions`, activate the runtime in production prompt paths, or migrate existing prose. WP-02 supplies the repository roots. WP-03 and later packages migrate callers by the inventory ledger.
 
-The later repository-service package supplies real store paths and lifecycle. WP-01 tests use temporary directories only.
+## Public operations
 
-## Document format
+`InstructionRuntime` exposes complete caller operations:
 
-Managed Markdown starts with YAML frontmatter:
+- `discover(InstructionSources)` discovers all supported resource families and retains scoped invalid entries for truthful shadowing.
+- `resolve(&InstructionSelector)` applies explicit scope or project-first specificity and returns one validated document.
+- `render(&InstructionSelector, &typed_values)` resolves dependencies and returns complete rendered text plus the dependency/reverse-consumer graph.
+- `render_agent(...)` additionally enforces primary/isolated availability metadata.
+- `render_registered(&ConsumerRegistration, &typed_values)` renders a code-owned singleton and distinguishes required missing files from deleted user resources.
+- `InstructionConsumer<T>` binds one consumer registration to a serializable value type without taking over delivery behavior.
+
+Callers do not coordinate public load, parse, validate, resolve, graph, partial, and render stages.
+
+## Resource model
+
+Supported kinds are:
+
+- `system`
+- `agent`
+- `agent-addendum`
+- `module`
+- `notification`
+- `tool-guidance`
+- `skill`
+
+Default directories are `system/`, `agents/`, `addenda/`, `modules/`, `notifications/`, `tools/`, and `skills/<name>/SKILL.md`.
+
+Stable IDs use lowercase ASCII letters, digits, `-`, `_`, and `.`, beginning with a letter or digit. Jcode adds no ID-length product limit.
+
+Ordinary resources use YAML frontmatter followed by a complete Markdown body:
 
 ```markdown
 ---
-id: reviewer
-name: Reviewer
+id: synthetic-agent
 kind: agent
-description: Reviews completed implementation work.
+name: Synthetic agent
+description: Synthetic mechanism fixture
 availability: both
 template: handlebars
 includes:
-  - quality
-  - global:safety
+  - common
 ---
 
-{{> quality}}
+{{> project:quality}}
 
-Review {{project.name}}.
+Hello {{user.name}}.
 ```
 
-Rules:
+Plain text is the default. Agent resources require a non-empty name, description, and `primary`, `isolated`, or `both` availability. Addenda require an explicit agent target. Skills may use their existing `name` as the stable ID and retain `allowed-tools` compatibility.
 
-- `id` is stable and uses lowercase ASCII letters, digits, `.`, `_`, and `-`.
-- Skills may use their existing `name` as the stable ID.
-- `kind` must match the containing resource family.
-- Plain text is the default.
-- Handlebars is opt-in with `template: handlebars`.
-- Agents require nonempty `name`, `description`, and `availability`.
-- Addenda require an explicit `target` agent selector.
-- `includes` are module references rendered before the resource body.
-- `allowed-tools` is parsed for skill compatibility but remains metadata, not a runtime permission grant.
-- Empty bodies are valid. A registered consumer can declare that empty prose is not meaningful.
+`InstructionDocument::to_markdown` provides deterministic semantic serialization for manager and protocol work. It preserves the body text rather than interpreting it while serializing.
 
-`InstructionDocument::to_markdown` produces deterministic frontmatter for manager and round-trip use. It preserves the body text held by the domain document.
-
-## Resolution
+## Specificity and invalid resources
 
 References may be:
 
-```text
-shared-module
-project:shared-module
-global:shared-module
-```
+- Unqualified: project first, then global
+- `global:<id>`
+- `project:<id>`
 
-Unqualified references use a present project definition first and otherwise global. A present invalid or ambiguous project definition fails. It never silently falls back to global.
+A present project candidate shadows global even when the project document is invalid. It fails the affected operation instead of silently falling back.
 
-Duplicate stable IDs in one kind and scope are ambiguous. They remain visible through `InstructionRuntime::resources` and fail only callers that select them. Invalid unrelated resources remain visible through diagnostics and do not block valid resources.
+Duplicate IDs in one kind and scope are ambiguous and fail selection. Invalid or ambiguous unrelated resources remain inspectable and do not block a valid resource.
 
-Dedicated `AGENTS.md` sources are not catalog resources. `render_external_agents` returns global content before project content, matching the accepted Phase 3 target ordering.
+Global and project `AGENTS.md` are dedicated external inputs, not managed catalog documents. `render_external_agents` renders global first and project second. The runtime does not commit or import them.
 
-## Restricted Handlebars
+## Complete rendering
 
-The adapter uses Handlebars 6 with:
+Plain documents treat `{{ ... }}` literally.
+
+Handlebars mode uses version 6 through a restricted adapter:
 
 - Strict missing-value behavior
-- Serialized typed values
-- HTML escaping disabled
+- Typed `serde::Serialize` values only
+- HTML escaping disabled for Markdown/plain text
 - Registered managed module partials only
-- Project-first or explicit-scope partial resolution
-- Pre-render dependency and cycle validation
-- No custom helper registry
-- No scripts
+- Project-first and explicit-scope partial lookup
+- No helper calls
+- No block expressions
+- No subexpressions
 - No arbitrary filesystem loader
-- No block helpers or subexpressions
+- No script execution
+- Pre-render dependency cycle detection
 
-Allowed expressions are typed value paths such as:
+Metadata `includes` render complete modules before the owning body. Handlebars partials render at their exact source position. Agent-addendum targets are validated dependencies but are not implicitly copied into the addendum body.
 
-```handlebars
-{{project.name}}
-```
+The graph traversal is iterative. Jcode adds no source-size, body-size, expansion-depth, graph-depth, or rendered-output cap. Large finite sources and deep finite acyclic graphs render completely. Filesystem, serialization, allocation, and machine failures remain errors. No partial output is returned as success.
 
-Allowed partials are managed module references:
+## Empty, missing, and delete semantics
 
-```handlebars
-{{> quality}}
-{{> project:quality}}
-{{> global:quality}}
-```
+- An empty body is valid and renders empty text.
+- An empty project definition still shadows the global definition.
+- Removing a project definition exposes global on the next discovery.
+- Removing a user-defined resource makes it absent.
+- A required registered singleton that is absent produces `RegisteredResourceMissing` with its expected path.
+- A consumer may declare empty prose invalid through `empty_is_meaningful = false`.
+- The runtime never restores a seed merely because a file is empty or absent.
 
-Plain documents treat Handlebars-like text literally.
+Repository initialization and damaged-store recovery belong to WP-02.
 
-## Complete rendering and limits
+## Diagnostics and errors
 
-The runtime reads complete UTF-8 files and returns complete rendered text. It adds no source-size, body-size, instruction-ID-length, graph-depth, expansion, or output-size cap.
+Discovery records path-scoped diagnostics for unreadable or unidentified files. A document whose stable ID can be recovered remains a scoped invalid catalog entry so its shadowing semantics stay truthful.
 
-Dependency traversal is iterative, so a deep finite acyclic graph does not consume the Rust call stack. Filesystem, UTF-8, allocation, or operating-system failures remain explicit errors. The runtime never returns partial text as success.
+Typed errors distinguish:
 
-## Registered consumers
+- Invalid ID or selector
+- Resource absent
+- Registered singleton missing
+- Scoped ambiguity
+- Invalid selected resource and source path
+- Empty content rejected by a consumer contract
+- Restricted-template violation
+- Missing typed value or rendering failure
+- Dependency cycle with a resource chain
+- Agent availability mismatch
+- Value serialization failure
 
-A code-owned consumer registers stable identity and behavioral metadata without embedding the human prose:
+Errors identify the affected resource and operation. Runtime state is immutable after discovery, so a failed render has no partial mutation to roll back.
 
-```rust
-let registration = ConsumerRegistration::new(
-    "startup-context.stale",
-    "startup-context-stale",
-    InstructionKind::Notification,
-    "notifications/startup-context-stale.md",
-    "Startup Context",
-    "Startup Context retains XML, receipt state, role, ordering, and persistence.",
-)?;
-let consumer = InstructionConsumer::<StartupContextStaleValues>::new(registration);
-let rendered = consumer.render(&runtime, &values)?;
-```
+## Security and cache relevance
 
-The generic value type fixes the typed rendering contract at the consumer declaration. The runtime returns text and dependency information. The subsystem still owns delivery and structure.
+The renderer cannot execute repository code, call helpers, load arbitrary paths, or escape configured instruction roots through partial references. Repository and symlink policy remains a WP-02 responsibility.
 
-A required registered singleton that is absent returns `RegisteredResourceMissing` with the expected path. An ordinary user-defined resource that was deleted returns `ResourceNotFound`. These states are deliberately distinct.
+WP-01 does not change provider prompts, tool definitions, or session cache behavior. Later activation packages render once at their accepted lifecycle boundary and persist exact text. The runtime itself has no watcher, source hash, Git revision, freshness state, truncation, or cache policy.
 
-## Agent metadata
+## Mechanism verification
 
-Agent resources expose:
+Synthetic tests cover:
 
-- Stable ID
-- Display name
-- Selection description
-- `primary`, `isolated`, or `both` availability
-- Template mode
-- Body and module dependencies
-
-`render_agent` validates availability and renders complete instructions. It does not activate a session or choose a model. Phase 3 WP-03 owns primary session activation and WP-04 owns transitions.
-
-## Verification
-
-Synthetic mechanism tests cover:
-
-- Every resource kind and semantic round trip
+- Every resource kind and semantic Markdown round trip
 - Plain literal braces
 - Typed Handlebars values without HTML escaping
 - Project-first and explicit-scope partials
 - Invalid project shadowing
-- Unrelated-invalid-resource isolation
-- Empty, missing registered singleton, and deleted user-resource semantics
-- Duplicate-ID ambiguity
+- Unrelated-resource isolation
+- Empty, missing registered, and deleted-user-resource distinctions
+- Deep finite graphs and large complete sources
+- Cycle, missing dependency, unknown value, helper, and ambiguity failures
 - Agent availability
+- Typed registered consumers and delivery ownership
 - Addendum target validation
-- Metadata includes and reverse consumers
-- Deep finite graphs
-- Cycle rejection
-- Missing dependencies
-- Unknown values
-- Helper rejection
-- Multi-megabyte complete rendering
-- Dedicated global-before-project `AGENTS.md`
+- Dependency and reverse-consumer derivation
+- Dedicated global/project `AGENTS.md` ordering
 
-The tests use synthetic prose. They do not snapshot or judge central prompt wording.
+The fixtures use synthetic prose. They do not snapshot, require, forbid, or judge Mirza-approved instruction wording.
 
-The full production instruction migration map is [`INSTRUCTION_INVENTORY.md`](INSTRUCTION_INVENTORY.md).
+## Handoff to later packages
+
+- WP-02 supplies validated Git-backed global and project roots plus import receipts.
+- WP-03 uses the runtime for complete system composition and the compatibility `jcode` agent.
+- WP-05 adopts managed skill discovery and activation snapshots.
+- WP-06 and WP-07 migrate inventory rows through registered typed consumers.
+- WP-09 and WP-10 use catalog summaries, diagnostics, complete content, graphs, and deterministic document serialization for the manager.
+- WP-11 reconciles every inventory row and verifies exact migration equality or an approved exception.
