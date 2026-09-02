@@ -72,6 +72,8 @@ Hello {{user.name}}.
 
 Plain text is the default. Agent resources require a non-empty name, description, and `primary`, `isolated`, or `both` availability. Addenda require an explicit agent target. Skills may use their existing `name` as the stable ID and retain `allowed-tools` compatibility.
 
+Name and description have one domain source of truth in `InstructionMetadata`. `AgentMetadata` carries only agent-specific availability. The parser rejects unknown frontmatter fields rather than silently dropping them during `to_markdown`; new extension metadata must first become an explicit typed field with defined runtime and manager semantics.
+
 `InstructionDocument::to_markdown` provides deterministic semantic serialization for manager and protocol work. It preserves the body text rather than interpreting it while serializing.
 
 ## Specificity and invalid resources
@@ -106,7 +108,7 @@ Handlebars mode uses version 6 through a restricted adapter:
 - No script execution
 - Pre-render dependency cycle detection
 
-Metadata `includes` render complete modules before the owning body. Handlebars partials render at their exact source position. Agent-addendum targets are validated dependencies but are not implicitly copied into the addendum body.
+Metadata `includes` render complete modules before the owning body. Handlebars partials render at their exact source position. The graph exposes render dependencies and validation-only dependencies separately. Agent-addendum targets must resolve as valid agents, but their bodies and transitive modules are not rendered with the addendum's values and are not implicitly copied into the addendum body.
 
 The graph traversal is iterative. Jcode adds no source-size, body-size, expansion-depth, graph-depth, or rendered-output cap. Large finite sources and deep finite acyclic graphs render completely. Filesystem, serialization, allocation, and machine failures remain errors. No partial output is returned as success.
 
@@ -157,6 +159,7 @@ Synthetic tests cover:
 - Typed Handlebars values without HTML escaping
 - Project-first and explicit-scope partials
 - Invalid project shadowing
+- Unreadable/invalid-UTF-8 project shadowing without global fallback
 - Unrelated-resource isolation
 - Empty, missing registered, and deleted-user-resource distinctions
 - Deep finite graphs and large complete sources
@@ -164,7 +167,9 @@ Synthetic tests cover:
 - Agent availability
 - Typed registered consumers and delivery ownership
 - Addendum target validation
+- Validation-only addendum targets whose agent templates require unrelated values
 - Dependency and reverse-consumer derivation
+- Unknown frontmatter rejection and single-source agent metadata serialization
 - Dedicated global/project `AGENTS.md` ordering
 
 The fixtures use synthetic prose. They do not snapshot, require, forbid, or judge Mirza-approved instruction wording.
