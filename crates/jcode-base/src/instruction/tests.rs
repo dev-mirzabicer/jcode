@@ -667,6 +667,46 @@ fn unknown_frontmatter_fields_are_rejected_instead_of_silently_discarded() {
 }
 
 #[test]
+fn known_frontmatter_fields_are_rejected_on_incompatible_resource_kinds() {
+    let fixture = Fixture::new();
+    let cases = [
+        (
+            InstructionKind::Module,
+            "wrong-availability",
+            "availability: both",
+            "availability",
+        ),
+        (
+            InstructionKind::System,
+            "wrong-target",
+            "target: global:agent",
+            "target",
+        ),
+        (
+            InstructionKind::Notification,
+            "wrong-tools",
+            "allowed-tools: read, bash",
+            "allowed-tools",
+        ),
+    ];
+    for (kind, id, field, expected_name) in cases {
+        fixture.write(
+            InstructionScope::Global,
+            kind,
+            id,
+            &source(id, kind, &format!("{field}\n"), "body"),
+        );
+        let error = fixture
+            .runtime()
+            .resolve(&selector(kind, id))
+            .expect_err("kind-incompatible metadata must not be silently accepted");
+        assert!(matches!(error, InstructionError::InvalidResource { .. }));
+        assert!(error.to_string().contains(expected_name));
+        assert!(error.to_string().contains("only valid for"));
+    }
+}
+
+#[test]
 fn agent_name_and_description_have_one_metadata_source_of_truth() {
     let fixture = Fixture::new();
     fixture.write(

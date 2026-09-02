@@ -72,7 +72,7 @@ Hello {{user.name}}.
 
 Plain text is the default. Agent resources require a non-empty name, description, and `primary`, `isolated`, or `both` availability. Addenda require an explicit agent target. Skills may use their existing `name` as the stable ID and retain `allowed-tools` compatibility.
 
-Name and description have one domain source of truth in `InstructionMetadata`. `AgentMetadata` carries only agent-specific availability. The parser rejects unknown frontmatter fields rather than silently dropping them during `to_markdown`; new extension metadata must first become an explicit typed field with defined runtime and manager semantics.
+Name and description have one domain source of truth in `InstructionMetadata`. `AgentMetadata` carries only agent-specific availability. The parser rejects unknown frontmatter fields rather than silently dropping them during `to_markdown`; new extension metadata must first become an explicit typed field with defined runtime and manager semantics. It also rejects known fields on kinds that do not define them: `availability` is agent-only, `target` is agent-addendum-only, and `allowed-tools` is skill-only.
 
 `InstructionDocument::to_markdown` provides deterministic semantic serialization for manager and protocol work. It preserves the body text rather than interpreting it while serializing.
 
@@ -170,6 +170,7 @@ Synthetic tests cover:
 - Validation-only addendum targets whose agent templates require unrelated values
 - Dependency and reverse-consumer derivation
 - Unknown frontmatter rejection and single-source agent metadata serialization
+- Kind-incompatible known-frontmatter rejection without silent serialization loss
 - Dedicated global/project `AGENTS.md` ordering
 
 The fixtures use synthetic prose. They do not snapshot, require, forbid, or judge Mirza-approved instruction wording.

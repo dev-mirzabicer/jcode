@@ -743,6 +743,7 @@ fn parse_document(
             expected_kind.directory()
         ));
     }
+    validate_kind_specific_frontmatter(&raw, expected_kind)?;
     let id_value = raw
         .id
         .as_deref()
@@ -812,6 +813,28 @@ fn parse_document(
         body: body.to_string(),
         path: path.to_path_buf(),
     })
+}
+
+fn validate_kind_specific_frontmatter(
+    raw: &ResourceFrontmatter,
+    expected_kind: InstructionKind,
+) -> Result<(), String> {
+    if raw.availability.is_some() && expected_kind != InstructionKind::Agent {
+        return Err(format!(
+            "frontmatter field 'availability' is only valid for agent resources, not {expected_kind}"
+        ));
+    }
+    if raw.target.is_some() && expected_kind != InstructionKind::AgentAddendum {
+        return Err(format!(
+            "frontmatter field 'target' is only valid for agent-addendum resources, not {expected_kind}"
+        ));
+    }
+    if raw.allowed_tools.is_some() && expected_kind != InstructionKind::Skill {
+        return Err(format!(
+            "frontmatter field 'allowed-tools' is only valid for skill resources, not {expected_kind}"
+        ));
+    }
+    Ok(())
 }
 
 fn nonempty(value: Option<&str>, label: &str) -> Result<String, String> {
