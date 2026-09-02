@@ -726,8 +726,25 @@ fn project_submodule_external_and_non_git_modes_preserve_parent_authority() {
     let parent_head = git(&parent, &["rev-parse", "HEAD"]);
     let submodule = fixture
         .service
-        .configure_submodule(&parent, remote.to_str().unwrap(), "main", None)
+        .configure_submodule(
+            &parent,
+            "setup-submodule",
+            remote.to_str().unwrap(),
+            "main",
+            None,
+        )
         .unwrap();
+    let repeated_submodule = fixture
+        .service
+        .configure_submodule(
+            &parent,
+            "setup-submodule-retry",
+            remote.to_str().unwrap(),
+            "main",
+            None,
+        )
+        .expect("submodule setup retry is idempotent");
+    assert_eq!(repeated_submodule.root, submodule.root);
     assert_eq!(submodule.kind, InstructionRepositoryKind::ProjectSubmodule);
     assert_eq!(git(&parent, &["rev-parse", "HEAD"]), parent_head);
     let parent_status = git(&parent, &["status", "--short"]);
@@ -760,7 +777,12 @@ fn project_submodule_external_and_non_git_modes_preserve_parent_authority() {
     init_plain_git(&external_parent);
     let external = fixture
         .service
-        .configure_external_remote(&external_parent, remote.to_str().unwrap(), "main")
+        .configure_external_remote(
+            &external_parent,
+            "setup-external",
+            remote.to_str().unwrap(),
+            "main",
+        )
         .unwrap();
     assert_eq!(external.kind, InstructionRepositoryKind::ProjectExternal);
     assert!(external.owner_only);
@@ -768,12 +790,33 @@ fn project_submodule_external_and_non_git_modes_preserve_parent_authority() {
         fixture.service.inspect(&external).unwrap().health,
         InstructionRepositoryHealth::Ready
     );
+    let setup_lease =
+        acquire_mutation_lease(&fixture.state, &external, "held-setup-lease").unwrap();
+    let busy_setup = fixture
+        .service
+        .configure_external_remote(
+            &external_parent,
+            "blocked-external-setup",
+            remote.to_str().unwrap(),
+            "main",
+        )
+        .expect_err("repository setup must honor the cross-process mutation lease");
+    assert_eq!(
+        busy_setup.kind,
+        InstructionRepositoryErrorKind::MutationBusy
+    );
+    drop(setup_lease);
 
     let local_parent = fixture._root.path().join("local-parent");
     init_plain_git(&local_parent);
     let local = fixture
         .service
-        .configure_external_local(&local_parent, &source.root, Some("main".to_string()))
+        .configure_external_local(
+            &local_parent,
+            "setup-local",
+            &source.root,
+            Some("main".to_string()),
+        )
         .unwrap();
     assert_eq!(local.root, std::fs::canonicalize(&source.root).unwrap());
 
@@ -791,8 +834,14 @@ fn project_submodule_external_and_non_git_modes_preserve_parent_authority() {
     std::fs::create_dir_all(&non_git).unwrap();
     let standalone = fixture
         .service
-        .configure_non_git_project(&non_git, None, &seed(), &[])
+        .configure_non_git_project(&non_git, "setup-standalone", None, &seed(), &[])
         .unwrap();
+    let repeated_standalone = fixture
+        .service
+        .configure_non_git_project(&non_git, "setup-standalone-retry", None, &seed(), &[])
+        .expect("standalone setup retry is idempotent");
+    assert!(!repeated_standalone.created);
+    assert_eq!(repeated_standalone.commit, standalone.commit);
     assert_eq!(
         standalone.repository.kind,
         InstructionRepositoryKind::NonGitProject
@@ -842,7 +891,12 @@ fn explicit_branch_and_local_remote_operations_cover_fast_forward_and_conflict()
     init_plain_git(&consumer_parent);
     let consumer = fixture
         .service
-        .configure_external_remote(&consumer_parent, bare.to_str().unwrap(), "main")
+        .configure_external_remote(
+            &consumer_parent,
+            "setup-consumer",
+            bare.to_str().unwrap(),
+            "main",
+        )
         .unwrap();
     let remote_before = git(&bare, &["rev-parse", "refs/heads/main"]);
     let local_only = draft_commit(
@@ -1042,7 +1096,12 @@ fn project_configuration_write_never_escapes_through_dot_jcode_symlink() {
     symlink(&outside, project.join(".jcode")).unwrap();
     let error = fixture
         .service
-        .configure_external_local(&project, &source.root, Some("main".to_string()))
+        .configure_external_local(
+            &project,
+            "setup-symlink-project",
+            &source.root,
+            Some("main".to_string()),
+        )
         .expect_err("configuration write must reject a symlinked .jcode directory");
     assert_eq!(error.kind, InstructionRepositoryErrorKind::SymlinkEscape);
     assert!(!outside.join("instructions.toml").exists());

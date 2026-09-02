@@ -1,4 +1,5 @@
-use super::git::GitRepository;
+use super::git::{GitRepository, validate_operation_id};
+use super::lease::acquire_mutation_lease;
 use super::mutation::{atomic_write_path, validate_relative_path};
 use super::service::InstructionRepositoryService;
 use super::types::*;
@@ -81,6 +82,7 @@ impl InstructionRepositoryService {
     pub fn configure_submodule(
         &self,
         launch_dir: impl AsRef<Path>,
+        operation_id: &str,
         url: &str,
         branch: &str,
         path: Option<PathBuf>,
@@ -104,30 +106,44 @@ impl InstructionRepositoryService {
         }
         let relative = path.unwrap_or_else(|| PathBuf::from(CONVENTIONAL_SUBMODULE_PATH));
         validate_relative_path(&relative)?;
-        GitRepository::add_submodule(project.active_root(), url, branch, &relative)?;
-        let config = InstructionProjectConfig::new(InstructionProjectRepositoryMode::Submodule {
-            path: relative.clone(),
-            url: Some(url.to_string()),
-            branch: Some(branch.to_string()),
-        });
         let config_path = project.active_root().join(PROJECT_CONFIG_RELATIVE_PATH);
-        save_project_config(&config_path, &config)
-            .map_err(|error| error.may_have_working_changes())?;
-        Ok(InstructionRepositoryRef {
+        let repository = InstructionRepositoryRef {
             id: format!("project-{}", project.key().digest()),
             kind: InstructionRepositoryKind::ProjectSubmodule,
-            root: project.active_root().join(relative),
+            root: project.active_root().join(&relative),
             project_root: Some(project.active_root().to_path_buf()),
-            project_config_path: Some(config_path),
+            project_config_path: Some(config_path.clone()),
             configured_branch: Some(branch.to_string()),
             configured_remote: Some(url.to_string()),
             owner_only: false,
-        })
+        };
+        validate_operation_id(operation_id)?;
+        let _lease = acquire_mutation_lease(&roots.durable_state, &repository, operation_id)?;
+        if GitRepository::submodule_recorded_commit(project.active_root(), &relative)?.is_none() {
+            GitRepository::add_submodule(project.active_root(), url, branch, &relative)
+                .map_err(InstructionRepositoryError::may_have_working_changes)?;
+        } else if !GitRepository::new(&repository.root).is_repository() {
+            return Err(InstructionRepositoryError::new(
+                InstructionRepositoryErrorKind::RepositoryDamaged,
+                "configure instruction submodule",
+                "parent records the submodule, but its checkout is missing or invalid",
+            )
+            .repository(&repository));
+        }
+        let config = InstructionProjectConfig::new(InstructionProjectRepositoryMode::Submodule {
+            path: relative,
+            url: Some(url.to_string()),
+            branch: Some(branch.to_string()),
+        });
+        save_project_config(&config_path, &config)
+            .map_err(|error| error.may_have_working_changes())?;
+        Ok(repository)
     }
 
     pub fn configure_external_remote(
         &self,
         launch_dir: impl AsRef<Path>,
+        operation_id: &str,
         url: &str,
         branch: &str,
     ) -> InstructionRepositoryResult<InstructionRepositoryRef> {
@@ -141,14 +157,20 @@ impl InstructionRepositoryService {
                     error.to_string(),
                 )
             })?;
-        let config =
-            InstructionProjectConfig::new(InstructionProjectRepositoryMode::ExternalRemote {
-                url: url.to_string(),
-                branch: branch.to_string(),
-            });
         let config_path = project.active_root().join(PROJECT_CONFIG_RELATIVE_PATH);
-        save_project_config(&config_path, &config)?;
         let checkout = external_checkout_root(roots, project.key());
+        let repository = InstructionRepositoryRef {
+            id: format!("project-{}", project.key().digest()),
+            kind: InstructionRepositoryKind::ProjectExternal,
+            root: checkout.clone(),
+            project_root: Some(project.active_root().to_path_buf()),
+            project_config_path: Some(config_path.clone()),
+            configured_branch: Some(branch.to_string()),
+            configured_remote: Some(url.to_string()),
+            owner_only: true,
+        };
+        validate_operation_id(operation_id)?;
+        let _lease = acquire_mutation_lease(&roots.durable_state, &repository, operation_id)?;
         if !checkout.exists() {
             GitRepository::clone_remote(url, branch, &checkout)
                 .map_err(InstructionRepositoryError::may_have_working_changes)?;
@@ -162,21 +184,20 @@ impl InstructionRepositoryService {
             .may_have_working_changes());
         }
         harden_private_checkout(&checkout)?;
-        Ok(InstructionRepositoryRef {
-            id: format!("project-{}", project.key().digest()),
-            kind: InstructionRepositoryKind::ProjectExternal,
-            root: checkout,
-            project_root: Some(project.active_root().to_path_buf()),
-            project_config_path: Some(config_path),
-            configured_branch: Some(branch.to_string()),
-            configured_remote: Some(url.to_string()),
-            owner_only: true,
-        })
+        let config =
+            InstructionProjectConfig::new(InstructionProjectRepositoryMode::ExternalRemote {
+                url: url.to_string(),
+                branch: branch.to_string(),
+            });
+        save_project_config(&config_path, &config)
+            .map_err(InstructionRepositoryError::may_have_working_changes)?;
+        Ok(repository)
     }
 
     pub fn configure_external_local(
         &self,
         launch_dir: impl AsRef<Path>,
+        operation_id: &str,
         checkout: impl AsRef<Path>,
         branch: Option<String>,
     ) -> InstructionRepositoryResult<InstructionRepositoryRef> {
@@ -207,28 +228,32 @@ impl InstructionRepositoryService {
             )
             .path(&canonical));
         }
-        let config =
-            InstructionProjectConfig::new(InstructionProjectRepositoryMode::ExternalLocal {
-                path: canonical.clone(),
-                branch: branch.clone(),
-            });
         let config_path = project.active_root().join(PROJECT_CONFIG_RELATIVE_PATH);
-        save_project_config(&config_path, &config)?;
-        Ok(InstructionRepositoryRef {
+        let repository = InstructionRepositoryRef {
             id: format!("project-{}", project.key().digest()),
             kind: InstructionRepositoryKind::ProjectExternal,
-            root: canonical,
+            root: canonical.clone(),
             project_root: Some(project.active_root().to_path_buf()),
-            project_config_path: Some(config_path),
-            configured_branch: branch,
+            project_config_path: Some(config_path.clone()),
+            configured_branch: branch.clone(),
             configured_remote: None,
             owner_only: false,
-        })
+        };
+        validate_operation_id(operation_id)?;
+        let _lease = acquire_mutation_lease(&roots.durable_state, &repository, operation_id)?;
+        let config =
+            InstructionProjectConfig::new(InstructionProjectRepositoryMode::ExternalLocal {
+                path: canonical,
+                branch,
+            });
+        save_project_config(&config_path, &config)?;
+        Ok(repository)
     }
 
     pub fn configure_non_git_project(
         &self,
         launch_dir: impl AsRef<Path>,
+        operation_id: &str,
         path: Option<PathBuf>,
         seed: &InstructionStoreSeed,
         legacy: &[InstructionLegacyImportSpec],
@@ -252,23 +277,27 @@ impl InstructionRepositoryService {
         }
         let relative = path.unwrap_or_else(|| PathBuf::from(CONVENTIONAL_SUBMODULE_PATH));
         validate_relative_path(&relative)?;
-        let config = InstructionProjectConfig::new(InstructionProjectRepositoryMode::Standalone {
-            path: relative.clone(),
-        });
         let config_path = project.active_root().join(PROJECT_CONFIG_RELATIVE_PATH);
-        save_project_config(&config_path, &config)?;
         let repository = InstructionRepositoryRef {
             id: format!("project-{}", project.key().digest()),
             kind: InstructionRepositoryKind::NonGitProject,
-            root: project.active_root().join(relative),
+            root: project.active_root().join(&relative),
             project_root: Some(project.active_root().to_path_buf()),
-            project_config_path: Some(config_path),
+            project_config_path: Some(config_path.clone()),
             configured_branch: Some("main".to_string()),
             configured_remote: None,
             owner_only: false,
         };
-        self.initialize_repository(&repository, seed, legacy, "main")
-            .map_err(InstructionRepositoryError::may_have_working_changes)
+        validate_operation_id(operation_id)?;
+        let _lease = acquire_mutation_lease(&roots.durable_state, &repository, operation_id)?;
+        let initialization =
+            self.initialize_repository_locked(&repository, seed, legacy, "main", operation_id)?;
+        let config = InstructionProjectConfig::new(InstructionProjectRepositoryMode::Standalone {
+            path: relative,
+        });
+        save_project_config(&config_path, &config)
+            .map_err(InstructionRepositoryError::may_have_working_changes)?;
+        Ok(initialization)
     }
 }
 

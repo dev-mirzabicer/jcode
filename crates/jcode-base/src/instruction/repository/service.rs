@@ -222,6 +222,19 @@ impl InstructionRepositoryService {
         let roots = self.roots()?;
         let operation_id = format!("initialize-{}", repository.id);
         let _lease = acquire_mutation_lease(&roots.durable_state, repository, &operation_id)?;
+        self.initialize_repository_locked(repository, seed, legacy, branch, &operation_id)
+    }
+
+    pub(super) fn initialize_repository_locked(
+        &self,
+        repository: &InstructionRepositoryRef,
+        seed: &InstructionStoreSeed,
+        legacy: &[InstructionLegacyImportSpec],
+        branch: &str,
+        operation_id: &str,
+    ) -> InstructionRepositoryResult<InstructionStoreInitialization> {
+        validate_branch(branch)?;
+        validate_operation_id(operation_id)?;
         let existing_attempt = self.initialization_attempt(repository);
 
         if repository.root.exists() {
@@ -333,11 +346,11 @@ impl InstructionRepositoryService {
             }
             self.validate_complete_store(repository)?;
             let git = GitRepository::init(&repository.root, branch)?;
-            let index_path = self.isolated_index_path(repository, &operation_id)?;
+            let index_path = self.isolated_index_path(repository, operation_id)?;
             let commit = git.initial_commit(
                 &index_path,
                 "instruction: initialize managed store",
-                &operation_id,
+                operation_id,
             );
             cleanup_index(&index_path);
             let commit = commit?;
@@ -404,8 +417,8 @@ impl InstructionRepositoryService {
         };
         let receipt = self.initialization_receipt_path(repository)?;
         let _ = std::fs::remove_file(receipt);
-        drop(_lease);
-        let initialization = self.initialize_repository(repository, seed, legacy, branch)?;
+        let initialization =
+            self.initialize_repository_locked(repository, seed, legacy, branch, &operation_id)?;
         Ok(InstructionStoreRecreation {
             initialization,
             damaged_backup: backup,

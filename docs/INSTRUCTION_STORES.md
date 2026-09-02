@@ -57,7 +57,7 @@ It is schema-versioned. Modes are `submodule`, `external-remote`, `external-loca
 
 Repository mutations use:
 
-- One cross-process mutation lease per instruction repository
+- One cross-process mutation lease per instruction repository, including initialization and repository setup
 - Draft base `HEAD` plus exact target fingerprints
 - Atomic same-directory file replacement
 - An isolated Git index that stages only owned paths
@@ -66,6 +66,8 @@ Repository mutations use:
 - Runtime resource and dependency validation before commit publication
 
 Affected resource and dependency behavior is compared with the expected committed `HEAD`. New resource, reference, or dependency errors block the commit and leave the working edit visible for repair, including on retry. Existing unrelated resource errors do not block a valid edit, and multi-path operations can repair references atomically. Unrelated staged, dirty, and untracked repository state is preserved. Detached repositories cannot Save until a branch is selected. Restore writes historical content as a new commit. No-op Save and restore create no commit.
+
+Submodule, external-checkout, and standalone setup also carry operation identities. A retry reuses the repository already created by an interrupted setup while the same repository lease prevents concurrent setup from racing it.
 
 Ordinary operations do not offer reset, rebase, force push, commit deletion, or history rewrite.
 
