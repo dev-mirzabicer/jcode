@@ -435,10 +435,38 @@ impl InstructionRepositoryService {
         let manifest = self.load_manifest(repository)?;
         let runtime =
             crate::instruction::InstructionRuntime::discover(self.validation_sources(repository)?);
+        let resources = runtime.resources();
+        let mut diagnostics = runtime.diagnostics().to_vec();
+        collect_managed_path_diagnostics(
+            repository,
+            &repository.root,
+            &repository.root,
+            &mut diagnostics,
+        )?;
+        for summary in &resources {
+            if !matches!(
+                summary.state,
+                crate::instruction::ResourceValidationState::Valid
+            ) {
+                continue;
+            }
+            let selector = explicit_selector(&summary.resource)?;
+            if let Err(error) = runtime.validate_graph(&selector) {
+                diagnostics.push(crate::instruction::InstructionDiagnostic {
+                    scope: summary.resource.scope,
+                    path: summary
+                        .paths
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| repository.root.clone()),
+                    detail: error.to_string(),
+                });
+            }
+        }
         Ok(InstructionRepositoryValidation {
             manifest,
-            resources: runtime.resources(),
-            diagnostics: runtime.diagnostics().to_vec(),
+            resources,
+            diagnostics,
         })
     }
 
@@ -1232,15 +1260,14 @@ impl InstructionRepositoryService {
         &self,
         repository: &InstructionRepositoryRef,
     ) -> InstructionRepositoryResult<()> {
-        let validation = self.validate_repository(repository)?;
-        if let Some(diagnostic) = validation.diagnostics.first() {
+        let issues = self.validation_issue_set(repository)?;
+        if let Some(issue) = issues.first() {
             return Err(InstructionRepositoryError::new(
                 InstructionRepositoryErrorKind::RepositoryDamaged,
                 "validate complete instruction store",
-                diagnostic.detail.clone(),
+                issue.clone(),
             )
-            .repository(repository)
-            .path(&diagnostic.path));
+            .repository(repository));
         }
         Ok(())
     }
@@ -2132,6 +2159,74 @@ fn collect_managed_path_issues(
             collect_managed_path_issues(repository, root, &path, issues)?;
         } else if !file_type.is_file() {
             issues.insert(format!("path:{}:unsupported-file-type", relative.display()));
+        }
+    }
+    Ok(())
+}
+
+fn collect_managed_path_diagnostics(
+    repository: &InstructionRepositoryRef,
+    root: &Path,
+    directory: &Path,
+    diagnostics: &mut Vec<crate::instruction::InstructionDiagnostic>,
+) -> InstructionRepositoryResult<()> {
+    for entry in std::fs::read_dir(directory).map_err(|error| {
+        repository_io_error(
+            repository,
+            "inspect managed repository paths",
+            directory,
+            error,
+        )
+    })? {
+        let entry = entry.map_err(|error| {
+            repository_io_error(
+                repository,
+                "inspect managed repository path",
+                directory,
+                error,
+            )
+        })?;
+        let path = entry.path();
+        let relative = path.strip_prefix(root).map_err(|_| {
+            InstructionRepositoryError::new(
+                InstructionRepositoryErrorKind::SymlinkEscape,
+                "inspect managed repository path",
+                "repository entry escaped its configured root",
+            )
+            .repository(repository)
+            .path(&path)
+        })?;
+        if relative
+            .components()
+            .next()
+            .is_some_and(|component| component.as_os_str() == std::ffi::OsStr::new(".git"))
+        {
+            continue;
+        }
+        let file_type = entry.file_type().map_err(|error| {
+            repository_io_error(repository, "inspect managed repository path", &path, error)
+        })?;
+        let detail = if relative.to_str().is_none() {
+            Some("managed repository path is not valid UTF-8".to_string())
+        } else if file_type.is_symlink() {
+            Some("managed repository path is a symlink".to_string())
+        } else if !file_type.is_file() && !file_type.is_dir() {
+            Some("managed repository path has an unsupported file type".to_string())
+        } else {
+            None
+        };
+        if let Some(detail) = detail {
+            diagnostics.push(crate::instruction::InstructionDiagnostic {
+                scope: match repository.kind {
+                    InstructionRepositoryKind::Global => InstructionScope::Global,
+                    _ => InstructionScope::Project,
+                },
+                path: path.clone(),
+                detail,
+            });
+        }
+        if file_type.is_dir() {
+            collect_managed_path_diagnostics(repository, root, &path, diagnostics)?;
         }
     }
     Ok(())

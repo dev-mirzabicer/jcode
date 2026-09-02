@@ -1130,6 +1130,31 @@ fn repository_validation_reports_invalid_resources_without_hiding_valid_ones() {
         )
         .expect("repairing an existing invalid resource is allowed");
     assert_eq!(repaired.disposition, InstructionCommitDisposition::Created);
+
+    std::fs::write(
+        repository.root.join("modules/renamed.md"),
+        "---\nid: renamed\nkind: module\nincludes:\n  - missing-module\n---\n\ngraph failure",
+    )
+    .unwrap();
+    let graph_validation = fixture.service.validate_repository(&repository).unwrap();
+    assert!(!graph_validation.is_valid());
+    assert!(graph_validation.diagnostics.iter().any(|diagnostic| {
+        diagnostic.path.ends_with("modules/renamed.md")
+            && diagnostic.detail.contains("missing-module")
+    }));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        let outside = fixture._root.path().join("validation-outside");
+        std::fs::write(&outside, "outside").unwrap();
+        symlink(&outside, repository.root.join("modules/escape.md")).unwrap();
+        let path_validation = fixture.service.validate_repository(&repository).unwrap();
+        assert!(!path_validation.is_valid());
+        assert!(path_validation.diagnostics.iter().any(|diagnostic| {
+            diagnostic.path.ends_with("modules/escape.md") && diagnostic.detail.contains("symlink")
+        }));
+    }
 }
 
 #[test]
