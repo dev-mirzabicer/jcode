@@ -349,9 +349,16 @@ impl InstructionRuntime {
             let document = self.resolve(&selector)?.clone();
             let planned = self.plan_document(&resource, &document)?;
             graph
-                .dependencies
-                .insert(resource.clone(), planned.dependencies.clone());
-            for dependency in &planned.dependencies {
+                .render_dependencies
+                .insert(resource.clone(), planned.render_dependencies.clone());
+            graph
+                .validation_dependencies
+                .insert(resource.clone(), planned.validation_dependencies.clone());
+            for dependency in planned
+                .render_dependencies
+                .iter()
+                .chain(&planned.validation_dependencies)
+            {
                 graph
                     .reverse_consumers
                     .entry(dependency.clone())
@@ -368,7 +375,7 @@ impl InstructionRuntime {
             );
 
             stack.push((resource.clone(), true));
-            for dependency in planned.dependencies.into_iter().rev() {
+            for dependency in planned.render_dependencies.into_iter().rev() {
                 match visits.get(&dependency) {
                     Some(Visit::Done) => {}
                     Some(Visit::Visiting) => {
@@ -409,9 +416,10 @@ impl InstructionRuntime {
                     .map(|document| self.document_ref(document))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let mut dependencies = includes.clone();
+        let mut render_dependencies = includes.clone();
+        let mut validation_dependencies = Vec::new();
         if let Some(addendum) = &document.metadata.addendum {
-            dependencies.push(self.document_ref(self.resolve(&addendum.target)?));
+            validation_dependencies.push(self.document_ref(self.resolve(&addendum.target)?));
         }
         let segments = match document.template_mode {
             TemplateMode::Plain => vec![PlannedSegment::Text(document.body.clone())],
@@ -424,18 +432,21 @@ impl InstructionRuntime {
                     }
                     TemplateSegment::Partial(selector) => {
                         let dependency = self.document_ref(self.resolve(&selector)?);
-                        dependencies.push(dependency.clone());
+                        render_dependencies.push(dependency.clone());
                         Ok(PlannedSegment::Partial(dependency))
                     }
                 })
                 .collect::<Result<Vec<_>, InstructionError>>()?,
         };
         let mut seen = BTreeSet::new();
-        dependencies.retain(|dependency| seen.insert(dependency.clone()));
+        render_dependencies.retain(|dependency| seen.insert(dependency.clone()));
+        let mut seen_validation = BTreeSet::new();
+        validation_dependencies.retain(|dependency| seen_validation.insert(dependency.clone()));
         Ok(PlannedDocument {
             segments,
             includes,
-            dependencies,
+            render_dependencies,
+            validation_dependencies,
         })
     }
 
@@ -510,18 +521,29 @@ impl InstructionRuntime {
         expected_kind: InstructionKind,
         path: PathBuf,
     ) {
+        let fallback_id = fallback_id(&path, expected_kind);
         let source = match fs::read_to_string(&path) {
             Ok(source) => source,
             Err(error) => {
+                let detail = format!("could not read complete UTF-8 resource: {error}");
                 self.diagnostics.push(InstructionDiagnostic {
                     scope,
-                    path,
-                    detail: error.to_string(),
+                    path: path.clone(),
+                    detail: detail.clone(),
                 });
+                if let Some(id) = fallback_id {
+                    self.entries
+                        .entry((expected_kind, id))
+                        .or_default()
+                        .for_scope_mut(scope)
+                        .push(CatalogCandidate {
+                            path,
+                            parsed: Err(detail),
+                        });
+                }
                 return;
             }
         };
-        let fallback_id = fallback_id(&path, expected_kind);
         let parsed = parse_document(scope, expected_kind, &path, &source);
         let candidate_id = parsed
             .as_ref()
@@ -602,7 +624,8 @@ struct PlannedNode {
 struct PlannedDocument {
     segments: Vec<PlannedSegment>,
     includes: Vec<InstructionResourceRef>,
-    dependencies: Vec<InstructionResourceRef>,
+    render_dependencies: Vec<InstructionResourceRef>,
+    validation_dependencies: Vec<InstructionResourceRef>,
 }
 
 #[derive(Clone, Debug)]
@@ -666,7 +689,7 @@ fn cycle_chain(
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
 struct ResourceFrontmatter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     id: Option<String>,
@@ -740,8 +763,6 @@ fn parse_document(
         .map_err(|error| error.to_string())?;
     let agent = if expected_kind == InstructionKind::Agent {
         Some(AgentMetadata {
-            display_name: nonempty(raw.name.as_deref(), "agent name")?,
-            description: nonempty(raw.description.as_deref(), "agent description")?,
             availability: raw
                 .availability
                 .ok_or_else(|| "agent frontmatter requires availability".to_string())?,
@@ -749,6 +770,10 @@ fn parse_document(
     } else {
         None
     };
+    if expected_kind == InstructionKind::Agent {
+        nonempty(raw.name.as_deref(), "agent name")?;
+        nonempty(raw.description.as_deref(), "agent description")?;
+    }
     let addendum = if expected_kind == InstructionKind::AgentAddendum {
         Some(AddendumMetadata {
             target: InstructionSelector::parse(

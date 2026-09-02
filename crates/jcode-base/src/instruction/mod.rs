@@ -226,8 +226,6 @@ impl fmt::Display for InstructionResourceRef {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentMetadata {
-    pub display_name: String,
-    pub description: String,
     pub availability: AgentAvailability,
 }
 
@@ -329,7 +327,11 @@ pub struct InstructionResourceSummary {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct InstructionGraph {
-    pub dependencies:
+    /// Dependencies whose rendered text contributes to the consumer.
+    pub render_dependencies:
+        std::collections::BTreeMap<InstructionResourceRef, Vec<InstructionResourceRef>>,
+    /// References that must resolve and validate but whose text is not rendered.
+    pub validation_dependencies:
         std::collections::BTreeMap<InstructionResourceRef, Vec<InstructionResourceRef>>,
     pub reverse_consumers:
         std::collections::BTreeMap<InstructionResourceRef, Vec<InstructionResourceRef>>,

@@ -252,7 +252,7 @@ fn deep_finite_graph_and_large_source_render_without_product_caps() {
         .expect("deep finite render");
     assert!(deep.text.starts_with("0>1>2>"));
     assert!(deep.text.ends_with("END"));
-    assert_eq!(deep.graph.dependencies.len(), DEPTH);
+    assert_eq!(deep.graph.render_dependencies.len(), DEPTH);
     let large_render = runtime
         .render(&selector(InstructionKind::System, "large"), &json!({}))
         .expect("large render");
@@ -584,8 +584,8 @@ fn addendum_targets_are_validated_and_appear_in_the_dependency_graph() {
         &source(
             "base-agent",
             InstructionKind::Agent,
-            "name: Base agent\ndescription: synthetic\navailability: both\n",
-            "base",
+            "name: Base agent\ndescription: synthetic\navailability: both\ntemplate: handlebars\n",
+            "base {{required_value}}",
         ),
     );
     fixture.write(
@@ -608,7 +608,94 @@ fn addendum_targets_are_validated_and_appear_in_the_dependency_graph() {
         )
         .unwrap();
     assert_eq!(rendered.text, "addendum");
-    assert_eq!(rendered.graph.dependencies[&rendered.root].len(), 1);
+    assert!(rendered.graph.render_dependencies[&rendered.root].is_empty());
+    assert_eq!(
+        rendered.graph.validation_dependencies[&rendered.root].len(),
+        1
+    );
+}
+
+#[test]
+fn unreadable_project_resource_shadows_valid_global_resource() {
+    let fixture = Fixture::new();
+    fixture.write(
+        InstructionScope::Global,
+        InstructionKind::Module,
+        "shared",
+        &source("shared", InstructionKind::Module, "", "global"),
+    );
+    let project_path = fixture
+        .project
+        .join(InstructionKind::Module.directory())
+        .join("shared.md");
+    fs::create_dir_all(project_path.parent().unwrap()).unwrap();
+    fs::write(&project_path, [0xff, 0xfe, 0xfd]).unwrap();
+
+    let runtime = fixture.runtime();
+    let error = runtime
+        .render(&selector(InstructionKind::Module, "shared"), &json!({}))
+        .expect_err("unreadable project resource must shadow global");
+    assert!(matches!(error, InstructionError::InvalidResource { .. }));
+    assert!(error.to_string().contains("complete UTF-8"));
+    assert_eq!(
+        runtime
+            .render(
+                &InstructionSelector::global(InstructionKind::Module, "shared").unwrap(),
+                &json!({}),
+            )
+            .unwrap()
+            .text,
+        "global"
+    );
+}
+
+#[test]
+fn unknown_frontmatter_fields_are_rejected_instead_of_silently_discarded() {
+    let fixture = Fixture::new();
+    fixture.write(
+        InstructionScope::Global,
+        InstructionKind::System,
+        "future",
+        "---\nid: future\nkind: system\nfuture-field: preserve-me\n---\n\nbody",
+    );
+    let error = fixture
+        .runtime()
+        .resolve(&selector(InstructionKind::System, "future"))
+        .expect_err("unknown metadata must not be silently accepted");
+    assert!(matches!(error, InstructionError::InvalidResource { .. }));
+    assert!(error.to_string().contains("unknown field"));
+}
+
+#[test]
+fn agent_name_and_description_have_one_metadata_source_of_truth() {
+    let fixture = Fixture::new();
+    fixture.write(
+        InstructionScope::Global,
+        InstructionKind::Agent,
+        "agent",
+        &source(
+            "agent",
+            InstructionKind::Agent,
+            "name: One name\ndescription: One description\navailability: primary\n",
+            "body",
+        ),
+    );
+    let runtime = fixture.runtime();
+    let document = runtime
+        .resolve(&selector(InstructionKind::Agent, "agent"))
+        .unwrap();
+    assert_eq!(document.metadata.display_name.as_deref(), Some("One name"));
+    assert_eq!(
+        document.metadata.description.as_deref(),
+        Some("One description")
+    );
+    assert_eq!(
+        document.metadata.agent.as_ref().unwrap().availability,
+        AgentAvailability::Primary
+    );
+    let markdown = document.to_markdown().unwrap();
+    assert_eq!(markdown.matches("name: One name").count(), 1);
+    assert_eq!(markdown.matches("description: One description").count(), 1);
 }
 
 #[test]
