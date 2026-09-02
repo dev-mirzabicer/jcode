@@ -5,6 +5,7 @@
 //! not own Git, session activation, message roles, provider framing, or TUI
 //! editing. Those callers receive finished text and retain their own behavior.
 
+mod repository;
 mod runtime;
 mod template;
 
@@ -14,6 +15,7 @@ use std::marker::PhantomData;
 use std::path::PathBuf;
 use std::str::FromStr;
 
+pub use repository::*;
 pub use runtime::InstructionRuntime;
 
 /// Stable user-readable identity for one managed instruction resource.

@@ -726,7 +726,7 @@ fn is_plain(mode: &TemplateMode) -> bool {
     *mode == TemplateMode::Plain
 }
 
-fn parse_document(
+pub(super) fn parse_document(
     scope: InstructionScope,
     expected_kind: InstructionKind,
     path: &Path,

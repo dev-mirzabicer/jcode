@@ -657,6 +657,10 @@ pub struct Server {
     context_transactions: Arc<crate::context::ContextTransactionService>,
     /// Server-owned Startup Context status, browser, and editor-ownership service.
     startup_context: Arc<startup_context::StartupContextCoordinator>,
+    /// Server-owned Git and mutation authority for managed instruction stores.
+    /// Construction performs no initialization or migration; later protocol and
+    /// activation packages call the service through explicit operations.
+    instruction_repositories: Arc<crate::instruction::InstructionRepositoryService>,
     socket_path: PathBuf,
     debug_socket_path: PathBuf,
     gateway_config_override: Option<crate::gateway::GatewayConfig>,
@@ -766,6 +770,9 @@ impl Server {
             provider,
             context_transactions: Arc::new(crate::context::ContextTransactionService::new()),
             startup_context: Arc::new(startup_context::StartupContextCoordinator::new(&identity)),
+            instruction_repositories: Arc::new(
+                crate::instruction::InstructionRepositoryService::new(),
+            ),
             socket_path: socket_path(),
             debug_socket_path: debug_socket_path(),
             gateway_config_override: None,
@@ -820,6 +827,10 @@ impl Server {
     /// Get the server identity
     pub fn identity(&self) -> &ServerIdentity {
         &self.identity
+    }
+
+    pub fn instruction_repositories(&self) -> &crate::instruction::InstructionRepositoryService {
+        &self.instruction_repositories
     }
 
     fn runtime(&self) -> ServerRuntime {
