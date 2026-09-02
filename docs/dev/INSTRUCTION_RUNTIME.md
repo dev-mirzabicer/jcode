@@ -1,6 +1,6 @@
 # Instruction runtime foundation
 
-**Status:** Phase 3 WP-01 typed foundation. Production prompt callers have not migrated yet.
+**Status:** Phase 3 WP-01 typed runtime plus WP-02 Git-backed repository service. Production prompt callers have not migrated yet.
 
 **Source module:** `crates/jcode-base/src/instruction/`
 
@@ -10,17 +10,16 @@
 
 The instruction runtime is the one typed authority for managed instruction discovery, resource identity, global/project specificity, document parsing, dependency validation, and complete rendering.
 
-It deliberately does not own:
+The runtime deliberately does not own:
 
-- Git repositories, commits, branches, remotes, locking, or editing
 - Session activation, freezing, switching, persistence, or exports
 - System versus user-message delivery
 - Display roles, timestamps, XML tags, receipts, tool schemas, or provider framing
 - Prompt-quality judgment
 
-Those behaviors remain with their current domain owners. Later Phase 3 packages call this runtime for finished text instead of reproducing its internal stages.
+The sibling `instruction::repository` domain now owns Git repositories, commits, branches, remotes, mutation locking, drafts, history, restore, project repository configuration, and legacy-import receipts. It does not render instructions. Later Phase 3 packages call the runtime for finished text and the repository service for source/history operations instead of reproducing either domain.
 
-WP-01 does not initialize `~/.jcode/instructions`, activate the runtime in production prompt paths, or migrate existing prose. WP-02 supplies the repository roots. WP-03 and later packages migrate callers by the inventory ledger.
+WP-02 does not initialize Mirza's live `~/.jcode/instructions`, activate the runtime in production prompt paths, or disable any legacy source. The app-core server owns an inert `InstructionRepositoryService`; explicit operations and sandbox tests exercise it. WP-03 and later packages initialize/cut over at their accepted lifecycle boundary and migrate callers by the inventory ledger.
 
 ## Public operations
 
@@ -122,7 +121,7 @@ The graph traversal is iterative. Jcode adds no source-size, body-size, expansio
 - A consumer may declare empty prose invalid through `empty_is_meaningful = false`.
 - The runtime never restores a seed merely because a file is empty or absent.
 
-Repository initialization and damaged-store recovery belong to WP-02.
+Repository initialization and damaged-store recovery are implemented by WP-02 as described below.
 
 ## Diagnostics and errors
 
@@ -177,9 +176,98 @@ The fixtures use synthetic prose. They do not snapshot, require, forbid, or judg
 
 ## Handoff to later packages
 
-- WP-02 supplies validated Git-backed global and project roots plus import receipts.
+- WP-02 supplies validated Git-backed global and project roots plus import receipts through `InstructionRepositoryService`.
 - WP-03 uses the runtime for complete system composition and the compatibility `jcode` agent.
 - WP-05 adopts managed skill discovery and activation snapshots.
 - WP-06 and WP-07 migrate inventory rows through registered typed consumers.
 - WP-09 and WP-10 use catalog summaries, diagnostics, complete content, graphs, and deterministic document serialization for the manager.
 - WP-11 reconciles every inventory row and verifies exact migration equality or an approved exception.
+
+## Git-backed instruction repository service
+
+`InstructionRepositoryService` is the server-owned authority for instruction-store topology and mutation. Its public operations return typed repository/configuration/history state rather than raw Git output.
+
+### Store topology
+
+- Global: `~/.jcode/instructions`, owner-only standalone Git repository on local `main` by default.
+- Git project default: a true instruction submodule, conventionally `<project>/.jcode/instructions`.
+- Project external remote: an explicit URL and branch cloned under private Jcode state.
+- Project external local: an explicit existing checkout path.
+- Non-Git project: a standalone Git repository scoped to the project, conventionally `<project>/.jcode/instructions`, without making the parent project a repository.
+- Project configuration: `<project>/.jcode/instructions.toml`, schema-versioned and fail-closed. Invalid explicit configuration never becomes silent global-only behavior.
+
+Project identity reuses the accepted Startup Context Git-common-directory or canonical-directory helper, but instruction state, receipts, locks, and configuration are independent.
+
+### Initialization and health
+
+First initialization:
+
+1. Acquires the repository mutation lease.
+2. Plans complete eligible legacy imports without changing their sources.
+3. Materializes the schema manifest and complete seed/import resources.
+4. Validates the complete store with the instruction runtime.
+5. Initializes Git and creates one baseline commit through an isolated index.
+6. Hardens the global/private repository tree.
+7. Writes a private initialization receipt.
+
+Repeated initialization of a valid store is a no-op. An existing initialized or otherwise committed invalid store is damage, not a first install. It is never silently overwritten with the shipped seed. Recovery operations include restoring a missing committed file from current `HEAD` and explicit seed recreation that renames the damaged store aside before creating a new repository.
+
+`inspect` exposes health, current `HEAD`, attached/detached branch, upstream and ahead/behind, parsed working/index changes, conflicts, active mutation lease, configured-branch warnings, and parent gitlink state for submodules. `validate_repository` separately exposes complete runtime diagnostics and valid/invalid resource summaries so one invalid resource does not hide unrelated valid resources.
+
+### Read authority and paths
+
+- A present working file is authoritative, including an empty file.
+- Present invalid UTF-8 or invalid resource text remains present and is reported by the affected runtime operation.
+- `AllowHeadFallback` is an explicit caller policy. It is not used by ordinary interactive reads.
+- Managed paths must be UTF-8, repository-relative, traversal-free, and outside `.git`.
+- Repository roots and every existing path component are checked with `symlink_metadata`. Managed reads and writes fail closed rather than following a symlink outside the configured repository.
+
+### Drafts and commits
+
+`open_draft` records:
+
+- Repository and target path
+- Current complete content, if present
+- Exact target fingerprint
+- Current complete `HEAD`
+
+Save validates the same base, writes through a same-directory temporary file plus atomic replacement, stages only owned paths in a private index, creates one commit with a structural operation trailer, publishes it with compare-and-swap `update-ref`, and refreshes only those paths in the ordinary index. Unrelated staged, dirty, and untracked state remains unchanged.
+
+Operation IDs make retry idempotent. Retry can recognize an already published commit. It also accepts the intended final working-file state after interruption between file write and commit. If a process stops after commit publication but before legacy-import working-file materialization, retry proves the commit identity and rematerializes the committed manifest and resource without another commit.
+
+Save is disabled on detached `HEAD`. No-op Save and restore-to-current-content create no commit.
+
+### Mutations, history, and synchronization
+
+The service supports:
+
+- Write, clear body, rename, delete, and one multi-path commit for reference repair
+- Commit an externally edited version
+- Per-resource or repository history
+- Complete UTF-8 content at a revision
+- Revision comparison
+- Restore through a new commit
+- Explicit branch checkout or creation
+- Explicit remote configuration, fetch, pull, and push
+- True submodule setup with parent `.gitmodules` and gitlink changes left uncommitted
+
+Pull requires a clean instruction repository. Fast-forward-only and visible merge modes are distinct. Conflicts remain in the working tree and typed inspection reports them. Jcode never pushes automatically, never force-pushes, never rewrites history, and never commits a parent project's gitlink.
+
+### Mutation concurrency
+
+One cross-process lease exists per instruction repository. On Unix it uses a nonblocking kernel `flock` plus owner metadata. Other platforms use an exclusive owner file with expiry-based crash recovery. Read-only inspection remains available while another process owns mutation. Owner metadata includes operation ID, PID, and acquisition/expiry times.
+
+### Legacy import backend
+
+Typed discovery covers current global and project:
+
+- `.jcode/system-prompt.md`
+- `.jcode/prompt-overlay.md`
+- `.jcode/preferred-tools.md`
+- `.jcode/swarm-prompt.md`
+
+It deliberately excludes `AGENTS.md` and external skills. Import copies the complete source into a typed managed Markdown resource, records source SHA-256 and separate empty/blank semantics, validates the resource, commits the resource and receipt together, and leaves the original untouched. A target that exists without a matching receipt is a conflict, not permission to overwrite it. Runtime source deactivation remains a later-package cutover after the durable receipt exists.
+
+### Production boundary
+
+The service is owned by app-core `Server`, but constructor use performs no repository I/O. There is no protocol or TUI surface in WP-02 and no production prompt activation. WP-09 and WP-10 can expose the existing typed service rather than adding Git policy to the client.
