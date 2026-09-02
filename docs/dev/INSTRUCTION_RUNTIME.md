@@ -231,7 +231,7 @@ Repeated initialization of a valid store is a no-op. An existing initialized or 
 - Exact target fingerprint
 - Current complete `HEAD`
 
-Save validates the same base, writes through a same-directory temporary file plus atomic replacement, stages only owned paths in a private index, creates one commit with a structural operation trailer, publishes it with compare-and-swap `update-ref`, and refreshes only those paths in the ordinary index. Unrelated staged, dirty, and untracked state remains unchanged.
+Save validates the same base, writes through a same-directory temporary file plus atomic replacement, compares complete repository resource/dependency issues before and after the mutation, stages only owned paths in a private index, creates one commit with a structural operation trailer, publishes it with compare-and-swap `update-ref`, and refreshes only those paths in the ordinary index. A newly invalid resource, missing reference, or dependency cycle blocks the commit and leaves the working edit visible for repair. Existing unrelated invalid resources remain isolated, and a mutation may repair them. Unrelated staged, dirty, and untracked Git state remains unchanged.
 
 Operation IDs make retry idempotent. Retry can recognize an already published commit. It also accepts the intended final working-file state after interruption between file write and commit. If a process stops after commit publication but before legacy-import working-file materialization, retry proves the commit identity and rematerializes the committed manifest and resource without another commit.
 

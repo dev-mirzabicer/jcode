@@ -8,7 +8,7 @@ use super::types::*;
 use crate::instruction::{InstructionDocument, InstructionScope, InstructionSources};
 use crate::startup_context::StartupContext;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 const STORE_MANIFEST: &str = "instruction-store.toml";
@@ -583,7 +583,25 @@ impl InstructionRepositoryService {
         request: &InstructionCommitRequest,
     ) -> InstructionRepositoryResult<InstructionCommitOutcome> {
         let roots = self.roots()?;
-        commit_request(&roots.durable_state, repository, request)
+        let before = self.validation_issue_set(repository)?;
+        commit_request(&roots.durable_state, repository, request, || {
+            let after = self.validation_issue_set(repository)?;
+            let introduced = after.difference(&before).cloned().collect::<Vec<_>>();
+            if introduced.is_empty() {
+                Ok(())
+            } else {
+                Err(InstructionRepositoryError::new(
+                    InstructionRepositoryErrorKind::RepositoryDamaged,
+                    "validate instruction mutation",
+                    format!(
+                        "mutation introduced {} new resource or dependency error(s): {}",
+                        introduced.len(),
+                        introduced.join(" | ")
+                    ),
+                )
+                .repository(repository))
+            }
+        })
     }
 
     pub fn commit_external_version(
@@ -1256,6 +1274,79 @@ impl InstructionRepositoryService {
                 Ok(InstructionSources::new(global_root).with_project_root(&repository.root))
             }
         }
+    }
+
+    fn validation_issue_set(
+        &self,
+        repository: &InstructionRepositoryRef,
+    ) -> InstructionRepositoryResult<BTreeSet<String>> {
+        let runtime =
+            crate::instruction::InstructionRuntime::discover(self.validation_sources(repository)?);
+        let mut issues = BTreeSet::new();
+        for diagnostic in runtime.diagnostics() {
+            issues.insert(format!(
+                "diagnostic:{}:{}",
+                diagnostic.path.display(),
+                diagnostic.detail
+            ));
+        }
+        for summary in runtime.resources() {
+            match &summary.state {
+                crate::instruction::ResourceValidationState::Valid => {
+                    let selector = match summary.resource.scope {
+                        InstructionScope::Global => {
+                            crate::instruction::InstructionSelector::global(
+                                summary.resource.kind,
+                                summary.resource.id.as_str(),
+                            )
+                        }
+                        InstructionScope::Project => {
+                            crate::instruction::InstructionSelector::project(
+                                summary.resource.kind,
+                                summary.resource.id.as_str(),
+                            )
+                        }
+                    }
+                    .map_err(|error| {
+                        InstructionRepositoryError::new(
+                            InstructionRepositoryErrorKind::RepositoryDamaged,
+                            "validate instruction repository graph",
+                            error.to_string(),
+                        )
+                        .repository(repository)
+                    })?;
+                    if let Err(error) = runtime.validate_graph(&selector) {
+                        issues.insert(format!("graph:{}:{error}", summary.resource));
+                    }
+                }
+                crate::instruction::ResourceValidationState::Invalid(detail) => {
+                    issues.insert(format!(
+                        "resource:{}:invalid:{}:{}",
+                        summary.resource,
+                        summary
+                            .paths
+                            .iter()
+                            .map(|path| path.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join(","),
+                        detail
+                    ));
+                }
+                crate::instruction::ResourceValidationState::Ambiguous => {
+                    issues.insert(format!(
+                        "resource:{}:ambiguous:{}",
+                        summary.resource,
+                        summary
+                            .paths
+                            .iter()
+                            .map(|path| path.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    ));
+                }
+            }
+        }
+        Ok(issues)
     }
 
     fn store_health(

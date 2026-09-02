@@ -63,8 +63,9 @@ Repository mutations use:
 - An isolated Git index that stages only owned paths
 - One local commit per real change
 - Structural operation identities for idempotent retry
+- Runtime resource and dependency validation before commit publication
 
-Unrelated staged, dirty, and untracked repository state is preserved. Detached repositories cannot Save until a branch is selected. Restore writes historical content as a new commit. No-op Save and restore create no commit.
+New resource, reference, or dependency errors block the commit and leave the working edit visible for repair. Existing unrelated resource errors do not block a valid edit, and multi-path operations can repair references atomically. Unrelated staged, dirty, and untracked repository state is preserved. Detached repositories cannot Save until a branch is selected. Restore writes historical content as a new commit. No-op Save and restore create no commit.
 
 Ordinary operations do not offer reset, rebase, force push, commit deletion, or history rewrite.
 

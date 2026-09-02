@@ -156,6 +156,19 @@ impl InstructionRuntime {
         self.render_root(root, values)
     }
 
+    /// Validate and return the complete dependency graph without rendering
+    /// typed occurrence values. Repository mutation uses this to reject newly
+    /// broken references and cycles while allowing unrelated pre-existing
+    /// invalid resources to remain isolated.
+    pub fn validate_graph(
+        &self,
+        selector: &InstructionSelector,
+    ) -> Result<InstructionGraph, InstructionError> {
+        let document = self.resolve(selector)?;
+        let root = self.document_ref(document);
+        Ok(self.build_plan(&root)?.graph)
+    }
+
     pub fn render_agent<T: Serialize>(
         &self,
         selector: &InstructionSelector,

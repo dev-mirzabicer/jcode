@@ -6,7 +6,8 @@ use crate::instruction::{
     InstructionId, InstructionKind, InstructionMetadata, InstructionScope, TemplateMode,
 };
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 struct Fixture {
     _root: tempfile::TempDir,
@@ -511,6 +512,31 @@ fn history_compare_restore_clear_rename_and_multi_delete_create_new_commits() {
         .head()
         .unwrap()
         .unwrap();
+    let agent_only = fingerprint(&repository, Path::new(delete_paths[0])).unwrap();
+    let blocked_delete = fixture
+        .service
+        .commit(
+            &repository,
+            &InstructionCommitRequest {
+                operation_id: "delete-agent-with-live-reference".to_string(),
+                message: "instruction: invalid partial delete".to_string(),
+                expected_head: delete_head.clone(),
+                expected_files: vec![agent_only],
+                mutations: vec![InstructionFileMutation::Delete {
+                    relative_path: PathBuf::from(delete_paths[0]),
+                }],
+            },
+        )
+        .expect_err("deleting a referenced agent must require reference repair");
+    assert_eq!(
+        blocked_delete.kind,
+        InstructionRepositoryErrorKind::RepositoryDamaged
+    );
+    assert!(!blocked_delete.existing_state_unchanged);
+    assert_eq!(
+        GitRepository::new(&repository.root).head().unwrap(),
+        Some(delete_head.clone())
+    );
     let expected_files = delete_paths
         .iter()
         .map(|path| fingerprint(&repository, Path::new(path)).unwrap())
@@ -750,6 +776,16 @@ fn project_submodule_external_and_non_git_modes_preserve_parent_authority() {
         .configure_external_local(&local_parent, &source.root, Some("main".to_string()))
         .unwrap();
     assert_eq!(local.root, std::fs::canonicalize(&source.root).unwrap());
+
+    std::fs::remove_dir_all(&external.root).unwrap();
+    let missing_external = fixture.service.inspect(&external).unwrap();
+    assert!(matches!(
+        missing_external.health,
+        InstructionRepositoryHealth::Damaged(InstructionRepositoryDamage {
+            kind: InstructionRepositoryDamageKind::MissingCheckout,
+            ..
+        })
+    ));
 
     let non_git = fixture._root.path().join("plain-project");
     std::fs::create_dir_all(&non_git).unwrap();
@@ -1020,6 +1056,54 @@ fn repository_validation_reports_invalid_resources_without_hiding_valid_ones() {
         fixture.service.inspect(&repository).unwrap().health,
         InstructionRepositoryHealth::Ready
     );
+
+    let draft = fixture
+        .service
+        .open_draft(&repository, "modules/common.md")
+        .unwrap();
+    let invalid = fixture
+        .service
+        .commit(
+            &repository,
+            &InstructionCommitRequest {
+                operation_id: "write-invalid-common".to_string(),
+                message: "instruction: invalid common".to_string(),
+                expected_head: draft.base_head,
+                expected_files: vec![draft.base],
+                mutations: vec![InstructionFileMutation::Write {
+                    relative_path: PathBuf::from("modules/common.md"),
+                    content: b"missing frontmatter".to_vec(),
+                }],
+            },
+        )
+        .expect_err("new invalid resource must not be committed");
+    assert_eq!(
+        invalid.kind,
+        InstructionRepositoryErrorKind::RepositoryDamaged
+    );
+    assert!(!invalid.existing_state_unchanged);
+
+    let repair = fixture
+        .service
+        .open_draft(&repository, "modules/common.md")
+        .unwrap();
+    let repaired = fixture
+        .service
+        .commit(
+            &repository,
+            &InstructionCommitRequest {
+                operation_id: "repair-invalid-common".to_string(),
+                message: "instruction: repair common".to_string(),
+                expected_head: repair.base_head,
+                expected_files: vec![repair.base],
+                mutations: vec![InstructionFileMutation::Write {
+                    relative_path: PathBuf::from("modules/common.md"),
+                    content: managed("common", "module", "repaired common").into_bytes(),
+                }],
+            },
+        )
+        .expect("repairing an existing invalid resource is allowed");
+    assert_eq!(repaired.disposition, InstructionCommitDisposition::Created);
 }
 
 #[test]
@@ -1032,4 +1116,90 @@ fn server_service_construction_does_not_initialize_the_live_store() {
         service.inspect(&repository).unwrap().health,
         InstructionRepositoryHealth::Uninitialized
     );
+}
+
+#[test]
+fn mutation_lease_is_exclusive_across_processes_and_recovers_on_exit() {
+    let fixture = Fixture::new();
+    let repository = fixture.initialize().repository;
+    let ready = fixture._root.path().join("lease-child-ready");
+    let release = fixture._root.path().join("lease-child-release");
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "instruction::repository::tests::mutation_lease_child_process_helper",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("JCODE_INSTRUCTION_LEASE_CHILD_STATE", &fixture.state)
+        .env("JCODE_INSTRUCTION_LEASE_CHILD_ROOT", &repository.root)
+        .env("JCODE_INSTRUCTION_LEASE_CHILD_READY", &ready)
+        .env("JCODE_INSTRUCTION_LEASE_CHILD_RELEASE", &release)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn lease helper process");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !ready.exists() && Instant::now() < deadline {
+        if let Some(status) = child.try_wait().unwrap() {
+            let output = child.wait_with_output().unwrap();
+            panic!(
+                "lease helper exited early with {status}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        ready.exists(),
+        "lease helper did not acquire its lock in time"
+    );
+    let busy = acquire_mutation_lease(&fixture.state, &repository, "parent-operation")
+        .expect_err("second process must observe the live mutation lease");
+    assert_eq!(busy.kind, InstructionRepositoryErrorKind::MutationBusy);
+
+    std::fs::write(&release, b"release").unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "lease helper failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    acquire_mutation_lease(&fixture.state, &repository, "after-child-exit")
+        .expect("kernel releases the mutation lease when the child exits");
+}
+
+#[test]
+fn mutation_lease_child_process_helper() {
+    let Some(state) = std::env::var_os("JCODE_INSTRUCTION_LEASE_CHILD_STATE") else {
+        return;
+    };
+    let root = PathBuf::from(
+        std::env::var_os("JCODE_INSTRUCTION_LEASE_CHILD_ROOT").expect("child repository root"),
+    );
+    let ready = PathBuf::from(
+        std::env::var_os("JCODE_INSTRUCTION_LEASE_CHILD_READY").expect("child ready path"),
+    );
+    let release = PathBuf::from(
+        std::env::var_os("JCODE_INSTRUCTION_LEASE_CHILD_RELEASE").expect("child release path"),
+    );
+    let repository = InstructionRepositoryRef {
+        id: "global".to_string(),
+        kind: InstructionRepositoryKind::Global,
+        root,
+        project_root: None,
+        project_config_path: None,
+        configured_branch: Some("main".to_string()),
+        configured_remote: None,
+        owner_only: true,
+    };
+    let _lease = acquire_mutation_lease(Path::new(&state), &repository, "child-process-operation")
+        .expect("child acquires mutation lease");
+    std::fs::write(&ready, b"ready").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !release.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(release.exists(), "parent did not release helper in time");
 }

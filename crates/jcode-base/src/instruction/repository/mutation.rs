@@ -156,11 +156,15 @@ pub(super) fn atomic_write_path(
     result
 }
 
-pub(super) fn commit_request(
+pub(super) fn commit_request<F>(
     state_root: &Path,
     repository: &InstructionRepositoryRef,
     request: &InstructionCommitRequest,
-) -> InstructionRepositoryResult<InstructionCommitOutcome> {
+    validate_after_write: F,
+) -> InstructionRepositoryResult<InstructionCommitOutcome>
+where
+    F: FnOnce() -> InstructionRepositoryResult<()>,
+{
     validate_operation_id(&request.operation_id)?;
     let git = GitRepository::new(&repository.root);
     if let Some(commit) = git.find_operation_commit(&request.operation_id)? {
@@ -241,6 +245,7 @@ pub(super) fn commit_request(
             error
         }
     })?;
+    validate_after_write().map_err(InstructionRepositoryError::may_have_working_changes)?;
     let paths = affected_paths(&request.mutations);
     let index_dir = state_root
         .join("instruction-repositories")
