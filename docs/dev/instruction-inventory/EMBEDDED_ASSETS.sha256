@@ -1,0 +1,9 @@
+# Phase 3 WP-01 embedded instruction asset baseline
+# Source revision: 6860452868b26ae534635a12753c789cd177b3ca
+# Format: SHA-256  bytes  repository path
+00a42f2fbefa67a8d96be95c7b79eb01c6298268d143e96a23f71287b9bfd72b  1558  crates/jcode-base/src/prompt/system_prompt.md
+cf0ed41071a278d2288d1c7c0fb4a25f78556d392441f69e018ae642b2e2944a  1631  crates/jcode-base/src/prompt/swarm_prompt.md
+cba6b3e6349d36b41aa1977978758e47d44230cb3bad92cacd2877e34c7fae88  4242  crates/jcode-base/src/prompt/mission_continuation.md
+21f72134494ec0e1a733a5151b936da7a34f8a138134a06cf06fe3e559bb36ac  1198  crates/jcode-base/src/prompt/selfdev_mode.txt
+d096b26b6d0167098957946c110f9d5fcd8c0dba122e2ebd8730998ff271558a  465  crates/jcode-base/src/prompt/selfdev_focus_tui.txt
+393fed9a3288e2c7bd69158d8f52621c4017136424fdeb7aad5bf49bb0d20f23  601  crates/jcode-base/src/prompt/selfdev_focus_desktop2.txt
