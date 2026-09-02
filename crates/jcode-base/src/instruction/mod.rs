@@ -25,7 +25,6 @@ impl InstructionId {
     pub fn parse(value: impl Into<String>) -> Result<Self, InstructionError> {
         let value = value.into();
         let valid = !value.is_empty()
-            && value.len() <= 128
             && value.chars().next().is_some_and(|character| {
                 character.is_ascii_lowercase() || character.is_ascii_digit()
             })
@@ -37,7 +36,7 @@ impl InstructionId {
         if !valid {
             return Err(InstructionError::InvalidId {
                 value,
-                reason: "IDs must be 1-128 lowercase ASCII letters, digits, '-', '_', or '.', and must start with a letter or digit".to_string(),
+                reason: "IDs must use lowercase ASCII letters, digits, '-', '_', or '.', and must start with a letter or digit".to_string(),
             });
         }
         Ok(Self(value))

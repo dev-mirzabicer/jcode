@@ -575,6 +575,46 @@ fn metadata_includes_render_in_order_and_reverse_consumers_are_derived() {
 }
 
 #[test]
+fn addendum_targets_are_validated_and_appear_in_the_dependency_graph() {
+    let fixture = Fixture::new();
+    fixture.write(
+        InstructionScope::Global,
+        InstructionKind::Agent,
+        "base-agent",
+        &source(
+            "base-agent",
+            InstructionKind::Agent,
+            "name: Base agent\ndescription: synthetic\navailability: both\n",
+            "base",
+        ),
+    );
+    fixture.write(
+        InstructionScope::Project,
+        InstructionKind::AgentAddendum,
+        "project-addendum",
+        &source(
+            "project-addendum",
+            InstructionKind::AgentAddendum,
+            "target: global:base-agent\n",
+            "addendum",
+        ),
+    );
+    let runtime = fixture.runtime();
+    let rendered = runtime
+        .render(
+            &InstructionSelector::project(
+                InstructionKind::AgentAddendum,
+                "project-addendum",
+            )
+            .unwrap(),
+            &json!({}),
+        )
+        .unwrap();
+    assert_eq!(rendered.text, "addendum");
+    assert_eq!(rendered.graph.dependencies[&rendered.root].len(), 1);
+}
+
+#[test]
 fn malformed_unidentified_resource_is_diagnostic_only() {
     let fixture = Fixture::new();
     let path = fixture

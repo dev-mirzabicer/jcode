@@ -410,6 +410,9 @@ impl InstructionRuntime {
             })
             .collect::<Result<Vec<_>, _>>()?;
         let mut dependencies = includes.clone();
+        if let Some(addendum) = &document.metadata.addendum {
+            dependencies.push(self.document_ref(self.resolve(&addendum.target)?));
+        }
         let segments = match document.template_mode {
             TemplateMode::Plain => vec![PlannedSegment::Text(document.body.clone())],
             TemplateMode::Handlebars => parse_restricted_template(resource, &document.body)?
