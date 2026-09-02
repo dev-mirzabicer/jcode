@@ -602,11 +602,8 @@ fn addendum_targets_are_validated_and_appear_in_the_dependency_graph() {
     let runtime = fixture.runtime();
     let rendered = runtime
         .render(
-            &InstructionSelector::project(
-                InstructionKind::AgentAddendum,
-                "project-addendum",
-            )
-            .unwrap(),
+            &InstructionSelector::project(InstructionKind::AgentAddendum, "project-addendum")
+                .unwrap(),
             &json!({}),
         )
         .unwrap();
