@@ -11,6 +11,12 @@ pub(super) struct GitRepository {
     root: PathBuf,
 }
 
+#[derive(Clone, Debug)]
+pub(super) struct GitTreeEntry {
+    pub(super) mode: String,
+    pub(super) path: PathBuf,
+}
+
 impl GitRepository {
     pub(super) fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
@@ -185,6 +191,44 @@ impl GitRepository {
             });
         }
         Ok(entries)
+    }
+
+    pub(super) fn tree_entries(
+        &self,
+        commit: &str,
+    ) -> InstructionRepositoryResult<Vec<GitTreeEntry>> {
+        validate_commit_id(commit)?;
+        let bytes = self.checked_bytes(
+            "list instruction tree",
+            ["ls-tree", "-r", "-z", "--full-tree", commit],
+        )?;
+        bytes
+            .split(|byte| *byte == 0)
+            .filter(|record| !record.is_empty())
+            .map(|record| {
+                let (metadata, path) = record.split_once_byte(b'\t').ok_or_else(|| {
+                    InstructionRepositoryError::new(
+                        InstructionRepositoryErrorKind::GitCommand,
+                        "parse instruction tree",
+                        format!(
+                            "Git returned malformed tree entry: {}",
+                            String::from_utf8_lossy(record)
+                        ),
+                    )
+                })?;
+                let mode = metadata.split(|byte| *byte == b' ').next().ok_or_else(|| {
+                    InstructionRepositoryError::new(
+                        InstructionRepositoryErrorKind::GitCommand,
+                        "parse instruction tree",
+                        "Git tree entry has no mode",
+                    )
+                })?;
+                Ok(GitTreeEntry {
+                    mode: utf8_field("tree mode", mode)?,
+                    path: path_from_git_bytes(path),
+                })
+            })
+            .collect()
     }
 
     pub(super) fn compare(
@@ -1247,4 +1291,15 @@ fn trim_ascii(bytes: &[u8]) -> &[u8] {
         .rposition(|byte| !byte.is_ascii_whitespace())
         .map_or(start, |index| index + 1);
     &bytes[start..end]
+}
+
+trait SplitOnceByte {
+    fn split_once_byte(&self, byte: u8) -> Option<(&[u8], &[u8])>;
+}
+
+impl SplitOnceByte for [u8] {
+    fn split_once_byte(&self, byte: u8) -> Option<(&[u8], &[u8])> {
+        let index = self.iter().position(|candidate| *candidate == byte)?;
+        Some((&self[..index], &self[index + 1..]))
+    }
 }

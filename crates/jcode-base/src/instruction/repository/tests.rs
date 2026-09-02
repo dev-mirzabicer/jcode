@@ -1028,6 +1028,26 @@ fn invalid_explicit_project_configuration_never_falls_back_to_global_only() {
     assert_eq!(error.kind, InstructionRepositoryErrorKind::Configuration);
 }
 
+#[cfg(unix)]
+#[test]
+fn project_configuration_write_never_escapes_through_dot_jcode_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = Fixture::new();
+    let source = fixture.initialize().repository;
+    let project = fixture._root.path().join("symlink-project");
+    init_plain_git(&project);
+    let outside = fixture._root.path().join("outside-config");
+    std::fs::create_dir_all(&outside).unwrap();
+    symlink(&outside, project.join(".jcode")).unwrap();
+    let error = fixture
+        .service
+        .configure_external_local(&project, &source.root, Some("main".to_string()))
+        .expect_err("configuration write must reject a symlinked .jcode directory");
+    assert_eq!(error.kind, InstructionRepositoryErrorKind::SymlinkEscape);
+    assert!(!outside.join("instructions.toml").exists());
+}
+
 #[test]
 fn repository_validation_reports_invalid_resources_without_hiding_valid_ones() {
     let fixture = Fixture::new();
@@ -1061,27 +1081,33 @@ fn repository_validation_reports_invalid_resources_without_hiding_valid_ones() {
         .service
         .open_draft(&repository, "modules/common.md")
         .unwrap();
+    let invalid_request = InstructionCommitRequest {
+        operation_id: "write-invalid-common".to_string(),
+        message: "instruction: invalid common".to_string(),
+        expected_head: draft.base_head,
+        expected_files: vec![draft.base],
+        mutations: vec![InstructionFileMutation::Write {
+            relative_path: PathBuf::from("modules/common.md"),
+            content: b"missing frontmatter".to_vec(),
+        }],
+    };
     let invalid = fixture
         .service
-        .commit(
-            &repository,
-            &InstructionCommitRequest {
-                operation_id: "write-invalid-common".to_string(),
-                message: "instruction: invalid common".to_string(),
-                expected_head: draft.base_head,
-                expected_files: vec![draft.base],
-                mutations: vec![InstructionFileMutation::Write {
-                    relative_path: PathBuf::from("modules/common.md"),
-                    content: b"missing frontmatter".to_vec(),
-                }],
-            },
-        )
+        .commit(&repository, &invalid_request)
         .expect_err("new invalid resource must not be committed");
     assert_eq!(
         invalid.kind,
         InstructionRepositoryErrorKind::RepositoryDamaged
     );
     assert!(!invalid.existing_state_unchanged);
+    let retry = fixture
+        .service
+        .commit(&repository, &invalid_request)
+        .expect_err("retry must not reclassify rejected invalid content as pre-existing");
+    assert_eq!(
+        retry.kind,
+        InstructionRepositoryErrorKind::RepositoryDamaged
+    );
 
     let repair = fixture
         .service

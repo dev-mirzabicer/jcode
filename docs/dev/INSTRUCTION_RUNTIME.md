@@ -221,6 +221,7 @@ Repeated initialization of a valid store is a no-op. An existing initialized or 
 - `AllowHeadFallback` is an explicit caller policy. It is not used by ordinary interactive reads.
 - Managed paths must be UTF-8, repository-relative, traversal-free, and outside `.git`.
 - Repository roots and every existing path component are checked with `symlink_metadata`. Managed reads and writes fail closed rather than following a symlink outside the configured repository.
+- Project configuration reads and writes also reject a symlinked `.jcode` directory or configuration file.
 
 ### Drafts and commits
 
@@ -231,7 +232,7 @@ Repeated initialization of a valid store is a no-op. An existing initialized or 
 - Exact target fingerprint
 - Current complete `HEAD`
 
-Save validates the same base, writes through a same-directory temporary file plus atomic replacement, compares complete repository resource/dependency issues before and after the mutation, stages only owned paths in a private index, creates one commit with a structural operation trailer, publishes it with compare-and-swap `update-ref`, and refreshes only those paths in the ordinary index. A newly invalid resource, missing reference, or dependency cycle blocks the commit and leaves the working edit visible for repair. Existing unrelated invalid resources remain isolated, and a mutation may repair them. Unrelated staged, dirty, and untracked Git state remains unchanged.
+Save validates the same base, writes through a same-directory temporary file plus atomic replacement, compares affected resource/dependency behavior against a complete temporary snapshot of the expected Git `HEAD`, stages only owned paths in a private index, creates one commit with a structural operation trailer, publishes it with compare-and-swap `update-ref`, and refreshes only those paths in the ordinary index. A newly invalid resource, missing reference, or dependency cycle blocks the commit and leaves the working edit visible for repair. A retry cannot reclassify the rejected edit as pre-existing. Existing unrelated working-tree or committed invalid resources remain isolated, and a mutation may repair them. Unrelated staged, dirty, and untracked Git state remains unchanged.
 
 Operation IDs make retry idempotent. Retry can recognize an already published commit. It also accepts the intended final working-file state after interruption between file write and commit. If a process stops after commit publication but before legacy-import working-file materialization, retry proves the commit identity and rematerializes the committed manifest and resource without another commit.
 

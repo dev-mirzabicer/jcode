@@ -583,7 +583,7 @@ impl InstructionRepositoryService {
         request: &InstructionCommitRequest,
     ) -> InstructionRepositoryResult<InstructionCommitOutcome> {
         let roots = self.roots()?;
-        let before = self.validation_issue_set(repository)?;
+        let before = self.validation_issue_set_at_head(repository, &request.mutations)?;
         commit_request(&roots.durable_state, repository, request, || {
             let after = self.validation_issue_set(repository)?;
             let introduced = after.difference(&before).cloned().collect::<Vec<_>>();
@@ -1280,13 +1280,119 @@ impl InstructionRepositoryService {
         &self,
         repository: &InstructionRepositoryRef,
     ) -> InstructionRepositoryResult<BTreeSet<String>> {
-        let runtime =
-            crate::instruction::InstructionRuntime::discover(self.validation_sources(repository)?);
+        self.validation_issue_set_for_root(repository, &repository.root, BTreeSet::new())
+    }
+
+    fn validation_issue_set_at_head(
+        &self,
+        repository: &InstructionRepositoryRef,
+        mutations: &[InstructionFileMutation],
+    ) -> InstructionRepositoryResult<BTreeSet<String>> {
+        let mut allowed = self.validation_issue_set(repository)?;
+        let git = GitRepository::new(&repository.root);
+        let head = git.head()?.ok_or_else(|| {
+            InstructionRepositoryError::new(
+                InstructionRepositoryErrorKind::RepositoryDamaged,
+                "validate committed instruction repository",
+                "instruction repository has no current HEAD",
+            )
+            .repository(repository)
+        })?;
+        let validation_dir = self
+            .roots()?
+            .durable_state
+            .join("instruction-repositories")
+            .join("validation-snapshots");
+        crate::storage::ensure_dir(&validation_dir).map_err(|error| {
+            InstructionRepositoryError::new(
+                InstructionRepositoryErrorKind::Io,
+                "create instruction validation directory",
+                error.to_string(),
+            )
+            .repository(repository)
+            .path(&validation_dir)
+        })?;
+        let snapshot = tempfile::Builder::new()
+            .prefix(&format!("{}-", repository.id))
+            .tempdir_in(&validation_dir)
+            .map_err(|error| {
+                InstructionRepositoryError::new(
+                    InstructionRepositoryErrorKind::Io,
+                    "create committed instruction snapshot",
+                    error.to_string(),
+                )
+                .repository(repository)
+                .path(&validation_dir)
+            })?;
         let mut issues = BTreeSet::new();
+        for entry in git.tree_entries(&head)? {
+            validate_relative_path(&entry.path)?;
+            match entry.mode.as_str() {
+                "100644" | "100755" => {
+                    let bytes = git.show_file(&head, &entry.path)?.ok_or_else(|| {
+                        InstructionRepositoryError::new(
+                            InstructionRepositoryErrorKind::RepositoryDamaged,
+                            "materialize committed instruction snapshot",
+                            "Git tree entry disappeared while reading the same commit",
+                        )
+                        .repository(repository)
+                        .path(&entry.path)
+                    })?;
+                    let target = snapshot.path().join(&entry.path);
+                    if let Some(parent) = target.parent() {
+                        std::fs::create_dir_all(parent).map_err(|error| {
+                            repository_io_error(
+                                repository,
+                                "create committed snapshot directory",
+                                parent,
+                                error,
+                            )
+                        })?;
+                    }
+                    std::fs::write(&target, bytes).map_err(|error| {
+                        repository_io_error(
+                            repository,
+                            "write committed instruction snapshot",
+                            &target,
+                            error,
+                        )
+                    })?;
+                }
+                "120000" => {
+                    issues.insert(format!("path:{}:symlink", entry.path.display()));
+                }
+                mode => {
+                    issues.insert(format!(
+                        "path:{}:unsupported-mode:{mode}",
+                        entry.path.display()
+                    ));
+                }
+            }
+        }
+        let filters = self.impacted_issue_filters(repository, snapshot.path(), mutations)?;
+        allowed.retain(|issue| !filters.iter().any(|filter| issue.contains(filter)));
+        allowed.extend(self.validation_issue_set_for_root(repository, snapshot.path(), issues)?);
+        Ok(allowed)
+    }
+
+    fn validation_issue_set_for_root(
+        &self,
+        repository: &InstructionRepositoryRef,
+        repository_root: &Path,
+        mut issues: BTreeSet<String>,
+    ) -> InstructionRepositoryResult<BTreeSet<String>> {
+        let runtime = crate::instruction::InstructionRuntime::discover(
+            self.validation_sources_for_root(repository, repository_root)?,
+        );
+        collect_managed_path_issues(repository, repository_root, repository_root, &mut issues)?;
         for diagnostic in runtime.diagnostics() {
+            let path = diagnostic
+                .path
+                .strip_prefix(repository_root)
+                .unwrap_or(&diagnostic.path);
             issues.insert(format!(
                 "diagnostic:{}:{}",
-                diagnostic.path.display(),
+                path.display(),
                 diagnostic.detail
             ));
         }
@@ -1326,7 +1432,12 @@ impl InstructionRepositoryService {
                         summary
                             .paths
                             .iter()
-                            .map(|path| path.display().to_string())
+                            .map(|path| {
+                                path.strip_prefix(repository_root)
+                                    .unwrap_or(path)
+                                    .display()
+                                    .to_string()
+                            })
                             .collect::<Vec<_>>()
                             .join(","),
                         detail
@@ -1339,7 +1450,12 @@ impl InstructionRepositoryService {
                         summary
                             .paths
                             .iter()
-                            .map(|path| path.display().to_string())
+                            .map(|path| {
+                                path.strip_prefix(repository_root)
+                                    .unwrap_or(path)
+                                    .display()
+                                    .to_string()
+                            })
                             .collect::<Vec<_>>()
                             .join(",")
                     ));
@@ -1347,6 +1463,106 @@ impl InstructionRepositoryService {
             }
         }
         Ok(issues)
+    }
+
+    fn validation_sources_for_root(
+        &self,
+        repository: &InstructionRepositoryRef,
+        repository_root: &Path,
+    ) -> InstructionRepositoryResult<InstructionSources> {
+        match repository.kind {
+            InstructionRepositoryKind::Global => Ok(InstructionSources::new(repository_root)),
+            _ => {
+                let global = self.global_repository()?;
+                let global_root = if global.root.exists() {
+                    global.root
+                } else {
+                    let empty_global = self
+                        .roots()?
+                        .durable_state
+                        .join("instruction-repositories")
+                        .join("validation-empty-global");
+                    std::fs::create_dir_all(&empty_global).map_err(|error| {
+                        repository_io_error(
+                            repository,
+                            "create validation root",
+                            &empty_global,
+                            error,
+                        )
+                    })?;
+                    empty_global
+                };
+                Ok(InstructionSources::new(global_root).with_project_root(repository_root))
+            }
+        }
+    }
+
+    fn impacted_issue_filters(
+        &self,
+        repository: &InstructionRepositoryRef,
+        repository_root: &Path,
+        mutations: &[InstructionFileMutation],
+    ) -> InstructionRepositoryResult<BTreeSet<String>> {
+        let affected_paths = mutations
+            .iter()
+            .flat_map(InstructionFileMutation::affected_paths)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let runtime = crate::instruction::InstructionRuntime::discover(
+            self.validation_sources_for_root(repository, repository_root)?,
+        );
+        let resources = runtime.resources();
+        let mut impacted = resources
+            .iter()
+            .filter(|summary| {
+                summary.paths.iter().any(|path| {
+                    path.strip_prefix(repository_root)
+                        .is_ok_and(|relative| affected_paths.contains(relative))
+                })
+            })
+            .map(|summary| summary.resource.clone())
+            .collect::<BTreeSet<_>>();
+
+        loop {
+            let mut changed = false;
+            for summary in &resources {
+                if impacted.contains(&summary.resource)
+                    || !matches!(
+                        summary.state,
+                        crate::instruction::ResourceValidationState::Valid
+                    )
+                {
+                    continue;
+                }
+                let selector = explicit_selector(&summary.resource)?;
+                let Ok(graph) = runtime.validate_graph(&selector) else {
+                    continue;
+                };
+                let references_impacted = graph
+                    .render_dependencies
+                    .iter()
+                    .chain(&graph.validation_dependencies)
+                    .any(|(consumer, dependencies)| {
+                        impacted.contains(consumer)
+                            || dependencies
+                                .iter()
+                                .any(|dependency| impacted.contains(dependency))
+                    });
+                if references_impacted {
+                    changed |= impacted.insert(summary.resource.clone());
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+
+        let mut filters = affected_paths
+            .into_iter()
+            .map(|path| path.display().to_string())
+            .collect::<BTreeSet<_>>();
+        filters.extend(impacted.into_iter().map(|resource| resource.to_string()));
+        Ok(filters)
     }
 
     fn store_health(
@@ -1843,6 +2059,82 @@ fn repository_io_error(
     )
     .repository(repository)
     .path(path)
+}
+
+fn explicit_selector(
+    resource: &crate::instruction::InstructionResourceRef,
+) -> InstructionRepositoryResult<crate::instruction::InstructionSelector> {
+    let selector = match resource.scope {
+        InstructionScope::Global => {
+            crate::instruction::InstructionSelector::global(resource.kind, resource.id.as_str())
+        }
+        InstructionScope::Project => {
+            crate::instruction::InstructionSelector::project(resource.kind, resource.id.as_str())
+        }
+    };
+    selector.map_err(|error| {
+        InstructionRepositoryError::new(
+            InstructionRepositoryErrorKind::RepositoryDamaged,
+            "construct instruction validation selector",
+            error.to_string(),
+        )
+    })
+}
+
+fn collect_managed_path_issues(
+    repository: &InstructionRepositoryRef,
+    root: &Path,
+    directory: &Path,
+    issues: &mut BTreeSet<String>,
+) -> InstructionRepositoryResult<()> {
+    for entry in std::fs::read_dir(directory).map_err(|error| {
+        repository_io_error(
+            repository,
+            "inspect managed repository paths",
+            directory,
+            error,
+        )
+    })? {
+        let entry = entry.map_err(|error| {
+            repository_io_error(
+                repository,
+                "inspect managed repository path",
+                directory,
+                error,
+            )
+        })?;
+        let path = entry.path();
+        let relative = path.strip_prefix(root).map_err(|_| {
+            InstructionRepositoryError::new(
+                InstructionRepositoryErrorKind::SymlinkEscape,
+                "inspect managed repository path",
+                "repository entry escaped its configured root",
+            )
+            .repository(repository)
+            .path(&path)
+        })?;
+        if relative
+            .components()
+            .next()
+            .is_some_and(|component| component.as_os_str() == std::ffi::OsStr::new(".git"))
+        {
+            continue;
+        }
+        if relative.to_str().is_none() {
+            issues.insert(format!("path:{}:non-utf8", relative.display()));
+        }
+        let file_type = entry.file_type().map_err(|error| {
+            repository_io_error(repository, "inspect managed repository path", &path, error)
+        })?;
+        if file_type.is_symlink() {
+            issues.insert(format!("path:{}:symlink", relative.display()));
+        } else if file_type.is_dir() {
+            collect_managed_path_issues(repository, root, &path, issues)?;
+        } else if !file_type.is_file() {
+            issues.insert(format!("path:{}:unsupported-file-type", relative.display()));
+        }
+    }
+    Ok(())
 }
 
 fn legacy_source_snapshot(

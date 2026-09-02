@@ -347,6 +347,7 @@ fn configured_repository(
 }
 
 fn load_project_config(path: &Path) -> InstructionRepositoryResult<InstructionProjectConfig> {
+    reject_project_config_symlinks(path)?;
     let content = std::fs::read_to_string(path).map_err(|error| {
         InstructionRepositoryError::new(
             InstructionRepositoryErrorKind::Configuration,
@@ -379,6 +380,7 @@ fn save_project_config(
     path: &Path,
     config: &InstructionProjectConfig,
 ) -> InstructionRepositoryResult<()> {
+    reject_project_config_symlinks(path)?;
     let content = toml::to_string_pretty(config).map_err(|error| {
         InstructionRepositoryError::new(
             InstructionRepositoryErrorKind::Configuration,
@@ -395,6 +397,32 @@ fn save_project_config(
         )
         .path(path)
     })
+}
+
+fn reject_project_config_symlinks(path: &Path) -> InstructionRepositoryResult<()> {
+    for candidate in path.parent().into_iter().chain(std::iter::once(path)) {
+        match std::fs::symlink_metadata(candidate) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(InstructionRepositoryError::new(
+                    InstructionRepositoryErrorKind::SymlinkEscape,
+                    "access instruction project configuration",
+                    "project instruction configuration may not traverse a symlink",
+                )
+                .path(candidate));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(InstructionRepositoryError::new(
+                    InstructionRepositoryErrorKind::Io,
+                    "inspect instruction project configuration",
+                    error.to_string(),
+                )
+                .path(candidate));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn external_checkout_root(
