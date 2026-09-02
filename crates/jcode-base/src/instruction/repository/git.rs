@@ -87,6 +87,19 @@ impl GitRepository {
         }))
     }
 
+    pub(super) fn remote_url(&self, remote: &str) -> InstructionRepositoryResult<Option<String>> {
+        validate_remote(remote)?;
+        let output = self.run(["remote", "get-url", "--", remote])?;
+        if !output.status.success() {
+            return Ok(None);
+        }
+        Ok(Some(
+            utf8_stdout("inspect remote URL", output)?
+                .trim()
+                .to_string(),
+        ))
+    }
+
     pub(super) fn changes(&self) -> InstructionRepositoryResult<Vec<InstructionRepositoryChange>> {
         let output = self.checked_bytes(
             "inspect working tree",

@@ -256,7 +256,7 @@ Pull requires a clean instruction repository. Fast-forward-only and visible merg
 
 ### Mutation concurrency
 
-One cross-process lease exists per instruction repository. Initialization, explicit recreation, project setup, branch and remote actions, imports, and content commits all hold that lease across their complete mutation. Setup callers supply structural operation IDs, and retry reuses an existing valid submodule, external checkout, or standalone store instead of duplicating it. On Unix the lease uses a nonblocking kernel `flock` plus owner metadata. Other platforms use an exclusive owner file with expiry-based crash recovery. Read-only inspection remains available while another process owns mutation. Owner metadata includes operation ID, PID, and acquisition/expiry times.
+One cross-process lease exists per instruction repository. Initialization, explicit recreation, project setup, branch and remote actions, imports, and content commits all hold that lease across their complete mutation. Setup callers supply structural operation IDs, and retry reuses an existing valid submodule, external checkout, or standalone store instead of duplicating it. Reuse validates the requested checkout origin and attached branch, so retry cannot silently rebind a project to different Git identity. On Unix the lease uses a nonblocking kernel `flock` plus owner metadata. Other platforms use an exclusive owner file with expiry-based crash recovery. Read-only inspection remains available while another process owns mutation. Owner metadata includes operation ID, PID, and acquisition/expiry times.
 
 ### Legacy import backend
 

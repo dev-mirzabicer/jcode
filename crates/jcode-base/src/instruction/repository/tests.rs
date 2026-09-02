@@ -745,6 +745,20 @@ fn project_submodule_external_and_non_git_modes_preserve_parent_authority() {
         )
         .expect("submodule setup retry is idempotent");
     assert_eq!(repeated_submodule.root, submodule.root);
+    let submodule_mismatch = fixture
+        .service
+        .configure_submodule(
+            &parent,
+            "setup-submodule-mismatch",
+            remote.to_str().unwrap(),
+            "other",
+            None,
+        )
+        .expect_err("existing submodule branch mismatch must be explicit");
+    assert_eq!(
+        submodule_mismatch.kind,
+        InstructionRepositoryErrorKind::Configuration
+    );
     assert_eq!(submodule.kind, InstructionRepositoryKind::ProjectSubmodule);
     assert_eq!(git(&parent, &["rev-parse", "HEAD"]), parent_head);
     let parent_status = git(&parent, &["status", "--short"]);
@@ -790,6 +804,19 @@ fn project_submodule_external_and_non_git_modes_preserve_parent_authority() {
         fixture.service.inspect(&external).unwrap().health,
         InstructionRepositoryHealth::Ready
     );
+    let external_mismatch = fixture
+        .service
+        .configure_external_remote(
+            &external_parent,
+            "setup-external-mismatch",
+            remote.to_str().unwrap(),
+            "other",
+        )
+        .expect_err("existing external branch mismatch must be explicit");
+    assert_eq!(
+        external_mismatch.kind,
+        InstructionRepositoryErrorKind::Configuration
+    );
     let setup_lease =
         acquire_mutation_lease(&fixture.state, &external, "held-setup-lease").unwrap();
     let busy_setup = fixture
@@ -819,6 +846,19 @@ fn project_submodule_external_and_non_git_modes_preserve_parent_authority() {
         )
         .unwrap();
     assert_eq!(local.root, std::fs::canonicalize(&source.root).unwrap());
+    let local_mismatch = fixture
+        .service
+        .configure_external_local(
+            &local_parent,
+            "setup-local-mismatch",
+            &source.root,
+            Some("other".to_string()),
+        )
+        .expect_err("existing local branch mismatch must be explicit");
+    assert_eq!(
+        local_mismatch.kind,
+        InstructionRepositoryErrorKind::Configuration
+    );
 
     std::fs::remove_dir_all(&external.root).unwrap();
     let missing_external = fixture.service.inspect(&external).unwrap();

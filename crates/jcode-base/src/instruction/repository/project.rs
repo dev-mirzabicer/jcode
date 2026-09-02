@@ -129,6 +129,8 @@ impl InstructionRepositoryService {
                 "parent records the submodule, but its checkout is missing or invalid",
             )
             .repository(&repository));
+        } else {
+            validate_checkout_identity(&repository, url, branch)?;
         }
         let config = InstructionProjectConfig::new(InstructionProjectRepositoryMode::Submodule {
             path: relative,
@@ -182,6 +184,8 @@ impl InstructionRepositoryService {
             )
             .path(&checkout)
             .may_have_working_changes());
+        } else {
+            validate_checkout_identity(&repository, url, branch)?;
         }
         harden_private_checkout(&checkout)?;
         let config =
@@ -220,14 +224,6 @@ impl InstructionRepositoryService {
             )
             .path(&checkout)
         })?;
-        if !GitRepository::new(&canonical).is_repository() {
-            return Err(InstructionRepositoryError::new(
-                InstructionRepositoryErrorKind::RepositoryDamaged,
-                "attach external instruction repository",
-                "selected checkout is not a Git worktree",
-            )
-            .path(&canonical));
-        }
         let config_path = project.active_root().join(PROJECT_CONFIG_RELATIVE_PATH);
         let repository = InstructionRepositoryRef {
             id: format!("project-{}", project.key().digest()),
@@ -241,6 +237,29 @@ impl InstructionRepositoryService {
         };
         validate_operation_id(operation_id)?;
         let _lease = acquire_mutation_lease(&roots.durable_state, &repository, operation_id)?;
+        let git = GitRepository::new(&canonical);
+        if !git.is_repository() {
+            return Err(InstructionRepositoryError::new(
+                InstructionRepositoryErrorKind::RepositoryDamaged,
+                "attach external instruction repository",
+                "selected checkout is not a Git worktree",
+            )
+            .path(&canonical));
+        }
+        if let Some(expected_branch) = branch.as_deref() {
+            let actual_branch = git.branch()?;
+            if actual_branch.as_deref() != Some(expected_branch) {
+                return Err(InstructionRepositoryError::new(
+                    InstructionRepositoryErrorKind::Configuration,
+                    "attach external instruction repository",
+                    format!(
+                        "requested branch '{expected_branch}', but the checkout is on {}",
+                        actual_branch.as_deref().unwrap_or("detached HEAD")
+                    ),
+                )
+                .path(&canonical));
+            }
+        }
         let config =
             InstructionProjectConfig::new(InstructionProjectRepositoryMode::ExternalLocal {
                 path: canonical,
@@ -532,4 +551,37 @@ fn config_error(path: &Path, detail: &str) -> InstructionRepositoryError {
         detail,
     )
     .path(path)
+}
+
+fn validate_checkout_identity(
+    repository: &InstructionRepositoryRef,
+    url: &str,
+    branch: &str,
+) -> InstructionRepositoryResult<()> {
+    let git = GitRepository::new(&repository.root);
+    let actual_url = git.remote_url("origin")?;
+    if actual_url.as_deref() != Some(url) {
+        return Err(InstructionRepositoryError::new(
+            InstructionRepositoryErrorKind::Configuration,
+            "reuse instruction repository checkout",
+            format!(
+                "existing checkout origin is {}, not the requested URL '{url}'",
+                actual_url.as_deref().unwrap_or("not configured")
+            ),
+        )
+        .repository(repository));
+    }
+    let actual_branch = git.branch()?;
+    if actual_branch.as_deref() != Some(branch) {
+        return Err(InstructionRepositoryError::new(
+            InstructionRepositoryErrorKind::Configuration,
+            "reuse instruction repository checkout",
+            format!(
+                "existing checkout is on {}, not the requested branch '{branch}'",
+                actual_branch.as_deref().unwrap_or("detached HEAD")
+            ),
+        )
+        .repository(repository));
+    }
+    Ok(())
 }
