@@ -125,6 +125,23 @@ fn initial_subscribe_target_session(request: &Request) -> Option<&str> {
     }
 }
 
+fn initial_subscribe_agent(request: &Request) -> Option<&str> {
+    match request {
+        Request::Subscribe { agent, .. } => agent.as_deref(),
+        _ => None,
+    }
+}
+
+fn initial_subscribe_selfdev(request: &Request) -> bool {
+    matches!(
+        request,
+        Request::Subscribe {
+            selfdev: Some(true),
+            ..
+        }
+    )
+}
+
 fn initial_subscribe_startup_caller(request: &Request) -> crate::agent::StartupContextCaller {
     match request {
         Request::Subscribe {
@@ -385,13 +402,87 @@ async fn refresh_session_control_handle(
     clippy::too_many_arguments,
     reason = "client lifecycle wiring spans sessions, swarm state, file state, channels, debug, and runtime coordination"
 )]
+#[cfg(test)]
 pub(super) async fn handle_client(
+    stream: Stream,
+    sessions: SessionAgents,
+    global_event_tx: broadcast::Sender<ServerEvent>,
+    provider_template: Arc<dyn Provider>,
+    context_transactions: Arc<crate::context::ContextTransactionService>,
+    startup_context: Arc<super::startup_context::StartupContextCoordinator>,
+    global_is_processing: Arc<RwLock<bool>>,
+    global_session_id: Arc<RwLock<String>>,
+    client_count: Arc<RwLock<usize>>,
+    client_connections: Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
+    swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
+    swarms_by_id: Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    shared_context: Arc<RwLock<HashMap<String, HashMap<String, SharedContext>>>>,
+    swarm_plans: Arc<RwLock<HashMap<String, VersionedPlan>>>,
+    swarm_coordinators: Arc<RwLock<HashMap<String, String>>>,
+    file_touch: FileTouchService,
+    channel_subscriptions: ChannelSubscriptions,
+    channel_subscriptions_by_session: ChannelSubscriptions,
+    client_debug_state: Arc<RwLock<ClientDebugState>>,
+    client_debug_response_tx: broadcast::Sender<(u64, String)>,
+    event_history: Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
+    event_counter: Arc<std::sync::atomic::AtomicU64>,
+    swarm_event_tx: broadcast::Sender<SwarmEvent>,
+    server_name: String,
+    server_icon: String,
+    mcp_pool: Arc<crate::mcp::SharedMcpPool>,
+    shutdown_signals: Arc<RwLock<HashMap<String, InterruptSignal>>>,
+    soft_interrupt_queues: SessionInterruptQueues,
+    await_members_runtime: AwaitMembersRuntime,
+    swarm_mutation_runtime: SwarmMutationRuntime,
+) -> Result<()> {
+    handle_client_with_instruction_repositories(
+        stream,
+        sessions,
+        global_event_tx,
+        provider_template,
+        context_transactions,
+        startup_context,
+        Arc::new(crate::instruction::InstructionRepositoryService::new()),
+        global_is_processing,
+        global_session_id,
+        client_count,
+        client_connections,
+        swarm_members,
+        swarms_by_id,
+        shared_context,
+        swarm_plans,
+        swarm_coordinators,
+        file_touch,
+        channel_subscriptions,
+        channel_subscriptions_by_session,
+        client_debug_state,
+        client_debug_response_tx,
+        event_history,
+        event_counter,
+        swarm_event_tx,
+        server_name,
+        server_icon,
+        mcp_pool,
+        shutdown_signals,
+        soft_interrupt_queues,
+        await_members_runtime,
+        swarm_mutation_runtime,
+    )
+    .await
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "client lifecycle wiring spans sessions, swarm state, file state, channels, debug, and runtime coordination"
+)]
+pub(super) async fn handle_client_with_instruction_repositories(
     stream: Stream,
     sessions: SessionAgents,
     _global_event_tx: broadcast::Sender<ServerEvent>,
     provider_template: Arc<dyn Provider>,
     context_transactions: Arc<crate::context::ContextTransactionService>,
     startup_context: Arc<super::startup_context::StartupContextCoordinator>,
+    instruction_repositories: Arc<crate::instruction::InstructionRepositoryService>,
     _global_is_processing: Arc<RwLock<bool>>,
     global_session_id: Arc<RwLock<String>>,
     client_count: Arc<RwLock<usize>>,
@@ -540,6 +631,7 @@ pub(super) async fn handle_client(
             )
         })
         .await;
+    new_agent.set_instruction_repositories((*instruction_repositories).clone());
     let requested_target = initial_subscribe_target_session(&initial_request);
     let target_available = requested_target.is_some_and(crate::session::session_exists);
     let initial_startup_caller = initial_subscribe_startup_caller(&initial_request);
@@ -567,6 +659,53 @@ pub(super) async fn handle_client(
     }
     let mut client_primary_startup_activated = false;
     if requested_target.is_none() || !target_available {
+        if initial_subscribe_selfdev(&initial_request) {
+            new_agent.set_canary("self-dev");
+        }
+        let instruction_selection = match crate::instruction::AgentSelection::parse(
+            initial_subscribe_agent(&initial_request),
+        ) {
+            Ok(selection) => selection,
+            Err(error) => {
+                let provisional_session_id = new_agent.session_id().to_string();
+                new_agent.mark_closed();
+                crate::tool::clear_session_tool_policy(&provisional_session_id);
+                let cleanup_error =
+                    crate::session::remove_unpublished_session(&provisional_session_id)
+                        .err()
+                        .map(|cleanup| format!("; unpublished session cleanup failed: {cleanup}"))
+                        .unwrap_or_default();
+                write_direct_event(
+                    &writer,
+                    &ServerEvent::Error {
+                        id: initial_request.id(),
+                        message: format!("Invalid initial agent selection: {error}{cleanup_error}"),
+                        retry_after_secs: None,
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
+        };
+        if let Err(error) = new_agent.activate_primary_instructions(instruction_selection) {
+            let provisional_session_id = new_agent.session_id().to_string();
+            new_agent.mark_closed();
+            crate::tool::clear_session_tool_policy(&provisional_session_id);
+            let cleanup_error = crate::session::remove_unpublished_session(&provisional_session_id)
+                .err()
+                .map(|cleanup| format!("; unpublished session cleanup failed: {cleanup}"))
+                .unwrap_or_default();
+            write_direct_event(
+                &writer,
+                &ServerEvent::Error {
+                    id: initial_request.id(),
+                    message: format!("Initial agent activation failed: {error}{cleanup_error}"),
+                    retry_after_secs: None,
+                },
+            )
+            .await?;
+            return Ok(());
+        }
         match new_agent.activate_startup_context(crate::agent::StartupContextActivation::primary(
             initial_startup_caller,
         )) {
@@ -1319,6 +1458,7 @@ pub(super) async fn handle_client(
                         &provider,
                         &registry,
                         &context_transactions,
+                        &instruction_repositories,
                         &sessions,
                         &shutdown_signals,
                         &soft_interrupt_queues,
@@ -1502,6 +1642,7 @@ pub(super) async fn handle_client(
                 working_dir: subscribe_working_dir,
                 selfdev,
                 target_session_id,
+                agent: _,
                 startup_context_caller: _,
                 client_instance_id,
                 client_has_local_history,
@@ -2672,6 +2813,61 @@ pub(super) async fn handle_client(
                 .await;
             }
 
+            Request::SetAgent {
+                id,
+                agent: selection,
+            } => {
+                if reject_if_agent_busy_for_request(
+                    id,
+                    "set_agent",
+                    &client_session_id,
+                    client_is_processing,
+                    &agent,
+                    &client_event_tx,
+                ) {
+                    continue;
+                }
+                let mut agent_guard = agent.lock().await;
+                if agent_guard.first_provider_dispatch_at().is_some() {
+                    let _ = client_event_tx.send(ServerEvent::Error {
+                        id,
+                        message: "The initial agent is already dispatched; post-dispatch agent transitions arrive in Phase 3 WP-04.".to_string(),
+                        retry_after_secs: None,
+                    });
+                    continue;
+                }
+                let selection = match crate::instruction::AgentSelection::parse(Some(&selection)) {
+                    Ok(selection) => selection,
+                    Err(error) => {
+                        let _ = client_event_tx.send(ServerEvent::Error {
+                            id,
+                            message: format!("Invalid agent selection: {error}"),
+                            retry_after_secs: None,
+                        });
+                        continue;
+                    }
+                };
+                match agent_guard.activate_primary_instructions(selection) {
+                    Ok(activation) => {
+                        let active = activation.state.active_agent;
+                        let _ = client_event_tx.send(ServerEvent::AgentSelected {
+                            id,
+                            agent_id: active.id,
+                            display_name: active.display_name,
+                            scope: active.scope.to_string(),
+                        });
+                        let _ = client_event_tx.send(ServerEvent::Done { id });
+                    }
+                    Err(error) => {
+                        let _ = client_event_tx.send(ServerEvent::Error {
+                            id,
+                            message: format!("Agent selection failed: {error}"),
+                            retry_after_secs: None,
+                        });
+                    }
+                }
+            }
+
             Request::Split { id } => {
                 handle_split(id, &client_session_id, &client_event_tx).await;
             }
@@ -2687,7 +2883,14 @@ pub(super) async fn handle_client(
                 ) {
                     continue;
                 }
-                handle_transfer(id, &client_session_id, &agent, &client_event_tx).await;
+                handle_transfer(
+                    id,
+                    &client_session_id,
+                    &agent,
+                    &instruction_repositories,
+                    &client_event_tx,
+                )
+                .await;
             }
 
             Request::TriggerMemoryExtraction { id } => {

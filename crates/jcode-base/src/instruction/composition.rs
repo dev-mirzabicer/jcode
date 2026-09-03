@@ -174,10 +174,34 @@ impl SystemPromptComposer {
             &global_manifest,
         )?;
 
+        let project_system_imported = project_manifest.as_ref().is_some_and(|manifest| {
+            manifest
+                .legacy_imports
+                .values()
+                .any(|receipt| receipt.source_kind == LegacyInstructionSourceKind::SystemPrompt)
+        });
+        let project_legacy_prompt = if project_system_imported {
+            None
+        } else {
+            project_root
+                .as_ref()
+                .map(|root| read_nonblank(root.join(".jcode/system-prompt.md")))
+                .transpose()?
+                .flatten()
+        };
+        let render_selection = if selection.scope == super::InstructionScopeSelector::Project
+            && selection.id.as_str() == COMPATIBILITY_AGENT_ID
+            && runtime.resolve(&selection).is_err()
+            && project_legacy_prompt.is_some()
+        {
+            InstructionSelector::global(InstructionKind::Agent, COMPATIBILITY_AGENT_ID)?
+        } else {
+            selection.clone()
+        };
         let mut rendered_agent =
-            runtime.render_agent(&selection, AgentAvailability::Primary, &())?;
+            runtime.render_agent(&render_selection, AgentAvailability::Primary, &())?;
         let mut agent_reference = rendered_agent.root.clone();
-        let agent_document = runtime.resolve(&selection)?;
+        let agent_document = runtime.resolve(&render_selection)?;
         let display_name = agent_document
             .metadata
             .display_name
@@ -191,18 +215,16 @@ impl SystemPromptComposer {
         {
             rendered_agent.text = rendered_agent.text.trim().to_string();
         }
-        let project_system_imported = project_manifest.as_ref().is_some_and(|manifest| {
-            manifest
-                .legacy_imports
-                .values()
-                .any(|receipt| receipt.source_kind == LegacyInstructionSourceKind::SystemPrompt)
-        });
         if agent_reference.id.as_str() == COMPATIBILITY_AGENT_ID
-            && !project_system_imported
-            && let Some(root) = project_root.as_ref()
-            && let Some(project_prompt) = read_nonblank(root.join(".jcode/system-prompt.md"))?
+            && let Some(project_prompt) = project_legacy_prompt
         {
-            if agent_reference.scope == InstructionScope::Project {
+            if runtime
+                .resolve(&InstructionSelector::project(
+                    InstructionKind::Agent,
+                    COMPATIBILITY_AGENT_ID,
+                )?)
+                .is_ok()
+            {
                 return Err(SystemPromptActivationError::Compatibility(
                     "project legacy system-prompt.md and managed project:jcode both exist without an import receipt"
                         .to_string(),

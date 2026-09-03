@@ -1,4 +1,4 @@
-use super::Agent;
+use super::{Agent, PrimaryInstructionActivationError};
 use crate::session::{Session, StartupContextInstallError, StartupContextInstallOutcome};
 use crate::startup_context::{
     StartupContext, StartupContextError, StartupFailurePolicy, StartupFileIssue, StartupPreparation,
@@ -7,6 +7,7 @@ use jcode_session_types::StoredStartupContextState;
 use jcode_session_types::{StoredStartupContextBlock, StoredStartupContextBlockKind};
 use std::error::Error;
 use std::fmt;
+use std::path::Path;
 
 #[derive(Clone, Debug)]
 pub(crate) struct StartupContextActionRequiredError {
@@ -174,6 +175,10 @@ impl StartupContextActivationOutcome {
 
 #[derive(Debug)]
 pub enum StartupContextActivationError {
+    Instruction {
+        caller: StartupContextCaller,
+        source: PrimaryInstructionActivationError,
+    },
     Domain {
         caller: StartupContextCaller,
         source: StartupContextError,
@@ -196,7 +201,8 @@ pub enum StartupContextActivationError {
 impl StartupContextActivationError {
     pub fn caller(&self) -> StartupContextCaller {
         match self {
-            Self::Domain { caller, .. }
+            Self::Instruction { caller, .. }
+            | Self::Domain { caller, .. }
             | Self::Blocked { caller, .. }
             | Self::Install { caller, .. }
             | Self::Cleanup { caller, .. } => *caller,
@@ -206,14 +212,20 @@ impl StartupContextActivationError {
     pub fn issues(&self) -> Vec<&StartupFileIssue> {
         match self {
             Self::Blocked { preparation, .. } => preparation.issues().collect(),
-            Self::Domain { .. } | Self::Install { .. } | Self::Cleanup { .. } => Vec::new(),
+            Self::Instruction { .. }
+            | Self::Domain { .. }
+            | Self::Install { .. }
+            | Self::Cleanup { .. } => Vec::new(),
         }
     }
 
     pub fn preparation(&self) -> Option<&StartupPreparation> {
         match self {
             Self::Blocked { preparation, .. } => Some(preparation.as_ref()),
-            Self::Domain { .. } | Self::Install { .. } | Self::Cleanup { .. } => None,
+            Self::Instruction { .. }
+            | Self::Domain { .. }
+            | Self::Install { .. }
+            | Self::Cleanup { .. } => None,
         }
     }
 }
@@ -221,6 +233,11 @@ impl StartupContextActivationError {
 impl fmt::Display for StartupContextActivationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Instruction { caller, source } => write!(
+                formatter,
+                "instruction activation failed for {}: {source}",
+                caller.label()
+            ),
             Self::Domain { caller, source } => write!(
                 formatter,
                 "Startup Context preparation failed for {}: {source}",
@@ -256,6 +273,7 @@ impl fmt::Display for StartupContextActivationError {
 impl Error for StartupContextActivationError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::Instruction { source, .. } => Some(source),
             Self::Domain { source, .. } => Some(source),
             Self::Install { source, .. } => Some(source),
             Self::Cleanup { source, .. } => Some(source.as_ref()),
@@ -265,6 +283,44 @@ impl Error for StartupContextActivationError {
 }
 
 impl Agent {
+    pub fn activate_primary_instructions(
+        &mut self,
+        selection: crate::instruction::AgentSelection,
+    ) -> Result<crate::instruction::SystemPromptActivation, PrimaryInstructionActivationError> {
+        let skills = self.current_skills_snapshot();
+        let available_skills = skills
+            .list()
+            .iter()
+            .map(|skill| crate::prompt::SkillInfo {
+                name: skill.name.clone(),
+                description: skill.description.clone(),
+            })
+            .collect::<Vec<_>>();
+        let working_dir = self.session.working_dir.as_deref().map(Path::new);
+        let activation = crate::instruction::SystemPromptComposer::from_repository_service(
+            self.instruction_repositories.clone(),
+        )
+        .activate(crate::instruction::SystemPromptActivationRequest {
+            working_dir,
+            selection,
+            is_selfdev: self.session.is_canary,
+            capabilities: crate::prompt::PromptCapabilities::current(),
+            available_skills: &available_skills,
+        })?;
+        if self.session.active_agent() == Some(&activation.state.active_agent) {
+            return Ok(activation);
+        }
+        let previous = self.session.system_prompt.clone();
+        self.session.install_system_prompt(activation.state.clone());
+        if let Err(error) = self.session.save() {
+            self.session.system_prompt = previous;
+            return Err(PrimaryInstructionActivationError::Persistence(error));
+        }
+        self.provider
+            .invalidate_context_continuation("frozen system prompt activated");
+        Ok(activation)
+    }
+
     pub fn activate_startup_context(
         &mut self,
         activation: StartupContextActivation,
@@ -433,6 +489,7 @@ mod tests {
     #[derive(Clone, Default)]
     struct RecordingProvider {
         calls: std::sync::Arc<AtomicUsize>,
+        systems: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     }
 
     #[async_trait]
@@ -445,6 +502,10 @@ mod tests {
             _resume_session_id: Option<&str>,
         ) -> anyhow::Result<EventStream> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            self.systems
+                .lock()
+                .expect("record systems")
+                .push(_system.to_string());
             Ok(Box::pin(futures::stream::iter(vec![
                 Ok(StreamEvent::TextDelta("ok".to_string())),
                 Ok(StreamEvent::MessageEnd { stop_reason: None }),
@@ -477,6 +538,10 @@ mod tests {
                 previous,
                 _home: home,
             }
+        }
+
+        fn path(&self) -> &std::path::Path {
+            self._home.path()
         }
     }
 
@@ -516,6 +581,137 @@ mod tests {
         session.working_dir = Some(project.to_string_lossy().into_owned());
         session.ensure_initial_session_context_message();
         session
+    }
+
+    #[tokio::test]
+    async fn primary_requests_freeze_static_prompt_across_disk_edits_and_restore() {
+        let home = TestHome::new();
+        let project = tempfile::tempdir().expect("project");
+        let provider = RecordingProvider::default();
+        let provider_handle: std::sync::Arc<dyn Provider> = std::sync::Arc::new(provider.clone());
+        let (mut agent, _) = Agent::new_with_startup_context_and_agent(
+            provider_handle,
+            crate::tool::Registry::empty(),
+            project.path().to_str(),
+            StartupContextActivation::primary(StartupContextCaller::RunCommand),
+            crate::instruction::AgentSelection::Default,
+            false,
+        )
+        .expect("primary activation");
+        let frozen = agent
+            .system_prompt_text()
+            .expect("frozen system prompt")
+            .to_string();
+        let session_id = agent.session_id().to_string();
+
+        agent.run_once("first turn").await.expect("first turn");
+        assert!(agent.first_provider_dispatch_at().is_some());
+        let common_path = home.path().join("instructions/system/common.md");
+        let common = crate::instruction::InstructionDocument {
+            id: crate::instruction::InstructionId::parse("common").expect("id"),
+            kind: crate::instruction::InstructionKind::System,
+            scope: crate::instruction::InstructionScope::Global,
+            template_mode: crate::instruction::TemplateMode::Plain,
+            metadata: crate::instruction::InstructionMetadata::default(),
+            body: "SYNTHETIC_DISK_EDIT".to_string(),
+            path: std::path::PathBuf::from("system/common.md"),
+        };
+        std::fs::write(common_path, common.to_markdown().expect("serialize"))
+            .expect("edit managed source");
+        agent.run_once("second turn").await.expect("second turn");
+
+        let systems = provider.systems.lock().expect("systems").clone();
+        assert_eq!(systems.len(), 2);
+        assert_eq!(systems[0], frozen);
+        assert_eq!(systems[1], frozen);
+        assert!(!systems[1].contains("SYNTHETIC_DISK_EDIT"));
+
+        let restored_provider: std::sync::Arc<dyn Provider> = std::sync::Arc::new(provider.clone());
+        let mut restored = Agent::new_with_disabled_startup_context(
+            restored_provider,
+            crate::tool::Registry::empty(),
+            None,
+        );
+        restored.restore_session(&session_id).expect("restore");
+        assert_eq!(restored.system_prompt_text(), Some(frozen.as_str()));
+        restored
+            .run_once("restored turn")
+            .await
+            .expect("restored turn");
+        let systems = provider.systems.lock().expect("systems");
+        assert_eq!(systems.len(), 3);
+        assert_eq!(systems[2], frozen);
+    }
+
+    #[test]
+    fn old_session_migration_uses_compatibility_agent_even_when_default_changed() {
+        let home = TestHome::new();
+        let project = tempfile::tempdir().expect("project");
+        crate::instruction::SystemPromptComposer::new()
+            .activate(crate::instruction::SystemPromptActivationRequest {
+                working_dir: Some(project.path()),
+                selection: crate::instruction::AgentSelection::Default,
+                is_selfdev: false,
+                capabilities: crate::prompt::PromptCapabilities { mermaid: false },
+                available_skills: &[],
+            })
+            .expect("initialize store");
+        let synthetic = crate::instruction::InstructionDocument {
+            id: crate::instruction::InstructionId::parse("synthetic").expect("id"),
+            kind: crate::instruction::InstructionKind::Agent,
+            scope: crate::instruction::InstructionScope::Global,
+            template_mode: crate::instruction::TemplateMode::Plain,
+            metadata: crate::instruction::InstructionMetadata {
+                display_name: Some("Synthetic".to_string()),
+                description: Some("synthetic fixture".to_string()),
+                agent: Some(crate::instruction::AgentMetadata {
+                    availability: crate::instruction::AgentAvailability::Both,
+                }),
+                ..crate::instruction::InstructionMetadata::default()
+            },
+            body: "SYNTHETIC_DEFAULT".to_string(),
+            path: std::path::PathBuf::from("agents/synthetic.md"),
+        };
+        std::fs::write(
+            home.path().join("instructions/agents/synthetic.md"),
+            synthetic.to_markdown().expect("serialize"),
+        )
+        .expect("write synthetic agent");
+        std::fs::write(
+            home.path().join("instructions/instruction-store.toml"),
+            "schema_version = 1\ndefault_agent = \"global:synthetic\"\n",
+        )
+        .expect("write default");
+
+        let mut old =
+            Session::create_with_id("session_old_prompt_migration".to_string(), None, None);
+        old.working_dir = Some(project.path().to_string_lossy().into_owned());
+        old.save().expect("save old session");
+        let provider: std::sync::Arc<dyn Provider> =
+            std::sync::Arc::new(RecordingProvider::default());
+        let mut agent = Agent::new_with_disabled_startup_context(
+            provider,
+            crate::tool::Registry::empty(),
+            None,
+        );
+        agent
+            .restore_session("session_old_prompt_migration")
+            .expect("migrate old session");
+        assert_eq!(
+            agent.active_agent().map(|agent| agent.id.as_str()),
+            Some("jcode")
+        );
+        assert!(
+            !agent
+                .system_prompt_text()
+                .expect("migrated system")
+                .contains("SYNTHETIC_DEFAULT")
+        );
+        let stored = Session::load("session_old_prompt_migration").expect("reload migrated");
+        assert_eq!(
+            stored.active_agent().map(|agent| agent.id.as_str()),
+            Some("jcode")
+        );
     }
 
     #[test]

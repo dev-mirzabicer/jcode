@@ -275,12 +275,43 @@ fn transfer_child_uses_authoritative_handoff_instead_of_invalid_legacy_compactio
             cache_control: None,
         }],
     );
+    let instruction_repositories = crate::instruction::InstructionRepositoryService::new();
+    let activation = crate::instruction::SystemPromptComposer::from_repository_service(
+        instruction_repositories.clone(),
+    )
+    .activate(crate::instruction::SystemPromptActivationRequest {
+        working_dir: Some(&project),
+        selection: crate::instruction::AgentSelection::Default,
+        is_selfdev: false,
+        capabilities: crate::prompt::PromptCapabilities { mermaid: false },
+        available_skills: &[],
+    })
+    .expect("activate transfer source agent");
+    let active_before = activation.state.active_agent.clone();
+    parent.install_system_prompt(activation.state);
+    parent.active_skill = Some(crate::session::StoredActiveSkill {
+        skill_id: "synthetic".to_string(),
+        rendered_text: "SYNTHETIC_ACTIVE_SKILL".to_string(),
+    });
     parent.save().expect("save transfer parent");
     let parent_before = serde_json::to_vec(&crate::session::Session::load(&parent.id).unwrap())
         .expect("serialize parent");
+    let common_path = temp.path().join("instructions/system/common.md");
+    let common = crate::instruction::InstructionDocument {
+        id: crate::instruction::InstructionId::parse("common").expect("id"),
+        kind: crate::instruction::InstructionKind::System,
+        scope: crate::instruction::InstructionScope::Global,
+        template_mode: crate::instruction::TemplateMode::Plain,
+        metadata: crate::instruction::InstructionMetadata::default(),
+        body: "TRANSFER_CURRENT_SOURCE".to_string(),
+        path: std::path::PathBuf::from("system/common.md"),
+    };
+    std::fs::write(common_path, common.to_markdown().expect("serialize"))
+        .expect("edit transfer source");
     let (child_id, _) = create_transfer_child_session(
         &parent.id,
         &parent,
+        &instruction_repositories,
         Some("Readable transfer summary".to_string()),
     )
     .expect("create transfer child");
@@ -299,6 +330,14 @@ fn transfer_child_uses_authoritative_handoff_instead_of_invalid_legacy_compactio
     assert_eq!(child.provider_key, parent.provider_key);
     assert_eq!(child.route_api_method, parent.route_api_method);
     assert!(child.provider_session_id.is_none());
+    assert_eq!(child.active_agent(), Some(&active_before));
+    assert!(
+        child
+            .system_prompt_text()
+            .expect("transfer system prompt")
+            .contains("TRANSFER_CURRENT_SOURCE")
+    );
+    assert!(child.active_skill.is_none());
     let handoff = child.messages.last().expect("authoritative handoff");
     assert_eq!(
         handoff.display_role,
@@ -371,8 +410,15 @@ fn transfer_capture_failure_leaves_no_child_session_or_todo_sidecar() {
         .map(|entry| entry.file_name())
         .collect::<std::collections::HashSet<_>>();
 
+    let instruction_repositories = crate::instruction::InstructionRepositoryService::new();
     assert!(
-        create_transfer_child_session(&parent.id, &parent, Some("handoff".to_string())).is_err()
+        create_transfer_child_session(
+            &parent.id,
+            &parent,
+            &instruction_repositories,
+            Some("handoff".to_string())
+        )
+        .is_err()
     );
     let after = std::fs::read_dir(&sessions_dir)
         .expect("sessions dir")

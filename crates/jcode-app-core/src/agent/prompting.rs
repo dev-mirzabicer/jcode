@@ -99,29 +99,44 @@ impl Agent {
             .as_ref()
             .and_then(|name| skills.get(name).map(|skill| skill.get_prompt().to_string()));
 
-        let available_skills: Vec<crate::prompt::SkillInfo> = self
-            .current_skills_snapshot()
-            .list()
-            .iter()
-            .map(|skill| crate::prompt::SkillInfo {
-                name: skill.name.clone(),
-                description: skill.description.clone(),
-            })
-            .collect();
-
-        let working_dir = self
-            .session
-            .working_dir
-            .as_ref()
-            .map(std::path::PathBuf::from);
-
-        let (mut split, _context_info) = crate::prompt::build_system_prompt_split(
-            skill_prompt.as_deref(),
-            &available_skills,
-            self.session.is_canary,
-            memory_prompt,
-            working_dir.as_deref(),
-        );
+        let mut split = if let Some(static_part) = self.session.system_prompt_text() {
+            crate::prompt::SplitSystemPrompt {
+                static_part: static_part.to_string(),
+                dynamic_part: String::new(),
+            }
+        } else {
+            let available_skills = skills
+                .list()
+                .iter()
+                .map(|skill| crate::prompt::SkillInfo {
+                    name: skill.name.clone(),
+                    description: skill.description.clone(),
+                })
+                .collect::<Vec<_>>();
+            let working_dir = self
+                .session
+                .working_dir
+                .as_ref()
+                .map(std::path::PathBuf::from);
+            crate::prompt::build_system_prompt_split(
+                None,
+                &available_skills,
+                self.session.is_canary,
+                None,
+                working_dir.as_deref(),
+            )
+            .0
+        };
+        if let Some(memory_prompt) = memory_prompt {
+            split.dynamic_part.push_str(memory_prompt);
+        }
+        if let Some(skill_prompt) = skill_prompt {
+            if !split.dynamic_part.is_empty() {
+                split.dynamic_part.push_str("\n\n");
+            }
+            split.dynamic_part.push_str("# Active Skill\n\n");
+            split.dynamic_part.push_str(&skill_prompt);
+        }
 
         self.append_current_turn_system_reminder(&mut split);
         crate::prompt::append_swarm_effort_directive(

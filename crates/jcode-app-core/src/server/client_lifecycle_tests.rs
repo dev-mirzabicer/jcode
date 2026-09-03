@@ -880,6 +880,7 @@ fn subscribe_request(working_dir: Option<&str>) -> Request {
         working_dir: working_dir.map(str::to_string),
         selfdev: None,
         target_session_id: None,
+        agent: None,
         startup_context_caller: None,
         client_instance_id: None,
         client_has_local_history: false,
@@ -891,6 +892,18 @@ fn subscribe_request(working_dir: Option<&str>) -> Request {
 async fn fresh_shared_startup_session(
     project: &std::path::Path,
     target_session_id: Option<&str>,
+) -> (
+    String,
+    crate::protocol::StartupContextStatusState,
+    crate::session::Session,
+) {
+    fresh_shared_startup_session_with_agent(project, target_session_id, None).await
+}
+
+async fn fresh_shared_startup_session_with_agent(
+    project: &std::path::Path,
+    target_session_id: Option<&str>,
+    initial_agent: Option<&str>,
 ) -> (
     String,
     crate::protocol::StartupContextStatusState,
@@ -940,10 +953,12 @@ async fn fresh_shared_startup_session(
     let mut request = subscribe_request(Some(project.to_string_lossy().as_ref()));
     if let Request::Subscribe {
         target_session_id: target,
+        agent,
         ..
     } = &mut request
     {
         *target = target_session_id.map(str::to_string);
+        *agent = initial_agent.map(str::to_string);
     }
     client_writer
         .write_all(
@@ -995,6 +1010,65 @@ async fn fresh_shared_startup_session(
         .expect("server task result");
     assert!(client_connections.read().await.is_empty());
     (session_id, state, persisted)
+}
+
+#[tokio::test]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "the explicit-agent server journey serializes JCODE_HOME across a real connection"
+)]
+async fn fresh_shared_subscribe_activates_explicit_agent_before_publication() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    let project = tempfile::tempdir().expect("project");
+    crate::instruction::SystemPromptComposer::new()
+        .activate(crate::instruction::SystemPromptActivationRequest {
+            working_dir: Some(project.path()),
+            selection: crate::instruction::AgentSelection::Default,
+            is_selfdev: false,
+            capabilities: crate::prompt::PromptCapabilities { mermaid: false },
+            available_skills: &[],
+        })
+        .expect("initialize global store");
+    let global = crate::instruction::InstructionRepositoryService::new()
+        .global_repository()
+        .expect("global repository");
+    let explicit = crate::instruction::InstructionDocument {
+        id: crate::instruction::InstructionId::parse("explicit").expect("id"),
+        kind: crate::instruction::InstructionKind::Agent,
+        scope: crate::instruction::InstructionScope::Global,
+        template_mode: crate::instruction::TemplateMode::Plain,
+        metadata: crate::instruction::InstructionMetadata {
+            display_name: Some("Explicit".to_string()),
+            description: Some("synthetic mechanism fixture".to_string()),
+            agent: Some(crate::instruction::AgentMetadata {
+                availability: crate::instruction::AgentAvailability::Both,
+            }),
+            ..crate::instruction::InstructionMetadata::default()
+        },
+        body: "SYNTHETIC_EXPLICIT_AGENT".to_string(),
+        path: std::path::PathBuf::from("agents/explicit.md"),
+    };
+    std::fs::write(
+        global.root.join("agents/explicit.md"),
+        explicit.to_markdown().expect("serialize"),
+    )
+    .expect("write explicit agent");
+
+    let (_, _, session) =
+        fresh_shared_startup_session_with_agent(project.path(), None, Some("global:explicit"))
+            .await;
+    assert_eq!(
+        session.active_agent().map(|agent| agent.id.as_str()),
+        Some("explicit")
+    );
+    assert!(
+        session
+            .system_prompt_text()
+            .expect("system prompt")
+            .contains("SYNTHETIC_EXPLICIT_AGENT")
+    );
+    assert!(session.first_provider_dispatch_at().is_none());
 }
 
 #[tokio::test]
@@ -2267,6 +2341,7 @@ async fn legacy_compaction_wire_requests_reject_without_mutating_live_session_as
         working_dir: Some(working_dir.to_string_lossy().into_owned()),
         selfdev: Some(false),
         target_session_id: None,
+        agent: None,
         startup_context_caller: None,
         client_instance_id: Some("legacy-context-wire-test".to_string()),
         client_has_local_history: false,

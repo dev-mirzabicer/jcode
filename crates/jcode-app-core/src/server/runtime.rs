@@ -1,4 +1,4 @@
-use super::client_lifecycle::handle_client;
+use super::client_lifecycle::handle_client_with_instruction_repositories;
 use super::debug::{ClientConnectionInfo, ClientDebugState, handle_debug_client};
 use super::debug_jobs::DebugJob;
 use super::util::get_shared_mcp_pool;
@@ -94,6 +94,7 @@ pub(super) struct ServerRuntime {
     provider: Arc<dyn Provider>,
     context_transactions: Arc<crate::context::ContextTransactionService>,
     startup_context: Arc<super::startup_context::StartupContextCoordinator>,
+    instruction_repositories: Arc<crate::instruction::InstructionRepositoryService>,
     is_processing: Arc<RwLock<bool>>,
     session_id: Arc<RwLock<String>>,
     client_count: Arc<RwLock<usize>>,
@@ -129,6 +130,7 @@ impl ServerRuntime {
             provider: Arc::clone(&server.provider),
             context_transactions: Arc::clone(&server.context_transactions),
             startup_context: Arc::clone(&server.startup_context),
+            instruction_repositories: Arc::clone(&server.instruction_repositories),
             is_processing: Arc::clone(&server.is_processing),
             session_id: Arc::clone(&server.session_id),
             client_count: Arc::clone(&server.client_count),
@@ -344,13 +346,14 @@ impl ServerRuntime {
         let result = {
             let client = async {
                 let mcp_pool = get_shared_mcp_pool(&self.mcp_pool).await;
-                handle_client(
+                handle_client_with_instruction_repositories(
                     stream,
                     Arc::clone(&self.sessions),
                     self.event_tx.clone(),
                     Arc::clone(&self.provider),
                     Arc::clone(&self.context_transactions),
                     Arc::clone(&self.startup_context),
+                    Arc::clone(&self.instruction_repositories),
                     Arc::clone(&self.is_processing),
                     Arc::clone(&self.session_id),
                     Arc::clone(&self.client_count),

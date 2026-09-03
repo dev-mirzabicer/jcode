@@ -254,7 +254,16 @@ impl App {
                     self.session.id, error
                 ));
             }
-            if let Err(error) = self.session.mark_startup_context_dispatched() {
+            let dispatch_result = if self.session.system_prompt.is_some() {
+                self.session
+                    .mark_provider_dispatched()
+                    .map_err(anyhow::Error::new)
+            } else {
+                self.session
+                    .mark_startup_context_dispatched()
+                    .map_err(anyhow::Error::new)
+            };
+            if let Err(error) = dispatch_result {
                 memory_pending.restore_now();
                 return Err(anyhow::anyhow!(error));
             }

@@ -95,6 +95,10 @@ pub enum Request {
     #[serde(rename = "clear")]
     Clear { id: u64 },
 
+    /// Replace the provisional primary agent before the first provider dispatch.
+    #[serde(rename = "set_agent")]
+    SetAgent { id: u64, agent: String },
+
     /// Rewind conversation history to the given 1-based message index.
     #[serde(rename = "rewind")]
     Rewind { id: u64, message_index: usize },
@@ -138,6 +142,10 @@ pub enum Request {
         selfdev: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target_session_id: Option<String>,
+        /// Optional initial primary agent. Ignored when attaching to an existing
+        /// session, whose exact stored activation remains authoritative.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         startup_context_caller: Option<StartupContextPrimaryCaller>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1286,6 +1294,15 @@ pub enum ServerEvent {
     /// Session ID assigned
     #[serde(rename = "session")]
     SessionId { session_id: String },
+
+    /// Current primary agent identity for the session.
+    #[serde(rename = "agent_selected")]
+    AgentSelected {
+        id: u64,
+        agent_id: String,
+        display_name: String,
+        scope: String,
+    },
 
     /// Server requests that this client/session close itself.
     #[serde(rename = "session_close_requested")]

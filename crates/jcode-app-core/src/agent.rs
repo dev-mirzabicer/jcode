@@ -218,11 +218,42 @@ pub(crate) struct PendingTurnOptions {
         Option<jcode_session_types::StoredUnattendedContextAuthorization>,
 }
 
+#[derive(Debug)]
+pub enum PrimaryInstructionActivationError {
+    Composition(crate::instruction::SystemPromptActivationError),
+    Persistence(anyhow::Error),
+}
+
+impl std::fmt::Display for PrimaryInstructionActivationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Composition(error) => write!(formatter, "{error}"),
+            Self::Persistence(error) => write!(formatter, "persist frozen system prompt: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for PrimaryInstructionActivationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Composition(error) => Some(error),
+            Self::Persistence(error) => Some(error.as_ref()),
+        }
+    }
+}
+
+impl From<crate::instruction::SystemPromptActivationError> for PrimaryInstructionActivationError {
+    fn from(error: crate::instruction::SystemPromptActivationError) -> Self {
+        Self::Composition(error)
+    }
+}
+
 pub struct Agent {
     provider: Arc<dyn Provider>,
     registry: Registry,
     skills: Arc<SkillRegistry>,
     session: Session,
+    instruction_repositories: crate::instruction::InstructionRepositoryService,
     active_skill: Option<String>,
     allowed_tools: Option<HashSet<String>>,
     disabled_tools: HashSet<String>,
@@ -321,6 +352,7 @@ impl Agent {
             registry,
             skills,
             session,
+            instruction_repositories: crate::instruction::InstructionRepositoryService::new(),
             active_skill: None,
             allowed_tools,
             disabled_tools,
@@ -448,7 +480,66 @@ impl Agent {
         activation: StartupContextActivation,
     ) -> std::result::Result<(Self, StartupContextActivationOutcome), StartupContextActivationError>
     {
+        Self::new_with_startup_context_and_agent(
+            provider,
+            registry,
+            working_dir,
+            activation,
+            crate::instruction::AgentSelection::Default,
+            false,
+        )
+    }
+
+    pub fn new_with_startup_context_and_agent(
+        provider: Arc<dyn Provider>,
+        registry: Registry,
+        working_dir: Option<&str>,
+        activation: StartupContextActivation,
+        agent_selection: crate::instruction::AgentSelection,
+        is_selfdev: bool,
+    ) -> std::result::Result<(Self, StartupContextActivationOutcome), StartupContextActivationError>
+    {
+        Self::new_with_startup_context_and_agent_with_repositories(
+            provider,
+            registry,
+            working_dir,
+            activation,
+            agent_selection,
+            is_selfdev,
+            crate::instruction::InstructionRepositoryService::new(),
+        )
+    }
+
+    pub fn new_with_startup_context_and_agent_with_repositories(
+        provider: Arc<dyn Provider>,
+        registry: Registry,
+        working_dir: Option<&str>,
+        activation: StartupContextActivation,
+        agent_selection: crate::instruction::AgentSelection,
+        is_selfdev: bool,
+        instruction_repositories: crate::instruction::InstructionRepositoryService,
+    ) -> std::result::Result<(Self, StartupContextActivationOutcome), StartupContextActivationError>
+    {
         let mut agent = Self::new_with_initial_working_dir(provider, registry, working_dir);
+        agent.instruction_repositories = instruction_repositories;
+        if is_selfdev {
+            agent.set_canary("self-dev");
+        }
+        if let StartupContextActivation::Primary { caller, .. } = activation
+            && let Err(source) = agent.activate_primary_instructions(agent_selection)
+        {
+            let activation_error = source.to_string();
+            agent.session.mark_closed();
+            crate::tool::clear_session_tool_policy(&agent.session.id);
+            if let Err(cleanup) = crate::session::remove_unpublished_session(&agent.session.id) {
+                return Err(StartupContextActivationError::Cleanup {
+                    caller,
+                    activation_error,
+                    source: cleanup,
+                });
+            }
+            return Err(StartupContextActivationError::Instruction { caller, source });
+        }
         match agent.activate_startup_context(activation) {
             Ok(outcome) => Ok((agent, outcome)),
             Err(error) => {

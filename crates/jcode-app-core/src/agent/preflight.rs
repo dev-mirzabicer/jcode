@@ -17,10 +17,15 @@ impl Agent {
             }
         }
 
-        let outcome = self
-            .session
-            .mark_startup_context_dispatched_with(self.startup_context_persistence.as_ref())
-            .map_err(|error| anyhow::anyhow!(error))?;
+        let outcome = if self.session.system_prompt.is_some() {
+            self.session
+                .mark_provider_dispatched_with(self.startup_context_persistence.as_ref())
+                .map_err(|error| anyhow::anyhow!(error))?
+        } else {
+            self.session
+                .mark_startup_context_dispatched_with(self.startup_context_persistence.as_ref())
+                .map_err(|error| anyhow::anyhow!(error))?
+        };
         if let crate::session::StartupContextDispatchOutcome::Persisted { batches_marked } = outcome
         {
             let accounting = self.session.startup_context_accounting();

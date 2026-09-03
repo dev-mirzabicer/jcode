@@ -686,6 +686,7 @@ fn clone_split_session(parent_session_id: &str) -> anyhow::Result<(String, Strin
 fn create_transfer_child_session(
     parent_session_id: &str,
     parent: &Session,
+    instruction_repositories: &crate::instruction::InstructionRepositoryService,
     summary: Option<String>,
 ) -> anyhow::Result<(String, String)> {
     let todos = crate::todo::load_todos(parent_session_id).unwrap_or_default();
@@ -704,9 +705,61 @@ fn create_transfer_child_session(
     child.is_canary = parent.is_canary;
     child.testing_build = parent.testing_build.clone();
     child.provider_session_id = None;
+    child.clear_active_skill();
     child.status = crate::session::SessionStatus::Closed;
 
     let child_id = child.id.clone();
+    let instruction_selection = parent
+        .active_agent()
+        .map(crate::instruction::AgentSelection::from_stored)
+        .transpose()
+        .map_err(anyhow::Error::new)
+        .and_then(|selection| match selection {
+            Some(selection) => Ok(selection),
+            None => Ok(crate::instruction::AgentSelection::Explicit(
+                crate::instruction::InstructionSelector::global(
+                    crate::instruction::InstructionKind::Agent,
+                    "jcode",
+                )?,
+            )),
+        });
+    let instruction_activation = instruction_selection.and_then(|selection| {
+        let global_skills = crate::skill::SkillRegistry::shared_snapshot();
+        let effective_skills = crate::skill::SkillRegistry::effective_for_working_dir(
+            &global_skills,
+            child.working_dir.as_deref().map(std::path::Path::new),
+        );
+        let available_skills = effective_skills
+            .list()
+            .iter()
+            .map(|skill| crate::prompt::SkillInfo {
+                name: skill.name.clone(),
+                description: skill.description.clone(),
+            })
+            .collect::<Vec<_>>();
+        crate::instruction::SystemPromptComposer::from_repository_service(
+            instruction_repositories.clone(),
+        )
+        .activate(crate::instruction::SystemPromptActivationRequest {
+            working_dir: child.working_dir.as_deref().map(std::path::Path::new),
+            selection,
+            is_selfdev: child.is_canary,
+            capabilities: crate::prompt::PromptCapabilities::current(),
+            available_skills: &available_skills,
+        })
+        .map_err(anyhow::Error::new)
+    });
+    match instruction_activation {
+        Ok(activation) => child.install_system_prompt(activation.state),
+        Err(error) => {
+            if let Err(cleanup) = remove_failed_transfer_child(&child_id) {
+                anyhow::bail!(
+                    "transfer instruction activation failed ({error}); unpublished child cleanup also failed: {cleanup}"
+                );
+            }
+            return Err(error.context("transfer instruction activation failed"));
+        }
+    }
     let transfer_activation = if parent.is_debug {
         crate::agent::StartupContextActivation::Disabled
     } else {
@@ -815,6 +868,7 @@ pub(super) async fn handle_transfer(
     id: u64,
     client_session_id: &str,
     agent: &Arc<Mutex<Agent>>,
+    instruction_repositories: &crate::instruction::InstructionRepositoryService,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
     let started = Instant::now();
@@ -889,28 +943,32 @@ pub(super) async fn handle_transfer(
             }
         };
 
-    let (new_session_id, new_session_name) =
-        match create_transfer_child_session(client_session_id, &parent, transfer_summary) {
-            Ok(result) => result,
-            Err(error) => {
-                crate::logging::event_warn(
-                    "SESSION_LIFECYCLE",
-                    vec![
-                        ("phase", "transfer_create_error".to_string()),
-                        ("request_id", id.to_string()),
-                        ("session_id", client_session_id.to_string()),
-                        ("error", crate::util::format_error_chain(&error)),
-                        ("elapsed_ms", started.elapsed().as_millis().to_string()),
-                    ],
-                );
-                let _ = client_event_tx.send(ServerEvent::Error {
-                    id,
-                    message: format!("Failed to create transfer session: {error}"),
-                    retry_after_secs: None,
-                });
-                return;
-            }
-        };
+    let (new_session_id, new_session_name) = match create_transfer_child_session(
+        client_session_id,
+        &parent,
+        instruction_repositories,
+        transfer_summary,
+    ) {
+        Ok(result) => result,
+        Err(error) => {
+            crate::logging::event_warn(
+                "SESSION_LIFECYCLE",
+                vec![
+                    ("phase", "transfer_create_error".to_string()),
+                    ("request_id", id.to_string()),
+                    ("session_id", client_session_id.to_string()),
+                    ("error", crate::util::format_error_chain(&error)),
+                    ("elapsed_ms", started.elapsed().as_millis().to_string()),
+                ],
+            );
+            let _ = client_event_tx.send(ServerEvent::Error {
+                id,
+                message: format!("Failed to create transfer session: {error}"),
+                retry_after_secs: None,
+            });
+            return;
+        }
+    };
     crate::logging::event_info(
         "SESSION_LIFECYCLE",
         vec![

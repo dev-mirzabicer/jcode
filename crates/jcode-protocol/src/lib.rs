@@ -571,6 +571,7 @@ impl Request {
             Request::SoftInterrupt { id, .. } => *id,
             Request::CancelSoftInterrupts { id } => *id,
             Request::Clear { id } => *id,
+            Request::SetAgent { id, .. } => *id,
             Request::Rewind { id, .. } => *id,
             Request::RewindUndo { id } => *id,
             Request::Ping { id } => *id,

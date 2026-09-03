@@ -963,6 +963,14 @@ impl Agent {
             self.session.model = Some(self.provider_model());
         }
         self.restore_reasoning_effort_from_session();
+        if self.session.system_prompt.is_none() {
+            self.activate_primary_instructions(crate::instruction::AgentSelection::Explicit(
+                crate::instruction::InstructionSelector::global(
+                    crate::instruction::InstructionKind::Agent,
+                    "jcode",
+                )?,
+            ))?;
+        }
         let model_ms = model_start.elapsed().as_millis();
 
         let mark_active_start = Instant::now();

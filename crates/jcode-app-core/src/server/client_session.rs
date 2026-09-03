@@ -138,6 +138,7 @@ pub(super) async fn handle_clear_session(
     provider: &Arc<dyn Provider>,
     registry: &Registry,
     context_transactions: &crate::context::ContextTransactionService,
+    instruction_repositories: &crate::instruction::InstructionRepositoryService,
     sessions: &SessionAgents,
     shutdown_signals: &Arc<RwLock<HashMap<String, InterruptSignal>>>,
     soft_interrupt_queues: &SessionInterruptQueues,
@@ -165,11 +166,12 @@ pub(super) async fn handle_clear_session(
             ("client_selfdev", client_selfdev.to_string()),
         ],
     );
-    let (preserve_debug, working_dir) = {
+    let (preserve_debug, working_dir, retained_agent) = {
         let agent_guard = agent.lock().await;
         (
             agent_guard.is_debug(),
             agent_guard.working_dir().map(str::to_string),
+            agent_guard.active_agent().cloned(),
         )
     };
 
@@ -178,11 +180,28 @@ pub(super) async fn handle_clear_session(
     } else {
         crate::agent::StartupContextActivation::primary(crate::agent::StartupContextCaller::Clear)
     };
-    let (mut new_agent, _) = match Agent::new_with_startup_context(
+    let selection = match retained_agent.as_ref() {
+        Some(agent) => match crate::instruction::AgentSelection::from_stored(agent) {
+            Ok(selection) => selection,
+            Err(error) => {
+                let _ = client_event_tx.send(ServerEvent::Error {
+                    id,
+                    message: format!("Clear could not retain the active agent identity: {error}"),
+                    retry_after_secs: None,
+                });
+                return;
+            }
+        },
+        None => crate::instruction::AgentSelection::Default,
+    };
+    let (mut new_agent, _) = match Agent::new_with_startup_context_and_agent_with_repositories(
         Arc::clone(provider),
         registry.clone(),
         working_dir.as_deref(),
         clear_activation,
+        selection,
+        client_selfdev,
+        instruction_repositories.clone(),
     ) {
         Ok(result) => result,
         Err(error) => {
@@ -910,6 +929,16 @@ pub(super) async fn handle_subscribe(
     let _ = client_event_tx.send(ServerEvent::SessionId {
         session_id: client_session_id.to_string(),
     });
+    if let Ok(agent_guard) = agent.try_lock()
+        && let Some(active_agent) = agent_guard.active_agent()
+    {
+        let _ = client_event_tx.send(ServerEvent::AgentSelected {
+            id,
+            agent_id: active_agent.id.clone(),
+            display_name: active_agent.display_name.clone(),
+            scope: active_agent.scope.to_string(),
+        });
+    }
     let _ = client_event_tx.send(ServerEvent::Done { id });
 }
 

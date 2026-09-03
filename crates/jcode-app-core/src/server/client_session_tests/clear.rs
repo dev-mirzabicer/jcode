@@ -34,6 +34,29 @@ async fn handle_clear_session_replaces_runtime_handles_and_updates_shutdown_regi
         .lock()
         .await
         .set_working_dir_for_pending_context(Some(project.to_string_lossy().into_owned()));
+    {
+        let mut guard = agent.lock().await;
+        guard
+            .activate_primary_instructions(crate::instruction::AgentSelection::Default)
+            .expect("activate clear source agent");
+    }
+    let active_before = agent
+        .lock()
+        .await
+        .active_agent()
+        .cloned()
+        .expect("active clear source agent");
+    let common_path = home.path().join("instructions/system/common.md");
+    let common = crate::instruction::InstructionDocument {
+        id: crate::instruction::InstructionId::parse("common").expect("id"),
+        kind: crate::instruction::InstructionKind::System,
+        scope: crate::instruction::InstructionScope::Global,
+        template_mode: crate::instruction::TemplateMode::Plain,
+        metadata: crate::instruction::InstructionMetadata::default(),
+        body: "CLEAR_CURRENT_SOURCE".to_string(),
+        path: std::path::PathBuf::from("system/common.md"),
+    };
+    std::fs::write(common_path, common.to_markdown()?).expect("edit clear source");
 
     let old_queue = {
         let guard = agent.lock().await;
@@ -109,6 +132,7 @@ async fn handle_clear_session_replaces_runtime_handles_and_updates_shutdown_regi
     let (swarm_event_tx, _swarm_event_rx) = broadcast::channel::<SwarmEvent>(8);
     let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
     let context_transactions = crate::context::ContextTransactionService::new();
+    let instruction_repositories = crate::instruction::InstructionRepositoryService::new();
 
     let mut client_session_id = old_session_id.to_string();
     handle_clear_session(
@@ -120,6 +144,7 @@ async fn handle_clear_session_replaces_runtime_handles_and_updates_shutdown_regi
         &provider,
         &registry,
         &context_transactions,
+        &instruction_repositories,
         &sessions,
         &shutdown_signals,
         &soft_interrupt_queues,
@@ -138,6 +163,14 @@ async fn handle_clear_session_replaces_runtime_handles_and_updates_shutdown_regi
     .await;
 
     assert_ne!(client_session_id, old_session_id);
+    let cleared = crate::session::Session::load(&client_session_id)?;
+    assert_eq!(cleared.active_agent(), Some(&active_before));
+    assert!(
+        cleared
+            .system_prompt_text()
+            .expect("cleared system prompt")
+            .contains("CLEAR_CURRENT_SOURCE")
+    );
     assert!(swarm_members.read().await.is_empty());
     assert!(swarm_members.read().await.get(&client_session_id).is_none());
     assert!(swarms_by_id.read().await.get("swarm-test").is_none());

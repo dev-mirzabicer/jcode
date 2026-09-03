@@ -325,6 +325,25 @@ impl Agent {
         self.session.working_dir.as_deref()
     }
 
+    pub fn active_agent(&self) -> Option<&crate::session::StoredAgentReference> {
+        self.session.active_agent()
+    }
+
+    pub fn first_provider_dispatch_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.session.first_provider_dispatch_at()
+    }
+
+    pub fn system_prompt_text(&self) -> Option<&str> {
+        self.session.system_prompt_text()
+    }
+
+    pub fn set_instruction_repositories(
+        &mut self,
+        repositories: crate::instruction::InstructionRepositoryService,
+    ) {
+        self.instruction_repositories = repositories;
+    }
+
     /// Get the stored messages (for transcript export)
     pub fn messages(&self) -> &[StoredMessage] {
         &self.session.messages
