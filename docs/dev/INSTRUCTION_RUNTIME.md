@@ -194,7 +194,7 @@ The fixtures use synthetic prose. They do not snapshot, require, forbid, or judg
 - Project external remote: an explicit URL and branch cloned under private Jcode state.
 - Project external local: an explicit existing checkout path.
 - Non-Git project: a standalone Git repository scoped to the project, conventionally `<project>/.jcode/instructions`, without making the parent project a repository.
-- Project configuration: `<project>/.jcode/instructions.toml`, schema-versioned and fail-closed. Invalid explicit configuration never becomes silent global-only behavior.
+- Project configuration: `<project>/.jcode/instructions.toml`, schema-versioned and fail-closed. Invalid, ordinary-symlink, and dangling-symlink explicit configuration never becomes silent global-only behavior.
 
 Project identity reuses the accepted Startup Context Git-common-directory or canonical-directory helper, but instruction state, receipts, locks, and configuration are independent.
 
@@ -210,7 +210,7 @@ First initialization:
 6. Hardens the global/private repository tree.
 7. Writes a private initialization receipt.
 
-Repeated initialization of a valid store is a no-op. An existing initialized or otherwise committed invalid store is damage, not a first install. It is never silently overwritten with the shipped seed. Recovery operations include restoring a missing committed file from current `HEAD` and explicit seed recreation that renames the damaged store aside before creating a new repository.
+Repeated initialization first validates the complete working manifest, resources, and dependency graph, then returns a no-op for a valid store. An existing initialized or otherwise committed invalid store is damage, not a first install. It is never silently overwritten with the shipped seed. Recovery operations include restoring a missing committed file from current `HEAD` and explicit seed recreation. Recreation preflights the complete replacement seed, imports, and branch before renaming the damaged store aside. If a later materialization fails, the error reports changed state and the exact backup path.
 
 `inspect` exposes health, current `HEAD`, attached/detached branch, upstream and ahead/behind, parsed working/index changes, conflicts, active mutation lease, configured-branch warnings, and parent gitlink state for submodules. `validate_repository` separately exposes complete runtime diagnostics and valid/invalid resource summaries so one invalid resource does not hide unrelated valid resources.
 
@@ -221,7 +221,7 @@ Repeated initialization of a valid store is a no-op. An existing initialized or 
 - `AllowHeadFallback` is an explicit caller policy. It is not used by ordinary interactive reads.
 - Managed paths must be UTF-8, repository-relative, traversal-free, and outside `.git`.
 - Repository roots and every existing path component are checked with `symlink_metadata`. Managed reads and writes fail closed rather than following a symlink outside the configured repository.
-- Project configuration reads and writes also reject a symlinked `.jcode` directory or configuration file.
+- Project configuration discovery, reads, and writes also reject a symlinked `.jcode` directory or configuration file, including dangling symlinks.
 
 ### Drafts and commits
 
@@ -232,11 +232,11 @@ Repeated initialization of a valid store is a no-op. An existing initialized or 
 - Exact target fingerprint
 - Current complete `HEAD`
 
-Save validates the same base, writes through a same-directory temporary file plus atomic replacement, compares affected resource/dependency behavior against a complete temporary snapshot of the expected Git `HEAD`, stages only owned paths in a private index, creates one commit with a structural operation trailer, publishes it with compare-and-swap `update-ref`, and refreshes only those paths in the ordinary index. A newly invalid resource, missing reference, or dependency cycle blocks the commit and leaves the working edit visible for repair. A retry cannot reclassify the rejected edit as pre-existing. Existing unrelated working-tree or committed invalid resources remain isolated, and a mutation may repair them. Unrelated staged, dirty, and untracked Git state remains unchanged.
+Save validates the same base, writes through a same-directory temporary file plus atomic replacement, compares affected manifest/resource/dependency behavior against a complete temporary snapshot of the expected Git `HEAD`, stages only owned paths in a private index, creates one commit with a structural operation trailer, publishes it with compare-and-swap `update-ref`, and refreshes only those paths in the ordinary index. A newly invalid manifest or resource, missing reference, or dependency cycle blocks the commit and leaves the working edit visible for repair. A retry cannot reclassify the rejected edit as pre-existing. Existing unrelated working-tree or committed invalid resources remain isolated, and a mutation may repair them. Unrelated staged, dirty, and untracked Git state remains unchanged.
 
 Operation IDs make retry idempotent. Retry can recognize an already published commit. It also accepts the intended final working-file state after interruption between file write and commit. If a process stops after commit publication but before legacy-import working-file materialization, retry proves the commit identity and rematerializes the committed manifest and resource without another commit.
 
-Save is disabled on detached `HEAD`. No-op Save and restore-to-current-content create no commit.
+Save is disabled on detached `HEAD`. Restore validates committed content as complete UTF-8 before any working-tree write. No-op Save and restore-to-current-content create no commit.
 
 ### Mutations, history, and synchronization
 
@@ -256,7 +256,7 @@ Pull requires a clean instruction repository. Fast-forward-only and visible merg
 
 ### Mutation concurrency
 
-One cross-process lease exists per instruction repository. Initialization, explicit recreation, project setup, branch and remote actions, imports, and content commits all hold that lease across their complete mutation. Setup callers supply structural operation IDs, and retry reuses an existing valid submodule, external checkout, or standalone store instead of duplicating it. Reuse validates the requested checkout origin and attached branch, so retry cannot silently rebind a project to different Git identity. On Unix the lease uses a nonblocking kernel `flock` plus owner metadata. Other platforms use an exclusive owner file with expiry-based crash recovery. Read-only inspection remains available while another process owns mutation. Owner metadata includes operation ID, PID, and acquisition/expiry times.
+One cross-process lease exists per instruction repository. Initialization, explicit recreation, project setup, branch and remote actions, imports, and content commits all hold that lease across their complete mutation. Setup callers supply structural operation IDs, and retry reuses an existing valid submodule, external checkout, or standalone store instead of duplicating it. Reuse validates the requested checkout origin, attached branch, and complete store, so retry cannot silently rebind a project to different Git identity or publish configuration for an ordinary repository. Unix uses nonblocking kernel `flock`; Windows uses an exclusive no-sharing file handle. Both release ownership on process death and do not expire a live long-running operation. Other non-Unix, non-Windows targets retain an expiry-file fallback and are an explicit unsupported safety boundary. Read-only inspection remains available while another process owns mutation. Owner metadata includes operation ID, PID, and a diagnostic deadline.
 
 ### Legacy import backend
 
@@ -267,7 +267,7 @@ Typed discovery covers current global and project:
 - `.jcode/preferred-tools.md`
 - `.jcode/swarm-prompt.md`
 
-It deliberately excludes `AGENTS.md` and external skills. Import copies the complete source into a typed managed Markdown resource, records source SHA-256 and separate empty/blank semantics, validates the resource, commits the resource and receipt together, and leaves the original untouched. A target that exists without a matching receipt is a conflict, not permission to overwrite it. Runtime source deactivation remains a later-package cutover after the durable receipt exists.
+It deliberately excludes `AGENTS.md` and external skills. Import copies the complete source into a typed managed Markdown resource, records source SHA-256 and separate empty/blank semantics, validates the complete prospective manifest/resource/dependency graph, commits the resource and receipt together, and leaves the original untouched. A target that exists without a matching receipt is a conflict, not permission to overwrite it. An already-completed retry only restores missing committed files; divergent working files are preserved and listed in the typed outcome. Runtime source deactivation remains a later-package cutover after the durable receipt exists.
 
 ### Production boundary
 

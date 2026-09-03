@@ -43,7 +43,7 @@ Explicit configuration lives at:
 <project>/.jcode/instructions.toml
 ```
 
-It is schema-versioned. Modes are `submodule`, `external-remote`, `external-local`, and `standalone`. Invalid explicit configuration fails visibly. Jcode does not silently ignore it and continue as global-only.
+It is schema-versioned. Modes are `submodule`, `external-remote`, `external-local`, and `standalone`. Invalid explicit configuration, including a dangling or ordinary configuration symlink, fails visibly. Jcode does not silently ignore it and continue as global-only.
 
 ## Runtime authority
 
@@ -65,9 +65,9 @@ Repository mutations use:
 - Structural operation identities for idempotent retry
 - Runtime resource and dependency validation before commit publication
 
-Affected resource and dependency behavior is compared with the expected committed `HEAD`. New resource, reference, or dependency errors block the commit and leave the working edit visible for repair, including on retry. Existing unrelated resource errors do not block a valid edit, and multi-path operations can repair references atomically. Unrelated staged, dirty, and untracked repository state is preserved. Detached repositories cannot Save until a branch is selected. Restore writes historical content as a new commit. No-op Save and restore create no commit.
+Affected manifest, resource, and dependency behavior is compared with the expected committed `HEAD`. New manifest, resource, reference, or dependency errors block the commit and leave the working edit visible for repair, including on retry. Existing unrelated resource errors do not block a valid edit, and multi-path operations can repair references atomically. Unrelated staged, dirty, and untracked repository state is preserved. Detached repositories cannot Save until a branch is selected. Restore validates complete UTF-8 before changing the working file and writes historical content as a new commit. No-op Save and restore create no commit.
 
-Submodule, external-checkout, and standalone setup also carry operation identities. A retry reuses the repository already created by an interrupted setup while the same repository lease prevents concurrent setup from racing it. Existing checkout reuse verifies the requested origin and attached branch rather than silently accepting different Git identity.
+Submodule, external-checkout, and standalone setup also carry operation identities. A retry reuses the repository already created by an interrupted setup while the same repository lease prevents concurrent setup from racing it. Existing checkout reuse verifies the requested origin, attached branch, manifest, resources, and dependency graph before project configuration is published.
 
 Ordinary operations do not offer reset, rebase, force push, commit deletion, or history rewrite.
 
@@ -79,9 +79,9 @@ Pull requires a clean instruction repository. Fast-forward-only and merge behavi
 
 ## Initialization and recovery
 
-First installation materializes a complete seed, plans eligible exact legacy imports, validates resources, initializes Git, creates one baseline commit, secures private files, and writes a private initialization receipt.
+First installation materializes a complete seed, plans eligible exact legacy imports, validates the manifest plus complete resource and dependency graph, initializes Git, creates one baseline commit, secures private files, and writes a private initialization receipt. Re-running initialization repeats complete validation before accepting the store as healthy.
 
-After initialization, a missing or invalid store is damage. Jcode does not silently recreate it from the shipped seed. Recovery supports restoring committed files from current `HEAD` and an explicit seed recreation that first moves the damaged repository aside.
+After initialization, a missing or invalid store is damage. Jcode does not silently recreate it from the shipped seed. Recovery supports restoring committed files from current `HEAD` and an explicit seed recreation. Recreation validates the replacement seed, imports, and branch before moving the damaged repository aside. A later failure reports changed state and the exact preserved backup path.
 
 ## Legacy sources
 
@@ -92,7 +92,7 @@ The repository service can inspect and plan exact import for current global and 
 - `.jcode/preferred-tools.md`
 - `.jcode/swarm-prompt.md`
 
-Import leaves the original untouched, records its SHA-256 and empty/blank semantics, validates the managed resource, and commits the resource plus receipt together. Runtime deactivation happens only after a later activation package adopts the durable receipt.
+Import leaves the original untouched, records its SHA-256 and empty/blank semantics, validates the complete prospective repository graph, and commits the resource plus receipt together. An already-completed retry materializes missing committed files but never overwrites a newer working-tree edit; the typed outcome lists preserved divergent paths. Runtime deactivation happens only after a later activation package adopts the durable receipt.
 
 `AGENTS.md` remains a dedicated live ecosystem input. External skills remain read-only until an explicit Copy workflow is implemented. Neither is imported automatically.
 
