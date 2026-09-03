@@ -21,9 +21,11 @@ impl App {
             .and_then(|name| skills.get(name).map(|s| s.get_prompt().to_string()));
         let (mut split, context_info) = if let Some(static_part) = self.session.system_prompt_text()
         {
-            let mut info = crate::prompt::ContextInfo::default();
-            info.system_prompt_chars = static_part.len();
-            info.total_chars = static_part.len();
+            let info = crate::prompt::ContextInfo {
+                system_prompt_chars: static_part.len(),
+                total_chars: static_part.len(),
+                ..Default::default()
+            };
             (
                 crate::prompt::SplitSystemPrompt {
                     static_part: static_part.to_string(),
