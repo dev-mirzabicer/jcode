@@ -470,6 +470,20 @@ fn load_startup_stub_preserves_metadata_but_skips_heavy_vectors() -> Result<()> 
     session.reasoning_effort = Some("high".to_string());
     session.provider_key = Some("openai".to_string());
     session.route_api_method = Some("openai-api".to_string());
+    session.install_system_prompt(StoredSystemPromptState {
+        text: "SYNTHETIC_STUB_SYSTEM".to_string(),
+        active_agent: StoredAgentReference {
+            scope: crate::instruction::InstructionScope::Global,
+            id: "synthetic".to_string(),
+            display_name: "Synthetic".to_string(),
+        },
+        first_provider_dispatch_at: Some(Utc::now()),
+        active_transition_message_id: None,
+    });
+    session.active_skill = Some(StoredActiveSkill {
+        skill_id: "synthetic-skill".to_string(),
+        rendered_text: "SYNTHETIC_SKILL".to_string(),
+    });
     session.set_canary("self-dev");
     session.append_stored_message(StoredMessage {
         id: "msg_1".to_string(),
@@ -520,6 +534,17 @@ fn load_startup_stub_preserves_metadata_but_skips_heavy_vectors() -> Result<()> 
     assert_eq!(stub.reasoning_effort.as_deref(), Some("high"));
     assert_eq!(stub.provider_key.as_deref(), Some("openai"));
     assert_eq!(stub.route_api_method.as_deref(), Some("openai-api"));
+    assert_eq!(stub.system_prompt_text(), Some("SYNTHETIC_STUB_SYSTEM"));
+    assert_eq!(
+        stub.active_agent().map(|agent| agent.id.as_str()),
+        Some("synthetic")
+    );
+    assert_eq!(
+        stub.active_skill
+            .as_ref()
+            .map(|skill| skill.rendered_text.as_str()),
+        Some("SYNTHETIC_SKILL")
+    );
     assert!(stub.is_canary);
     assert!(stub.messages.is_empty());
     assert!(stub.env_snapshots.is_empty());
@@ -545,6 +570,16 @@ fn load_for_remote_startup_preserves_messages_and_replay_but_skips_heavy_vectors
     );
     session.model = Some("gpt-5.4".to_string());
     session.reasoning_effort = Some("medium".to_string());
+    session.install_system_prompt(StoredSystemPromptState {
+        text: "SYNTHETIC_REMOTE_SYSTEM".to_string(),
+        active_agent: StoredAgentReference {
+            scope: crate::instruction::InstructionScope::Project,
+            id: "remote".to_string(),
+            display_name: "Remote".to_string(),
+        },
+        first_provider_dispatch_at: None,
+        active_transition_message_id: None,
+    });
     session.append_stored_message(StoredMessage {
         id: "msg_remote_1".to_string(),
         role: Role::Assistant,
@@ -591,11 +626,99 @@ fn load_for_remote_startup_preserves_messages_and_replay_but_skips_heavy_vectors
     assert_eq!(loaded.parent_id.as_deref(), Some("parent_remote"));
     assert_eq!(loaded.model.as_deref(), Some("gpt-5.4"));
     assert_eq!(loaded.reasoning_effort.as_deref(), Some("medium"));
+    assert_eq!(loaded.system_prompt_text(), Some("SYNTHETIC_REMOTE_SYSTEM"));
+    assert_eq!(
+        loaded.active_agent().map(|agent| agent.id.as_str()),
+        Some("remote")
+    );
     assert_eq!(loaded.messages.len(), 1);
     assert!(loaded.replay_events.is_empty());
     assert!(loaded.env_snapshots.is_empty());
     assert!(loaded.memory_injections.is_empty());
     Ok(())
+}
+
+#[test]
+fn frozen_system_state_round_trips_journal_split_and_first_dispatch() -> Result<()> {
+    let _env_lock = lock_env();
+    let temp_home = tempfile::Builder::new()
+        .prefix("jcode-frozen-system-state-")
+        .tempdir()
+        .map_err(|e| anyhow!(e))?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+
+    let mut session = Session::create_with_id(
+        "session_frozen_system_state".to_string(),
+        None,
+        Some("frozen system state".to_string()),
+    );
+    session.install_system_prompt(StoredSystemPromptState {
+        text: "SYNTHETIC_FROZEN_SYSTEM".to_string(),
+        active_agent: StoredAgentReference {
+            scope: crate::instruction::InstructionScope::Global,
+            id: "synthetic".to_string(),
+            display_name: "Synthetic".to_string(),
+        },
+        first_provider_dispatch_at: None,
+        active_transition_message_id: None,
+    });
+    session.active_skill = Some(StoredActiveSkill {
+        skill_id: "skill".to_string(),
+        rendered_text: "SYNTHETIC_ACTIVE_SKILL".to_string(),
+    });
+    session.save()?;
+    session.mark_provider_dispatched()?;
+    assert!(session.first_provider_dispatch_at().is_some());
+
+    let loaded = Session::load("session_frozen_system_state")?;
+    assert_eq!(loaded.system_prompt, session.system_prompt);
+    assert_eq!(loaded.active_skill, session.active_skill);
+
+    let mut split = Session::create_with_id("session_frozen_split".to_string(), None, None);
+    split.inherit_continuation_state_from(&loaded);
+    assert_eq!(split.system_prompt, loaded.system_prompt);
+    assert_eq!(split.active_skill, loaded.active_skill);
+    assert!(split.provider_session_id.is_none());
+
+    let profile = split.memory_profile_snapshot();
+    assert_eq!(profile.system_prompt_bytes, "SYNTHETIC_FROZEN_SYSTEM".len());
+    assert_eq!(profile.active_skill_bytes, "SYNTHETIC_ACTIVE_SKILL".len());
+    Ok(())
+}
+
+#[test]
+fn first_dispatch_failure_restores_the_exact_prior_activation() {
+    #[derive(Debug)]
+    struct FailingPersistence;
+
+    impl StartupContextSessionPersistence for FailingPersistence {
+        fn persist(&self, _session: &mut Session) -> Result<()> {
+            Err(anyhow!("synthetic persistence failure"))
+        }
+    }
+
+    let mut session = Session::create_with_id(
+        "session_dispatch_rollback".to_string(),
+        None,
+        Some("dispatch rollback".to_string()),
+    );
+    session.install_system_prompt(StoredSystemPromptState {
+        text: "SYNTHETIC_UNDISPATCHED".to_string(),
+        active_agent: StoredAgentReference {
+            scope: crate::instruction::InstructionScope::Global,
+            id: "synthetic".to_string(),
+            display_name: "Synthetic".to_string(),
+        },
+        first_provider_dispatch_at: None,
+        active_transition_message_id: None,
+    });
+    let before = session.clone();
+    let error = session
+        .mark_provider_dispatched_with(&FailingPersistence)
+        .expect_err("dispatch must fail");
+    assert!(matches!(error, SystemPromptDispatchError::Persistence(_)));
+    assert_eq!(session.system_prompt, before.system_prompt);
+    assert_eq!(session.updated_at, before.updated_at);
 }
 
 #[test]

@@ -114,6 +114,63 @@ pub fn is_scheduled_task_message(message: &StoredMessage) -> bool {
         })
 }
 
+/// Stable identity of the agent whose complete instructions are active.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredAgentReference {
+    pub scope: crate::instruction::InstructionScope,
+    pub id: String,
+    pub display_name: String,
+}
+
+/// Exact current true-system activation for one session.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredSystemPromptState {
+    pub text: String,
+    pub active_agent: StoredAgentReference,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_provider_dispatch_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_transition_message_id: Option<String>,
+}
+
+/// Exact rendered skill text retained while an invocation remains active.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredActiveSkill {
+    pub skill_id: String,
+    pub rendered_text: String,
+}
+
+#[derive(Debug)]
+pub enum SystemPromptDispatchError {
+    MissingActivation,
+    StartupContext(StartupContextDispatchError),
+    Persistence(anyhow::Error),
+}
+
+impl std::fmt::Display for SystemPromptDispatchError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingActivation => {
+                formatter.write_str("session has no frozen system-prompt activation")
+            }
+            Self::StartupContext(error) => write!(formatter, "{error}"),
+            Self::Persistence(error) => {
+                write!(formatter, "persist first provider dispatch: {error}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SystemPromptDispatchError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::StartupContext(error) => Some(error),
+            Self::Persistence(error) => Some(error.as_ref()),
+            Self::MissingActivation => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: String,
@@ -130,6 +187,12 @@ pub struct Session {
     /// Persisted initial preparation failure when no truthful receipt could be built.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub startup_context_block: Option<StoredStartupContextBlock>,
+    /// Exact system prompt and active agent selected for this session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<StoredSystemPromptState>,
+    /// Exact active skill text. WP-05 owns activation semantics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_skill: Option<StoredActiveSkill>,
     /// Persisted compacted-view state so reload/resume can continue using the
     /// active summary + recent tail instead of re-sending the full transcript.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -248,6 +311,10 @@ struct SessionStartupStub {
     startup_context: Option<StoredStartupContextReceipt>,
     #[serde(default)]
     startup_context_block: Option<StoredStartupContextBlock>,
+    #[serde(default)]
+    system_prompt: Option<StoredSystemPromptState>,
+    #[serde(default)]
+    active_skill: Option<StoredActiveSkill>,
     #[serde(default)]
     context_view: StoredContextViewState,
     #[serde(default)]
@@ -395,6 +462,78 @@ pub fn derive_session_provider_key(provider_name: &str) -> Option<String> {
 }
 
 impl Session {
+    pub fn system_prompt_text(&self) -> Option<&str> {
+        self.system_prompt.as_ref().map(|state| state.text.as_str())
+    }
+
+    pub fn active_agent(&self) -> Option<&StoredAgentReference> {
+        self.system_prompt.as_ref().map(|state| &state.active_agent)
+    }
+
+    pub fn first_provider_dispatch_at(&self) -> Option<DateTime<Utc>> {
+        self.system_prompt
+            .as_ref()
+            .and_then(|state| state.first_provider_dispatch_at)
+    }
+
+    pub fn install_system_prompt(&mut self, state: StoredSystemPromptState) {
+        self.system_prompt = Some(state);
+        self.updated_at = Utc::now();
+        self.mark_memory_profile_dirty();
+    }
+
+    pub fn clear_active_skill(&mut self) {
+        if self.active_skill.take().is_some() {
+            self.updated_at = Utc::now();
+            self.mark_memory_profile_dirty();
+        }
+    }
+
+    /// Persist the independent first-provider-dispatch boundary in the same
+    /// durable transaction as any Startup Context delivery transition. This
+    /// remains correct for an empty Startup Context plan, where the agent
+    /// boundary still changes even if no startup receipt does.
+    pub fn mark_provider_dispatched(
+        &mut self,
+    ) -> std::result::Result<StartupContextDispatchOutcome, SystemPromptDispatchError> {
+        self.mark_provider_dispatched_with(&DurableStartupContextSessionPersistence)
+    }
+
+    pub fn mark_provider_dispatched_with(
+        &mut self,
+        persistence: &dyn StartupContextSessionPersistence,
+    ) -> std::result::Result<StartupContextDispatchOutcome, SystemPromptDispatchError> {
+        let previous = self.clone();
+        let Some(system_prompt) = self.system_prompt.as_mut() else {
+            return Err(SystemPromptDispatchError::MissingActivation);
+        };
+        let first_dispatch_changed = system_prompt.first_provider_dispatch_at.is_none();
+        if first_dispatch_changed {
+            system_prompt.first_provider_dispatch_at = Some(Utc::now());
+            self.updated_at = Utc::now();
+        }
+
+        let startup_outcome = match self.mark_startup_context_dispatched_with(persistence) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                *self = previous;
+                return Err(SystemPromptDispatchError::StartupContext(error));
+            }
+        };
+        let startup_persisted = matches!(
+            startup_outcome,
+            StartupContextDispatchOutcome::Persisted { .. }
+        );
+        if first_dispatch_changed
+            && !startup_persisted
+            && let Err(error) = persistence.persist(self)
+        {
+            *self = previous;
+            return Err(SystemPromptDispatchError::Persistence(error));
+        }
+        Ok(startup_outcome)
+    }
+
     /// Clone the persisted state that defines a true continuation child.
     ///
     /// The child retains stable message IDs and an independent clone of the complete context-view
@@ -403,6 +542,8 @@ impl Session {
         self.replace_messages(parent.messages.clone());
         self.startup_context = parent.startup_context.clone();
         self.startup_context_block = parent.startup_context_block.clone();
+        self.system_prompt = parent.system_prompt.clone();
+        self.active_skill = parent.active_skill.clone();
         self.compaction = parent.compaction.clone();
         self.context_view = parent.context_view.clone();
         self.provider_session_id = None;
@@ -430,6 +571,8 @@ impl Session {
         session.updated_at = stub.updated_at;
         session.startup_context = stub.startup_context;
         session.startup_context_block = stub.startup_context_block;
+        session.system_prompt = stub.system_prompt;
+        session.active_skill = stub.active_skill;
         session.compaction = stub.compaction;
         session.context_view = stub.context_view;
         session.provider_session_id = stub.provider_session_id;
@@ -468,6 +611,8 @@ impl Session {
         session.messages = snapshot.messages;
         session.startup_context = snapshot.startup_context;
         session.startup_context_block = snapshot.startup_context_block;
+        session.system_prompt = snapshot.system_prompt;
+        session.active_skill = snapshot.active_skill;
         session.compaction = snapshot.compaction;
         session.context_view = snapshot.context_view;
         session.provider_session_id = snapshot.provider_session_id;
@@ -641,6 +786,8 @@ impl Session {
             compaction: self.compaction.clone(),
             startup_context: self.startup_context.clone(),
             startup_context_block: self.startup_context_block.clone(),
+            system_prompt: self.system_prompt.clone(),
+            active_skill: self.active_skill.clone(),
             context_view: self.context_view.clone(),
             provider_session_id: self.provider_session_id.clone(),
             provider_key: self.provider_key.clone(),
@@ -829,6 +976,16 @@ impl Session {
             .map(estimate_json_bytes)
             .unwrap_or(0);
         let context_view_json_bytes = estimate_json_bytes(&self.context_view);
+        let system_prompt_bytes = self
+            .system_prompt
+            .as_ref()
+            .map(|state| state.text.len())
+            .unwrap_or_default();
+        let active_skill_bytes = self
+            .active_skill
+            .as_ref()
+            .map(|state| state.rendered_text.len())
+            .unwrap_or_default();
 
         SessionMemoryProfileSnapshot {
             message_count: self.memory_profile_cache.messages_count,
@@ -839,6 +996,8 @@ impl Session {
             env_snapshot_count: self.memory_profile_cache.env_snapshots_count,
             memory_injection_count: self.memory_profile_cache.memory_injections_count,
             replay_event_count: self.memory_profile_cache.replay_events_count,
+            system_prompt_bytes,
+            active_skill_bytes,
             payload_text_bytes: self.memory_profile_cache.message_stats.payload_text_bytes(),
             total_json_bytes: self.memory_profile_cache.messages_json_bytes
                 + self.memory_profile_cache.provider_cache_json_bytes
@@ -847,6 +1006,16 @@ impl Session {
                 + self.memory_profile_cache.replay_events_json_bytes
                 + compaction_json_bytes
                 + context_view_json_bytes
+                + self
+                    .system_prompt
+                    .as_ref()
+                    .map(estimate_json_bytes)
+                    .unwrap_or_default()
+                + self
+                    .active_skill
+                    .as_ref()
+                    .map(estimate_json_bytes)
+                    .unwrap_or_default()
                 + self
                     .memory_profile_cache
                     .projected_provider_cache_json_bytes,
@@ -924,6 +1093,8 @@ impl Session {
         self.compaction = meta.compaction;
         self.startup_context = meta.startup_context;
         self.startup_context_block = meta.startup_context_block;
+        self.system_prompt = meta.system_prompt;
+        self.active_skill = meta.active_skill;
         self.context_view = meta.context_view;
         self.provider_session_id = meta.provider_session_id;
         self.provider_key = meta.provider_key;
@@ -1159,6 +1330,8 @@ impl Session {
             messages: Vec::new(),
             startup_context: None,
             startup_context_block: None,
+            system_prompt: None,
+            active_skill: None,
             compaction: None,
             context_view: StoredContextViewState::default(),
             provider_session_id: None,
@@ -1221,6 +1394,8 @@ impl Session {
             messages: Vec::new(),
             startup_context: None,
             startup_context_block: None,
+            system_prompt: None,
+            active_skill: None,
             compaction: None,
             context_view: StoredContextViewState::default(),
             provider_session_id: None,
@@ -2229,6 +2404,10 @@ struct RemoteStartupSessionSnapshot {
     startup_context: Option<StoredStartupContextReceipt>,
     #[serde(default)]
     startup_context_block: Option<StoredStartupContextBlock>,
+    #[serde(default)]
+    system_prompt: Option<StoredSystemPromptState>,
+    #[serde(default)]
+    active_skill: Option<StoredActiveSkill>,
     #[serde(default)]
     compaction: Option<StoredCompactionState>,
     #[serde(default)]

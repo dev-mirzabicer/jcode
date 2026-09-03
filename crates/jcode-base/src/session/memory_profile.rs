@@ -205,6 +205,8 @@ pub struct SessionMemoryProfileSnapshot {
     pub env_snapshot_count: usize,
     pub memory_injection_count: usize,
     pub replay_event_count: usize,
+    pub system_prompt_bytes: usize,
+    pub active_skill_bytes: usize,
     pub payload_text_bytes: usize,
     pub total_json_bytes: usize,
     pub provider_cache_json_bytes: usize,
