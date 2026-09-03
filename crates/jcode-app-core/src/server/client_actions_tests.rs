@@ -142,6 +142,20 @@ fn clone_split_session_uses_persisted_session_state() {
     parent.autoreview_enabled = Some(true);
     parent.autojudge_enabled = Some(true);
     parent.provider_session_id = Some("must-not-transfer".to_string());
+    parent.install_system_prompt(crate::session::StoredSystemPromptState {
+        text: "SYNTHETIC_SPLIT_SYSTEM".to_string(),
+        active_agent: crate::session::StoredAgentReference {
+            scope: crate::instruction::InstructionScope::Project,
+            id: "split-agent".to_string(),
+            display_name: "Split agent".to_string(),
+        },
+        first_provider_dispatch_at: Some(chrono::Utc::now()),
+        active_transition_message_id: None,
+    });
+    parent.active_skill = Some(crate::session::StoredActiveSkill {
+        skill_id: "split-skill".to_string(),
+        rendered_text: "SYNTHETIC_SPLIT_SKILL".to_string(),
+    });
     parent.startup_context_block = Some(jcode_session_types::StoredStartupContextBlock {
         kind: jcode_session_types::StoredStartupContextBlockKind::PlanStorage,
         message: "synthetic inherited block".to_string(),
@@ -205,6 +219,8 @@ fn clone_split_session_uses_persisted_session_state() {
     assert_eq!(child.improve_mode, parent.improve_mode);
     assert_eq!(child.autoreview_enabled, parent.autoreview_enabled);
     assert_eq!(child.autojudge_enabled, parent.autojudge_enabled);
+    assert_eq!(child.system_prompt, migrated_parent.system_prompt);
+    assert_eq!(child.active_skill, migrated_parent.active_skill);
     assert!(child.provider_session_id.is_none());
     assert_eq!(child.status, crate::session::SessionStatus::Closed);
     assert_ne!(child.id, parent.id);
