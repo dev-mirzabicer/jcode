@@ -74,6 +74,7 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("RewindUndo", Covered),
     ("RunSubagent", ClientInternal),
     ("SetContextEmergencyPolicy", ClientInternal),
+    ("SetAgent", ClientInternal),
     ("SetFeature", ClientInternal),
     ("SetModel", Covered),
     ("SetPremiumMode", ClientInternal),
