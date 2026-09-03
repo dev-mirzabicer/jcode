@@ -99,6 +99,28 @@ impl InstructionRepositoryService {
         })
     }
 
+    pub fn global_agents_path(&self) -> InstructionRepositoryResult<PathBuf> {
+        let roots = self.roots()?;
+        let sandboxed = std::env::var_os("JCODE_HOME")
+            .map(PathBuf::from)
+            .is_some_and(|configured| configured == roots.jcode_home);
+        if sandboxed {
+            Ok(roots.jcode_home.join("external/AGENTS.md"))
+        } else {
+            roots
+                .jcode_home
+                .parent()
+                .map(|home| home.join("AGENTS.md"))
+                .ok_or_else(|| {
+                    InstructionRepositoryError::new(
+                        InstructionRepositoryErrorKind::Configuration,
+                        "resolve global AGENTS.md",
+                        "Jcode home has no parent directory",
+                    )
+                })
+        }
+    }
+
     pub fn instruction_sources(
         &self,
         project: Option<&InstructionRepositoryRef>,
@@ -2274,6 +2296,7 @@ fn prepare_seed(
         }
     }
     let mut receipts = Vec::new();
+    let mut import_paths = BTreeSet::new();
     for plan in imports {
         let receipt = receipt_for_plan(plan);
         if manifest
@@ -2287,22 +2310,24 @@ fn prepare_seed(
                 format!("duplicate legacy import ID {}", plan.spec.import_id),
             ));
         }
-        if files
-            .insert(
-                plan.spec.target.relative_path.clone(),
-                plan.managed_content.as_bytes().to_vec(),
-            )
-            .is_some()
-        {
+        if !import_paths.insert(plan.spec.target.relative_path.clone()) {
             return Err(InstructionRepositoryError::new(
                 InstructionRepositoryErrorKind::Conflict,
                 "prepare instruction-store seed",
                 format!(
-                    "legacy import target {} collides with another seed file",
+                    "multiple legacy imports target {}",
                     plan.spec.target.relative_path.display()
                 ),
             ));
         }
+        // A legacy import intentionally replaces the shipped seed at the same
+        // semantic path. This is how an existing compatibility prompt becomes
+        // the first managed working version without creating duplicate active
+        // contribution. Two imports may never target the same path.
+        files.insert(
+            plan.spec.target.relative_path.clone(),
+            plan.managed_content.as_bytes().to_vec(),
+        );
         receipts.push(receipt);
     }
     Ok((

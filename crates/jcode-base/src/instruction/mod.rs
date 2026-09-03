@@ -5,6 +5,7 @@
 //! not own Git, session activation, message roles, provider framing, or TUI
 //! editing. Those callers receive finished text and retain their own behavior.
 
+mod composition;
 mod repository;
 mod runtime;
 mod template;
@@ -15,6 +16,7 @@ use std::marker::PhantomData;
 use std::path::PathBuf;
 use std::str::FromStr;
 
+pub use composition::*;
 pub use repository::*;
 pub use runtime::InstructionRuntime;
 

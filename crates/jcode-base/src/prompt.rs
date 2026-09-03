@@ -47,7 +47,7 @@ impl Default for PromptCapabilities {
 }
 
 impl PromptCapabilities {
-    fn current() -> Self {
+    pub fn current() -> Self {
         Self {
             mermaid: crate::config::config().features.mermaid,
         }
@@ -226,9 +226,27 @@ impl SplitSystemPrompt {
 }
 
 /// Skill info for system prompt
+#[derive(Debug)]
 pub struct SkillInfo {
     pub name: String,
     pub description: String,
+}
+
+/// Render the current code-owned available-skills catalog section. WP-05 moves
+/// its prose to the managed instruction store; WP-03 freezes the complete
+/// rendered result at session activation without changing its bytes.
+pub fn build_available_skills_prompt(available_skills: &[SkillInfo]) -> Option<String> {
+    if available_skills.is_empty() {
+        return None;
+    }
+    let mut section = "# Available Skills\n\nYou have access to the following skills that the user can invoke with `/skillname`:\n".to_string();
+    for skill in available_skills {
+        section.push_str(&format!("\n- `/{} ` - {}", skill.name, skill.description));
+    }
+    section.push_str(
+        "\n\nWhen a user asks about available skills or capabilities, mention these skills.",
+    );
+    Some(section)
 }
 
 /// Information about what's loaded in the context window
@@ -453,14 +471,7 @@ pub fn build_system_prompt_full_with_capabilities(
     }
 
     // Add available skills list
-    if !available_skills.is_empty() {
-        let mut skills_section = "# Available Skills\n\nYou have access to the following skills that the user can invoke with `/skillname`:\n".to_string();
-        for skill in available_skills {
-            skills_section.push_str(&format!("\n- `/{} ` - {}", skill.name, skill.description));
-        }
-        skills_section.push_str(
-            "\n\nWhen a user asks about available skills or capabilities, mention these skills.",
-        );
+    if let Some(skills_section) = build_available_skills_prompt(available_skills) {
         info.skills_chars = skills_section.len();
         parts.push(skills_section);
     }
@@ -546,14 +557,7 @@ pub fn build_system_prompt_split_with_capabilities(
     }
 
     // Add available skills list (fairly static)
-    if !available_skills.is_empty() {
-        let mut skills_section = "# Available Skills\n\nYou have access to the following skills that the user can invoke with `/skillname`:\n".to_string();
-        for skill in available_skills {
-            skills_section.push_str(&format!("\n- `/{} ` - {}", skill.name, skill.description));
-        }
-        skills_section.push_str(
-            "\n\nWhen a user asks about available skills or capabilities, mention these skills.",
-        );
+    if let Some(skills_section) = build_available_skills_prompt(available_skills) {
         info.skills_chars = skills_section.len();
         static_parts.push(skills_section);
     }
@@ -624,7 +628,7 @@ impl SelfDevProductContext {
     }
 }
 
-fn build_selfdev_prompt_static_for_working_dir(working_dir: Option<&Path>) -> String {
+pub(crate) fn build_selfdev_prompt_static_for_working_dir(working_dir: Option<&Path>) -> String {
     build_selfdev_prompt_static_for_context(SelfDevProductContext::from_working_dir(working_dir))
 }
 

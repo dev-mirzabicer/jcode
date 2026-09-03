@@ -10,6 +10,23 @@ const PROJECT_CONFIG_RELATIVE_PATH: &str = ".jcode/instructions.toml";
 const CONVENTIONAL_SUBMODULE_PATH: &str = ".jcode/instructions";
 
 impl InstructionRepositoryService {
+    pub fn resolve_project_root(
+        &self,
+        launch_dir: impl AsRef<Path>,
+    ) -> InstructionRepositoryResult<PathBuf> {
+        let roots = self.roots()?;
+        StartupContext::from_durable_state_dir(&roots.durable_state)
+            .resolve_project(launch_dir)
+            .map(|project| project.active_root().to_path_buf())
+            .map_err(|error| {
+                InstructionRepositoryError::new(
+                    InstructionRepositoryErrorKind::Configuration,
+                    "resolve instruction project root",
+                    error.to_string(),
+                )
+            })
+    }
+
     pub fn resolve_project_repository(
         &self,
         launch_dir: impl AsRef<Path>,

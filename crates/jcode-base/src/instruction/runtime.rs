@@ -127,6 +127,30 @@ impl InstructionRuntime {
         out
     }
 
+    /// Return valid, unambiguous documents of one kind and scope in stable ID
+    /// order. Catalog diagnostics retain invalid and ambiguous candidates for
+    /// inspection, while activation callers use this view for optional
+    /// relationships such as project agent addenda.
+    pub fn documents(
+        &self,
+        kind: InstructionKind,
+        scope: InstructionScope,
+    ) -> Vec<&InstructionDocument> {
+        self.entries
+            .iter()
+            .filter_map(|((entry_kind, _), scopes)| {
+                if *entry_kind != kind {
+                    return None;
+                }
+                let candidates = scopes.for_scope(scope);
+                if candidates.len() != 1 {
+                    return None;
+                }
+                candidates[0].parsed.as_ref().ok()
+            })
+            .collect()
+    }
+
     pub fn resolve(
         &self,
         selector: &InstructionSelector,
