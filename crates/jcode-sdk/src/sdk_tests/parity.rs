@@ -161,6 +161,9 @@ fn neither_sdk_has_an_untriaged_public_capability() {
 
 /// Rust-specific members, with the reason each one is not mirrored.
 const RUST_ONLY: &[&str] = &[
+    // TypeScript expresses this as the optional second `createSession` argument;
+    // Rust keeps the original one-argument method and exposes a named overload.
+    "create_session_with_agent",
     // `connect_with` is the explicit transport seam Rust tests use; TypeScript
     // accepts its transport through the options passed to `connect`.
     "connect_with",
