@@ -479,12 +479,14 @@ impl Session {
     pub fn install_system_prompt(&mut self, state: StoredSystemPromptState) {
         self.system_prompt = Some(state);
         self.updated_at = Utc::now();
+        self.persist_state.force_snapshot = true;
         self.mark_memory_profile_dirty();
     }
 
     pub fn clear_active_skill(&mut self) {
         if self.active_skill.take().is_some() {
             self.updated_at = Utc::now();
+            self.persist_state.force_snapshot = true;
             self.mark_memory_profile_dirty();
         }
     }
@@ -511,6 +513,7 @@ impl Session {
         if first_dispatch_changed {
             system_prompt.first_provider_dispatch_at = Some(Utc::now());
             self.updated_at = Utc::now();
+            self.persist_state.force_snapshot = true;
         }
 
         let startup_outcome = match self.mark_startup_context_dispatched_with(persistence) {
@@ -786,8 +789,6 @@ impl Session {
             compaction: self.compaction.clone(),
             startup_context: self.startup_context.clone(),
             startup_context_block: self.startup_context_block.clone(),
-            system_prompt: self.system_prompt.clone(),
-            active_skill: self.active_skill.clone(),
             context_view: self.context_view.clone(),
             provider_session_id: self.provider_session_id.clone(),
             provider_key: self.provider_key.clone(),
@@ -821,6 +822,7 @@ impl Session {
             env_snapshots_mode: PersistVectorMode::Clean,
             memory_injections_mode: PersistVectorMode::Clean,
             replay_events_mode: PersistVectorMode::Clean,
+            force_snapshot: false,
             last_meta: Some(self.journal_meta()),
         };
     }
@@ -1093,8 +1095,6 @@ impl Session {
         self.compaction = meta.compaction;
         self.startup_context = meta.startup_context;
         self.startup_context_block = meta.startup_context_block;
-        self.system_prompt = meta.system_prompt;
-        self.active_skill = meta.active_skill;
         self.context_view = meta.context_view;
         self.provider_session_id = meta.provider_session_id;
         self.provider_key = meta.provider_key;

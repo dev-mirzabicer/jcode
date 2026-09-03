@@ -2,9 +2,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    EnvSnapshot, SessionImproveMode, SessionStatus, StoredActiveSkill, StoredCompactionState,
-    StoredContextViewState, StoredMemoryInjection, StoredMessage, StoredReplayEvent,
-    StoredStartupContextBlock, StoredStartupContextReceipt, StoredSystemPromptState,
+    EnvSnapshot, SessionImproveMode, SessionStatus, StoredCompactionState, StoredContextViewState,
+    StoredMemoryInjection, StoredMessage, StoredReplayEvent, StoredStartupContextBlock,
+    StoredStartupContextReceipt,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -19,10 +19,6 @@ pub(super) struct SessionJournalMeta {
     pub(super) startup_context: Option<StoredStartupContextReceipt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) startup_context_block: Option<StoredStartupContextBlock>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) system_prompt: Option<StoredSystemPromptState>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) active_skill: Option<StoredActiveSkill>,
     #[serde(default, skip_serializing_if = "StoredContextViewState::is_default")]
     pub(super) context_view: StoredContextViewState,
     pub(super) provider_session_id: Option<String>,
@@ -85,6 +81,7 @@ pub(super) struct SessionPersistState {
     pub(super) env_snapshots_mode: PersistVectorMode,
     pub(super) memory_injections_mode: PersistVectorMode,
     pub(super) replay_events_mode: PersistVectorMode,
+    pub(super) force_snapshot: bool,
     pub(super) last_meta: Option<SessionJournalMeta>,
 }
 

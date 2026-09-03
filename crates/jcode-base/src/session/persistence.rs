@@ -460,6 +460,7 @@ impl Session {
             .as_ref()
             .is_some_and(|prev| metadata_requires_snapshot(prev, &current_meta));
         let vectors_need_snapshot = !self.persist_state.snapshot_exists
+            || self.persist_state.force_snapshot
             || self.persist_state.messages_mode == PersistVectorMode::Full
             || self.persist_state.env_snapshots_mode == PersistVectorMode::Full
             || self.persist_state.memory_injections_mode == PersistVectorMode::Full

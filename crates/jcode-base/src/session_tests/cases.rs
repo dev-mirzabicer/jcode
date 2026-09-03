@@ -669,6 +669,17 @@ fn frozen_system_state_round_trips_journal_split_and_first_dispatch() -> Result<
     session.save()?;
     session.mark_provider_dispatched()?;
     assert!(session.first_provider_dispatch_at().is_some());
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "journal tail".to_string(),
+            cache_control: None,
+        }],
+    );
+    session.save()?;
+    let journal = std::fs::read_to_string(session_journal_path("session_frozen_system_state")?)?;
+    assert!(!journal.contains("SYNTHETIC_FROZEN_SYSTEM"));
+    assert!(!journal.contains("SYNTHETIC_ACTIVE_SKILL"));
 
     let loaded = Session::load("session_frozen_system_state")?;
     assert_eq!(loaded.system_prompt, session.system_prompt);
