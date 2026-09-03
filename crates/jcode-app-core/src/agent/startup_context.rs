@@ -287,6 +287,14 @@ impl Agent {
         &mut self,
         selection: crate::instruction::AgentSelection,
     ) -> Result<crate::instruction::SystemPromptActivation, PrimaryInstructionActivationError> {
+        if let Some(current) = self.session.system_prompt.as_ref()
+            && selection.matches_stored(&current.active_agent)
+        {
+            return Ok(crate::instruction::SystemPromptActivation {
+                state: current.clone(),
+                initialized_global_store: false,
+            });
+        }
         let skills = self.current_skills_snapshot();
         let available_skills = skills
             .list()
@@ -307,13 +315,10 @@ impl Agent {
             capabilities: crate::prompt::PromptCapabilities::current(),
             available_skills: &available_skills,
         })?;
-        if self.session.active_agent() == Some(&activation.state.active_agent) {
-            return Ok(activation);
-        }
-        let previous = self.session.system_prompt.clone();
+        let previous = self.session.clone();
         self.session.install_system_prompt(activation.state.clone());
         if let Err(error) = self.session.save() {
-            self.session.system_prompt = previous;
+            self.session = previous;
             return Err(PrimaryInstructionActivationError::Persistence(error));
         }
         self.provider
@@ -712,6 +717,80 @@ mod tests {
             stored.active_agent().map(|agent| agent.id.as_str()),
             Some("jcode")
         );
+    }
+
+    #[test]
+    fn same_agent_selection_is_source_free_and_replacement_save_failure_restores_state() {
+        let home = TestHome::new();
+        let project = tempfile::tempdir().expect("project");
+        let provider: std::sync::Arc<dyn Provider> =
+            std::sync::Arc::new(RecordingProvider::default());
+        let mut agent = Agent::new_with_disabled_startup_context(
+            provider,
+            crate::tool::Registry::empty(),
+            project.path().to_str(),
+        );
+        agent
+            .activate_primary_instructions(crate::instruction::AgentSelection::Default)
+            .expect("initial activation");
+        let before = agent.session.clone();
+
+        let store = home.path().join("instructions");
+        let moved_store = home.path().join("instructions-away");
+        std::fs::rename(&store, &moved_store).expect("move store");
+        let same =
+            agent.activate_primary_instructions(crate::instruction::AgentSelection::Explicit(
+                crate::instruction::InstructionSelector::global(
+                    crate::instruction::InstructionKind::Agent,
+                    "jcode",
+                )
+                .expect("selector"),
+            ));
+        assert!(same.is_ok(), "same-agent no-op must not read the store");
+        assert_eq!(agent.session.system_prompt, before.system_prompt);
+        assert_eq!(agent.session.updated_at, before.updated_at);
+        std::fs::rename(&moved_store, &store).expect("restore store");
+
+        let replacement = crate::instruction::InstructionDocument {
+            id: crate::instruction::InstructionId::parse("replacement").expect("id"),
+            kind: crate::instruction::InstructionKind::Agent,
+            scope: crate::instruction::InstructionScope::Global,
+            template_mode: crate::instruction::TemplateMode::Plain,
+            metadata: crate::instruction::InstructionMetadata {
+                display_name: Some("Replacement".to_string()),
+                description: Some("synthetic replacement".to_string()),
+                agent: Some(crate::instruction::AgentMetadata {
+                    availability: crate::instruction::AgentAvailability::Both,
+                }),
+                ..crate::instruction::InstructionMetadata::default()
+            },
+            body: "SYNTHETIC_REPLACEMENT".to_string(),
+            path: std::path::PathBuf::from("agents/replacement.md"),
+        };
+        std::fs::write(
+            store.join("agents/replacement.md"),
+            replacement.to_markdown().expect("serialize"),
+        )
+        .expect("write replacement");
+        let sessions = home.path().join("sessions");
+        std::fs::remove_dir_all(&sessions).expect("remove test sessions");
+        std::fs::write(&sessions, "block session directory").expect("block session saves");
+
+        let error = agent
+            .activate_primary_instructions(crate::instruction::AgentSelection::Explicit(
+                crate::instruction::InstructionSelector::global(
+                    crate::instruction::InstructionKind::Agent,
+                    "replacement",
+                )
+                .expect("selector"),
+            ))
+            .expect_err("replacement persistence must fail");
+        assert!(matches!(
+            error,
+            PrimaryInstructionActivationError::Persistence(_)
+        ));
+        assert_eq!(agent.session.system_prompt, before.system_prompt);
+        assert_eq!(agent.session.updated_at, before.updated_at);
     }
 
     #[test]

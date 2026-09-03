@@ -3308,6 +3308,19 @@ fn handle_primary_agent_command(app: &mut App, trimmed: &str) -> bool {
             return true;
         }
     };
+    if app
+        .session
+        .active_agent()
+        .is_some_and(|active| selection.matches_stored(active))
+    {
+        let display_name = app
+            .session
+            .active_agent()
+            .map(|active| active.display_name.clone())
+            .unwrap_or_default();
+        app.set_status_notice(format!("Agent → {display_name}"));
+        return true;
+    }
     let skills = app.current_skills_snapshot();
     let available_skills = skills
         .list()
@@ -3335,17 +3348,10 @@ fn handle_primary_agent_command(app: &mut App, trimmed: &str) -> bool {
             return true;
         }
     };
-    if app.session.active_agent() == Some(&activation.state.active_agent) {
-        app.set_status_notice(format!(
-            "Agent → {}",
-            activation.state.active_agent.display_name
-        ));
-        return true;
-    }
-    let previous = app.session.system_prompt.clone();
+    let previous = app.session.clone();
     app.session.install_system_prompt(activation.state.clone());
     if let Err(error) = app.session.save() {
-        app.session.system_prompt = previous;
+        app.session = previous;
         app.push_display_message(DisplayMessage::error(format!(
             "Agent selection could not be persisted: {error}"
         )));

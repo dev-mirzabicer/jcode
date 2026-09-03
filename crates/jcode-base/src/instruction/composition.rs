@@ -46,6 +46,20 @@ impl AgentSelection {
         };
         Ok(Self::Explicit(selector))
     }
+
+    pub fn matches_stored(&self, agent: &StoredAgentReference) -> bool {
+        match self {
+            Self::Default => false,
+            Self::Explicit(selector) if selector.id.as_str() != agent.id => false,
+            Self::Explicit(selector) => match selector.scope {
+                super::InstructionScopeSelector::Unqualified => true,
+                super::InstructionScopeSelector::Global => agent.scope == InstructionScope::Global,
+                super::InstructionScopeSelector::Project => {
+                    agent.scope == InstructionScope::Project
+                }
+            },
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
