@@ -7,7 +7,7 @@ const LEASE_DURATION_SECONDS: i64 = 300;
 
 #[derive(Debug)]
 pub(super) struct RepositoryMutationGuard {
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     _file: File,
     owner_path: PathBuf,
     operation_id: String,
@@ -72,7 +72,41 @@ pub(super) fn acquire_mutation_lease(
         })
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .share_mode(0)
+            .open(&paths.lock)
+            .map_err(|error| {
+                if error.raw_os_error() == Some(32) {
+                    busy_error(repository, read_owner(&paths.owner))
+                } else {
+                    lease_io_error(repository, "open mutation lock", &paths.lock, error)
+                }
+            })?;
+        crate::platform::set_permissions_owner_only(&paths.lock).map_err(|error| {
+            lease_io_error(repository, "secure mutation lock", &paths.lock, error)
+        })?;
+        crate::storage::write_json_secret(&paths.owner, &owner).map_err(|error| {
+            lease_io_error(
+                repository,
+                "write mutation owner",
+                &paths.owner,
+                std::io::Error::other(error.to_string()),
+            )
+        })?;
+        Ok(RepositoryMutationGuard {
+            _file: file,
+            owner_path: paths.owner,
+            operation_id: operation_id.to_string(),
+        })
+    }
+
+    #[cfg(not(any(unix, windows)))]
     {
         if let Some(existing) = read_owner(&paths.owner) {
             if existing.expires_at > Utc::now() {
@@ -139,7 +173,24 @@ pub(super) fn active_mutation_lease(
         }
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        if !paths.lock.exists() {
+            return None;
+        }
+        match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(0)
+            .open(&paths.lock)
+        {
+            Ok(_) => None,
+            Err(_) => read_owner(&paths.owner),
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
     {
         read_owner(&paths.owner).filter(|owner| owner.expires_at > Utc::now())
     }
@@ -183,7 +234,7 @@ fn busy_error(
         || "another process owns the repository mutation lease".to_string(),
         |owner| {
             format!(
-                "operation '{}' in process {} owns the mutation lease until {}",
+                "operation '{}' in process {} owns the mutation lease (metadata deadline {}; kernel lock is authoritative on Unix and Windows)",
                 owner.operation_id, owner.pid, owner.expires_at
             )
         },

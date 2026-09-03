@@ -1,8 +1,8 @@
 use super::git::{GitRepository, validate_branch, validate_operation_id};
 use super::lease::{acquire_mutation_lease, active_mutation_lease};
 use super::mutation::{
-    atomic_write, commit_request, fingerprint, read_working_utf8, safe_target, sha256,
-    validate_relative_path,
+    atomic_write, atomic_write_path, commit_request, fingerprint, read_working_utf8, safe_target,
+    sha256, validate_relative_path,
 };
 use super::types::*;
 use crate::instruction::{InstructionDocument, InstructionScope, InstructionSources};
@@ -37,6 +37,22 @@ struct InitializationAttempt {
     repository_id: String,
     root: PathBuf,
     branch: String,
+}
+
+#[derive(Clone, Debug)]
+struct PreparedStoreSeed {
+    manifest: InstructionStoreManifest,
+    files: Vec<InstructionSeedFile>,
+    receipts: Vec<LegacyImportReceipt>,
+}
+
+#[cfg(test)]
+static FAIL_RECREATION_AFTER_BACKUP: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+pub(super) fn fail_recreation_after_backup_once() {
+    FAIL_RECREATION_AFTER_BACKUP.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
 impl Default for InstructionRepositoryService {
@@ -246,6 +262,7 @@ impl InstructionRepositoryService {
                     self.store_health(repository, &git, Some(&head))?,
                     InstructionRepositoryHealth::Ready
                 ) {
+                    self.validate_complete_store(repository)?;
                     if repository.owner_only {
                         harden_repository_tree(&repository.root)?;
                     }
@@ -295,15 +312,23 @@ impl InstructionRepositoryService {
             }
         }
 
-        for spec in legacy {
-            validate_import_scope(repository, spec)?;
-        }
-        let plans = legacy
-            .iter()
-            .map(|spec| self.plan_legacy_import(spec))
-            .collect::<InstructionRepositoryResult<Vec<_>>>()?;
-        let plans = plans.into_iter().flatten().collect::<Vec<_>>();
-        let (manifest, files, receipts) = prepare_seed(seed, &plans)?;
+        let prepared = self.prepare_repository_seed(repository, seed, legacy)?;
+        self.materialize_new_repository_locked(repository, prepared, branch, operation_id)
+    }
+
+    fn materialize_new_repository_locked(
+        &self,
+        repository: &InstructionRepositoryRef,
+        prepared: PreparedStoreSeed,
+        branch: &str,
+        operation_id: &str,
+    ) -> InstructionRepositoryResult<InstructionStoreInitialization> {
+        validate_branch(branch)?;
+        let PreparedStoreSeed {
+            manifest,
+            files,
+            receipts,
+        } = prepared;
         let created_root = !repository.root.exists();
         self.write_initialization_attempt(repository, branch)?;
         std::fs::create_dir_all(&repository.root).map_err(|error| {
@@ -382,9 +407,12 @@ impl InstructionRepositoryService {
         legacy: &[InstructionLegacyImportSpec],
         branch: &str,
     ) -> InstructionRepositoryResult<InstructionStoreRecreation> {
+        validate_branch(branch)?;
         let roots = self.roots()?;
         let operation_id = format!("recreate-{}-{}", repository.id, crate::id::new_id("store"));
         let _lease = acquire_mutation_lease(&roots.durable_state, repository, &operation_id)?;
+        let prepared = self.prepare_repository_seed(repository, seed, legacy)?;
+        self.validate_prepared_store(repository, &prepared)?;
         let backup = if repository.root.exists() {
             let parent = repository.root.parent().ok_or_else(|| {
                 InstructionRepositoryError::new(
@@ -399,9 +427,10 @@ impl InstructionRepositoryService {
                 .and_then(|name| name.to_str())
                 .unwrap_or("instructions");
             let backup = parent.join(format!(
-                "{name}.damaged-{}-{}",
+                "{name}.damaged-{}-{}-{}",
                 chrono::Utc::now().format("%Y%m%dT%H%M%SZ"),
-                std::process::id()
+                std::process::id(),
+                rand::random::<u64>()
             ));
             std::fs::rename(&repository.root, &backup).map_err(|error| {
                 repository_io_error(
@@ -417,8 +446,21 @@ impl InstructionRepositoryService {
         };
         let receipt = self.initialization_receipt_path(repository)?;
         let _ = std::fs::remove_file(receipt);
-        let initialization =
-            self.initialize_repository_locked(repository, seed, legacy, branch, &operation_id)?;
+        #[cfg(test)]
+        if FAIL_RECREATION_AFTER_BACKUP.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return Err(recreation_failure(
+                InstructionRepositoryError::new(
+                    InstructionRepositoryErrorKind::Io,
+                    "recreate instruction store",
+                    "injected failure after preserving the damaged store",
+                )
+                .repository(repository),
+                backup.as_ref(),
+            ));
+        }
+        let initialization = self
+            .materialize_new_repository_locked(repository, prepared, branch, &operation_id)
+            .map_err(|error| recreation_failure(error, backup.as_ref()))?;
         Ok(InstructionStoreRecreation {
             initialization,
             damaged_backup: backup,
@@ -769,10 +811,21 @@ impl InstructionRepositoryService {
         })?;
         let base = fingerprint(repository, relative_path)?;
         let mutation = match git.show_file(commit, relative_path)? {
-            Some(content) => InstructionFileMutation::Write {
-                relative_path: relative_path.to_path_buf(),
-                content,
-            },
+            Some(content) => {
+                String::from_utf8(content.clone()).map_err(|error| {
+                    InstructionRepositoryError::new(
+                        InstructionRepositoryErrorKind::InvalidUtf8,
+                        "restore instruction revision",
+                        error.to_string(),
+                    )
+                    .repository(repository)
+                    .path(relative_path)
+                })?;
+                InstructionFileMutation::Write {
+                    relative_path: relative_path.to_path_buf(),
+                    content,
+                }
+            }
             None => InstructionFileMutation::Delete {
                 relative_path: relative_path.to_path_buf(),
             },
@@ -817,8 +870,7 @@ impl InstructionRepositoryService {
             .repository(repository)
             .path(relative_path)
         })?;
-        atomic_write(repository, relative_path, &bytes)?;
-        let content = String::from_utf8(bytes).map_err(|error| {
+        let content = String::from_utf8(bytes.clone()).map_err(|error| {
             InstructionRepositoryError::new(
                 InstructionRepositoryErrorKind::InvalidUtf8,
                 "restore working file from HEAD",
@@ -827,6 +879,7 @@ impl InstructionRepositoryService {
             .repository(repository)
             .path(relative_path)
         })?;
+        atomic_write(repository, relative_path, &bytes)?;
         Ok(InstructionFileContent {
             relative_path: relative_path.to_path_buf(),
             source: InstructionFileSource::WorkingTree,
@@ -1166,10 +1219,16 @@ impl InstructionRepositoryService {
         let _lease = acquire_mutation_lease(&roots.durable_state, repository, operation_id)?;
         let git = GitRepository::new(&repository.root);
         if let Some(commit) = git.find_operation_commit(operation_id)? {
-            self.materialize_head_file(repository, &git, &commit, Path::new(STORE_MANIFEST))?;
-            self.materialize_head_file(repository, &git, &commit, &plan.spec.target.relative_path)?;
-            let receipt = self
-                .load_committed_manifest(repository)?
+            let current_head = git.head()?.ok_or_else(|| {
+                InstructionRepositoryError::new(
+                    InstructionRepositoryErrorKind::RepositoryDamaged,
+                    "recover completed legacy import",
+                    "instruction repository has no current HEAD",
+                )
+                .repository(repository)
+            })?;
+            let manifest = self.load_committed_manifest(repository)?;
+            let receipt = manifest
                 .legacy_imports
                 .get(&plan.spec.import_id)
                 .cloned()
@@ -1181,7 +1240,20 @@ impl InstructionRepositoryService {
                     )
                     .repository(repository)
                 })?;
-            return Ok(InstructionLegacyImportOutcome::AlreadyImported { receipt, commit });
+            let working_changes_preserved = self.reconcile_committed_files(
+                repository,
+                &git,
+                &current_head,
+                [
+                    Path::new(STORE_MANIFEST),
+                    plan.spec.target.relative_path.as_path(),
+                ],
+            )?;
+            return Ok(InstructionLegacyImportOutcome::AlreadyImported {
+                receipt,
+                commit,
+                working_changes_preserved,
+            });
         }
         let head = git.head()?.ok_or_else(|| {
             InstructionRepositoryError::new(
@@ -1193,11 +1265,19 @@ impl InstructionRepositoryService {
         })?;
         let mut manifest = self.load_committed_manifest(repository)?;
         if let Some(receipt) = manifest.legacy_imports.get(&plan.spec.import_id).cloned() {
-            self.materialize_head_file(repository, &git, &head, Path::new(STORE_MANIFEST))?;
-            self.materialize_head_file(repository, &git, &head, &plan.spec.target.relative_path)?;
+            let working_changes_preserved = self.reconcile_committed_files(
+                repository,
+                &git,
+                &head,
+                [
+                    Path::new(STORE_MANIFEST),
+                    plan.spec.target.relative_path.as_path(),
+                ],
+            )?;
             return Ok(InstructionLegacyImportOutcome::AlreadyImported {
                 receipt,
                 commit: head,
+                working_changes_preserved,
             });
         }
         if git
@@ -1212,6 +1292,26 @@ impl InstructionRepositoryService {
             .repository(repository)
             .path(&plan.spec.target.relative_path));
         }
+        self.require_working_matches_commit(repository, &git, &head, Path::new(STORE_MANIFEST))?;
+        if safe_target(repository, &plan.spec.target.relative_path, false)?.exists() {
+            return Err(InstructionRepositoryError::new(
+                InstructionRepositoryErrorKind::Conflict,
+                "import legacy instruction",
+                "legacy import target exists in the working tree without a durable receipt",
+            )
+            .repository(repository)
+            .path(&plan.spec.target.relative_path));
+        }
+        let previous_manifest = git
+            .show_file(&head, Path::new(STORE_MANIFEST))?
+            .ok_or_else(|| {
+                InstructionRepositoryError::new(
+                    InstructionRepositoryErrorKind::RepositoryDamaged,
+                    "import legacy instruction",
+                    "current Git HEAD is missing instruction-store.toml",
+                )
+                .repository(repository)
+            })?;
         let receipt = receipt_for_plan(&plan);
         manifest
             .legacy_imports
@@ -1235,6 +1335,7 @@ impl InstructionRepositoryService {
                 plan.managed_content.as_bytes().to_vec(),
             ),
         ];
+        self.validate_virtual_files(repository, &writes, &[])?;
         let committed = git.commit_virtual_files(
             &index_path,
             &writes,
@@ -1252,11 +1353,25 @@ impl InstructionRepositoryService {
             )
             .repository(repository)
         })?;
-        self.materialize_head_file(repository, &git, &commit, Path::new(STORE_MANIFEST))
+        let working_changes_preserved = self
+            .publish_committed_files(
+                repository,
+                &git,
+                &commit,
+                [
+                    (
+                        Path::new(STORE_MANIFEST),
+                        Some(previous_manifest.as_slice()),
+                    ),
+                    (plan.spec.target.relative_path.as_path(), None),
+                ],
+            )
             .map_err(InstructionRepositoryError::may_have_working_changes)?;
-        self.materialize_head_file(repository, &git, &commit, &plan.spec.target.relative_path)
-            .map_err(InstructionRepositoryError::may_have_working_changes)?;
-        Ok(InstructionLegacyImportOutcome::Imported { receipt, commit })
+        Ok(InstructionLegacyImportOutcome::Imported {
+            receipt,
+            commit,
+            working_changes_preserved,
+        })
     }
 
     pub(super) fn roots(&self) -> InstructionRepositoryResult<&ServiceRoots> {
@@ -1269,7 +1384,82 @@ impl InstructionRepositoryService {
         })
     }
 
-    fn validate_complete_store(
+    fn prepare_repository_seed(
+        &self,
+        repository: &InstructionRepositoryRef,
+        seed: &InstructionStoreSeed,
+        legacy: &[InstructionLegacyImportSpec],
+    ) -> InstructionRepositoryResult<PreparedStoreSeed> {
+        for spec in legacy {
+            validate_import_scope(repository, spec)?;
+        }
+        let plans = legacy
+            .iter()
+            .map(|spec| self.plan_legacy_import(spec))
+            .collect::<InstructionRepositoryResult<Vec<_>>>()?;
+        let plans = plans.into_iter().flatten().collect::<Vec<_>>();
+        let (manifest, files, receipts) = prepare_seed(seed, &plans)?;
+        Ok(PreparedStoreSeed {
+            manifest,
+            files,
+            receipts,
+        })
+    }
+
+    fn validate_prepared_store(
+        &self,
+        repository: &InstructionRepositoryRef,
+        prepared: &PreparedStoreSeed,
+    ) -> InstructionRepositoryResult<()> {
+        let validation_dir = self
+            .roots()?
+            .durable_state
+            .join("instruction-repositories")
+            .join("seed-validation");
+        crate::storage::ensure_dir(&validation_dir).map_err(|error| {
+            InstructionRepositoryError::new(
+                InstructionRepositoryErrorKind::Io,
+                "create seed validation directory",
+                error.to_string(),
+            )
+            .repository(repository)
+            .path(&validation_dir)
+        })?;
+        let root = tempfile::Builder::new()
+            .prefix(&format!("{}-", repository.id))
+            .tempdir_in(&validation_dir)
+            .map_err(|error| {
+                InstructionRepositoryError::new(
+                    InstructionRepositoryErrorKind::Io,
+                    "create seed validation store",
+                    error.to_string(),
+                )
+                .repository(repository)
+                .path(&validation_dir)
+            })?;
+        let mut validation_repository = repository.clone();
+        validation_repository.root = root.path().to_path_buf();
+        validation_repository.owner_only = false;
+        let manifest = toml::to_string_pretty(&prepared.manifest).map_err(|error| {
+            InstructionRepositoryError::new(
+                InstructionRepositoryErrorKind::InvalidManifest,
+                "serialize replacement seed manifest",
+                error.to_string(),
+            )
+            .repository(repository)
+        })?;
+        atomic_write(
+            &validation_repository,
+            Path::new(STORE_MANIFEST),
+            manifest.as_bytes(),
+        )?;
+        for file in &prepared.files {
+            atomic_write(&validation_repository, &file.relative_path, &file.content)?;
+        }
+        self.validate_complete_store(&validation_repository)
+    }
+
+    pub(super) fn validate_complete_store(
         &self,
         repository: &InstructionRepositoryRef,
     ) -> InstructionRepositoryResult<()> {
@@ -1329,6 +1519,17 @@ impl InstructionRepositoryService {
         mutations: &[InstructionFileMutation],
     ) -> InstructionRepositoryResult<BTreeSet<String>> {
         let mut allowed = self.validation_issue_set(repository)?;
+        let (snapshot, issues) = self.committed_validation_snapshot(repository)?;
+        let filters = self.impacted_issue_filters(repository, snapshot.path(), mutations)?;
+        allowed.retain(|issue| !filters.iter().any(|filter| issue.contains(filter)));
+        allowed.extend(self.validation_issue_set_for_root(repository, snapshot.path(), issues)?);
+        Ok(allowed)
+    }
+
+    fn committed_validation_snapshot(
+        &self,
+        repository: &InstructionRepositoryRef,
+    ) -> InstructionRepositoryResult<(tempfile::TempDir, BTreeSet<String>)> {
         let git = GitRepository::new(&repository.root);
         let head = git.head()?.ok_or_else(|| {
             InstructionRepositoryError::new(
@@ -1409,10 +1610,65 @@ impl InstructionRepositoryService {
                 }
             }
         }
-        let filters = self.impacted_issue_filters(repository, snapshot.path(), mutations)?;
-        allowed.retain(|issue| !filters.iter().any(|filter| issue.contains(filter)));
-        allowed.extend(self.validation_issue_set_for_root(repository, snapshot.path(), issues)?);
-        Ok(allowed)
+        Ok((snapshot, issues))
+    }
+
+    fn validate_virtual_files(
+        &self,
+        repository: &InstructionRepositoryRef,
+        writes: &[(PathBuf, Vec<u8>)],
+        deletes: &[PathBuf],
+    ) -> InstructionRepositoryResult<()> {
+        let (snapshot, path_issues) = self.committed_validation_snapshot(repository)?;
+        let before =
+            self.validation_issue_set_for_root(repository, snapshot.path(), path_issues.clone())?;
+        for (relative_path, content) in writes {
+            validate_relative_path(relative_path)?;
+            atomic_write_path(&snapshot.path().join(relative_path), content, false).map_err(
+                |error| {
+                    InstructionRepositoryError::new(
+                        InstructionRepositoryErrorKind::Io,
+                        "materialize virtual instruction edit",
+                        error.to_string(),
+                    )
+                    .repository(repository)
+                    .path(relative_path)
+                },
+            )?;
+        }
+        for relative_path in deletes {
+            validate_relative_path(relative_path)?;
+            let target = snapshot.path().join(relative_path);
+            match std::fs::remove_file(&target) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(InstructionRepositoryError::new(
+                        InstructionRepositoryErrorKind::Io,
+                        "materialize virtual instruction deletion",
+                        error.to_string(),
+                    )
+                    .repository(repository)
+                    .path(relative_path));
+                }
+            }
+        }
+        let after = self.validation_issue_set_for_root(repository, snapshot.path(), path_issues)?;
+        let introduced = after.difference(&before).cloned().collect::<Vec<_>>();
+        if introduced.is_empty() {
+            Ok(())
+        } else {
+            Err(InstructionRepositoryError::new(
+                InstructionRepositoryErrorKind::RepositoryDamaged,
+                "validate virtual instruction commit",
+                format!(
+                    "virtual commit introduced {} resource or dependency error(s): {}",
+                    introduced.len(),
+                    introduced.join(" | ")
+                ),
+            )
+            .repository(repository))
+        }
     }
 
     fn validation_issue_set_for_root(
@@ -1421,6 +1677,20 @@ impl InstructionRepositoryService {
         repository_root: &Path,
         mut issues: BTreeSet<String>,
     ) -> InstructionRepositoryResult<BTreeSet<String>> {
+        let manifest_path = repository_root.join(STORE_MANIFEST);
+        match std::fs::read_to_string(&manifest_path) {
+            Ok(content) => {
+                if let Err(error) = parse_manifest(repository, &content) {
+                    issues.insert(format!("manifest:invalid:{}", error.detail));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                issues.insert("manifest:missing".to_string());
+            }
+            Err(error) => {
+                issues.insert(format!("manifest:unreadable:{error}"));
+            }
+        }
         let runtime = crate::instruction::InstructionRuntime::discover(
             self.validation_sources_for_root(repository, repository_root)?,
         );
@@ -1694,23 +1964,153 @@ impl InstructionRepositoryService {
         }))
     }
 
-    fn materialize_head_file(
+    fn require_working_matches_commit(
         &self,
         repository: &InstructionRepositoryRef,
         git: &GitRepository,
         commit: &str,
         relative_path: &Path,
     ) -> InstructionRepositoryResult<()> {
-        let bytes = git.show_file(commit, relative_path)?.ok_or_else(|| {
-            InstructionRepositoryError::new(
-                InstructionRepositoryErrorKind::RepositoryDamaged,
-                "materialize committed instruction file",
-                "committed operation is missing an expected file",
+        let committed = git.show_file(commit, relative_path)?;
+        let target = safe_target(repository, relative_path, false)?;
+        let working = match std::fs::read(&target) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(repository_io_error(
+                    repository,
+                    "read working instruction file",
+                    &target,
+                    error,
+                ));
+            }
+        };
+        if working == committed {
+            Ok(())
+        } else {
+            Err(InstructionRepositoryError::new(
+                InstructionRepositoryErrorKind::Conflict,
+                "validate legacy import working state",
+                "working file differs from the expected committed version",
             )
             .repository(repository)
-            .path(relative_path)
-        })?;
-        atomic_write(repository, relative_path, &bytes)
+            .path(relative_path))
+        }
+    }
+
+    fn reconcile_committed_files<'a, I>(
+        &self,
+        repository: &InstructionRepositoryRef,
+        git: &GitRepository,
+        commit: &str,
+        relative_paths: I,
+    ) -> InstructionRepositoryResult<Vec<PathBuf>>
+    where
+        I: IntoIterator<Item = &'a Path>,
+    {
+        let mut preserved = Vec::new();
+        for relative_path in relative_paths {
+            let bytes = git.show_file(commit, relative_path)?.ok_or_else(|| {
+                InstructionRepositoryError::new(
+                    InstructionRepositoryErrorKind::RepositoryDamaged,
+                    "reconcile committed instruction file",
+                    "committed operation is missing an expected file",
+                )
+                .repository(repository)
+                .path(relative_path)
+            })?;
+            let target = safe_target(repository, relative_path, false)?;
+            match std::fs::symlink_metadata(&target) {
+                Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                    let working = std::fs::read(&target).map_err(|error| {
+                        repository_io_error(
+                            repository,
+                            "read working instruction file",
+                            &target,
+                            error,
+                        )
+                    })?;
+                    if working != bytes {
+                        preserved.push(relative_path.to_path_buf());
+                    }
+                }
+                Ok(_) => preserved.push(relative_path.to_path_buf()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    atomic_write(repository, relative_path, &bytes)?;
+                }
+                Err(error) => {
+                    return Err(repository_io_error(
+                        repository,
+                        "inspect working instruction file",
+                        &target,
+                        error,
+                    ));
+                }
+            }
+        }
+        Ok(preserved)
+    }
+
+    fn publish_committed_files<'a, I>(
+        &self,
+        repository: &InstructionRepositoryRef,
+        git: &GitRepository,
+        commit: &str,
+        expectations: I,
+    ) -> InstructionRepositoryResult<Vec<PathBuf>>
+    where
+        I: IntoIterator<Item = (&'a Path, Option<&'a [u8]>)>,
+    {
+        let mut preserved = Vec::new();
+        for (relative_path, expected_previous) in expectations {
+            let committed = git.show_file(commit, relative_path)?.ok_or_else(|| {
+                InstructionRepositoryError::new(
+                    InstructionRepositoryErrorKind::RepositoryDamaged,
+                    "publish committed instruction file",
+                    "committed operation is missing an expected file",
+                )
+                .repository(repository)
+                .path(relative_path)
+            })?;
+            let target = safe_target(repository, relative_path, false)?;
+            match std::fs::symlink_metadata(&target) {
+                Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                    let working = std::fs::read(&target).map_err(|error| {
+                        repository_io_error(
+                            repository,
+                            "read working instruction file",
+                            &target,
+                            error,
+                        )
+                    })?;
+                    if working == committed {
+                        continue;
+                    }
+                    if expected_previous.is_some_and(|expected| working == expected) {
+                        atomic_write(repository, relative_path, &committed)?;
+                    } else {
+                        preserved.push(relative_path.to_path_buf());
+                    }
+                }
+                Ok(_) => preserved.push(relative_path.to_path_buf()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    if expected_previous.is_none() {
+                        atomic_write(repository, relative_path, &committed)?;
+                    } else {
+                        preserved.push(relative_path.to_path_buf());
+                    }
+                }
+                Err(error) => {
+                    return Err(repository_io_error(
+                        repository,
+                        "inspect working instruction file",
+                        &target,
+                        error,
+                    ));
+                }
+            }
+        }
+        Ok(preserved)
     }
 
     fn isolated_index_path(
@@ -2099,6 +2499,22 @@ fn repository_io_error(
     )
     .repository(repository)
     .path(path)
+}
+
+fn recreation_failure(
+    mut error: InstructionRepositoryError,
+    backup: Option<&PathBuf>,
+) -> InstructionRepositoryError {
+    error.existing_state_unchanged = false;
+    if let Some(backup) = backup {
+        error.detail = format!(
+            "{}; the preserved damaged store remains at {}",
+            error.detail,
+            backup.display()
+        );
+        error.path = Some(backup.clone());
+    }
+    error
 }
 
 fn explicit_selector(

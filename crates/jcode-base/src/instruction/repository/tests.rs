@@ -220,6 +220,56 @@ fn global_initialization_is_private_idempotent_and_damage_is_explicit() {
 }
 
 #[test]
+fn recreation_preflights_invalid_seed_and_branch_before_moving_the_store() {
+    let fixture = Fixture::new();
+    let initialized = fixture.initialize();
+    let repository = initialized.repository;
+    let original_head = initialized.commit;
+    let invalid_seed = InstructionStoreSeed {
+        manifest: InstructionStoreManifest::current(),
+        files: vec![InstructionSeedFile {
+            relative_path: PathBuf::from("system/invalid.md"),
+            content: b"---\nid: invalid\nkind: system\nincludes:\n  - missing\n---\n\ninvalid"
+                .to_vec(),
+        }],
+    };
+    let invalid = fixture
+        .service
+        .recreate_from_seed(&repository, &invalid_seed, &[], "main")
+        .expect_err("invalid replacement seed must fail before moving the store");
+    assert!(invalid.existing_state_unchanged);
+    assert_eq!(
+        GitRepository::new(&repository.root).head().unwrap(),
+        Some(original_head.clone())
+    );
+    let invalid_branch = fixture
+        .service
+        .recreate_from_seed(&repository, &seed(), &[], "bad..branch")
+        .expect_err("invalid replacement branch must fail before moving the store");
+    assert!(invalid_branch.existing_state_unchanged);
+    assert_eq!(
+        GitRepository::new(&repository.root).head().unwrap(),
+        Some(original_head)
+    );
+}
+
+#[test]
+fn recreation_failure_after_backup_reports_changed_state_and_backup_path() {
+    let fixture = Fixture::new();
+    let repository = fixture.initialize().repository;
+    super::service::fail_recreation_after_backup_once();
+    let error = fixture
+        .service
+        .recreate_from_seed(&repository, &seed(), &[], "main")
+        .expect_err("injected post-backup recreation failure");
+    assert!(!error.existing_state_unchanged);
+    let backup = error.path.expect("reported backup path");
+    assert!(backup.exists());
+    assert!(error.detail.contains(&backup.display().to_string()));
+    assert!(!repository.root.exists());
+}
+
+#[test]
 fn interrupted_initialization_resumes_only_with_its_durable_attempt_record() {
     let fixture = Fixture::new();
     let repository = fixture.service.global_repository().unwrap();
@@ -264,6 +314,25 @@ fn interrupted_initialization_resumes_only_with_its_durable_attempt_record() {
         std::fs::read_to_string(resumed.repository.root.join("modules/common.md"))
             .unwrap()
             .contains("seed common body")
+    );
+}
+
+#[test]
+fn initialization_reuse_rejects_invalid_working_resources() {
+    let fixture = Fixture::new();
+    let repository = fixture.initialize().repository;
+    std::fs::write(
+        repository.root.join("modules/common.md"),
+        "---\nid: common\nkind: module\nincludes:\n  - missing\n---\n\ninvalid graph",
+    )
+    .unwrap();
+    let error = fixture
+        .service
+        .initialize_global(&seed(), &[])
+        .expect_err("initialization reuse must validate the complete working store");
+    assert_eq!(
+        error.kind,
+        InstructionRepositoryErrorKind::RepositoryDamaged
     );
 }
 
@@ -409,6 +478,41 @@ fn scoped_commit_preserves_unrelated_index_and_worktree_and_is_idempotent() {
         std::fs::read_to_string(repository.root.join("modules/common.md"))
             .unwrap()
             .contains("external edit wins")
+    );
+}
+
+#[test]
+fn generic_commit_rejects_an_invalid_store_manifest() {
+    let fixture = Fixture::new();
+    let repository = fixture.initialize().repository;
+    let draft = fixture
+        .service
+        .open_draft(&repository, "instruction-store.toml")
+        .unwrap();
+    let head = draft.base_head.clone();
+    let error = fixture
+        .service
+        .commit(
+            &repository,
+            &InstructionCommitRequest {
+                operation_id: "invalid-manifest".to_string(),
+                message: "instruction: invalid manifest".to_string(),
+                expected_head: draft.base_head,
+                expected_files: vec![draft.base],
+                mutations: vec![InstructionFileMutation::Write {
+                    relative_path: PathBuf::from("instruction-store.toml"),
+                    content: b"schema_version = 999\n".to_vec(),
+                }],
+            },
+        )
+        .expect_err("invalid manifest must not be published");
+    assert_eq!(
+        error.kind,
+        InstructionRepositoryErrorKind::RepositoryDamaged
+    );
+    assert_eq!(
+        GitRepository::new(&repository.root).head().unwrap(),
+        Some(head)
     );
 }
 
@@ -620,7 +724,14 @@ fn legacy_import_is_exact_idempotent_and_commit_precedes_inactivation() {
         .import_legacy(&repository, &spec, "import-overlay")
         .unwrap();
     let (receipt, commit) = match imported {
-        InstructionLegacyImportOutcome::Imported { receipt, commit } => (receipt, commit),
+        InstructionLegacyImportOutcome::Imported {
+            receipt,
+            commit,
+            working_changes_preserved,
+        } => {
+            assert!(working_changes_preserved.is_empty());
+            (receipt, commit)
+        }
         other => panic!("unexpected import outcome: {other:?}"),
     };
     assert_eq!(std::fs::read_to_string(&legacy_path).unwrap(), exact);
@@ -665,18 +776,45 @@ fn legacy_import_is_exact_idempotent_and_commit_precedes_inactivation() {
         InstructionLegacyImportOutcome::AlreadyImported {
             receipt: recovered,
             commit: recovered_commit,
+            working_changes_preserved,
         } => {
             assert_eq!(recovered, receipt);
             assert_eq!(recovered_commit, commit);
+            assert!(working_changes_preserved.is_empty());
         }
         other => panic!("unexpected recovery outcome: {other:?}"),
     }
     assert_eq!(
         GitRepository::new(&repository.root).head().unwrap(),
-        Some(commit)
+        Some(commit.clone())
     );
     assert!(repository.root.join("instruction-store.toml").exists());
     assert!(repository.root.join("system/legacy-overlay.md").exists());
+
+    let later_working_edit = "later user working-tree edit";
+    std::fs::write(
+        repository.root.join("system/legacy-overlay.md"),
+        later_working_edit,
+    )
+    .unwrap();
+    let repeated = fixture
+        .service
+        .import_legacy(&repository, &spec, "import-overlay")
+        .expect("completed import retry");
+    match repeated {
+        InstructionLegacyImportOutcome::AlreadyImported {
+            working_changes_preserved,
+            ..
+        } => assert_eq!(
+            working_changes_preserved,
+            vec![PathBuf::from("system/legacy-overlay.md")]
+        ),
+        other => panic!("unexpected repeated import outcome: {other:?}"),
+    }
+    assert_eq!(
+        std::fs::read_to_string(repository.root.join("system/legacy-overlay.md")).unwrap(),
+        later_working_edit
+    );
 
     let empty_path = fixture.home.join("preferred-tools.md");
     std::fs::write(&empty_path, "  \n").unwrap();
@@ -704,6 +842,45 @@ fn legacy_import_is_exact_idempotent_and_commit_precedes_inactivation() {
         .service
         .import_legacy(&repository, &empty_spec, "import-empty-tools")
         .unwrap();
+
+    let invalid_path = fixture.home.join("invalid-legacy.md");
+    std::fs::write(&invalid_path, "invalid dependency import").unwrap();
+    let invalid_spec = InstructionLegacyImportSpec {
+        import_id: "invalid-dependency-import".to_string(),
+        source_kind: LegacyInstructionSourceKind::InventoryApproved,
+        source_path: invalid_path,
+        target: InstructionLegacyImportTarget {
+            relative_path: PathBuf::from("system/invalid-import.md"),
+            id: InstructionId::parse("invalid-import").unwrap(),
+            kind: InstructionKind::System,
+            scope: InstructionScope::Global,
+            template_mode: TemplateMode::Plain,
+            metadata: InstructionMetadata {
+                includes: vec![
+                    crate::instruction::InstructionSelector::unqualified(
+                        InstructionKind::Module,
+                        "missing-import-dependency",
+                    )
+                    .unwrap(),
+                ],
+                ..InstructionMetadata::default()
+            },
+        },
+    };
+    let before_invalid = GitRepository::new(&repository.root).head().unwrap();
+    let invalid = fixture
+        .service
+        .import_legacy(&repository, &invalid_spec, "import-invalid-dependency")
+        .expect_err("legacy import with unresolved dependency must not commit");
+    assert_eq!(
+        invalid.kind,
+        InstructionRepositoryErrorKind::RepositoryDamaged
+    );
+    assert_eq!(
+        GitRepository::new(&repository.root).head().unwrap(),
+        before_invalid
+    );
+    assert!(!repository.root.join("system/invalid-import.md").exists());
 }
 
 #[test]
@@ -1105,6 +1282,35 @@ fn detached_head_lease_read_fallback_and_symlink_boundaries_fail_closed() {
 }
 
 #[test]
+fn invalid_utf8_head_restore_leaves_the_working_file_unchanged() {
+    let fixture = Fixture::new();
+    let repository = fixture.initialize().repository;
+    git(&repository.root, &["config", "user.name", "Fixture"]);
+    git(
+        &repository.root,
+        &["config", "user.email", "fixture@example.invalid"],
+    );
+    std::fs::write(repository.root.join("modules/common.md"), [0xff, 0xfe]).unwrap();
+    git(&repository.root, &["add", "modules/common.md"]);
+    git(
+        &repository.root,
+        &["commit", "-m", "fixture: invalid UTF-8"],
+    );
+    let sentinel = managed("common", "module", "working sentinel");
+    std::fs::write(repository.root.join("modules/common.md"), &sentinel).unwrap();
+    let error = fixture
+        .service
+        .restore_working_file_from_head(&repository, "modules/common.md", "restore-invalid-utf8")
+        .expect_err("invalid UTF-8 HEAD content must fail before write");
+    assert_eq!(error.kind, InstructionRepositoryErrorKind::InvalidUtf8);
+    assert!(error.existing_state_unchanged);
+    assert_eq!(
+        std::fs::read_to_string(repository.root.join("modules/common.md")).unwrap(),
+        sentinel
+    );
+}
+
+#[test]
 fn invalid_explicit_project_configuration_never_falls_back_to_global_only() {
     let fixture = Fixture::new();
     let project = fixture._root.path().join("configured-project");
@@ -1120,6 +1326,29 @@ fn invalid_explicit_project_configuration_never_falls_back_to_global_only() {
         .resolve_project_repository(&project)
         .expect_err("invalid explicit configuration must fail visibly");
     assert_eq!(error.kind, InstructionRepositoryErrorKind::Configuration);
+}
+
+#[test]
+fn external_local_setup_rejects_a_git_repository_without_instruction_manifest() {
+    let fixture = Fixture::new();
+    let project = fixture._root.path().join("manifest-project");
+    let ordinary = fixture._root.path().join("ordinary-git");
+    init_plain_git(&project);
+    init_plain_git(&ordinary);
+    let error = fixture
+        .service
+        .configure_external_local(
+            &project,
+            "attach-ordinary-git",
+            &ordinary,
+            Some("main".to_string()),
+        )
+        .expect_err("ordinary Git checkout must not become an instruction store");
+    assert_eq!(
+        error.kind,
+        InstructionRepositoryErrorKind::RepositoryDamaged
+    );
+    assert!(!project.join(".jcode/instructions.toml").exists());
 }
 
 #[cfg(unix)]
@@ -1145,6 +1374,27 @@ fn project_configuration_write_never_escapes_through_dot_jcode_symlink() {
         .expect_err("configuration write must reject a symlinked .jcode directory");
     assert_eq!(error.kind, InstructionRepositoryErrorKind::SymlinkEscape);
     assert!(!outside.join("instructions.toml").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn dangling_project_configuration_symlink_fails_visibly() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = Fixture::new();
+    let project = fixture._root.path().join("dangling-config-project");
+    init_plain_git(&project);
+    std::fs::create_dir_all(project.join(".jcode")).unwrap();
+    symlink(
+        fixture._root.path().join("missing-config-target"),
+        project.join(".jcode/instructions.toml"),
+    )
+    .unwrap();
+    let error = fixture
+        .service
+        .resolve_project_repository(&project)
+        .expect_err("dangling explicit configuration must not look absent");
+    assert_eq!(error.kind, InstructionRepositoryErrorKind::SymlinkEscape);
 }
 
 #[test]

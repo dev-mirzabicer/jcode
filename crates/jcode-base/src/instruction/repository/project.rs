@@ -27,7 +27,7 @@ impl InstructionRepositoryService {
         let project_root = project.active_root().to_path_buf();
         let config_path = project_root.join(PROJECT_CONFIG_RELATIVE_PATH);
         let project_id = format!("project-{}", project.key().digest());
-        if config_path.exists() {
+        if project_config_present(&config_path)? {
             let config = load_project_config(&config_path)?;
             return configured_repository(
                 roots,
@@ -73,7 +73,7 @@ impl InstructionRepositoryService {
                 )
             })?;
         let path = project.active_root().join(PROJECT_CONFIG_RELATIVE_PATH);
-        if !path.exists() {
+        if !project_config_present(&path)? {
             return Ok(None);
         }
         load_project_config(&path).map(Some)
@@ -132,6 +132,8 @@ impl InstructionRepositoryService {
         } else {
             validate_checkout_identity(&repository, url, branch)?;
         }
+        self.validate_complete_store(&repository)
+            .map_err(InstructionRepositoryError::may_have_working_changes)?;
         let config = InstructionProjectConfig::new(InstructionProjectRepositoryMode::Submodule {
             path: relative,
             url: Some(url.to_string()),
@@ -187,6 +189,8 @@ impl InstructionRepositoryService {
         } else {
             validate_checkout_identity(&repository, url, branch)?;
         }
+        self.validate_complete_store(&repository)
+            .map_err(InstructionRepositoryError::may_have_working_changes)?;
         harden_private_checkout(&checkout)?;
         let config =
             InstructionProjectConfig::new(InstructionProjectRepositoryMode::ExternalRemote {
@@ -260,6 +264,7 @@ impl InstructionRepositoryService {
                 .path(&canonical));
             }
         }
+        self.validate_complete_store(&repository)?;
         let config =
             InstructionProjectConfig::new(InstructionProjectRepositoryMode::ExternalLocal {
                 path: canonical,
@@ -422,6 +427,19 @@ fn load_project_config(path: &Path) -> InstructionRepositoryResult<InstructionPr
         ));
     }
     Ok(config)
+}
+
+fn project_config_present(path: &Path) -> InstructionRepositoryResult<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(InstructionRepositoryError::new(
+            InstructionRepositoryErrorKind::Io,
+            "inspect instruction project configuration",
+            error.to_string(),
+        )
+        .path(path)),
+    }
 }
 
 fn save_project_config(

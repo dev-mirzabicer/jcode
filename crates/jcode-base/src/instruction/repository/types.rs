@@ -454,10 +454,12 @@ pub enum InstructionLegacyImportOutcome {
     Imported {
         receipt: LegacyImportReceipt,
         commit: String,
+        working_changes_preserved: Vec<PathBuf>,
     },
     AlreadyImported {
         receipt: LegacyImportReceipt,
         commit: String,
+        working_changes_preserved: Vec<PathBuf>,
     },
     SourceAbsent,
 }
