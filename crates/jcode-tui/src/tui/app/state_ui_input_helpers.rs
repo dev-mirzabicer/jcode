@@ -49,6 +49,7 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::hidden("/model-status", "Alias for /provider-test-coverage"),
     RegisteredCommand::public("/refresh-model-list", "Refresh provider model catalogs"),
     RegisteredCommand::public("/agents", "Configure models for agent roles"),
+    RegisteredCommand::public("/agent", "Select the primary agent before the first turn"),
     RegisteredCommand::public(
         "/swarm-prompt",
         "Open the active swarm routing prompt in your editor",
@@ -1626,6 +1627,7 @@ impl App {
                 | "/splitview"
                 | "/split-view"
                 | "/model"
+                | "/agent"
                 | "/agents"
                 | "/effort"
                 | "/fast"

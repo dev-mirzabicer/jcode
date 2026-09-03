@@ -115,6 +115,14 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
     if args.disable_base_tools {
         crate::env::set_var("JCODE_DISABLE_BASE_TOOLS", "1");
     }
+    if let Some(agent) = args
+        .agent
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        crate::env::set_var("JCODE_AGENT_SELECTION", agent);
+    }
     if args.tool_profile.is_some()
         || args.tools.is_some()
         || args.disabled_tools.is_some()
@@ -236,6 +244,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                 &args.provider,
                 args.model.as_deref(),
                 args.resume.as_deref(),
+                args.agent.as_deref(),
                 &message,
                 json,
                 ndjson,
@@ -296,13 +305,16 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             let (provider, registry) =
                 provider_init::init_provider_and_registry(&args.provider, args.model.as_deref())
                     .await?;
-            let (mut agent, outcome) = agent::Agent::new_with_startup_context(
+            let selection = crate::instruction::AgentSelection::parse(args.agent.as_deref())?;
+            let (mut agent, outcome) = agent::Agent::new_with_startup_context_and_agent(
                 provider,
                 registry,
                 None,
                 agent::StartupContextActivation::primary(
                     agent::StartupContextCaller::InteractiveRepl,
                 ),
+                selection,
+                false,
             )?;
             if outcome.is_blocked() {
                 if let Some(block) = agent.startup_context_preparation_block() {

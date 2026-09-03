@@ -106,7 +106,10 @@ fn request_roundtrip() {
         ApiRequest::SetRetentionPolicy {
             archive_after_days: Some(30),
         },
-        ApiRequest::CreateSession { working_dir: None },
+        ApiRequest::CreateSession {
+            working_dir: None,
+            agent: None,
+        },
         ApiRequest::AttachSession {
             session_id: "s1".into(),
         },

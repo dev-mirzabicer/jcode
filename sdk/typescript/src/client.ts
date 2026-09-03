@@ -433,7 +433,7 @@ export class JcodeClient extends EventEmitter {
     await this.requestOk({ req: "set_retention_policy", archive_after_days: archiveAfterDays });
   }
 
-  async createSession(workingDir?: string): Promise<SessionInfo> {
+  async createSession(workingDir?: string, agent?: string): Promise<SessionInfo> {
     if (!this.supports("startup_context_creation_errors")) {
       throw new HarnessError(
         "startup_context",
@@ -441,7 +441,11 @@ export class JcodeClient extends EventEmitter {
         { kind: "unsupported", issues: [] },
       );
     }
-    const frame = await this.requestOk({ req: "create_session", working_dir: workingDir });
+    const frame = await this.requestOk({
+      req: "create_session",
+      working_dir: workingDir,
+      agent,
+    });
     if (frame.ev === "startup_context_creation_failed") {
       const failure = frame.error as import("./protocol.js").StartupContextCreateError;
       throw new HarnessError("startup_context", failure.message, failure);

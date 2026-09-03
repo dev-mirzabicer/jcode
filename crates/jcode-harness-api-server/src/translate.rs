@@ -325,6 +325,12 @@ impl BridgeState {
                     "id": id,
                     "working_dir": working_dir,
                 });
+                if req == "create_session"
+                    && let Some(agent) = request["agent"].as_str()
+                    && !agent.trim().is_empty()
+                {
+                    subscribe["agent"] = json!(agent);
+                }
                 // Sessions rooted inside a jcode checkout are self-dev
                 // sessions: the daemon only enables the self-dev tools and
                 // prompt when the subscribe says so, and a client that opens

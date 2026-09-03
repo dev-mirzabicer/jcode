@@ -2369,6 +2369,7 @@ pub async fn run_single_message_command(
     choice: &super::provider_init::ProviderChoice,
     model: Option<&str>,
     resume_session: Option<&str>,
+    agent_selection: Option<&str>,
     message: &str,
     emit_json: bool,
     emit_ndjson: bool,
@@ -2407,13 +2408,16 @@ pub async fn run_single_message_command(
         restore_agent_session_if_requested(&mut agent, resume_session)?;
         agent
     } else {
-        match crate::agent::Agent::new_with_startup_context(
+        let selection = crate::instruction::AgentSelection::parse(agent_selection)?;
+        match crate::agent::Agent::new_with_startup_context_and_agent(
             provider.clone(),
             registry,
             None,
             crate::agent::StartupContextActivation::primary(
                 crate::agent::StartupContextCaller::RunCommand,
             ),
+            selection,
+            false,
         ) {
             Ok((agent, _)) => agent,
             Err(error) => {

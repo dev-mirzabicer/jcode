@@ -1480,6 +1480,18 @@ pub(in crate::tui::app) fn handle_server_event(
             app.update_terminal_title();
             false
         }
+        ServerEvent::AgentSelected {
+            agent_id,
+            display_name,
+            scope,
+            ..
+        } => {
+            app.push_display_message(DisplayMessage::system(format!(
+                "Primary agent: {display_name} ({scope}:{agent_id})"
+            )));
+            app.set_status_notice(format!("Agent → {display_name}"));
+            true
+        }
         ServerEvent::SessionCloseRequested { reason } => {
             app.push_display_message(DisplayMessage::system(format!(
                 "Session close requested by coordinator: {reason}"

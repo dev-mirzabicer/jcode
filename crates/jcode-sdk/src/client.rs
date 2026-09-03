@@ -612,6 +612,14 @@ impl JcodeClient {
     }
 
     pub fn create_session(&self, working_dir: Option<String>) -> Result<SessionInfo> {
+        self.create_session_with_agent(working_dir, None)
+    }
+
+    pub fn create_session_with_agent(
+        &self,
+        working_dir: Option<String>,
+        agent: Option<String>,
+    ) -> Result<SessionInfo> {
         if !self.supports("startup_context_creation_errors") {
             let error = jcode_harness_api::StartupContextCreateError {
                 kind: jcode_harness_api::StartupContextCreateErrorKind::Unsupported,
@@ -624,7 +632,7 @@ impl JcodeClient {
                 error.message,
             ));
         }
-        let frame = self.request(ApiRequest::CreateSession { working_dir })?;
+        let frame = self.request(ApiRequest::CreateSession { working_dir, agent })?;
         match frame.event {
             ApiEvent::Attached { session } => Ok(session),
             ApiEvent::StartupContextCreationFailed { error } => Err(Error::new(

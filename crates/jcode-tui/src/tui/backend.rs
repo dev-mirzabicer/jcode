@@ -358,6 +358,15 @@ impl RemoteConnection {
             working_dir,
             selfdev,
             target_session_id: resume_target.clone(),
+            agent: resume_target
+                .is_none()
+                .then(|| {
+                    std::env::var("JCODE_AGENT_SELECTION")
+                        .ok()
+                        .map(|value| value.trim().to_string())
+                        .filter(|value| !value.is_empty())
+                })
+                .flatten(),
             startup_context_caller: None,
             client_instance_id: conn.client_instance_id.clone(),
             client_has_local_history,
@@ -799,6 +808,17 @@ impl RemoteConnection {
         };
         self.next_request_id += 1;
         self.send_request(request).await?;
+        Ok(id)
+    }
+
+    pub async fn set_agent(&mut self, agent: &str) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::SetAgent {
+            id,
+            agent: agent.to_string(),
+        })
+        .await?;
         Ok(id)
     }
 

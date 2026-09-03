@@ -93,6 +93,10 @@ pub(crate) struct Args {
     #[arg(short, long, global = true)]
     pub(crate) model: Option<String>,
 
+    /// Initial primary agent (`name`, `global:name`, or `project:name`).
+    #[arg(long, global = true)]
+    pub(crate) agent: Option<String>,
+
     /// Named provider profile from [providers.<name>] in config.toml.
     /// Implies --provider openai-compatible for OpenAI-compatible profiles.
     #[arg(long, global = true)]

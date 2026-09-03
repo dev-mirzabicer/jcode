@@ -1077,6 +1077,26 @@ async fn handle_remote_key_internal(
                     return Ok(());
                 }
 
+                if trimmed == "/agent" || trimmed.starts_with("/agent ") {
+                    let selection = trimmed.strip_prefix("/agent").unwrap_or_default().trim();
+                    if selection.is_empty() {
+                        app.push_display_message(DisplayMessage::error(
+                            "Usage: /agent <name|global:name|project:name>".to_string(),
+                        ));
+                        return Ok(());
+                    }
+                    match remote.set_agent(selection).await {
+                        Ok(_) => app.set_status_notice(format!("Selecting agent {selection}...")),
+                        Err(error) => {
+                            app.push_display_message(DisplayMessage::error(format!(
+                                "Failed to request agent selection: {error}"
+                            )));
+                            app.set_status_notice("Agent selection failed");
+                        }
+                    }
+                    return Ok(());
+                }
+
                 if app_mod::commands::handle_agents_command(app, trimmed) {
                     return Ok(());
                 }

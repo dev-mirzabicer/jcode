@@ -1402,6 +1402,14 @@ fn test_agents_command_suggestions_include_targets() {
 }
 
 #[test]
+fn test_primary_agent_command_is_discoverable_and_accepts_selectors() {
+    let app = create_test_app();
+    let suggestions = app.get_suggestions_for("/agen");
+    assert!(suggestions.iter().any(|(cmd, _)| cmd == "/agent"));
+    assert!(App::command_accepts_args("/agent"));
+}
+
+#[test]
 fn test_swarm_prompt_command_is_discoverable_in_suggestions_and_help() {
     let app = create_test_app();
     let suggestions = app.get_suggestions_for("/swarm-pro");

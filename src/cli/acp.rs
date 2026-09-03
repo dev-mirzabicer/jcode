@@ -702,6 +702,10 @@ impl AcpRuntime {
                 working_dir: Some(cwd.display().to_string()),
                 selfdev: None,
                 target_session_id: None,
+                agent: std::env::var("JCODE_AGENT_SELECTION")
+                    .ok()
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty()),
                 startup_context_caller: None,
                 client_instance_id: Some("acp".to_string()),
                 client_has_local_history: false,
@@ -754,6 +758,7 @@ impl AcpRuntime {
                 working_dir: Some(cwd.display().to_string()),
                 selfdev: None,
                 target_session_id: Some(target_session_id.clone()),
+                agent: None,
                 startup_context_caller: None,
                 client_instance_id: Some("acp".to_string()),
                 client_has_local_history: false,

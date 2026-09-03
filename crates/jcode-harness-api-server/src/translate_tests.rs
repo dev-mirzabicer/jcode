@@ -85,12 +85,17 @@ fn state_with_session() -> BridgeState {
 #[test]
 fn create_session_maps_to_subscribe() {
     let mut state = BridgeState::default();
-    let out = state.api_request_to_legacy(&json!({"req": "create_session", "id": 1}));
+    let out = state.api_request_to_legacy(&json!({
+        "req": "create_session",
+        "id": 1,
+        "agent": "project:reviewer"
+    }));
     let Outbound::Legacy(value) = &out[0] else {
         panic!("expected legacy outbound");
     };
     assert_eq!(value["type"], "subscribe");
     assert!(value["working_dir"].is_string());
+    assert_eq!(value["agent"], "project:reviewer");
     assert_eq!(value["startup_context_caller"], "harness_api_create");
 }
 

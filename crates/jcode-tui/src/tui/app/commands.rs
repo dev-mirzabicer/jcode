@@ -3281,6 +3281,85 @@ pub(super) fn handle_agents_command(app: &mut App, trimmed: &str) -> bool {
     true
 }
 
+fn handle_primary_agent_command(app: &mut App, trimmed: &str) -> bool {
+    if trimmed != "/agent" && !trimmed.starts_with("/agent ") {
+        return false;
+    }
+    let selection = trimmed.strip_prefix("/agent").unwrap_or_default().trim();
+    if selection.is_empty() {
+        app.push_display_message(DisplayMessage::error(
+            "Usage: /agent <name|global:name|project:name>".to_string(),
+        ));
+        return true;
+    }
+    if app.session.first_provider_dispatch_at().is_some() {
+        app.push_display_message(DisplayMessage::error(
+            "The initial agent is already dispatched; post-dispatch agent transitions arrive in Phase 3 WP-04."
+                .to_string(),
+        ));
+        return true;
+    }
+    let selection = match crate::instruction::AgentSelection::parse(Some(selection)) {
+        Ok(selection) => selection,
+        Err(error) => {
+            app.push_display_message(DisplayMessage::error(format!(
+                "Invalid agent selection: {error}"
+            )));
+            return true;
+        }
+    };
+    let skills = app.current_skills_snapshot();
+    let available_skills = skills
+        .list()
+        .iter()
+        .map(|skill| crate::prompt::SkillInfo {
+            name: skill.name.clone(),
+            description: skill.description.clone(),
+        })
+        .collect::<Vec<_>>();
+    let working_dir = app.session.working_dir.as_deref().map(std::path::Path::new);
+    let activation = match crate::instruction::SystemPromptComposer::new().activate(
+        crate::instruction::SystemPromptActivationRequest {
+            working_dir,
+            selection,
+            is_selfdev: app.session.is_canary,
+            capabilities: crate::prompt::PromptCapabilities::current(),
+            available_skills: &available_skills,
+        },
+    ) {
+        Ok(activation) => activation,
+        Err(error) => {
+            app.push_display_message(DisplayMessage::error(format!(
+                "Agent selection failed: {error}"
+            )));
+            return true;
+        }
+    };
+    if app.session.active_agent() == Some(&activation.state.active_agent) {
+        app.set_status_notice(format!(
+            "Agent → {}",
+            activation.state.active_agent.display_name
+        ));
+        return true;
+    }
+    let previous = app.session.system_prompt.clone();
+    app.session.install_system_prompt(activation.state.clone());
+    if let Err(error) = app.session.save() {
+        app.session.system_prompt = previous;
+        app.push_display_message(DisplayMessage::error(format!(
+            "Agent selection could not be persisted: {error}"
+        )));
+        return true;
+    }
+    let active = activation.state.active_agent;
+    app.push_display_message(DisplayMessage::system(format!(
+        "Primary agent: {} ({}:{})",
+        active.display_name, active.scope, active.id
+    )));
+    app.set_status_notice(format!("Agent → {}", active.display_name));
+    true
+}
+
 fn handle_alignment_command(app: &mut App, trimmed: &str) -> bool {
     if !trimmed.starts_with("/alignment") {
         return false;
@@ -3404,6 +3483,10 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
     }
 
     if handle_swarm_prompt_command(app, trimmed) {
+        return true;
+    }
+
+    if handle_primary_agent_command(app, trimmed) {
         return true;
     }
 
