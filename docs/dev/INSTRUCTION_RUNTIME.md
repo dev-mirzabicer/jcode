@@ -1,6 +1,6 @@
 # Instruction runtime foundation
 
-**Status:** Phase 3 WP-01 typed runtime plus WP-02 Git-backed repository service. Production prompt callers have not migrated yet.
+**Status:** Phase 3 typed runtime, Git-backed repository service, complete primary composition, and frozen session activation.
 
 **Source module:** `crates/jcode-base/src/instruction/`
 
@@ -12,14 +12,14 @@ The instruction runtime is the one typed authority for managed instruction disco
 
 The runtime deliberately does not own:
 
-- Session activation, freezing, switching, persistence, or exports
+- Session delivery, switching, exports, or provider continuation policy
 - System versus user-message delivery
 - Display roles, timestamps, XML tags, receipts, tool schemas, or provider framing
 - Prompt-quality judgment
 
-The sibling `instruction::repository` domain now owns Git repositories, commits, branches, remotes, mutation locking, drafts, history, restore, project repository configuration, and legacy-import receipts. It does not render instructions. Later Phase 3 packages call the runtime for finished text and the repository service for source/history operations instead of reproducing either domain.
+The sibling `instruction::repository` domain owns Git repositories, commits, branches, remotes, mutation locking, drafts, history, restore, project repository configuration, and legacy-import receipts. `SystemPromptComposer` owns complete primary selection and composition over those sources. Session and caller layers own atomic persistence, first dispatch, lifecycle, delivery, and errors.
 
-WP-02 does not initialize Mirza's live `~/.jcode/instructions`, activate the runtime in production prompt paths, or disable any legacy source. The app-core server owns an inert `InstructionRepositoryService`; explicit operations and sandbox tests exercise it. WP-03 and later packages initialize/cut over at their accepted lifecycle boundary and migrate callers by the inventory ledger.
+The app-core server owns an `InstructionRepositoryService`. Construction remains side-effect free. A new primary activation initializes or validates the global seed, resolves any project store, composes current sources, and persists exact rendered text before publication. Later packages reuse these authorities instead of adding another prompt loader or Git path.
 
 ## Public operations
 
@@ -123,6 +123,23 @@ The graph traversal is iterative. Jcode adds no source-size, body-size, expansio
 
 Repository initialization and damaged-store recovery are implemented by WP-02 as described below.
 
+## Frozen primary composition
+
+`SystemPromptComposer::activate` is the caller-level operation for a new primary context. It:
+
+1. Initializes or validates the shipped global store and durable legacy imports.
+2. Resolves the configured project repository and dedicated global/project `AGENTS.md` inputs.
+3. Applies explicit, project-default, global-default, or compatibility selection.
+4. Enforces agent specificity and primary availability.
+5. Renders the profile kernel, complete agent, modules, redefinitions, addenda, common guidance, capability slots, self-development mechanics, preferred-tool compatibility sources, and available-skill snapshot.
+6. Returns exact prompt text plus stable agent identity.
+
+The app-core `Agent` persists that result before Startup Context publication. Request builders read the stored static text. Resume, reload, reconnect, takeover, and split do not read instruction source. Clear and transfer call the same composer with the retained identity and current sources.
+
+Frozen prompt and active-skill scalars live in full session snapshots. Their changes force a checkpoint and do not copy large text into each append-journal entry. The first-provider-dispatch boundary is independent of Startup Context and is persisted before provider opening.
+
+Old sessions without frozen state activate explicit `global:jcode` once, matching the old current-source behavior without claiming historical bytes.
+
 ## Diagnostics and errors
 
 Discovery records path-scoped diagnostics for unreadable or unidentified files. A document whose stable ID can be recovered remains a scoped invalid catalog entry so its shadowing semantics stay truthful.
@@ -145,9 +162,9 @@ Errors identify the affected resource and operation. Runtime state is immutable 
 
 ## Security and cache relevance
 
-The renderer cannot execute repository code, call helpers, load arbitrary paths, or escape configured instruction roots through partial references. Repository and symlink policy remains a WP-02 responsibility.
+The renderer cannot execute repository code, call helpers, load arbitrary paths, or escape configured instruction roots through partial references. The repository service owns path and symlink policy.
 
-WP-01 does not change provider prompts, tool definitions, or session cache behavior. Later activation packages render once at their accepted lifecycle boundary and persist exact text. The runtime itself has no watcher, source hash, Git revision, freshness state, truncation, or cache policy.
+Static prompt bytes are stable for the lifetime of one activation. Disk and config changes do not mutate them. The runtime itself still has no watcher, source hash, Git revision, freshness state, truncation, or cache policy. Session request paths keep dynamic skill text and turn reminders separate and preserve tool-definition locking.
 
 ## Mechanism verification
 
@@ -177,7 +194,8 @@ The fixtures use synthetic prose. They do not snapshot, require, forbid, or judg
 ## Handoff to later packages
 
 - WP-02 supplies validated Git-backed global and project roots plus import receipts through `InstructionRepositoryService`.
-- WP-03 uses the runtime for complete system composition and the compatibility `jcode` agent.
+- WP-03 supplies complete primary composition, exact session freezing, initial selection, and lifecycle foundations.
+- WP-04 adopts the active identity and dispatch boundary for append transitions, explicit system replacement, context protection, inspection, and exports.
 - WP-05 adopts managed skill discovery and activation snapshots.
 - WP-06 and WP-07 migrate inventory rows through registered typed consumers.
 - WP-09 and WP-10 use catalog summaries, diagnostics, complete content, graphs, and deterministic document serialization for the manager.
@@ -267,8 +285,8 @@ Typed discovery covers current global and project:
 - `.jcode/preferred-tools.md`
 - `.jcode/swarm-prompt.md`
 
-It deliberately excludes `AGENTS.md` and external skills. Import copies the complete source into a typed managed Markdown resource, records source SHA-256 and separate empty/blank semantics, validates the complete prospective manifest/resource/dependency graph, commits the resource and receipt together, and leaves the original untouched. A target that exists without a matching receipt is a conflict, not permission to overwrite it. An already-completed retry only restores missing committed files; divergent working files are preserved and listed in the typed outcome. Runtime source deactivation remains a later-package cutover after the durable receipt exists.
+It deliberately excludes `AGENTS.md` and external skills. Import copies the complete source into a typed managed Markdown resource, records source SHA-256 and separate empty/blank semantics, validates the complete prospective manifest/resource/dependency graph, commits the resource and receipt together, and leaves the original untouched. A target that exists without a matching receipt is a conflict, not permission to overwrite it. An already-completed retry only restores missing committed files; divergent working files are preserved and listed in the typed outcome. Primary composition deactivates imported global system-prompt and overlay sources only when their durable receipts exist.
 
 ### Production boundary
 
-The service is owned by app-core `Server`, but constructor use performs no repository I/O. There is no protocol or TUI surface in WP-02 and no production prompt activation. WP-09 and WP-10 can expose the existing typed service rather than adding Git policy to the client.
+App-core `Server` owns the repository service. Construction performs no repository I/O. Primary activation is live across shared-server sessions, app-core turns, local prompt construction, CLI run, direct REPL, ACP, and Harness creation. Clear and transfer reuse the same server-owned service. WP-09 and WP-10 add the central manager protocol and TUI over the existing typed service.

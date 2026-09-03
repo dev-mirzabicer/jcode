@@ -61,6 +61,8 @@ The Phase 3 product and acceptance contract allow exact runtime bytes **or a rep
 
 The fixture content is synthetic. The Jcode-authored wrappers and prose are the real production output from the starting implementation.
 
+WP-03 post-migration results for the compatibility agent and system-composition rows are recorded in [`WP03_MIGRATION_EVIDENCE.md`](WP03_MIGRATION_EVIDENCE.md). Its disposable equality probe was removed after use.
+
 ## Completeness check
 
 The artifact set is complete only when:

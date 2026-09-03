@@ -1,47 +1,85 @@
-# Configuring the System Prompt
+# Configuring primary agent instructions
 
-jcode builds its system prompt from several layers. Two of them are user-editable
-files, so you can tune agent behavior without rebuilding.
+Jcode composes one complete static system prompt when a primary session activates and stores the exact rendered text in that session. See [`AGENT_PROFILES.md`](AGENT_PROFILES.md) for selection, lifecycle, persistence, and recovery.
 
-## Layers (in order)
+## Managed stores
 
-1. **Base system prompt** — built-in `crates/jcode-base/src/prompt/system_prompt.md`,
-   overridable by file (see below).
-2. Capability modules (e.g. Mermaid guidance).
-3. Self-dev guidance (self-dev sessions only).
-4. `AGENTS.md` — project `./AGENTS.md` and global `~/AGENTS.md`.
-5. Prompt overlay — `./.jcode/prompt-overlay.md` and `~/.jcode/prompt-overlay.md`.
-6. Preferred tools — `./.jcode/preferred-tools.md` and `~/.jcode/preferred-tools.md`.
-7. Memory and the active skill prompt (dynamic, not cached).
+Global managed instructions live in:
 
-## Adding guidance (most common)
+```text
+~/.jcode/instructions/
+```
 
-Append instructions without touching the default prompt:
+Configured project stores use the repository modes in [`INSTRUCTION_STORES.md`](INSTRUCTION_STORES.md). The working tree is runtime authority. The initial global seed contains the profile kernel, an empty common layer, Mermaid guidance, and the `jcode` compatibility agent.
 
-- `~/.jcode/prompt-overlay.md` — applies everywhere.
-- `./.jcode/prompt-overlay.md` — applies to one project.
+A global store is initialized on the first primary activation. Server construction alone performs no instruction repository I/O.
 
-Both are included when present.
+## Initial agent selection
 
-## Replacing the base prompt
+Use any of:
 
-To fully replace layer 1, create either file:
+```text
+jcode --agent reviewer
+jcode --agent global:jcode run "message"
+jcode --agent project:reviewer repl
+```
 
-- `./.jcode/system-prompt.md` (project, highest precedence)
-- `~/.jcode/system-prompt.md` (global)
+In a fresh TUI session before the first provider request:
 
-The first non-empty file wins; otherwise the built-in default is used. An empty or
-whitespace-only file falls back to the default, so you cannot accidentally ship an
-empty prompt.
+```text
+/agent reviewer
+/agent global:jcode
+/agent project:reviewer
+```
 
-This replaces only the base prompt. `AGENTS.md`, overlays, and skills still apply. Agent memory
-would remain a separate dynamic source when globally enabled, but Mirza's downstream disables it.
-See [`MEMORY_POLICY.md`](MEMORY_POLICY.md).
+Remote `Subscribe` and Harness `CreateSession` requests also accept an optional `agent` selector. Rust SDK callers can use `create_session_with_agent`; TypeScript callers can use `createSession(workingDir, agent)`.
 
-## Notes
+Selection precedence is explicit selector, project-store `default_agent`, global-store `default_agent`, then effective `jcode` compatibility fallback. An invalid configured tier fails instead of falling through.
 
-- Changes to these files take effect for **new sessions**; a running session keeps the
-  prompt captured at start.
-- Editing the built-in `system_prompt.md` requires a rebuild (`selfdev build-reload`),
-  since it is embedded with `include_str!`.
-- Swarm model-routing guidance has its own analogous file: `.jcode/swarm-prompt.md`.
+## Static composition order
+
+The current stable slots are:
+
+1. Agent-profile kernel
+2. Selected agent
+3. Enabled capability resources
+4. Self-development mechanics for self-development sessions
+5. Global common guidance
+6. Project common guidance or compatible project overlay
+7. Global then project `AGENTS.md`
+8. Applicable project agent addenda
+9. Global then project preferred-tool compatibility guidance
+10. Available-skills catalog snapshot
+
+Memory is absent while globally disabled. Startup Context file snapshots remain authoritative user messages and are not system-prompt layers.
+
+## Legacy compatibility
+
+On first global-store initialization:
+
+- A nonblank `~/.jcode/system-prompt.md` is imported as the initial managed `global:jcode` body.
+- A present `~/.jcode/prompt-overlay.md` is imported as global common guidance.
+- Originals remain unchanged and become inactive only because durable import receipts prove the managed equivalent.
+
+A project with no configured managed store retains its `.jcode/system-prompt.md` and `.jcode/prompt-overlay.md` compatibility inputs. A configured project store can define or redefine agents and common guidance. Present legacy and managed sources with no matching import receipt fail rather than contributing twice.
+
+`AGENTS.md` remains a dedicated ecosystem input and is not imported automatically. Preferred-tool files remain live compatibility sources until their later managed migration.
+
+## Session freezing
+
+After activation, edits to managed resources, legacy prompt files, `AGENTS.md`, preferred-tool files, or the available-skill catalog do not change that session's static prompt. Config reload also does not replace stored static text.
+
+Resume, reconnect, takeover, reload, and split reuse exact stored text. Clear and transfer retain the active agent identity but render current sources for their new contexts. Old sessions without stored prompt state migrate once to the current `global:jcode` compatibility composition before their next provider request.
+
+Post-dispatch ordinary profile switching and explicit true-system replacement arrive in Phase 3 WP-04. `/agent` therefore rejects a session whose first provider dispatch has already occurred.
+
+## Dynamic prompt material
+
+The following remain late request material rather than part of the stored static prompt:
+
+- Active skill text until WP-05 adopts its persisted activation state
+- Current-turn system reminders
+- Swarm effort directives
+- Memory only in runtimes where memory is enabled; Mirza's downstream globally disables it
+
+Tool definitions retain their independent lock and one intentional late-MCP rebuild behavior.

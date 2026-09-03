@@ -1,8 +1,8 @@
 # Instruction stores
 
-**Status:** Phase 3 repository infrastructure. Production prompt activation and the central manager arrive in later Phase 3 packages.
+**Status:** Phase 3 Git repository infrastructure and primary system-prompt activation. The central instruction manager arrives in later Phase 3 packages.
 
-Jcode has a typed service for Git-versioned managed instructions. The service is present in the server, but it does not initialize or migrate Mirza's live instruction store merely because Jcode starts.
+Jcode has a typed service for Git-versioned managed instructions. App-core `Server` owns the service. Server construction performs no repository I/O; the first primary instruction activation initializes or validates the global store and then uses the same service for activation, clear, and transfer.
 
 ## Locations
 
@@ -14,7 +14,7 @@ Jcode has a typed service for Git-versioned managed instructions. The service is
 
 The global store is an owner-only standalone Git repository. It uses local branch `main` by default. The rest of `~/.jcode` is not part of this repository.
 
-### Project submodule
+### Git project submodule
 
 The conventional Git-project store is:
 
@@ -79,7 +79,7 @@ Pull requires a clean instruction repository. Fast-forward-only and merge behavi
 
 ## Initialization and recovery
 
-First installation materializes a complete seed, plans eligible exact legacy imports, validates the manifest plus complete resource and dependency graph, initializes Git, creates one baseline commit, secures private files, and writes a private initialization receipt. Re-running initialization repeats complete validation before accepting the store as healthy.
+First installation materializes the shipped profile kernel, common layer, Mermaid resource, and `jcode` compatibility agent together with eligible exact legacy imports, validates the manifest plus complete resource and dependency graph, initializes Git, creates one baseline commit, secures private files, and writes a private initialization receipt. Re-running initialization repeats complete validation before accepting the store as healthy.
 
 After initialization, a missing or invalid store is damage. Jcode does not silently recreate it from the shipped seed. Recovery supports restoring committed files from current `HEAD` and an explicit seed recreation. Recreation validates the replacement seed, imports, and branch before moving the damaged repository aside. A later failure reports changed state and the exact preserved backup path.
 
@@ -92,19 +92,16 @@ The repository service can inspect and plan exact import for current global and 
 - `.jcode/preferred-tools.md`
 - `.jcode/swarm-prompt.md`
 
-Import leaves the original untouched, records its SHA-256 and empty/blank semantics, validates the complete prospective repository graph, and commits the resource plus receipt together. An already-completed retry materializes missing committed files but never overwrites a newer working-tree edit; the typed outcome lists preserved divergent paths. Runtime deactivation happens only after a later activation package adopts the durable receipt.
+Import leaves the original untouched, records its SHA-256 and empty/blank semantics, validates the complete prospective repository graph, and commits the resource plus receipt together. The primary composer deactivates a global system-prompt or overlay compatibility source only after the durable receipt exists. An already-completed retry materializes missing committed files but never overwrites a newer working-tree edit; the typed outcome lists preserved divergent paths.
 
 `AGENTS.md` remains a dedicated live ecosystem input. External skills remain read-only until an explicit Copy workflow is implemented. Neither is imported automatically.
 
-## Current activation boundary
+## Primary activation
 
-Phase 3 WP-02 does not:
+The first new primary session initializes or validates the global store, resolves any configured project repository, and passes those roots to the typed composer. The same working-tree authority and complete validation rules therefore control default selection, explicit selection, clear, transfer, and old-session migration. A damaged initialized global store or invalid configured project store blocks activation rather than falling back to shipped seed or global-only behavior.
 
-- Initialize Mirza's live store
-- Change the current system prompt
-- Disable a legacy prompt source
-- Add agent commands
-- Change skill activation
-- Add the central instruction manager UI
+The global store is not initialized by ordinary server construction, read-only repository service access, internal non-primary agents, or documentation commands. See [`AGENT_PROFILES.md`](AGENT_PROFILES.md) for composition and lifecycle.
 
-Repository behavior is currently exercised through typed Rust interfaces and sandboxed real-Git fixtures. Phase 3 WP-03 adopts the roots for frozen system composition. WP-09 and WP-10 expose inspection and mutation through the central manager.
+## Current boundary
+
+The repository service and primary activation path are live. Read-only and editing manager protocol/TUI surfaces arrive in WP-09 and WP-10. Network Git operations remain explicit and no parent-project gitlink is committed automatically.
