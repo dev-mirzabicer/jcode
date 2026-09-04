@@ -32,7 +32,7 @@ In a fresh TUI session before the first provider request:
 /agent project:reviewer
 ```
 
-Remote `Subscribe` and Harness `CreateSession` requests also accept an optional `agent` selector. Rust SDK callers can use `create_session_with_agent`; TypeScript callers can use `createSession(workingDir, agent)`.
+Remote `Subscribe` and Harness `CreateSession` requests also accept an optional `agent` selector. Rust SDK callers can use `create_session_with_agent`; TypeScript callers can use `createSession(workingDir, agent)`. The Harness bridge advertises `initial_agent_selection`, and both SDKs fail before sending an agent-bearing request to an older bridge that lacks it. Ordinary creation without an agent remains compatible.
 
 Selection precedence is explicit selector, project-store `default_agent`, global-store `default_agent`, then effective `jcode` compatibility fallback. An invalid configured tier fails instead of falling through.
 
@@ -61,7 +61,7 @@ On first global-store initialization:
 - A present `~/.jcode/prompt-overlay.md` is imported as global common guidance.
 - Originals remain unchanged and become inactive only because durable import receipts prove the managed equivalent.
 
-A project with no configured managed store retains its `.jcode/system-prompt.md` and `.jcode/prompt-overlay.md` compatibility inputs. A configured project store can define or redefine agents and common guidance. Present legacy and managed sources with no matching import receipt fail rather than contributing twice.
+A project legacy system prompt or overlay remains a compatibility input only while the corresponding managed project resource is genuinely absent and no import receipt has completed cutover. A present invalid or ambiguous managed resource fails; it cannot disappear behind legacy fallback. Explicit `global:` selection remains global even when project legacy input exists. A configured project store can define or redefine agents and common guidance. Present valid legacy and managed definitions with no matching import receipt fail rather than contributing twice.
 
 `AGENTS.md` remains a dedicated ecosystem input and is not imported automatically. Preferred-tool files remain live compatibility sources until their later managed migration.
 
@@ -69,7 +69,9 @@ A project with no configured managed store retains its `.jcode/system-prompt.md`
 
 After activation, edits to managed resources, legacy prompt files, `AGENTS.md`, preferred-tool files, or the available-skill catalog do not change that session's static prompt. Config reload also does not replace stored static text.
 
-Resume, reconnect, takeover, reload, and split reuse exact stored text. Clear and transfer retain the active agent identity but render current sources for their new contexts. Old sessions without stored prompt state migrate once to the current `global:jcode` compatibility composition before their next provider request.
+Resume, reconnect, takeover, reload, and split reuse exact stored text. Server-backed and direct clear retain the active agent identity, render current sources, recapture Startup Context, and install the new context only after complete persistence succeeds. Transfer follows the same fresh-source rule and clears active skill. Old sessions without stored prompt state stage and durably persist the current `global:jcode` compatibility composition before replacing live Agent state; failed migration leaves the previously active Agent unchanged, and successful migration clears provider-native continuation before another request.
+
+Applicable invalid or ambiguous project addenda fail composition. Invalid unrelated addenda remain isolated. Unqualified pre-dispatch selection resolves project-first specificity before Jcode decides whether the operation is a same-agent no-op.
 
 Post-dispatch ordinary profile switching and explicit true-system replacement arrive in Phase 3 WP-04. `/agent` therefore rejects a session whose first provider dispatch has already occurred.
 

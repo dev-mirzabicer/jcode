@@ -131,14 +131,14 @@ Repository initialization and damaged-store recovery are implemented by WP-02 as
 2. Resolves the configured project repository and dedicated global/project `AGENTS.md` inputs.
 3. Applies explicit, project-default, global-default, or compatibility selection.
 4. Enforces agent specificity and primary availability.
-5. Renders the profile kernel, complete agent, modules, redefinitions, addenda, common guidance, capability slots, self-development mechanics, preferred-tool compatibility sources, and available-skill snapshot.
+5. Renders the profile kernel, complete agent, modules, redefinitions, applicable addenda, common guidance, capability slots, self-development mechanics, preferred-tool compatibility sources, and available-skill snapshot. Applicable invalid or ambiguous addenda fail; unrelated damaged addenda remain isolated.
 6. Returns exact prompt text plus stable agent identity.
 
-The app-core `Agent` persists that result before Startup Context publication. Request builders read the stored static text. Resume, reload, reconnect, takeover, and split do not read instruction source. Clear and transfer call the same composer with the retained identity and current sources.
+The app-core `Agent` persists that result before Startup Context publication. Request builders read the stored static text. Resume, reload, reconnect, takeover, and split do not read instruction source. Server and direct clear plus transfer call the same composer with the retained identity and current sources, and do not replace the live context until the complete new context is durable.
 
-Frozen prompt and active-skill scalars live in full session snapshots. Their changes force a checkpoint and do not copy large text into each append-journal entry. The first-provider-dispatch boundary is independent of Startup Context and is persisted before provider opening.
+Frozen prompt and active-skill scalars live in full session snapshots. Their changes force a checkpoint and do not copy large text into each append-journal entry. Metadata-only startup stubs deserialize agent, dispatch, transition, and skill identity without prompt or skill bodies. Full restore and remote history startup retain exact complete text. The first-provider-dispatch boundary is independent of Startup Context and is persisted before provider opening.
 
-Old sessions without frozen state activate explicit `global:jcode` once, matching the old current-source behavior without claiming historical bytes.
+Old sessions without frozen state stage explicit `global:jcode`, clear stored provider-native continuation, and persist the migration before live Agent assignment. A failure leaves prior session, provider, tool policy, queues, and continuation unchanged. This matches the old current-source behavior without claiming historical bytes.
 
 ## Diagnostics and errors
 
@@ -188,6 +188,11 @@ Synthetic tests cover:
 - Unknown frontmatter rejection and single-source agent metadata serialization
 - Kind-incompatible known-frontmatter rejection without silent serialization loss
 - Dedicated global/project `AGENTS.md` ordering
+- Applicable invalid and ambiguous addenda fail without weakening unrelated-invalid-resource isolation
+- Legacy compatibility fallback only on `ResourceNotFound`, with explicit scope and unqualified specificity preserved
+- Atomic direct clear and old-session migration, including provider continuation invalidation
+- Four-MiB metadata-only startup-stub loading without prompt or skill-body materialization
+- Harness `initial_agent_selection` capability negotiation and older-server rejection
 
 The fixtures use synthetic prose. They do not snapshot, require, forbid, or judge Mirza-approved instruction wording.
 

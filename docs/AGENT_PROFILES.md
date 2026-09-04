@@ -13,7 +13,7 @@ Selection precedence for a new primary session is:
 
 Selectors accept `name`, `global:name`, or `project:name`. Unqualified selectors use project-first specificity. A configured or explicit missing, invalid, ambiguous, or primary-unavailable agent fails. Jcode does not continue to a lower selection tier after a configured tier fails.
 
-The Rust SDK exposes `create_session_with_agent`. The TypeScript SDK accepts the optional second `createSession(workingDir, agent)` argument.
+The Rust SDK exposes `create_session_with_agent`. The TypeScript SDK accepts the optional second `createSession(workingDir, agent)` argument. The Harness bridge advertises `initial_agent_selection`; both SDKs reject an agent-bearing request before sending it when the connected bridge lacks that capability. Ordinary creation without an agent remains compatible with older bridges that support typed Startup Context creation failures.
 
 ## Compatibility agent and kernel
 
@@ -28,11 +28,11 @@ The shipped global instruction seed contains:
 
 The global store is initialized on the first primary instruction activation, not on server construction. Existing nonblank global `.jcode/system-prompt.md` and `.jcode/prompt-overlay.md` sources are imported into the first managed commit with durable receipts. Originals remain untouched. A valid initialized store is reused. A damaged initialized store blocks activation and requires repository recovery.
 
-Projects without a configured managed store retain compatible project `.jcode/system-prompt.md` and `.jcode/prompt-overlay.md` behavior. Dedicated global and project `AGENTS.md` inputs remain outside managed repositories. Global contributions now precede project contributions. Preferred-tool files remain compatibility inputs until their later Phase 3 migration.
+Projects without a configured managed store retain compatible project `.jcode/system-prompt.md` and `.jcode/prompt-overlay.md` behavior. Legacy fallback occurs only when the corresponding managed project resource is genuinely absent. A present invalid or ambiguous managed resource fails, and explicit global selection is not replaced by project legacy input. Dedicated global and project `AGENTS.md` inputs remain outside managed repositories. Global contributions now precede project contributions. Preferred-tool files remain compatibility inputs until their later Phase 3 migration.
 
 ## Complete activation composition
 
-The composer owns one complete operation. It resolves sources, defaults, specificity, agent availability, modules, project redefinitions, addenda, and complete rendering. Callers do not assemble prompt layers.
+The composer owns one complete operation. It resolves sources, defaults, specificity, agent availability, modules, project redefinitions, addenda, and complete rendering. Applicable invalid or ambiguous addenda fail activation; unrelated damaged addenda remain isolated. Callers do not assemble prompt layers.
 
 The current stable slots are:
 
@@ -68,15 +68,15 @@ The first dispatch boundary is persisted before opening the provider request. It
 ## Lifecycle
 
 - Resume, reconnect, takeover, reload, and split reuse exact stored text and active identity without instruction source access.
-- Clear retains the active identity, renders current sources, recaptures Startup Context, and publishes only after both activations succeed.
+- Server-backed and direct `Agent::clear` paths retain the active identity, render current sources, recapture Startup Context, and publish or install the replacement only after the complete child state is durable. Failure leaves the live session unchanged.
 - Transfer retains the active identity, renders current sources, clears active-skill state, recaptures Startup Context, appends the existing handoff, and removes a failed unpublished child completely.
-- An old session without stored prompt state renders and persists the current `global:jcode` compatibility composition when first restored. This does not claim historical prompt recovery and does not rewrite transcript messages.
+- An old session without stored prompt state stages and durably persists the current `global:jcode` compatibility composition before replacing live Agent state. Failure leaves the previous live session, tool policy, provider state, queues, and continuation untouched. Successful migration clears stored and in-memory provider-native continuation before another request. This does not claim historical prompt recovery and does not rewrite transcript messages.
 - `/agent <selector>` before first provider dispatch replaces provisional system state and appends no message. Re-selecting the same resolved identity is a no-op.
 - Post-dispatch ordinary switching and explicit true-system replacement are intentionally unavailable until Phase 3 WP-04.
 
 ## Storage and recovery
 
-Frozen prompt and active-skill text are snapshot state, not append-journal metadata. A change to either forces an atomic full session snapshot so a large prompt is not duplicated in every later journal entry. Startup stubs and remote startup loads retain the exact activation metadata they need. Session memory diagnostics account for frozen prompt and active-skill bytes.
+Frozen prompt and active-skill text are full snapshot state, not append-journal metadata. A change to either forces an atomic full session snapshot so a large prompt is not duplicated in every later journal entry. Metadata-only startup stubs deserialize only active agent identity, first-dispatch and active-transition metadata, and active skill ID; they do not materialize complete prompt or skill bodies. Full restore, remote history startup, resume, and split continue loading exact text where required. Session memory diagnostics account for complete text only when it is actually loaded.
 
 Instruction activation errors identify the selected resource or repository operation and leave prior session state unchanged. Fresh-session failures remove unpublished session artifacts and tool policy. Interactive clients receive a visible error. CLI, REPL, ACP, and Harness creation fail before a provider request.
 

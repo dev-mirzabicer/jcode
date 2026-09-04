@@ -92,13 +92,13 @@ The repository service can inspect and plan exact import for current global and 
 - `.jcode/preferred-tools.md`
 - `.jcode/swarm-prompt.md`
 
-Import leaves the original untouched, records its SHA-256 and empty/blank semantics, validates the complete prospective repository graph, and commits the resource plus receipt together. The primary composer deactivates a global system-prompt or overlay compatibility source only after the durable receipt exists. An already-completed retry materializes missing committed files but never overwrites a newer working-tree edit; the typed outcome lists preserved divergent paths.
+Import leaves the original untouched, records its SHA-256 and empty/blank semantics, validates the complete prospective repository graph, and commits the resource plus receipt together. The primary composer deactivates a global system-prompt or overlay compatibility source only after the durable receipt exists. Project compatibility fallback applies only when the corresponding managed project resource is genuinely absent. Invalid or ambiguous managed project resources remain authoritative failures, and explicit global selection is never replaced by project legacy input. An already-completed retry materializes missing committed files but never overwrites a newer working-tree edit; the typed outcome lists preserved divergent paths.
 
 `AGENTS.md` remains a dedicated live ecosystem input. External skills remain read-only until an explicit Copy workflow is implemented. Neither is imported automatically.
 
 ## Primary activation
 
-The first new primary session initializes or validates the global store, resolves any configured project repository, and passes those roots to the typed composer. The same working-tree authority and complete validation rules therefore control default selection, explicit selection, clear, transfer, and old-session migration. A damaged initialized global store or invalid configured project store blocks activation rather than falling back to shipped seed or global-only behavior.
+The first new primary session initializes or validates the global store, resolves any configured project repository, and passes those roots to the typed composer. The same working-tree authority and complete validation rules therefore control default selection, explicit selection, direct and server clear, transfer, and staged old-session migration. A damaged initialized global store or invalid configured project store blocks activation rather than falling back to shipped seed or global-only behavior.
 
 The global store is not initialized by ordinary server construction, read-only repository service access, internal non-primary agents, or documentation commands. See [`AGENT_PROFILES.md`](AGENT_PROFILES.md) for composition and lifecycle.
 
