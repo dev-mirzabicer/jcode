@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 const KERNEL_ID: &str = "kernel";
 const COMMON_ID: &str = "common";
 const MERMAID_ID: &str = "mermaid";
+const AVAILABLE_SKILLS_ID: &str = "available-skills";
 const COMPATIBILITY_AGENT_ID: &str = "jcode";
 const AGENT_TRANSITION_ID: &str = "agent-transition";
 const AGENT_REPLACEMENT_ID: &str = "agent-replacement";
@@ -24,6 +25,7 @@ const AGENT_REPLACEMENT_ID: &str = "agent-replacement";
 pub const AGENT_PROFILE_KERNEL: &str = "## Agent profiles\n\nThe initial agent profile appears in this system prompt. After the user explicitly changes agents, Jcode may append a Jcode-generated `<jcode_agent_profile>` user message containing a complete replacement profile. From that message onward, follow the latest such profile instead of earlier agent-profile instructions. It does not replace other system instructions or earlier conversation context.\n";
 pub const AGENT_TRANSITION_PROSE: &str = "The user switched this session to the following complete agent profile. Follow it from this point onward instead of earlier agent-profile instructions.\n";
 pub const AGENT_REPLACEMENT_PROSE: &str = "The user explicitly replaced this session's system prompt and active agent from {{previous_agent}} to {{new_agent}}.\n";
+pub const AVAILABLE_SKILLS_PROSE: &str = "# Available Skills\n\nYou have access to the following skills that the user can invoke with `/skillname`:\n{{skills}}\n\nWhen a user asks about available skills or capabilities, mention these skills.";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AgentSelection {
@@ -126,6 +128,11 @@ struct AgentReplacementValues<'a> {
     new_agent: &'a str,
 }
 
+#[derive(Serialize)]
+struct AvailableSkillsValues {
+    skills: String,
+}
+
 #[derive(Debug)]
 pub enum SystemPromptActivationError {
     Repository(InstructionRepositoryError),
@@ -192,6 +199,19 @@ impl SystemPromptComposer {
 
     pub fn from_repository_service(repositories: InstructionRepositoryService) -> Self {
         Self { repositories }
+    }
+
+    /// Initialize or validate the shipped global instruction store, including
+    /// exact eligible legacy imports and versioned seed adoption.
+    pub fn ensure_global_store(
+        &self,
+    ) -> Result<super::InstructionStoreInitialization, SystemPromptActivationError> {
+        let seed = shipped_instruction_seed()?;
+        let legacy = global_legacy_imports(&self.repositories)?;
+        let initialized = self.repositories.initialize_global(&seed, &legacy)?;
+        self.repositories
+            .ensure_shipped_seed(&initialized.repository, &seed)?;
+        Ok(initialized)
     }
 
     pub fn activate(
@@ -305,11 +325,7 @@ impl SystemPromptComposer {
         &self,
         working_dir: Option<&Path>,
     ) -> Result<CompositionEnvironment, SystemPromptActivationError> {
-        let seed = shipped_instruction_seed()?;
-        let legacy = global_legacy_imports(&self.repositories)?;
-        let initialized = self.repositories.initialize_global(&seed, &legacy)?;
-        self.repositories
-            .ensure_shipped_seed(&initialized.repository, &seed)?;
+        let initialized = self.ensure_global_store()?;
         let project_root = working_dir
             .map(|working_dir| self.repositories.resolve_project_root(working_dir))
             .transpose()?;
@@ -441,8 +457,11 @@ fn compose_activation(
         environment.project_root.as_deref(),
         &mut parts,
     )?;
-    if let Some(skills) = prompt::build_available_skills_prompt(request.available_skills) {
-        parts.push(skills);
+    if !request.available_skills.is_empty() {
+        parts.push(render_available_skills(
+            &environment.runtime,
+            request.available_skills,
+        )?);
     }
 
     Ok(SystemPromptActivation {
@@ -566,6 +585,28 @@ fn render_notification<T: Serialize>(
     )?);
     consumer
         .render(runtime, values)
+        .map(|rendered| rendered.text)
+}
+
+fn render_available_skills(
+    runtime: &super::InstructionRuntime,
+    skills: &[SkillInfo],
+) -> Result<String, InstructionError> {
+    let rows = skills
+        .iter()
+        .map(|skill| format!("\n- `/{} ` - {}", skill.name, skill.description))
+        .collect::<String>();
+    let mut registration = ConsumerRegistration::new(
+        "available-skills-catalog",
+        AVAILABLE_SKILLS_ID,
+        InstructionKind::System,
+        "system/available-skills.md",
+        "primary system-prompt composition",
+        "Managed available-skills prose; activation supplies the sorted effective skill names and descriptions and freezes the complete result.",
+    )?;
+    registration.required = true;
+    InstructionConsumer::<AvailableSkillsValues>::new(registration)
+        .render(runtime, &AvailableSkillsValues { skills: rows })
         .map(|rendered| rendered.text)
 }
 
@@ -719,6 +760,15 @@ pub fn shipped_instruction_seed() -> Result<InstructionStoreSeed, InstructionErr
             metadata: InstructionMetadata::default(),
             body: prompt::MERMAID_PROMPT.to_string(),
             path: PathBuf::from("system/mermaid.md"),
+        },
+        InstructionDocument {
+            id: InstructionId::parse(AVAILABLE_SKILLS_ID)?,
+            kind: InstructionKind::System,
+            scope: InstructionScope::Global,
+            template_mode: TemplateMode::Handlebars,
+            metadata: InstructionMetadata::default(),
+            body: AVAILABLE_SKILLS_PROSE.to_string(),
+            path: PathBuf::from("system/available-skills.md"),
         },
         compatibility_agent_document()?,
         InstructionDocument {
@@ -949,6 +999,62 @@ mod tests {
         assert!(!second.initialized_global_store);
         assert!(second.state.text.contains("SYNTHETIC_AGENT_V2"));
         assert!(!first.state.text.contains("SYNTHETIC_AGENT_V2"));
+    }
+
+    #[test]
+    fn available_skills_use_managed_prose_and_typed_activation_values() {
+        let fixture = Fixture::new();
+        let composer = fixture.composer();
+        composer
+            .activate(fixture.request(AgentSelection::Default))
+            .expect("initialize");
+        let mut resource = document(
+            InstructionScope::Global,
+            InstructionKind::System,
+            AVAILABLE_SKILLS_ID,
+            "system/available-skills.md",
+            "SYNTHETIC_SKILL_CATALOG{{skills}}",
+        );
+        resource.template_mode = TemplateMode::Handlebars;
+        std::fs::write(
+            fixture
+                .jcode_home
+                .join("instructions/system/available-skills.md"),
+            resource.to_markdown().expect("serialize"),
+        )
+        .expect("managed available skills");
+        let skills = vec![
+            SkillInfo {
+                name: "alpha".to_string(),
+                description: "Alpha description".to_string(),
+            },
+            SkillInfo {
+                name: "beta".to_string(),
+                description: "Beta description".to_string(),
+            },
+        ];
+        let activation = composer
+            .activate(SystemPromptActivationRequest {
+                working_dir: Some(&fixture.project),
+                selection: AgentSelection::Default,
+                is_selfdev: false,
+                capabilities: PromptCapabilities { mermaid: false },
+                available_skills: &skills,
+            })
+            .expect("activation with skills");
+        assert!(activation.state.text.contains("SYNTHETIC_SKILL_CATALOG"));
+        assert!(
+            activation
+                .state
+                .text
+                .contains("- `/alpha ` - Alpha description")
+        );
+        assert!(
+            activation
+                .state
+                .text
+                .contains("- `/beta ` - Beta description")
+        );
     }
 
     #[test]

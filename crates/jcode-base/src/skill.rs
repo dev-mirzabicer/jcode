@@ -2,6 +2,7 @@ use anyhow::Result;
 use chrono::Utc;
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 #[cfg(not(test))]
@@ -9,7 +10,121 @@ use std::sync::OnceLock;
 use tokio::sync::RwLock;
 
 mod invocation;
+mod managed;
 pub use invocation::SkillInvocation;
+pub use managed::{
+    ManagedSkillCopyDisposition, ManagedSkillCopyOutcome, ManagedSkillCopyRequest,
+    ManagedSkillDestination, copy_external_skill,
+};
+
+/// Where an effective skill package comes from.
+///
+/// Scope precedence is project before global. Within one scope, managed
+/// instruction-store skills override the existing external compatibility
+/// sources. Existing external ordering remains unchanged.
+#[derive(Debug, Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum SkillSourceKind {
+    ManagedGlobal,
+    ManagedProject,
+    ExternalPlugin,
+    ExternalJcodeGlobal,
+    ExternalAgentsGlobal,
+    ExternalJcodeProject,
+    ExternalAgentsProject,
+    ExternalClaudeProject,
+}
+
+impl SkillSourceKind {
+    pub fn is_managed(self) -> bool {
+        matches!(self, Self::ManagedGlobal | Self::ManagedProject)
+    }
+
+    pub fn is_read_only(self) -> bool {
+        !self.is_managed()
+    }
+
+    pub fn scope(self) -> crate::instruction::InstructionScope {
+        use crate::instruction::InstructionScope;
+        match self {
+            Self::ManagedProject
+            | Self::ExternalJcodeProject
+            | Self::ExternalAgentsProject
+            | Self::ExternalClaudeProject => InstructionScope::Project,
+            Self::ManagedGlobal
+            | Self::ExternalPlugin
+            | Self::ExternalJcodeGlobal
+            | Self::ExternalAgentsGlobal => InstructionScope::Global,
+        }
+    }
+}
+
+impl fmt::Display for SkillSourceKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::ManagedGlobal => "managed global",
+            Self::ManagedProject => "managed project",
+            Self::ExternalPlugin => "external plugin",
+            Self::ExternalJcodeGlobal => "external Jcode global",
+            Self::ExternalAgentsGlobal => "external .agents global",
+            Self::ExternalJcodeProject => "external Jcode project",
+            Self::ExternalAgentsProject => "external .agents project",
+            Self::ExternalClaudeProject => "external Claude project",
+        })
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct SkillSource {
+    pub kind: SkillSourceKind,
+    pub package_root: PathBuf,
+    pub managed_resource: Option<crate::instruction::InstructionResourceRef>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct SkillCatalogDiagnostic {
+    pub name: Option<String>,
+    pub source: Option<SkillSource>,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum SkillCatalogState {
+    Valid,
+    Invalid(String),
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct SkillCatalogEntry {
+    pub name: String,
+    pub description: Option<String>,
+    pub source: SkillSource,
+    pub state: SkillCatalogState,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct SkillActivation {
+    pub skill_id: String,
+    pub description: String,
+    pub rendered_text: String,
+    pub source: SkillSource,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct SkillResolutionError {
+    pub skill_name: Option<String>,
+    pub detail: String,
+}
+
+impl fmt::Display for SkillResolutionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.skill_name.as_deref() {
+            Some(name) => write!(formatter, "skill '{name}' is unavailable: {}", self.detail),
+            None => write!(formatter, "skill catalog is unavailable: {}", self.detail),
+        }
+    }
+}
+
+impl std::error::Error for SkillResolutionError {}
 
 /// A skill definition from SKILL.md
 #[derive(Debug, Clone)]
@@ -34,6 +149,9 @@ struct SkillFrontmatter {
 #[derive(Debug, Default, Clone)]
 pub struct SkillRegistry {
     skills: HashMap<String, Skill>,
+    sources: HashMap<String, SkillSource>,
+    blocked: HashMap<String, SkillCatalogDiagnostic>,
+    diagnostics: Vec<SkillCatalogDiagnostic>,
 }
 
 /// Maximum directory depth scanned under a Claude Code plugin root when
@@ -246,7 +364,7 @@ impl SkillRegistry {
         if let Ok(jcode_dir) = crate::storage::jcode_dir() {
             let jcode_skills = jcode_dir.join("skills");
             if jcode_skills.exists() {
-                registry.load_from_dir(&jcode_skills)?;
+                registry.load_from_dir(&jcode_skills, SkillSourceKind::ExternalJcodeGlobal)?;
             }
         }
 
@@ -254,7 +372,7 @@ impl SkillRegistry {
         if let Ok(agents_skills) = crate::storage::user_home_path(".agents/skills")
             && agents_skills.exists()
         {
-            registry.load_from_dir(&agents_skills)?;
+            registry.load_from_dir(&agents_skills, SkillSourceKind::ExternalAgentsGlobal)?;
         }
 
         Ok(registry)
@@ -277,25 +395,51 @@ impl SkillRegistry {
     /// over same-named global skills, mirroring the historical load order
     /// (project dirs loaded last).
     pub fn merge_overlay(&mut self, overlay: Self) {
-        self.skills.extend(overlay.skills);
+        for (name, skill) in overlay.skills {
+            self.blocked.remove(&name);
+            if let Some(source) = overlay.sources.get(&name) {
+                self.sources.insert(name.clone(), source.clone());
+            }
+            self.skills.insert(name, skill);
+        }
+        for diagnostic in overlay.blocked.into_values() {
+            self.insert_invalid(diagnostic);
+        }
+        self.diagnostics.extend(overlay.diagnostics);
     }
 
     /// Effective skills for a session: shared global skills plus the
     /// project-local overlay for the session's workspace root.
     pub fn effective_for_working_dir(base: &Self, working_dir: Option<&Path>) -> Self {
+        Self::effective_for_working_dir_with_repositories(
+            base,
+            working_dir,
+            &crate::instruction::InstructionRepositoryService::new(),
+        )
+    }
+
+    pub fn effective_for_working_dir_with_repositories(
+        base: &Self,
+        working_dir: Option<&Path>,
+        repositories: &crate::instruction::InstructionRepositoryService,
+    ) -> Self {
         let mut effective = base.clone();
+        let managed =
+            managed::ManagedSkillLayers::load_with_repositories(working_dir, repositories);
+        effective.merge_layer(managed.global);
         if let Ok(overlay) = Self::load_project_overlay(working_dir) {
             effective.merge_overlay(overlay);
         }
+        effective.merge_layer(managed.project);
+        effective.diagnostics.extend(managed.diagnostics);
         effective
     }
 
     /// Load skills from all standard locations, with project-local locations
     /// resolved against an optional active session working directory.
     pub fn load_for_working_dir(working_dir: Option<&Path>) -> Result<Self> {
-        let mut registry = Self::load_global()?;
-        registry.load_project_local_dirs(working_dir)?;
-        Ok(registry)
+        let global = Self::load_global()?;
+        Ok(Self::effective_for_working_dir(&global, working_dir))
     }
 
     fn project_local_dir(working_dir: Option<&Path>, name: &str) -> PathBuf {
@@ -307,19 +451,19 @@ impl SkillRegistry {
         // Load from ./.jcode/skills/ (project-local jcode skills)
         let local_jcode = Self::project_local_dir(working_dir, ".jcode");
         if local_jcode.exists() {
-            self.load_from_dir(&local_jcode)?;
+            self.load_from_dir(&local_jcode, SkillSourceKind::ExternalJcodeProject)?;
         }
 
         // Load from ./.agents/skills/ (shared cross-tool `.agents` convention)
         let local_agents = Self::project_local_dir(working_dir, ".agents");
         if local_agents.exists() {
-            self.load_from_dir(&local_agents)?;
+            self.load_from_dir(&local_agents, SkillSourceKind::ExternalAgentsProject)?;
         }
 
         // Fallback: ./.claude/skills/ (project-local Claude skills for compatibility)
         let local_claude = Self::project_local_dir(working_dir, ".claude");
         if local_claude.exists() {
-            self.load_from_dir(&local_claude)?;
+            self.load_from_dir(&local_claude, SkillSourceKind::ExternalClaudeProject)?;
         }
 
         Ok(())
@@ -338,7 +482,9 @@ impl SkillRegistry {
     fn load_plugin_skills_from_root(&mut self, plugins_root: &Path) -> usize {
         let mut count = 0;
         for dir in Self::plugin_skill_dirs_under(plugins_root) {
-            count += self.load_from_dir_count(&dir).unwrap_or(0);
+            count += self
+                .load_from_dir_count(&dir, SkillSourceKind::ExternalPlugin)
+                .unwrap_or(0);
         }
         count
     }
@@ -453,7 +599,7 @@ impl SkillRegistry {
     }
 
     /// Load skills from a directory
-    fn load_from_dir(&mut self, dir: &Path) -> Result<()> {
+    fn load_from_dir(&mut self, dir: &Path, source_kind: SkillSourceKind) -> Result<()> {
         if !dir.is_dir() {
             return Ok(());
         }
@@ -467,7 +613,7 @@ impl SkillRegistry {
                 if skill_file.exists()
                     && let Ok(skill) = Self::parse_skill(&skill_file)
                 {
-                    self.skills.insert(skill.name.clone(), skill);
+                    self.insert_valid(skill, source_kind, None);
                 }
             }
         }
@@ -547,15 +693,23 @@ impl SkillRegistry {
     pub fn reload(&mut self, name: &str) -> Result<bool> {
         // Find the skill's path first
         let path = self.skills.get(name).map(|s| s.path.clone());
+        let source = self.sources.get(name).cloned();
 
         if let Some(path) = path {
             if path.exists() {
                 let skill = Self::parse_skill(&path)?;
-                self.skills.insert(skill.name.clone(), skill);
+                self.skills.remove(name);
+                self.sources.remove(name);
+                if let Some(source) = source {
+                    self.insert_valid(skill, source.kind, source.managed_resource);
+                } else {
+                    self.skills.insert(skill.name.clone(), skill);
+                }
                 Ok(true)
             } else {
                 // Skill file was deleted
                 self.skills.remove(name);
+                self.sources.remove(name);
                 Ok(false)
             }
         } else {
@@ -577,14 +731,12 @@ impl SkillRegistry {
     /// can never leak its project skills into the shared registry that other
     /// sessions see (issue #457).
     pub fn reload_global(&mut self) -> Result<usize> {
-        // The available-skills list is embedded in the static system prompt,
-        // so a reload that changes it legitimately invalidates warm KV cache
-        // prefixes. Document it so the miss is attributed instead of alarmed.
-        crate::cache_invalidation::record(
-            "skill reload",
-            "reloaded all skills; the skills list in the system prompt may have changed",
-        );
+        // Reload changes discovery and future activations only. Existing system
+        // and active-skill text are exact session snapshots.
         self.skills.clear();
+        self.sources.clear();
+        self.blocked.clear();
+        self.diagnostics.clear();
 
         let mut count = 0;
 
@@ -598,7 +750,8 @@ impl SkillRegistry {
         if let Ok(jcode_dir) = crate::storage::jcode_dir() {
             let jcode_skills = jcode_dir.join("skills");
             if jcode_skills.exists() {
-                count += self.load_from_dir_count(&jcode_skills)?;
+                count +=
+                    self.load_from_dir_count(&jcode_skills, SkillSourceKind::ExternalJcodeGlobal)?;
             }
         }
 
@@ -606,14 +759,15 @@ impl SkillRegistry {
         if let Ok(agents_skills) = crate::storage::user_home_path(".agents/skills")
             && agents_skills.exists()
         {
-            count += self.load_from_dir_count(&agents_skills)?;
+            count +=
+                self.load_from_dir_count(&agents_skills, SkillSourceKind::ExternalAgentsGlobal)?;
         }
 
         Ok(count)
     }
 
     /// Load skills from a directory and return count
-    fn load_from_dir_count(&mut self, dir: &Path) -> Result<usize> {
+    fn load_from_dir_count(&mut self, dir: &Path, source_kind: SkillSourceKind) -> Result<usize> {
         if !dir.is_dir() {
             return Ok(0);
         }
@@ -628,7 +782,7 @@ impl SkillRegistry {
                 if skill_file.exists()
                     && let Ok(skill) = Self::parse_skill(&skill_file)
                 {
-                    self.skills.insert(skill.name.clone(), skill);
+                    self.insert_valid(skill, source_kind, None);
                     count += 1;
                 }
             }
@@ -675,7 +829,127 @@ impl SkillRegistry {
 
     /// Return true if a skill with the given name is currently loaded.
     pub fn contains(&self, name: &str) -> bool {
-        self.skills.contains_key(name)
+        self.skills.contains_key(name) || self.blocked.contains_key(name)
+    }
+
+    pub fn source(&self, name: &str) -> Option<&SkillSource> {
+        self.sources.get(name)
+    }
+
+    pub fn diagnostics(&self) -> &[SkillCatalogDiagnostic] {
+        &self.diagnostics
+    }
+
+    pub fn catalog_entries(&self) -> Vec<SkillCatalogEntry> {
+        let mut entries = self
+            .skills
+            .values()
+            .filter_map(|skill| {
+                self.sources
+                    .get(&skill.name)
+                    .cloned()
+                    .map(|source| SkillCatalogEntry {
+                        name: skill.name.clone(),
+                        description: Some(skill.description.clone()),
+                        source,
+                        state: SkillCatalogState::Valid,
+                    })
+            })
+            .collect::<Vec<_>>();
+        entries.extend(self.blocked.values().filter_map(|diagnostic| {
+            Some(SkillCatalogEntry {
+                name: diagnostic.name.clone()?,
+                description: None,
+                source: diagnostic.source.clone()?,
+                state: SkillCatalogState::Invalid(diagnostic.detail.clone()),
+            })
+        }));
+        entries.sort_by(|left, right| left.name.cmp(&right.name));
+        entries
+    }
+
+    pub fn resolve(&self, name: &str) -> std::result::Result<Option<&Skill>, SkillResolutionError> {
+        if let Some(diagnostic) = self.blocked.get(name) {
+            return Err(SkillResolutionError {
+                skill_name: Some(name.to_string()),
+                detail: diagnostic.detail.clone(),
+            });
+        }
+        if let Some(diagnostic) = self
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.name.is_none())
+        {
+            return Err(SkillResolutionError {
+                skill_name: None,
+                detail: diagnostic.detail.clone(),
+            });
+        }
+        if let Some(skill) = self.skills.get(name) {
+            return Ok(Some(skill));
+        }
+        Ok(None)
+    }
+
+    pub fn activate(
+        &self,
+        name: &str,
+    ) -> std::result::Result<Option<SkillActivation>, SkillResolutionError> {
+        let Some(skill) = self.resolve(name)? else {
+            return Ok(None);
+        };
+        let source = self
+            .sources
+            .get(name)
+            .cloned()
+            .ok_or_else(|| SkillResolutionError {
+                skill_name: Some(name.to_string()),
+                detail: "effective skill has no source identity".to_string(),
+            })?;
+        Ok(Some(SkillActivation {
+            skill_id: skill.name.clone(),
+            description: skill.description.clone(),
+            rendered_text: skill.get_prompt(),
+            source,
+        }))
+    }
+
+    fn insert_valid(
+        &mut self,
+        skill: Skill,
+        source_kind: SkillSourceKind,
+        managed_resource: Option<crate::instruction::InstructionResourceRef>,
+    ) {
+        let name = skill.name.clone();
+        let package_root = skill.path.parent().unwrap_or(&skill.path).to_path_buf();
+        self.blocked.remove(&name);
+        self.sources.insert(
+            name.clone(),
+            SkillSource {
+                kind: source_kind,
+                package_root,
+                managed_resource,
+            },
+        );
+        self.skills.insert(name, skill);
+    }
+
+    fn insert_invalid(&mut self, diagnostic: SkillCatalogDiagnostic) {
+        if let Some(name) = diagnostic.name.clone() {
+            self.skills.remove(&name);
+            self.sources.remove(&name);
+            self.blocked.insert(name, diagnostic.clone());
+        }
+        self.diagnostics.push(diagnostic);
+    }
+
+    fn merge_layer(&mut self, layer: managed::ManagedSkillLayer) {
+        for diagnostic in layer.blocked.into_values() {
+            self.insert_invalid(diagnostic);
+        }
+        for (skill, source) in layer.valid.into_values() {
+            self.insert_valid(skill, source.kind, source.managed_resource);
+        }
     }
 }
 
@@ -1407,7 +1681,10 @@ mod tests {
         let mut registry = SkillRegistry::default();
         registry.load_plugin_skills_from_root(&plugins_root);
         registry
-            .load_from_dir(&temp.path().join(".jcode/skills"))
+            .load_from_dir(
+                &temp.path().join(".jcode/skills"),
+                SkillSourceKind::ExternalJcodeProject,
+            )
             .expect("load explicit skills");
 
         let skill = registry.get("shared-name").expect("skill present");
