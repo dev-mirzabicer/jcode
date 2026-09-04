@@ -40,6 +40,8 @@ pub enum ErrorKind {
     InvalidOption,
     /// An operation requires a cloneable native socket transport.
     UnsupportedTransport,
+    /// The connected Harness server does not advertise a requested capability.
+    UnsupportedCapability,
     /// A global event consumer fell behind its bounded queue.
     EventBufferOverflow,
 }
@@ -62,6 +64,7 @@ impl ErrorKind {
             Self::InvalidInstanceHome => "invalid_instance_home",
             Self::InvalidOption => "invalid_option",
             Self::UnsupportedTransport => "unsupported_transport",
+            Self::UnsupportedCapability => "unsupported_capability",
             Self::EventBufferOverflow => "event_buffer_overflow",
             Self::StartupContext(_) => "startup_context",
             Self::Harness(code) => match code {

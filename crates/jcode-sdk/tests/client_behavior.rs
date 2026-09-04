@@ -49,6 +49,7 @@ fn fake_harness(handle: impl Fn(&ClientFrame, &mut dyn Write) + Send + 'static) 
         vec![
             "sessions".to_string(),
             "startup_context_creation_errors".to_string(),
+            "initial_agent_selection".to_string(),
         ],
         handle,
     )
@@ -175,6 +176,51 @@ fn create_session_rejects_a_server_without_startup_context_capability() {
     ));
 }
 
+#[test]
+fn create_session_with_agent_rejects_a_server_without_agent_capability() {
+    let client = fake_harness_with_capabilities(
+        vec![
+            "sessions".to_string(),
+            "startup_context_creation_errors".to_string(),
+        ],
+        |_, _| panic!("unsupported agent selection must fail before sending the request"),
+    );
+    let error = client
+        .create_session_with_agent(
+            Some("/tmp/project".to_string()),
+            Some("global:jcode".to_string()),
+        )
+        .expect_err("old server must not silently ignore the requested agent");
+    assert_eq!(error.code(), "unsupported_capability");
+    assert!(matches!(error.kind, ErrorKind::UnsupportedCapability));
+}
+
+#[test]
+fn create_session_without_agent_remains_compatible_without_agent_capability() {
+    let client = fake_harness_with_capabilities(
+        vec![
+            "sessions".to_string(),
+            "startup_context_creation_errors".to_string(),
+        ],
+        |frame, writer| {
+            if let ApiRequest::CreateSession { agent, .. } = &frame.request {
+                assert!(agent.is_none());
+                reply(
+                    frame,
+                    ApiEvent::Attached {
+                        session: session("ordinary"),
+                    },
+                    writer,
+                );
+            }
+        },
+    );
+    let created = client
+        .create_session(Some("/tmp/project".to_string()))
+        .expect("ordinary creation stays compatible");
+    assert_eq!(created.session_id, "ordinary");
+}
+
 /// GA session-management, runtime, credential, and file methods must preserve
 /// the stable protocol shapes while returning ergonomic SDK-owned values.
 #[test]
@@ -265,7 +311,11 @@ fn ga_runtime_and_file_methods_map_requests_and_typed_replies() {
     assert_eq!(runtime.protocol_version, API_VERSION_MAJOR);
     assert_eq!(
         runtime.capabilities,
-        ["sessions", "startup_context_creation_errors"]
+        [
+            "sessions",
+            "startup_context_creation_errors",
+            "initial_agent_selection",
+        ]
     );
     assert!(runtime.healthy);
     assert_eq!(runtime.session_id, "s1");

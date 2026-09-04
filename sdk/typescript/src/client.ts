@@ -441,6 +441,12 @@ export class JcodeClient extends EventEmitter {
         { kind: "unsupported", issues: [] },
       );
     }
+    if (agent !== undefined && !this.supports("initial_agent_selection")) {
+      throw new HarnessError(
+        "unsupported_capability",
+        "the connected Harness server does not support initial agent selection",
+      );
+    }
     const frame = await this.requestOk({
       req: "create_session",
       working_dir: workingDir,

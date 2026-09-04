@@ -83,6 +83,47 @@ test("error frames reject as HarnessError", async () => {
   await server.close();
 });
 
+test("agent selection requires an advertised Harness capability", async () => {
+  let createRequests = 0;
+  const server = await startMockHarness({
+    capabilities: ["sessions", "streaming", "startup_context_creation_errors"],
+    onRequest(request) {
+      if (request.req === "create_session") createRequests += 1;
+    },
+  });
+  const client = await JcodeClient.connect({ socketPath: server.socketPath });
+  await assert.rejects(() => client.createSession("/tmp/project", "global:jcode"), (error) => {
+    assert.ok(error instanceof HarnessError);
+    assert.equal((error as HarnessError).code, "unsupported_capability");
+    return true;
+  });
+  assert.equal(createRequests, 0);
+  client.close();
+  await server.close();
+});
+
+test("ordinary session creation remains compatible without agent capability", async () => {
+  const server = await startMockHarness({
+    capabilities: ["sessions", "streaming", "startup_context_creation_errors"],
+    onRequest(request, send) {
+      if (request.req === "create_session") {
+        assert.equal(request.agent, undefined);
+        send({
+          v: 1,
+          reply_to: request.id,
+          ev: "attached",
+          session: { session_id: "ordinary", status: "idle" },
+        });
+      }
+    },
+  });
+  const client = await JcodeClient.connect({ socketPath: server.socketPath });
+  const created = await client.createSession("/tmp/project");
+  assert.equal(created.session_id, "ordinary");
+  client.close();
+  await server.close();
+});
+
 test("run() collects a full turn and auto-approves permissions", async () => {
   const server = await startMockHarness({
     onRequest(request, send) {

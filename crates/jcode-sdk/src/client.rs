@@ -632,6 +632,12 @@ impl JcodeClient {
                 error.message,
             ));
         }
+        if agent.is_some() && !self.supports("initial_agent_selection") {
+            return Err(Error::new(
+                ErrorKind::UnsupportedCapability,
+                "the connected Harness server does not support initial agent selection",
+            ));
+        }
         let frame = self.request(ApiRequest::CreateSession { working_dir, agent })?;
         match frame.event {
             ApiEvent::Attached { session } => Ok(session),

@@ -40,6 +40,18 @@ pub use jcode_harness_api::{api_socket_path, legacy_socket_path};
 /// machine. 16 MiB is far above any legitimate frame (the largest real one is a
 /// message carrying base64 images) and far below a problem.
 const MAX_FRAME_BYTES: u64 = 16 * 1024 * 1024;
+const BRIDGE_CAPABILITIES: &[&str] = &[
+    "sessions",
+    "streaming",
+    "persisted_session_discovery",
+    "runtime_info",
+    "api_key_provisioning",
+    "session_archive",
+    "session_retention",
+    "session_files",
+    "startup_context_creation_errors",
+    "initial_agent_selection",
+];
 
 /// Read one newline-delimited frame, refusing to buffer more than
 /// `MAX_FRAME_BYTES`. Returns `Ok(0)` at end of stream, like `read_line`.
@@ -216,20 +228,11 @@ async fn handle_api_client(stream: Stream, legacy_socket: PathBuf) -> Result<()>
         ApiEvent::HelloOk {
             version: API_VERSION_MAJOR,
             server: format!("jcode-harness-api-bridge/{}", env!("CARGO_PKG_VERSION")),
-            capabilities: [
-                "sessions",
-                "streaming",
-                "persisted_session_discovery",
-                "runtime_info",
-                "api_key_provisioning",
-                "session_archive",
-                "session_retention",
-                "session_files",
-                "startup_context_creation_errors",
-            ]
-            .into_iter()
-            .map(str::to_string)
-            .collect(),
+            capabilities: BRIDGE_CAPABILITIES
+                .iter()
+                .copied()
+                .map(str::to_string)
+                .collect(),
         },
     );
     write_json_line(&mut write_half, &hello_ok).await?;
@@ -317,6 +320,14 @@ async fn handle_api_client(stream: Stream, legacy_socket: PathBuf) -> Result<()>
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod capability_tests {
+    #[test]
+    fn initial_agent_selection_is_explicitly_advertised() {
+        assert!(super::BRIDGE_CAPABILITIES.contains(&"initial_agent_selection"));
     }
 }
 

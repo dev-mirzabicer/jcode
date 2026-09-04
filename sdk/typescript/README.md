@@ -386,6 +386,7 @@ try {
 
 | Code | Cause | Recovery |
 | --- | --- | --- |
+| `unsupported_capability` | The client requested an additive feature, such as initial agent selection, that the connected Harness server did not advertise. | Upgrade or switch the Harness server, or omit the optional feature. The SDK fails before sending a request that an older server could silently ignore. |
 | `unsupported_transport` | `globalEvents()` was called on a custom transport, which cannot be cloned into per-session connections. | Use a native socket client, or consume individual `events()` streams yourself. |
 | `event_buffer_overflow` | A `globalEvents()` consumer fell behind `maxBufferedEvents`; the SDK fails rather than dropping events silently. | Consume faster, reduce work in the loop, or deliberately increase the bounded buffer. Recreate the iterator afterward. |
 | `concurrent_next` | Two callers invoked `next()` concurrently on the same global event iterator. | Give the iterator one consumer and fan out events inside the application. |
