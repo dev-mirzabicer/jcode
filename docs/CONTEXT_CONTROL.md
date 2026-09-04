@@ -594,6 +594,13 @@ marked transcript-invalidated at one new revision; valid older transactions rema
 Rewind undo restores the exact prior messages and context state and validates the restored
 projection before publication.
 
+When a session's current agent is delivered by an appended profile message, that exact
+message is active configuration as well as authoritative transcript source. The Context
+Editor marks it as locked, keeps complete detail inspectable, and rejects a summary range
+covering it before curator work. Rewind pins it at the new tail boundary rather than
+time-traveling agent configuration; undo restores prior history without duplicating it.
+Superseded profile messages have no active lock and follow ordinary historical context rules.
+
 ### Clear
 
 Clear starts with no context transactions and invalidates provider continuation.

@@ -1,6 +1,6 @@
 # Instruction runtime foundation
 
-**Status:** Phase 3 typed runtime, Git-backed repository service, complete primary composition, and frozen session activation.
+**Status:** Phase 3 typed runtime, Git-backed repository service, complete primary composition, frozen activation, append profile transitions, and explicit true-system replacement.
 
 **Source module:** `crates/jcode-base/src/instruction/`
 
@@ -140,6 +140,18 @@ Frozen prompt and active-skill scalars live in full session snapshots. Their cha
 
 Old sessions without frozen state stage explicit `global:jcode`, clear stored provider-native continuation, and persist the migration before live Agent assignment. A failure leaves prior session, provider, tool policy, queues, and continuation unchanged. This matches the old current-source behavior without claiming historical bytes.
 
+## Profile lifecycle operations
+
+`SystemPromptComposer` also exposes complete caller operations for:
+
+- `render_agent_transition`: resolves current target specificity, availability, modules, compatible project redefinition, and applicable addenda, then renders the managed transition sentence. It does not include kernel or independent system slots.
+- `replace_system_prompt`: composes the complete latest true system prompt and renders the managed replacement audit sentence with typed agent names.
+- `list_primary_agents`: returns valid global and project primary-capable agents with explicit scope and descriptions for TUI, remote, Harness, and SDK callers.
+
+The shipped seed is versioned separately from the store schema. A newer binary can commit paths introduced by a newer seed to an existing valid store. The operation preserves existing working files, rejects damaged committed-but-missing paths, updates the durable seed version once, and treats later deletion as user authority rather than a reason to recreate content.
+
+Session delivery remains outside this module. `Session` atomically owns appended message content, active identity, active transition ID, and the structural profile-message identity index. App-core and TUI callers own idle gating, persistence, provider preflight, continuation reset, cache attribution, context accounting, UI cards, and errors.
+
 ## Diagnostics and errors
 
 Discovery records path-scoped diagnostics for unreadable or unidentified files. A document whose stable ID can be recovered remains a scoped invalid catalog entry so its shadowing semantics stay truthful.
@@ -193,6 +205,11 @@ Synthetic tests cover:
 - Atomic direct clear and old-session migration, including provider continuation invalidation
 - Four-MiB metadata-only startup-stub loading without prompt or skill-body materialization
 - Harness `initial_agent_selection` capability negotiation and older-server rejection
+- Versioned shipped-seed upgrades without overwriting working files or recreating adopted deletions
+- Current-source transition and replacement composition with exact specificity and applicable addenda
+- Atomic append switching, same-agent no-op, replacement continuation/cache transition, and tool-lock independence
+- Active-profile Context Editor locking before curator work and rewind/undo identity preservation
+- Raw, Markdown, replay, protocol, Harness, Rust SDK, TypeScript SDK, and wide/narrow TUI mechanisms
 
 The fixtures use synthetic prose. They do not snapshot, require, forbid, or judge Mirza-approved instruction wording.
 
@@ -200,7 +217,7 @@ The fixtures use synthetic prose. They do not snapshot, require, forbid, or judg
 
 - WP-02 supplies validated Git-backed global and project roots plus import receipts through `InstructionRepositoryService`.
 - WP-03 supplies complete primary composition, exact session freezing, initial selection, and lifecycle foundations.
-- WP-04 adopts the active identity and dispatch boundary for append transitions, explicit system replacement, context protection, inspection, and exports.
+- WP-04 supplies append transitions, explicit system replacement, context protection, rewind pinning, inspection, exports, and public control interfaces.
 - WP-05 adopts managed skill discovery and activation snapshots.
 - WP-06 and WP-07 migrate inventory rows through registered typed consumers.
 - WP-09 and WP-10 use catalog summaries, diagnostics, complete content, graphs, and deterministic document serialization for the manager.

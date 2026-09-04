@@ -10,7 +10,7 @@ Global managed instructions live in:
 ~/.jcode/instructions/
 ```
 
-Configured project stores use the repository modes in [`INSTRUCTION_STORES.md`](INSTRUCTION_STORES.md). The working tree is runtime authority. The initial global seed contains the profile kernel, an empty common layer, Mermaid guidance, and the `jcode` compatibility agent.
+Configured project stores use the repository modes in [`INSTRUCTION_STORES.md`](INSTRUCTION_STORES.md). The working tree is runtime authority. The global shipped seed contains the profile kernel, an empty common layer, Mermaid guidance, the `jcode` compatibility agent, and managed transition and replacement notifications. Existing initialized stores adopt newly shipped seed paths through a versioned local commit that does not overwrite existing working files or recreate later user deletions.
 
 A global store is initialized on the first primary activation. Server construction alone performs no instruction repository I/O.
 
@@ -73,13 +73,17 @@ Resume, reconnect, takeover, reload, and split reuse exact stored text. Server-b
 
 Applicable invalid or ambiguous project addenda fail composition. Invalid unrelated addenda remain isolated. Unqualified pre-dispatch selection resolves project-first specificity before Jcode decides whether the operation is a same-agent no-op.
 
-Post-dispatch ordinary profile switching and explicit true-system replacement arrive in Phase 3 WP-04. `/agent` therefore rejects a session whose first provider dispatch has already occurred.
+## Agent changes after creation
+
+`/agent` opens the primary-agent picker. Before first dispatch, selection replaces provisional composition without a message or cache event. After first dispatch, ordinary selection appends only the complete current target profile and applicable addenda as a hidden user-authority message, preserving the true-system prefix. `/agent replace [selector]` explicitly renders and installs a new complete true system prompt, validates current provider budget, clears active appended-profile protection, resets provider continuation and prompt-cache tracking, and appends a managed audit notice. Neither operation makes an immediate provider call, and both are idle-only.
+
+`/agent inspect` returns exact stored current system and active-skill text. The old `/agents` special-role model picker is now `/agent-models`; `/agents` remains a compatibility alias.
 
 ## Dynamic prompt material
 
 The following remain late request material rather than part of the stored static prompt:
 
-- Active skill text until WP-05 adopts its persisted activation state
+- Active skill text until WP-05 completes managed invocation and lifecycle adoption
 - Current-turn system reminders
 - Swarm effort directives
 - Memory only in runtimes where memory is enabled; Mirza's downstream globally disables it

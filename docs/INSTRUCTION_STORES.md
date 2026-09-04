@@ -1,6 +1,6 @@
 # Instruction stores
 
-**Status:** Phase 3 Git repository infrastructure and primary system-prompt activation. The central instruction manager arrives in later Phase 3 packages.
+**Status:** Phase 3 Git repository infrastructure, primary activation, and versioned shipped-seed adoption. The central instruction manager arrives in later Phase 3 packages.
 
 Jcode has a typed service for Git-versioned managed instructions. App-core `Server` owns the service. Server construction performs no repository I/O; the first primary instruction activation initializes or validates the global store and then uses the same service for activation, clear, and transfer.
 
@@ -79,7 +79,9 @@ Pull requires a clean instruction repository. Fast-forward-only and merge behavi
 
 ## Initialization and recovery
 
-First installation materializes the shipped profile kernel, common layer, Mermaid resource, and `jcode` compatibility agent together with eligible exact legacy imports, validates the manifest plus complete resource and dependency graph, initializes Git, creates one baseline commit, secures private files, and writes a private initialization receipt. Re-running initialization repeats complete validation before accepting the store as healthy.
+First installation materializes the shipped profile kernel, common layer, Mermaid resource, `jcode` compatibility agent, and managed profile-transition notifications together with eligible exact legacy imports, validates the manifest plus complete resource and dependency graph, initializes Git, creates one baseline commit, secures private files, and writes a private initialization receipt. Re-running initialization repeats complete validation before accepting the store as healthy.
+
+The manifest also records a shipped-seed version, separate from its schema version. When a newer Jcode introduces new shipped resource paths, the composer adopts them through one isolated local commit before use. Adoption writes only missing paths introduced by that seed and the manifest update. It never overwrites an existing working file. A path committed at `HEAD` but missing from the working tree is damage and must be restored explicitly. Once a seed version is adopted, deleting one of its resources is user authority and later activations do not recreate it.
 
 After initialization, a missing or invalid store is damage. Jcode does not silently recreate it from the shipped seed. Recovery supports restoring committed files from current `HEAD` and an explicit seed recreation. Recreation validates the replacement seed, imports, and branch before moving the damaged repository aside. A later failure reports changed state and the exact preserved backup path.
 
