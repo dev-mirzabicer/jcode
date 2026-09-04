@@ -833,6 +833,23 @@ mod tests {
         .expect("current primary activation");
         agent.provider_session_id = Some("live-runtime-continuation".to_string());
         agent.session.provider_session_id = Some("live-stored-continuation".to_string());
+        agent.pending_alerts.push("preserve-alert".to_string());
+        agent.current_turn_system_reminder = Some("preserve-reminder".to_string());
+        agent.locked_tools = Some(Vec::new());
+        agent.mcp_late_register_resolved = true;
+        agent.background_tool_signal.fire();
+        agent.graceful_shutdown.fire();
+        agent
+            .soft_interrupt_queue
+            .lock()
+            .expect("soft interrupt queue")
+            .push(crate::agent::SoftInterruptMessage {
+                content: "preserve-interrupt".to_string(),
+                images: Vec::new(),
+                urgent: true,
+                source: crate::agent::SoftInterruptSource::User,
+                unattended_context: None,
+            });
         let before_session = agent.session.clone();
         let before_provider_session_id = agent.provider_session_id.clone();
 
@@ -855,6 +872,24 @@ mod tests {
             before_session.provider_session_id
         );
         assert_eq!(agent.provider_session_id, before_provider_session_id);
+        assert_eq!(agent.pending_alerts, ["preserve-alert"]);
+        assert_eq!(
+            agent.current_turn_system_reminder.as_deref(),
+            Some("preserve-reminder")
+        );
+        assert!(agent.locked_tools.is_some());
+        assert!(agent.mcp_late_register_resolved);
+        assert!(agent.background_tool_signal.is_set());
+        assert!(agent.graceful_shutdown.is_set());
+        assert_eq!(
+            agent
+                .soft_interrupt_queue
+                .lock()
+                .expect("soft interrupt queue")
+                .first()
+                .map(|message| message.content.as_str()),
+            Some("preserve-interrupt")
+        );
         let unchanged_target = Session::load(&target.id).expect("reload unchanged target");
         assert!(unchanged_target.system_prompt.is_none());
         assert_eq!(
