@@ -1537,6 +1537,69 @@ fn local_primary_agent_picker_rechecks_busy_state_at_mutation_boundary() {
 }
 
 #[test]
+fn local_profile_append_and_replacement_invalidate_rewind_undo() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let mut activation = crate::instruction::SystemPromptComposer::new()
+            .activate(crate::instruction::SystemPromptActivationRequest {
+                working_dir: app.session.working_dir.as_deref().map(std::path::Path::new),
+                selection: crate::instruction::AgentSelection::Default,
+                is_selfdev: false,
+                capabilities: crate::prompt::PromptCapabilities { mermaid: false },
+                available_skills: &[],
+            })
+            .expect("initial local agent activation");
+        activation.state.first_provider_dispatch_at = Some(chrono::Utc::now());
+        app.session.install_system_prompt(activation.state);
+        let agent_path = crate::storage::jcode_dir()
+            .expect("Jcode home")
+            .join("instructions/agents/local-reviewer.md");
+        std::fs::write(
+            agent_path,
+            "---\nid: local-reviewer\nkind: agent\nname: Local Reviewer\ndescription: Synthetic local reviewer\navailability: both\n---\n\nSYNTHETIC_LOCAL_REVIEWER",
+        )
+        .expect("write local reviewer");
+        let selection = || {
+            crate::instruction::AgentSelection::Explicit(
+                crate::instruction::InstructionSelector::global(
+                    crate::instruction::InstructionKind::Agent,
+                    "local-reviewer",
+                )
+                .expect("local reviewer selector"),
+            )
+        };
+        let snapshot = LocalRewindUndoSnapshot {
+            messages: app.session.messages.clone(),
+            agent_profile_message_ids: app.session.agent_profile_message_ids.clone(),
+            context_view: app.session.context_view.clone(),
+            visible_message_count: app.session.rewind_target_count(),
+        };
+        app.rewind_undo_snapshot = Some(snapshot);
+        super::commands::apply_local_primary_agent_change(
+            &mut app,
+            selection(),
+            crate::agent::AgentProfileChangeMode::Ordinary,
+        )
+        .expect("local append");
+        assert!(app.rewind_undo_snapshot.is_none());
+
+        app.rewind_undo_snapshot = Some(LocalRewindUndoSnapshot {
+            messages: app.session.messages.clone(),
+            agent_profile_message_ids: app.session.agent_profile_message_ids.clone(),
+            context_view: app.session.context_view.clone(),
+            visible_message_count: app.session.rewind_target_count(),
+        });
+        super::commands::apply_local_primary_agent_change(
+            &mut app,
+            selection(),
+            crate::agent::AgentProfileChangeMode::ReplaceSystem,
+        )
+        .expect("local replacement");
+        assert!(app.rewind_undo_snapshot.is_none());
+    });
+}
+
+#[test]
 fn test_swarm_prompt_command_is_discoverable_in_suggestions_and_help() {
     let app = create_test_app();
     let suggestions = app.get_suggestions_for("/swarm-pro");
