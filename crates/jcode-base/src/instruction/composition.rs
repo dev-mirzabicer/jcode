@@ -1,6 +1,6 @@
 use super::{
-    AddendumMetadata, AgentAvailability, AgentMetadata, InstructionDocument, InstructionError,
-    InstructionId, InstructionKind, InstructionLegacyImportSpec, InstructionLegacyImportTarget,
+    AgentAvailability, AgentMetadata, InstructionDocument, InstructionError, InstructionId,
+    InstructionKind, InstructionLegacyImportSpec, InstructionLegacyImportTarget,
     InstructionMetadata, InstructionRepositoryError, InstructionRepositoryService,
     InstructionResourceRef, InstructionScope, InstructionSeedFile, InstructionSelector,
     InstructionStoreManifest, InstructionStoreSeed, LegacyInstructionSourceKind, TemplateMode,
@@ -52,7 +52,9 @@ impl AgentSelection {
             Self::Default => false,
             Self::Explicit(selector) if selector.id.as_str() != agent.id => false,
             Self::Explicit(selector) => match selector.scope {
-                super::InstructionScopeSelector::Unqualified => true,
+                // Unqualified selection must resolve current project-first
+                // specificity before it can be classified as a no-op.
+                super::InstructionScopeSelector::Unqualified => false,
                 super::InstructionScopeSelector::Global => agent.scope == InstructionScope::Global,
                 super::InstructionScopeSelector::Project => {
                     agent.scope == InstructionScope::Project
@@ -194,7 +196,9 @@ impl SystemPromptComposer {
                 .values()
                 .any(|receipt| receipt.source_kind == LegacyInstructionSourceKind::SystemPrompt)
         });
-        let project_legacy_prompt = if project_system_imported {
+        let project_legacy_allowed = selection.id.as_str() == COMPATIBILITY_AGENT_ID
+            && !matches!(selection.scope, super::InstructionScopeSelector::Global);
+        let project_legacy_prompt = if project_system_imported || !project_legacy_allowed {
             None
         } else {
             project_root
@@ -203,11 +207,23 @@ impl SystemPromptComposer {
                 .transpose()?
                 .flatten()
         };
-        let render_selection = if selection.scope == super::InstructionScopeSelector::Project
-            && selection.id.as_str() == COMPATIBILITY_AGENT_ID
-            && runtime.resolve(&selection).is_err()
-            && project_legacy_prompt.is_some()
-        {
+        let use_project_legacy = if project_legacy_prompt.is_some() {
+            let project_selector =
+                InstructionSelector::project(InstructionKind::Agent, COMPATIBILITY_AGENT_ID)?;
+            match runtime.resolve(&project_selector) {
+                Ok(_) => {
+                    return Err(SystemPromptActivationError::Compatibility(
+                        "project legacy system-prompt.md and managed project:jcode both exist without an import receipt"
+                            .to_string(),
+                    ));
+                }
+                Err(InstructionError::ResourceNotFound { .. }) => true,
+                Err(error) => return Err(error.into()),
+            }
+        } else {
+            false
+        };
+        let render_selection = if use_project_legacy {
             InstructionSelector::global(InstructionKind::Agent, COMPATIBILITY_AGENT_ID)?
         } else {
             selection.clone()
@@ -229,21 +245,7 @@ impl SystemPromptComposer {
         {
             rendered_agent.text = rendered_agent.text.trim().to_string();
         }
-        if agent_reference.id.as_str() == COMPATIBILITY_AGENT_ID
-            && let Some(project_prompt) = project_legacy_prompt
-        {
-            if runtime
-                .resolve(&InstructionSelector::project(
-                    InstructionKind::Agent,
-                    COMPATIBILITY_AGENT_ID,
-                )?)
-                .is_ok()
-            {
-                return Err(SystemPromptActivationError::Compatibility(
-                    "project legacy system-prompt.md and managed project:jcode both exist without an import receipt"
-                        .to_string(),
-                ));
-            }
+        if use_project_legacy && let Some(project_prompt) = project_legacy_prompt {
             rendered_agent.text = project_prompt.trim().to_string();
             agent_reference.scope = InstructionScope::Project;
         }
@@ -280,28 +282,40 @@ impl SystemPromptComposer {
             .map(|root| read_present(root.join(".jcode/prompt-overlay.md")))
             .transpose()?
             .flatten();
-        if project_repository.is_some()
-            && (project_overlay_imported || project_legacy_overlay.is_none())
-        {
+        if project_overlay_imported {
             push_optional_system(
                 &runtime,
                 InstructionScope::Project,
                 COMMON_ID,
-                project_overlay_imported,
+                true,
                 &mut parts,
             )?;
-        } else if let Some(content) = project_legacy_overlay {
+        } else {
             let managed_common = InstructionSelector::project(InstructionKind::System, COMMON_ID)?;
-            if runtime.resolve(&managed_common).is_ok() {
-                return Err(SystemPromptActivationError::Compatibility(
-                    "project legacy prompt-overlay.md and managed project:common both exist without an import receipt"
-                        .to_string(),
-                ));
+            match runtime.resolve(&managed_common) {
+                Ok(_) if project_legacy_overlay.is_some() => {
+                    return Err(SystemPromptActivationError::Compatibility(
+                        "project legacy prompt-overlay.md and managed project:common both exist without an import receipt"
+                            .to_string(),
+                    ));
+                }
+                Ok(_) => push_optional_system(
+                    &runtime,
+                    InstructionScope::Project,
+                    COMMON_ID,
+                    false,
+                    &mut parts,
+                )?,
+                Err(InstructionError::ResourceNotFound { .. }) => {
+                    if let Some(content) = project_legacy_overlay {
+                        parts.push(format!(
+                            "# Project Prompt Overlay (.jcode/prompt-overlay.md)\n\n{}",
+                            content.trim()
+                        ));
+                    }
+                }
+                Err(error) => return Err(error.into()),
             }
-            parts.push(format!(
-                "# Project Prompt Overlay (.jcode/prompt-overlay.md)\n\n{}",
-                content.trim()
-            ));
         }
 
         let external_agents = runtime.render_external_agents();
@@ -404,19 +418,7 @@ fn push_project_addenda(
     active_agent: &InstructionResourceRef,
     parts: &mut Vec<String>,
 ) -> Result<(), InstructionError> {
-    for addendum in runtime.documents(InstructionKind::AgentAddendum, InstructionScope::Project) {
-        let Some(AddendumMetadata { target }) = addendum.metadata.addendum.as_ref() else {
-            continue;
-        };
-        let target = runtime.resolve(target)?;
-        let target_ref = InstructionResourceRef {
-            scope: target.scope,
-            kind: target.kind,
-            id: target.id.clone(),
-        };
-        if &target_ref != active_agent {
-            continue;
-        }
+    for addendum in runtime.applicable_project_addenda(active_agent)? {
         let rendered = runtime.render(
             &InstructionSelector::project(InstructionKind::AgentAddendum, addendum.id.to_string())?,
             &(),
@@ -584,6 +586,7 @@ fn legacy_target(document: &InstructionDocument) -> InstructionLegacyImportTarge
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::instruction::AddendumMetadata;
 
     struct Fixture {
         _temp: tempfile::TempDir,
@@ -974,6 +977,202 @@ mod tests {
             missing,
             Err(SystemPromptActivationError::Instruction(
                 InstructionError::ResourceNotFound { .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn applicable_invalid_and_ambiguous_addenda_fail_but_unrelated_damage_is_isolated() {
+        let fixture = Fixture::new();
+        let composer = fixture.composer();
+        composer
+            .activate(fixture.request(AgentSelection::Default))
+            .expect("initialize global");
+        let mut manifest = InstructionStoreManifest::current();
+        manifest.default_agent = Some("project:builder".to_string());
+        let repository = fixture
+            .service()
+            .configure_non_git_project(
+                &fixture.project,
+                "setup-addendum-validation",
+                None,
+                &seed(
+                    manifest,
+                    vec![
+                        document(
+                            InstructionScope::Project,
+                            InstructionKind::Agent,
+                            "builder",
+                            "agents/builder.md",
+                            "SYNTHETIC_BUILDER",
+                        ),
+                        document(
+                            InstructionScope::Project,
+                            InstructionKind::Agent,
+                            "other",
+                            "agents/other.md",
+                            "SYNTHETIC_OTHER",
+                        ),
+                    ],
+                ),
+                &[],
+            )
+            .expect("project repository");
+        std::fs::create_dir_all(repository.repository.root.join("addenda"))
+            .expect("addenda directory");
+        std::fs::write(
+            repository.repository.root.join("addenda/unrelated.md"),
+            "---\nid: unrelated\nkind: agent-addendum\ntarget: project:other\nunknown: rejected\n---\n\nUNRELATED",
+        )
+        .expect("write unrelated invalid addendum");
+        composer
+            .activate(fixture.request(AgentSelection::Default))
+            .expect("unrelated invalid addendum remains isolated");
+
+        std::fs::write(
+            repository.repository.root.join("addenda/applicable.md"),
+            "---\nid: applicable\nkind: agent-addendum\ntarget: project:builder\nunknown: rejected\n---\n\nAPPLICABLE",
+        )
+        .expect("write applicable invalid addendum");
+        let invalid = composer.activate(fixture.request(AgentSelection::Default));
+        assert!(matches!(
+            invalid,
+            Err(SystemPromptActivationError::Instruction(
+                InstructionError::InvalidResource { .. }
+            ))
+        ));
+        std::fs::remove_file(repository.repository.root.join("addenda/applicable.md"))
+            .expect("remove invalid addendum");
+
+        for name in ["ambiguous-a.md", "ambiguous-b.md"] {
+            std::fs::write(
+                repository.repository.root.join("addenda").join(name),
+                "---\nid: ambiguous\nkind: agent-addendum\ntarget: project:builder\n---\n\nAMBIGUOUS",
+            )
+            .expect("write ambiguous addendum");
+        }
+        let ambiguous = composer.activate(fixture.request(AgentSelection::Default));
+        assert!(matches!(
+            ambiguous,
+            Err(SystemPromptActivationError::Instruction(
+                InstructionError::AmbiguousResource { .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn compatibility_fallback_requires_true_absence_and_respects_explicit_global_scope() {
+        let fixture = Fixture::new();
+        let composer = fixture.composer();
+        composer
+            .activate(fixture.request(AgentSelection::Default))
+            .expect("initialize global");
+        let repository = fixture
+            .service()
+            .configure_non_git_project(
+                &fixture.project,
+                "setup-specificity-validation",
+                None,
+                &seed(
+                    InstructionStoreManifest::current(),
+                    vec![document(
+                        InstructionScope::Project,
+                        InstructionKind::Agent,
+                        COMPATIBILITY_AGENT_ID,
+                        "agents/jcode.md",
+                        "SYNTHETIC_PROJECT_MANAGED",
+                    )],
+                ),
+                &[],
+            )
+            .expect("project repository");
+        std::fs::create_dir_all(fixture.project.join(".jcode")).expect("project jcode dir");
+        std::fs::write(
+            fixture.project.join(".jcode/system-prompt.md"),
+            "SYNTHETIC_PROJECT_LEGACY",
+        )
+        .expect("write legacy project prompt");
+        std::fs::write(
+            repository.repository.root.join("agents/jcode.md"),
+            "---\nid: jcode\nkind: agent\nname: Broken\ndescription: broken\navailability: both\nunknown: rejected\n---\n\nBROKEN",
+        )
+        .expect("damage managed project agent");
+
+        let unqualified = composer.activate(fixture.request(AgentSelection::Default));
+        assert!(matches!(
+            unqualified,
+            Err(SystemPromptActivationError::Instruction(
+                InstructionError::InvalidResource { .. }
+            ))
+        ));
+        let explicit_global = composer
+            .activate(
+                fixture.request(AgentSelection::Explicit(
+                    InstructionSelector::global(InstructionKind::Agent, COMPATIBILITY_AGENT_ID)
+                        .expect("global selector"),
+                )),
+            )
+            .expect("explicit global ignores project legacy and project damage");
+        assert_eq!(
+            explicit_global.state.active_agent.scope,
+            InstructionScope::Global
+        );
+        assert!(
+            !explicit_global
+                .state
+                .text
+                .contains("SYNTHETIC_PROJECT_LEGACY")
+        );
+    }
+
+    #[test]
+    fn invalid_managed_project_common_does_not_fall_back_to_legacy_overlay() {
+        let fixture = Fixture::new();
+        let composer = fixture.composer();
+        composer
+            .activate(fixture.request(AgentSelection::Default))
+            .expect("initialize global");
+        let repository = fixture
+            .service()
+            .configure_non_git_project(
+                &fixture.project,
+                "setup-common-specificity-validation",
+                None,
+                &seed(
+                    InstructionStoreManifest::current(),
+                    vec![document(
+                        InstructionScope::Project,
+                        InstructionKind::System,
+                        COMMON_ID,
+                        "system/common.md",
+                        "SYNTHETIC_PROJECT_COMMON",
+                    )],
+                ),
+                &[],
+            )
+            .expect("project repository");
+        std::fs::create_dir_all(fixture.project.join(".jcode")).expect("project jcode dir");
+        std::fs::write(
+            fixture.project.join(".jcode/prompt-overlay.md"),
+            "SYNTHETIC_LEGACY_OVERLAY",
+        )
+        .expect("write legacy overlay");
+        std::fs::write(
+            repository.repository.root.join("system/common.md"),
+            "---\nid: common\nkind: system\nunknown: rejected\n---\n\nBROKEN",
+        )
+        .expect("damage managed common");
+
+        let result = composer.activate(
+            fixture.request(AgentSelection::Explicit(
+                InstructionSelector::global(InstructionKind::Agent, COMPATIBILITY_AGENT_ID)
+                    .expect("global selector"),
+            )),
+        );
+        assert!(matches!(
+            result,
+            Err(SystemPromptActivationError::Instruction(
+                InstructionError::InvalidResource { .. }
             ))
         ));
     }

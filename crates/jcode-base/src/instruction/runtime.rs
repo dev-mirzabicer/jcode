@@ -11,6 +11,7 @@ use std::path::Path;
 struct CatalogCandidate {
     path: PathBuf,
     parsed: Result<InstructionDocument, String>,
+    addendum_target_hint: Option<InstructionSelector>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -149,6 +150,105 @@ impl InstructionRuntime {
                 candidates[0].parsed.as_ref().ok()
             })
             .collect()
+    }
+
+    /// Return project addenda that apply to the exact active agent. Invalid or
+    /// ambiguous applicable candidates fail instead of disappearing, while an
+    /// unrelated damaged addendum remains isolated from this activation.
+    pub fn applicable_project_addenda(
+        &self,
+        active_agent: &InstructionResourceRef,
+    ) -> Result<Vec<&InstructionDocument>, InstructionError> {
+        let mut applicable = Vec::new();
+        for ((kind, id), scopes) in &self.entries {
+            if *kind != InstructionKind::AgentAddendum {
+                continue;
+            }
+            let candidates = scopes.for_scope(InstructionScope::Project);
+            let potentially_applicable = candidates.iter().any(|candidate| {
+                candidate
+                    .addendum_target_hint
+                    .as_ref()
+                    .is_some_and(|target| self.target_selects_active_scope(target, active_agent))
+            });
+            if candidates.len() > 1 {
+                if potentially_applicable {
+                    return Err(InstructionError::AmbiguousResource {
+                        selector: InstructionSelector::project(
+                            InstructionKind::AgentAddendum,
+                            id.to_string(),
+                        )?,
+                        scope: InstructionScope::Project,
+                        paths: candidates
+                            .iter()
+                            .map(|candidate| candidate.path.clone())
+                            .collect(),
+                    });
+                }
+                continue;
+            }
+            let Some(candidate) = candidates.first() else {
+                continue;
+            };
+            let Some(target) = candidate.addendum_target_hint.as_ref() else {
+                continue;
+            };
+            if !self.target_matches_active(target, active_agent)? {
+                continue;
+            }
+            match &candidate.parsed {
+                Ok(document) => applicable.push(document),
+                Err(detail) => {
+                    return Err(InstructionError::InvalidResource {
+                        resource: InstructionResourceRef {
+                            scope: InstructionScope::Project,
+                            kind: InstructionKind::AgentAddendum,
+                            id: id.clone(),
+                        },
+                        path: candidate.path.clone(),
+                        detail: detail.clone(),
+                    });
+                }
+            }
+        }
+        Ok(applicable)
+    }
+
+    fn target_selects_active_scope(
+        &self,
+        target: &InstructionSelector,
+        active_agent: &InstructionResourceRef,
+    ) -> bool {
+        if target.id != active_agent.id {
+            return false;
+        }
+        match target.scope {
+            InstructionScopeSelector::Global => active_agent.scope == InstructionScope::Global,
+            InstructionScopeSelector::Project => active_agent.scope == InstructionScope::Project,
+            InstructionScopeSelector::Unqualified
+                if active_agent.scope == InstructionScope::Project =>
+            {
+                true
+            }
+            InstructionScopeSelector::Unqualified => self
+                .entries
+                .get(&(InstructionKind::Agent, target.id.clone()))
+                .is_none_or(|scopes| scopes.project.is_empty()),
+        }
+    }
+
+    fn target_matches_active(
+        &self,
+        target: &InstructionSelector,
+        active_agent: &InstructionResourceRef,
+    ) -> Result<bool, InstructionError> {
+        if !self.target_selects_active_scope(target, active_agent) {
+            return Ok(false);
+        }
+        let target = self.resolve(target)?;
+        Ok(target.scope == active_agent.scope
+            && target.kind == active_agent.kind
+            && target.id == active_agent.id)
     }
 
     pub fn resolve(
@@ -576,11 +676,13 @@ impl InstructionRuntime {
                         .push(CatalogCandidate {
                             path,
                             parsed: Err(detail),
+                            addendum_target_hint: None,
                         });
                 }
                 return;
             }
         };
+        let addendum_target_hint = frontmatter_addendum_target_hint(expected_kind, &source);
         let parsed = parse_document(scope, expected_kind, &path, &source);
         let candidate_id = parsed
             .as_ref()
@@ -610,7 +712,11 @@ impl InstructionRuntime {
             .entry((expected_kind, id))
             .or_default()
             .for_scope_mut(scope)
-            .push(CatalogCandidate { path, parsed });
+            .push(CatalogCandidate {
+                path,
+                parsed,
+                addendum_target_hint,
+            });
     }
 
     fn load_external_agents(&mut self) {
@@ -929,6 +1035,22 @@ fn frontmatter_candidate_id(kind: InstructionKind, source: &str) -> Option<Instr
                 .flatten()
         })?;
     InstructionId::parse(id.to_string()).ok()
+}
+
+fn frontmatter_addendum_target_hint(
+    expected_kind: InstructionKind,
+    source: &str,
+) -> Option<InstructionSelector> {
+    if expected_kind != InstructionKind::AgentAddendum {
+        return None;
+    }
+    #[derive(Deserialize)]
+    struct TargetHint {
+        target: Option<String>,
+    }
+    let (frontmatter, _) = split_frontmatter(source).ok()?;
+    let hint: TargetHint = serde_yaml::from_str(frontmatter).ok()?;
+    InstructionSelector::parse(InstructionKind::Agent, hint.target.as_deref()?).ok()
 }
 
 fn fallback_id(path: &Path, kind: InstructionKind) -> Option<InstructionId> {
