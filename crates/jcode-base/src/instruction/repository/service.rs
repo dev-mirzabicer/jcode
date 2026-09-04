@@ -902,6 +902,50 @@ impl InstructionRepositoryService {
         })
     }
 
+    /// Read every committed regular file under one repository-relative prefix.
+    /// Skill Copy uses this binary-safe view to distinguish an identical
+    /// committed package from matching working files left before publication.
+    pub fn files_at_revision_under(
+        &self,
+        repository: &InstructionRepositoryRef,
+        commit: &str,
+        relative_prefix: impl AsRef<Path>,
+    ) -> InstructionRepositoryResult<BTreeMap<PathBuf, Vec<u8>>> {
+        let relative_prefix = relative_prefix.as_ref();
+        validate_relative_path(relative_prefix)?;
+        let git = GitRepository::new(&repository.root);
+        let mut files = BTreeMap::new();
+        for entry in git.tree_entries(commit)? {
+            if !entry.path.starts_with(relative_prefix) {
+                continue;
+            }
+            if !matches!(entry.mode.as_str(), "100644" | "100755") {
+                return Err(InstructionRepositoryError::new(
+                    InstructionRepositoryErrorKind::RepositoryDamaged,
+                    "read committed instruction package",
+                    format!(
+                        "unsupported Git mode {} at {}",
+                        entry.mode,
+                        entry.path.display()
+                    ),
+                )
+                .repository(repository)
+                .path(&entry.path));
+            }
+            let content = git.show_file(commit, &entry.path)?.ok_or_else(|| {
+                InstructionRepositoryError::new(
+                    InstructionRepositoryErrorKind::RepositoryDamaged,
+                    "read committed instruction package",
+                    "Git tree entry has no readable blob",
+                )
+                .repository(repository)
+                .path(&entry.path)
+            })?;
+            files.insert(entry.path, content);
+        }
+        Ok(files)
+    }
+
     pub fn compare_revisions(
         &self,
         repository: &InstructionRepositoryRef,

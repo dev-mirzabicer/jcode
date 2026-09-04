@@ -64,6 +64,7 @@ Copy:
 - Creates one isolated instruction-repository commit without staging unrelated state
 - Refuses to overwrite a different existing managed package
 - Returns no change for an identical repeated Copy
+- Distinguishes an identical committed package from matching working files and completes a matching partial or pre-commit interrupted Copy instead of reporting false success
 
 A project-scoped external source remains more specific than a global managed copy. The Copy outcome reports whether the selected destination becomes effective for the source project, allowing the manager to explain that a project destination is required when appropriate.
 

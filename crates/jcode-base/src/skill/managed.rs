@@ -357,31 +357,27 @@ pub fn copy_external_skill(
         .inspect(&repository)?
         .head
         .ok_or_else(|| copy_error("destination instruction repository has no current HEAD"))?;
-    if !existing.is_empty() {
-        if existing == desired {
-            return Ok(ManagedSkillCopyOutcome {
-                disposition: ManagedSkillCopyDisposition::NoChange,
-                repository,
-                skill_id: skill_id.to_string(),
-                invocation_name: skill.name.clone(),
-                commit: head,
-                changed_paths: Vec::new(),
-                effective_for_source_project: destination_is_effective(
-                    request.destination,
-                    source.kind,
-                ),
-            });
-        }
-        return Err(InstructionRepositoryError::new(
-            InstructionRepositoryErrorKind::Conflict,
-            "copy external skill",
-            format!(
-                "managed destination {} already exists with different content",
-                package_root.display()
+    let committed = repositories.files_at_revision_under(&repository, &head, &package_root)?;
+    let working_conflicts = existing
+        .iter()
+        .any(|(path, content)| desired.get(path) != Some(content));
+    let committed_has_extra = committed.keys().any(|path| !desired.contains_key(path));
+    if working_conflicts || committed_has_extra {
+        return Err(copy_collision(&repository, &package_root));
+    }
+    if existing == desired && committed == desired {
+        return Ok(ManagedSkillCopyOutcome {
+            disposition: ManagedSkillCopyDisposition::NoChange,
+            repository,
+            skill_id: skill_id.to_string(),
+            invocation_name: skill.name.clone(),
+            commit: head,
+            changed_paths: Vec::new(),
+            effective_for_source_project: destination_is_effective(
+                request.destination,
+                source.kind,
             ),
-        )
-        .repository(&repository)
-        .path(&package_root));
+        });
     }
 
     let mut expected_files = Vec::new();
@@ -603,6 +599,22 @@ fn copy_error(detail: impl Into<String>) -> InstructionRepositoryError {
         "copy external skill",
         detail,
     )
+}
+
+fn copy_collision(
+    repository: &InstructionRepositoryRef,
+    package_root: &Path,
+) -> InstructionRepositoryError {
+    InstructionRepositoryError::new(
+        InstructionRepositoryErrorKind::Conflict,
+        "copy external skill",
+        format!(
+            "managed destination {} contains content outside this external package",
+            package_root.display()
+        ),
+    )
+    .repository(repository)
+    .path(package_root)
 }
 
 #[cfg(test)]
@@ -947,6 +959,19 @@ mod tests {
             vec![0, 1, 2, 3]
         );
         assert_eq!(
+            fixture
+                .service
+                .files_at_revision_under(
+                    &copied.repository,
+                    &copied.commit,
+                    Path::new("skills/copy-skill"),
+                )
+                .expect("committed binary package")
+                .get(Path::new("skills/copy-skill/references/nested/data.bin"))
+                .map(Vec::as_slice),
+            Some(&[0, 1, 2, 3][..])
+        );
+        assert_eq!(
             std::fs::read(destination.join(".jcode-source/original-SKILL.md"))
                 .expect("original skill source"),
             std::fs::read(source_root.join("SKILL.md")).expect("external original")
@@ -1092,6 +1117,53 @@ mod tests {
             .expect("managed project copy");
         assert_eq!(activation.source.kind, SkillSourceKind::ManagedProject);
         assert!(activation.rendered_text.contains("PROJECT_COPY_BODY"));
+    }
+
+    #[test]
+    fn copy_external_skill_retry_completes_partial_matching_worktree() {
+        let fixture = Fixture::new();
+        let source_root = fixture.external_global("partial-copy", "Partial copy", "PARTIAL_BODY");
+        std::fs::write(source_root.join("reference.txt"), "REFERENCE").expect("reference");
+        let registry = fixture.effective(&fixture.external_registry());
+        let skill = registry.get("partial-copy").expect("skill");
+        let source = registry.source("partial-copy").expect("source");
+        let id = InstructionId::parse("partial-copy").expect("id");
+        let package_root = PathBuf::from("skills/partial-copy");
+        let desired = copied_package(skill, source, &package_root, &id).expect("desired package");
+        let repository = fixture.global_repository();
+        let (partial_path, partial_content) = desired.iter().next().expect("package file");
+        let absolute = repository.root.join(partial_path);
+        std::fs::create_dir_all(absolute.parent().expect("parent")).expect("partial parent");
+        std::fs::write(&absolute, partial_content).expect("partial matching file");
+
+        let outcome = copy_external_skill(
+            &fixture.service,
+            &registry,
+            ManagedSkillCopyRequest {
+                skill_name: "partial-copy",
+                working_dir: Some(&fixture.project),
+                destination: ManagedSkillDestination::Global,
+                destination_id: None,
+                operation_id: "complete-partial-copy",
+            },
+        )
+        .expect("complete partial Copy");
+        assert_eq!(outcome.disposition, ManagedSkillCopyDisposition::Created);
+        assert_eq!(
+            fixture
+                .service
+                .files_at_revision_under(&repository, &outcome.commit, &package_root)
+                .expect("committed package"),
+            desired
+        );
+        assert!(
+            fixture
+                .service
+                .inspect(&repository)
+                .expect("inspect")
+                .changes
+                .is_empty()
+        );
     }
 
     #[cfg(unix)]

@@ -27,7 +27,7 @@ Permanent synthetic mechanism tests cover:
 - Invalid managed specificity without silent external fallback
 - Isolation of unrelated invalid skills
 - Plain literal braces and opt-in restricted Handlebars modules
-- Complete global and project package Copy, nested and binary reference files, original source preservation, non-model-facing attribution, collisions, idempotency, removal fallback, and symlink rejection
+- Complete global and project package Copy, nested and binary reference files, original source preservation, non-model-facing attribution, collisions, idempotency, matching partial/pre-commit retry completion, removal fallback, and symlink rejection
 - Latest source at invocation, stable later turns after disk edits, reinvocation, registry reload semantics, resume, process reconstruction, split, system replacement, and active-skill persistence
 - Local and remote slash invocation, trailing prompts, images, multi-word names, remote-only server catalog names, bare activation, authoritative confirmation, and turn-coupled server ordering
 - Managed available-skills typed rendering and frozen system activation
