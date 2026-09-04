@@ -54,10 +54,7 @@ impl Fixture {
 }
 
 fn source(id: &str, kind: InstructionKind, extra: &str, body: &str) -> String {
-    format!(
-        "---\nid: {id}\nkind: {kind}\n{extra}---\n\n{body}",
-        kind = kind.to_string()
-    )
+    format!("---\nid: {id}\nkind: {kind}\n{extra}---\n\n{body}")
 }
 
 fn selector(kind: InstructionKind, id: &str) -> InstructionSelector {
