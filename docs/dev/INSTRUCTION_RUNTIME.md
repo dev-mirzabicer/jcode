@@ -220,7 +220,7 @@ The fixtures use synthetic prose. They do not snapshot, require, forbid, or judg
 - WP-02 supplies validated Git-backed global and project roots plus import receipts through `InstructionRepositoryService`.
 - WP-03 supplies complete primary composition, exact session freezing, initial selection, and lifecycle foundations.
 - WP-04 supplies append transitions, explicit system replacement, context protection, rewind pinning, inspection, exports, and public control interfaces.
-- WP-05 adopts managed skill discovery and activation snapshots.
+- WP-05 supplies managed and external skill discovery, deterministic source precedence, restricted rendering, complete Copy transactions, and exact active rendered-text snapshots.
 - WP-06 and WP-07 migrate inventory rows through registered typed consumers.
 - WP-09 and WP-10 use catalog summaries, diagnostics, complete content, graphs, and deterministic document serialization for the manager.
 - WP-11 reconciles every inventory row and verifies exact migration equality or an approved exception.

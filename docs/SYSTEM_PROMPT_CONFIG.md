@@ -10,7 +10,7 @@ Global managed instructions live in:
 ~/.jcode/instructions/
 ```
 
-Configured project stores use the repository modes in [`INSTRUCTION_STORES.md`](INSTRUCTION_STORES.md). The working tree is runtime authority. The global shipped seed contains the profile kernel, an empty common layer, Mermaid guidance, the `jcode` compatibility agent, and managed transition and replacement notifications. Existing initialized stores adopt newly shipped seed paths through a versioned local commit that does not overwrite existing working files or recreate later user deletions.
+Configured project stores use the repository modes in [`INSTRUCTION_STORES.md`](INSTRUCTION_STORES.md). The working tree is runtime authority. The global shipped seed contains the profile kernel, an empty common layer, Mermaid guidance, managed available-skills prose, the `jcode` compatibility agent, and managed transition and replacement notifications. Existing initialized stores adopt newly shipped seed paths through a versioned local commit that does not overwrite existing working files or recreate later user deletions.
 
 A global store is initialized on the first primary activation. Server construction alone performs no instruction repository I/O.
 
@@ -49,7 +49,7 @@ The current stable slots are:
 7. Global then project `AGENTS.md`
 8. Applicable project agent addenda
 9. Global then project preferred-tool compatibility guidance
-10. Available-skills catalog snapshot
+10. Managed available-skills catalog snapshot
 
 Memory is absent while globally disabled. Startup Context file snapshots remain authoritative user messages and are not system-prompt layers.
 
@@ -69,6 +69,8 @@ A project legacy system prompt or overlay remains a compatibility input only whi
 
 After activation, edits to managed resources, legacy prompt files, `AGENTS.md`, preferred-tool files, or the available-skill catalog do not change that session's static prompt. Config reload also does not replace stored static text.
 
+The available-skills prose lives at `system/available-skills.md`. The composer supplies sorted effective names and complete descriptions as typed values. Skill discovery and active rendered-text lifecycle are documented in [`SKILLS.md`](SKILLS.md).
+
 Resume, reconnect, takeover, reload, and split reuse exact stored text. Server-backed and direct clear retain the active agent identity, render current sources, recapture Startup Context, and install the new context only after complete persistence succeeds. Transfer follows the same fresh-source rule and clears active skill. Old sessions without stored prompt state stage and durably persist the current `global:jcode` compatibility composition before replacing live Agent state; failed migration leaves the previously active Agent unchanged, and successful migration clears provider-native continuation before another request.
 
 Applicable invalid or ambiguous project addenda fail composition. Invalid unrelated addenda remain isolated. Unqualified pre-dispatch selection resolves project-first specificity before Jcode decides whether the operation is a same-agent no-op.
@@ -83,7 +85,7 @@ Applicable invalid or ambiguous project addenda fail composition. Invalid unrela
 
 The following remain late request material rather than part of the stored static prompt:
 
-- Active skill text until WP-05 completes managed invocation and lifecycle adoption
+- Exact active rendered skill text from `Session.active_skill`
 - Current-turn system reminders
 - Swarm effort directives
 - Memory only in runtimes where memory is enabled; Mirza's downstream globally disables it

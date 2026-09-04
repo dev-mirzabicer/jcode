@@ -79,7 +79,7 @@ Pull requires a clean instruction repository. Fast-forward-only and merge behavi
 
 ## Initialization and recovery
 
-First installation materializes the shipped profile kernel, common layer, Mermaid resource, `jcode` compatibility agent, and managed profile-transition notifications together with eligible exact legacy imports, validates the manifest plus complete resource and dependency graph, initializes Git, creates one baseline commit, secures private files, and writes a private initialization receipt. Re-running initialization repeats complete validation before accepting the store as healthy.
+First installation materializes the shipped profile kernel, common layer, Mermaid and available-skills resources, `jcode` compatibility agent, and managed profile-transition notifications together with eligible exact legacy imports, validates the manifest plus complete resource and dependency graph, initializes Git, creates one baseline commit, secures private files, and writes a private initialization receipt. Re-running initialization repeats complete validation before accepting the store as healthy.
 
 The manifest also records a shipped-seed version, separate from its schema version. When a newer Jcode introduces new shipped resource paths, the composer adopts them through one isolated local commit before use. Adoption writes only missing paths introduced by that seed and the manifest update. It never overwrites an existing working file. A path committed at `HEAD` but missing from the working tree is damage and must be restored explicitly. Once a seed version is adopted, deleting one of its resources is user authority and later activations do not recreate it.
 
@@ -96,7 +96,7 @@ The repository service can inspect and plan exact import for current global and 
 
 Import leaves the original untouched, records its SHA-256 and empty/blank semantics, validates the complete prospective repository graph, and commits the resource plus receipt together. The primary composer deactivates a global system-prompt or overlay compatibility source only after the durable receipt exists. Project compatibility fallback applies only when the corresponding managed project resource is genuinely absent. Invalid or ambiguous managed project resources remain authoritative failures, and explicit global selection is never replaced by project legacy input. An already-completed retry materializes missing committed files but never overwrites a newer working-tree edit; the typed outcome lists preserved divergent paths.
 
-`AGENTS.md` remains a dedicated live ecosystem input. External skills remain read-only until an explicit Copy workflow is implemented. Neither is imported automatically.
+`AGENTS.md` remains a dedicated live ecosystem input. External skills remain read-only and are never imported automatically. The typed Copy backend can preserve a complete external package and commit a managed global or project copy; the central manager action arrives in WP-10. See [`SKILLS.md`](SKILLS.md).
 
 ## Primary activation
 

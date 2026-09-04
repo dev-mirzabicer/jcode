@@ -41,6 +41,7 @@ The shipped global instruction seed contains:
 - `system/kernel.md`
 - `system/common.md`
 - `system/mermaid.md`
+- `system/available-skills.md`
 - `agents/jcode.md`
 - `notifications/agent-transition.md`
 - `notifications/agent-replacement.md`
@@ -132,6 +133,8 @@ Context preview and draft preparation accept authoritative `Agent` or `Session` 
 - A true-system replacement clears active-message protection but does not rewrite or delete earlier transition messages or context transactions.
 - Persistence failure leaves the complete previous session state active.
 
+Each skill invocation renders current source once and persists the complete active text before a coupled turn is accepted. Later disk edits and registry reloads do not mutate it. Reinvocation replaces it from current source; clear and transfer clear it. See [`SKILLS.md`](SKILLS.md).
+
 The deprecated Claude CLI transport cannot replay general edited history, but it now sends the complete trailing user-authority sequence. An appended profile therefore reaches the CLI immediately before the real user prompt, including on an opaque resumed CLI session. Explicit true-system replacement still clears continuation, so the next non-resumed CLI request receives the new system prompt.
 
 ## Inspection, exports, and replay
@@ -144,7 +147,7 @@ The deprecated Claude CLI transport cannot replay general edited history, but it
 
 ## Remote, Harness, and SDK interfaces
 
-The internal protocol supports `SetAgent`, `GetAgentCatalog`, and `GetAgentStatus`. Agent selection events identify provisional, unchanged, appended, and replaced outcomes.
+The internal protocol supports `SetAgent`, `GetAgentCatalog`, `GetAgentStatus`, and `ActivateSkill`. A message can carry an atomic `activate_skill` request before turn acceptance. Agent selection events identify provisional, unchanged, appended, and replaced outcomes; skill activation events update attached clients from authoritative server state.
 
 The Harness bridge advertises `agent_profile_controls` and exposes:
 

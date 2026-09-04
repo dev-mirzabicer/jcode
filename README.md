@@ -605,7 +605,7 @@ Resume sessions from different harnesses. Claude code broke on you? Resume the s
 image of /Resume for codex sessions
 
 
-Skills are not all loaded on startup. The conversation is embedded as a semantic vector, and will automatically inject a skill if there is an embedding hit similar to memories. The agent has a skill tool for you to manually activate a skill at anytime. You may also activate via slash commands. 
+Skills are discovered from managed Jcode instruction stores and supported external skill locations. Activate one with its slash command or inspect it with `skill_manage`. Each invocation snapshots the latest rendered source into the session, so later disk edits do not silently change an active skill. See [`docs/SKILLS.md`](docs/SKILLS.md).
 
 ---
 
