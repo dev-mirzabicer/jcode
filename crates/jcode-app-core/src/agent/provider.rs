@@ -341,6 +341,12 @@ impl Agent {
         self.session.active_transition_message_id()
     }
 
+    pub fn validate_active_agent_profile(
+        &self,
+    ) -> Result<(), crate::session::AgentProfileSessionError> {
+        self.session.validate_active_agent_profile()
+    }
+
     pub fn active_skill_text(&self) -> Option<&str> {
         self.session
             .active_skill

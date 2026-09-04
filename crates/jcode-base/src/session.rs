@@ -195,6 +195,8 @@ pub enum AgentProfileSessionError {
     MissingActivation,
     NotDispatched,
     ActiveTransitionMissing(String),
+    ActiveTransitionNotStructural(String),
+    ActiveTransitionDuplicated(String),
 }
 
 impl std::fmt::Display for AgentProfileSessionError {
@@ -209,6 +211,14 @@ impl std::fmt::Display for AgentProfileSessionError {
             Self::ActiveTransitionMissing(message_id) => write!(
                 formatter,
                 "active agent profile message {message_id} is missing from authoritative history"
+            ),
+            Self::ActiveTransitionNotStructural(message_id) => write!(
+                formatter,
+                "active agent profile message {message_id} is not a structurally registered Jcode profile control"
+            ),
+            Self::ActiveTransitionDuplicated(message_id) => write!(
+                formatter,
+                "active agent profile message {message_id} is duplicated in authoritative history or its structural identity index"
             ),
         }
     }
@@ -602,6 +612,65 @@ impl Session {
         self.agent_profile_message_ids
             .iter()
             .any(|candidate| candidate == message_id)
+    }
+
+    /// Validate the narrow invariant required before provider preparation and
+    /// context mutation. An active appended profile must identify exactly one
+    /// structurally registered, code-framed authoritative message.
+    pub fn validate_active_agent_profile(&self) -> Result<(), AgentProfileSessionError> {
+        let Some(message_id) = self.active_transition_message_id() else {
+            return Ok(());
+        };
+        let indexed = self
+            .agent_profile_message_ids
+            .iter()
+            .filter(|candidate| candidate.as_str() == message_id)
+            .count();
+        if indexed == 0 {
+            return Err(AgentProfileSessionError::ActiveTransitionNotStructural(
+                message_id.to_string(),
+            ));
+        }
+        let mut messages = self
+            .messages
+            .iter()
+            .filter(|message| message.id == message_id);
+        let Some(message) = messages.next() else {
+            return Err(AgentProfileSessionError::ActiveTransitionMissing(
+                message_id.to_string(),
+            ));
+        };
+        if indexed != 1 || messages.next().is_some() {
+            return Err(AgentProfileSessionError::ActiveTransitionDuplicated(
+                message_id.to_string(),
+            ));
+        }
+        let active_agent = self
+            .active_agent()
+            .ok_or(AgentProfileSessionError::MissingActivation)?;
+        let scope = match active_agent.scope {
+            crate::instruction::InstructionScope::Global => "global",
+            crate::instruction::InstructionScope::Project => "project",
+        };
+        let expected_open = format!(
+            "<jcode_agent_profile scope=\"{scope}\" id=\"{}\">",
+            active_agent.id
+        );
+        let framed = message.role == Role::User
+            && message.display_role == Some(StoredDisplayRole::System)
+            && message.timestamp.is_none()
+            && matches!(
+                message.content.as_slice(),
+                [ContentBlock::Text { text, .. }]
+                    if text.trim_start().starts_with(&expected_open)
+                        && text.trim_end().ends_with("</jcode_agent_profile>")
+            );
+        if !framed {
+            return Err(AgentProfileSessionError::ActiveTransitionNotStructural(
+                message_id.to_string(),
+            ));
+        }
+        Ok(())
     }
 
     /// Update the lightweight active-profile projection used by remote clients.

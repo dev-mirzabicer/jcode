@@ -830,6 +830,65 @@ fn active_agent_profile_is_structural_atomic_pinned_and_export_complete() {
 }
 
 #[test]
+fn active_agent_profile_validation_rejects_missing_unregistered_and_duplicate_identity() {
+    let mut session = Session::create_with_id("session-profile-validation".to_string(), None, None);
+    session.install_system_prompt(StoredSystemPromptState {
+        text: "SYNTHETIC_SYSTEM".to_string(),
+        active_agent: StoredAgentReference {
+            scope: crate::instruction::InstructionScope::Global,
+            id: "initial".to_string(),
+            display_name: "Initial".to_string(),
+        },
+        first_provider_dispatch_at: Some(Utc::now()),
+        active_transition_message_id: None,
+    });
+    let message_id = session
+        .append_agent_profile_transition(crate::instruction::AgentProfileTransition {
+            agent: StoredAgentReference {
+                scope: crate::instruction::InstructionScope::Global,
+                id: "active".to_string(),
+                display_name: "Active".to_string(),
+            },
+            transition_sentence: "SYNTHETIC_TRANSITION".to_string(),
+            complete_instructions: "SYNTHETIC_PROFILE".to_string(),
+            initialized_global_store: false,
+        })
+        .expect("append profile");
+    session
+        .validate_active_agent_profile()
+        .expect("valid structural profile");
+
+    let message = session.messages.pop().expect("active message");
+    assert!(matches!(
+        session.validate_active_agent_profile(),
+        Err(AgentProfileSessionError::ActiveTransitionMissing(id)) if id == message_id
+    ));
+    session.messages.push(message);
+
+    session.agent_profile_message_ids.clear();
+    assert!(matches!(
+        session.validate_active_agent_profile(),
+        Err(AgentProfileSessionError::ActiveTransitionNotStructural(id)) if id == message_id
+    ));
+    session.agent_profile_message_ids.push(message_id.clone());
+    if let ContentBlock::Text { text, .. } = &mut session.messages[0].content[0] {
+        *text = text.replace("id=\"active\"", "id=\"wrong\"");
+    }
+    assert!(matches!(
+        session.validate_active_agent_profile(),
+        Err(AgentProfileSessionError::ActiveTransitionNotStructural(id)) if id == message_id
+    ));
+    if let ContentBlock::Text { text, .. } = &mut session.messages[0].content[0] {
+        *text = text.replace("id=\"wrong\"", "id=\"active\"");
+    }
+    session.agent_profile_message_ids.push(message_id.clone());
+    assert!(matches!(
+        session.validate_active_agent_profile(),
+        Err(AgentProfileSessionError::ActiveTransitionDuplicated(id)) if id == message_id
+    ));
+}
+
+#[test]
 fn first_dispatch_failure_restores_the_exact_prior_activation() {
     #[derive(Debug)]
     struct FailingPersistence;

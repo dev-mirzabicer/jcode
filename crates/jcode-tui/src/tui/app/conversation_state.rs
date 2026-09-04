@@ -29,6 +29,13 @@ impl App {
             return Ok(self.messages.clone());
         }
         self.session
+            .validate_active_agent_profile()
+            .map_err(|error| {
+                format!(
+                    "The provider request was not sent because active agent profile state is invalid: {error}. Use /agent inspect and repair or replace the profile before retrying."
+                )
+            })?;
+        self.session
             .projected_messages_for_provider()
             .map_err(|error| {
                 format!(

@@ -3302,39 +3302,63 @@ pub(super) fn handle_agents_command(app: &mut App, trimmed: &str) -> bool {
     true
 }
 
-fn handle_primary_agent_command(app: &mut App, trimmed: &str) -> bool {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum PrimaryAgentCommand {
+    OpenPicker {
+        replace: bool,
+    },
+    Inspect,
+    Select {
+        selector: String,
+        mode: crate::agent::AgentProfileChangeMode,
+    },
+}
+
+pub(super) fn parse_primary_agent_command(trimmed: &str) -> Option<PrimaryAgentCommand> {
     if trimmed != "/agent" && !trimmed.starts_with("/agent ") {
-        return false;
+        return None;
     }
     let rest = trimmed.strip_prefix("/agent").unwrap_or_default().trim();
     if rest.is_empty() {
-        match local_primary_agent_catalog(app) {
-            Ok(entries) => app.open_primary_agent_picker(entries, false),
-            Err(error) => app.push_display_message(DisplayMessage::error(format!(
-                "Agent catalog failed: {error}"
-            ))),
-        }
-        return true;
+        return Some(PrimaryAgentCommand::OpenPicker { replace: false });
     }
-    if rest == "inspect" {
-        app.push_display_message(DisplayMessage::system(local_agent_inspection(app)));
-        return true;
+    let (first, remaining) = rest
+        .find(char::is_whitespace)
+        .map(|index| (&rest[..index], rest[index..].trim()))
+        .unwrap_or((rest, ""));
+    match (first, remaining) {
+        ("inspect", "") => Some(PrimaryAgentCommand::Inspect),
+        ("replace", "") => Some(PrimaryAgentCommand::OpenPicker { replace: true }),
+        ("replace", selector) => Some(PrimaryAgentCommand::Select {
+            selector: selector.to_string(),
+            mode: crate::agent::AgentProfileChangeMode::ReplaceSystem,
+        }),
+        _ => Some(PrimaryAgentCommand::Select {
+            selector: rest.to_string(),
+            mode: crate::agent::AgentProfileChangeMode::Ordinary,
+        }),
     }
-    let (mode, selection_text) = match rest.strip_prefix("replace") {
-        Some(remaining) if remaining.trim().is_empty() => {
+}
+
+fn handle_primary_agent_command(app: &mut App, trimmed: &str) -> bool {
+    let Some(command) = parse_primary_agent_command(trimmed) else {
+        return false;
+    };
+    let (selection_text, mode) = match command {
+        PrimaryAgentCommand::OpenPicker { replace } => {
             match local_primary_agent_catalog(app) {
-                Ok(entries) => app.open_primary_agent_picker(entries, true),
+                Ok(entries) => app.open_primary_agent_picker(entries, replace),
                 Err(error) => app.push_display_message(DisplayMessage::error(format!(
                     "Agent catalog failed: {error}"
                 ))),
             }
             return true;
         }
-        Some(remaining) => (
-            crate::agent::AgentProfileChangeMode::ReplaceSystem,
-            remaining.trim(),
-        ),
-        None => (crate::agent::AgentProfileChangeMode::Ordinary, rest),
+        PrimaryAgentCommand::Inspect => {
+            app.push_display_message(DisplayMessage::system(local_agent_inspection(app)));
+            return true;
+        }
+        PrimaryAgentCommand::Select { selector, mode } => (selector, mode),
     };
     if app.is_processing() {
         app.push_display_message(DisplayMessage::error(
@@ -3342,7 +3366,7 @@ fn handle_primary_agent_command(app: &mut App, trimmed: &str) -> bool {
         ));
         return true;
     }
-    let selection = match crate::instruction::AgentSelection::parse(Some(selection_text)) {
+    let selection = match crate::instruction::AgentSelection::parse(Some(&selection_text)) {
         Ok(selection) => selection,
         Err(error) => {
             app.push_display_message(DisplayMessage::error(format!(
@@ -3414,6 +3438,11 @@ pub(super) fn apply_local_primary_agent_change(
     selection: crate::instruction::AgentSelection,
     mode: crate::agent::AgentProfileChangeMode,
 ) -> Result<crate::agent::AgentProfileChangeOutcome, String> {
+    if app.is_processing() {
+        return Err(
+            "Wait for the current turn to finish before changing the agent profile.".to_string(),
+        );
+    }
     let current = app
         .session
         .active_agent()
@@ -3455,6 +3484,7 @@ pub(super) fn apply_local_primary_agent_change(
         candidate.install_system_prompt(activation.state.clone());
         candidate.save().map_err(|error| error.to_string())?;
         app.session = candidate;
+        app.rewind_undo_snapshot = None;
         let agent = activation.state.active_agent;
         return Ok(crate::agent::AgentProfileChangeOutcome::Provisional { agent });
     }
@@ -3477,6 +3507,7 @@ pub(super) fn apply_local_primary_agent_change(
                 .map_err(|error| error.to_string())?;
             candidate.save().map_err(|error| error.to_string())?;
             app.session = candidate;
+            app.rewind_undo_snapshot = None;
             app.replace_provider_messages(projected);
             let session_id = app.session.id.clone();
             app.context_transactions.invalidate_session_drafts(
@@ -3542,6 +3573,7 @@ pub(super) fn apply_local_primary_agent_change(
             }
             candidate.save().map_err(|error| error.to_string())?;
             app.session = candidate;
+            app.rewind_undo_snapshot = None;
             app.after_local_provider_context_changed(
                 "agent system replacement",
                 &format!("active agent replaced with {}", agent.id),

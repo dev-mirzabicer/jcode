@@ -86,10 +86,18 @@ impl ClaudeProvider {
     }
 
     fn extract_user_prompt(&self, messages: &[Message]) -> Result<String> {
-        for msg in messages.iter().rev() {
-            if msg.role != Role::User {
-                continue;
-            }
+        let Some(last_user_index) = messages
+            .iter()
+            .rposition(|message| message.role == Role::User)
+        else {
+            anyhow::bail!("No user prompt found for Claude CLI request");
+        };
+        let mut first_user_index = last_user_index;
+        while first_user_index > 0 && messages[first_user_index - 1].role == Role::User {
+            first_user_index -= 1;
+        }
+        let mut prompts = Vec::new();
+        for msg in &messages[first_user_index..=last_user_index] {
             let mut parts = Vec::new();
             for block in &msg.content {
                 match block {
@@ -105,8 +113,11 @@ impl ClaudeProvider {
                 }
             }
             if !parts.is_empty() {
-                return Ok(parts.join("\n\n"));
+                prompts.push(parts.join("\n\n"));
             }
+        }
+        if !prompts.is_empty() {
+            return Ok(prompts.join("\n\n"));
         }
         anyhow::bail!("No user prompt found for Claude CLI request");
     }
@@ -1174,6 +1185,64 @@ mod context_validation_tests {
     use jcode_provider_core::{
         ContextProjectionOperationKind, ContextProjectionValidationOperation,
     };
+    use std::sync::OnceLock;
+    use tokio_stream::StreamExt;
+
+    async fn env_lock() -> tokio::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await
+    }
+
+    struct EnvRestore {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvRestore {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var_os(key);
+            jcode_base::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => jcode_base::env::set_var(self.key, value),
+                None => jcode_base::env::remove_var(self.key),
+            }
+        }
+    }
+
+    struct TestDir(std::path::PathBuf);
+
+    impl TestDir {
+        fn new() -> Self {
+            let unique = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "jcode-claude-cli-profile-{}-{unique}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&path).expect("create Claude CLI fixture directory");
+            Self(path)
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
 
     #[test]
     fn claude_cli_projected_context_is_precisely_unsupported() {
@@ -1196,6 +1265,79 @@ mod context_validation_tests {
                 .unsupported_reasons()
                 .iter()
                 .any(|reason| reason.contains("opaque upstream --resume session"))
+        );
+    }
+
+    #[test]
+    fn claude_cli_prompt_preserves_trailing_user_authority_sequence() {
+        let provider = ClaudeProvider::new();
+        let messages = vec![
+            Message::assistant_text("earlier assistant"),
+            Message::user("<jcode_agent_profile>PROFILE_MARKER</jcode_agent_profile>"),
+            Message::user("REAL_USER_MARKER"),
+            Message::assistant_text("later assistant state not resent"),
+        ];
+        let prompt = provider
+            .extract_user_prompt(&messages)
+            .expect("trailing prompt");
+        assert_eq!(
+            prompt,
+            "<jcode_agent_profile>PROFILE_MARKER</jcode_agent_profile>\n\nREAL_USER_MARKER"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn claude_cli_subprocess_receives_profile_control_before_real_user_prompt() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _lock = env_lock().await;
+        let temp = TestDir::new();
+        let executable = temp.path().join("fake-claude");
+        let capture = temp.path().join("stdin.jsonl");
+        let quote = |path: &std::path::Path| {
+            format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
+        };
+        std::fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\ncat > {}\nprintf '%s\\n' '{{\"type\":\"result\",\"is_error\":false,\"session_id\":\"fake-session\"}}'\n",
+                quote(&capture)
+            ),
+        )
+        .expect("write fake Claude CLI");
+        let mut permissions = std::fs::metadata(&executable)
+            .expect("fake Claude CLI metadata")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&executable, permissions).expect("make fake CLI executable");
+        let _path = EnvRestore::set("JCODE_CLAUDE_CLI_PATH", &executable);
+
+        let provider = ClaudeProvider::new();
+        let messages = vec![
+            Message::assistant_text("earlier assistant"),
+            Message::user("<jcode_agent_profile>PROFILE_MARKER</jcode_agent_profile>"),
+            Message::user("REAL_USER_MARKER"),
+        ];
+        let mut stream = provider
+            .complete(&messages, &[], "SYNTHETIC_SYSTEM", Some("resume-session"))
+            .await
+            .expect("start fake Claude CLI");
+        while let Some(event) = stream.next().await {
+            event.expect("fake Claude CLI event");
+        }
+
+        let input = std::fs::read_to_string(&capture).expect("captured CLI input");
+        let payload: serde_json::Value =
+            serde_json::from_str(input.trim()).expect("captured JSON input");
+        let content = payload["message"]["content"]
+            .as_str()
+            .expect("captured prompt string");
+        let profile = content.find("PROFILE_MARKER").expect("profile marker");
+        let user = content.find("REAL_USER_MARKER").expect("real user marker");
+        assert!(
+            profile < user,
+            "profile control must precede the real user prompt"
         );
     }
 }

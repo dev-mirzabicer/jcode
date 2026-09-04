@@ -58,6 +58,67 @@ async fn session_control_handle_does_not_wait_for_busy_agent_lock() {
 }
 
 #[tokio::test]
+async fn profile_mutation_guard_rejects_busy_without_check_to_lock_race() {
+    let provider: Arc<dyn Provider> = Arc::new(PanicOnForkProvider {
+        forked: Arc::new(AtomicBool::new(false)),
+    });
+    let registry = Registry::new(Arc::clone(&provider)).await;
+    let agent = Arc::new(Mutex::new(Agent::new(provider, registry)));
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+
+    let busy_guard = agent.lock().await;
+    let started = Instant::now();
+    assert!(
+        try_lock_idle_agent_for_request(
+            41,
+            "set_agent",
+            "session-profile-busy",
+            false,
+            &agent,
+            &event_tx,
+        )
+        .is_none()
+    );
+    assert!(started.elapsed() < Duration::from_millis(100));
+    assert!(matches!(
+        event_rx.try_recv(),
+        Ok(ServerEvent::Error { id: 41, .. })
+    ));
+    drop(busy_guard);
+
+    let mutation_guard = try_lock_idle_agent_for_request(
+        42,
+        "set_agent",
+        "session-profile-idle",
+        false,
+        &agent,
+        &event_tx,
+    )
+    .expect("idle mutation guard");
+    assert!(
+        agent.try_lock().is_err(),
+        "the mutation boundary must retain the one nonblocking guard"
+    );
+    drop(mutation_guard);
+
+    assert!(
+        try_lock_idle_agent_for_request(
+            43,
+            "set_agent",
+            "session-profile-processing",
+            true,
+            &agent,
+            &event_tx,
+        )
+        .is_none()
+    );
+    assert!(matches!(
+        event_rx.try_recv(),
+        Ok(ServerEvent::Error { id: 43, .. })
+    ));
+}
+
+#[tokio::test]
 async fn refreshed_session_control_handle_does_not_wait_for_busy_agent_lock() {
     let provider: Arc<dyn Provider> = Arc::new(PanicOnForkProvider {
         forked: Arc::new(AtomicBool::new(false)),

@@ -333,6 +333,39 @@ fn send_agent_busy_error(
     });
 }
 
+fn try_lock_idle_agent_for_request<'a>(
+    request_id: u64,
+    request_kind: &'static str,
+    client_session_id: &str,
+    client_is_processing: bool,
+    agent: &'a Arc<Mutex<Agent>>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) -> Option<tokio::sync::MutexGuard<'a, Agent>> {
+    if client_is_processing {
+        send_agent_busy_error(
+            request_id,
+            request_kind,
+            client_session_id,
+            true,
+            client_event_tx,
+        );
+        return None;
+    }
+    match agent.try_lock() {
+        Ok(agent_guard) => Some(agent_guard),
+        Err(_) => {
+            send_agent_busy_error(
+                request_id,
+                request_kind,
+                client_session_id,
+                false,
+                client_event_tx,
+            );
+            None
+        }
+    }
+}
+
 fn server_reload_starting() -> bool {
     matches!(
         crate::server::recent_reload_state(RELOAD_STARTING_GUARD_MAX_AGE),
@@ -2819,17 +2852,16 @@ pub(super) async fn handle_client_with_instruction_repositories(
                 agent: selection,
                 replace,
             } => {
-                if reject_if_agent_busy_for_request(
+                let Some(mut agent_guard) = try_lock_idle_agent_for_request(
                     id,
                     "set_agent",
                     &client_session_id,
                     client_is_processing,
                     &agent,
                     &client_event_tx,
-                ) {
+                ) else {
                     continue;
-                }
-                let mut agent_guard = agent.lock().await;
+                };
                 let selection = match crate::instruction::AgentSelection::parse(Some(&selection)) {
                     Ok(selection) => selection,
                     Err(error) => {
@@ -2907,6 +2939,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
                             message_id,
                             message_content,
                         };
+                        drop(agent_guard);
                         let _ = fanout_live_client_event(&swarm_members, &client_session_id, event)
                             .await;
                         let _ = client_event_tx.send(ServerEvent::Done { id });
@@ -2921,6 +2954,12 @@ pub(super) async fn handle_client_with_instruction_repositories(
                 }
             }
 
+            /*
+             * SetAgent deliberately retains its nonblocking Agent guard for the
+             * whole transaction above. Do not replace it with the generic
+             * check-then-lock helper: that would reintroduce a race with turn
+             * acquisition.
+             */
             Request::GetAgentCatalog { id } => {
                 let catalog = match agent.try_lock() {
                     Ok(agent_guard) => agent_guard

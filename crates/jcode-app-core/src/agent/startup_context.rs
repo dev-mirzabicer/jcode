@@ -381,6 +381,7 @@ impl Agent {
                 .save()
                 .map_err(PrimaryInstructionActivationError::Persistence)?;
             self.session = candidate;
+            self.rewind_undo_snapshot = None;
             let agent = activation.state.active_agent;
             return Ok(super::AgentProfileChangeOutcome::Provisional { agent });
         }
@@ -405,6 +406,7 @@ impl Agent {
                     .save()
                     .map_err(PrimaryInstructionActivationError::Persistence)?;
                 self.session = candidate;
+                self.rewind_undo_snapshot = None;
                 self.reseed_context_runtime_from_session();
                 Ok(super::AgentProfileChangeOutcome::Appended { agent, message_id })
             }
@@ -469,6 +471,7 @@ impl Agent {
                     .save()
                     .map_err(PrimaryInstructionActivationError::Persistence)?;
                 self.session = candidate;
+                self.rewind_undo_snapshot = None;
                 crate::cache_invalidation::record(
                     "agent system replacement",
                     format!("active agent replaced with {}", agent.id),
@@ -1528,6 +1531,177 @@ mod tests {
                 .expect("provisional prompt")
                 .contains("SYNTHETIC_PROVISIONAL_PROFILE")
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn provider_preparation_rejects_missing_active_profile_message() {
+        let home = TestHome::new();
+        let project = tempfile::tempdir().expect("project");
+        let provider = RecordingProvider::default();
+        let provider_handle: std::sync::Arc<dyn Provider> = std::sync::Arc::new(provider.clone());
+        let mut agent = Agent::new_with_disabled_startup_context(
+            provider_handle,
+            crate::tool::Registry::empty(),
+            project.path().to_str(),
+        );
+        agent
+            .activate_primary_instructions(crate::instruction::AgentSelection::Default)
+            .expect("initial activation");
+        agent
+            .session
+            .system_prompt
+            .as_mut()
+            .expect("system prompt")
+            .first_provider_dispatch_at = Some(chrono::Utc::now());
+        std::fs::write(
+            home.path().join("instructions/agents/active.md"),
+            "---\nid: active\nkind: agent\nname: Active\ndescription: Synthetic active agent\navailability: both\n---\n\nSYNTHETIC_ACTIVE_PROFILE",
+        )
+        .expect("write active agent");
+        let outcome = agent
+            .change_primary_agent(
+                crate::instruction::AgentSelection::Explicit(
+                    crate::instruction::InstructionSelector::global(
+                        crate::instruction::InstructionKind::Agent,
+                        "active",
+                    )
+                    .expect("selector"),
+                ),
+                crate::agent::AgentProfileChangeMode::Ordinary,
+            )
+            .await
+            .expect("append active profile");
+        let crate::agent::AgentProfileChangeOutcome::Appended { message_id, .. } = outcome else {
+            panic!("expected appended profile")
+        };
+        agent
+            .session
+            .messages
+            .retain(|message| message.id != message_id);
+
+        let error = agent
+            .messages_for_provider()
+            .expect_err("missing active profile must block provider preparation");
+        assert!(
+            error
+                .to_string()
+                .contains("Agent profile validation failed")
+        );
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn profile_append_and_replacement_invalidate_rewind_undo() {
+        let home = TestHome::new();
+        let project = tempfile::tempdir().expect("project");
+        let provider: std::sync::Arc<dyn Provider> =
+            std::sync::Arc::new(RecordingProvider::default());
+        let mut agent = Agent::new_with_disabled_startup_context(
+            provider,
+            crate::tool::Registry::empty(),
+            project.path().to_str(),
+        );
+        agent
+            .activate_primary_instructions(crate::instruction::AgentSelection::Default)
+            .expect("initial activation");
+        agent
+            .session
+            .system_prompt
+            .as_mut()
+            .expect("system prompt")
+            .first_provider_dispatch_at = Some(chrono::Utc::now());
+        for (id, name) in [("first", "First"), ("second", "Second")] {
+            std::fs::write(
+                home.path().join(format!("instructions/agents/{id}.md")),
+                format!(
+                    "---\nid: {id}\nkind: agent\nname: {name}\ndescription: Synthetic {name}\navailability: both\n---\n\nSYNTHETIC_{name}_PROFILE"
+                ),
+            )
+            .expect("write profile agent");
+        }
+        let selection = |id: &str| {
+            crate::instruction::AgentSelection::Explicit(
+                crate::instruction::InstructionSelector::global(
+                    crate::instruction::InstructionKind::Agent,
+                    id,
+                )
+                .expect("selector"),
+            )
+        };
+        agent.session.add_message(
+            crate::message::Role::User,
+            vec![crate::message::ContentBlock::Text {
+                text: "visible user".to_string(),
+                cache_control: None,
+            }],
+        );
+        agent.session.add_message(
+            crate::message::Role::Assistant,
+            vec![crate::message::ContentBlock::Text {
+                text: "visible assistant".to_string(),
+                cache_control: None,
+            }],
+        );
+        agent.session.save().expect("persist visible turns");
+        agent
+            .change_primary_agent(
+                selection("first"),
+                crate::agent::AgentProfileChangeMode::Ordinary,
+            )
+            .await
+            .expect("append first profile");
+
+        agent.rewind_to_message(1).expect("rewind before append");
+        let appended = agent
+            .change_primary_agent(
+                selection("second"),
+                crate::agent::AgentProfileChangeMode::Ordinary,
+            )
+            .await
+            .expect("append second profile");
+        let crate::agent::AgentProfileChangeOutcome::Appended { message_id, .. } = appended else {
+            panic!("expected appended second profile")
+        };
+        assert_eq!(agent.undo_rewind().unwrap_err(), "No rewind to undo.");
+        assert_eq!(
+            agent.active_transition_message_id(),
+            Some(message_id.as_str())
+        );
+        assert!(
+            agent
+                .session
+                .messages
+                .iter()
+                .any(|message| message.id == message_id)
+        );
+
+        agent.session.add_message(
+            crate::message::Role::Assistant,
+            vec![crate::message::ContentBlock::Text {
+                text: "new visible assistant".to_string(),
+                cache_control: None,
+            }],
+        );
+        agent.session.save().expect("persist second visible turn");
+        agent
+            .rewind_to_message(1)
+            .expect("rewind before replacement");
+        let replaced = agent
+            .change_primary_agent(
+                selection("first"),
+                crate::agent::AgentProfileChangeMode::ReplaceSystem,
+            )
+            .await
+            .expect("replace system profile");
+        assert!(matches!(
+            replaced,
+            crate::agent::AgentProfileChangeOutcome::Replaced { .. }
+        ));
+        assert_eq!(agent.undo_rewind().unwrap_err(), "No rewind to undo.");
+        assert_eq!(agent.active_transition_message_id(), None);
+        agent
+            .validate_active_agent_profile()
+            .expect("replacement profile state");
     }
 
     #[test]

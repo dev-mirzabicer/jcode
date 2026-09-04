@@ -1077,36 +1077,19 @@ async fn handle_remote_key_internal(
                 }
 
                 if trimmed == "/agent" || trimmed.starts_with("/agent ") {
-                    let rest = trimmed.strip_prefix("/agent").unwrap_or_default().trim();
-                    if rest.is_empty() {
-                        match remote.request_agent_catalog().await {
-                            Ok(_) => app.set_status_notice("Loading agent profiles..."),
-                            Err(error) => {
-                                app.push_display_message(DisplayMessage::error(format!(
-                                    "Failed to request agent catalog: {error}"
-                                )));
-                                app.set_status_notice("Agent catalog failed");
-                            }
-                        }
+                    let Some(command) = app_mod::commands::parse_primary_agent_command(trimmed)
+                    else {
                         return Ok(());
-                    }
-                    if rest == "inspect" {
-                        match remote.request_agent_status(true).await {
-                            Ok(_) => app.set_status_notice("Inspecting agent profile..."),
-                            Err(error) => {
-                                app.push_display_message(DisplayMessage::error(format!(
-                                    "Failed to request agent status: {error}"
-                                )));
-                                app.set_status_notice("Agent inspection failed");
-                            }
-                        }
-                        return Ok(());
-                    }
-                    let (replace, selection) = match rest.strip_prefix("replace") {
-                        Some(remaining) if remaining.trim().is_empty() => {
-                            app.pending_agent_catalog_replace = true;
+                    };
+                    match command {
+                        app_mod::commands::PrimaryAgentCommand::OpenPicker { replace } => {
+                            app.pending_agent_catalog_replace = replace;
                             match remote.request_agent_catalog().await {
-                                Ok(_) => app.set_status_notice("Loading replacement agents..."),
+                                Ok(_) => app.set_status_notice(if replace {
+                                    "Loading replacement agents..."
+                                } else {
+                                    "Loading agent profiles..."
+                                }),
                                 Err(error) => {
                                     app.pending_agent_catalog_replace = false;
                                     app.push_display_message(DisplayMessage::error(format!(
@@ -1115,22 +1098,34 @@ async fn handle_remote_key_internal(
                                     app.set_status_notice("Agent catalog failed");
                                 }
                             }
-                            return Ok(());
                         }
-                        Some(remaining) => (true, remaining.trim()),
-                        None => (false, rest),
-                    };
-                    match remote.set_agent(selection, replace).await {
-                        Ok(_) => app.set_status_notice(if replace {
-                            format!("Replacing system agent with {selection}...")
-                        } else {
-                            format!("Selecting agent {selection}...")
-                        }),
-                        Err(error) => {
-                            app.push_display_message(DisplayMessage::error(format!(
-                                "Failed to request agent change: {error}"
-                            )));
-                            app.set_status_notice("Agent change failed");
+                        app_mod::commands::PrimaryAgentCommand::Inspect => {
+                            match remote.request_agent_status(true).await {
+                                Ok(_) => app.set_status_notice("Inspecting agent profile..."),
+                                Err(error) => {
+                                    app.push_display_message(DisplayMessage::error(format!(
+                                        "Failed to request agent status: {error}"
+                                    )));
+                                    app.set_status_notice("Agent inspection failed");
+                                }
+                            }
+                        }
+                        app_mod::commands::PrimaryAgentCommand::Select { selector, mode } => {
+                            let replace =
+                                mode == crate::agent::AgentProfileChangeMode::ReplaceSystem;
+                            match remote.set_agent(&selector, replace).await {
+                                Ok(_) => app.set_status_notice(if replace {
+                                    format!("Replacing system agent with {selector}...")
+                                } else {
+                                    format!("Selecting agent {selector}...")
+                                }),
+                                Err(error) => {
+                                    app.push_display_message(DisplayMessage::error(format!(
+                                        "Failed to request agent change: {error}"
+                                    )));
+                                    app.set_status_notice("Agent change failed");
+                                }
+                            }
                         }
                     }
                     return Ok(());

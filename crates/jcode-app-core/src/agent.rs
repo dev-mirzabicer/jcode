@@ -877,6 +877,13 @@ impl Agent {
     }
 
     fn projected_provider_messages_for_request(&mut self) -> Result<Vec<Message>> {
+        self.session.validate_active_agent_profile().map_err(|error| {
+            anyhow::anyhow!(
+                "Agent profile validation failed for session {}: {}. The provider request was not sent; inspect the session profile state before retrying.",
+                self.session.id,
+                error
+            )
+        })?;
         self.session.projected_messages_for_provider().map_err(|error| {
             anyhow::anyhow!(
                 "Context projection failed for session {} at revision {}: {}. The provider request was not sent; review or repair the active context transactions.",

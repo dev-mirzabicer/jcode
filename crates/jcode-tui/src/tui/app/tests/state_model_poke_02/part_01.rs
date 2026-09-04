@@ -1419,6 +1419,32 @@ fn test_primary_agent_command_is_discoverable_and_accepts_selectors() {
 }
 
 #[test]
+fn primary_agent_replace_is_an_exact_shared_subcommand_token() {
+    assert_eq!(
+        super::commands::parse_primary_agent_command("/agent replace"),
+        Some(super::commands::PrimaryAgentCommand::OpenPicker {
+            replace: true
+        })
+    );
+    assert!(matches!(
+        super::commands::parse_primary_agent_command("/agent replace reviewer"),
+        Some(super::commands::PrimaryAgentCommand::Select {
+            selector,
+            mode: crate::agent::AgentProfileChangeMode::ReplaceSystem,
+        }) if selector == "reviewer"
+    ));
+    for selector in ["replacement", "replace-reviewer"] {
+        assert!(matches!(
+            super::commands::parse_primary_agent_command(&format!("/agent {selector}")),
+            Some(super::commands::PrimaryAgentCommand::Select {
+                selector: parsed,
+                mode: crate::agent::AgentProfileChangeMode::Ordinary,
+            }) if parsed == selector
+        ));
+    }
+}
+
+#[test]
 fn primary_agent_picker_marks_current_and_carries_explicit_replace_intent() {
     let mut app = create_test_app();
     app.session.update_active_agent_metadata(
@@ -1472,6 +1498,39 @@ fn busy_primary_agent_change_rejects_without_queueing() {
     app.submit_input();
 
     assert!(app.queued_messages.is_empty());
+    assert!(app.display_messages().iter().any(|message| {
+        message.role == "error" && message.content.contains("current turn to finish")
+    }));
+}
+
+#[test]
+fn local_primary_agent_picker_rechecks_busy_state_at_mutation_boundary() {
+    let mut app = create_test_app();
+    app.session.update_active_agent_metadata(
+        crate::session::StoredAgentReference {
+            scope: crate::instruction::InstructionScope::Global,
+            id: "current".to_string(),
+            display_name: "Current".to_string(),
+        },
+        None,
+    );
+    app.open_primary_agent_picker(
+        vec![crate::instruction::AgentCatalogEntry {
+            agent: crate::session::StoredAgentReference {
+                scope: crate::instruction::InstructionScope::Global,
+                id: "current".to_string(),
+                display_name: "Current".to_string(),
+            },
+            description: "Synthetic current agent".to_string(),
+        }],
+        false,
+    );
+    app.is_processing = true;
+
+    app.handle_inline_interactive_key(KeyCode::Enter, KeyModifiers::NONE)
+        .expect("picker busy rejection");
+
+    assert!(app.inline_interactive_state.is_none());
     assert!(app.display_messages().iter().any(|message| {
         message.role == "error" && message.content.contains("current turn to finish")
     }));
