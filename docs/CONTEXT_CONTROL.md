@@ -553,7 +553,7 @@ closed.
 | Amazon Bedrock | Validates through the Converse builder only when the AWS SDK feature is present. Replayed-reasoning suppression is not claimed for unsupported block kinds. |
 | GitHub Copilot | Validates through the Copilot chat builder. Locked model state fails closed. Copilot does not accept `[1m]` model profiles. |
 | Cursor Agent | Validates through the exact text-prompt builder and rejects projections that would depend on silent prefix truncation. Replayed-reasoning suppression is not claimed. |
-| Claude CLI route | Historical context operations are disabled. This deprecated route sends the latest prompt and relies on opaque upstream `--resume` state, so it cannot validate replay of edited history. Use native Anthropic. |
+| Claude CLI route | Historical context operations are disabled. This deprecated route sends the complete trailing user-authority sequence, including an appended agent profile before the real prompt, but relies on opaque upstream `--resume` state and cannot validate general replay of edited history. Use native Anthropic. |
 
 Request-builder validation is necessary but not equivalent to a credentialed live provider
 probe. The latest source-builder and live-probe status is recorded separately in the
@@ -597,8 +597,11 @@ projection before publication.
 When a session's current agent is delivered by an appended profile message, that exact
 message is active configuration as well as authoritative transcript source. The Context
 Editor marks it as locked, keeps complete detail inspectable, and rejects a summary range
-covering it before curator work. Rewind pins it at the new tail boundary rather than
-time-traveling agent configuration; undo restores prior history without duplicating it.
+covering it before curator work. Preview and preparation APIs derive this protection from
+authoritative Session or Agent state, and a ready draft revalidates it before commit. Rewind
+pins it at the new tail boundary rather than time-traveling agent configuration; undo restores
+prior history without duplication only until a later profile append or replacement invalidates
+the undo snapshot.
 Superseded profile messages have no active lock and follow ordinary historical context rules.
 
 ### Clear

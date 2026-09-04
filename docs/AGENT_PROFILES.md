@@ -29,7 +29,7 @@ The Rust SDK exposes `create_session_with_agent`. The TypeScript SDK accepts the
 - After first provider dispatch, `/agent <selector>` appends a complete current-source target profile as a Jcode-generated hidden user-authority message. It makes no provider call and preserves the existing system prefix.
 - `/agent replace` opens the replacement picker. `/agent replace <selector>` explicitly installs the latest complete composition as the true system prompt.
 - `/agent inspect` displays the exact current stored system prompt, active agent delivery, and active rendered skill text.
-- Agent changes are idle-only. Busy sessions reject them rather than queueing them.
+- Agent changes are idle-only. The local picker rechecks at mutation time, and the server retains one nonblocking Agent guard through the complete transaction. Busy sessions reject rather than wait or queue.
 - Selecting the exact current qualified identity ordinarily does nothing and does not reread source. An unqualified selector still resolves current project-first specificity before Jcode classifies it as unchanged.
 
 The former special-role model picker is `/agent-models`. `/agents` remains a compatibility alias and displays guidance to use `/agent` for primary profiles.
@@ -118,7 +118,11 @@ The active appended profile is a protected authoritative message:
 - Unrelated messages and superseded profile messages retain ordinary context-control behavior.
 - Context apply, revert, reapply, projection validation, and curator prompts are otherwise unchanged.
 
-Rewind changes conversation history, not current agent configuration. If rewind would truncate the active appended profile, Jcode pins that exact stored message at the new tail boundary. Undo restores the exact prior transcript and structural profile identity without duplicating the active message. Existing provider-continuation reset and context-transaction reconciliation still apply.
+Rewind changes conversation history, not current agent configuration. If rewind would truncate the active appended profile, Jcode pins that exact stored message at the new tail boundary. Undo restores the exact prior transcript and structural profile identity without duplicating the active message, but only while agent configuration remains unchanged. Any successful append or true-system replacement after rewind invalidates that undo snapshot instead of restoring history that omits the newer active profile. Existing provider-continuation reset and context-transaction reconciliation still apply.
+
+Provider request preparation validates that an active transition ID identifies exactly one structurally registered, correctly framed authoritative profile message. Missing, duplicated, unregistered, or malformed active profile state blocks the request before provider dispatch.
+
+Context preview and draft preparation accept authoritative `Agent` or `Session` state rather than an optional caller-supplied profile ID. The captured active-profile identity persists in the ready draft and is revalidated immediately before apply, so an obsolete or unprotected draft cannot commit.
 
 ## Lifecycle
 
@@ -127,6 +131,8 @@ Rewind changes conversation history, not current agent configuration. If rewind 
 - Model and provider changes retain exact prompt and profile state.
 - A true-system replacement clears active-message protection but does not rewrite or delete earlier transition messages or context transactions.
 - Persistence failure leaves the complete previous session state active.
+
+The deprecated Claude CLI transport cannot replay general edited history, but it now sends the complete trailing user-authority sequence. An appended profile therefore reaches the CLI immediately before the real user prompt, including on an opaque resumed CLI session. Explicit true-system replacement still clears continuation, so the next non-resumed CLI request receives the new system prompt.
 
 ## Inspection, exports, and replay
 

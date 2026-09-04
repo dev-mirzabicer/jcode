@@ -152,6 +152,8 @@ The shipped seed is versioned separately from the store schema. A newer binary c
 
 Session delivery remains outside this module. `Session` atomically owns appended message content, active identity, active transition ID, and the structural profile-message identity index. App-core and TUI callers own idle gating, persistence, provider preflight, continuation reset, cache attribution, context accounting, UI cards, and errors.
 
+Before provider preparation or context mutation, `Session::validate_active_agent_profile` requires the active ID to identify exactly one structurally indexed, code-framed user-authority profile message. Profile mutation invalidates any earlier rewind-undo snapshot. Context APIs derive protection from authoritative Session or Agent state and persist the captured active ID through ready-draft apply validation. The deprecated Claude CLI adapter preserves the complete consecutive trailing user-authority sequence rather than extracting only the latest user message.
+
 ## Diagnostics and errors
 
 Discovery records path-scoped diagnostics for unreadable or unidentified files. A document whose stable ID can be recovered remains a scoped invalid catalog entry so its shadowing semantics stay truthful.
