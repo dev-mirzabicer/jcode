@@ -117,13 +117,10 @@ pub(super) fn handle_preview_context_ranges(
             .try_lock()
             .map_err(|_| ContextServiceError::SessionBusy)?;
         service
-            .preview_context_ranges_with_active_profile(
-                agent.session_id(),
-                agent.messages(),
-                agent.context_view_state(),
+            .preview_context_ranges(
+                &agent,
                 expected_context_revision,
                 expected_transcript_digest,
-                agent.active_transition_message_id(),
                 &ranges,
             )
             .map(|preview| ServerEvent::ContextRangeClosurePreview { id, preview })

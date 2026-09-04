@@ -446,6 +446,7 @@ fn context_protocol_events_reduce_with_exact_correlation_and_prompt_safe_action_
         crate::protocol::ContextDraft {
             identity: identity(),
             authorization: StoredContextAuthorization::Manual { initiated_by: None },
+            active_agent_profile_message_id: None,
             required_operations: Vec::new(),
             distillation_proposals: Vec::new(),
             ineligible_distillations: Vec::new(),

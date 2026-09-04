@@ -1291,6 +1291,7 @@ fn debug_draft(pricing: PricingFixture, proposal_count: usize) -> ContextDraft {
     ContextDraft {
         identity: debug_identity(),
         authorization: StoredContextAuthorization::Manual { initiated_by: None },
+        active_agent_profile_message_id: None,
         required_operations: vec![reasoning],
         distillation_proposals: proposals,
         ineligible_distillations: vec![crate::protocol::ContextIneligibleDistillation {

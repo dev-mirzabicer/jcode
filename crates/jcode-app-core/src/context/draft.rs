@@ -33,6 +33,7 @@ use crate::provider::{
     ContextProjectionOperationKind, ContextProjectionValidationOperation,
     ContextReasoningBlockKind, ModelRoute, Provider,
 };
+use crate::session::Session;
 use chrono::{DateTime, Utc};
 use jcode_context_core::{
     ContextEconomicsInput, ContextTargetIndex, analyze_cache_prefix,
@@ -209,14 +210,40 @@ pub struct ContextTransactionService {
 /// provider-validation, and economics pipeline. Current session identity is
 /// revalidated again before application.
 pub struct ContextDraftRuntimeInput {
-    pub session_id: String,
-    pub messages: Vec<StoredMessage>,
-    pub context_view: StoredContextViewState,
-    pub provider: Arc<dyn Provider>,
-    pub route: String,
-    pub model_routes: Vec<ModelRoute>,
-    pub estimated_total_request_tokens_before: Option<usize>,
-    pub active_agent_profile_message_id: Option<String>,
+    session_id: String,
+    messages: Vec<StoredMessage>,
+    context_view: StoredContextViewState,
+    provider: Arc<dyn Provider>,
+    route: String,
+    model_routes: Vec<ModelRoute>,
+    estimated_total_request_tokens_before: Option<usize>,
+    active_agent_profile_message_id: Option<String>,
+}
+
+impl ContextDraftRuntimeInput {
+    pub fn from_session(
+        session: &Session,
+        provider: Arc<dyn Provider>,
+        route: String,
+        model_routes: Vec<ModelRoute>,
+        estimated_total_request_tokens_before: Option<usize>,
+    ) -> Result<Self, ContextServiceError> {
+        session
+            .validate_active_agent_profile()
+            .map_err(|error| ContextServiceError::Stale(error.to_string()))?;
+        Ok(Self {
+            session_id: session.id.clone(),
+            messages: session.messages.clone(),
+            context_view: session.context_view.clone(),
+            provider,
+            route,
+            model_routes,
+            estimated_total_request_tokens_before,
+            active_agent_profile_message_id: session
+                .active_transition_message_id()
+                .map(str::to_string),
+        })
+    }
 }
 
 impl Default for ContextTransactionService {
@@ -267,8 +294,11 @@ impl ContextTransactionService {
         agent: &mut Agent,
         processing: bool,
     ) -> Result<crate::context::ContextEditorSnapshot, ContextServiceError> {
+        agent
+            .validate_active_agent_profile()
+            .map_err(|error| ContextServiceError::Stale(error.to_string()))?;
         let provider = agent.provider_handle();
-        self.context_editor_snapshot_for_session(
+        self.context_editor_snapshot_from_parts(
             agent.session_id(),
             agent.messages(),
             agent.context_view_state(),
@@ -280,11 +310,34 @@ impl ContextTransactionService {
         )
     }
 
+    pub fn context_editor_snapshot_for_session(
+        &self,
+        session: &Session,
+        processing: bool,
+        provider: &dyn Provider,
+        route: &str,
+        projected_request_tokens: Option<usize>,
+    ) -> Result<crate::context::ContextEditorSnapshot, ContextServiceError> {
+        session
+            .validate_active_agent_profile()
+            .map_err(|error| ContextServiceError::Stale(error.to_string()))?;
+        self.context_editor_snapshot_from_parts(
+            &session.id,
+            &session.messages,
+            &session.context_view,
+            processing,
+            provider,
+            route,
+            projected_request_tokens,
+            session.active_transition_message_id(),
+        )
+    }
+
     #[expect(
         clippy::too_many_arguments,
-        reason = "snapshot construction keeps exact session, provider, route, and request-estimate identity"
+        reason = "internal snapshot construction keeps exact session, provider, route, and active-profile identity"
     )]
-    pub fn context_editor_snapshot_for_session(
+    fn context_editor_snapshot_from_parts(
         &self,
         session_id: &str,
         messages: &[StoredMessage],
@@ -417,26 +470,20 @@ impl ContextTransactionService {
     )]
     pub fn context_editor_snapshot_page_for_session(
         &self,
-        session_id: &str,
-        messages: &[StoredMessage],
-        context_view: &StoredContextViewState,
+        session: &Session,
         processing: bool,
         provider: &dyn Provider,
         route: &str,
         projected_request_tokens: Option<usize>,
-        active_agent_profile_message_id: Option<&str>,
         page_start: usize,
         page_size: usize,
     ) -> Result<crate::context::ContextEditorSnapshot, ContextServiceError> {
         let snapshot = self.context_editor_snapshot_for_session(
-            session_id,
-            messages,
-            context_view,
+            session,
             processing,
             provider,
             route,
             projected_request_tokens,
-            active_agent_profile_message_id,
         )?;
         crate::context::paginate_context_editor_snapshot(snapshot, page_start, page_size)
             .map_err(|error| ContextServiceError::InvalidSelection(error.to_string()))
@@ -516,20 +563,42 @@ impl ContextTransactionService {
 
     pub fn preview_context_ranges(
         &self,
-        session_id: &str,
-        messages: &[StoredMessage],
-        context_view: &StoredContextViewState,
+        agent: &Agent,
         expected_context_revision: u64,
         expected_transcript_digest: u64,
         ranges: &[ContextMessageRangeSelection],
     ) -> Result<ContextRangeClosurePreview, ContextServiceError> {
-        self.preview_context_ranges_with_active_profile(
-            session_id,
-            messages,
-            context_view,
+        agent
+            .validate_active_agent_profile()
+            .map_err(|error| ContextServiceError::Stale(error.to_string()))?;
+        self.preview_context_ranges_from_parts(
+            agent.session_id(),
+            agent.messages(),
+            agent.context_view_state(),
             expected_context_revision,
             expected_transcript_digest,
-            None,
+            agent.active_transition_message_id(),
+            ranges,
+        )
+    }
+
+    pub fn preview_context_ranges_for_session(
+        &self,
+        session: &Session,
+        expected_context_revision: u64,
+        expected_transcript_digest: u64,
+        ranges: &[ContextMessageRangeSelection],
+    ) -> Result<ContextRangeClosurePreview, ContextServiceError> {
+        session
+            .validate_active_agent_profile()
+            .map_err(|error| ContextServiceError::Stale(error.to_string()))?;
+        self.preview_context_ranges_from_parts(
+            &session.id,
+            &session.messages,
+            &session.context_view,
+            expected_context_revision,
+            expected_transcript_digest,
+            session.active_transition_message_id(),
             ranges,
         )
     }
@@ -538,7 +607,7 @@ impl ContextTransactionService {
         clippy::too_many_arguments,
         reason = "range preview keeps exact session, transcript, context revision, active-profile, and selection identity"
     )]
-    pub fn preview_context_ranges_with_active_profile(
+    fn preview_context_ranges_from_parts(
         &self,
         session_id: &str,
         messages: &[StoredMessage],
@@ -622,7 +691,10 @@ impl ContextTransactionService {
         request: ContextDraftRequest,
     ) -> Result<ContextCuratorPlanPreview, ContextServiceError> {
         let provider = agent.provider_handle();
-        self.preview_context_curator_plan_for_session_with_active_profile(
+        agent
+            .validate_active_agent_profile()
+            .map_err(|error| ContextServiceError::Stale(error.to_string()))?;
+        self.preview_context_curator_plan_from_parts(
             agent.session_id(),
             agent.messages(),
             agent.context_view_state(),
@@ -644,9 +716,7 @@ impl ContextTransactionService {
     )]
     pub fn preview_context_curator_plan_for_session(
         &self,
-        session_id: &str,
-        messages: &[StoredMessage],
-        context_view: &StoredContextViewState,
+        session: &Session,
         processing: bool,
         provider: &dyn Provider,
         route: &str,
@@ -656,10 +726,13 @@ impl ContextTransactionService {
         request: ContextDraftRequest,
         configured_default: &crate::config::ContextCuratorConfig,
     ) -> Result<ContextCuratorPlanPreview, ContextServiceError> {
-        self.preview_context_curator_plan_for_session_with_active_profile(
-            session_id,
-            messages,
-            context_view,
+        session
+            .validate_active_agent_profile()
+            .map_err(|error| ContextServiceError::Stale(error.to_string()))?;
+        self.preview_context_curator_plan_from_parts(
+            &session.id,
+            &session.messages,
+            &session.context_view,
             processing,
             provider,
             route,
@@ -667,7 +740,7 @@ impl ContextTransactionService {
             expected_context_revision,
             expected_transcript_digest,
             request,
-            None,
+            session.active_transition_message_id(),
             configured_default,
         )
     }
@@ -676,7 +749,7 @@ impl ContextTransactionService {
         clippy::too_many_arguments,
         reason = "exact curator preview retains authoritative session, route, transcript, profile, and configured-default identity"
     )]
-    pub fn preview_context_curator_plan_for_session_with_active_profile(
+    fn preview_context_curator_plan_from_parts(
         &self,
         session_id: &str,
         messages: &[StoredMessage],
@@ -774,6 +847,9 @@ impl ContextTransactionService {
         let guard = agent
             .try_lock()
             .map_err(|_| ContextServiceError::SessionBusy)?;
+        guard
+            .validate_active_agent_profile()
+            .map_err(|error| ContextServiceError::Stale(error.to_string()))?;
         let draft_id = Uuid::new_v4().to_string();
         let created_at = Utc::now();
         let expires_at = created_at
@@ -1248,6 +1324,27 @@ impl ContextTransactionService {
             self.finish_failed(&draft_id, error);
             return;
         }
+        if let Err(error) = guard.validate_active_agent_profile() {
+            drop(guard);
+            drop(artifacts);
+            drop(capture);
+            self.finish_failed(&draft_id, ContextServiceError::Stale(error.to_string()));
+            return;
+        }
+        if capture.active_agent_profile_message_id.as_deref()
+            != guard.active_transition_message_id()
+        {
+            drop(guard);
+            drop(artifacts);
+            drop(capture);
+            self.finish_failed(
+                &draft_id,
+                ContextServiceError::Stale(
+                    "active agent profile changed during context draft preparation".to_string(),
+                ),
+            );
+            return;
+        }
         let provider = guard.provider_handle();
         let estimated_total_request_tokens_before = guard.current_context_request_token_estimate();
         let draft = build_ready_draft(
@@ -1524,6 +1621,7 @@ struct ReasoningFilterStats {
 struct CapturedContextDraft {
     identity: ContextDraftIdentity,
     authorization: StoredContextAuthorization,
+    active_agent_profile_message_id: Option<String>,
     messages: Vec<StoredMessage>,
     base_context_view: StoredContextViewState,
     ranges: Vec<ContextCuratorRangeWork>,
@@ -1765,6 +1863,7 @@ fn capture_context_draft_with_active_profile(
     Ok(CapturedContextDraft {
         identity,
         authorization: request.authorization,
+        active_agent_profile_message_id: active_agent_profile_message_id.map(str::to_string),
         messages,
         base_context_view,
         ranges,
@@ -2304,6 +2403,7 @@ fn build_ready_draft_inner(
     Ok(ContextDraft {
         identity: capture.identity,
         authorization: capture.authorization,
+        active_agent_profile_message_id: capture.active_agent_profile_message_id,
         required_operations,
         distillation_proposals: proposals,
         ineligible_distillations: ineligible,
@@ -3042,6 +3142,7 @@ mod store_tests {
         ContextDraft {
             identity: identity(id, expires_at),
             authorization: StoredContextAuthorization::Manual { initiated_by: None },
+            active_agent_profile_message_id: None,
             required_operations: Vec::new(),
             distillation_proposals: Vec::new(),
             ineligible_distillations: Vec::new(),
@@ -4375,24 +4476,11 @@ mod orchestration_tests {
 
         let mut reviewed = request();
         let fingerprint = {
-            let guard = agent.lock().await;
-            let provider_handle = guard.provider_handle();
-            let route = guard.context_route_identity();
-            let routes = guard.model_routes();
+            let mut guard = agent.lock().await;
+            let revision = guard.context_view_state().revision;
+            let digest = authoritative_transcript_digest(guard.messages());
             service
-                .preview_context_curator_plan_for_session(
-                    guard.session_id(),
-                    guard.messages(),
-                    guard.context_view_state(),
-                    false,
-                    provider_handle.as_ref(),
-                    &route,
-                    &routes,
-                    guard.context_view_state().revision,
-                    authoritative_transcript_digest(guard.messages()),
-                    reviewed.clone(),
-                    &crate::config::ContextCuratorConfig::default(),
-                )
+                .preview_context_curator_plan(&mut guard, false, revision, digest, reviewed.clone())
                 .expect("exact manual preview")
                 .fingerprint
         };
@@ -5182,69 +5270,64 @@ mod orchestration_tests {
     fn active_agent_profile_is_locked_before_range_preview_or_curator_capture() {
         let service = ContextTransactionService::new();
         let provider = DraftProvider::new();
-        let messages = vec![
-            stored(
-                "ordinary-message",
-                Role::User,
-                vec![ContentBlock::Text {
-                    text: "ordinary context".to_string(),
-                    cache_control: None,
-                }],
-            ),
-            stored(
-                "active-profile-message",
-                Role::User,
-                vec![ContentBlock::Text {
-                    text: "SYNTHETIC_ACTIVE_PROFILE".to_string(),
-                    cache_control: None,
-                }],
-            ),
-        ];
-        let state = StoredContextViewState::default();
-        let digest = authoritative_transcript_digest(&messages);
+        let mut session = Session::create_with_id("session-profile-lock".to_string(), None, None);
+        session.install_system_prompt(crate::session::StoredSystemPromptState {
+            text: "SYNTHETIC_SYSTEM".to_string(),
+            active_agent: crate::session::StoredAgentReference {
+                scope: crate::instruction::InstructionScope::Global,
+                id: "initial".to_string(),
+                display_name: "Initial".to_string(),
+            },
+            first_provider_dispatch_at: Some(Utc::now()),
+            active_transition_message_id: None,
+        });
+        let ordinary_message_id = session.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "ordinary context".to_string(),
+                cache_control: None,
+            }],
+        );
+        let active_profile_message_id = session
+            .append_agent_profile_transition(crate::instruction::AgentProfileTransition {
+                agent: crate::session::StoredAgentReference {
+                    scope: crate::instruction::InstructionScope::Global,
+                    id: "active".to_string(),
+                    display_name: "Active".to_string(),
+                },
+                transition_sentence: "SYNTHETIC_TRANSITION".to_string(),
+                complete_instructions: "SYNTHETIC_ACTIVE_PROFILE".to_string(),
+                initialized_global_store: false,
+            })
+            .expect("append active profile");
+        let digest = authoritative_transcript_digest(&session.messages);
         let snapshot = service
-            .context_editor_snapshot_for_session_with_curator_config_and_active_profile(
-                "session-profile-lock",
-                &messages,
-                &state,
-                false,
-                &provider,
-                "draft-route",
-                None,
-                Some("active-profile-message"),
-                &crate::config::ContextCuratorConfig::default(),
-            )
+            .context_editor_snapshot_for_session(&session, false, &provider, "draft-route", None)
             .expect("profile-aware snapshot");
         assert!(!snapshot.messages[0].active_agent_profile);
         assert!(snapshot.messages[1].active_agent_profile);
 
         let error = service
-            .preview_context_ranges_with_active_profile(
-                "session-profile-lock",
-                &messages,
-                &state,
+            .preview_context_ranges_for_session(
+                &session,
                 0,
                 digest,
-                Some("active-profile-message"),
                 &[ContextMessageRangeSelection {
-                    start_message_id: "ordinary-message".to_string(),
-                    end_message_id: "active-profile-message".to_string(),
+                    start_message_id: ordinary_message_id.clone(),
+                    end_message_id: active_profile_message_id,
                 }],
             )
             .expect_err("active profile range must reject before curator work");
         assert!(matches!(error, ContextServiceError::Conflict(_)));
 
         service
-            .preview_context_ranges_with_active_profile(
-                "session-profile-lock",
-                &messages,
-                &state,
+            .preview_context_ranges_for_session(
+                &session,
                 0,
                 digest,
-                Some("active-profile-message"),
                 &[ContextMessageRangeSelection {
-                    start_message_id: "ordinary-message".to_string(),
-                    end_message_id: "ordinary-message".to_string(),
+                    start_message_id: ordinary_message_id.clone(),
+                    end_message_id: ordinary_message_id,
                 }],
             )
             .expect("unrelated context remains transformable");
@@ -5386,10 +5469,8 @@ mod orchestration_tests {
         let service = ContextTransactionService::new();
         let digest = authoritative_transcript_digest(&session.messages);
         let forward = service
-            .preview_context_ranges(
-                &session.id,
-                &session.messages,
-                &session.context_view,
+            .preview_context_ranges_for_session(
+                &session,
                 session.context_view.revision,
                 digest,
                 &[ContextMessageRangeSelection {
@@ -5399,10 +5480,8 @@ mod orchestration_tests {
             )
             .expect("forward range preview");
         let backward = service
-            .preview_context_ranges(
-                &session.id,
-                &session.messages,
-                &session.context_view,
+            .preview_context_ranges_for_session(
+                &session,
                 session.context_view.revision,
                 digest,
                 &[ContextMessageRangeSelection {

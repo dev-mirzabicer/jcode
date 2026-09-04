@@ -740,14 +740,11 @@ impl App {
                 let event = self
                     .context_transactions
                     .context_editor_snapshot_page_for_session(
-                        &self.session.id,
-                        &self.session.messages,
-                        &self.session.context_view,
+                        &self.session,
                         self.is_processing,
                         self.provider.as_ref(),
                         &self.local_context_route_identity(),
                         self.local_context_request_token_estimate(),
-                        self.session.active_transition_message_id(),
                         page_start,
                         page_size,
                     )
@@ -806,13 +803,10 @@ impl App {
                 );
                 let event = self
                     .context_transactions
-                    .preview_context_ranges_with_active_profile(
-                        &self.session.id,
-                        &self.session.messages,
-                        &self.session.context_view,
+                    .preview_context_ranges_for_session(
+                        &self.session,
                         context_revision,
                         transcript_digest,
-                        self.session.active_transition_message_id(),
                         &ranges,
                     )
                     .map(|preview| ServerEvent::ContextRangeClosurePreview { id, preview });
@@ -837,10 +831,8 @@ impl App {
                 );
                 let event = self
                     .context_transactions
-                    .preview_context_curator_plan_for_session_with_active_profile(
-                        &self.session.id,
-                        &self.session.messages,
-                        &self.session.context_view,
+                    .preview_context_curator_plan_for_session(
+                        &self.session,
                         self.is_processing,
                         self.provider.as_ref(),
                         &self.local_context_route_identity(),
@@ -848,7 +840,6 @@ impl App {
                         context_revision,
                         transcript_digest,
                         request,
-                        self.session.active_transition_message_id(),
                         &crate::config::config().context.curator,
                     )
                     .map(|preview| ServerEvent::ContextCuratorPlanPreview { id, preview });
@@ -899,19 +890,24 @@ impl App {
             }
             ContextEditorAction::PrepareDraft(request) => {
                 self.context_protocol.begin_prepare_draft(id);
-                let input = ContextDraftRuntimeInput {
-                    session_id: self.session.id.clone(),
-                    messages: self.session.messages.clone(),
-                    context_view: self.session.context_view.clone(),
-                    provider: Arc::clone(&self.provider),
-                    route: self.local_context_route_identity(),
-                    model_routes: self.provider.model_routes(),
-                    estimated_total_request_tokens_before: self
-                        .local_context_request_token_estimate(),
-                    active_agent_profile_message_id: self
-                        .session
-                        .active_transition_message_id()
-                        .map(str::to_string),
+                let input = match ContextDraftRuntimeInput::from_session(
+                    &self.session,
+                    Arc::clone(&self.provider),
+                    self.local_context_route_identity(),
+                    self.provider.model_routes(),
+                    self.local_context_request_token_estimate(),
+                ) {
+                    Ok(input) => input,
+                    Err(error) => {
+                        self.send_local_context_rejection(
+                            id,
+                            ContextRequestKind::PrepareDraft,
+                            None,
+                            None,
+                            error,
+                        );
+                        return;
+                    }
                 };
                 match self.context_transactions.prepare_draft_for_session(
                     input,

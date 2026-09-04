@@ -483,6 +483,8 @@ pub struct ContextIneligibleDistillation {
 pub struct ContextDraft {
     pub identity: ContextDraftIdentity,
     pub authorization: StoredContextAuthorization,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_agent_profile_message_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_operations: Vec<StoredContextOperation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

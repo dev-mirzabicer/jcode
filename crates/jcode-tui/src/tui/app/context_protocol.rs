@@ -1161,6 +1161,7 @@ mod tests {
         ContextDraft {
             identity: identity(),
             authorization: StoredContextAuthorization::Manual { initiated_by: None },
+            active_agent_profile_message_id: None,
             required_operations: Vec::new(),
             distillation_proposals: Vec::new(),
             ineligible_distillations: Vec::new(),

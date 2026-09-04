@@ -328,18 +328,14 @@ impl Agent {
         request: ContextDraftRequest,
         report: &ContextPreflightReport,
     ) -> Result<(String, ContextDraft)> {
-        let input = ContextDraftRuntimeInput {
-            session_id: self.session.id.clone(),
-            messages: self.session.messages.clone(),
-            context_view: self.session.context_view.clone(),
-            provider: Arc::clone(&self.provider),
-            route: self.context_route_identity(),
-            model_routes: self.provider.model_routes(),
-            estimated_total_request_tokens_before: Some(report.projected_input_tokens),
-            active_agent_profile_message_id: self
-                .active_transition_message_id()
-                .map(str::to_string),
-        };
+        let input = ContextDraftRuntimeInput::from_session(
+            &self.session,
+            Arc::clone(&self.provider),
+            self.context_route_identity(),
+            self.provider.model_routes(),
+            Some(report.projected_input_tokens),
+        )
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         let draft_id = service
             .prepare_draft_for_session(input, request, false)
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;

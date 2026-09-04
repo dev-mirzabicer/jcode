@@ -234,6 +234,11 @@ impl ContextTransactionService {
             .map_err(|_| ContextServiceError::SessionBusy)?;
         let draft = self.reserve_ready_draft(draft_id, agent.session_id())?;
 
+        if let Err(error) = agent.validate_active_agent_profile() {
+            let error = ContextServiceError::Stale(error.to_string());
+            self.fail_applying_draft(draft_id, error.clone());
+            return Err(error);
+        }
         let selected_distillations =
             match selected_distillation_operations(&draft, selected_distillation_ids.as_deref()) {
                 Ok(operations) => operations,
@@ -243,6 +248,15 @@ impl ContextTransactionService {
                 }
             };
         if let Err(error) = validate_capture_identity(&agent, &draft.identity) {
+            self.fail_applying_draft(draft_id, error.clone());
+            return Err(error);
+        }
+        if let Err(error) = validate_active_profile_draft(
+            agent.messages(),
+            agent.active_transition_message_id(),
+            &draft,
+            &selected_distillations,
+        ) {
             self.fail_applying_draft(draft_id, error.clone());
             return Err(error);
         }
@@ -329,6 +343,20 @@ impl ContextTransactionService {
             provider,
             route,
             &draft.identity,
+        ) {
+            self.fail_applying_draft(draft_id, error.clone());
+            return Err(error);
+        }
+        session.validate_active_agent_profile().map_err(|error| {
+            let error = ContextServiceError::Stale(error.to_string());
+            self.fail_applying_draft(draft_id, error.clone());
+            error
+        })?;
+        if let Err(error) = validate_active_profile_draft(
+            &session.messages,
+            session.active_transition_message_id(),
+            &draft,
+            &selected_distillations,
         ) {
             self.fail_applying_draft(draft_id, error.clone());
             return Err(error);
@@ -499,6 +527,65 @@ impl ContextTransactionService {
         }
         store.enforce_total_bytes(self.limits.max_total_bytes);
     }
+}
+
+fn validate_active_profile_draft(
+    messages: &[crate::session::StoredMessage],
+    current_active_message_id: Option<&str>,
+    draft: &ContextDraft,
+    selected_distillations: &[StoredContextOperation],
+) -> Result<(), ContextServiceError> {
+    if draft.active_agent_profile_message_id.as_deref() != current_active_message_id {
+        return Err(ContextServiceError::Stale(
+            "active agent profile changed after context draft capture".to_string(),
+        ));
+    }
+    let Some(active_message_id) = current_active_message_id else {
+        return Ok(());
+    };
+    let active_index = messages
+        .iter()
+        .position(|message| message.id == active_message_id)
+        .ok_or_else(|| {
+            ContextServiceError::Stale(format!(
+                "active agent profile message {active_message_id} is missing from authoritative history"
+            ))
+        })?;
+    for operation in draft
+        .required_operations
+        .iter()
+        .chain(selected_distillations)
+    {
+        if let StoredContextOperation::RangeSummary(summary) = operation {
+            let start = messages
+                .iter()
+                .position(|message| message.id == summary.source_range.start_message_id)
+                .ok_or_else(|| {
+                    ContextServiceError::Stale(
+                        "context draft range start disappeared before apply".to_string(),
+                    )
+                })?;
+            let end = messages
+                .iter()
+                .position(|message| message.id == summary.source_range.end_message_id)
+                .ok_or_else(|| {
+                    ContextServiceError::Stale(
+                        "context draft range end disappeared before apply".to_string(),
+                    )
+                })?;
+            let (start, end) = if start <= end {
+                (start, end)
+            } else {
+                (end, start)
+            };
+            if start <= active_index && active_index <= end {
+                return Err(ContextServiceError::Conflict(format!(
+                    "context draft range includes active agent profile message {active_message_id}"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_unattended_emergency_transaction(
@@ -1235,6 +1322,9 @@ mod tests {
                 expires_at: Utc::now() + chrono::Duration::minutes(30),
             },
             authorization: authorization.clone(),
+            active_agent_profile_message_id: agent
+                .active_transition_message_id()
+                .map(str::to_string),
             required_operations,
             distillation_proposals: vec![proposal],
             ineligible_distillations: Vec::new(),
@@ -1503,6 +1593,9 @@ mod tests {
                 expires_at: now + chrono::Duration::minutes(30),
             },
             authorization,
+            active_agent_profile_message_id: source
+                .active_transition_message_id()
+                .map(str::to_string),
             required_operations: operations,
             distillation_proposals: Vec::new(),
             ineligible_distillations: Vec::new(),
@@ -1713,6 +1806,138 @@ mod tests {
             receipt_before
         );
         assert_eq!(persistence.calls(), 3);
+    }
+
+    #[test]
+    fn direct_context_apply_rejects_draft_with_stale_active_profile_identity() {
+        let provider = TestProvider::new(true);
+        let mut session = Session::create_with_id("session-profile-commit".to_string(), None, None);
+        session.install_system_prompt(crate::session::StoredSystemPromptState {
+            text: "SYNTHETIC_SYSTEM".to_string(),
+            active_agent: crate::session::StoredAgentReference {
+                scope: crate::instruction::InstructionScope::Global,
+                id: "initial".to_string(),
+                display_name: "Initial".to_string(),
+            },
+            first_provider_dispatch_at: Some(Utc::now()),
+            active_transition_message_id: None,
+        });
+        let ordinary_id = session.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "ordinary source for summary".repeat(20),
+                cache_control: None,
+            }],
+        );
+        let active_profile_id = session
+            .append_agent_profile_transition(crate::instruction::AgentProfileTransition {
+                agent: crate::session::StoredAgentReference {
+                    scope: crate::instruction::InstructionScope::Global,
+                    id: "active".to_string(),
+                    display_name: "Active".to_string(),
+                },
+                transition_sentence: "SYNTHETIC_TRANSITION".to_string(),
+                complete_instructions: "SYNTHETIC_ACTIVE_PROFILE".to_string(),
+                initialized_global_store: false,
+            })
+            .expect("append active profile");
+        let source_range = build_message_range(&session.messages, 0, 0).expect("source range");
+        assert_eq!(source_range.start_message_id, ordinary_id);
+        let authorization = StoredContextAuthorization::Manual { initiated_by: None };
+        let operation = StoredContextOperation::RangeSummary(StoredRangeSummary {
+            source_range,
+            summary_text: "synthetic complete summary".to_string(),
+            file_change_digest: "No files changed.".to_string(),
+            changed_files: Vec::new(),
+            change_evidence_complete: true,
+            file_evidence: None,
+            boundary_expansions: Vec::new(),
+            generator: Some(generator()),
+            source_token_estimate: 100,
+            replacement_token_estimate: 10,
+            warnings: Vec::new(),
+            created_at: Utc::now(),
+            legacy_coverage: None,
+        });
+        let preview = build_preview(ContextDraftPreviewInput {
+            provider: &provider,
+            messages: &session.messages,
+            base_state: &session.context_view,
+            transaction_id: "draft-profile-commit",
+            proposed_revision: 1,
+            authorization: authorization.clone(),
+            operations: std::slice::from_ref(&operation),
+            pricing: None,
+            estimated_total_request_tokens_before: None,
+            notices: Vec::new(),
+            ranges: &[],
+            proposals: &[],
+        })
+        .expect("draft preview");
+        let draft = ContextDraft {
+            identity: ContextDraftIdentity {
+                draft_id: "draft-profile-commit".to_string(),
+                session_id: session.id.clone(),
+                base_context_revision: 0,
+                raw_message_count: session.messages.len(),
+                transcript_digest: authoritative_transcript_digest(&session.messages),
+                provider_name: provider.name().to_string(),
+                model: provider.model(),
+                route: "profile-commit-route".to_string(),
+                created_at: Utc::now(),
+                expires_at: Utc::now() + chrono::Duration::minutes(30),
+            },
+            authorization,
+            // Simulate a draft captured through an obsolete/unprotected path.
+            active_agent_profile_message_id: None,
+            required_operations: vec![operation],
+            distillation_proposals: Vec::new(),
+            ineligible_distillations: Vec::new(),
+            preview,
+            curator_usage: Vec::new(),
+        };
+        assert_eq!(
+            session.active_transition_message_id(),
+            Some(active_profile_id.as_str())
+        );
+        let direct_persistence = Arc::new(TestDirectSessionPersistence::default());
+        let service = ContextTransactionService::with_persistence_boundaries(
+            ContextServiceLimits::default(),
+            Arc::new(TestPersistence::default()),
+            direct_persistence.clone(),
+        );
+        let reserved_bytes = serde_json::to_vec(&draft).expect("draft bytes").len();
+        service.lock_store().entries.insert(
+            draft.identity.draft_id.clone(),
+            ContextDraftEntry {
+                identity: draft.identity.clone(),
+                progress: ContextDraftProgress {
+                    phase: ContextDraftPhase::Ready,
+                    completed_items: 1,
+                    total_items: 1,
+                },
+                state: DraftEntryState::Ready(draft),
+                cancellation: CancellationToken::new(),
+                notify: Arc::new(Notify::new()),
+                reserved_bytes,
+                generation_in_flight: false,
+            },
+        );
+        let context_before = session.context_view.clone();
+        let error = service
+            .apply_draft_to_session(
+                &mut session,
+                &provider,
+                "profile-commit-route",
+                None,
+                "draft-profile-commit",
+                None,
+                false,
+            )
+            .expect_err("stale profile protection must block commit");
+        assert!(matches!(error, ContextServiceError::Stale(_)));
+        assert_eq!(session.context_view, context_before);
+        assert_eq!(direct_persistence.calls(), 0);
     }
 
     #[test]
