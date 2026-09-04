@@ -74,6 +74,25 @@ pub enum ApiRequest {
     /// Fetch conversation history.
     GetHistory { session_id: String },
 
+    /// List valid primary agents for the attached session's project.
+    ListAgents { session_id: String },
+
+    /// Select a primary agent. Ordinary post-dispatch selection appends the
+    /// complete profile; `replace` explicitly replaces the true system prompt.
+    SetAgent {
+        session_id: String,
+        agent: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        replace: bool,
+    },
+
+    /// Inspect active profile state and, optionally, complete instruction text.
+    InspectAgent {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        include_instructions: bool,
+    },
+
     /// Fetch the tail of *any* session's conversation, attached or not.
     ///
     /// `GetHistory` can only answer for the session this connection is

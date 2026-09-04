@@ -13,9 +13,9 @@
 use crate::errors::{Error, ErrorKind, Result};
 use crate::launch::{LaunchOptions, LaunchedInstance, ensure_runtime, launch_instance};
 use jcode_harness_api::{
-    API_VERSION_MAJOR, ApiEvent, ApiRequest, ClientFrame, HistoryMessage, ModelRouteInfo,
-    PermissionDecision, ServerFrame, SessionInfo, TextMatch, api_socket_path, read_frame,
-    write_frame,
+    API_VERSION_MAJOR, AgentInfo, ApiEvent, ApiRequest, ClientFrame, HistoryMessage,
+    ModelRouteInfo, PermissionDecision, ServerFrame, SessionInfo, TextMatch, api_socket_path,
+    read_frame, write_frame,
 };
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -463,6 +463,17 @@ impl JcodeClient {
         self.capabilities.iter().any(|c| c == capability)
     }
 
+    fn require_capability(&self, capability: &str) -> Result<()> {
+        if self.supports(capability) {
+            Ok(())
+        } else {
+            Err(Error::new(
+                ErrorKind::UnsupportedCapability,
+                format!("the connected Harness server does not support {capability}"),
+            ))
+        }
+    }
+
     /// Send a raw request and wait for its reply frame.
     pub fn request(&self, request: ApiRequest) -> Result<ServerFrame> {
         let (tx, rx) = channel();
@@ -733,6 +744,88 @@ impl JcodeClient {
         {
             ApiEvent::History { messages, .. } => Ok(messages),
             other => Err(unexpected("history", &other)),
+        }
+    }
+
+    pub fn list_agents(&self, session_id: &str) -> Result<Vec<AgentInfo>> {
+        self.require_capability("agent_profile_controls")?;
+        match self
+            .request_ok(ApiRequest::ListAgents {
+                session_id: session_id.to_string(),
+            })?
+            .event
+        {
+            ApiEvent::Agents { agents, .. } => Ok(agents),
+            other => Err(unexpected("agents", &other)),
+        }
+    }
+
+    pub fn set_agent(&self, session_id: &str, agent: &str, replace: bool) -> Result<AgentStatus> {
+        self.require_capability("agent_profile_controls")?;
+        match self
+            .request_ok(ApiRequest::SetAgent {
+                session_id: session_id.to_string(),
+                agent: agent.to_string(),
+                replace,
+            })?
+            .event
+        {
+            ApiEvent::AgentChanged {
+                agent_id,
+                display_name,
+                scope,
+                change,
+                message_id,
+                ..
+            } => Ok(AgentStatus {
+                agent_id,
+                display_name,
+                scope,
+                change,
+                message_id,
+                first_provider_dispatched: None,
+                active_transition_message_id: None,
+                system_prompt: None,
+                active_skill: None,
+            }),
+            other => Err(unexpected("agent_changed", &other)),
+        }
+    }
+
+    pub fn inspect_agent(
+        &self,
+        session_id: &str,
+        include_instructions: bool,
+    ) -> Result<AgentStatus> {
+        self.require_capability("agent_profile_controls")?;
+        match self
+            .request_ok(ApiRequest::InspectAgent {
+                session_id: session_id.to_string(),
+                include_instructions,
+            })?
+            .event
+        {
+            ApiEvent::AgentStatus {
+                agent_id,
+                display_name,
+                scope,
+                first_provider_dispatched,
+                active_transition_message_id,
+                system_prompt,
+                active_skill,
+                ..
+            } => Ok(AgentStatus {
+                agent_id,
+                display_name,
+                scope,
+                change: "current".to_string(),
+                message_id: None,
+                first_provider_dispatched: Some(first_provider_dispatched),
+                active_transition_message_id,
+                system_prompt,
+                active_skill,
+            }),
+            other => Err(unexpected("agent_status", &other)),
         }
     }
 
@@ -1103,6 +1196,19 @@ pub struct RuntimeInfo {
     pub model: Option<String>,
     pub providers: Vec<String>,
     pub routes: Vec<ModelRouteInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentStatus {
+    pub agent_id: String,
+    pub display_name: String,
+    pub scope: String,
+    pub change: String,
+    pub message_id: Option<String>,
+    pub first_provider_dispatched: Option<bool>,
+    pub active_transition_message_id: Option<String>,
+    pub system_prompt: Option<String>,
+    pub active_skill: Option<String>,
 }
 
 /// Content and truncation metadata returned by [`JcodeClient::read_file`].

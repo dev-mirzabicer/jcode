@@ -50,6 +50,7 @@ fn fake_harness(handle: impl Fn(&ClientFrame, &mut dyn Write) + Send + 'static) 
             "sessions".to_string(),
             "startup_context_creation_errors".to_string(),
             "initial_agent_selection".to_string(),
+            "agent_profile_controls".to_string(),
         ],
         handle,
     )
@@ -221,6 +222,64 @@ fn create_session_without_agent_remains_compatible_without_agent_capability() {
     assert_eq!(created.session_id, "ordinary");
 }
 
+#[test]
+fn profile_controls_map_typed_requests_and_fail_before_send_without_capability() {
+    let client = fake_harness(|frame, writer| {
+        let event = match &frame.request {
+            ApiRequest::ListAgents { .. } => ApiEvent::Agents {
+                session_id: "s1".to_string(),
+                agents: vec![jcode_harness_api::AgentInfo {
+                    agent_id: "reviewer".to_string(),
+                    display_name: "Reviewer".to_string(),
+                    scope: "project".to_string(),
+                    description: "Synthetic reviewer".to_string(),
+                    active: true,
+                }],
+            },
+            ApiRequest::SetAgent { replace, .. } => ApiEvent::AgentChanged {
+                session_id: "s1".to_string(),
+                agent_id: "reviewer".to_string(),
+                display_name: "Reviewer".to_string(),
+                scope: "project".to_string(),
+                change: if *replace { "replaced" } else { "appended" }.to_string(),
+                message_id: Some("profile-message".to_string()),
+            },
+            ApiRequest::InspectAgent {
+                include_instructions,
+                ..
+            } => ApiEvent::AgentStatus {
+                session_id: "s1".to_string(),
+                agent_id: "reviewer".to_string(),
+                display_name: "Reviewer".to_string(),
+                scope: "project".to_string(),
+                first_provider_dispatched: true,
+                active_transition_message_id: Some("profile-message".to_string()),
+                system_prompt: include_instructions.then(|| "SYNTHETIC_SYSTEM".to_string()),
+                active_skill: include_instructions.then(|| "SYNTHETIC_SKILL".to_string()),
+            },
+            other => panic!("unexpected request: {other:?}"),
+        };
+        reply(frame, event, writer);
+    });
+    let agents = client.list_agents("s1").expect("list agents");
+    assert_eq!(agents[0].agent_id, "reviewer");
+    let changed = client
+        .set_agent("s1", "project:reviewer", true)
+        .expect("replace agent");
+    assert_eq!(changed.change, "replaced");
+    let inspected = client.inspect_agent("s1", true).expect("inspect agent");
+    assert_eq!(inspected.system_prompt.as_deref(), Some("SYNTHETIC_SYSTEM"));
+    assert_eq!(inspected.active_skill.as_deref(), Some("SYNTHETIC_SKILL"));
+
+    let unsupported = fake_harness_with_capabilities(vec!["sessions".to_string()], |_, _| {
+        panic!("unsupported profile control must fail before sending")
+    });
+    let error = unsupported
+        .list_agents("s1")
+        .expect_err("missing capability must reject");
+    assert_eq!(error.code(), "unsupported_capability");
+}
+
 /// GA session-management, runtime, credential, and file methods must preserve
 /// the stable protocol shapes while returning ergonomic SDK-owned values.
 #[test]
@@ -315,6 +374,7 @@ fn ga_runtime_and_file_methods_map_requests_and_typed_replies() {
             "sessions",
             "startup_context_creation_errors",
             "initial_agent_selection",
+            "agent_profile_controls",
         ]
     );
     assert!(runtime.healthy);

@@ -3,7 +3,7 @@
 
 use crate::background_progress::parse_background_notification;
 use jcode_harness_api::{
-    ApiEvent, ErrorCode, HistoryMessage, ModelRouteInfo, ServerFrame, SessionInfo,
+    AgentInfo, ApiEvent, ErrorCode, HistoryMessage, ModelRouteInfo, ServerFrame, SessionInfo,
     StartupContextCreateError, StartupContextCreateErrorKind, StartupContextCreateIssue, TextMatch,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -29,6 +29,9 @@ const REQUIRES_ATTACH: &[&str] = &[
     "rewind",
     "rewind_undo",
     "get_history",
+    "list_agents",
+    "set_agent",
+    "inspect_agent",
     "list_models",
     "set_model",
     "set_reasoning_effort",
@@ -142,6 +145,9 @@ enum SimpleKind {
     ReasoningEffort,
     /// Awaiting the catalog reply that answers `list_models`.
     Models,
+    AgentChange,
+    Agents,
+    AgentStatus,
     Credential {
         provider: String,
         configured: bool,
@@ -416,6 +422,42 @@ impl BridgeState {
                 let id = self.legacy_id();
                 self.pending_simple.push((id, api_id, SimpleKind::History));
                 vec![Outbound::Legacy(json!({"type": "get_history", "id": id}))]
+            }
+            "list_agents" => {
+                let id = self.legacy_id();
+                self.pending_simple.push((id, api_id, SimpleKind::Agents));
+                vec![Outbound::Legacy(
+                    json!({"type": "get_agent_catalog", "id": id}),
+                )]
+            }
+            "set_agent" => {
+                let agent = request["agent"].as_str().unwrap_or("").trim();
+                if agent.is_empty() {
+                    return Self::error_reply(
+                        api_id,
+                        ErrorCode::InvalidRequest,
+                        "set_agent needs a non-empty `agent`",
+                    );
+                }
+                let id = self.legacy_id();
+                self.pending_simple
+                    .push((id, api_id, SimpleKind::AgentChange));
+                vec![Outbound::Legacy(json!({
+                    "type": "set_agent",
+                    "id": id,
+                    "agent": agent,
+                    "replace": request["replace"].as_bool().unwrap_or(false),
+                }))]
+            }
+            "inspect_agent" => {
+                let id = self.legacy_id();
+                self.pending_simple
+                    .push((id, api_id, SimpleKind::AgentStatus));
+                vec![Outbound::Legacy(json!({
+                    "type": "get_agent_status",
+                    "id": id,
+                    "include_instructions": request["include_instructions"].as_bool().unwrap_or(false),
+                }))]
             }
             // Answered from the stored record rather than the daemon: the
             // legacy protocol can only speak about the attached session, and
@@ -1022,6 +1064,83 @@ impl BridgeState {
                     ],
                     None => vec![ServerFrame::event(info)],
                 }
+            }
+            "agent_selected" => {
+                let id = event["id"].as_u64().unwrap_or(0);
+                let Some(api_id) = self.take_simple(id, SimpleKind::AgentChange) else {
+                    return vec![];
+                };
+                vec![ServerFrame::reply(
+                    api_id,
+                    ApiEvent::AgentChanged {
+                        session_id: session(self),
+                        agent_id: event["agent_id"].as_str().unwrap_or("").to_string(),
+                        display_name: event["display_name"].as_str().unwrap_or("").to_string(),
+                        scope: event["scope"].as_str().unwrap_or("").to_string(),
+                        change: event["change"]
+                            .as_str()
+                            .unwrap_or("provisional")
+                            .to_string(),
+                        message_id: event["message_id"].as_str().map(str::to_string),
+                    },
+                )]
+            }
+            "agent_catalog" => {
+                let id = event["id"].as_u64().unwrap_or(0);
+                let Some(api_id) = self.take_simple(id, SimpleKind::Agents) else {
+                    return vec![];
+                };
+                let agents = event["agents"]
+                    .as_array()
+                    .map(|agents| {
+                        agents
+                            .iter()
+                            .map(|agent| AgentInfo {
+                                agent_id: agent["agent_id"].as_str().unwrap_or("").to_string(),
+                                display_name: agent["display_name"]
+                                    .as_str()
+                                    .unwrap_or("")
+                                    .to_string(),
+                                scope: agent["scope"].as_str().unwrap_or("").to_string(),
+                                description: agent["description"]
+                                    .as_str()
+                                    .unwrap_or("")
+                                    .to_string(),
+                                active: agent["active"].as_bool().unwrap_or(false),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                vec![ServerFrame::reply(
+                    api_id,
+                    ApiEvent::Agents {
+                        session_id: session(self),
+                        agents,
+                    },
+                )]
+            }
+            "agent_status" => {
+                let id = event["id"].as_u64().unwrap_or(0);
+                let Some(api_id) = self.take_simple(id, SimpleKind::AgentStatus) else {
+                    return vec![];
+                };
+                vec![ServerFrame::reply(
+                    api_id,
+                    ApiEvent::AgentStatus {
+                        session_id: session(self),
+                        agent_id: event["agent_id"].as_str().unwrap_or("").to_string(),
+                        display_name: event["display_name"].as_str().unwrap_or("").to_string(),
+                        scope: event["scope"].as_str().unwrap_or("").to_string(),
+                        first_provider_dispatched: event["first_provider_dispatched"]
+                            .as_bool()
+                            .unwrap_or(false),
+                        active_transition_message_id: event["active_transition_message_id"]
+                            .as_str()
+                            .map(str::to_string),
+                        system_prompt: event["system_prompt"].as_str().map(str::to_string),
+                        active_skill: event["active_skill"].as_str().map(str::to_string),
+                    },
+                )]
             }
             "reasoning_effort_changed" => {
                 let id = event["id"].as_u64().unwrap_or(0);

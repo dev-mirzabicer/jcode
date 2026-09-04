@@ -38,6 +38,35 @@ pub enum ApiEvent {
         messages: Vec<HistoryMessage>,
     },
 
+    Agents {
+        session_id: String,
+        agents: Vec<AgentInfo>,
+    },
+
+    AgentChanged {
+        session_id: String,
+        agent_id: String,
+        display_name: String,
+        scope: String,
+        change: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
+    },
+
+    AgentStatus {
+        session_id: String,
+        agent_id: String,
+        display_name: String,
+        scope: String,
+        first_provider_dispatched: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active_transition_message_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        system_prompt: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active_skill: Option<String>,
+    },
+
     /// Reply to `Ping`.
     Pong,
 
@@ -305,4 +334,13 @@ pub struct HistoryMessage {
     /// "user" | "assistant" | "tool".
     pub role: String,
     pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentInfo {
+    pub agent_id: String,
+    pub display_name: String,
+    pub scope: String,
+    pub description: String,
+    pub active: bool,
 }

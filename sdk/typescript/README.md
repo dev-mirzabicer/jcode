@@ -217,6 +217,9 @@ discovery pass only.
 | `globalEvents(options?)` | Bounded fan-in stream over all persisted and newly created sessions |
 | `cancel(id)` / `softInterrupt(id, content, urgent?)` | Interrupt a turn |
 | `getHistory(id)` / `peekSession(id, limit?)` | Read a transcript (peek works unattached) |
+| `listAgents(id)` | List valid global/project primary agents for the attached session |
+| `setAgent(id, agent, replace?)` | Append a profile or explicitly replace the true system prompt |
+| `inspectAgent(id, includeInstructions?)` | Inspect active identity, delivery, and optional exact system/skill text |
 | `clear(id)` / `rewind(id, index)` | Edit history |
 | `respondToPermission(id, requestId, decision)` | Answer a permission prompt |
 | `listModels(id)` / `setModel(id, model)` | List and choose the session's model |
@@ -231,6 +234,8 @@ discovery pass only.
 | `rewindUndo(id)` | Restore what the last `rewind` removed |
 | `cancelSoftInterrupts(id)` | Retract queued soft interrupts |
 | `ping()` | Liveness |
+
+Agent profile controls require the advertised `agent_profile_controls` capability. The SDK rejects before sending when an older bridge lacks it. Ordinary `setAgent` after first dispatch appends complete instructions without making a model call; `replace: true` requests the explicit true-system replacement path.
 
 ## Models
 

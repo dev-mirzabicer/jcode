@@ -51,6 +51,7 @@ const BRIDGE_CAPABILITIES: &[&str] = &[
     "session_files",
     "startup_context_creation_errors",
     "initial_agent_selection",
+    "agent_profile_controls",
 ];
 
 /// Read one newline-delimited frame, refusing to buffer more than

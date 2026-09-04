@@ -113,6 +113,18 @@ fn request_roundtrip() {
         ApiRequest::AttachSession {
             session_id: "s1".into(),
         },
+        ApiRequest::ListAgents {
+            session_id: "s1".into(),
+        },
+        ApiRequest::SetAgent {
+            session_id: "s1".into(),
+            agent: "reviewer".into(),
+            replace: true,
+        },
+        ApiRequest::InspectAgent {
+            session_id: "s1".into(),
+            include_instructions: true,
+        },
         ApiRequest::Cancel {
             session_id: "s1".into(),
         },

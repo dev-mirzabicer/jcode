@@ -835,6 +835,103 @@ fn a_requested_model_change_replies_and_broadcasts() {
     assert_eq!(state.current_model.as_deref(), Some("claude-fable-5"));
 }
 
+#[test]
+fn agent_profile_controls_translate_complete_typed_requests_and_replies() {
+    let mut state = state_with_session();
+    let out = state.api_request_to_legacy(&json!({
+        "id": 40, "req": "set_agent", "agent": "project:reviewer", "replace": true,
+    }));
+    let legacy_id = match &out[..] {
+        [Outbound::Legacy(value)] => {
+            assert_eq!(value["type"], "set_agent");
+            assert_eq!(value["agent"], "project:reviewer");
+            assert_eq!(value["replace"], true);
+            value["id"].as_u64().unwrap()
+        }
+        other => panic!("expected agent change request, got {other:?}"),
+    };
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "agent_selected",
+        "id": legacy_id,
+        "agent_id": "reviewer",
+        "display_name": "Reviewer",
+        "scope": "project",
+        "change": "replaced",
+        "message_id": "audit-1",
+    }));
+    match &frames[..] {
+        [frame] => {
+            assert_eq!(frame.reply_to, Some(40));
+            assert!(matches!(
+                &frame.event,
+                ApiEvent::AgentChanged {
+                    agent_id,
+                    change,
+                    message_id: Some(message_id),
+                    ..
+                } if agent_id == "reviewer" && change == "replaced" && message_id == "audit-1"
+            ));
+        }
+        other => panic!("expected agent change reply, got {other:?}"),
+    }
+
+    let out = state.api_request_to_legacy(&json!({"id": 41, "req": "list_agents"}));
+    let legacy_id = match &out[0] {
+        Outbound::Legacy(value) => {
+            assert_eq!(value["type"], "get_agent_catalog");
+            value["id"].as_u64().unwrap()
+        }
+        _ => unreachable!(),
+    };
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "agent_catalog",
+        "id": legacy_id,
+        "agents": [{
+            "agent_id": "reviewer",
+            "display_name": "Reviewer",
+            "scope": "project",
+            "description": "Synthetic reviewer",
+            "active": true,
+        }],
+    }));
+    assert!(matches!(
+        &frames[0].event,
+        ApiEvent::Agents { agents, .. }
+            if agents.len() == 1 && agents[0].agent_id == "reviewer" && agents[0].active
+    ));
+
+    let out = state.api_request_to_legacy(&json!({
+        "id": 42, "req": "inspect_agent", "include_instructions": true,
+    }));
+    let legacy_id = match &out[0] {
+        Outbound::Legacy(value) => {
+            assert_eq!(value["type"], "get_agent_status");
+            assert_eq!(value["include_instructions"], true);
+            value["id"].as_u64().unwrap()
+        }
+        _ => unreachable!(),
+    };
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "agent_status",
+        "id": legacy_id,
+        "agent_id": "reviewer",
+        "display_name": "Reviewer",
+        "scope": "project",
+        "first_provider_dispatched": true,
+        "active_transition_message_id": "profile-1",
+        "system_prompt": "SYNTHETIC_SYSTEM",
+        "active_skill": "SYNTHETIC_SKILL",
+    }));
+    assert!(matches!(
+        &frames[0].event,
+        ApiEvent::AgentStatus {
+            system_prompt: Some(system_prompt),
+            active_skill: Some(active_skill),
+            ..
+        } if system_prompt == "SYNTHETIC_SYSTEM" && active_skill == "SYNTHETIC_SKILL"
+    ));
+}
+
 /// The daemon reports a rejected switch in-band, on a success-shaped event.
 /// Reporting success there would leave the client's picker showing a model
 /// the session is not using.

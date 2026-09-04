@@ -124,6 +124,93 @@ test("ordinary session creation remains compatible without agent capability", as
   await server.close();
 });
 
+test("agent profile controls negotiate capability and map typed replies", async () => {
+  const requests: any[] = [];
+  const server = await startMockHarness({
+    capabilities: ["sessions", "streaming", "agent_profile_controls"],
+    onRequest(request, send) {
+      requests.push(request);
+      if (request.req === "list_agents") {
+        send({
+          v: 1,
+          reply_to: request.id,
+          ev: "agents",
+          session_id: "s1",
+          agents: [
+            {
+              agent_id: "reviewer",
+              display_name: "Reviewer",
+              scope: "project",
+              description: "Synthetic reviewer",
+              active: true,
+            },
+          ],
+        });
+      } else if (request.req === "set_agent") {
+        send({
+          v: 1,
+          reply_to: request.id,
+          ev: "agent_changed",
+          session_id: "s1",
+          agent_id: "reviewer",
+          display_name: "Reviewer",
+          scope: "project",
+          change: request.replace ? "replaced" : "appended",
+          message_id: "profile-message",
+        });
+      } else if (request.req === "inspect_agent") {
+        send({
+          v: 1,
+          reply_to: request.id,
+          ev: "agent_status",
+          session_id: "s1",
+          agent_id: "reviewer",
+          display_name: "Reviewer",
+          scope: "project",
+          first_provider_dispatched: true,
+          active_transition_message_id: "profile-message",
+          system_prompt: "SYNTHETIC_SYSTEM",
+          active_skill: "SYNTHETIC_SKILL",
+        });
+      }
+    },
+  });
+  const client = await JcodeClient.connect({ socketPath: server.socketPath });
+  const agents = await client.listAgents("s1");
+  assert.equal(agents[0]?.agent_id, "reviewer");
+  const changed = await client.setAgent("s1", "project:reviewer", true);
+  assert.equal(changed.change, "replaced");
+  const inspected = await client.inspectAgent("s1", true);
+  assert.equal(inspected.systemPrompt, "SYNTHETIC_SYSTEM");
+  assert.equal(inspected.activeSkill, "SYNTHETIC_SKILL");
+  assert.equal(requests.find((request) => request.req === "set_agent")?.replace, true);
+  assert.equal(
+    requests.find((request) => request.req === "inspect_agent")?.include_instructions,
+    true,
+  );
+  client.close();
+  await server.close();
+});
+
+test("agent profile controls fail before sending to an older Harness bridge", async () => {
+  let requests = 0;
+  const server = await startMockHarness({
+    capabilities: ["sessions", "streaming"],
+    onRequest() {
+      requests += 1;
+    },
+  });
+  const client = await JcodeClient.connect({ socketPath: server.socketPath });
+  await assert.rejects(() => client.listAgents("s1"), (error) => {
+    assert.ok(error instanceof HarnessError);
+    assert.equal((error as HarnessError).code, "unsupported_capability");
+    return true;
+  });
+  assert.equal(requests, 0);
+  client.close();
+  await server.close();
+});
+
 test("run() collects a full turn and auto-approves permissions", async () => {
   const server = await startMockHarness({
     onRequest(request, send) {

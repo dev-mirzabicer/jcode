@@ -21,6 +21,7 @@ import {
 import {
   API_VERSION_MAJOR,
   type AnyApiEvent,
+  type AgentInfo,
   type ApiEvent,
   type ApiRequest,
   type HistoryMessage,
@@ -57,6 +58,18 @@ export interface FileStatus {
   kind: string;
   size?: number;
   modifiedMs?: number;
+}
+
+export interface AgentStatus {
+  agentId: string;
+  displayName: string;
+  scope: string;
+  change: string;
+  messageId?: string;
+  firstProviderDispatched?: boolean;
+  activeTransitionMessageId?: string;
+  systemPrompt?: string;
+  activeSkill?: string;
 }
 
 
@@ -222,6 +235,15 @@ export class JcodeClient extends EventEmitter {
    */
   supports(capability: string): boolean {
     return this.capabilities.includes(capability);
+  }
+
+  private requireCapability(capability: string): void {
+    if (!this.supports(capability)) {
+      throw new HarnessError(
+        "unsupported_capability",
+        `the connected Harness server does not support ${capability}`,
+      );
+    }
   }
 
   private constructor(
@@ -570,6 +592,52 @@ export class JcodeClient extends EventEmitter {
       "history",
     );
     return frame.messages ?? [];
+  }
+
+  async listAgents(sessionId: string): Promise<AgentInfo[]> {
+    this.requireCapability("agent_profile_controls");
+    const frame = await this.expectReply(
+      { req: "list_agents", session_id: sessionId },
+      "agents",
+    );
+    return frame.agents ?? [];
+  }
+
+  async setAgent(sessionId: string, agent: string, replace = false): Promise<AgentStatus> {
+    this.requireCapability("agent_profile_controls");
+    const frame = await this.expectReply(
+      { req: "set_agent", session_id: sessionId, agent, replace },
+      "agent_changed",
+    );
+    return {
+      agentId: frame.agent_id,
+      displayName: frame.display_name,
+      scope: frame.scope,
+      change: frame.change,
+      messageId: frame.message_id,
+    };
+  }
+
+  async inspectAgent(sessionId: string, includeInstructions = false): Promise<AgentStatus> {
+    this.requireCapability("agent_profile_controls");
+    const frame = await this.expectReply(
+      {
+        req: "inspect_agent",
+        session_id: sessionId,
+        include_instructions: includeInstructions,
+      },
+      "agent_status",
+    );
+    return {
+      agentId: frame.agent_id,
+      displayName: frame.display_name,
+      scope: frame.scope,
+      change: "current",
+      firstProviderDispatched: frame.first_provider_dispatched,
+      activeTransitionMessageId: frame.active_transition_message_id,
+      systemPrompt: frame.system_prompt,
+      activeSkill: frame.active_skill,
+    };
   }
 
   async peekSession(sessionId: string, limit?: number): Promise<HistoryMessage[]> {

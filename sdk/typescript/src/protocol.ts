@@ -51,6 +51,14 @@ export interface HistoryMessage {
   content: string;
 }
 
+export interface AgentInfo {
+  agent_id: string;
+  display_name: string;
+  scope: string;
+  description: string;
+  active: boolean;
+}
+
 export type StartupContextCreateErrorKind =
   | "unsupported"
   | "project_identity"
@@ -98,6 +106,9 @@ export type ApiRequest =
       urgent?: boolean;
     }
   | { req: "get_history"; session_id: string }
+  | { req: "list_agents"; session_id: string }
+  | { req: "set_agent"; session_id: string; agent: string; replace?: boolean }
+  | { req: "inspect_agent"; session_id: string; include_instructions?: boolean }
   | { req: "peek_session"; session_id: string; limit?: number }
   | { req: "clear"; session_id: string }
   | { req: "rewind"; session_id: string; message_index: number }
@@ -130,6 +141,27 @@ export type ApiEvent =
   | { ev: "attached"; session: SessionInfo }
   | { ev: "startup_context_creation_failed"; error: StartupContextCreateError }
   | { ev: "history"; session_id: string; messages: HistoryMessage[] }
+  | { ev: "agents"; session_id: string; agents: AgentInfo[] }
+  | {
+      ev: "agent_changed";
+      session_id: string;
+      agent_id: string;
+      display_name: string;
+      scope: string;
+      change: string;
+      message_id?: string;
+    }
+  | {
+      ev: "agent_status";
+      session_id: string;
+      agent_id: string;
+      display_name: string;
+      scope: string;
+      first_provider_dispatched: boolean;
+      active_transition_message_id?: string;
+      system_prompt?: string;
+      active_skill?: string;
+    }
   | { ev: "pong" }
   | { ev: "text_delta"; session_id: string; text: string }
   | { ev: "reasoning_delta"; session_id: string; text: string }
@@ -246,6 +278,9 @@ export const KNOWN_EVENT_KINDS = [
   "attached",
   "startup_context_creation_failed",
   "history",
+  "agents",
+  "agent_changed",
+  "agent_status",
   "pong",
   "text_delta",
   "reasoning_delta",
@@ -285,6 +320,9 @@ export const KNOWN_REQUEST_KINDS = [
   "cancel",
   "soft_interrupt",
   "get_history",
+  "list_agents",
+  "set_agent",
+  "inspect_agent",
   "peek_session",
   "clear",
   "rewind",
