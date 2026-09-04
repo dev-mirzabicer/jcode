@@ -2157,7 +2157,7 @@ pub(in crate::tui::app) fn handle_server_event(
                             .to_string()
                     } else {
                         format!(
-                            "✓ Rewound conversation to message {}. Removed {} message{}. Active agent configuration remained current. Undo anytime with /rewind undo.",
+                            "✓ Rewound to message {}. Removed {} message{}. Active agent configuration remained current. Undo anytime with /rewind undo.",
                             notice.message_index.unwrap_or_default(),
                             notice.changed_messages,
                             if notice.changed_messages == 1 {

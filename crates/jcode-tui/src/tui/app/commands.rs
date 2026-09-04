@@ -2180,7 +2180,7 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
                 }
 
                 app.push_display_message(DisplayMessage::system(format!(
-                    "✓ Rewound conversation to message {}. Removed {} message{}. Active agent configuration remained current. Undo anytime with /rewind undo.",
+                    "✓ Rewound to message {}. Removed {} message{}. Active agent configuration remained current. Undo anytime with /rewind undo.",
                     n,
                     removed,
                     if removed == 1 { "" } else { "s" }

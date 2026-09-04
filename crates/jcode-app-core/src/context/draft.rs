@@ -308,10 +308,6 @@ impl ContextTransactionService {
         )
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "snapshot construction keeps exact session, provider, route, request-estimate, and curator-selection identity"
-    )]
     #[cfg(test)]
     #[expect(
         clippy::too_many_arguments,
@@ -538,6 +534,10 @@ impl ContextTransactionService {
         )
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "range preview keeps exact session, transcript, context revision, active-profile, and selection identity"
+    )]
     pub fn preview_context_ranges_with_active_profile(
         &self,
         session_id: &str,
