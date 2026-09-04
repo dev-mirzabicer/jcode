@@ -10,7 +10,9 @@ use crate::instruction::{
     InstructionScope, InstructionSelector, ResourceValidationState, SystemPromptComposer,
     TemplateMode,
 };
-use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use serde::Deserialize;
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -603,9 +605,9 @@ fn copy_error(detail: impl Into<String>) -> InstructionRepositoryError {
     )
 }
 
+#[cfg(test)]
 #[derive(Deserialize)]
 #[serde(rename_all = "kebab-case")]
-#[allow(dead_code)]
 struct AttributionProbe {
     schema_version: u32,
     source_kind: String,
