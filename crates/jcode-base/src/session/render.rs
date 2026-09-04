@@ -457,15 +457,19 @@ fn render_messages_and_images_with_compacted_history_inner(
             continue;
         }
 
-        let role = match msg.display_role {
-            Some(StoredDisplayRole::System) => "system",
-            Some(StoredDisplayRole::BackgroundTask) => "background_task",
-            None if is_auto_poke_user_message(msg) => "system",
-            None if super::is_scheduled_task_message(msg) => "system",
-            None => match msg.role {
-                Role::User => "user",
-                Role::Assistant => "assistant",
-            },
+        let role = if session.is_agent_profile_message(&msg.id) {
+            "agent_profile"
+        } else {
+            match msg.display_role {
+                Some(StoredDisplayRole::System) => "system",
+                Some(StoredDisplayRole::BackgroundTask) => "background_task",
+                None if is_auto_poke_user_message(msg) => "system",
+                None if super::is_scheduled_task_message(msg) => "system",
+                None => match msg.role {
+                    Role::User => "user",
+                    Role::Assistant => "assistant",
+                },
+            }
         };
         // Gate continuations are model-facing instructions naming specific
         // todos and fields. In the transcript the user only wants to know a

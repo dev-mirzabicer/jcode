@@ -335,6 +335,157 @@ impl Agent {
         Ok(activation)
     }
 
+    pub fn list_primary_agents(
+        &self,
+    ) -> Result<Vec<crate::instruction::AgentCatalogEntry>, PrimaryInstructionActivationError> {
+        let working_dir = self.session.working_dir.as_deref().map(Path::new);
+        crate::instruction::SystemPromptComposer::from_repository_service(
+            self.instruction_repositories.clone(),
+        )
+        .list_primary_agents(working_dir)
+        .map_err(PrimaryInstructionActivationError::from)
+    }
+
+    pub async fn change_primary_agent(
+        &mut self,
+        selection: crate::instruction::AgentSelection,
+        mode: super::AgentProfileChangeMode,
+    ) -> Result<super::AgentProfileChangeOutcome, PrimaryInstructionActivationError> {
+        let current = self
+            .session
+            .active_agent()
+            .cloned()
+            .ok_or(crate::session::AgentProfileSessionError::MissingActivation)?;
+        let dispatched = self.session.first_provider_dispatch_at().is_some();
+
+        if mode == super::AgentProfileChangeMode::Ordinary && selection.matches_stored(&current) {
+            return Ok(super::AgentProfileChangeOutcome::NoChange { agent: current });
+        }
+
+        let working_dir = self.session.working_dir.as_deref().map(Path::new);
+        let composer = crate::instruction::SystemPromptComposer::from_repository_service(
+            self.instruction_repositories.clone(),
+        );
+
+        if !dispatched {
+            let activation =
+                self.compose_primary_instructions_for_session(&self.session, selection)?;
+            if mode == super::AgentProfileChangeMode::Ordinary
+                && activation.state.active_agent == current
+            {
+                return Ok(super::AgentProfileChangeOutcome::NoChange { agent: current });
+            }
+            let mut candidate = self.session.clone();
+            candidate.install_system_prompt(activation.state.clone());
+            candidate
+                .save()
+                .map_err(PrimaryInstructionActivationError::Persistence)?;
+            self.session = candidate;
+            let agent = activation.state.active_agent;
+            return Ok(super::AgentProfileChangeOutcome::Provisional { agent });
+        }
+
+        match mode {
+            super::AgentProfileChangeMode::Ordinary => {
+                let transition = composer.render_agent_transition(working_dir, selection)?;
+                if transition.agent == current {
+                    return Ok(super::AgentProfileChangeOutcome::NoChange { agent: current });
+                }
+                let agent = transition.agent.clone();
+                let mut candidate = self.session.clone();
+                let message_id = candidate.append_agent_profile_transition(transition)?;
+                candidate.projected_messages_for_provider().map_err(|error| {
+                    PrimaryInstructionActivationError::Composition(
+                        crate::instruction::SystemPromptActivationError::Compatibility(format!(
+                            "append agent profile produced an invalid provider projection: {error}"
+                        )),
+                    )
+                })?;
+                candidate
+                    .save()
+                    .map_err(PrimaryInstructionActivationError::Persistence)?;
+                self.session = candidate;
+                self.reseed_context_runtime_from_session();
+                Ok(super::AgentProfileChangeOutcome::Appended { agent, message_id })
+            }
+            super::AgentProfileChangeMode::ReplaceSystem => {
+                let skills = self.current_skills_snapshot_for_working_dir(working_dir);
+                let available_skills = skills
+                    .list()
+                    .iter()
+                    .map(|skill| crate::prompt::SkillInfo {
+                        name: skill.name.clone(),
+                        description: skill.description.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                let replacement = composer.replace_system_prompt(
+                    crate::instruction::SystemPromptActivationRequest {
+                        working_dir,
+                        selection,
+                        is_selfdev: self.session.is_canary,
+                        capabilities: crate::prompt::PromptCapabilities::current(),
+                        available_skills: &available_skills,
+                    },
+                    &current,
+                )?;
+                let agent = replacement.activation.state.active_agent.clone();
+                let mut candidate = self.session.clone();
+                let audit_message_id = candidate.apply_system_prompt_replacement(
+                    replacement.activation.state,
+                    replacement.audit_sentence,
+                )?;
+                candidate.provider_session_id = None;
+                let projected = candidate.projected_messages_for_provider().map_err(|error| {
+                    PrimaryInstructionActivationError::Composition(
+                        crate::instruction::SystemPromptActivationError::Compatibility(format!(
+                            "replace system prompt produced an invalid provider projection: {error}"
+                        )),
+                    )
+                })?;
+                let mut split = self.build_system_prompt_split(None);
+                split.static_part = candidate
+                    .system_prompt_text()
+                    .unwrap_or_default()
+                    .to_string();
+                let tools = match self.locked_tools.as_ref() {
+                    Some(tools) => tools.clone(),
+                    None => self.tool_definitions_for_debug().await,
+                };
+                let breakdown =
+                    crate::context::request_token_breakdown(&projected, 0, 0, &split, &tools);
+                let preflight = crate::context::evaluate_context_preflight(
+                    candidate.context_view.revision,
+                    self.provider.context_request_budget(),
+                    breakdown,
+                );
+                if preflight.pressure == crate::protocol::ContextPressureLevel::Blocked {
+                    return Err(PrimaryInstructionActivationError::ContextPreflight {
+                        projected_input_tokens: preflight.projected_input_tokens,
+                        safe_input_budget: preflight.safe_input_budget,
+                        required_reduction_tokens: preflight.required_reduction_tokens,
+                    });
+                }
+                candidate
+                    .save()
+                    .map_err(PrimaryInstructionActivationError::Persistence)?;
+                self.session = candidate;
+                crate::cache_invalidation::record(
+                    "agent system replacement",
+                    format!("active agent replaced with {}", agent.id),
+                );
+                self.cache_tracker.reset();
+                self.provider_session_id = None;
+                self.provider
+                    .invalidate_context_continuation("agent system prompt replaced");
+                self.reseed_context_runtime_from_session();
+                Ok(super::AgentProfileChangeOutcome::Replaced {
+                    agent,
+                    audit_message_id: Some(audit_message_id),
+                })
+            }
+        }
+    }
+
     pub fn activate_startup_context(
         &mut self,
         activation: StartupContextActivation,
@@ -503,6 +654,7 @@ mod tests {
     #[derive(Clone, Default)]
     struct RecordingProvider {
         calls: std::sync::Arc<AtomicUsize>,
+        invalidations: std::sync::Arc<AtomicUsize>,
         systems: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     }
 
@@ -532,6 +684,10 @@ mod tests {
 
         fn fork(&self) -> std::sync::Arc<dyn Provider> {
             std::sync::Arc::new(self.clone())
+        }
+
+        fn invalidate_context_continuation(&self, _reason: &str) {
+            self.invalidations.fetch_add(1, Ordering::SeqCst);
         }
     }
 
@@ -1059,6 +1215,319 @@ mod tests {
         ));
         assert_eq!(agent.session.system_prompt, before.system_prompt);
         assert_eq!(agent.session.updated_at, before.updated_at);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn post_dispatch_switch_appends_and_explicit_replace_resets_only_prompt_state() {
+        let home = TestHome::new();
+        let project = tempfile::tempdir().expect("project");
+        let provider = RecordingProvider::default();
+        let provider_handle: std::sync::Arc<dyn Provider> = std::sync::Arc::new(provider.clone());
+        let mut agent = Agent::new_with_disabled_startup_context(
+            provider_handle,
+            crate::tool::Registry::empty(),
+            project.path().to_str(),
+        );
+        agent
+            .activate_primary_instructions(crate::instruction::AgentSelection::Default)
+            .expect("initial activation");
+        agent
+            .session
+            .system_prompt
+            .as_mut()
+            .expect("system prompt")
+            .first_provider_dispatch_at = Some(chrono::Utc::now());
+        agent.session.model = Some("synthetic-model".to_string());
+        agent.session.reasoning_effort = Some("high".to_string());
+        agent.session.provider_session_id = Some("stored-continuation".to_string());
+        agent.provider_session_id = Some("live-continuation".to_string());
+        let _ = agent.tool_definitions().await;
+        assert!(agent.locked_tools.is_some());
+        let invalidations_before = provider.invalidations.load(Ordering::SeqCst);
+
+        let store = home.path().join("instructions");
+        let agent_path = store.join("agents/reviewer.md");
+        std::fs::write(
+            &agent_path,
+            "---\nid: reviewer\nkind: agent\nname: Reviewer\ndescription: Synthetic reviewer\navailability: both\n---\n\nSYNTHETIC_APPEND_PROFILE",
+        )
+        .expect("write reviewer");
+        let selection = crate::instruction::AgentSelection::Explicit(
+            crate::instruction::InstructionSelector::global(
+                crate::instruction::InstructionKind::Agent,
+                "reviewer",
+            )
+            .expect("selector"),
+        );
+        agent.session.add_message(
+            crate::message::Role::User,
+            vec![crate::message::ContentBlock::Text {
+                text: "visible user turn".to_string(),
+                cache_control: None,
+            }],
+        );
+        let before_messages = agent.session.messages.len();
+        let outcome = agent
+            .change_primary_agent(
+                selection.clone(),
+                crate::agent::AgentProfileChangeMode::Ordinary,
+            )
+            .await
+            .expect("append switch");
+        let crate::agent::AgentProfileChangeOutcome::Appended { message_id, .. } = outcome else {
+            panic!("expected appended profile")
+        };
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            provider.invalidations.load(Ordering::SeqCst),
+            invalidations_before
+        );
+        assert_eq!(agent.session.messages.len(), before_messages + 1);
+        assert_eq!(
+            agent.active_transition_message_id(),
+            Some(message_id.as_str())
+        );
+        assert_eq!(agent.session.model.as_deref(), Some("synthetic-model"));
+        assert_eq!(agent.session.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(
+            agent.provider_session_id.as_deref(),
+            Some("live-continuation")
+        );
+        assert!(agent.locked_tools.is_some());
+
+        agent.session.add_message(
+            crate::message::Role::Assistant,
+            vec![crate::message::ContentBlock::Text {
+                text: "visible assistant turn".to_string(),
+                cache_control: None,
+            }],
+        );
+        agent.session.save().expect("persist assistant turn");
+        assert_eq!(agent.rewind_to_message(1).expect("rewind"), 1);
+        assert_eq!(
+            agent
+                .session
+                .messages
+                .iter()
+                .filter(|message| message.id == message_id)
+                .count(),
+            1
+        );
+        assert_eq!(
+            agent.active_transition_message_id(),
+            Some(message_id.as_str())
+        );
+        assert_eq!(agent.undo_rewind().expect("undo rewind"), 1);
+        assert_eq!(
+            agent
+                .session
+                .messages
+                .iter()
+                .filter(|message| message.id == message_id)
+                .count(),
+            1
+        );
+        assert_eq!(
+            agent.active_transition_message_id(),
+            Some(message_id.as_str())
+        );
+        let _ = agent.tool_definitions().await;
+        assert!(agent.locked_tools.is_some());
+
+        let moved_store = home.path().join("instructions-away");
+        std::fs::rename(&store, &moved_store).expect("move store");
+        let same = agent
+            .change_primary_agent(
+                selection.clone(),
+                crate::agent::AgentProfileChangeMode::Ordinary,
+            )
+            .await
+            .expect("same-agent source-free no-op");
+        assert!(matches!(
+            same,
+            crate::agent::AgentProfileChangeOutcome::NoChange { .. }
+        ));
+        std::fs::rename(&moved_store, &store).expect("restore store");
+
+        std::fs::write(
+            store.join("agents/failing.md"),
+            "---\nid: failing\nkind: agent\nname: Failing\ndescription: Synthetic failing agent\navailability: both\n---\n\nSYNTHETIC_FAILING_PROFILE",
+        )
+        .expect("write failing agent");
+        let before_failed_append =
+            serde_json::to_vec(&agent.session).expect("serialize before failed append");
+        let sessions_dir = home.path().join("sessions");
+        std::fs::remove_dir_all(&sessions_dir).expect("remove sessions for append failure");
+        std::fs::write(&sessions_dir, "block session persistence")
+            .expect("block append persistence");
+        let append_error = agent
+            .change_primary_agent(
+                crate::instruction::AgentSelection::Explicit(
+                    crate::instruction::InstructionSelector::global(
+                        crate::instruction::InstructionKind::Agent,
+                        "failing",
+                    )
+                    .expect("failing selector"),
+                ),
+                crate::agent::AgentProfileChangeMode::Ordinary,
+            )
+            .await
+            .expect_err("failed append persistence must reject");
+        assert!(matches!(
+            append_error,
+            PrimaryInstructionActivationError::Persistence(_)
+        ));
+        assert_eq!(
+            serde_json::to_vec(&agent.session).expect("serialize after failed append"),
+            before_failed_append
+        );
+        std::fs::remove_file(&sessions_dir).expect("remove append blocker");
+        std::fs::create_dir_all(&sessions_dir).expect("restore sessions directory");
+        agent.session.save().expect("restore persisted session");
+
+        std::fs::write(
+            &agent_path,
+            "---\nid: reviewer\nkind: agent\nname: Reviewer\ndescription: Synthetic reviewer\navailability: both\n---\n\nSYNTHETIC_REPLACED_PROFILE",
+        )
+        .expect("update reviewer");
+        agent.session.provider_session_id = Some("stored-replacement-continuation".to_string());
+        agent.provider_session_id = Some("live-replacement-continuation".to_string());
+        agent.session.save().expect("persist replacement setup");
+        let before_failed_replacement =
+            serde_json::to_vec(&agent.session).expect("serialize before failed replacement");
+        std::fs::remove_dir_all(&sessions_dir).expect("remove sessions for replacement failure");
+        std::fs::write(&sessions_dir, "block session persistence")
+            .expect("block replacement persistence");
+        let replacement_error = agent
+            .change_primary_agent(
+                selection.clone(),
+                crate::agent::AgentProfileChangeMode::ReplaceSystem,
+            )
+            .await
+            .expect_err("failed replacement persistence must reject");
+        assert!(matches!(
+            replacement_error,
+            PrimaryInstructionActivationError::Persistence(_)
+        ));
+        assert_eq!(
+            serde_json::to_vec(&agent.session).expect("serialize after failed replacement"),
+            before_failed_replacement
+        );
+        assert_eq!(
+            agent.provider_session_id.as_deref(),
+            Some("live-replacement-continuation")
+        );
+        std::fs::remove_file(&sessions_dir).expect("remove replacement blocker");
+        std::fs::create_dir_all(&sessions_dir).expect("restore sessions directory");
+        agent.session.save().expect("restore replacement setup");
+        let invalidations_before_replacement = provider.invalidations.load(Ordering::SeqCst);
+        let outcome = agent
+            .change_primary_agent(
+                selection,
+                crate::agent::AgentProfileChangeMode::ReplaceSystem,
+            )
+            .await
+            .expect("explicit replacement");
+        assert!(matches!(
+            outcome,
+            crate::agent::AgentProfileChangeOutcome::Replaced {
+                audit_message_id: Some(_),
+                ..
+            }
+        ));
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            provider.invalidations.load(Ordering::SeqCst),
+            invalidations_before_replacement + 1
+        );
+        assert_eq!(agent.provider_session_id, None);
+        assert_eq!(agent.session.provider_session_id, None);
+        assert_eq!(agent.active_transition_message_id(), None);
+        assert!(
+            agent
+                .system_prompt_text()
+                .expect("replacement prompt")
+                .contains("SYNTHETIC_REPLACED_PROFILE")
+        );
+        assert_eq!(agent.session.model.as_deref(), Some("synthetic-model"));
+        assert_eq!(agent.session.reasoning_effort.as_deref(), Some("high"));
+        assert!(agent.locked_tools.is_some());
+
+        let saved = Session::load(&agent.session.id).expect("load persisted replacement");
+        assert_eq!(saved.provider_session_id, None);
+        assert_eq!(saved.active_transition_message_id(), None);
+        assert!(
+            saved
+                .system_prompt_text()
+                .expect("saved prompt")
+                .contains("SYNTHETIC_REPLACED_PROFILE")
+        );
+        agent.session.active_skill = Some(crate::session::StoredActiveSkill {
+            skill_id: "synthetic-skill".to_string(),
+            rendered_text: "SYNTHETIC_ACTIVE_SKILL_EXPORT".to_string(),
+        });
+        let markdown = agent.export_conversation_markdown();
+        assert!(markdown.contains("SYNTHETIC_REPLACED_PROFILE"));
+        assert!(markdown.contains("SYNTHETIC_ACTIVE_SKILL_EXPORT"));
+        assert!(markdown.contains("SYNTHETIC_APPEND_PROFILE"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pre_dispatch_explicit_replace_is_provisional_and_cache_neutral() {
+        let home = TestHome::new();
+        let project = tempfile::tempdir().expect("project");
+        let provider = RecordingProvider::default();
+        let provider_handle: std::sync::Arc<dyn Provider> = std::sync::Arc::new(provider.clone());
+        let mut agent = Agent::new_with_disabled_startup_context(
+            provider_handle,
+            crate::tool::Registry::empty(),
+            project.path().to_str(),
+        );
+        agent
+            .activate_primary_instructions(crate::instruction::AgentSelection::Default)
+            .expect("initial activation");
+        std::fs::write(
+            home.path().join("instructions/agents/provisional.md"),
+            "---\nid: provisional\nkind: agent\nname: Provisional\ndescription: Synthetic provisional agent\navailability: both\n---\n\nSYNTHETIC_PROVISIONAL_PROFILE",
+        )
+        .expect("write provisional agent");
+        let invalidations_before = provider.invalidations.load(Ordering::SeqCst);
+        let messages_before =
+            serde_json::to_vec(&agent.session.messages).expect("serialize prior messages");
+        let outcome = agent
+            .change_primary_agent(
+                crate::instruction::AgentSelection::Explicit(
+                    crate::instruction::InstructionSelector::global(
+                        crate::instruction::InstructionKind::Agent,
+                        "provisional",
+                    )
+                    .expect("selector"),
+                ),
+                crate::agent::AgentProfileChangeMode::ReplaceSystem,
+            )
+            .await
+            .expect("pre-dispatch replace");
+        assert!(matches!(
+            outcome,
+            crate::agent::AgentProfileChangeOutcome::Provisional { .. }
+        ));
+        assert!(agent.first_provider_dispatch_at().is_none());
+        assert!(agent.active_transition_message_id().is_none());
+        assert_eq!(
+            serde_json::to_vec(&agent.session.messages).expect("serialize current messages"),
+            messages_before
+        );
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            provider.invalidations.load(Ordering::SeqCst),
+            invalidations_before
+        );
+        assert!(
+            agent
+                .system_prompt_text()
+                .expect("provisional prompt")
+                .contains("SYNTHETIC_PROVISIONAL_PROFILE")
+        );
     }
 
     #[test]

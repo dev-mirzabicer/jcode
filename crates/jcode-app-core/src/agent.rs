@@ -187,6 +187,7 @@ pub struct TokenUsage {
 #[derive(Debug, Clone)]
 struct RewindUndoSnapshot {
     messages: Vec<StoredMessage>,
+    agent_profile_message_ids: Vec<String>,
     context_view: jcode_session_types::StoredContextViewState,
     visible_message_count: usize,
 }
@@ -222,6 +223,12 @@ pub(crate) struct PendingTurnOptions {
 pub enum PrimaryInstructionActivationError {
     Composition(crate::instruction::SystemPromptActivationError),
     Persistence(anyhow::Error),
+    Session(crate::session::AgentProfileSessionError),
+    ContextPreflight {
+        projected_input_tokens: usize,
+        safe_input_budget: usize,
+        required_reduction_tokens: usize,
+    },
 }
 
 impl std::fmt::Display for PrimaryInstructionActivationError {
@@ -229,6 +236,15 @@ impl std::fmt::Display for PrimaryInstructionActivationError {
         match self {
             Self::Composition(error) => write!(formatter, "{error}"),
             Self::Persistence(error) => write!(formatter, "persist frozen system prompt: {error}"),
+            Self::Session(error) => write!(formatter, "{error}"),
+            Self::ContextPreflight {
+                projected_input_tokens,
+                safe_input_budget,
+                required_reduction_tokens,
+            } => write!(
+                formatter,
+                "replacement prompt would use {projected_input_tokens} input tokens, exceeding the safe provider budget {safe_input_budget} by {required_reduction_tokens}; edit context or choose a larger route before replacing"
+            ),
         }
     }
 }
@@ -238,6 +254,49 @@ impl std::error::Error for PrimaryInstructionActivationError {
         match self {
             Self::Composition(error) => Some(error),
             Self::Persistence(error) => Some(error.as_ref()),
+            Self::Session(error) => Some(error),
+            Self::ContextPreflight { .. } => None,
+        }
+    }
+}
+
+impl From<crate::session::AgentProfileSessionError> for PrimaryInstructionActivationError {
+    fn from(error: crate::session::AgentProfileSessionError) -> Self {
+        Self::Session(error)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentProfileChangeMode {
+    Ordinary,
+    ReplaceSystem,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AgentProfileChangeOutcome {
+    NoChange {
+        agent: crate::session::StoredAgentReference,
+    },
+    Provisional {
+        agent: crate::session::StoredAgentReference,
+    },
+    Appended {
+        agent: crate::session::StoredAgentReference,
+        message_id: String,
+    },
+    Replaced {
+        agent: crate::session::StoredAgentReference,
+        audit_message_id: Option<String>,
+    },
+}
+
+impl AgentProfileChangeOutcome {
+    pub fn agent(&self) -> &crate::session::StoredAgentReference {
+        match self {
+            Self::NoChange { agent }
+            | Self::Provisional { agent }
+            | Self::Appended { agent, .. }
+            | Self::Replaced { agent, .. } => agent,
         }
     }
 }
@@ -1175,9 +1234,27 @@ impl Agent {
         let session = self.session.redacted_for_export_with_policy(policy);
         let startup_message_ids = session.startup_context_message_ids();
         let mut md = String::new();
+        if let Some(system_prompt) = session.system_prompt.as_ref() {
+            md.push_str("## System prompt\n\n");
+            md.push_str(&format!(
+                "Active agent: {} ({}:{})\n\n```text\n{}\n```\n\n",
+                system_prompt.active_agent.display_name,
+                system_prompt.active_agent.scope,
+                system_prompt.active_agent.id,
+                system_prompt.text
+            ));
+        }
+        if let Some(active_skill) = session.active_skill.as_ref() {
+            md.push_str(&format!(
+                "## Active skill: {}\n\n```text\n{}\n```\n\n",
+                active_skill.skill_id, active_skill.rendered_text
+            ));
+        }
         for msg in &session.messages {
             let role_label = if startup_message_ids.contains(msg.id.as_str()) {
                 "Startup Context"
+            } else if session.is_agent_profile_message(&msg.id) {
+                "Agent Profile"
             } else {
                 match msg.role {
                     Role::User => "User",

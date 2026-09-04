@@ -528,6 +528,7 @@ fn context_protocol_events_reduce_with_exact_correlation_and_prompt_safe_action_
                 summary_coverage: None,
                 active_operations: Vec::new(),
                 removable_reasoning_kinds: Vec::new(),
+                active_agent_profile: false,
             }],
             active_transactions: Vec::new(),
             emergency_policy: jcode_session_types::StoredContextEmergencyPolicy::Block,

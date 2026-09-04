@@ -145,6 +145,61 @@ fn startup_context_replay_is_receipt_only_by_default_and_full_only_by_explicit_p
     );
 }
 
+#[test]
+fn replay_export_includes_exact_session_instructions_and_profile_transition() {
+    let mut session = Session::create_with_id("replay-profile-state".to_string(), None, None);
+    session.install_system_prompt(crate::session::StoredSystemPromptState {
+        text: "SYNTHETIC_REPLAY_SYSTEM".to_string(),
+        active_agent: crate::session::StoredAgentReference {
+            scope: crate::instruction::InstructionScope::Global,
+            id: "initial".to_string(),
+            display_name: "Initial".to_string(),
+        },
+        first_provider_dispatch_at: Some(Utc::now()),
+        active_transition_message_id: None,
+    });
+    session.active_skill = Some(crate::session::StoredActiveSkill {
+        skill_id: "replay-skill".to_string(),
+        rendered_text: "SYNTHETIC_REPLAY_SKILL".to_string(),
+    });
+    session
+        .append_agent_profile_transition(crate::instruction::AgentProfileTransition {
+            agent: crate::session::StoredAgentReference {
+                scope: crate::instruction::InstructionScope::Project,
+                id: "reviewer".to_string(),
+                display_name: "Reviewer".to_string(),
+            },
+            transition_sentence: "SYNTHETIC_REPLAY_TRANSITION".to_string(),
+            complete_instructions: "SYNTHETIC_REPLAY_PROFILE api_key=replay-secret".to_string(),
+            initialized_global_store: false,
+        })
+        .expect("append replay profile");
+
+    let timeline = export_timeline(&session);
+    assert!(timeline.iter().any(|event| matches!(
+        &event.kind,
+        TimelineEventKind::SessionInstructions {
+            system_prompt,
+            active_skill: Some(active_skill),
+            ..
+        } if system_prompt == "SYNTHETIC_REPLAY_SYSTEM"
+            && active_skill == "SYNTHETIC_REPLAY_SKILL"
+    )));
+    assert!(timeline.iter().any(|event| matches!(
+        &event.kind,
+        TimelineEventKind::DisplayMessage { role, content, .. }
+            if role == "agent_profile"
+                && content.contains("SYNTHETIC_REPLAY_PROFILE")
+                && content.contains("api_key=replay-secret")
+    )));
+    let replay_events = timeline_to_replay_events(&timeline);
+    assert!(replay_events.iter().any(|(_, event)| matches!(
+        event,
+        ReplayEvent::DisplayMessage { role, content, .. }
+            if role == "agent_profile" && content.contains("SYNTHETIC_REPLAY_PROFILE")
+    )));
+}
+
 struct EnvVarGuard {
     key: &'static str,
     prev: Option<OsString>,

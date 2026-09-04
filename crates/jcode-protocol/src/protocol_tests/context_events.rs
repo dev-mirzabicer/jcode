@@ -203,6 +203,7 @@ fn context_snapshot() -> ContextEditorSnapshot {
             }),
             active_operations: Vec::new(),
             removable_reasoning_kinds: Vec::new(),
+            active_agent_profile: false,
         }],
         active_transactions: vec![context_transaction_summary()],
         emergency_policy: jcode_session_types::StoredContextEmergencyPolicy::Block,

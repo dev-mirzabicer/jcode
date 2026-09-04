@@ -700,6 +700,136 @@ fn frozen_system_state_round_trips_journal_split_and_first_dispatch() -> Result<
 }
 
 #[test]
+fn active_agent_profile_is_structural_atomic_pinned_and_export_complete() {
+    let mut session = Session::create_with_id("session-profile-transition".to_string(), None, None);
+    session.install_system_prompt(StoredSystemPromptState {
+        text: "SYNTHETIC_INITIAL_SYSTEM".to_string(),
+        active_agent: StoredAgentReference {
+            scope: crate::instruction::InstructionScope::Global,
+            id: "initial".to_string(),
+            display_name: "Initial".to_string(),
+        },
+        first_provider_dispatch_at: Some(Utc::now()),
+        active_transition_message_id: None,
+    });
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "before profile".to_string(),
+            cache_control: None,
+        }],
+    );
+
+    let transition_id = session
+        .append_agent_profile_transition(crate::instruction::AgentProfileTransition {
+            agent: StoredAgentReference {
+                scope: crate::instruction::InstructionScope::Project,
+                id: "synthetic".to_string(),
+                display_name: "Synthetic".to_string(),
+            },
+            transition_sentence: "SYNTHETIC_TRANSITION_SENTENCE".to_string(),
+            complete_instructions: "SYNTHETIC_PROFILE api_key=profile-secret".to_string(),
+            initialized_global_store: false,
+        })
+        .expect("append profile");
+    let transition = session.messages.last().expect("transition message");
+    assert_eq!(transition.id, transition_id);
+    assert_eq!(transition.role, Role::User);
+    assert_eq!(transition.display_role, Some(StoredDisplayRole::System));
+    assert_eq!(transition.timestamp, None);
+    assert!(session.is_agent_profile_message(&transition_id));
+    assert_eq!(
+        session.active_transition_message_id(),
+        Some(transition_id.as_str())
+    );
+    assert_eq!(
+        session.active_agent().map(|agent| agent.id.as_str()),
+        Some("synthetic")
+    );
+    let exact_transition_text = transition
+        .content
+        .iter()
+        .find_map(|block| match block {
+            ContentBlock::Text { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .expect("transition text");
+    assert!(exact_transition_text.contains("SYNTHETIC_PROFILE"));
+
+    session.add_message(
+        Role::Assistant,
+        vec![ContentBlock::Text {
+            text: "after profile".to_string(),
+            cache_control: None,
+        }],
+    );
+    assert!(
+        session
+            .truncate_messages_preserving_active_profile(1)
+            .expect("rewind pin")
+    );
+    assert_eq!(session.messages.len(), 2);
+    assert_eq!(session.messages.last().unwrap().id, transition_id);
+    assert_eq!(
+        session
+            .agent_profile_message_ids
+            .iter()
+            .filter(|message_id| *message_id == &transition_id)
+            .count(),
+        1
+    );
+
+    let encoded = serde_json::to_string(&session).expect("serialize session");
+    let decoded: Session = serde_json::from_str(&encoded).expect("deserialize session");
+    assert_eq!(
+        decoded.active_transition_message_id(),
+        Some(transition_id.as_str())
+    );
+    assert!(decoded.is_agent_profile_message(&transition_id));
+
+    let exported = decoded.redacted_for_export();
+    let exported_transition = exported
+        .messages
+        .iter()
+        .find(|message| message.id == transition_id)
+        .expect("exported transition");
+    let exported_text = exported_transition
+        .content
+        .iter()
+        .find_map(|block| match block {
+            ContentBlock::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .expect("exported transition text");
+    assert_eq!(exported_text, exact_transition_text);
+
+    let audit_id = session
+        .apply_system_prompt_replacement(
+            StoredSystemPromptState {
+                text: "SYNTHETIC_REPLACEMENT_SYSTEM".to_string(),
+                active_agent: StoredAgentReference {
+                    scope: crate::instruction::InstructionScope::Global,
+                    id: "replacement".to_string(),
+                    display_name: "Replacement".to_string(),
+                },
+                first_provider_dispatch_at: None,
+                active_transition_message_id: Some("must-clear".to_string()),
+            },
+            "SYNTHETIC_REPLACEMENT_AUDIT".to_string(),
+        )
+        .expect("replace system");
+    assert_eq!(session.active_transition_message_id(), None);
+    assert!(session.first_provider_dispatch_at().is_some());
+    assert!(
+        session
+            .messages
+            .iter()
+            .any(|message| message.id == audit_id)
+    );
+    assert!(session.is_agent_profile_message(&transition_id));
+}
+
+#[test]
 fn first_dispatch_failure_restores_the_exact_prior_activation() {
     #[derive(Debug)]
     struct FailingPersistence;

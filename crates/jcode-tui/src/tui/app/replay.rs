@@ -437,14 +437,18 @@ pub(super) fn apply_replay_event(
             if role == "swarm" {
                 app.swarm_enabled = true;
             }
-            app.push_display_message(DisplayMessage {
-                role: role.clone(),
-                content: content.clone(),
-                tool_calls: vec![],
-                duration_secs: None,
-                title: title.clone(),
-                tool_data: None,
-            });
+            if role == "agent_profile" {
+                app.push_display_message(DisplayMessage::agent_profile(content.clone()));
+            } else {
+                app.push_display_message(DisplayMessage {
+                    role: role.clone(),
+                    content: content.clone(),
+                    tool_calls: vec![],
+                    duration_secs: None,
+                    title: title.clone(),
+                    tool_data: None,
+                });
+            }
         }
         ReplayEvent::SwarmStatus { members } => {
             app.swarm_enabled = true;

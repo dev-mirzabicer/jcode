@@ -735,6 +735,7 @@ fn debug_message(index: usize) -> ContextEditorMessage {
         summary_coverage: None,
         active_operations: Vec::new(),
         removable_reasoning_kinds: removable.then_some(kind).into_iter().collect(),
+        active_agent_profile: false,
     }
 }
 

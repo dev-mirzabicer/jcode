@@ -337,6 +337,17 @@ impl Agent {
         self.session.system_prompt_text()
     }
 
+    pub fn active_transition_message_id(&self) -> Option<&str> {
+        self.session.active_transition_message_id()
+    }
+
+    pub fn active_skill_text(&self) -> Option<&str> {
+        self.session
+            .active_skill
+            .as_ref()
+            .map(|skill| skill.rendered_text.as_str())
+    }
+
     pub fn set_instruction_repositories(
         &mut self,
         repositories: crate::instruction::InstructionRepositoryService,

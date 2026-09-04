@@ -63,6 +63,26 @@ pub struct HistoryMessage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentProfileSummary {
+    pub agent_id: String,
+    pub display_name: String,
+    pub scope: String,
+    pub description: String,
+    #[serde(default)]
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentProfileChangeKind {
+    #[default]
+    Provisional,
+    NoChange,
+    Appended,
+    Replaced,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionActivitySnapshot {
     pub is_processing: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -572,6 +592,7 @@ impl Request {
             Request::CancelSoftInterrupts { id } => *id,
             Request::Clear { id } => *id,
             Request::SetAgent { id, .. } => *id,
+            Request::GetAgentCatalog { id } | Request::GetAgentStatus { id, .. } => *id,
             Request::Rewind { id, .. } => *id,
             Request::RewindUndo { id } => *id,
             Request::Ping { id } => *id,

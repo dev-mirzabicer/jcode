@@ -41,6 +41,23 @@ impl DisplayMessage {
         }
     }
 
+    /// Create a collapsed, expandable card for a complete appended agent
+    /// profile. The encoded display state is UI-only; authoritative session and
+    /// export content remains complete and unchanged.
+    pub fn agent_profile(content: impl Into<String>) -> Self {
+        let body = content.into();
+        let content =
+            crate::encode_collapsible_swarm_content("Complete profile instructions", &body);
+        Self {
+            role: "agent_profile".to_string(),
+            content,
+            tool_calls: Vec::new(),
+            duration_secs: None,
+            title: Some("Agent Profile".to_string()),
+            tool_data: None,
+        }
+    }
+
     /// Create a background task completion message (dedicated card display).
     pub fn background_task(content: impl Into<String>) -> Self {
         Self {
@@ -221,6 +238,9 @@ impl DisplayMessage {
 
     /// Convert the shared session renderer output into the TUI transcript model.
     pub fn from_rendered_message(item: RenderedMessage) -> Self {
+        if item.role == "agent_profile" {
+            return Self::agent_profile(item.content);
+        }
         Self {
             role: item.role,
             content: item.content,

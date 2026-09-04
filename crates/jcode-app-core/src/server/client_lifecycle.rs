@@ -57,9 +57,10 @@ use super::provider_control::{
 use super::{
     AwaitMembersRuntime, ClientConnectionInfo, ClientDebugState, FileTouchService,
     SessionControlHandle, SessionInterruptQueues, SharedContext, SwarmEvent, SwarmMember,
-    SwarmMutationRuntime, VersionedPlan, format_structured_completion_report,
-    register_session_interrupt_queue, send_swarm_plan_to_session, truncate_detail,
-    update_member_status, update_member_status_with_report, update_member_status_with_report_tldr,
+    SwarmMutationRuntime, VersionedPlan, fanout_live_client_event,
+    format_structured_completion_report, register_session_interrupt_queue,
+    send_swarm_plan_to_session, truncate_detail, update_member_status,
+    update_member_status_with_report, update_member_status_with_report_tldr,
 };
 use crate::agent::Agent;
 use crate::bus::{Bus, BusEvent};
@@ -2816,6 +2817,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
             Request::SetAgent {
                 id,
                 agent: selection,
+                replace,
             } => {
                 if reject_if_agent_busy_for_request(
                     id,
@@ -2828,14 +2830,6 @@ pub(super) async fn handle_client_with_instruction_repositories(
                     continue;
                 }
                 let mut agent_guard = agent.lock().await;
-                if agent_guard.first_provider_dispatch_at().is_some() {
-                    let _ = client_event_tx.send(ServerEvent::Error {
-                        id,
-                        message: "The initial agent is already dispatched; post-dispatch agent transitions arrive in Phase 3 WP-04.".to_string(),
-                        retry_after_secs: None,
-                    });
-                    continue;
-                }
                 let selection = match crate::instruction::AgentSelection::parse(Some(&selection)) {
                     Ok(selection) => selection,
                     Err(error) => {
@@ -2847,15 +2841,74 @@ pub(super) async fn handle_client_with_instruction_repositories(
                         continue;
                     }
                 };
-                match agent_guard.activate_primary_instructions(selection) {
-                    Ok(activation) => {
-                        let active = activation.state.active_agent;
-                        let _ = client_event_tx.send(ServerEvent::AgentSelected {
+                let mode = if replace {
+                    crate::agent::AgentProfileChangeMode::ReplaceSystem
+                } else {
+                    crate::agent::AgentProfileChangeMode::Ordinary
+                };
+                match agent_guard.change_primary_agent(selection, mode).await {
+                    Ok(outcome) => {
+                        let active = outcome.agent().clone();
+                        let (change, message_id) = match outcome {
+                            crate::agent::AgentProfileChangeOutcome::NoChange { .. } => (
+                                crate::protocol::AgentProfileChangeKind::NoChange,
+                                agent_guard
+                                    .active_transition_message_id()
+                                    .map(str::to_string),
+                            ),
+                            crate::agent::AgentProfileChangeOutcome::Provisional { .. } => {
+                                (crate::protocol::AgentProfileChangeKind::Provisional, None)
+                            }
+                            crate::agent::AgentProfileChangeOutcome::Appended {
+                                message_id,
+                                ..
+                            } => (
+                                crate::protocol::AgentProfileChangeKind::Appended,
+                                Some(message_id),
+                            ),
+                            crate::agent::AgentProfileChangeOutcome::Replaced {
+                                audit_message_id,
+                                ..
+                            } => (
+                                crate::protocol::AgentProfileChangeKind::Replaced,
+                                audit_message_id,
+                            ),
+                        };
+                        let message_content = message_id.as_deref().and_then(|message_id| {
+                            agent_guard
+                                .messages()
+                                .iter()
+                                .find(|message| message.id == message_id)
+                                .and_then(|message| {
+                                    message.content.iter().find_map(|block| match block {
+                                        crate::message::ContentBlock::Text { text, .. } => {
+                                            Some(text.clone())
+                                        }
+                                        _ => None,
+                                    })
+                                })
+                        });
+                        if matches!(
+                            change,
+                            crate::protocol::AgentProfileChangeKind::Appended
+                                | crate::protocol::AgentProfileChangeKind::Replaced
+                        ) {
+                            context_transactions.invalidate_session_drafts(
+                                agent_guard.session_id(),
+                                "agent profile change replaced authoritative prompt or history",
+                            );
+                        }
+                        let event = ServerEvent::AgentSelected {
                             id,
                             agent_id: active.id,
                             display_name: active.display_name,
                             scope: active.scope.to_string(),
-                        });
+                            change,
+                            message_id,
+                            message_content,
+                        };
+                        let _ = fanout_live_client_event(&swarm_members, &client_session_id, event)
+                            .await;
                         let _ = client_event_tx.send(ServerEvent::Done { id });
                     }
                     Err(error) => {
@@ -2866,6 +2919,66 @@ pub(super) async fn handle_client_with_instruction_repositories(
                         });
                     }
                 }
+            }
+
+            Request::GetAgentCatalog { id } => {
+                let agent_guard = agent.lock().await;
+                match agent_guard.list_primary_agents() {
+                    Ok(entries) => {
+                        let active = agent_guard.active_agent();
+                        let agents = entries
+                            .into_iter()
+                            .map(|entry| crate::protocol::AgentProfileSummary {
+                                active: active.is_some_and(|current| current == &entry.agent),
+                                agent_id: entry.agent.id,
+                                display_name: entry.agent.display_name,
+                                scope: entry.agent.scope.to_string(),
+                                description: entry.description,
+                            })
+                            .collect();
+                        let _ = client_event_tx.send(ServerEvent::AgentCatalog { id, agents });
+                        let _ = client_event_tx.send(ServerEvent::Done { id });
+                    }
+                    Err(error) => {
+                        let _ = client_event_tx.send(ServerEvent::Error {
+                            id,
+                            message: format!("Agent catalog failed: {error}"),
+                            retry_after_secs: None,
+                        });
+                    }
+                }
+            }
+
+            Request::GetAgentStatus {
+                id,
+                include_instructions,
+            } => {
+                let agent_guard = agent.lock().await;
+                let Some(active) = agent_guard.active_agent().cloned() else {
+                    let _ = client_event_tx.send(ServerEvent::Error {
+                        id,
+                        message: "Session has no active primary agent.".to_string(),
+                        retry_after_secs: None,
+                    });
+                    continue;
+                };
+                let _ = client_event_tx.send(ServerEvent::AgentStatus {
+                    id,
+                    agent_id: active.id,
+                    display_name: active.display_name,
+                    scope: active.scope.to_string(),
+                    first_provider_dispatched: agent_guard.first_provider_dispatch_at().is_some(),
+                    active_transition_message_id: agent_guard
+                        .active_transition_message_id()
+                        .map(str::to_string),
+                    system_prompt: include_instructions
+                        .then(|| agent_guard.system_prompt_text().map(str::to_string))
+                        .flatten(),
+                    active_skill: include_instructions
+                        .then(|| agent_guard.active_skill_text().map(str::to_string))
+                        .flatten(),
+                });
+                let _ = client_event_tx.send(ServerEvent::Done { id });
             }
 
             Request::Split { id } => {

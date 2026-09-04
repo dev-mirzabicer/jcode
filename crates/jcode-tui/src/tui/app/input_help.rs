@@ -37,8 +37,11 @@ impl App {
             "refresh-model-list" => {
                 "/refresh-model-list\nForce-refresh provider model catalogs, update /model, and persist the refreshed cache."
             }
-            "agents" => {
-                "/agents\nOpen the agent-model config picker.\n\n/agents <swarm|review|judge|memory|ambient>\nJump straight to that agent role's saved model override."
+            "agent" => {
+                "/agent\nOpen the primary-agent picker.\n\n/agent <name|global:name|project:name>\nBefore first dispatch, replace provisional system composition. After first dispatch, append the complete target profile without a model call.\n\n/agent replace [name|global:name|project:name]\nOpen the replacement picker or explicitly install the selected agent as a new true system prompt. This resets provider continuation and intentionally transitions the prompt cache.\n\n/agent inspect\nShow exact current system prompt, active profile delivery, and active skill text. Agent changes are idle-only."
+            }
+            "agent-models" | "agents" => {
+                "/agent-models\nOpen the special-role model config picker.\n\n/agent-models <swarm|review|judge|memory|ambient>\nJump straight to that role's saved model override.\n\n/agents remains a compatibility alias; use /agent for primary profiles."
             }
             "swarm-prompt" => {
                 "/swarm-prompt\nOpen the active swarm routing prompt in $VISUAL or $EDITOR.\n\nJcode uses a nonblank project override at ./.jcode/swarm-prompt.md when present, then ~/.jcode/swarm-prompt.md, then the built-in default. If no editable override exists, this command creates the global file from the built-in default. Restart or reload Jcode after editing because running agent tool registries cache the prompt."

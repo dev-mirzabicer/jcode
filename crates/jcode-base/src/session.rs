@@ -114,6 +114,23 @@ pub fn is_scheduled_task_message(message: &StoredMessage) -> bool {
         })
 }
 
+fn agent_profile_message_text(
+    agent: &StoredAgentReference,
+    transition_sentence: &str,
+    complete_instructions: &str,
+) -> String {
+    let scope = match agent.scope {
+        crate::instruction::InstructionScope::Global => "global",
+        crate::instruction::InstructionScope::Project => "project",
+    };
+    format!(
+        "<jcode_agent_profile scope=\"{scope}\" id=\"{}\">\n{}\n\n{}\n</jcode_agent_profile>",
+        agent.id,
+        transition_sentence.trim_end(),
+        complete_instructions
+    )
+}
+
 /// Stable identity of the agent whose complete instructions are active.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoredAgentReference {
@@ -173,6 +190,32 @@ pub enum SystemPromptDispatchError {
     Persistence(anyhow::Error),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentProfileSessionError {
+    MissingActivation,
+    NotDispatched,
+    ActiveTransitionMissing(String),
+}
+
+impl std::fmt::Display for AgentProfileSessionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingActivation => {
+                formatter.write_str("session has no frozen system-prompt activation")
+            }
+            Self::NotDispatched => formatter.write_str(
+                "ordinary profile transitions require a completed first provider dispatch",
+            ),
+            Self::ActiveTransitionMissing(message_id) => write!(
+                formatter,
+                "active agent profile message {message_id} is missing from authoritative history"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for AgentProfileSessionError {}
+
 impl std::fmt::Display for SystemPromptDispatchError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -207,6 +250,11 @@ pub struct Session {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub messages: Vec<StoredMessage>,
+    /// Structural identities of Jcode-generated appended profile messages.
+    /// `messages` remains the authoritative content; this index prevents export,
+    /// replay, and UI code from recognizing profiles by parsing prose.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agent_profile_message_ids: Vec<String>,
     /// Persisted Startup Context receipt. Exact captured contents live only in `messages`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub startup_context: Option<StoredStartupContextReceipt>,
@@ -550,6 +598,133 @@ impl Session {
         self.mark_memory_profile_dirty();
     }
 
+    pub fn is_agent_profile_message(&self, message_id: &str) -> bool {
+        self.agent_profile_message_ids
+            .iter()
+            .any(|candidate| candidate == message_id)
+    }
+
+    /// Update the lightweight active-profile projection used by remote clients.
+    /// This never fabricates or changes stored system-prompt text.
+    pub fn update_active_agent_metadata(
+        &mut self,
+        agent: StoredAgentReference,
+        active_transition_message_id: Option<String>,
+    ) {
+        if let Some(state) = self.system_prompt.as_mut() {
+            state.active_agent = agent;
+            state.active_transition_message_id = active_transition_message_id;
+        } else if let Some(state) = self.system_prompt_metadata.as_mut() {
+            state.active_agent = agent;
+            state.active_transition_message_id = active_transition_message_id;
+        } else {
+            self.system_prompt_metadata = Some(StoredSystemPromptMetadata {
+                active_agent: agent,
+                first_provider_dispatch_at: None,
+                active_transition_message_id,
+            });
+        }
+    }
+
+    pub fn append_agent_profile_transition(
+        &mut self,
+        transition: crate::instruction::AgentProfileTransition,
+    ) -> Result<String, AgentProfileSessionError> {
+        let Some(system_prompt) = self.system_prompt.as_mut() else {
+            return Err(AgentProfileSessionError::MissingActivation);
+        };
+        if system_prompt.first_provider_dispatch_at.is_none() {
+            return Err(AgentProfileSessionError::NotDispatched);
+        }
+
+        let message_id = new_id("message");
+        let content = agent_profile_message_text(
+            &transition.agent,
+            &transition.transition_sentence,
+            &transition.complete_instructions,
+        );
+        system_prompt.active_agent = transition.agent;
+        system_prompt.active_transition_message_id = Some(message_id.clone());
+        self.agent_profile_message_ids.push(message_id.clone());
+        self.append_stored_message(StoredMessage {
+            id: message_id.clone(),
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: content,
+                cache_control: None,
+            }],
+            display_role: Some(StoredDisplayRole::System),
+            timestamp: None,
+            tool_duration_ms: None,
+            token_usage: None,
+        });
+        self.updated_at = Utc::now();
+        self.persist_state.force_snapshot = true;
+        self.mark_memory_profile_dirty();
+        Ok(message_id)
+    }
+
+    pub fn apply_system_prompt_replacement(
+        &mut self,
+        mut state: StoredSystemPromptState,
+        audit_sentence: String,
+    ) -> Result<String, AgentProfileSessionError> {
+        let Some(previous) = self.system_prompt.as_ref() else {
+            return Err(AgentProfileSessionError::MissingActivation);
+        };
+        state.first_provider_dispatch_at = previous.first_provider_dispatch_at;
+        state.active_transition_message_id = None;
+        self.install_system_prompt(state);
+        let audit_id = new_id("message");
+        self.append_stored_message(StoredMessage {
+            id: audit_id.clone(),
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: audit_sentence,
+                cache_control: None,
+            }],
+            display_role: Some(StoredDisplayRole::System),
+            timestamp: None,
+            tool_duration_ms: None,
+            token_usage: None,
+        });
+        Ok(audit_id)
+    }
+
+    pub fn truncate_messages_preserving_active_profile(
+        &mut self,
+        len: usize,
+    ) -> Result<bool, AgentProfileSessionError> {
+        let active_message = self
+            .active_transition_message_id()
+            .map(str::to_string)
+            .map(|message_id| {
+                self.messages
+                    .iter()
+                    .enumerate()
+                    .find(|(_, message)| message.id == message_id)
+                    .map(|(index, message)| (index, message.clone()))
+                    .ok_or(AgentProfileSessionError::ActiveTransitionMissing(
+                        message_id,
+                    ))
+            })
+            .transpose()?;
+        let preserve = active_message
+            .as_ref()
+            .is_some_and(|(index, _)| *index >= len);
+        self.truncate_messages(len);
+        self.agent_profile_message_ids.retain(|message_id| {
+            self.messages
+                .iter()
+                .any(|message| &message.id == message_id)
+        });
+        if preserve && let Some((_, message)) = active_message {
+            self.agent_profile_message_ids.push(message.id.clone());
+            self.append_stored_message(message);
+        }
+        Ok(preserve)
+    }
+
     pub fn clear_active_skill(&mut self) {
         if self.active_skill.take().is_some() || self.active_skill_metadata.take().is_some() {
             self.updated_at = Utc::now();
@@ -610,6 +785,7 @@ impl Session {
     /// history, but never reuses provider-native continuation state from the parent process.
     pub fn inherit_continuation_state_from(&mut self, parent: &Session) {
         self.replace_messages(parent.messages.clone());
+        self.agent_profile_message_ids = parent.agent_profile_message_ids.clone();
         self.startup_context = parent.startup_context.clone();
         self.startup_context_block = parent.startup_context_block.clone();
         self.system_prompt = parent.system_prompt.clone();
@@ -669,6 +845,7 @@ impl Session {
         session.saved = stub.saved;
         session.save_label = stub.save_label;
         session.messages.clear();
+        session.agent_profile_message_ids.clear();
         session.env_snapshots.clear();
         session.memory_injections.clear();
         session.replay_events.clear();
@@ -683,6 +860,7 @@ impl Session {
         session.created_at = snapshot.created_at;
         session.updated_at = snapshot.updated_at;
         session.messages = snapshot.messages;
+        session.agent_profile_message_ids = snapshot.agent_profile_message_ids;
         session.startup_context = snapshot.startup_context;
         session.startup_context_block = snapshot.startup_context_block;
         session.system_prompt = snapshot.system_prompt;
@@ -1401,6 +1579,7 @@ impl Session {
             created_at: now,
             updated_at: now,
             messages: Vec::new(),
+            agent_profile_message_ids: Vec::new(),
             startup_context: None,
             startup_context_block: None,
             system_prompt: None,
@@ -1467,6 +1646,7 @@ impl Session {
             created_at: now,
             updated_at: now,
             messages: Vec::new(),
+            agent_profile_message_ids: Vec::new(),
             startup_context: None,
             startup_context_block: None,
             system_prompt: None,
@@ -1857,6 +2037,13 @@ request in this new forked session, using the inherited conversation only as con
         }
         redact_context_view(&mut redacted.context_view);
         for msg in &mut redacted.messages {
+            if redacted
+                .agent_profile_message_ids
+                .iter()
+                .any(|message_id| message_id == &msg.id)
+            {
+                continue;
+            }
             for block in &mut msg.content {
                 match block {
                     ContentBlock::Text { text, .. }
@@ -2006,6 +2193,11 @@ request in this new forked session, using the inherited conversation only as con
 
     pub fn replace_messages(&mut self, messages: Vec<StoredMessage>) {
         self.messages = messages;
+        self.agent_profile_message_ids.retain(|message_id| {
+            self.messages
+                .iter()
+                .any(|message| &message.id == message_id)
+        });
         self.mark_memory_profile_dirty();
         self.mark_messages_full_dirty();
     }
@@ -2013,6 +2205,11 @@ request in this new forked session, using the inherited conversation only as con
     pub fn truncate_messages(&mut self, len: usize) {
         if len < self.messages.len() {
             self.messages.truncate(len);
+            self.agent_profile_message_ids.retain(|message_id| {
+                self.messages
+                    .iter()
+                    .any(|message| &message.id == message_id)
+            });
             self.mark_memory_profile_dirty();
             self.mark_messages_full_dirty();
         }
@@ -2477,6 +2674,8 @@ struct RemoteStartupSessionSnapshot {
     updated_at: DateTime<Utc>,
     #[serde(default)]
     messages: Vec<StoredMessage>,
+    #[serde(default)]
+    agent_profile_message_ids: Vec<String>,
     #[serde(default)]
     startup_context: Option<StoredStartupContextReceipt>,
     #[serde(default)]

@@ -219,7 +219,8 @@ impl App {
         let Some(message) = self.display_messages.get(msg_idx) else {
             return false;
         };
-        if message.role != "swarm" {
+        let is_agent_profile = message.role == "agent_profile";
+        if !matches!(message.role.as_str(), "swarm" | "agent_profile") {
             return false;
         }
         let Some(toggled) = jcode_tui_messages::toggle_collapsible_swarm_content(&message.content)
@@ -233,9 +234,17 @@ impl App {
             return false;
         }
         self.set_status_notice(if expanded {
-            "Swarm message expanded"
+            if is_agent_profile {
+                "Agent profile expanded"
+            } else {
+                "Swarm message expanded"
+            }
         } else {
-            "Swarm message collapsed"
+            if is_agent_profile {
+                "Agent profile collapsed"
+            } else {
+                "Swarm message collapsed"
+            }
         });
         true
     }

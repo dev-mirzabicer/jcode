@@ -15,6 +15,62 @@ fn test_request_roundtrip() -> Result<()> {
 }
 
 #[test]
+fn agent_profile_control_requests_and_events_roundtrip() -> Result<()> {
+    let request = Request::SetAgent {
+        id: 40,
+        agent: "project:reviewer".to_string(),
+        replace: true,
+    };
+    let json = serde_json::to_string(&request)?;
+    let decoded = parse_request_json(&json)?;
+    assert!(matches!(
+        decoded,
+        Request::SetAgent {
+            id: 40,
+            ref agent,
+            replace: true,
+        } if agent == "project:reviewer"
+    ));
+    let legacy = parse_request_json(
+        r#"{"type":"set_agent","id":41,"agent":"reviewer"}"#,
+    )?;
+    assert!(matches!(legacy, Request::SetAgent { replace: false, .. }));
+
+    for request in [
+        Request::GetAgentCatalog { id: 42 },
+        Request::GetAgentStatus {
+            id: 43,
+            include_instructions: true,
+        },
+    ] {
+        let json = serde_json::to_string(&request)?;
+        assert_eq!(parse_request_json(&json)?.id(), request.id());
+    }
+
+    let event = ServerEvent::AgentSelected {
+        id: 40,
+        agent_id: "reviewer".to_string(),
+        display_name: "Reviewer".to_string(),
+        scope: "project".to_string(),
+        change: AgentProfileChangeKind::Appended,
+        message_id: Some("profile-message".to_string()),
+        message_content: Some("SYNTHETIC_PROFILE".to_string()),
+    };
+    let json = serde_json::to_string(&event)?;
+    let decoded: ServerEvent = serde_json::from_str(&json)?;
+    assert!(matches!(
+        decoded,
+        ServerEvent::AgentSelected {
+            change: AgentProfileChangeKind::Appended,
+            message_id: Some(ref id),
+            message_content: Some(ref content),
+            ..
+        } if id == "profile-message" && content == "SYNTHETIC_PROFILE"
+    ));
+    Ok(())
+}
+
+#[test]
 fn test_soft_interrupt_images_roundtrip_and_legacy_default() -> Result<()> {
     let req = Request::SoftInterrupt {
         id: 2,

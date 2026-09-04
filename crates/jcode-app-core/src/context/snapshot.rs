@@ -219,6 +219,7 @@ pub fn build_context_editor_snapshot(
                 summary_coverage: summary_coverage[stored_index].clone(),
                 active_operations: message_badges[stored_index].clone(),
                 removable_reasoning_kinds,
+                active_agent_profile: false,
             }
         })
         .collect();

@@ -9,6 +9,11 @@ use std::fmt;
 use std::path::PathBuf;
 
 pub const INSTRUCTION_STORE_SCHEMA_VERSION: u32 = 1;
+pub const INSTRUCTION_STORE_SEED_VERSION: u32 = 2;
+
+fn initial_instruction_store_seed_version() -> u32 {
+    1
+}
 pub const INSTRUCTION_PROJECT_CONFIG_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -155,6 +160,8 @@ impl InstructionRepositoryValidation {
 #[serde(deny_unknown_fields)]
 pub struct InstructionStoreManifest {
     pub schema_version: u32,
+    #[serde(default = "initial_instruction_store_seed_version")]
+    pub seed_version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_agent: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -165,6 +172,7 @@ impl InstructionStoreManifest {
     pub fn current() -> Self {
         Self {
             schema_version: INSTRUCTION_STORE_SCHEMA_VERSION,
+            seed_version: INSTRUCTION_STORE_SEED_VERSION,
             default_agent: None,
             legacy_imports: BTreeMap::new(),
         }

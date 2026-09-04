@@ -1219,6 +1219,7 @@ mod tests {
                 summary_coverage: None,
                 active_operations: Vec::new(),
                 removable_reasoning_kinds: Vec::new(),
+                active_agent_profile: false,
             }],
             active_transactions: Vec::new(),
             emergency_policy: StoredContextEmergencyPolicy::Block,

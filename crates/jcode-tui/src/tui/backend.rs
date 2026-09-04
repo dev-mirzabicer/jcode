@@ -811,12 +811,31 @@ impl RemoteConnection {
         Ok(id)
     }
 
-    pub async fn set_agent(&mut self, agent: &str) -> Result<u64> {
+    pub async fn set_agent(&mut self, agent: &str, replace: bool) -> Result<u64> {
         let id = self.next_request_id;
         self.next_request_id += 1;
         self.send_request(Request::SetAgent {
             id,
             agent: agent.to_string(),
+            replace,
+        })
+        .await?;
+        Ok(id)
+    }
+
+    pub async fn request_agent_catalog(&mut self) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::GetAgentCatalog { id }).await?;
+        Ok(id)
+    }
+
+    pub async fn request_agent_status(&mut self, include_instructions: bool) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::GetAgentStatus {
+            id,
+            include_instructions,
         })
         .await?;
         Ok(id)

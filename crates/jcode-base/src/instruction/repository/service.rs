@@ -249,6 +249,114 @@ impl InstructionRepositoryService {
         self.initialize_repository(&repository, seed, legacy, DEFAULT_BRANCH)
     }
 
+    /// Add resources introduced by a newer shipped seed exactly once without
+    /// overwriting an existing working file. The durable seed version
+    /// distinguishes a resource that predates this installation from one the
+    /// user removed after adopting it.
+    pub fn ensure_shipped_seed(
+        &self,
+        repository: &InstructionRepositoryRef,
+        seed: &InstructionStoreSeed,
+    ) -> InstructionRepositoryResult<Option<InstructionCommitOutcome>> {
+        let mut manifest = self.load_manifest(repository)?;
+        if manifest.seed_version > seed.manifest.seed_version {
+            return Err(InstructionRepositoryError::new(
+                InstructionRepositoryErrorKind::InvalidManifest,
+                "upgrade shipped instruction seed",
+                format!(
+                    "store seed version {} is newer than this Jcode seed version {}",
+                    manifest.seed_version, seed.manifest.seed_version
+                ),
+            )
+            .repository(repository));
+        }
+        if manifest.seed_version == seed.manifest.seed_version {
+            return Ok(None);
+        }
+
+        let git = GitRepository::new(&repository.root);
+        let expected_head = git.head()?.ok_or_else(|| {
+            InstructionRepositoryError::new(
+                InstructionRepositoryErrorKind::RepositoryDamaged,
+                "upgrade shipped instruction seed",
+                "instruction repository has no current HEAD",
+            )
+            .repository(repository)
+        })?;
+        if git.branch()?.is_none() {
+            return Err(InstructionRepositoryError::new(
+                InstructionRepositoryErrorKind::DetachedHead,
+                "upgrade shipped instruction seed",
+                "instruction repository is detached; check out a branch before upgrading",
+            )
+            .repository(repository));
+        }
+
+        let manifest_path = PathBuf::from(STORE_MANIFEST);
+        let mut expected_files = vec![fingerprint(repository, &manifest_path)?];
+        let mut mutations = Vec::new();
+        for file in &seed.files {
+            let state = fingerprint(repository, &file.relative_path)?;
+            match &state.fingerprint {
+                InstructionTargetFingerprint::Missing => {
+                    if git.file_exists_at_head(&file.relative_path)? {
+                        return Err(InstructionRepositoryError::new(
+                            InstructionRepositoryErrorKind::RepositoryDamaged,
+                            "upgrade shipped instruction seed",
+                            "a shipped resource is committed but missing from the working tree; restore it explicitly before upgrading",
+                        )
+                        .repository(repository)
+                        .path(&file.relative_path));
+                    }
+                    expected_files.push(state);
+                    mutations.push(InstructionFileMutation::Write {
+                        relative_path: file.relative_path.clone(),
+                        content: file.content.clone(),
+                    });
+                }
+                InstructionTargetFingerprint::File { .. } => {}
+                InstructionTargetFingerprint::Symlink | InstructionTargetFingerprint::Other => {
+                    return Err(InstructionRepositoryError::new(
+                        InstructionRepositoryErrorKind::InvalidPath,
+                        "upgrade shipped instruction seed",
+                        "a shipped resource path is not a regular file",
+                    )
+                    .repository(repository)
+                    .path(&file.relative_path));
+                }
+            }
+        }
+
+        manifest.seed_version = seed.manifest.seed_version;
+        let manifest_content = toml::to_string_pretty(&manifest).map_err(|error| {
+            InstructionRepositoryError::new(
+                InstructionRepositoryErrorKind::InvalidManifest,
+                "serialize upgraded instruction store manifest",
+                error.to_string(),
+            )
+            .repository(repository)
+        })?;
+        mutations.push(InstructionFileMutation::Write {
+            relative_path: manifest_path,
+            content: manifest_content.into_bytes(),
+        });
+
+        self.commit(
+            repository,
+            &InstructionCommitRequest {
+                operation_id: format!("upgrade-seed-v{}", seed.manifest.seed_version),
+                message: format!(
+                    "instruction: upgrade shipped seed to v{}",
+                    seed.manifest.seed_version
+                ),
+                expected_head,
+                expected_files,
+                mutations,
+            },
+        )
+        .map(Some)
+    }
+
     pub fn initialize_repository(
         &self,
         repository: &InstructionRepositoryRef,

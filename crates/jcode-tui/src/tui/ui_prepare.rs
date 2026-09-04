@@ -1592,6 +1592,14 @@ fn render_message_into(
                 acc.push_auto(align_if_unset(line, align));
             }
         }
+        "agent_profile" => {
+            let content_width = width.saturating_sub(4);
+            let cached =
+                get_cached_message_lines(msg, content_width, app.diff_mode(), render_swarm_message);
+            for line in cached {
+                acc.push_auto(align_if_unset(line, align));
+            }
+        }
         // Terminal-style clear spacer (Ctrl+L): N blank rows that push the
         // prior transcript up out of the viewport while keeping it in
         // scrollback. The separator blank already pushed above counts toward

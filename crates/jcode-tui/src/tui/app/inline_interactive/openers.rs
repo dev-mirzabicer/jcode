@@ -9,6 +9,57 @@ use crate::tui::{
 };
 
 impl App {
+    pub(crate) fn open_primary_agent_picker(
+        &mut self,
+        agents: Vec<crate::instruction::AgentCatalogEntry>,
+        replace: bool,
+    ) {
+        let active = self.session.active_agent();
+        let entries = agents
+            .into_iter()
+            .map(|entry| {
+                let selector = format!("{}:{}", entry.agent.scope, entry.agent.id);
+                PickerEntry {
+                    name: entry.agent.display_name.clone(),
+                    options: vec![PickerOption {
+                        provider: entry.agent.scope.to_string(),
+                        api_method: if replace {
+                            "replace system".to_string()
+                        } else {
+                            "switch profile".to_string()
+                        },
+                        available: true,
+                        detail: entry.description,
+                        estimated_reference_cost_micros: None,
+                    }],
+                    action: PickerAction::PrimaryAgent { selector, replace },
+                    selected_option: 0,
+                    is_current: active.is_some_and(|current| current == &entry.agent),
+                    is_default: false,
+                    is_favorite: false,
+                    recommended: false,
+                    recommendation_rank: usize::MAX,
+                    usage_score: 0,
+                    old: false,
+                    created_date: None,
+                    effort: None,
+                }
+            })
+            .collect::<Vec<_>>();
+        self.inline_view_state = None;
+        self.inline_interactive_state = Some(InlineInteractiveState {
+            kind: PickerKind::Agent,
+            filtered: (0..entries.len()).collect(),
+            entries,
+            selected: 0,
+            column: 0,
+            filter: String::new(),
+            preview: false,
+        });
+        self.input.clear();
+        self.cursor_pos = 0;
+    }
+
     pub(crate) fn open_agents_picker(&mut self) {
         let mut targets = vec![
             AgentModelTarget::Swarm,
@@ -33,9 +84,9 @@ impl App {
                         api_method: agent_model_target_config_path(target).to_string(),
                         available: true,
                         detail: if target == AgentModelTarget::Swarm {
-                            "/agents swarm · routing: /swarm-prompt".to_string()
+                            "/agent-models swarm · routing: /swarm-prompt".to_string()
                         } else {
-                            format!("/agents {}", agent_model_target_slug(target))
+                            format!("/agent-models {}", agent_model_target_slug(target))
                         },
                         estimated_reference_cost_micros: None,
                     }],

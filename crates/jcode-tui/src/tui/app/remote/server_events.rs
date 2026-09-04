@@ -1484,12 +1484,134 @@ pub(in crate::tui::app) fn handle_server_event(
             agent_id,
             display_name,
             scope,
+            change,
+            message_id,
+            message_content,
             ..
         } => {
-            app.push_display_message(DisplayMessage::system(format!(
-                "Primary agent: {display_name} ({scope}:{agent_id})"
-            )));
-            app.set_status_notice(format!("Agent → {display_name}"));
+            let active_agent = crate::session::StoredAgentReference {
+                scope: match scope.as_str() {
+                    "project" => crate::instruction::InstructionScope::Project,
+                    _ => crate::instruction::InstructionScope::Global,
+                },
+                id: agent_id.clone(),
+                display_name: display_name.clone(),
+            };
+            let active_transition_message_id = (change
+                != crate::protocol::AgentProfileChangeKind::Replaced)
+                .then(|| message_id.clone())
+                .flatten();
+            app.session
+                .update_active_agent_metadata(active_agent, active_transition_message_id);
+            match change {
+                crate::protocol::AgentProfileChangeKind::Appended => {
+                    if let Some(content) = message_content {
+                        app.push_display_message(DisplayMessage::agent_profile(content));
+                    }
+                    app.set_status_notice(format!("Agent → {display_name} · appended"));
+                    let _ = message_id;
+                }
+                crate::protocol::AgentProfileChangeKind::Replaced => {
+                    crate::cache_invalidation::record(
+                        "agent system replacement",
+                        format!("active agent replaced with {agent_id}"),
+                    );
+                    app.kv_cache.cache_generation = app.kv_cache.cache_generation.wrapping_add(1);
+                    app.kv_cache.kv_cache_baseline = None;
+                    app.kv_cache.cold_cache_warned_baseline_completed_at = None;
+                    if let Some(content) = message_content {
+                        app.push_display_message(DisplayMessage::system(content));
+                    }
+                    app.set_status_notice(format!("Agent → {display_name} · system replaced"));
+                    let _ = message_id;
+                }
+                crate::protocol::AgentProfileChangeKind::NoChange => {
+                    app.set_status_notice(format!("Agent → {display_name} (unchanged)"));
+                }
+                crate::protocol::AgentProfileChangeKind::Provisional => {
+                    app.push_display_message(DisplayMessage::system(format!(
+                        "Primary agent: {display_name} ({scope}:{agent_id})"
+                    )));
+                    app.set_status_notice(format!("Agent → {display_name}"));
+                }
+            }
+            true
+        }
+        ServerEvent::AgentCatalog { agents, .. } => {
+            if let Some(active) = agents.iter().find(|entry| entry.active) {
+                let scope = match active.scope.as_str() {
+                    "project" => crate::instruction::InstructionScope::Project,
+                    _ => crate::instruction::InstructionScope::Global,
+                };
+                let transition_id = app
+                    .session
+                    .active_transition_message_id()
+                    .map(str::to_string);
+                app.session.update_active_agent_metadata(
+                    crate::session::StoredAgentReference {
+                        scope,
+                        id: active.agent_id.clone(),
+                        display_name: active.display_name.clone(),
+                    },
+                    transition_id,
+                );
+            }
+            let entries = agents
+                .into_iter()
+                .filter_map(|entry| {
+                    let scope = match entry.scope.as_str() {
+                        "global" => crate::instruction::InstructionScope::Global,
+                        "project" => crate::instruction::InstructionScope::Project,
+                        _ => return None,
+                    };
+                    Some(crate::instruction::AgentCatalogEntry {
+                        agent: crate::session::StoredAgentReference {
+                            scope,
+                            id: entry.agent_id,
+                            display_name: entry.display_name,
+                        },
+                        description: entry.description,
+                    })
+                })
+                .collect();
+            let replace = std::mem::take(&mut app.pending_agent_catalog_replace);
+            app.open_primary_agent_picker(entries, replace);
+            app.set_status_notice("Agent profiles");
+            true
+        }
+        ServerEvent::AgentStatus {
+            agent_id,
+            display_name,
+            scope,
+            first_provider_dispatched,
+            active_transition_message_id,
+            system_prompt,
+            active_skill,
+            ..
+        } => {
+            let delivery = active_transition_message_id
+                .as_deref()
+                .map(|message_id| format!("appended profile message `{message_id}`"))
+                .unwrap_or_else(|| "true system prompt".to_string());
+            let mut sections = vec![
+                "# Agent profile".to_string(),
+                format!(
+                    "Active: **{display_name}** (`{scope}:{agent_id}`)\n\nDelivery: {delivery}\n\nFirst provider dispatch: {}",
+                    if first_provider_dispatched {
+                        "complete"
+                    } else {
+                        "not yet dispatched"
+                    }
+                ),
+            ];
+            if let Some(system_prompt) = system_prompt {
+                sections.push(format!("## System prompt\n\n```text\n{system_prompt}\n```"));
+            }
+            if let Some(active_skill) = active_skill {
+                sections.push(format!("## Active skill\n\n```text\n{active_skill}\n```"));
+            }
+            app.push_display_message(DisplayMessage::system(sections.join("\n\n")));
+            app.set_status_notice("Agent profile inspected");
             true
         }
         ServerEvent::SessionCloseRequested { reason } => {
@@ -1946,13 +2068,19 @@ pub(in crate::tui::app) fn handle_server_event(
                     } else {
                         let restored_messages = messages
                             .into_iter()
-                            .map(|msg| DisplayMessage {
-                                role: msg.role,
-                                content: msg.content,
-                                tool_calls: msg.tool_calls.unwrap_or_default(),
-                                duration_secs: None,
-                                title: None,
-                                tool_data: msg.tool_data,
+                            .map(|msg| {
+                                if msg.role == "agent_profile" {
+                                    DisplayMessage::agent_profile(msg.content)
+                                } else {
+                                    DisplayMessage {
+                                        role: msg.role,
+                                        content: msg.content,
+                                        tool_calls: msg.tool_calls.unwrap_or_default(),
+                                        duration_secs: None,
+                                        title: None,
+                                        tool_data: msg.tool_data,
+                                    }
+                                }
                             })
                             .collect();
                         app.replace_display_messages(restored_messages);
@@ -2029,7 +2157,7 @@ pub(in crate::tui::app) fn handle_server_event(
                             .to_string()
                     } else {
                         format!(
-                            "✓ Rewound to message {}. Removed {} message{}. Undo anytime with /rewind undo.",
+                            "✓ Rewound conversation to message {}. Removed {} message{}. Active agent configuration remained current. Undo anytime with /rewind undo.",
                             notice.message_index.unwrap_or_default(),
                             notice.changed_messages,
                             if notice.changed_messages == 1 {
@@ -2207,13 +2335,19 @@ pub(in crate::tui::app) fn handle_server_event(
             }
             let restored_messages = messages
                 .into_iter()
-                .map(|msg| DisplayMessage {
-                    role: msg.role,
-                    content: msg.content,
-                    tool_calls: msg.tool_calls.unwrap_or_default(),
-                    duration_secs: None,
-                    title: None,
-                    tool_data: msg.tool_data,
+                .map(|msg| {
+                    if msg.role == "agent_profile" {
+                        DisplayMessage::agent_profile(msg.content)
+                    } else {
+                        DisplayMessage {
+                            role: msg.role,
+                            content: msg.content,
+                            tool_calls: msg.tool_calls.unwrap_or_default(),
+                            duration_secs: None,
+                            title: None,
+                            tool_data: msg.tool_data,
+                        }
+                    }
                 })
                 .collect();
             app.apply_compacted_history_window(

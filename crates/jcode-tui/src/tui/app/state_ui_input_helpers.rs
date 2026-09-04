@@ -48,8 +48,9 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     ),
     RegisteredCommand::hidden("/model-status", "Alias for /provider-test-coverage"),
     RegisteredCommand::public("/refresh-model-list", "Refresh provider model catalogs"),
-    RegisteredCommand::public("/agents", "Configure models for agent roles"),
-    RegisteredCommand::public("/agent", "Select the primary agent before the first turn"),
+    RegisteredCommand::public("/agent-models", "Configure models for special agent roles"),
+    RegisteredCommand::hidden("/agents", "Compatibility alias for /agent-models"),
+    RegisteredCommand::public("/agent", "Select, replace, or inspect the primary agent"),
     RegisteredCommand::public(
         "/swarm-prompt",
         "Open the active swarm routing prompt in your editor",
@@ -542,17 +543,25 @@ impl App {
             return self.rank_suggestions(input, suggestions);
         }
 
-        if prefix.starts_with("/agents ") {
+        if prefix.starts_with("/agent-models ") || prefix.starts_with("/agents ") {
+            let command = if prefix.starts_with("/agents ") {
+                "/agents"
+            } else {
+                "/agent-models"
+            };
             let mut suggestions = vec![
-                ("/agents swarm".into(), "Configure swarm/subagent model"),
-                ("/agents review".into(), "Configure code review model"),
-                ("/agents judge".into(), "Configure judge model"),
-                ("/agents ambient".into(), "Configure ambient model"),
+                (format!("{command} swarm"), "Configure swarm/subagent model"),
+                (format!("{command} review"), "Configure code review model"),
+                (format!("{command} judge"), "Configure judge model"),
+                (format!("{command} ambient"), "Configure ambient model"),
             ];
             if crate::config::config().features.memory {
                 suggestions.insert(
                     3,
-                    ("/agents memory".into(), "Configure memory sidecar model"),
+                    (
+                        format!("{command} memory"),
+                        "Configure memory sidecar model",
+                    ),
                 );
             }
             return self.rank_suggestions(input, suggestions);
@@ -694,8 +703,40 @@ impl App {
             return vec![("/model".into(), "Open model picker or type `/model <name>`")];
         }
 
-        if prefix_trimmed == "/agents" {
-            return vec![("/agents".into(), "Open agent model config picker")];
+        if prefix_trimmed == "/agent-models" || prefix_trimmed == "/agents" {
+            return vec![(
+                prefix_trimmed.into(),
+                if prefix_trimmed == "/agents" {
+                    "Compatibility alias for /agent-models"
+                } else {
+                    "Open special-role model config picker"
+                }
+                .into(),
+            )];
+        }
+
+        if prefix.starts_with("/agent ") {
+            return self.rank_suggestions(
+                input,
+                vec![
+                    ("/agent inspect".into(), "Inspect exact active instructions"),
+                    (
+                        "/agent replace ".into(),
+                        "Explicitly replace the true system prompt",
+                    ),
+                ],
+            );
+        }
+
+        if prefix_trimmed == "/agent" {
+            return vec![
+                ("/agent".into(), "Open the primary-agent picker"),
+                ("/agent inspect".into(), "Inspect exact active instructions"),
+                (
+                    "/agent replace".into(),
+                    "Open the true-system replacement picker",
+                ),
+            ];
         }
 
         if prefix.starts_with("/help ") || prefix.starts_with("/? ") {
@@ -1628,6 +1669,7 @@ impl App {
                 | "/split-view"
                 | "/model"
                 | "/agent"
+                | "/agent-models"
                 | "/agents"
                 | "/effort"
                 | "/fast"

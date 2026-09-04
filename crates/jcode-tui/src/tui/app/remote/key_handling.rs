@@ -137,8 +137,7 @@ fn show_remote_rewind_history(app: &mut App) {
         let preview = crate::util::truncate_str(&msg.content, 80);
         history.push_str(&format!("  {} {} - {}\n", i + 1, role_str, preview));
     }
-    history.push_str("\nUse /rewind N to rewind to message N (removes all messages after).");
-    history.push_str(" After rewinding, use /rewind undo to restore the removed messages.");
+    history.push_str("\nUse /rewind N to rewind conversation history to message N. Active agent configuration remains current. Use /rewind undo to restore removed history.");
     app.push_display_message(DisplayMessage::system(history));
 }
 
@@ -1078,20 +1077,60 @@ async fn handle_remote_key_internal(
                 }
 
                 if trimmed == "/agent" || trimmed.starts_with("/agent ") {
-                    let selection = trimmed.strip_prefix("/agent").unwrap_or_default().trim();
-                    if selection.is_empty() {
-                        app.push_display_message(DisplayMessage::error(
-                            "Usage: /agent <name|global:name|project:name>".to_string(),
-                        ));
+                    let rest = trimmed.strip_prefix("/agent").unwrap_or_default().trim();
+                    if rest.is_empty() {
+                        match remote.request_agent_catalog().await {
+                            Ok(_) => app.set_status_notice("Loading agent profiles..."),
+                            Err(error) => {
+                                app.push_display_message(DisplayMessage::error(format!(
+                                    "Failed to request agent catalog: {error}"
+                                )));
+                                app.set_status_notice("Agent catalog failed");
+                            }
+                        }
                         return Ok(());
                     }
-                    match remote.set_agent(selection).await {
-                        Ok(_) => app.set_status_notice(format!("Selecting agent {selection}...")),
+                    if rest == "inspect" {
+                        match remote.request_agent_status(true).await {
+                            Ok(_) => app.set_status_notice("Inspecting agent profile..."),
+                            Err(error) => {
+                                app.push_display_message(DisplayMessage::error(format!(
+                                    "Failed to request agent status: {error}"
+                                )));
+                                app.set_status_notice("Agent inspection failed");
+                            }
+                        }
+                        return Ok(());
+                    }
+                    let (replace, selection) = match rest.strip_prefix("replace") {
+                        Some(remaining) if remaining.trim().is_empty() => {
+                            app.pending_agent_catalog_replace = true;
+                            match remote.request_agent_catalog().await {
+                                Ok(_) => app.set_status_notice("Loading replacement agents..."),
+                                Err(error) => {
+                                    app.pending_agent_catalog_replace = false;
+                                    app.push_display_message(DisplayMessage::error(format!(
+                                        "Failed to request agent catalog: {error}"
+                                    )));
+                                    app.set_status_notice("Agent catalog failed");
+                                }
+                            }
+                            return Ok(());
+                        }
+                        Some(remaining) => (true, remaining.trim()),
+                        None => (false, rest),
+                    };
+                    match remote.set_agent(selection, replace).await {
+                        Ok(_) => app.set_status_notice(if replace {
+                            format!("Replacing system agent with {selection}...")
+                        } else {
+                            format!("Selecting agent {selection}...")
+                        }),
                         Err(error) => {
                             app.push_display_message(DisplayMessage::error(format!(
-                                "Failed to request agent selection: {error}"
+                                "Failed to request agent change: {error}"
                             )));
-                            app.set_status_notice("Agent selection failed");
+                            app.set_status_notice("Agent change failed");
                         }
                     }
                     return Ok(());

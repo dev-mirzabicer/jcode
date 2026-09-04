@@ -1404,6 +1404,15 @@ impl ContextEditor {
             }
             KeyCode::Char(' ') => {
                 if let Some(message) = self.current_message()
+                    && message.active_agent_profile
+                {
+                    self.error = Some(
+                        "The active agent profile is locked. Switch agents or explicitly replace the system prompt before transforming it."
+                            .to_string(),
+                    );
+                    return (false, None);
+                }
+                if let Some(message) = self.current_message()
                     && !self.selected_message_ids.remove(&message.message_id)
                 {
                     self.selected_message_ids.insert(message.message_id);
@@ -1488,6 +1497,13 @@ impl ContextEditor {
         let Some(message) = self.current_message() else {
             return (false, None);
         };
+        if message.active_agent_profile {
+            self.error = Some(
+                "The active agent profile cannot be a summary endpoint. Switch agents or explicitly replace the system prompt first."
+                    .to_string(),
+            );
+            return (false, None);
+        }
         let current_id = message.message_id;
         if let Some(anchor) = self.summary_anchor.take() {
             let Some(snapshot) = self.snapshot.as_ref() else {
@@ -2635,7 +2651,9 @@ impl ContextEditor {
                     } else {
                         " "
                     };
-                    let selected = if self.selected_message_ids.contains(&message.message_id) {
+                    let selected = if message.active_agent_profile {
+                        "🔒"
+                    } else if self.selected_message_ids.contains(&message.message_id) {
                         "●"
                     } else {
                         " "
@@ -3164,6 +3182,12 @@ impl ContextEditor {
             Line::from(""),
             Line::from(one_line(&message.preview, width.saturating_sub(2))),
         ];
+        if message.active_agent_profile {
+            lines.push(Line::from(""));
+            lines.push(Line::from(
+                "🔒 Active agent profile. Exact detail remains inspectable, but context transformations cannot cover this message while it is active.",
+            ));
+        }
         let active_context = self.active_context_preview_lines(&message);
         if !active_context.is_empty() {
             lines.push(Line::from(""));
@@ -5036,6 +5060,7 @@ mod tests {
             summary_coverage: None,
             active_operations: Vec::new(),
             removable_reasoning_kinds: Vec::new(),
+            active_agent_profile: false,
         }
     }
 
@@ -7560,6 +7585,49 @@ mod tests {
         let (close, _) = editor.handle_key(KeyCode::Esc, KeyModifiers::NONE);
         assert!(!close);
         assert!(editor.summary_anchor.is_none());
+    }
+
+    #[test]
+    fn active_agent_profile_row_is_locked_but_detail_remains_reachable() {
+        let mut snapshot = snapshot();
+        snapshot.messages[0].active_agent_profile = true;
+        let expected_message_id = snapshot.messages[0].message_id.clone();
+        let mut editor = ContextEditor::new(ContextEditorOpenMode::Edit);
+        editor.apply_snapshot(snapshot);
+
+        let (_, action) = editor.handle_key(KeyCode::Char(' '), KeyModifiers::NONE);
+        assert!(action.is_none());
+        assert!(!editor.selected_message_ids.contains(&expected_message_id));
+        assert!(
+            editor
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("active agent profile"))
+        );
+
+        editor.error = None;
+        let (_, action) = editor.handle_key(KeyCode::Char('s'), KeyModifiers::NONE);
+        assert!(action.is_none());
+        assert!(editor.summary_anchor.is_none());
+
+        let (_, action) = editor.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(matches!(
+            action,
+            Some(ContextEditorAction::LoadDetail { ref message_id, .. })
+                if message_id == &expected_message_id
+        ));
+        let rendered = editor
+            .message_preview_lines(90)
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("Active agent profile"));
     }
 
     #[test]

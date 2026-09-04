@@ -445,6 +445,14 @@ async fn apply_terminal_event(
                         }
                     }
                 }
+                if let Some((selection, replace)) = app.pending_agent_change.take() {
+                    if let Err(error) = remote.set_agent(&selection, replace).await {
+                        app.push_display_message(DisplayMessage::error(format!(
+                            "Failed to request agent change: {error}"
+                        )));
+                        app.set_status_notice("Agent change failed");
+                    }
+                }
                 if let Some(selection) = app.pending_account_picker_action.take() {
                     match selection {
                         crate::tui::AccountPickerAction::Switch { provider_id, label } => {

@@ -216,6 +216,7 @@ pub struct ContextDraftRuntimeInput {
     pub route: String,
     pub model_routes: Vec<ModelRoute>,
     pub estimated_total_request_tokens_before: Option<usize>,
+    pub active_agent_profile_message_id: Option<String>,
 }
 
 impl Default for ContextTransactionService {
@@ -275,6 +276,7 @@ impl ContextTransactionService {
             provider.as_ref(),
             &agent.context_route_identity(),
             agent.current_context_request_token_estimate(),
+            agent.active_transition_message_id(),
         )
     }
 
@@ -291,8 +293,9 @@ impl ContextTransactionService {
         provider: &dyn Provider,
         route: &str,
         projected_request_tokens: Option<usize>,
+        active_agent_profile_message_id: Option<&str>,
     ) -> Result<crate::context::ContextEditorSnapshot, ContextServiceError> {
-        self.context_editor_snapshot_for_session_with_curator_config(
+        self.context_editor_snapshot_for_session_with_curator_config_and_active_profile(
             session_id,
             messages,
             context_view,
@@ -300,6 +303,7 @@ impl ContextTransactionService {
             provider,
             route,
             projected_request_tokens,
+            active_agent_profile_message_id,
             &crate::config::config().context.curator,
         )
     }
@@ -307,6 +311,11 @@ impl ContextTransactionService {
     #[expect(
         clippy::too_many_arguments,
         reason = "snapshot construction keeps exact session, provider, route, request-estimate, and curator-selection identity"
+    )]
+    #[cfg(test)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "legacy test helper retains exact session, provider, route, request-estimate, and curator-selection identity"
     )]
     fn context_editor_snapshot_for_session_with_curator_config(
         &self,
@@ -319,6 +328,35 @@ impl ContextTransactionService {
         projected_request_tokens: Option<usize>,
         curator_config: &crate::config::ContextCuratorConfig,
     ) -> Result<crate::context::ContextEditorSnapshot, ContextServiceError> {
+        self.context_editor_snapshot_for_session_with_curator_config_and_active_profile(
+            session_id,
+            messages,
+            context_view,
+            processing,
+            provider,
+            route,
+            projected_request_tokens,
+            None,
+            curator_config,
+        )
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "snapshot construction keeps exact session, provider, route, request-estimate, profile, and curator-selection identity"
+    )]
+    fn context_editor_snapshot_for_session_with_curator_config_and_active_profile(
+        &self,
+        session_id: &str,
+        messages: &[StoredMessage],
+        context_view: &StoredContextViewState,
+        processing: bool,
+        provider: &dyn Provider,
+        route: &str,
+        projected_request_tokens: Option<usize>,
+        active_agent_profile_message_id: Option<&str>,
+        curator_config: &crate::config::ContextCuratorConfig,
+    ) -> Result<crate::context::ContextEditorSnapshot, ContextServiceError> {
         let mut snapshot =
             crate::context::build_context_editor_snapshot(crate::context::ContextSnapshotInput {
                 session_id,
@@ -329,6 +367,10 @@ impl ContextTransactionService {
                 route,
             })
             .map_err(|error| ContextServiceError::Projection(error.to_string()))?;
+        for message in &mut snapshot.messages {
+            message.active_agent_profile =
+                active_agent_profile_message_id == Some(message.message_id.as_str());
+        }
         if let Some(projected_request_tokens) = projected_request_tokens {
             snapshot.projected_request_tokens = projected_request_tokens;
         }
@@ -386,6 +428,7 @@ impl ContextTransactionService {
         provider: &dyn Provider,
         route: &str,
         projected_request_tokens: Option<usize>,
+        active_agent_profile_message_id: Option<&str>,
         page_start: usize,
         page_size: usize,
     ) -> Result<crate::context::ContextEditorSnapshot, ContextServiceError> {
@@ -397,6 +440,7 @@ impl ContextTransactionService {
             provider,
             route,
             projected_request_tokens,
+            active_agent_profile_message_id,
         )?;
         crate::context::paginate_context_editor_snapshot(snapshot, page_start, page_size)
             .map_err(|error| ContextServiceError::InvalidSelection(error.to_string()))
@@ -483,6 +527,27 @@ impl ContextTransactionService {
         expected_transcript_digest: u64,
         ranges: &[ContextMessageRangeSelection],
     ) -> Result<ContextRangeClosurePreview, ContextServiceError> {
+        self.preview_context_ranges_with_active_profile(
+            session_id,
+            messages,
+            context_view,
+            expected_context_revision,
+            expected_transcript_digest,
+            None,
+            ranges,
+        )
+    }
+
+    pub fn preview_context_ranges_with_active_profile(
+        &self,
+        session_id: &str,
+        messages: &[StoredMessage],
+        context_view: &StoredContextViewState,
+        expected_context_revision: u64,
+        expected_transcript_digest: u64,
+        active_agent_profile_message_id: Option<&str>,
+        ranges: &[ContextMessageRangeSelection],
+    ) -> Result<ContextRangeClosurePreview, ContextServiceError> {
         if context_view.revision != expected_context_revision {
             return Err(ContextServiceError::Stale(format!(
                 "context revision changed from {expected_context_revision} to {}",
@@ -502,6 +567,11 @@ impl ContextTransactionService {
         }
 
         let resolved = resolve_summary_ranges(messages, context_view, ranges)?;
+        reject_active_agent_profile_ranges(
+            messages,
+            active_agent_profile_message_id,
+            &resolved.closed_ranges,
+        )?;
         let previews = resolved
             .closed_ranges
             .iter()
@@ -552,7 +622,7 @@ impl ContextTransactionService {
         request: ContextDraftRequest,
     ) -> Result<ContextCuratorPlanPreview, ContextServiceError> {
         let provider = agent.provider_handle();
-        self.preview_context_curator_plan_for_session(
+        self.preview_context_curator_plan_for_session_with_active_profile(
             agent.session_id(),
             agent.messages(),
             agent.context_view_state(),
@@ -563,6 +633,7 @@ impl ContextTransactionService {
             expected_context_revision,
             expected_transcript_digest,
             request,
+            agent.active_transition_message_id(),
             &crate::config::config().context.curator,
         )
     }
@@ -583,6 +654,41 @@ impl ContextTransactionService {
         expected_context_revision: u64,
         expected_transcript_digest: u64,
         request: ContextDraftRequest,
+        configured_default: &crate::config::ContextCuratorConfig,
+    ) -> Result<ContextCuratorPlanPreview, ContextServiceError> {
+        self.preview_context_curator_plan_for_session_with_active_profile(
+            session_id,
+            messages,
+            context_view,
+            processing,
+            provider,
+            route,
+            model_routes,
+            expected_context_revision,
+            expected_transcript_digest,
+            request,
+            None,
+            configured_default,
+        )
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "exact curator preview retains authoritative session, route, transcript, profile, and configured-default identity"
+    )]
+    pub fn preview_context_curator_plan_for_session_with_active_profile(
+        &self,
+        session_id: &str,
+        messages: &[StoredMessage],
+        context_view: &StoredContextViewState,
+        processing: bool,
+        provider: &dyn Provider,
+        route: &str,
+        model_routes: &[ModelRoute],
+        expected_context_revision: u64,
+        expected_transcript_digest: u64,
+        request: ContextDraftRequest,
+        active_agent_profile_message_id: Option<&str>,
         configured_default: &crate::config::ContextCuratorConfig,
     ) -> Result<ContextCuratorPlanPreview, ContextServiceError> {
         if processing {
@@ -617,7 +723,13 @@ impl ContextTransactionService {
             created_at: now,
             expires_at: now,
         };
-        let capture = capture_context_draft(messages, context_view, identity, request)?;
+        let capture = capture_context_draft_with_active_profile(
+            messages,
+            context_view,
+            identity,
+            request,
+            active_agent_profile_message_id,
+        )?;
         if capture.ranges.is_empty() && capture.tools.is_empty() {
             return Err(ContextServiceError::InvalidSelection(
                 "the staged request contains no range-summary or tool-distillation curator task"
@@ -679,11 +791,12 @@ impl ContextTransactionService {
             created_at,
             expires_at,
         };
-        let capture = capture_context_draft(
+        let capture = capture_context_draft_with_active_profile(
             guard.messages(),
             guard.context_view_state(),
             identity.clone(),
             request,
+            guard.active_transition_message_id(),
         )?;
         let route = if capture.ranges.is_empty() && capture.tools.is_empty() {
             None
@@ -775,11 +888,12 @@ impl ContextTransactionService {
             created_at,
             expires_at,
         };
-        let capture = capture_context_draft(
+        let capture = capture_context_draft_with_active_profile(
             &input.messages,
             &input.context_view,
             identity.clone(),
             request,
+            input.active_agent_profile_message_id.as_deref(),
         )?;
         let route = if capture.ranges.is_empty() && capture.tools.is_empty() {
             None
@@ -1423,11 +1537,22 @@ struct CapturedContextDraft {
     notices: Vec<String>,
 }
 
+#[cfg(test)]
 fn capture_context_draft(
     messages: &[StoredMessage],
     context_view: &StoredContextViewState,
     identity: ContextDraftIdentity,
     request: ContextDraftRequest,
+) -> Result<CapturedContextDraft, ContextServiceError> {
+    capture_context_draft_with_active_profile(messages, context_view, identity, request, None)
+}
+
+fn capture_context_draft_with_active_profile(
+    messages: &[StoredMessage],
+    context_view: &StoredContextViewState,
+    identity: ContextDraftIdentity,
+    request: ContextDraftRequest,
+    active_agent_profile_message_id: Option<&str>,
 ) -> Result<CapturedContextDraft, ContextServiceError> {
     validate_context_curator_run_config(&request.curator)?;
     let messages = messages.to_vec();
@@ -1440,6 +1565,11 @@ fn capture_context_draft(
     let range_instructions =
         resolve_range_instructions(&request.summary_ranges, &request.curator.range_instructions)?;
     let resolved = resolve_summary_ranges(&messages, &base_context_view, &request.summary_ranges)?;
+    reject_active_agent_profile_ranges(
+        &messages,
+        active_agent_profile_message_id,
+        &resolved.closed_ranges,
+    )?;
     let requested_ranges = resolved.requested_ranges;
     let closed_ranges = resolved.closed_ranges;
     let shadowed = resolved.shadowed_active_operations;
@@ -1651,6 +1781,33 @@ fn capture_context_draft(
         expected_plan_fingerprint: request.curator.expected_plan_fingerprint,
         notices,
     })
+}
+
+fn reject_active_agent_profile_ranges(
+    messages: &[StoredMessage],
+    active_agent_profile_message_id: Option<&str>,
+    ranges: &[jcode_context_core::ClosedMessageRange],
+) -> Result<(), ContextServiceError> {
+    let Some(message_id) = active_agent_profile_message_id else {
+        return Ok(());
+    };
+    let message_index = messages
+        .iter()
+        .position(|message| message.id == message_id)
+        .ok_or_else(|| {
+            ContextServiceError::Stale(format!(
+                "active agent profile message {message_id} is missing from authoritative history"
+            ))
+        })?;
+    if ranges
+        .iter()
+        .any(|range| range.start <= message_index && message_index <= range.end)
+    {
+        return Err(ContextServiceError::Conflict(format!(
+            "selected range includes active agent profile message {message_id}; switch or explicitly replace the system prompt before transforming it"
+        )));
+    }
+    Ok(())
 }
 
 fn canonical_range_key(selection: &ContextMessageRangeSelection) -> (String, String) {
@@ -5019,6 +5176,78 @@ mod orchestration_tests {
                 reason: Some("test invalidation".to_string()),
             });
         assert_eq!(capture_targets(&state), 1);
+    }
+
+    #[test]
+    fn active_agent_profile_is_locked_before_range_preview_or_curator_capture() {
+        let service = ContextTransactionService::new();
+        let provider = DraftProvider::new();
+        let messages = vec![
+            stored(
+                "ordinary-message",
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "ordinary context".to_string(),
+                    cache_control: None,
+                }],
+            ),
+            stored(
+                "active-profile-message",
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "SYNTHETIC_ACTIVE_PROFILE".to_string(),
+                    cache_control: None,
+                }],
+            ),
+        ];
+        let state = StoredContextViewState::default();
+        let digest = authoritative_transcript_digest(&messages);
+        let snapshot = service
+            .context_editor_snapshot_for_session_with_curator_config_and_active_profile(
+                "session-profile-lock",
+                &messages,
+                &state,
+                false,
+                &provider,
+                "draft-route",
+                None,
+                Some("active-profile-message"),
+                &crate::config::ContextCuratorConfig::default(),
+            )
+            .expect("profile-aware snapshot");
+        assert!(!snapshot.messages[0].active_agent_profile);
+        assert!(snapshot.messages[1].active_agent_profile);
+
+        let error = service
+            .preview_context_ranges_with_active_profile(
+                "session-profile-lock",
+                &messages,
+                &state,
+                0,
+                digest,
+                Some("active-profile-message"),
+                &[ContextMessageRangeSelection {
+                    start_message_id: "ordinary-message".to_string(),
+                    end_message_id: "active-profile-message".to_string(),
+                }],
+            )
+            .expect_err("active profile range must reject before curator work");
+        assert!(matches!(error, ContextServiceError::Conflict(_)));
+
+        service
+            .preview_context_ranges_with_active_profile(
+                "session-profile-lock",
+                &messages,
+                &state,
+                0,
+                digest,
+                Some("active-profile-message"),
+                &[ContextMessageRangeSelection {
+                    start_message_id: "ordinary-message".to_string(),
+                    end_message_id: "ordinary-message".to_string(),
+                }],
+            )
+            .expect("unrelated context remains transformable");
     }
 
     #[test]

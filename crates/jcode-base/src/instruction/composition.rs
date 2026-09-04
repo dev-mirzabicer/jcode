@@ -1,12 +1,14 @@
 use super::{
-    AgentAvailability, AgentMetadata, InstructionDocument, InstructionError, InstructionId,
-    InstructionKind, InstructionLegacyImportSpec, InstructionLegacyImportTarget,
-    InstructionMetadata, InstructionRepositoryError, InstructionRepositoryService,
-    InstructionResourceRef, InstructionScope, InstructionSeedFile, InstructionSelector,
-    InstructionStoreManifest, InstructionStoreSeed, LegacyInstructionSourceKind, TemplateMode,
+    AgentAvailability, AgentMetadata, ConsumerRegistration, InstructionConsumer,
+    InstructionDocument, InstructionError, InstructionId, InstructionKind,
+    InstructionLegacyImportSpec, InstructionLegacyImportTarget, InstructionMetadata,
+    InstructionRepositoryError, InstructionRepositoryService, InstructionResourceRef,
+    InstructionScope, InstructionSeedFile, InstructionSelector, InstructionStoreManifest,
+    InstructionStoreSeed, LegacyInstructionSourceKind, TemplateMode,
 };
 use crate::prompt::{self, PromptCapabilities, SkillInfo};
 use crate::session::{StoredAgentReference, StoredSystemPromptState};
+use serde::Serialize;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -14,10 +16,14 @@ const KERNEL_ID: &str = "kernel";
 const COMMON_ID: &str = "common";
 const MERMAID_ID: &str = "mermaid";
 const COMPATIBILITY_AGENT_ID: &str = "jcode";
+const AGENT_TRANSITION_ID: &str = "agent-transition";
+const AGENT_REPLACEMENT_ID: &str = "agent-replacement";
 
 /// Mirza-approved Phase 3 profile-lifecycle kernel. The wrapper used for later
 /// appended transitions remains code-owned by WP-04.
 pub const AGENT_PROFILE_KERNEL: &str = "## Agent profiles\n\nThe initial agent profile appears in this system prompt. After the user explicitly changes agents, Jcode may append a Jcode-generated `<jcode_agent_profile>` user message containing a complete replacement profile. From that message onward, follow the latest such profile instead of earlier agent-profile instructions. It does not replace other system instructions or earlier conversation context.\n";
+pub const AGENT_TRANSITION_PROSE: &str = "The user switched this session to the following complete agent profile. Follow it from this point onward instead of earlier agent-profile instructions.\n";
+pub const AGENT_REPLACEMENT_PROSE: &str = "The user explicitly replaced this session's system prompt and active agent from {{previous_agent}} to {{new_agent}}.\n";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AgentSelection {
@@ -77,6 +83,47 @@ pub struct SystemPromptActivationRequest<'a> {
 pub struct SystemPromptActivation {
     pub state: StoredSystemPromptState,
     pub initialized_global_store: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentProfileTransition {
+    pub agent: StoredAgentReference,
+    pub transition_sentence: String,
+    pub complete_instructions: String,
+    pub initialized_global_store: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SystemPromptReplacement {
+    pub activation: SystemPromptActivation,
+    pub audit_sentence: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentCatalogEntry {
+    pub agent: StoredAgentReference,
+    pub description: String,
+}
+
+struct CompositionEnvironment {
+    runtime: super::InstructionRuntime,
+    global_manifest: InstructionStoreManifest,
+    project_manifest: Option<InstructionStoreManifest>,
+    project_root: Option<PathBuf>,
+    jcode_home: PathBuf,
+    initialized_global_store: bool,
+}
+
+struct RenderedAgentProfile {
+    agent: StoredAgentReference,
+    resource: InstructionResourceRef,
+    text: String,
+}
+
+#[derive(Serialize)]
+struct AgentReplacementValues<'a> {
+    previous_agent: &'a str,
+    new_agent: &'a str,
 }
 
 #[derive(Debug)]
@@ -151,15 +198,122 @@ impl SystemPromptComposer {
         &self,
         request: SystemPromptActivationRequest<'_>,
     ) -> Result<SystemPromptActivation, SystemPromptActivationError> {
+        let environment = self.prepare_environment(request.working_dir)?;
+        compose_activation(&environment, request)
+    }
+
+    pub fn render_agent_transition(
+        &self,
+        working_dir: Option<&Path>,
+        selection: AgentSelection,
+    ) -> Result<AgentProfileTransition, SystemPromptActivationError> {
+        let environment = self.prepare_environment(working_dir)?;
+        let profile = render_agent_profile(&environment, selection)?;
+        let mut parts = vec![profile.text];
+        push_project_addenda(&environment.runtime, &profile.resource, &mut parts)?;
+        let transition_sentence =
+            render_notification(&environment.runtime, AGENT_TRANSITION_ID, &())?;
+        Ok(AgentProfileTransition {
+            agent: profile.agent,
+            transition_sentence,
+            complete_instructions: parts.join("\n\n"),
+            initialized_global_store: environment.initialized_global_store,
+        })
+    }
+
+    pub fn replace_system_prompt(
+        &self,
+        request: SystemPromptActivationRequest<'_>,
+        previous_agent: &StoredAgentReference,
+    ) -> Result<SystemPromptReplacement, SystemPromptActivationError> {
+        let environment = self.prepare_environment(request.working_dir)?;
+        let activation = compose_activation(&environment, request)?;
+        let audit_sentence = render_notification(
+            &environment.runtime,
+            AGENT_REPLACEMENT_ID,
+            &AgentReplacementValues {
+                previous_agent: &previous_agent.display_name,
+                new_agent: &activation.state.active_agent.display_name,
+            },
+        )?;
+        Ok(SystemPromptReplacement {
+            activation,
+            audit_sentence,
+        })
+    }
+
+    pub fn list_primary_agents(
+        &self,
+        working_dir: Option<&Path>,
+    ) -> Result<Vec<AgentCatalogEntry>, SystemPromptActivationError> {
+        let environment = self.prepare_environment(working_dir)?;
+        let mut entries = Vec::new();
+        for scope in [InstructionScope::Global, InstructionScope::Project] {
+            for document in environment.runtime.documents(InstructionKind::Agent, scope) {
+                let Some(metadata) = document.metadata.agent.as_ref() else {
+                    continue;
+                };
+                if !matches!(
+                    metadata.availability,
+                    AgentAvailability::Primary | AgentAvailability::Both
+                ) {
+                    continue;
+                }
+                entries.push(AgentCatalogEntry {
+                    agent: StoredAgentReference {
+                        scope,
+                        id: document.id.to_string(),
+                        display_name: document
+                            .metadata
+                            .display_name
+                            .clone()
+                            .unwrap_or_else(|| document.id.to_string()),
+                    },
+                    description: document.metadata.description.clone().unwrap_or_default(),
+                });
+            }
+        }
+
+        let compatibility = render_agent_profile(
+            &environment,
+            AgentSelection::Explicit(InstructionSelector::unqualified(
+                InstructionKind::Agent,
+                COMPATIBILITY_AGENT_ID,
+            )?),
+        )?;
+        if !entries
+            .iter()
+            .any(|entry| entry.agent == compatibility.agent)
+        {
+            entries.push(AgentCatalogEntry {
+                agent: compatibility.agent,
+                description: "Jcode compatibility agent".to_string(),
+            });
+        }
+        entries.sort_by(|left, right| {
+            left.agent
+                .display_name
+                .to_ascii_lowercase()
+                .cmp(&right.agent.display_name.to_ascii_lowercase())
+                .then_with(|| left.agent.scope.cmp(&right.agent.scope))
+                .then_with(|| left.agent.id.cmp(&right.agent.id))
+        });
+        Ok(entries)
+    }
+
+    fn prepare_environment(
+        &self,
+        working_dir: Option<&Path>,
+    ) -> Result<CompositionEnvironment, SystemPromptActivationError> {
         let seed = shipped_instruction_seed()?;
         let legacy = global_legacy_imports(&self.repositories)?;
         let initialized = self.repositories.initialize_global(&seed, &legacy)?;
-        let project_root = request
-            .working_dir
+        self.repositories
+            .ensure_shipped_seed(&initialized.repository, &seed)?;
+        let project_root = working_dir
             .map(|working_dir| self.repositories.resolve_project_root(working_dir))
             .transpose()?;
-        let project_repository = request
-            .working_dir
+        let project_repository = working_dir
             .map(|working_dir| self.repositories.resolve_project_repository(working_dir))
             .transpose()?
             .flatten();
@@ -168,181 +322,251 @@ impl SystemPromptComposer {
             .repositories
             .instruction_sources(project_repository.as_ref())?;
         let global_repository = self.repositories.global_repository()?;
-        let jcode_home = global_repository.root.parent().ok_or_else(|| {
-            SystemPromptActivationError::Compatibility(
-                "global instruction repository has no Jcode home parent".to_string(),
-            )
-        })?;
+        let jcode_home = global_repository
+            .root
+            .parent()
+            .ok_or_else(|| {
+                SystemPromptActivationError::Compatibility(
+                    "global instruction repository has no Jcode home parent".to_string(),
+                )
+            })?
+            .to_path_buf();
         sources = sources.with_global_agents_md(self.repositories.global_agents_path()?);
         if let Some(root) = project_root.as_ref() {
             sources = sources.with_project_agents_md(root.join("AGENTS.md"));
         }
         let runtime = super::InstructionRuntime::discover(sources);
-
         let global_manifest = self.repositories.load_manifest(&initialized.repository)?;
         let project_manifest = project_repository
             .as_ref()
             .map(|repository| self.repositories.load_manifest(repository))
             .transpose()?;
-        let selection = resolve_selection(
-            request.selection,
-            project_manifest.as_ref(),
-            &global_manifest,
-        )?;
+        Ok(CompositionEnvironment {
+            runtime,
+            global_manifest,
+            project_manifest,
+            project_root,
+            jcode_home,
+            initialized_global_store: initialized.created,
+        })
+    }
+}
 
-        let project_system_imported = project_manifest.as_ref().is_some_and(|manifest| {
-            manifest
-                .legacy_imports
-                .values()
-                .any(|receipt| receipt.source_kind == LegacyInstructionSourceKind::SystemPrompt)
-        });
-        let project_legacy_allowed = selection.id.as_str() == COMPATIBILITY_AGENT_ID
-            && !matches!(selection.scope, super::InstructionScopeSelector::Global);
-        let project_legacy_prompt = if project_system_imported || !project_legacy_allowed {
-            None
-        } else {
-            project_root
-                .as_ref()
-                .map(|root| read_nonblank(root.join(".jcode/system-prompt.md")))
-                .transpose()?
-                .flatten()
-        };
-        let use_project_legacy = if project_legacy_prompt.is_some() {
-            let project_selector =
-                InstructionSelector::project(InstructionKind::Agent, COMPATIBILITY_AGENT_ID)?;
-            match runtime.resolve(&project_selector) {
-                Ok(_) => {
-                    return Err(SystemPromptActivationError::Compatibility(
-                        "project legacy system-prompt.md and managed project:jcode both exist without an import receipt"
-                            .to_string(),
-                    ));
-                }
-                Err(InstructionError::ResourceNotFound { .. }) => true,
-                Err(error) => return Err(error.into()),
-            }
-        } else {
-            false
-        };
-        let render_selection = if use_project_legacy {
-            InstructionSelector::global(InstructionKind::Agent, COMPATIBILITY_AGENT_ID)?
-        } else {
-            selection.clone()
-        };
-        let mut rendered_agent =
-            runtime.render_agent(&render_selection, AgentAvailability::Primary, &())?;
-        let mut agent_reference = rendered_agent.root.clone();
-        let agent_document = runtime.resolve(&render_selection)?;
-        let display_name = agent_document
-            .metadata
-            .display_name
-            .clone()
-            .unwrap_or_else(|| agent_reference.id.to_string());
-        if global_manifest
+fn compose_activation(
+    environment: &CompositionEnvironment,
+    request: SystemPromptActivationRequest<'_>,
+) -> Result<SystemPromptActivation, SystemPromptActivationError> {
+    let profile = render_agent_profile(environment, request.selection)?;
+    let mut parts = Vec::new();
+    parts.push(render_required_system(&environment.runtime, KERNEL_ID)?);
+    parts.push(profile.text);
+    if request.capabilities.mermaid {
+        parts.push(render_required_system(&environment.runtime, MERMAID_ID)?);
+    }
+    if request.is_selfdev {
+        parts.push(prompt::build_selfdev_prompt_static_for_working_dir(
+            request.working_dir,
+        ));
+    }
+
+    push_optional_system(
+        &environment.runtime,
+        InstructionScope::Global,
+        COMMON_ID,
+        environment
+            .global_manifest
             .legacy_imports
-            .contains_key("global-system-prompt")
-            && agent_reference.scope == InstructionScope::Global
-            && agent_reference.id.as_str() == COMPATIBILITY_AGENT_ID
-        {
-            rendered_agent.text = rendered_agent.text.trim().to_string();
-        }
-        if use_project_legacy && let Some(project_prompt) = project_legacy_prompt {
-            rendered_agent.text = project_prompt.trim().to_string();
-            agent_reference.scope = InstructionScope::Project;
-        }
-
-        let mut parts = Vec::new();
-        parts.push(render_required_system(&runtime, KERNEL_ID)?);
-        parts.push(rendered_agent.text);
-        if request.capabilities.mermaid {
-            parts.push(render_required_system(&runtime, MERMAID_ID)?);
-        }
-        if request.is_selfdev {
-            parts.push(prompt::build_selfdev_prompt_static_for_working_dir(
-                request.working_dir,
-            ));
-        }
-
-        push_optional_system(
-            &runtime,
-            InstructionScope::Global,
-            COMMON_ID,
-            global_manifest
-                .legacy_imports
-                .contains_key("global-prompt-overlay"),
-            &mut parts,
-        )?;
-        let project_overlay_imported = project_manifest.as_ref().is_some_and(|manifest| {
+            .contains_key("global-prompt-overlay"),
+        &mut parts,
+    )?;
+    let project_overlay_imported = environment
+        .project_manifest
+        .as_ref()
+        .is_some_and(|manifest| {
             manifest
                 .legacy_imports
                 .values()
                 .any(|receipt| receipt.source_kind == LegacyInstructionSourceKind::PromptOverlay)
         });
-        let project_legacy_overlay = project_root
-            .as_ref()
-            .map(|root| read_present(root.join(".jcode/prompt-overlay.md")))
-            .transpose()?
-            .flatten();
-        if project_overlay_imported {
-            push_optional_system(
-                &runtime,
-                InstructionScope::Project,
-                COMMON_ID,
-                true,
-                &mut parts,
-            )?;
-        } else {
-            let managed_common = InstructionSelector::project(InstructionKind::System, COMMON_ID)?;
-            match runtime.resolve(&managed_common) {
-                Ok(_) if project_legacy_overlay.is_some() => {
-                    return Err(SystemPromptActivationError::Compatibility(
+    let project_legacy_overlay = environment
+        .project_root
+        .as_ref()
+        .map(|root| read_present(root.join(".jcode/prompt-overlay.md")))
+        .transpose()?
+        .flatten();
+    if project_overlay_imported {
+        push_optional_system(
+            &environment.runtime,
+            InstructionScope::Project,
+            COMMON_ID,
+            true,
+            &mut parts,
+        )?;
+    } else {
+        let managed_common = InstructionSelector::project(InstructionKind::System, COMMON_ID)?;
+        match environment.runtime.resolve(&managed_common) {
+            Ok(_) if project_legacy_overlay.is_some() => {
+                return Err(SystemPromptActivationError::Compatibility(
                         "project legacy prompt-overlay.md and managed project:common both exist without an import receipt"
                             .to_string(),
                     ));
-                }
-                Ok(_) => push_optional_system(
-                    &runtime,
-                    InstructionScope::Project,
-                    COMMON_ID,
-                    false,
-                    &mut parts,
-                )?,
-                Err(InstructionError::ResourceNotFound { .. }) => {
-                    if let Some(content) = project_legacy_overlay {
-                        parts.push(format!(
-                            "# Project Prompt Overlay (.jcode/prompt-overlay.md)\n\n{}",
-                            content.trim()
-                        ));
-                    }
-                }
-                Err(error) => return Err(error.into()),
             }
+            Ok(_) => push_optional_system(
+                &environment.runtime,
+                InstructionScope::Project,
+                COMMON_ID,
+                false,
+                &mut parts,
+            )?,
+            Err(InstructionError::ResourceNotFound { .. }) => {
+                if let Some(content) = project_legacy_overlay {
+                    parts.push(format!(
+                        "# Project Prompt Overlay (.jcode/prompt-overlay.md)\n\n{}",
+                        content.trim()
+                    ));
+                }
+            }
+            Err(error) => return Err(error.into()),
         }
-
-        let external_agents = runtime.render_external_agents();
-        if !external_agents.is_empty() {
-            parts.push(external_agents);
-        }
-
-        push_project_addenda(&runtime, &agent_reference, &mut parts)?;
-        push_legacy_preferred_tools(jcode_home, project_root.as_deref(), &mut parts)?;
-        if let Some(skills) = prompt::build_available_skills_prompt(request.available_skills) {
-            parts.push(skills);
-        }
-
-        Ok(SystemPromptActivation {
-            state: StoredSystemPromptState {
-                text: parts.join("\n\n"),
-                active_agent: StoredAgentReference {
-                    scope: agent_reference.scope,
-                    id: agent_reference.id.to_string(),
-                    display_name,
-                },
-                first_provider_dispatch_at: None,
-                active_transition_message_id: None,
-            },
-            initialized_global_store: initialized.created,
-        })
     }
+
+    let external_agents = environment.runtime.render_external_agents();
+    if !external_agents.is_empty() {
+        parts.push(external_agents);
+    }
+
+    push_project_addenda(&environment.runtime, &profile.resource, &mut parts)?;
+    push_legacy_preferred_tools(
+        &environment.jcode_home,
+        environment.project_root.as_deref(),
+        &mut parts,
+    )?;
+    if let Some(skills) = prompt::build_available_skills_prompt(request.available_skills) {
+        parts.push(skills);
+    }
+
+    Ok(SystemPromptActivation {
+        state: StoredSystemPromptState {
+            text: parts.join("\n\n"),
+            active_agent: profile.agent,
+            first_provider_dispatch_at: None,
+            active_transition_message_id: None,
+        },
+        initialized_global_store: environment.initialized_global_store,
+    })
+}
+
+fn render_agent_profile(
+    environment: &CompositionEnvironment,
+    selection: AgentSelection,
+) -> Result<RenderedAgentProfile, SystemPromptActivationError> {
+    let selection = resolve_selection(
+        selection,
+        environment.project_manifest.as_ref(),
+        &environment.global_manifest,
+    )?;
+    let project_system_imported = environment
+        .project_manifest
+        .as_ref()
+        .is_some_and(|manifest| {
+            manifest
+                .legacy_imports
+                .values()
+                .any(|receipt| receipt.source_kind == LegacyInstructionSourceKind::SystemPrompt)
+        });
+    let project_legacy_allowed = selection.id.as_str() == COMPATIBILITY_AGENT_ID
+        && !matches!(selection.scope, super::InstructionScopeSelector::Global);
+    let project_legacy_prompt = if project_system_imported || !project_legacy_allowed {
+        None
+    } else {
+        environment
+            .project_root
+            .as_ref()
+            .map(|root| read_nonblank(root.join(".jcode/system-prompt.md")))
+            .transpose()?
+            .flatten()
+    };
+    let use_project_legacy = if project_legacy_prompt.is_some() {
+        let project_selector =
+            InstructionSelector::project(InstructionKind::Agent, COMPATIBILITY_AGENT_ID)?;
+        match environment.runtime.resolve(&project_selector) {
+            Ok(_) => {
+                return Err(SystemPromptActivationError::Compatibility(
+                    "project legacy system-prompt.md and managed project:jcode both exist without an import receipt"
+                        .to_string(),
+                ));
+            }
+            Err(InstructionError::ResourceNotFound { .. }) => true,
+            Err(error) => return Err(error.into()),
+        }
+    } else {
+        false
+    };
+    let render_selection = if use_project_legacy {
+        InstructionSelector::global(InstructionKind::Agent, COMPATIBILITY_AGENT_ID)?
+    } else {
+        selection
+    };
+    let mut rendered =
+        environment
+            .runtime
+            .render_agent(&render_selection, AgentAvailability::Primary, &())?;
+    let document = environment.runtime.resolve(&render_selection)?;
+    let display_name = document
+        .metadata
+        .display_name
+        .clone()
+        .unwrap_or_else(|| rendered.root.id.to_string());
+    if environment
+        .global_manifest
+        .legacy_imports
+        .contains_key("global-system-prompt")
+        && rendered.root.scope == InstructionScope::Global
+        && rendered.root.id.as_str() == COMPATIBILITY_AGENT_ID
+    {
+        rendered.text = rendered.text.trim().to_string();
+    }
+    if use_project_legacy && let Some(project_prompt) = project_legacy_prompt {
+        rendered.text = project_prompt.trim().to_string();
+        rendered.root.scope = InstructionScope::Project;
+    }
+    Ok(RenderedAgentProfile {
+        agent: StoredAgentReference {
+            scope: rendered.root.scope,
+            id: rendered.root.id.to_string(),
+            display_name,
+        },
+        resource: rendered.root,
+        text: rendered.text,
+    })
+}
+
+fn render_notification<T: Serialize>(
+    runtime: &super::InstructionRuntime,
+    id: &str,
+    values: &T,
+) -> Result<String, InstructionError> {
+    let path = match id {
+        AGENT_TRANSITION_ID => "notifications/agent-transition.md",
+        AGENT_REPLACEMENT_ID => "notifications/agent-replacement.md",
+        _ => {
+            return Err(InstructionError::InvalidId {
+                value: id.to_string(),
+                reason: "unregistered profile notification".to_string(),
+            });
+        }
+    };
+    let consumer = InstructionConsumer::<T>::new(ConsumerRegistration::new(
+        format!("agent-profile-{id}"),
+        id,
+        InstructionKind::Notification,
+        path,
+        "session agent-profile lifecycle",
+        "Managed profile transition or true-system replacement prose; session owns framing, structural identity, persistence, and cache behavior.",
+    )?);
+    consumer
+        .render(runtime, values)
+        .map(|rendered| rendered.text)
 }
 
 fn resolve_selection(
@@ -497,6 +721,24 @@ pub fn shipped_instruction_seed() -> Result<InstructionStoreSeed, InstructionErr
             path: PathBuf::from("system/mermaid.md"),
         },
         compatibility_agent_document()?,
+        InstructionDocument {
+            id: InstructionId::parse(AGENT_TRANSITION_ID)?,
+            kind: InstructionKind::Notification,
+            scope: InstructionScope::Global,
+            template_mode: TemplateMode::Plain,
+            metadata: InstructionMetadata::default(),
+            body: AGENT_TRANSITION_PROSE.to_string(),
+            path: PathBuf::from("notifications/agent-transition.md"),
+        },
+        InstructionDocument {
+            id: InstructionId::parse(AGENT_REPLACEMENT_ID)?,
+            kind: InstructionKind::Notification,
+            scope: InstructionScope::Global,
+            template_mode: TemplateMode::Handlebars,
+            metadata: InstructionMetadata::default(),
+            body: AGENT_REPLACEMENT_PROSE.to_string(),
+            path: PathBuf::from("notifications/agent-replacement.md"),
+        },
     ];
     Ok(InstructionStoreSeed {
         manifest: InstructionStoreManifest::current(),
@@ -707,6 +949,116 @@ mod tests {
         assert!(!second.initialized_global_store);
         assert!(second.state.text.contains("SYNTHETIC_AGENT_V2"));
         assert!(!first.state.text.contains("SYNTHETIC_AGENT_V2"));
+    }
+
+    #[test]
+    fn transition_replacement_and_catalog_reuse_current_profile_resolution() {
+        let fixture = Fixture::new();
+        let composer = fixture.composer();
+        let initial = composer
+            .activate(fixture.request(AgentSelection::Default))
+            .expect("initial activation");
+        let global_root = initial
+            .state
+            .active_agent
+            .scope
+            .eq(&InstructionScope::Global)
+            .then(|| fixture.jcode_home.join("instructions"))
+            .expect("global compatibility activation");
+        std::fs::write(
+            global_root.join("system/kernel.md"),
+            document(
+                InstructionScope::Global,
+                InstructionKind::System,
+                KERNEL_ID,
+                "system/kernel.md",
+                "SYNTHETIC_KERNEL_ONLY_FOR_FULL_COMPOSITION",
+            )
+            .to_markdown()
+            .expect("serialize kernel"),
+        )
+        .expect("write synthetic kernel");
+        std::fs::create_dir_all(global_root.join("modules")).expect("create modules");
+        std::fs::write(
+            global_root.join("modules/transition-module.md"),
+            document(
+                InstructionScope::Global,
+                InstructionKind::Module,
+                "transition-module",
+                "modules/transition-module.md",
+                "SYNTHETIC_TRANSITION_MODULE",
+            )
+            .to_markdown()
+            .expect("serialize module"),
+        )
+        .expect("write module");
+        let mut agent = document(
+            InstructionScope::Global,
+            InstructionKind::Agent,
+            "reviewer",
+            "agents/reviewer.md",
+            "SYNTHETIC_TRANSITION_AGENT",
+        );
+        agent.metadata.display_name = Some("Synthetic Reviewer".to_string());
+        agent.metadata.includes = vec![
+            InstructionSelector::unqualified(InstructionKind::Module, "transition-module")
+                .expect("module selector"),
+        ];
+        std::fs::write(
+            global_root.join("agents/reviewer.md"),
+            agent.to_markdown().expect("serialize agent"),
+        )
+        .expect("write agent");
+
+        let selection = AgentSelection::Explicit(
+            InstructionSelector::global(InstructionKind::Agent, "reviewer")
+                .expect("reviewer selector"),
+        );
+        let transition = composer
+            .render_agent_transition(Some(&fixture.project), selection.clone())
+            .expect("render transition");
+        assert_eq!(transition.agent.id, "reviewer");
+        assert_eq!(transition.agent.display_name, "Synthetic Reviewer");
+        assert!(
+            transition
+                .complete_instructions
+                .starts_with("SYNTHETIC_TRANSITION_MODULE")
+        );
+        assert!(
+            transition
+                .complete_instructions
+                .contains("SYNTHETIC_TRANSITION_AGENT")
+        );
+        assert!(
+            !transition
+                .complete_instructions
+                .contains("SYNTHETIC_KERNEL_ONLY_FOR_FULL_COMPOSITION")
+        );
+
+        let replacement = composer
+            .replace_system_prompt(fixture.request(selection), &initial.state.active_agent)
+            .expect("render replacement");
+        assert_eq!(replacement.activation.state.active_agent.id, "reviewer");
+        assert!(
+            replacement
+                .activation
+                .state
+                .text
+                .contains("SYNTHETIC_TRANSITION_AGENT")
+        );
+        assert!(
+            replacement
+                .activation
+                .state
+                .text
+                .contains("SYNTHETIC_KERNEL_ONLY_FOR_FULL_COMPOSITION")
+        );
+        assert!(replacement.audit_sentence.contains("Synthetic Reviewer"));
+
+        let catalog = composer
+            .list_primary_agents(Some(&fixture.project))
+            .expect("list agents");
+        assert!(catalog.iter().any(|entry| entry.agent.id == "reviewer"));
     }
 
     #[test]

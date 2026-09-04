@@ -937,6 +937,11 @@ pub(super) async fn handle_subscribe(
             agent_id: active_agent.id.clone(),
             display_name: active_agent.display_name.clone(),
             scope: active_agent.scope.to_string(),
+            change: crate::protocol::AgentProfileChangeKind::NoChange,
+            message_id: agent_guard
+                .active_transition_message_id()
+                .map(str::to_string),
+            message_content: None,
         });
     }
     let _ = client_event_tx.send(ServerEvent::Done { id });

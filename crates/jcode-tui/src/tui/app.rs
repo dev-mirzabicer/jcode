@@ -185,6 +185,7 @@ struct TurnReasoningTrace {
 #[derive(Debug, Clone)]
 struct LocalRewindUndoSnapshot {
     messages: Vec<StoredMessage>,
+    agent_profile_message_ids: Vec<String>,
     context_view: jcode_session_types::StoredContextViewState,
     visible_message_count: usize,
 }
@@ -1450,6 +1451,9 @@ pub struct App {
     model_picker_load_request_id: u64,
     // Pending model switch from picker (for remote mode async processing)
     pending_model_switch: Option<String>,
+    // Pending primary-agent change from the remote picker.
+    pending_agent_change: Option<(String, bool)>,
+    pending_agent_catalog_replace: bool,
     pending_route_selection: Option<crate::provider::RouteSelection>,
     // Reasoning-effort variant chosen together with a model in the picker
     // (e.g. "gpt-5.5 (high)"), staged for remote mode alongside the model

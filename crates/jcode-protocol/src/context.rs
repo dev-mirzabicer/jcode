@@ -102,6 +102,8 @@ pub struct ContextEditorMessage {
     pub active_operations: Vec<ContextOperationBadge>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub removable_reasoning_kinds: Vec<StoredContextBlockKind>,
+    #[serde(default)]
+    pub active_agent_profile: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

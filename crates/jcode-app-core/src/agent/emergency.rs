@@ -336,6 +336,9 @@ impl Agent {
             route: self.context_route_identity(),
             model_routes: self.provider.model_routes(),
             estimated_total_request_tokens_before: Some(report.projected_input_tokens),
+            active_agent_profile_message_id: self
+                .active_transition_message_id()
+                .map(str::to_string),
         };
         let draft_id = service
             .prepare_draft_for_session(input, request, false)

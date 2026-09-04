@@ -220,6 +220,101 @@ fn global_initialization_is_private_idempotent_and_damage_is_explicit() {
 }
 
 #[test]
+fn shipped_seed_upgrade_adds_only_new_resources_and_never_recreates_user_deletions() {
+    let fixture = Fixture::new();
+    let mut initial_seed = seed();
+    initial_seed.manifest.seed_version = 1;
+    let initialized = fixture
+        .service
+        .initialize_global(&initial_seed, &[])
+        .expect("initialize prior shipped seed");
+    let repository = initialized.repository;
+
+    let user_edit = managed("common", "module", "user working edit");
+    std::fs::write(repository.root.join("modules/common.md"), &user_edit)
+        .expect("write unrelated valid working edit");
+
+    let mut upgraded_seed = initial_seed.clone();
+    upgraded_seed.manifest.seed_version = 2;
+    upgraded_seed.files.push(InstructionSeedFile {
+        relative_path: PathBuf::from("notifications/agent-transition.md"),
+        content: managed(
+            "agent-transition",
+            "notification",
+            "synthetic transition prose",
+        )
+        .into_bytes(),
+    });
+    let upgraded = fixture
+        .service
+        .ensure_shipped_seed(&repository, &upgraded_seed)
+        .expect("upgrade shipped seed")
+        .expect("upgrade commit");
+    assert_eq!(upgraded.disposition, InstructionCommitDisposition::Created);
+    assert_eq!(
+        std::fs::read_to_string(repository.root.join("modules/common.md")).unwrap(),
+        user_edit,
+        "seed upgrades must not overwrite existing working resources"
+    );
+    assert_eq!(
+        fixture
+            .service
+            .load_manifest(&repository)
+            .unwrap()
+            .seed_version,
+        2
+    );
+    assert!(
+        repository
+            .root
+            .join("notifications/agent-transition.md")
+            .is_file()
+    );
+    assert!(
+        fixture
+            .service
+            .ensure_shipped_seed(&repository, &upgraded_seed)
+            .expect("repeat upgrade")
+            .is_none(),
+        "an adopted seed must be a no-op"
+    );
+
+    let draft = fixture
+        .service
+        .open_draft(&repository, "notifications/agent-transition.md")
+        .expect("open seeded notification");
+    fixture
+        .service
+        .commit(
+            &repository,
+            &InstructionCommitRequest {
+                operation_id: "delete-seeded-notification".to_string(),
+                message: "instruction: delete seeded notification".to_string(),
+                expected_head: draft.base_head,
+                expected_files: vec![draft.base],
+                mutations: vec![InstructionFileMutation::Delete {
+                    relative_path: PathBuf::from("notifications/agent-transition.md"),
+                }],
+            },
+        )
+        .expect("delete adopted seeded resource");
+    assert!(
+        fixture
+            .service
+            .ensure_shipped_seed(&repository, &upgraded_seed)
+            .expect("check adopted seed after deletion")
+            .is_none()
+    );
+    assert!(
+        !repository
+            .root
+            .join("notifications/agent-transition.md")
+            .exists(),
+        "a later user deletion must remain authoritative"
+    );
+}
+
+#[test]
 fn recreation_preflights_invalid_seed_and_branch_before_moving_the_store() {
     let fixture = Fixture::new();
     let initialized = fixture.initialize();

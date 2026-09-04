@@ -1897,6 +1897,44 @@ fn render_swarm_message_expanded_shows_body_and_collapse_badge() {
 }
 
 #[test]
+fn agent_profile_card_is_collapsible_complete_and_width_safe() {
+    let saved = crate::tui::markdown::center_code_blocks();
+    crate::tui::markdown::set_center_code_blocks(false);
+    let body =
+        "SYNTHETIC_PROFILE_LINE\n\nAdditional complete instructions that wrap at narrow widths.";
+    let collapsed = DisplayMessage::agent_profile(body);
+    for width in [80, 24] {
+        let lines = render_swarm_message(&collapsed, width, crate::config::DiffDisplayMode::Off);
+        let text = lines
+            .iter()
+            .map(extract_line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Agent Profile"));
+        assert!(text.contains('▸') && text.contains("expand"), "{text}");
+        assert!(!text.contains("SYNTHETIC_PROFILE_LINE"));
+    }
+
+    let expanded_content = jcode_tui_messages::toggle_collapsible_swarm_content(&collapsed.content)
+        .expect("expand profile card");
+    let expanded = DisplayMessage {
+        content: expanded_content,
+        ..collapsed
+    };
+    for width in [80, 24] {
+        let lines = render_swarm_message(&expanded, width, crate::config::DiffDisplayMode::Off);
+        let text = lines
+            .iter()
+            .map(extract_line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("SYNTHETIC_PROFILE_LINE"));
+        assert!(text.contains('▾') && text.contains("collapse"), "{text}");
+    }
+    crate::tui::markdown::set_center_code_blocks(saved);
+}
+
+#[test]
 fn render_tool_message_prefers_subagent_title_with_model() {
     let msg = DisplayMessage {
         role: "tool".to_string(),

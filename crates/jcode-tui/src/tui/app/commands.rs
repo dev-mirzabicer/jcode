@@ -1991,6 +1991,7 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
         let restored = snapshot.visible_message_count.saturating_sub(current_count);
         let previous_session = app.session.clone();
         app.session.replace_messages(snapshot.messages);
+        app.session.agent_profile_message_ids = snapshot.agent_profile_message_ids;
         app.session.context_view = snapshot.context_view;
         app.session.provider_session_id = None;
         app.session.updated_at = chrono::Utc::now();
@@ -2080,7 +2081,7 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
             let preview = crate::util::truncate_str(content.trim(), 80);
             history.push_str(&format!("  {} {} - {}\n", i + 1, role_str, preview));
         }
-        history.push_str("\nUse /rewind N to rewind to message N (removes all messages after). After rewinding, use /rewind undo to restore the removed messages.");
+        history.push_str("\nUse /rewind N to rewind conversation history to message N. Active agent configuration remains current, including an active appended profile. After rewinding, use /rewind undo to restore removed history.");
 
         app.push_display_message(DisplayMessage::system(history));
         return true;
@@ -2095,11 +2096,21 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
                 let removed = visible_count - n;
                 let undo_snapshot = LocalRewindUndoSnapshot {
                     messages: app.session.messages.clone(),
+                    agent_profile_message_ids: app.session.agent_profile_message_ids.clone(),
                     context_view: app.session.context_view.clone(),
                     visible_message_count: visible_count,
                 };
                 let previous_session = app.session.clone();
-                app.session.truncate_messages(targets[n - 1] + 1);
+                if let Err(error) = app
+                    .session
+                    .truncate_messages_preserving_active_profile(targets[n - 1] + 1)
+                {
+                    app.session = previous_session;
+                    app.push_display_message(DisplayMessage::error(format!(
+                        "Cannot rewind because active agent configuration could not be preserved: {error}"
+                    )));
+                    return true;
+                }
                 let timestamp = chrono::Utc::now();
                 let reconciliation =
                     match jcode_context_core::reconcile_context_after_transcript_edit(
@@ -2169,7 +2180,7 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
                 }
 
                 app.push_display_message(DisplayMessage::system(format!(
-                    "✓ Rewound to message {}. Removed {} message{}. Undo anytime with /rewind undo.",
+                    "✓ Rewound conversation to message {}. Removed {} message{}. Active agent configuration remained current. Undo anytime with /rewind undo.",
                     n,
                     removed,
                     if removed == 1 { "" } else { "s" }
@@ -3247,11 +3258,21 @@ mod interactive_editor_tests {
 }
 
 pub(super) fn handle_agents_command(app: &mut App, trimmed: &str) -> bool {
-    if !trimmed.starts_with("/agents") {
+    let (prefix, compatibility_alias) = if trimmed == "/agents" || trimmed.starts_with("/agents ") {
+        ("/agents", true)
+    } else if trimmed == "/agent-models" || trimmed.starts_with("/agent-models ") {
+        ("/agent-models", false)
+    } else {
         return false;
-    }
+    };
 
-    let rest = trimmed.strip_prefix("/agents").unwrap_or_default().trim();
+    if compatibility_alias {
+        app.push_display_message(DisplayMessage::system(
+            "`/agents` is now a compatibility alias for `/agent-models`. Use `/agent` to select a primary agent profile."
+                .to_string(),
+        ));
+    }
+    let rest = trimmed.strip_prefix(prefix).unwrap_or_default().trim();
     if rest.is_empty() {
         app.open_agents_picker();
         return true;
@@ -3272,7 +3293,7 @@ pub(super) fn handle_agents_command(app: &mut App, trimmed: &str) -> bool {
             "swarm|review|judge|ambient"
         };
         app.push_display_message(DisplayMessage::error(format!(
-            "Usage: /agents or /agents <{targets}>"
+            "Usage: /agent-models or /agent-models <{targets}>"
         )));
         return true;
     };
@@ -3285,21 +3306,43 @@ fn handle_primary_agent_command(app: &mut App, trimmed: &str) -> bool {
     if trimmed != "/agent" && !trimmed.starts_with("/agent ") {
         return false;
     }
-    let selection = trimmed.strip_prefix("/agent").unwrap_or_default().trim();
-    if selection.is_empty() {
+    let rest = trimmed.strip_prefix("/agent").unwrap_or_default().trim();
+    if rest.is_empty() {
+        match local_primary_agent_catalog(app) {
+            Ok(entries) => app.open_primary_agent_picker(entries, false),
+            Err(error) => app.push_display_message(DisplayMessage::error(format!(
+                "Agent catalog failed: {error}"
+            ))),
+        }
+        return true;
+    }
+    if rest == "inspect" {
+        app.push_display_message(DisplayMessage::system(local_agent_inspection(app)));
+        return true;
+    }
+    let (mode, selection_text) = match rest.strip_prefix("replace") {
+        Some(remaining) if remaining.trim().is_empty() => {
+            match local_primary_agent_catalog(app) {
+                Ok(entries) => app.open_primary_agent_picker(entries, true),
+                Err(error) => app.push_display_message(DisplayMessage::error(format!(
+                    "Agent catalog failed: {error}"
+                ))),
+            }
+            return true;
+        }
+        Some(remaining) => (
+            crate::agent::AgentProfileChangeMode::ReplaceSystem,
+            remaining.trim(),
+        ),
+        None => (crate::agent::AgentProfileChangeMode::Ordinary, rest),
+    };
+    if app.is_processing() {
         app.push_display_message(DisplayMessage::error(
-            "Usage: /agent <name|global:name|project:name>".to_string(),
+            "Wait for the current turn to finish before changing the agent profile.".to_string(),
         ));
         return true;
     }
-    if app.session.first_provider_dispatch_at().is_some() {
-        app.push_display_message(DisplayMessage::error(
-            "The initial agent is already dispatched; post-dispatch agent transitions arrive in Phase 3 WP-04."
-                .to_string(),
-        ));
-        return true;
-    }
-    let selection = match crate::instruction::AgentSelection::parse(Some(selection)) {
+    let selection = match crate::instruction::AgentSelection::parse(Some(selection_text)) {
         Ok(selection) => selection,
         Err(error) => {
             app.push_display_message(DisplayMessage::error(format!(
@@ -3308,62 +3351,270 @@ fn handle_primary_agent_command(app: &mut App, trimmed: &str) -> bool {
             return true;
         }
     };
-    if app
-        .session
-        .active_agent()
-        .is_some_and(|active| selection.matches_stored(active))
-    {
-        let display_name = app
-            .session
-            .active_agent()
-            .map(|active| active.display_name.clone())
-            .unwrap_or_default();
-        app.set_status_notice(format!("Agent → {display_name}"));
-        return true;
-    }
-    let skills = app.current_skills_snapshot();
-    let available_skills = skills
-        .list()
-        .iter()
-        .map(|skill| crate::prompt::SkillInfo {
-            name: skill.name.clone(),
-            description: skill.description.clone(),
-        })
-        .collect::<Vec<_>>();
-    let working_dir = app.session.working_dir.as_deref().map(std::path::Path::new);
-    let activation = match crate::instruction::SystemPromptComposer::new().activate(
-        crate::instruction::SystemPromptActivationRequest {
-            working_dir,
-            selection,
-            is_selfdev: app.session.is_canary,
-            capabilities: crate::prompt::PromptCapabilities::current(),
-            available_skills: &available_skills,
-        },
-    ) {
-        Ok(activation) => activation,
+    match apply_local_primary_agent_change(app, selection, mode) {
+        Ok(outcome) => present_agent_change_outcome(app, outcome),
         Err(error) => {
             app.push_display_message(DisplayMessage::error(format!(
-                "Agent selection failed: {error}"
+                "Agent change failed: {error}"
             )));
-            return true;
         }
-    };
-    let previous = app.session.clone();
-    app.session.install_system_prompt(activation.state.clone());
-    if let Err(error) = app.session.save() {
-        app.session = previous;
-        app.push_display_message(DisplayMessage::error(format!(
-            "Agent selection could not be persisted: {error}"
-        )));
-        return true;
     }
-    let active = activation.state.active_agent;
-    app.push_display_message(DisplayMessage::system(format!(
-        "Primary agent: {} ({}:{})",
-        active.display_name, active.scope, active.id
-    )));
-    app.set_status_notice(format!("Agent → {}", active.display_name));
     true
+}
+
+fn local_primary_agent_catalog(
+    app: &App,
+) -> Result<
+    Vec<crate::instruction::AgentCatalogEntry>,
+    crate::instruction::SystemPromptActivationError,
+> {
+    crate::instruction::SystemPromptComposer::new()
+        .list_primary_agents(app.session.working_dir.as_deref().map(std::path::Path::new))
+}
+
+fn local_agent_inspection(app: &App) -> String {
+    let Some(active) = app.session.active_agent() else {
+        return "# Agent profile\n\nNo active primary agent is stored.".to_string();
+    };
+    let delivery = app
+        .session
+        .active_transition_message_id()
+        .map(|message_id| format!("appended profile message `{message_id}`"))
+        .unwrap_or_else(|| "true system prompt".to_string());
+    let mut sections = vec![
+        "# Agent profile".to_string(),
+        format!(
+            "Active: **{}** (`{}:{}`)\n\nDelivery: {}\n\nFirst provider dispatch: {}",
+            active.display_name,
+            active.scope,
+            active.id,
+            delivery,
+            if app.session.first_provider_dispatch_at().is_some() {
+                "complete"
+            } else {
+                "not yet dispatched"
+            }
+        ),
+        format!(
+            "## System prompt\n\n```text\n{}\n```",
+            app.session.system_prompt_text().unwrap_or_default()
+        ),
+    ];
+    if let Some(skill) = app.session.active_skill.as_ref() {
+        sections.push(format!(
+            "## Active skill: {}\n\n```text\n{}\n```",
+            skill.skill_id, skill.rendered_text
+        ));
+    }
+    sections.join("\n\n")
+}
+
+pub(super) fn apply_local_primary_agent_change(
+    app: &mut App,
+    selection: crate::instruction::AgentSelection,
+    mode: crate::agent::AgentProfileChangeMode,
+) -> Result<crate::agent::AgentProfileChangeOutcome, String> {
+    let current = app
+        .session
+        .active_agent()
+        .cloned()
+        .ok_or_else(|| "session has no active primary agent".to_string())?;
+    if mode == crate::agent::AgentProfileChangeMode::Ordinary && selection.matches_stored(&current)
+    {
+        return Ok(crate::agent::AgentProfileChangeOutcome::NoChange { agent: current });
+    }
+    let working_dir = app.session.working_dir.as_deref().map(std::path::Path::new);
+    let composer = crate::instruction::SystemPromptComposer::new();
+    let dispatched = app.session.first_provider_dispatch_at().is_some();
+
+    if !dispatched {
+        let skills = app.current_skills_snapshot();
+        let available_skills = skills
+            .list()
+            .iter()
+            .map(|skill| crate::prompt::SkillInfo {
+                name: skill.name.clone(),
+                description: skill.description.clone(),
+            })
+            .collect::<Vec<_>>();
+        let activation = composer
+            .activate(crate::instruction::SystemPromptActivationRequest {
+                working_dir,
+                selection,
+                is_selfdev: app.session.is_canary,
+                capabilities: crate::prompt::PromptCapabilities::current(),
+                available_skills: &available_skills,
+            })
+            .map_err(|error| error.to_string())?;
+        if mode == crate::agent::AgentProfileChangeMode::Ordinary
+            && activation.state.active_agent == current
+        {
+            return Ok(crate::agent::AgentProfileChangeOutcome::NoChange { agent: current });
+        }
+        let mut candidate = app.session.clone();
+        candidate.install_system_prompt(activation.state.clone());
+        candidate.save().map_err(|error| error.to_string())?;
+        app.session = candidate;
+        let agent = activation.state.active_agent;
+        return Ok(crate::agent::AgentProfileChangeOutcome::Provisional { agent });
+    }
+
+    match mode {
+        crate::agent::AgentProfileChangeMode::Ordinary => {
+            let transition = composer
+                .render_agent_transition(working_dir, selection)
+                .map_err(|error| error.to_string())?;
+            if transition.agent == current {
+                return Ok(crate::agent::AgentProfileChangeOutcome::NoChange { agent: current });
+            }
+            let agent = transition.agent.clone();
+            let mut candidate = app.session.clone();
+            let message_id = candidate
+                .append_agent_profile_transition(transition)
+                .map_err(|error| error.to_string())?;
+            let projected = candidate
+                .projected_messages_for_provider()
+                .map_err(|error| error.to_string())?;
+            candidate.save().map_err(|error| error.to_string())?;
+            app.session = candidate;
+            app.replace_provider_messages(projected);
+            let session_id = app.session.id.clone();
+            app.context_transactions.invalidate_session_drafts(
+                &session_id,
+                "agent profile transition appended authoritative history",
+            );
+            app.context_protocol
+                .accept_history(&session_id, app.session.context_view.revision);
+            Ok(crate::agent::AgentProfileChangeOutcome::Appended { agent, message_id })
+        }
+        crate::agent::AgentProfileChangeMode::ReplaceSystem => {
+            let skills = app.current_skills_snapshot();
+            let available_skills = skills
+                .list()
+                .iter()
+                .map(|skill| crate::prompt::SkillInfo {
+                    name: skill.name.clone(),
+                    description: skill.description.clone(),
+                })
+                .collect::<Vec<_>>();
+            let replacement = composer
+                .replace_system_prompt(
+                    crate::instruction::SystemPromptActivationRequest {
+                        working_dir,
+                        selection,
+                        is_selfdev: app.session.is_canary,
+                        capabilities: crate::prompt::PromptCapabilities::current(),
+                        available_skills: &available_skills,
+                    },
+                    &current,
+                )
+                .map_err(|error| error.to_string())?;
+            let agent = replacement.activation.state.active_agent.clone();
+            let mut candidate = app.session.clone();
+            let audit_message_id = candidate
+                .apply_system_prompt_replacement(
+                    replacement.activation.state,
+                    replacement.audit_sentence,
+                )
+                .map_err(|error| error.to_string())?;
+            candidate.provider_session_id = None;
+            let projected = candidate
+                .projected_messages_for_provider()
+                .map_err(|error| error.to_string())?;
+            let mut split = app.build_system_prompt_split(None);
+            split.static_part = candidate
+                .system_prompt_text()
+                .unwrap_or_default()
+                .to_string();
+            let tools = app.registry.try_definitions(None).map_err(str::to_string)?;
+            let breakdown =
+                crate::context::request_token_breakdown(&projected, 0, 0, &split, &tools);
+            let preflight = crate::context::evaluate_context_preflight(
+                candidate.context_view.revision,
+                app.provider.context_request_budget(),
+                breakdown,
+            );
+            if preflight.pressure == crate::protocol::ContextPressureLevel::Blocked {
+                return Err(format!(
+                    "Replacement would exceed the safe provider budget by {} token(s); edit context or choose a larger route first.",
+                    preflight.required_reduction_tokens
+                ));
+            }
+            candidate.save().map_err(|error| error.to_string())?;
+            app.session = candidate;
+            app.after_local_provider_context_changed(
+                "agent system replacement",
+                &format!("active agent replaced with {}", agent.id),
+            )?;
+            let session_id = app.session.id.clone();
+            app.context_transactions.invalidate_session_drafts(
+                &session_id,
+                "agent system replacement appended authoritative audit history",
+            );
+            app.context_protocol
+                .accept_history(&session_id, app.session.context_view.revision);
+            Ok(crate::agent::AgentProfileChangeOutcome::Replaced {
+                agent,
+                audit_message_id: Some(audit_message_id),
+            })
+        }
+    }
+}
+
+pub(super) fn present_agent_change_outcome(
+    app: &mut App,
+    outcome: crate::agent::AgentProfileChangeOutcome,
+) {
+    match outcome {
+        crate::agent::AgentProfileChangeOutcome::NoChange { agent } => {
+            app.set_status_notice(format!("Agent → {} (unchanged)", agent.display_name));
+        }
+        crate::agent::AgentProfileChangeOutcome::Provisional { agent } => {
+            app.push_display_message(DisplayMessage::system(format!(
+                "Primary agent: {} ({}:{})",
+                agent.display_name, agent.scope, agent.id
+            )));
+            app.set_status_notice(format!("Agent → {}", agent.display_name));
+        }
+        crate::agent::AgentProfileChangeOutcome::Appended { agent, message_id } => {
+            if let Some(message) = app
+                .session
+                .messages
+                .iter()
+                .find(|message| message.id == message_id)
+                .and_then(|message| {
+                    message.content.iter().find_map(|block| match block {
+                        ContentBlock::Text { text, .. } => Some(text.clone()),
+                        _ => None,
+                    })
+                })
+            {
+                app.push_display_message(DisplayMessage::agent_profile(message));
+            }
+            app.set_status_notice(format!("Agent → {} · appended", agent.display_name));
+        }
+        crate::agent::AgentProfileChangeOutcome::Replaced {
+            agent,
+            audit_message_id,
+        } => {
+            if let Some(message_id) = audit_message_id
+                && let Some(message) = app
+                    .session
+                    .messages
+                    .iter()
+                    .find(|message| message.id == message_id)
+                    .and_then(|message| {
+                        message.content.iter().find_map(|block| match block {
+                            ContentBlock::Text { text, .. } => Some(text.clone()),
+                            _ => None,
+                        })
+                    })
+            {
+                app.push_display_message(DisplayMessage::system(message));
+            }
+            app.set_status_notice(format!("Agent → {} · system replaced", agent.display_name));
+        }
+    }
 }
 
 fn handle_alignment_command(app: &mut App, trimmed: &str) -> bool {

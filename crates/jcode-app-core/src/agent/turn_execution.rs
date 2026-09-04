@@ -539,11 +539,14 @@ impl Agent {
         let removed = message_count - message_index;
         let undo_snapshot = RewindUndoSnapshot {
             messages: self.session.messages.clone(),
+            agent_profile_message_ids: self.session.agent_profile_message_ids.clone(),
             context_view: self.session.context_view.clone(),
             visible_message_count: message_count,
         };
         let previous_session = self.session.clone();
-        self.session.truncate_messages(stored_len);
+        self.session
+            .truncate_messages_preserving_active_profile(stored_len)
+            .map_err(|error| error.to_string())?;
         let timestamp = chrono::Utc::now();
         let reconciliation = jcode_context_core::reconcile_context_after_transcript_edit(
             &self.session.messages,
@@ -588,6 +591,7 @@ impl Agent {
         let restored = snapshot.visible_message_count.saturating_sub(current_count);
         let previous_session = self.session.clone();
         self.session.replace_messages(snapshot.messages);
+        self.session.agent_profile_message_ids = snapshot.agent_profile_message_ids;
         self.session.context_view = snapshot.context_view;
         self.session.provider_session_id = None;
         self.session.updated_at = chrono::Utc::now();

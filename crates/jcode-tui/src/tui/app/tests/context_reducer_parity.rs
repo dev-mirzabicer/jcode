@@ -1060,6 +1060,7 @@ fn parity_snapshot_with_selected_message() -> crate::protocol::ContextEditorSnap
         summary_coverage: None,
         active_operations: Vec::new(),
         removable_reasoning_kinds: Vec::new(),
+        active_agent_profile: false,
     }];
     snapshot
 }

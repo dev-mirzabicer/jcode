@@ -95,9 +95,28 @@ pub enum Request {
     #[serde(rename = "clear")]
     Clear { id: u64 },
 
-    /// Replace the provisional primary agent before the first provider dispatch.
+    /// Select the active primary agent. Ordinary post-dispatch changes append a
+    /// complete profile; `replace` explicitly replaces the true system prompt.
     #[serde(rename = "set_agent")]
-    SetAgent { id: u64, agent: String },
+    SetAgent {
+        id: u64,
+        agent: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        replace: bool,
+    },
+
+    /// List currently valid primary agents for the active project.
+    #[serde(rename = "get_agent_catalog")]
+    GetAgentCatalog { id: u64 },
+
+    /// Inspect exact current profile state. Complete prompt and skill text are
+    /// returned only on this explicit request, not in ordinary History.
+    #[serde(rename = "get_agent_status")]
+    GetAgentStatus {
+        id: u64,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        include_instructions: bool,
+    },
 
     /// Rewind conversation history to the given 1-based message index.
     #[serde(rename = "rewind")]
@@ -1302,6 +1321,34 @@ pub enum ServerEvent {
         agent_id: String,
         display_name: String,
         scope: String,
+        #[serde(default)]
+        change: crate::AgentProfileChangeKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_content: Option<String>,
+    },
+
+    #[serde(rename = "agent_catalog")]
+    AgentCatalog {
+        id: u64,
+        agents: Vec<crate::AgentProfileSummary>,
+    },
+
+    #[serde(rename = "agent_status")]
+    AgentStatus {
+        id: u64,
+        agent_id: String,
+        display_name: String,
+        scope: String,
+        #[serde(default)]
+        first_provider_dispatched: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active_transition_message_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        system_prompt: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active_skill: Option<String>,
     },
 
     /// Server requests that this client/session close itself.

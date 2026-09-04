@@ -106,6 +106,16 @@ pub enum TimelineEventKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },
+    /// Exact current session instruction state retained by exported timelines.
+    #[serde(rename = "session_instructions")]
+    SessionInstructions {
+        agent_id: String,
+        display_name: String,
+        scope: String,
+        system_prompt: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active_skill: Option<String>,
+    },
 }
 
 fn default_thinking_duration() -> u64 {
@@ -155,6 +165,21 @@ fn export_projected_timeline(session: &Session) -> Vec<TimelineEvent> {
     let mut t: u64 = 0;
     let session_start = session.created_at;
     let startup_message_ids = session.startup_context_message_ids();
+    if let Some(system_prompt) = session.system_prompt.as_ref() {
+        events.push(TimelineEvent {
+            t: 0,
+            kind: TimelineEventKind::SessionInstructions {
+                agent_id: system_prompt.active_agent.id.clone(),
+                display_name: system_prompt.active_agent.display_name.clone(),
+                scope: system_prompt.active_agent.scope.to_string(),
+                system_prompt: system_prompt.text.clone(),
+                active_skill: session
+                    .active_skill
+                    .as_ref()
+                    .map(|skill| skill.rendered_text.clone()),
+            },
+        });
+    }
 
     // Track tool IDs for pairing ToolUse → ToolResult
     let mut pending_tools: Vec<(String, String, serde_json::Value)> = Vec::new(); // (id, name, input)
@@ -193,6 +218,37 @@ fn export_projected_timeline(session: &Session) -> Vec<TimelineEvent> {
             if offset > t {
                 t = offset;
             }
+        }
+
+        if session.is_agent_profile_message(&msg.id) {
+            let content = extract_text(&msg.content);
+            if !content.is_empty() {
+                events.push(TimelineEvent {
+                    t,
+                    kind: TimelineEventKind::DisplayMessage {
+                        role: "agent_profile".to_string(),
+                        title: Some("Agent Profile".to_string()),
+                        content,
+                    },
+                });
+                t += 300;
+            }
+            continue;
+        }
+        if msg.display_role == Some(crate::session::StoredDisplayRole::System) {
+            let content = extract_text(&msg.content);
+            if !content.is_empty() {
+                events.push(TimelineEvent {
+                    t,
+                    kind: TimelineEventKind::DisplayMessage {
+                        role: "system".to_string(),
+                        title: None,
+                        content,
+                    },
+                });
+                t += 300;
+            }
+            continue;
         }
 
         match msg.role {
@@ -598,6 +654,7 @@ pub fn timeline_to_replay_events(timeline: &[TimelineEvent]) -> Vec<(u64, Replay
                     },
                 ));
             }
+            TimelineEventKind::SessionInstructions { .. } => {}
         }
     }
 

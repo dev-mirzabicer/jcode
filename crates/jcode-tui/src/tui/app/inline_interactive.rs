@@ -3407,6 +3407,39 @@ impl App {
                             }
                         }
                     }
+                    PickerAction::PrimaryAgent { selector, replace } => {
+                        self.inline_interactive_state = None;
+                        if self.is_remote {
+                            self.pending_agent_change = Some((selector.clone(), replace));
+                            self.set_status_notice(if replace {
+                                format!("Replacing system agent with {selector}...")
+                            } else {
+                                format!("Selecting agent {selector}...")
+                            });
+                        } else {
+                            let selection =
+                                crate::instruction::AgentSelection::parse(Some(&selector))
+                                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                            let mode = if replace {
+                                crate::agent::AgentProfileChangeMode::ReplaceSystem
+                            } else {
+                                crate::agent::AgentProfileChangeMode::Ordinary
+                            };
+                            match super::commands::apply_local_primary_agent_change(
+                                self, selection, mode,
+                            ) {
+                                Ok(outcome) => {
+                                    super::commands::present_agent_change_outcome(self, outcome)
+                                }
+                                Err(error) => {
+                                    self.push_display_message(DisplayMessage::error(format!(
+                                        "Agent change failed: {error}"
+                                    )));
+                                    self.set_status_notice("Agent change failed");
+                                }
+                            }
+                        }
+                    }
                     PickerAction::Model => {
                         if !route.available {
                             self.push_display_message(DisplayMessage::error(

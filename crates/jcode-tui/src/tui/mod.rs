@@ -931,6 +931,7 @@ pub(crate) fn detect_kv_cache_problem(
 pub enum PickerKind {
     Model,
     Account,
+    Agent,
     Login,
     Usage,
 }
@@ -1127,6 +1128,17 @@ impl PickerKind {
                 shows_default_shortcut_hint: false,
                 preview_activation_column: 0,
             },
+            Self::Agent => InlineInteractiveSchema {
+                layout: InlineInteractiveLayout::Compact,
+                primary_label: "AGENT",
+                secondary_label: "SCOPE",
+                secondary_preview_label: "SCOPE",
+                tertiary_label: "",
+                preview_submit_hint: "  ↵ select",
+                active_submit_hint: "  ↑↓/jk ↵ Esc",
+                shows_default_shortcut_hint: false,
+                preview_activation_column: 0,
+            },
             Self::Login => InlineInteractiveSchema {
                 layout: InlineInteractiveLayout::ThreeColumn,
                 primary_label: "ITEM",
@@ -1158,7 +1170,7 @@ impl PickerKind {
 
     pub fn filter_text(&self, entry: &PickerEntry) -> String {
         match self {
-            Self::Account => {
+            Self::Account | Self::Agent => {
                 let provider = entry
                     .active_option()
                     .map(|option| option.provider.as_str())
@@ -1251,6 +1263,10 @@ pub enum PickerAction {
         target: AgentModelTarget,
         clear_override: bool,
     },
+    PrimaryAgent {
+        selector: String,
+        replace: bool,
+    },
 }
 
 /// Unified inline picker with three columns.
@@ -1294,6 +1310,7 @@ fn estimate_picker_action_bytes(action: &PickerAction) -> usize {
         | PickerAction::AgentTarget(_)
         | PickerAction::AgentModelChoice { .. }
         | PickerAction::LogoutAll => 0,
+        PickerAction::PrimaryAgent { selector, .. } => selector.capacity(),
         PickerAction::Account(AccountPickerAction::Switch { provider_id, label }) => {
             provider_id.capacity() + label.capacity()
         }

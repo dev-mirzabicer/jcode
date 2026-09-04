@@ -415,6 +415,36 @@ impl Registry {
         defs
     }
 
+    /// Read the current deterministic tool definitions without waiting. Idle
+    /// control commands use this to preflight a prompt replacement without
+    /// introducing an async command path or mutating the tool registry.
+    pub fn try_definitions(
+        &self,
+        allowed_tools: Option<&HashSet<String>>,
+    ) -> Result<Vec<ToolDefinition>, &'static str> {
+        let tools = self
+            .tools
+            .try_read()
+            .map_err(|_| "tool definitions are currently being updated")?;
+        let mut definitions = tools
+            .iter()
+            .filter(|(name, _)| {
+                allowed_tools
+                    .map(|set| tool_name_is_allowed(set, name))
+                    .unwrap_or(true)
+            })
+            .map(|(name, tool)| {
+                let mut definition = tool.to_definition();
+                if definition.name != *name {
+                    definition.name = name.clone();
+                }
+                definition
+            })
+            .collect::<Vec<_>>();
+        definitions.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(definitions)
+    }
+
     pub async fn tool_names(&self) -> Vec<String> {
         let tools = self.tools.read().await;
         tools.keys().cloned().collect()

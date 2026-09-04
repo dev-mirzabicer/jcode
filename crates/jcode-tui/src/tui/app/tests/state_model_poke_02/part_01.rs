@@ -1399,6 +1399,12 @@ fn test_agents_command_suggestions_include_targets() {
     let app = create_test_app();
     let suggestions = app.get_suggestions_for("/agents re");
     assert!(suggestions.iter().any(|(cmd, _)| cmd == "/agents review"));
+    let current = app.get_suggestions_for("/agent-models re");
+    assert!(
+        current
+            .iter()
+            .any(|(cmd, _)| cmd == "/agent-models review")
+    );
 }
 
 #[test]
@@ -1407,6 +1413,68 @@ fn test_primary_agent_command_is_discoverable_and_accepts_selectors() {
     let suggestions = app.get_suggestions_for("/agen");
     assert!(suggestions.iter().any(|(cmd, _)| cmd == "/agent"));
     assert!(App::command_accepts_args("/agent"));
+    let modes = app.get_suggestions_for("/agent ");
+    assert!(modes.iter().any(|(cmd, _)| cmd == "/agent inspect"));
+    assert!(modes.iter().any(|(cmd, _)| cmd == "/agent replace "));
+}
+
+#[test]
+fn primary_agent_picker_marks_current_and_carries_explicit_replace_intent() {
+    let mut app = create_test_app();
+    app.session.update_active_agent_metadata(
+        crate::session::StoredAgentReference {
+            scope: crate::instruction::InstructionScope::Global,
+            id: "current".to_string(),
+            display_name: "Current".to_string(),
+        },
+        None,
+    );
+    app.open_primary_agent_picker(
+        vec![
+            crate::instruction::AgentCatalogEntry {
+                agent: crate::session::StoredAgentReference {
+                    scope: crate::instruction::InstructionScope::Global,
+                    id: "current".to_string(),
+                    display_name: "Current".to_string(),
+                },
+                description: "Synthetic current agent".to_string(),
+            },
+            crate::instruction::AgentCatalogEntry {
+                agent: crate::session::StoredAgentReference {
+                    scope: crate::instruction::InstructionScope::Project,
+                    id: "reviewer".to_string(),
+                    display_name: "Reviewer".to_string(),
+                },
+                description: "Synthetic reviewer".to_string(),
+            },
+        ],
+        true,
+    );
+    let picker = app
+        .inline_interactive_state
+        .as_ref()
+        .expect("primary agent picker");
+    assert_eq!(picker.kind, crate::tui::PickerKind::Agent);
+    assert!(picker.entries.iter().any(|entry| entry.is_current));
+    assert!(picker.entries.iter().any(|entry| matches!(
+        &entry.action,
+        crate::tui::PickerAction::PrimaryAgent { selector, replace: true }
+            if selector == "project:reviewer"
+    )));
+}
+
+#[test]
+fn busy_primary_agent_change_rejects_without_queueing() {
+    let mut app = create_test_app();
+    app.is_processing = true;
+    app.input = "/agent global:jcode".to_string();
+
+    app.submit_input();
+
+    assert!(app.queued_messages.is_empty());
+    assert!(app.display_messages().iter().any(|message| {
+        message.role == "error" && message.content.contains("current turn to finish")
+    }));
 }
 
 #[test]
