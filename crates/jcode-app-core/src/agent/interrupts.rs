@@ -238,7 +238,7 @@ impl Agent {
             "provider_session_id": self.provider_session_id,
             "last_upstream_provider": self.last_upstream_provider,
             "last_connection_type": self.last_connection_type,
-            "active_skill": self.active_skill,
+            "active_skill": self.session.active_skill_id(),
             "allowed_tools": self.allowed_tools,
             "disabled_tools": self.disabled_tools,
             "session": {

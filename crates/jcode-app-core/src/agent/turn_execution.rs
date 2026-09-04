@@ -1221,40 +1221,42 @@ impl Agent {
                 continue;
             }
 
-            // Check for skill invocation. Resolve against the registry (not
-            // the bare tokenizer) so a `SKILL.md` `name:` field containing
-            // spaces, e.g. "My Custom Skill", can still be matched: the
-            // bare parse always stops at the first whitespace.
+            // Check for skill invocation against a fresh effective source view.
+            // This keeps direct REPL behavior aligned with TUI and tool callers:
+            // disk edits affect the next invocation, never an already active snapshot.
+            let skills = self.current_skills_snapshot();
             if let Some(invocation) = skills.resolve_invocation(input) {
-                if let Some(skill) = skills.get(invocation.name) {
-                    println!("Activating skill: {}", skill.name);
-                    println!("{}\n", skill.description);
-                    self.active_skill = Some(invocation.name.to_string());
-                    if let Some(prompt) = invocation.prompt {
-                        if let Err(error) = self.observe_startup_context_before_user_turn() {
-                            eprintln!(
-                                "\nStartup Context warning: the latest file observation could not be saved, so no stale marker was claimed: {error}\n"
-                            );
+                match self.activate_skill(invocation.name) {
+                    Ok(activation) => {
+                        println!("Activating skill: {}", activation.skill_id);
+                        println!("{}\n", activation.description);
+                        if let Some(prompt) = invocation.prompt {
+                            if let Err(error) = self.observe_startup_context_before_user_turn() {
+                                eprintln!(
+                                    "\nStartup Context warning: the latest file observation could not be saved, so no stale marker was claimed: {error}\n"
+                                );
+                            }
+                            if let Err(e) = self.run_once(prompt).await {
+                                eprintln!("\nError: {}\n", e);
+                            }
+                            println!();
                         }
-                        if let Err(e) = self.run_once(prompt).await {
-                            eprintln!("\nError: {}\n", e);
-                        }
-                        println!();
                     }
-                    continue;
-                } else {
-                    println!("Unknown skill: /{}", invocation.name);
-                    println!(
-                        "Available: {}",
-                        skills
-                            .list()
-                            .iter()
-                            .map(|s| format!("/{}", s.name))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    );
-                    continue;
+                    Err(ActiveSkillActivationError::NotFound(_)) => {
+                        println!("Unknown skill: /{}", invocation.name);
+                        println!(
+                            "Available: {}",
+                            skills
+                                .list()
+                                .iter()
+                                .map(|skill| format!("/{}", skill.name))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+                    }
+                    Err(error) => eprintln!("Unable to activate skill: {error}"),
                 }
+                continue;
             }
 
             if let Err(error) = self.observe_startup_context_before_user_turn() {

@@ -816,6 +816,128 @@ mod tests {
         assert_eq!(systems[2], frozen);
     }
 
+    #[tokio::test]
+    async fn active_skill_text_is_frozen_until_reinvocation_and_survives_resume_and_split() {
+        let _home = TestHome::new();
+        let project = tempfile::tempdir().expect("project");
+        let skill_dir = project.path().join(".jcode/skills/snapshot-skill");
+        std::fs::create_dir_all(&skill_dir).expect("skill dir");
+        let skill_path = skill_dir.join("SKILL.md");
+        std::fs::write(
+            &skill_path,
+            "---\nname: snapshot-skill\ndescription: Snapshot skill\n---\nSKILL_V1\n",
+        )
+        .expect("skill v1");
+        let provider = RecordingProvider::default();
+        let (mut agent, _) = Agent::new_with_startup_context_and_agent(
+            std::sync::Arc::new(provider.clone()),
+            crate::tool::Registry::empty(),
+            project.path().to_str(),
+            StartupContextActivation::primary(StartupContextCaller::RunCommand),
+            crate::instruction::AgentSelection::Default,
+            false,
+        )
+        .expect("primary activation");
+
+        let first = agent.activate_skill("snapshot-skill").expect("activate v1");
+        assert!(first.rendered_text.contains("SKILL_V1"));
+        let first_dynamic = agent.build_system_prompt_split(None).dynamic_part;
+        assert!(first_dynamic.contains("SKILL_V1"));
+        let frozen_system = agent
+            .system_prompt_text()
+            .expect("system prompt")
+            .to_string();
+
+        let late_skill_dir = project.path().join(".jcode/skills/late-skill");
+        std::fs::create_dir_all(&late_skill_dir).expect("late skill dir");
+        std::fs::write(
+            late_skill_dir.join("SKILL.md"),
+            "---\nname: late-skill\ndescription: Added after activation\n---\nLATE\n",
+        )
+        .expect("late skill");
+        assert!(
+            agent
+                .available_skill_names()
+                .iter()
+                .any(|name| name == "late-skill")
+        );
+        assert_eq!(agent.system_prompt_text(), Some(frozen_system.as_str()));
+        assert!(!frozen_system.contains("late-skill"));
+
+        std::fs::write(
+            &skill_path,
+            "---\nname: snapshot-skill\ndescription: Snapshot skill\n---\nSKILL_V2\n",
+        )
+        .expect("skill v2");
+        assert_eq!(
+            agent.build_system_prompt_split(None).dynamic_part,
+            first_dynamic,
+            "disk edits must not mutate active rendered text"
+        );
+
+        agent
+            .run_once("dispatch before replacement")
+            .await
+            .expect("dispatch");
+        let current_agent = agent.active_agent().expect("active agent").clone();
+        agent
+            .change_primary_agent(
+                crate::instruction::AgentSelection::from_stored(&current_agent).expect("selection"),
+                crate::agent::AgentProfileChangeMode::ReplaceSystem,
+            )
+            .await
+            .expect("replace system");
+        assert!(
+            agent
+                .system_prompt_text()
+                .expect("refreshed system")
+                .contains("late-skill"),
+            "explicit system replacement refreshes available skills"
+        );
+        assert_eq!(
+            agent
+                .active_skill_text()
+                .expect("active skill survives replacement"),
+            first.rendered_text
+        );
+
+        let loaded = Session::load(agent.session_id()).expect("load active session");
+        let mut resumed = Agent::new_with_session(
+            std::sync::Arc::new(provider.clone()),
+            crate::tool::Registry::empty(),
+            loaded,
+            None,
+        );
+        assert_eq!(
+            resumed.build_system_prompt_split(None).dynamic_part,
+            first_dynamic,
+            "resume must use exact stored text without source access"
+        );
+
+        let reinvoked = resumed
+            .activate_skill("snapshot-skill")
+            .expect("reinvoke v2");
+        assert!(reinvoked.rendered_text.contains("SKILL_V2"));
+        assert!(!reinvoked.rendered_text.contains("SKILL_V1"));
+        let second_dynamic = resumed.build_system_prompt_split(None).dynamic_part;
+        assert!(second_dynamic.contains("SKILL_V2"));
+
+        let mut split = Session::create(Some(resumed.session_id().to_string()), None);
+        split.inherit_continuation_state_from(&resumed.session);
+        split.save().expect("save split");
+        let split_agent = Agent::new_with_session(
+            std::sync::Arc::new(provider),
+            crate::tool::Registry::empty(),
+            split,
+            None,
+        );
+        assert_eq!(
+            split_agent.build_system_prompt_split(None).dynamic_part,
+            second_dynamic,
+            "split must clone exact active rendered text"
+        );
+    }
+
     #[test]
     fn direct_clear_retains_agent_renders_current_source_and_clears_active_skill() {
         let home = TestHome::new();

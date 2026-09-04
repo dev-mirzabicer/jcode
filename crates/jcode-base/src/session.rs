@@ -802,6 +802,14 @@ impl Session {
         }
     }
 
+    pub fn set_active_skill(&mut self, skill: StoredActiveSkill) {
+        self.active_skill = Some(skill);
+        self.active_skill_metadata = None;
+        self.updated_at = Utc::now();
+        self.persist_state.force_snapshot = true;
+        self.mark_memory_profile_dirty();
+    }
+
     /// Persist the independent first-provider-dispatch boundary in the same
     /// durable transaction as any Startup Context delivery transition. This
     /// remains correct for an empty Startup Context plan, where the agent

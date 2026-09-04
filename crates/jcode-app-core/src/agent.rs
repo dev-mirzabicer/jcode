@@ -301,6 +301,33 @@ impl AgentProfileChangeOutcome {
     }
 }
 
+#[derive(Debug)]
+pub enum ActiveSkillActivationError {
+    Catalog(crate::skill::SkillResolutionError),
+    NotFound(String),
+    Persistence(anyhow::Error),
+}
+
+impl std::fmt::Display for ActiveSkillActivationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Catalog(error) => write!(formatter, "{error}"),
+            Self::NotFound(name) => write!(formatter, "skill '{name}' was not found"),
+            Self::Persistence(error) => write!(formatter, "persist active skill: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for ActiveSkillActivationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Catalog(error) => Some(error),
+            Self::Persistence(error) => Some(error.as_ref()),
+            Self::NotFound(_) => None,
+        }
+    }
+}
+
 impl From<crate::instruction::SystemPromptActivationError> for PrimaryInstructionActivationError {
     fn from(error: crate::instruction::SystemPromptActivationError) -> Self {
         Self::Composition(error)
@@ -313,7 +340,6 @@ pub struct Agent {
     skills: Arc<SkillRegistry>,
     session: Session,
     instruction_repositories: crate::instruction::InstructionRepositoryService,
-    active_skill: Option<String>,
     allowed_tools: Option<HashSet<String>>,
     disabled_tools: HashSet<String>,
     /// Provider-specific session ID for conversation resume (e.g., Claude Code CLI session)
@@ -412,7 +438,6 @@ impl Agent {
             skills,
             session,
             instruction_repositories: crate::instruction::InstructionRepositoryService::new(),
-            active_skill: None,
             allowed_tools,
             disabled_tools,
             provider_session_id: None,
@@ -472,9 +497,10 @@ impl Agent {
             .try_read()
             .map(|skills| Arc::new(skills.clone()))
             .unwrap_or_else(|_| self.skills.clone());
-        Arc::new(SkillRegistry::effective_for_working_dir(
+        Arc::new(SkillRegistry::effective_for_working_dir_with_repositories(
             &global,
             working_dir,
+            &self.instruction_repositories,
         ))
     }
 
@@ -484,6 +510,34 @@ impl Agent {
             .iter()
             .map(|skill| skill.name.clone())
             .collect()
+    }
+
+    pub fn activate_skill(
+        &mut self,
+        name: &str,
+    ) -> Result<crate::skill::SkillActivation, ActiveSkillActivationError> {
+        let activation = self
+            .current_skills_snapshot()
+            .activate(name)
+            .map_err(ActiveSkillActivationError::Catalog)?
+            .ok_or_else(|| ActiveSkillActivationError::NotFound(name.to_string()))?;
+        let mut candidate = self.session.clone();
+        candidate.set_active_skill(crate::session::StoredActiveSkill {
+            skill_id: activation.skill_id.clone(),
+            rendered_text: activation.rendered_text.clone(),
+        });
+        candidate
+            .save()
+            .map_err(ActiveSkillActivationError::Persistence)?;
+        self.session = candidate;
+        crate::cache_invalidation::record(
+            "skill activation",
+            format!(
+                "activated skill {} from {}",
+                activation.skill_id, activation.source.kind
+            ),
+        );
+        Ok(activation)
     }
 
     pub fn new(provider: Arc<dyn Provider>, registry: Registry) -> Self {
@@ -857,7 +911,6 @@ impl Agent {
     }
 
     fn reset_runtime_state_for_session_change(&mut self) {
-        self.active_skill = None;
         self.last_upstream_provider = None;
         self.last_connection_type = None;
         self.last_status_detail = None;

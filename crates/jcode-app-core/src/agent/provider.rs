@@ -354,6 +354,10 @@ impl Agent {
             .map(|skill| skill.rendered_text.as_str())
     }
 
+    pub fn active_skill_id(&self) -> Option<&str> {
+        self.session.active_skill_id()
+    }
+
     pub fn set_instruction_repositories(
         &mut self,
         repositories: crate::instruction::InstructionRepositoryService,

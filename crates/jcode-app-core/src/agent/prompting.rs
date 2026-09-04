@@ -93,11 +93,11 @@ impl Agent {
             };
         }
 
-        let skills = self.current_skills_snapshot();
         let skill_prompt = self
+            .session
             .active_skill
             .as_ref()
-            .and_then(|name| skills.get(name).map(|skill| skill.get_prompt().to_string()));
+            .map(|skill| skill.rendered_text.as_str());
 
         let mut split = if let Some(static_part) = self.session.system_prompt_text() {
             crate::prompt::SplitSystemPrompt {
@@ -105,6 +105,7 @@ impl Agent {
                 dynamic_part: String::new(),
             }
         } else {
+            let skills = self.current_skills_snapshot();
             let available_skills = skills
                 .list()
                 .iter()
@@ -135,7 +136,7 @@ impl Agent {
                 split.dynamic_part.push_str("\n\n");
             }
             split.dynamic_part.push_str("# Active Skill\n\n");
-            split.dynamic_part.push_str(&skill_prompt);
+            split.dynamic_part.push_str(skill_prompt);
         }
 
         self.append_current_turn_system_reminder(&mut split);
