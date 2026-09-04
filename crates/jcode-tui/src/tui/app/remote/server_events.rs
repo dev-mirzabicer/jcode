@@ -1487,8 +1487,10 @@ pub(in crate::tui::app) fn handle_server_event(
             change,
             message_id,
             message_content,
+            active_skill_id,
             ..
         } => {
+            app.active_skill = active_skill_id;
             let active_agent = crate::session::StoredAgentReference {
                 scope: match scope.as_str() {
                     "project" => crate::instruction::InstructionScope::Project,
@@ -1535,6 +1537,19 @@ pub(in crate::tui::app) fn handle_server_event(
                     app.set_status_notice(format!("Agent → {display_name}"));
                 }
             }
+            true
+        }
+        ServerEvent::SkillActivated {
+            skill_id,
+            description,
+            source,
+            ..
+        } => {
+            app.active_skill = Some(skill_id.clone());
+            app.push_display_message(DisplayMessage::system(format!(
+                "Activated skill: {skill_id} - {description}"
+            )));
+            app.set_status_notice(format!("Skill /{skill_id} active · {source}"));
             true
         }
         ServerEvent::AgentCatalog { agents, .. } => {
@@ -1859,6 +1874,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.remote_resume_activity = None;
                 app.is_processing = false;
                 app.status = ProcessingStatus::Idle;
+                app.active_skill = None;
                 app.follow_chat_bottom();
                 if prev_session_id.is_some() {
                     app.queued_messages.clear();

@@ -1664,23 +1664,53 @@ fn build_skills_report(app: &App) -> String {
         }
     } else {
         let snapshot = app.current_skills_snapshot();
-        let mut skills = snapshot.list();
-        skills.sort_by(|a, b| a.name.cmp(&b.name));
-        if skills.is_empty() {
+        let entries = snapshot.catalog_entries();
+        if entries.is_empty() {
             out.push_str(
-                "- none loaded\n  Add skills under ~/.jcode/skills/<name>/SKILL.md or ./.jcode/skills/<name>/SKILL.md\n",
+                "- none loaded\n  Managed skills live under instruction-store skills/<id>/SKILL.md; supported external locations remain read-only until Copy skill.\n",
             );
         } else {
-            for skill in skills {
-                let marker = if active.as_deref() == Some(skill.name.as_str()) {
+            for entry in entries {
+                let marker = if active.as_deref() == Some(entry.name.as_str()) {
                     " (active)"
                 } else {
                     ""
                 };
-                out.push_str(&format!("- /{}{}\n", skill.name, marker));
-                out.push_str(&format!("    {}\n", skill.description));
-                out.push_str(&format!("    path: {}\n", skill.path.display()));
+                out.push_str(&format!("- /{}{}\n", entry.name, marker));
+                match entry.state {
+                    crate::skill::SkillCatalogState::Valid => {
+                        if let Some(description) = entry.description {
+                            out.push_str(&format!("    {}\n", description));
+                        }
+                    }
+                    crate::skill::SkillCatalogState::Invalid(detail) => {
+                        out.push_str(&format!("    invalid: {}\n", detail));
+                    }
+                }
+                out.push_str(&format!(
+                    "    source: {}{}\n",
+                    entry.source.kind,
+                    if entry.source.kind.is_read_only() {
+                        " (read-only; Copy skill to manage)"
+                    } else {
+                        ""
+                    }
+                ));
+                out.push_str(&format!(
+                    "    path: {}\n",
+                    entry.source.package_root.join("SKILL.md").display()
+                ));
             }
+        }
+        for diagnostic in snapshot
+            .diagnostics()
+            .iter()
+            .filter(|diagnostic| diagnostic.name.is_none())
+        {
+            out.push_str(&format!(
+                "- managed source unavailable: {}\n",
+                diagnostic.detail
+            ));
         }
     }
 

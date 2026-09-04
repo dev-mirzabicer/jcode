@@ -65,6 +65,10 @@ pub enum Request {
         /// Synthetic continuations and provider retries set it to false.
         #[serde(default = "default_true", skip_serializing_if = "is_true")]
         observe_startup_context: bool,
+        /// Render and persist this skill from current source before accepting
+        /// the user turn. Failure rejects the turn before provider dispatch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        activate_skill: Option<String>,
     },
 
     /// Cancel current generation
@@ -94,6 +98,10 @@ pub enum Request {
     /// Clear conversation history
     #[serde(rename = "clear")]
     Clear { id: u64 },
+
+    /// Render and persist one skill without starting a model turn.
+    #[serde(rename = "activate_skill")]
+    ActivateSkill { id: u64, skill: String },
 
     /// Select the active primary agent. Ordinary post-dispatch changes append a
     /// complete profile; `replace` explicitly replaces the true system prompt.
@@ -1327,6 +1335,8 @@ pub enum ServerEvent {
         message_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message_content: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active_skill_id: Option<String>,
     },
 
     #[serde(rename = "agent_catalog")]
@@ -1349,6 +1359,15 @@ pub enum ServerEvent {
         system_prompt: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         active_skill: Option<String>,
+    },
+
+    /// Exact current-source skill activation completed and is now durable.
+    #[serde(rename = "skill_activated")]
+    SkillActivated {
+        id: u64,
+        skill_id: String,
+        description: String,
+        source: String,
     },
 
     /// Server requests that this client/session close itself.

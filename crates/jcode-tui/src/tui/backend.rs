@@ -247,6 +247,7 @@ pub struct RemoteConnection {
     protocol_bytes_scanned: usize,
     has_loaded_history: bool,
     call_output_tokens_seen: u64,
+    next_message_skill: Option<String>,
 }
 
 const DETACHED_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
@@ -345,6 +346,7 @@ impl RemoteConnection {
             protocol_bytes_scanned: 0,
             has_loaded_history: false,
             call_output_tokens_seen: 0,
+            next_message_skill: None,
         };
 
         // Subscribe to events
@@ -598,6 +600,7 @@ impl RemoteConnection {
             system_reminder,
             no_reply: false,
             observe_startup_context,
+            activate_skill: self.next_message_skill.take(),
         };
         self.next_request_id += 1;
         self.send_request(request).await?;
@@ -818,6 +821,21 @@ impl RemoteConnection {
             id,
             agent: agent.to_string(),
             replace,
+        })
+        .await?;
+        Ok(id)
+    }
+
+    pub fn stage_next_message_skill(&mut self, skill: Option<String>) {
+        self.next_message_skill = skill;
+    }
+
+    pub async fn activate_skill(&mut self, skill: &str) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::ActivateSkill {
+            id,
+            skill: skill.to_string(),
         })
         .await?;
         Ok(id)
@@ -1376,6 +1394,7 @@ impl RemoteConnection {
             protocol_bytes_scanned: 0,
             has_loaded_history: false,
             call_output_tokens_seen: 0,
+            next_message_skill: None,
         }
     }
 

@@ -435,6 +435,7 @@ fn submit_prepared_remote_input_defers_until_history_loads() {
         expanded: "hi".to_string(),
         images: vec![],
         pasted_contents: Vec::new(),
+        activate_skill: None,
     };
     rt.block_on(crate::tui::app::remote::submit_prepared_remote_input(
         &mut app,
@@ -496,6 +497,7 @@ fn remote_skill_invocation_with_prompt_sends_remote_turn() {
     let rt = tokio::runtime::Runtime::new().expect("runtime");
     let _guard = rt.enter();
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let peer = remote.take_dummy_peer().expect("dummy peer");
     remote.mark_history_loaded();
     rt.block_on(crate::tui::app::remote::submit_remote_slash_input(
         &mut app,
@@ -506,11 +508,30 @@ fn remote_skill_invocation_with_prompt_sends_remote_turn() {
             expanded: "/remote-skill explain the change".to_string(),
             images: vec![],
             pasted_contents: Vec::new(),
+            activate_skill: None,
         },
     ))
     .expect("remote skill prompt should send");
 
-    assert_eq!(app.active_skill.as_deref(), Some("remote-skill"));
+    let request = rt.block_on(async move {
+        use tokio::io::AsyncBufReadExt;
+        let mut reader = tokio::io::BufReader::new(peer);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.expect("read request");
+        serde_json::from_str::<crate::protocol::Request>(line.trim()).expect("parse request")
+    });
+    assert!(matches!(
+        request,
+        crate::protocol::Request::Message {
+            ref content,
+            activate_skill: Some(ref skill),
+            ..
+        } if content == "explain the change" && skill == "remote-skill"
+    ));
+    assert!(
+        app.active_skill.is_none(),
+        "remote UI waits for authoritative SkillActivated confirmation"
+    );
     assert!(app.is_processing, "remote skill prompt should start a turn");
     assert!(
         app.display_messages()
@@ -518,6 +539,123 @@ fn remote_skill_invocation_with_prompt_sends_remote_turn() {
             .any(|message| message.role == "user"
                 && message.content == "/remote-skill explain the change"),
         "remote skill prompt should be visible as the submitted user turn"
+    );
+}
+
+#[test]
+fn remote_bare_skill_invocation_sends_control_without_starting_turn() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.runtime_mode = crate::tui::app::AppRuntimeMode::RemoteClient;
+    let temp = tempfile::tempdir().expect("create skill dir");
+    let skill_dir = temp.path().join(".jcode/skills/remote-bare");
+    std::fs::create_dir_all(&skill_dir).expect("create skill dir");
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: remote-bare\ndescription: Bare remote skill\n---\nUse it.\n",
+    )
+    .expect("write skill");
+    app.session.working_dir = Some(temp.path().to_string_lossy().to_string());
+
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let peer = remote.take_dummy_peer().expect("dummy peer");
+    remote.mark_history_loaded();
+    rt.block_on(crate::tui::app::remote::submit_remote_slash_input(
+        &mut app,
+        &mut remote,
+        crate::tui::app::input::PreparedInput {
+            raw_input: "/remote-bare".to_string(),
+            cursor_pos: usize::MAX,
+            expanded: "/remote-bare".to_string(),
+            images: vec![],
+            pasted_contents: Vec::new(),
+            activate_skill: None,
+        },
+    ))
+    .expect("remote bare skill should send");
+
+    let request = rt.block_on(async move {
+        use tokio::io::AsyncBufReadExt;
+        let mut reader = tokio::io::BufReader::new(peer);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.expect("read request");
+        serde_json::from_str::<crate::protocol::Request>(line.trim()).expect("parse request")
+    });
+    assert!(matches!(
+        request,
+        crate::protocol::Request::ActivateSkill { ref skill, .. }
+            if skill == "remote-bare"
+    ));
+    assert!(!app.is_processing, "bare activation makes no model call");
+    assert!(app.active_skill.is_none());
+}
+
+#[test]
+fn remote_server_catalog_resolves_multi_word_skill_without_local_source() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.runtime_mode = crate::tui::app::AppRuntimeMode::RemoteClient;
+    app.remote_skills = vec!["Remote Managed Skill".to_string()];
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let peer = remote.take_dummy_peer().expect("dummy peer");
+    remote.mark_history_loaded();
+    rt.block_on(crate::tui::app::remote::submit_remote_slash_input(
+        &mut app,
+        &mut remote,
+        crate::tui::app::input::PreparedInput {
+            raw_input: "/Remote Managed Skill inspect this".to_string(),
+            cursor_pos: usize::MAX,
+            expanded: "/Remote Managed Skill inspect this".to_string(),
+            images: vec![],
+            pasted_contents: Vec::new(),
+            activate_skill: None,
+        },
+    ))
+    .expect("remote managed skill should send");
+    let request = rt.block_on(async move {
+        use tokio::io::AsyncBufReadExt;
+        let mut reader = tokio::io::BufReader::new(peer);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.expect("read request");
+        serde_json::from_str::<crate::protocol::Request>(line.trim()).expect("parse request")
+    });
+    assert!(matches!(
+        request,
+        crate::protocol::Request::Message {
+            ref content,
+            activate_skill: Some(ref skill),
+            ..
+        } if content == "inspect this" && skill == "Remote Managed Skill"
+    ));
+}
+
+#[test]
+fn authoritative_skill_event_updates_remote_projection() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let _guard = runtime.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let redraw = handle_server_event(
+        &mut app,
+        ServerEvent::SkillActivated {
+            id: 77,
+            skill_id: "confirmed-skill".to_string(),
+            description: "Confirmed description".to_string(),
+            source: "managed global".to_string(),
+        },
+        &mut remote,
+    );
+    assert!(redraw);
+    assert_eq!(app.active_skill.as_deref(), Some("confirmed-skill"));
+    assert!(
+        app.display_messages()
+            .last()
+            .is_some_and(|message| message.content.contains("Confirmed description"))
     );
 }
 
@@ -1112,6 +1250,7 @@ fn remote_dropped_file_path_is_sent_as_a_prompt_not_a_slash_command() {
             expanded: dropped.clone(),
             images: vec![],
             pasted_contents: Vec::new(),
+            activate_skill: None,
         },
     ))
     .expect("dropped path should send as a normal remote turn");

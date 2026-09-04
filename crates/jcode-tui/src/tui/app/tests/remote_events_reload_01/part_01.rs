@@ -147,6 +147,7 @@ fn test_handle_server_event_history_clears_connection_type_on_session_change_whe
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
 
     app.remote_session_id = Some("session_old".to_string());
+    app.active_skill = Some("old-session-skill".to_string());
     app.connection_type = Some("websocket".to_string());
 
     app.handle_server_event(
@@ -190,6 +191,7 @@ fn test_handle_server_event_history_clears_connection_type_on_session_change_whe
     );
 
     assert_eq!(app.remote_session_id.as_deref(), Some("session_new"));
+    assert!(app.active_skill.is_none());
     assert_eq!(app.connection_type, None);
 }
 

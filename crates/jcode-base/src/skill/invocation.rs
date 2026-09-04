@@ -12,6 +12,22 @@ impl SkillRegistry {
     /// containing spaces. The longest registered name wins; unknown names fall
     /// back to the identifier-shaped result from [`Self::parse_invocation`].
     pub fn resolve_invocation<'a>(&self, input: &'a str) -> Option<SkillInvocation<'a>> {
+        Self::resolve_invocation_where(input, |name| self.contains(name))
+    }
+
+    /// Resolve against names advertised by another authority, such as the
+    /// shared server's remote History snapshot.
+    pub fn resolve_invocation_names<'a>(
+        input: &'a str,
+        names: &[String],
+    ) -> Option<SkillInvocation<'a>> {
+        Self::resolve_invocation_where(input, |name| names.iter().any(|known| known == name))
+    }
+
+    fn resolve_invocation_where<'a>(
+        input: &'a str,
+        contains: impl Fn(&str) -> bool,
+    ) -> Option<SkillInvocation<'a>> {
         let fallback = Self::parse_invocation(input)?;
         let invocation = input.trim().strip_prefix('/')?;
         let boundaries = std::iter::once(invocation.len()).chain(
@@ -23,7 +39,7 @@ impl SkillRegistry {
 
         for end in boundaries {
             let name = &invocation[..end];
-            if name.is_empty() || !self.skills.contains_key(name) {
+            if name.is_empty() || !contains(name) {
                 continue;
             }
 
@@ -138,6 +154,21 @@ mod tests {
             Some(SkillInvocation {
                 name: "frontend-design",
                 prompt: Some("build a settings page"),
+            })
+        );
+    }
+
+    #[test]
+    fn resolves_multi_word_names_from_remote_catalog() {
+        let names = vec!["Remote Managed Skill".to_string()];
+        assert_eq!(
+            SkillRegistry::resolve_invocation_names(
+                "/Remote Managed Skill inspect the diff",
+                &names,
+            ),
+            Some(SkillInvocation {
+                name: "Remote Managed Skill",
+                prompt: Some("inspect the diff"),
             })
         );
     }

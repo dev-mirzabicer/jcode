@@ -184,6 +184,7 @@ pub(super) struct PreparedInput {
     pub expanded: String,
     pub images: Vec<(String, String)>,
     pub pasted_contents: Vec<String>,
+    pub activate_skill: Option<String>,
 }
 
 // Roughly 500k English words at ~6 bytes/word including spaces. This is still
@@ -2765,6 +2766,7 @@ pub(super) fn take_prepared_input(app: &mut App) -> PreparedInput {
         expanded,
         images,
         pasted_contents,
+        activate_skill: None,
     }
 }
 
@@ -3691,60 +3693,92 @@ impl App {
         if let Some(invocation) = skill_invocation {
             let skill_name = invocation.name.to_string();
             let trailing_prompt = invocation.prompt.map(str::to_string);
-            let mut skill = initial_snapshot.get(&skill_name).cloned();
+            let mut activation = initial_snapshot.activate(&skill_name);
 
             // Remote/minimal TUI clients may start with an empty skill snapshot, and
             // daemon-side `skill_manage reload_all` can update a different process.
             // On a slash miss, synchronously refresh from the active session working
             // directory before reporting Unknown skill so project-local skills such
             // as .jcode/skills/optimization work immediately after reload/build.
-            if skill.is_none() {
+            if matches!(activation, Ok(None)) {
                 self.refresh_skills_snapshot();
-                skill = self.current_skills_snapshot().get(&skill_name).cloned();
+                activation = self.current_skills_snapshot().activate(&skill_name);
             }
 
-            if let Some(skill) = skill {
-                self.active_skill = Some(skill_name.clone());
-                self.push_display_message(DisplayMessage {
-                    role: "system".to_string(),
-                    content: format!("Activated skill: {} - {}", skill.name, skill.description),
-                    tool_calls: vec![],
-                    duration_secs: None,
-                    title: None,
-                    tool_data: None,
-                });
-                if let Some(prompt) = trailing_prompt {
-                    input = prompt;
-                } else {
+            match activation {
+                Err(error) => {
+                    self.push_display_message(DisplayMessage::error(format!(
+                        "Unable to activate skill /{skill_name}: {error}"
+                    )));
                     return;
                 }
-            } else {
-                // Distinguish an endorsed-but-not-installed skill from a
-                // typo: the skill list advertises endorsed skills, so a bare
-                // "Unknown skill" for them reads like a bug (issue #445).
-                let endorsed_hint = crate::skill::endorsed_skills()
-                    .iter()
-                    .find(|endorsed| endorsed.name == skill_name)
-                    .map(|endorsed| match endorsed.install {
-                        Some(install) => format!(
-                            "Skill /{} is endorsed but not installed. Install it with `{}`, then run /skills or skill_manage reload_all.",
-                            skill_name, install
+                Ok(Some(activation)) => {
+                    let previous = self.session.clone();
+                    self.session
+                        .set_active_skill(crate::session::StoredActiveSkill {
+                            skill_id: activation.skill_id.clone(),
+                            rendered_text: activation.rendered_text.clone(),
+                        });
+                    if let Err(error) = self.session.save() {
+                        self.session = previous;
+                        self.push_display_message(DisplayMessage::error(format!(
+                            "Unable to persist skill /{skill_name}; nothing was changed: {error}"
+                        )));
+                        return;
+                    }
+                    self.active_skill = Some(skill_name.clone());
+                    crate::cache_invalidation::record(
+                        "skill activation",
+                        format!(
+                            "activated skill {} from {}",
+                            activation.skill_id, activation.source.kind
                         ),
-                        None => format!(
-                            "Skill /{} is endorsed but not installed (source: {}). Install it into ~/.jcode/skills/{}/SKILL.md.",
-                            skill_name, endorsed.source, skill_name
+                    );
+                    self.push_display_message(DisplayMessage {
+                        role: "system".to_string(),
+                        content: format!(
+                            "Activated skill: {} - {}",
+                            activation.skill_id, activation.description
                         ),
+                        tool_calls: vec![],
+                        duration_secs: None,
+                        title: None,
+                        tool_data: None,
                     });
-                self.push_display_message(DisplayMessage {
-                    role: "error".to_string(),
-                    content: endorsed_hint
-                        .unwrap_or_else(|| format!("Unknown skill: /{}", skill_name)),
-                    tool_calls: vec![],
-                    duration_secs: None,
-                    title: None,
-                    tool_data: None,
-                });
-                return;
+                    if let Some(prompt) = trailing_prompt {
+                        input = prompt;
+                    } else {
+                        return;
+                    }
+                }
+                Ok(None) => {
+                    // Distinguish an endorsed-but-not-installed skill from a
+                    // typo: the skill list advertises endorsed skills, so a bare
+                    // "Unknown skill" for them reads like a bug (issue #445).
+                    let endorsed_hint = crate::skill::endorsed_skills()
+                        .iter()
+                        .find(|endorsed| endorsed.name == skill_name)
+                        .map(|endorsed| match endorsed.install {
+                            Some(install) => format!(
+                                "Skill /{} is endorsed but not installed. Install it with `{}`, then run /skills or skill_manage reload_all.",
+                                skill_name, install
+                            ),
+                            None => format!(
+                                "Skill /{} is endorsed but not installed (source: {}). Install it into ~/.jcode/skills/{}/SKILL.md.",
+                                skill_name, endorsed.source, skill_name
+                            ),
+                        });
+                    self.push_display_message(DisplayMessage {
+                        role: "error".to_string(),
+                        content: endorsed_hint
+                            .unwrap_or_else(|| format!("Unknown skill: /{}", skill_name)),
+                        tool_calls: vec![],
+                        duration_secs: None,
+                        title: None,
+                        tool_data: None,
+                    });
+                    return;
+                }
             }
         }
 

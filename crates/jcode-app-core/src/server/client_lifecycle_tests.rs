@@ -1371,6 +1371,7 @@ async fn blocked_shared_startup_emits_prompt_safe_action_and_rolls_back_unanswer
         system_reminder: None,
         no_reply: false,
         observe_startup_context: true,
+        activate_skill: None,
     };
     client_writer
         .write_all((serde_json::to_string(&request).expect("serialize message") + "\n").as_bytes())
@@ -1552,6 +1553,7 @@ async fn later_real_user_turn_observes_staleness_before_prompt_and_continues() {
             system_reminder: None,
             no_reply: false,
             observe_startup_context,
+            activate_skill: None,
         };
         client_writer
             .write_all(
@@ -1809,6 +1811,7 @@ fn reload_starting_rejects_new_turn_without_spawning_processing_task() {
                 images: Vec::new(),
                 system_reminder: None,
                 observe_startup_context: true,
+                activate_skill: None,
             },
             "session_guard",
             &mut ProcessingState {
@@ -1850,6 +1853,103 @@ fn reload_starting_rejects_new_turn_without_spawning_processing_task() {
             !forked.load(Ordering::SeqCst),
             "rejecting during reload should not fork or invoke provider work"
         );
+    });
+}
+
+#[test]
+fn turn_coupled_skill_activation_persists_before_shared_server_processing() {
+    let _guard = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    let project = tempfile::tempdir().expect("project");
+    let skill_dir = project.path().join(".jcode/skills/server-skill");
+    std::fs::create_dir_all(&skill_dir).expect("skill dir");
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: server-skill\ndescription: Server skill\n---\nSERVER_SKILL_BODY\n",
+    )
+    .expect("skill");
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let provider: Arc<dyn Provider> = Arc::new(CompleteImmediatelyProvider);
+        let registry = Registry::new(Arc::clone(&provider)).await;
+        let mut session = crate::session::Session::create_with_id(
+            "session_turn_coupled_skill".to_string(),
+            None,
+            None,
+        );
+        session.model = Some("complete-immediately".to_string());
+        session.working_dir = Some(project.path().to_string_lossy().to_string());
+        let agent = Arc::new(Mutex::new(Agent::new_with_session(
+            provider, registry, session, None,
+        )));
+        let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
+        let (processing_done_tx, mut processing_done_rx) = mpsc::unbounded_channel();
+        let mut client_is_processing = false;
+        let mut processing_message_id = None;
+        let mut processing_session_id = None;
+        let mut processing_task = None;
+        let swarm_members = Arc::new(RwLock::new(HashMap::new()));
+        let swarms_by_id = Arc::new(RwLock::new(HashMap::new()));
+        let event_history = Arc::new(RwLock::new(std::collections::VecDeque::new()));
+        let event_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (swarm_event_tx, _) = broadcast::channel(8);
+
+        start_processing_message(
+            ProcessingMessage {
+                id: 84,
+                content: "use the active skill".to_string(),
+                images: Vec::new(),
+                system_reminder: None,
+                observe_startup_context: false,
+                activate_skill: Some("server-skill".to_string()),
+            },
+            "session_turn_coupled_skill",
+            &mut ProcessingState {
+                client_is_processing: &mut client_is_processing,
+                message_id: &mut processing_message_id,
+                session_id: &mut processing_session_id,
+                task: &mut processing_task,
+            },
+            &agent,
+            &client_event_tx,
+            &processing_done_tx,
+            Vec::new(),
+            &crate::server::startup_context::test_coordinator(),
+            &SwarmStatusRefs {
+                members: &swarm_members,
+                swarms_by_id: &swarms_by_id,
+                event_history: &event_history,
+                event_counter: &event_counter,
+                event_tx: &swarm_event_tx,
+            },
+        )
+        .await;
+
+        let activation_event = client_event_rx.recv().await.expect("activation event");
+        assert!(matches!(
+            activation_event,
+            ServerEvent::SkillActivated {
+                id: 84,
+                ref skill_id,
+                ..
+            } if skill_id == "server-skill"
+        ));
+        let (_, result, _) = processing_done_rx.recv().await.expect("turn completion");
+        result.expect("turn succeeds");
+        let agent = agent.lock().await;
+        assert_eq!(agent.active_skill_id(), Some("server-skill"));
+        assert!(
+            agent
+                .active_skill_text()
+                .expect("stored active text")
+                .contains("SERVER_SKILL_BODY")
+        );
+        let loaded = crate::session::Session::load(agent.session_id()).expect("load persisted");
+        assert_eq!(loaded.active_skill_id(), Some("server-skill"));
     });
 }
 
@@ -1921,6 +2021,7 @@ async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attac
             images: Vec::new(),
             system_reminder: None,
             observe_startup_context: true,
+            activate_skill: None,
         },
         session_id,
         &mut ProcessingState {
@@ -2047,6 +2148,7 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
                 images: Vec::new(),
                 system_reminder: Some(continuation.to_string()),
                 observe_startup_context: false,
+                activate_skill: None,
             },
             session_id,
             &mut ProcessingState {
@@ -2148,6 +2250,7 @@ fn reload_starting_rejects_new_turns_for_multiple_sessions() {
                     images: Vec::new(),
                     system_reminder: None,
                     observe_startup_context: true,
+                    activate_skill: None,
                 },
                 session_id,
                 &mut ProcessingState {
@@ -2923,6 +3026,7 @@ async fn busy_startup_apply_drains_after_active_turn_before_next_user_prompt() {
             images: Vec::new(),
             system_reminder: None,
             observe_startup_context: true,
+            activate_skill: None,
         },
         event_tx.clone(),
     ));
@@ -2998,6 +3102,7 @@ async fn busy_startup_apply_drains_after_active_turn_before_next_user_prompt() {
             images: Vec::new(),
             system_reminder: None,
             observe_startup_context: true,
+            activate_skill: None,
         },
         event_tx,
     )

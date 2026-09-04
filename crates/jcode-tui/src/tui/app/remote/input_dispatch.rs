@@ -152,6 +152,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_input(
         expanded,
         images,
         pasted_contents,
+        activate_skill,
     } = prepared;
     app.last_submitted_input = Some(raw_input.clone());
     app.pending_composer_input = Some(super::super::PendingComposerInput {
@@ -181,6 +182,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_input(
         title: None,
         tool_data: None,
     });
+    remote.stage_next_message_skill(activate_skill.clone());
     match app
         .begin_remote_send(remote, expanded.clone(), images.clone(), false)
         .await
@@ -206,6 +208,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_input(
                     expanded,
                     images,
                     pasted_contents,
+                    activate_skill,
                 },
             );
             Err(error)
@@ -238,14 +241,16 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
     // existing single-token command handling.
     let snapshot = app.current_skills_snapshot();
     let trimmed = raw_input.trim();
+    let invocation =
+        crate::skill::SkillRegistry::resolve_invocation_names(&raw_input, &app.remote_skills)
+            .or_else(|| snapshot.resolve_invocation(&raw_input));
     let is_command_shaped = trimmed == "/?"
-        || (input::parse_dropped_paths(&raw_input).is_none()
-            && snapshot.resolve_invocation(&raw_input).is_some());
+        || (input::parse_dropped_paths(&raw_input).is_none() && invocation.is_some());
     if !is_command_shaped {
         return submit_prepared_remote_input(app, remote, prepared).await;
     }
 
-    let Some(invocation) = snapshot.resolve_invocation(&raw_input) else {
+    let Some(invocation) = invocation else {
         app.input = raw_input;
         app.cursor_pos = app.input.len();
         app.submit_input();
@@ -253,42 +258,25 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
     };
 
     let Some(trailing_prompt) = invocation.prompt else {
-        app.input = raw_input;
-        app.cursor_pos = app.input.len();
-        app.submit_input();
+        let skill_name = invocation.name.to_string();
+        remote.activate_skill(&skill_name).await?;
+        app.set_status_notice(format!("Activating skill /{skill_name}..."));
         return Ok(());
     };
 
     let skill_name = invocation.name.to_string();
-    let mut skill = snapshot.get(&skill_name).cloned();
-    if skill.is_none() {
-        app.refresh_skills_snapshot();
-        skill = app.current_skills_snapshot().get(&skill_name).cloned();
-    }
-    if skill.is_none() {
-        // Preserve the existing unknown-skill and built-in slash-command
-        // handling, including the helpful endorsed-skill installation hint.
-        app.input = raw_input;
-        app.cursor_pos = app.input.len();
-        app.submit_input();
-        return Ok(());
-    }
 
-    // Reuse the normal bare invocation path to update active_skill and show
-    // the activation notice, then prepare only the trailing prompt for the
-    // remote request. This avoids duplicating slash-command presentation and
-    // keeps pasted images attached to the same user turn.
-    app.input = format!("/{}", skill_name);
-    app.cursor_pos = app.input.len();
-    app.pending_images.clear();
-    app.submit_input();
-
-    let expanded_prompt = app
-        .current_skills_snapshot()
-        .resolve_invocation(&prepared.expanded)
-        .and_then(|invocation| invocation.prompt)
-        .unwrap_or(trailing_prompt)
-        .to_string();
+    let expanded_prompt = crate::skill::SkillRegistry::resolve_invocation_names(
+        &prepared.expanded,
+        &app.remote_skills,
+    )
+    .or_else(|| {
+        app.current_skills_snapshot()
+            .resolve_invocation(&prepared.expanded)
+    })
+    .and_then(|invocation| invocation.prompt)
+    .unwrap_or(trailing_prompt)
+    .to_string();
     submit_prepared_remote_input(
         app,
         remote,
@@ -298,6 +286,7 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
             expanded: expanded_prompt,
             images: prepared.images,
             pasted_contents: prepared.pasted_contents,
+            activate_skill: Some(skill_name),
         },
     )
     .await
@@ -315,6 +304,7 @@ pub(in crate::tui::app) async fn route_prepared_input_to_new_remote_session(
         cursor_pos: prepared.cursor_pos,
         images: prepared.images,
         pasted_contents: prepared.pasted_contents,
+        activate_skill: prepared.activate_skill,
     });
     app.pending_split_model_override = None;
     app.pending_split_provider_key_override = None;
@@ -334,6 +324,7 @@ pub(in crate::tui::app) async fn route_prepared_input_to_new_remote_session(
                     expanded: prompt.content,
                     images: prompt.images,
                     pasted_contents: prompt.pasted_contents,
+                    activate_skill: prompt.activate_skill,
                 });
             app.pending_split_model_override = None;
             app.pending_split_provider_key_override = None;
@@ -358,6 +349,7 @@ pub(in crate::tui::app) async fn route_prepared_input_to_new_remote_session(
                 expanded: prompt.content,
                 images: prompt.images,
                 pasted_contents: prompt.pasted_contents,
+                activate_skill: prompt.activate_skill,
             });
         app.pending_split_model_override = None;
         app.pending_split_provider_key_override = None;

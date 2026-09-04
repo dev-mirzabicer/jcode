@@ -1,5 +1,6 @@
 #[test]
 fn skill_invocation_matches_a_multi_word_skill_name() {
+    let _home = SkillTestHome::new();
     let mut app = create_test_app();
     let temp = tempfile::tempdir().expect("tempdir");
     let skill_dir = temp.path().join(".jcode/skills/my-custom-skill");
@@ -16,6 +17,7 @@ fn skill_invocation_matches_a_multi_word_skill_name() {
     app.submit_input();
 
     assert_eq!(app.active_skill.as_deref(), Some("My Custom Skill"));
+    assert_eq!(app.session.active_skill_id(), Some("My Custom Skill"));
     let last = app.display_messages().last().expect("activation message");
     assert!(
         last.content.contains("Activated skill: My Custom Skill"),

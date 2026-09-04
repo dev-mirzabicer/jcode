@@ -53,6 +53,7 @@ impl Client {
             system_reminder: None,
             no_reply: false,
             observe_startup_context: true,
+            activate_skill: None,
         };
         let json = serde_json::to_string(&request)? + "\n";
         self.writer.write_all(json.as_bytes()).await?;

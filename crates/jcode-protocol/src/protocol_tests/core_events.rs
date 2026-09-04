@@ -7,10 +7,42 @@ fn test_request_roundtrip() -> Result<()> {
         system_reminder: None,
         no_reply: false,
         observe_startup_context: true,
+        activate_skill: None,
     };
     let json = serde_json::to_string(&req)?;
     let decoded = parse_request_json(&json)?;
     assert_eq!(decoded.id(), 1);
+    Ok(())
+}
+
+#[test]
+fn skill_activation_controls_and_events_roundtrip() -> Result<()> {
+    let request = Request::ActivateSkill {
+        id: 44,
+        skill: "synthetic-skill".to_string(),
+    };
+    let decoded = parse_request_json(&serde_json::to_string(&request)?)?;
+    assert!(matches!(
+        decoded,
+        Request::ActivateSkill { id: 44, ref skill } if skill == "synthetic-skill"
+    ));
+
+    let event = ServerEvent::SkillActivated {
+        id: 44,
+        skill_id: "synthetic-skill".to_string(),
+        description: "Synthetic description".to_string(),
+        source: "managed project".to_string(),
+    };
+    let decoded: ServerEvent = serde_json::from_str(&serde_json::to_string(&event)?)?;
+    assert!(matches!(
+        decoded,
+        ServerEvent::SkillActivated {
+            id: 44,
+            ref skill_id,
+            ref source,
+            ..
+        } if skill_id == "synthetic-skill" && source == "managed project"
+    ));
     Ok(())
 }
 
@@ -55,6 +87,7 @@ fn agent_profile_control_requests_and_events_roundtrip() -> Result<()> {
         change: AgentProfileChangeKind::Appended,
         message_id: Some("profile-message".to_string()),
         message_content: Some("SYNTHETIC_PROFILE".to_string()),
+        active_skill_id: Some("synthetic-skill".to_string()),
     };
     let json = serde_json::to_string(&event)?;
     let decoded: ServerEvent = serde_json::from_str(&json)?;
@@ -64,8 +97,11 @@ fn agent_profile_control_requests_and_events_roundtrip() -> Result<()> {
             change: AgentProfileChangeKind::Appended,
             message_id: Some(ref id),
             message_content: Some(ref content),
+            active_skill_id: Some(ref skill),
             ..
-        } if id == "profile-message" && content == "SYNTHETIC_PROFILE"
+        } if id == "profile-message"
+            && content == "SYNTHETIC_PROFILE"
+            && skill == "synthetic-skill"
     ));
     Ok(())
 }

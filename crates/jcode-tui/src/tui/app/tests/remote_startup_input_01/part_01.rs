@@ -983,6 +983,7 @@ fn test_remote_prompt_defers_while_model_switch_is_in_flight() {
             expanded: "hello after model switch".to_string(),
             images: vec![("image/png".to_string(), "abc123".to_string())],
         pasted_contents: Vec::new(),
+        activate_skill: None,
         },
     ))
     .expect("queued prompt should not try to send while model switch is pending");
@@ -1023,6 +1024,7 @@ fn test_remote_prompt_defers_while_post_login_model_setup_is_pending() {
             expanded: "review my project".to_string(),
             images: Vec::new(),
         pasted_contents: Vec::new(),
+        activate_skill: None,
         },
     ))
     .expect("post-login prompt should queue until the final model snapshot");
@@ -1060,6 +1062,7 @@ fn test_remote_model_switch_failure_restores_deferred_prompt() {
         expanded: "please use the selected model".to_string(),
         images: vec![("image/jpeg".to_string(), "def456".to_string())],
     pasted_contents: Vec::new(),
+    activate_skill: None,
     });
 
     app.handle_server_event(

@@ -24,6 +24,9 @@ fn test_protocol_request_roundtrip_randomized_samples() -> Result<()> {
             None
         };
         let observe_startup_context = rng.random_bool(0.5);
+        let activate_skill = rng
+            .random_bool(0.5)
+            .then(|| format!("skill-{id}"));
         let req = Request::Message {
             id,
             content: content.clone(),
@@ -31,6 +34,7 @@ fn test_protocol_request_roundtrip_randomized_samples() -> Result<()> {
             system_reminder: system_reminder.clone(),
             no_reply: rng.random_bool(0.5),
             observe_startup_context,
+            activate_skill: activate_skill.clone(),
         };
         let decoded = parse_request_json(&serde_json::to_string(&req)?)?;
         let Request::Message {
@@ -40,6 +44,7 @@ fn test_protocol_request_roundtrip_randomized_samples() -> Result<()> {
             system_reminder: decoded_system_reminder,
             no_reply: decoded_no_reply,
             observe_startup_context: decoded_observe_startup_context,
+            activate_skill: decoded_activate_skill,
         } = decoded
         else {
             return Err(anyhow!("expected randomized Message"));
@@ -53,6 +58,7 @@ fn test_protocol_request_roundtrip_randomized_samples() -> Result<()> {
             matches!(req, Request::Message { no_reply: true, .. })
         );
         assert_eq!(decoded_observe_startup_context, observe_startup_context);
+        assert_eq!(decoded_activate_skill, activate_skill);
     }
 
     for id in 100..132u64 {

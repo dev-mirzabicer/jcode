@@ -939,6 +939,50 @@ mod tests {
     }
 
     #[test]
+    fn active_skill_persistence_failure_preserves_previous_snapshot() {
+        let home = TestHome::new();
+        let project = tempfile::tempdir().expect("project");
+        for (name, body) in [("first-skill", "FIRST"), ("second-skill", "SECOND")] {
+            let dir = project.path().join(format!(".jcode/skills/{name}"));
+            std::fs::create_dir_all(&dir).expect("skill dir");
+            std::fs::write(
+                dir.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: {name}\n---\n{body}\n"),
+            )
+            .expect("skill");
+        }
+        let provider: std::sync::Arc<dyn Provider> =
+            std::sync::Arc::new(RecordingProvider::default());
+        let (mut agent, _) = Agent::new_with_startup_context_and_agent(
+            provider,
+            crate::tool::Registry::empty(),
+            project.path().to_str(),
+            StartupContextActivation::primary(StartupContextCaller::RunCommand),
+            crate::instruction::AgentSelection::Default,
+            false,
+        )
+        .expect("agent");
+        agent
+            .activate_skill("first-skill")
+            .expect("first activation");
+        let previous = agent.session.active_skill.clone();
+
+        let blocked_home = home.path().join("not-a-directory");
+        std::fs::write(&blocked_home, "file").expect("blocking file");
+        crate::env::set_var("JCODE_HOME", &blocked_home);
+        let error = agent
+            .activate_skill("second-skill")
+            .expect_err("persistence must fail");
+        crate::env::set_var("JCODE_HOME", home.path());
+
+        assert!(matches!(
+            error,
+            crate::agent::ActiveSkillActivationError::Persistence(_)
+        ));
+        assert_eq!(agent.session.active_skill, previous);
+    }
+
+    #[test]
     fn direct_clear_retains_agent_renders_current_source_and_clears_active_skill() {
         let home = TestHome::new();
         let project = tempfile::tempdir().expect("project");

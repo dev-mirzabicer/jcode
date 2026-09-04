@@ -942,6 +942,7 @@ pub(super) async fn handle_subscribe(
                 .active_transition_message_id()
                 .map(str::to_string),
             message_content: None,
+            active_skill_id: agent_guard.active_skill_id().map(str::to_string),
         });
     }
     let _ = client_event_tx.send(ServerEvent::Done { id });

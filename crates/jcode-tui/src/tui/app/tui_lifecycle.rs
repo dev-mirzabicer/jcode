@@ -392,6 +392,7 @@ impl App {
             crate::session::SessionImproveMode::RefactorRun => ImproveMode::RefactorRun,
             crate::session::SessionImproveMode::RefactorPlan => ImproveMode::RefactorPlan,
         });
+        let active_skill = session.active_skill_id().map(str::to_string);
 
         crate::logging::info("App::new_minimal_with_session: skipping skill/prompt bootstrap");
         crate::telemetry::begin_session_with_parent(
@@ -423,7 +424,7 @@ impl App {
             cursor_pos: 0,
             scroll_offset: 0,
             auto_scroll_paused: false,
-            active_skill: None,
+            active_skill,
             is_processing: false,
             streaming: StreamingProgress::default(),
             power_inhibitor: crate::power_inhibit::PowerInhibitor::new(),
@@ -861,6 +862,7 @@ impl App {
             session.parent_id.clone(),
             false,
         );
+        let active_skill = session.active_skill_id().map(str::to_string);
 
         let (local_context_event_tx, local_context_event_rx) =
             tokio::sync::mpsc::unbounded_channel();
@@ -884,7 +886,7 @@ impl App {
             cursor_pos: 0,
             scroll_offset: 0,
             auto_scroll_paused: false,
-            active_skill: None,
+            active_skill,
             is_processing: false,
             streaming: StreamingProgress::default(),
             power_inhibitor: crate::power_inhibit::PowerInhibitor::new(),

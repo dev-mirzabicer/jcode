@@ -176,6 +176,7 @@ struct ProcessingMessage {
     images: Vec<(String, String)>,
     system_reminder: Option<String>,
     observe_startup_context: bool,
+    activate_skill: Option<String>,
 }
 
 struct ProcessingState<'a> {
@@ -1363,8 +1364,17 @@ pub(super) async fn handle_client_with_instruction_repositories(
                 system_reminder,
                 no_reply,
                 observe_startup_context,
+                activate_skill,
             } => {
                 if no_reply {
+                    if activate_skill.is_some() {
+                        let _ = client_event_tx.send(ServerEvent::Error {
+                            id,
+                            message: "Context-only messages cannot activate a skill.".to_string(),
+                            retry_after_secs: None,
+                        });
+                        continue;
+                    }
                     append_context_message(
                         id,
                         &content,
@@ -1391,6 +1401,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
                         images,
                         system_reminder,
                         observe_startup_context,
+                        activate_skill,
                     },
                     &client_session_id,
                     &mut ProcessingState {
@@ -1517,6 +1528,40 @@ pub(super) async fn handle_client_with_instruction_repositories(
                     &soft_interrupt_queues,
                 )
                 .await;
+            }
+
+            Request::ActivateSkill { id, skill } => {
+                let Some(mut agent_guard) = try_lock_idle_agent_for_request(
+                    id,
+                    "activate_skill",
+                    &client_session_id,
+                    client_is_processing,
+                    &agent,
+                    &client_event_tx,
+                ) else {
+                    continue;
+                };
+                match agent_guard.activate_skill(&skill) {
+                    Ok(activation) => {
+                        let event = ServerEvent::SkillActivated {
+                            id,
+                            skill_id: activation.skill_id,
+                            description: activation.description,
+                            source: activation.source.kind.to_string(),
+                        };
+                        drop(agent_guard);
+                        let _ = fanout_live_client_event(&swarm_members, &client_session_id, event)
+                            .await;
+                        let _ = client_event_tx.send(ServerEvent::Done { id });
+                    }
+                    Err(error) => {
+                        let _ = client_event_tx.send(ServerEvent::Error {
+                            id,
+                            message: format!("Skill activation failed: {error}"),
+                            retry_after_secs: None,
+                        });
+                    }
+                }
             }
 
             Request::Rewind { id, message_index } => {
@@ -2938,6 +2983,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
                             change,
                             message_id,
                             message_content,
+                            active_skill_id: agent_guard.active_skill_id().map(str::to_string),
                         };
                         drop(agent_guard);
                         let _ = fanout_live_client_event(&swarm_members, &client_session_id, event)
@@ -4116,6 +4162,7 @@ async fn start_processing_message(
         images,
         system_reminder,
         observe_startup_context,
+        activate_skill,
     } = message;
     if server_reload_starting() {
         crate::logging::info(&format!(
@@ -4133,6 +4180,37 @@ async fn start_processing_message(
             retry_after_secs: None,
         });
         return;
+    }
+
+    let tx = super::state::session_event_fanout_sender_with_fallback(
+        client_session_id.to_string(),
+        Arc::clone(swarm.members),
+        client_event_tx.clone(),
+    );
+
+    if let Some(skill) = activate_skill.as_deref() {
+        let activation = {
+            let mut agent_guard = agent.lock().await;
+            agent_guard.activate_skill(skill)
+        };
+        match activation {
+            Ok(activation) => {
+                let _ = tx.send(ServerEvent::SkillActivated {
+                    id,
+                    skill_id: activation.skill_id,
+                    description: activation.description,
+                    source: activation.source.kind.to_string(),
+                });
+            }
+            Err(error) => {
+                let _ = client_event_tx.send(ServerEvent::Error {
+                    id,
+                    message: format!("Skill activation failed before turn acceptance: {error}"),
+                    retry_after_secs: None,
+                });
+                return;
+            }
+        }
     }
 
     *state.client_is_processing = true;
@@ -4170,11 +4248,6 @@ async fn start_processing_message(
     };
     let agent = Arc::clone(agent);
     let report_agent = Arc::clone(&agent);
-    let tx = super::state::session_event_fanout_sender_with_fallback(
-        client_session_id.to_string(),
-        Arc::clone(swarm.members),
-        client_event_tx.clone(),
-    );
     let done_tx = processing_done_tx.clone();
     let startup_context = Arc::clone(startup_context);
     crate::logging::info(&format!("Processing message id={} spawning task", id));
@@ -4191,6 +4264,7 @@ async fn start_processing_message(
                     images,
                     system_reminder,
                     observe_startup_context,
+                    activate_skill: None,
                 },
                 event_tx,
             ),
@@ -4567,6 +4641,7 @@ async fn process_message_streaming_mpsc_with_request_id(
         images,
         system_reminder,
         observe_startup_context,
+        activate_skill: _,
     } = message;
     let mut agent = agent.lock().await;
     let session_id = agent.session_id().to_string();

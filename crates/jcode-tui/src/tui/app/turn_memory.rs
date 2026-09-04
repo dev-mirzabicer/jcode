@@ -14,11 +14,11 @@ impl App {
             };
         }
 
-        let skills = self.current_skills_snapshot();
         let skill_prompt = self
+            .session
             .active_skill
             .as_ref()
-            .and_then(|name| skills.get(name).map(|s| s.get_prompt().to_string()));
+            .map(|skill| skill.rendered_text.as_str());
         let (mut split, context_info) = if let Some(static_part) = self.session.system_prompt_text()
         {
             let info = crate::prompt::ContextInfo {
@@ -34,6 +34,7 @@ impl App {
                 info,
             )
         } else {
+            let skills = self.current_skills_snapshot();
             let available_skills = skills
                 .list()
                 .iter()
@@ -58,7 +59,7 @@ impl App {
                 split.dynamic_part.push_str("\n\n");
             }
             split.dynamic_part.push_str("# Active Skill\n\n");
-            split.dynamic_part.push_str(&skill_prompt);
+            split.dynamic_part.push_str(skill_prompt);
         }
         self.append_current_turn_system_reminder(&mut split);
         crate::prompt::append_swarm_effort_directive(

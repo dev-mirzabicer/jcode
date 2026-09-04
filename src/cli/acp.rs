@@ -885,6 +885,7 @@ impl AcpRuntime {
                 system_reminder: None,
                 no_reply: false,
                 observe_startup_context: true,
+                activate_skill: None,
             })
             .await;
         if let Err(err) = send_result {

@@ -165,6 +165,7 @@ struct PendingSplitPrompt {
     cursor_pos: usize,
     images: Vec<(String, String)>,
     pasted_contents: Vec<String>,
+    activate_skill: Option<String>,
 }
 
 struct PendingLocalTransfer {

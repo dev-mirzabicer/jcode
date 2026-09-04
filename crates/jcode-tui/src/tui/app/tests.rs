@@ -57,6 +57,36 @@ include!("tests/spinner_slash_commands.rs");
 include!("tests/command_suggestions_cache.rs");
 include!("tests/skill_invocation_multi_word.rs");
 include!("tests/prompt_history_cross_session.rs");
+
+struct SkillTestHome {
+    _guard: std::sync::MutexGuard<'static, ()>,
+    previous: Option<std::ffi::OsString>,
+    _home: tempfile::TempDir,
+}
+
+impl SkillTestHome {
+    fn new() -> Self {
+        let guard = crate::storage::lock_test_env();
+        let previous = std::env::var_os("JCODE_HOME");
+        let home = tempfile::tempdir().expect("skill test JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", home.path());
+        Self {
+            _guard: guard,
+            previous,
+            _home: home,
+        }
+    }
+}
+
+impl Drop for SkillTestHome {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(value) => crate::env::set_var("JCODE_HOME", value),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+    }
+}
+
 #[test]
 fn kv_cache_signature_prefix_match_allows_appended_messages() {
     let baseline_messages = vec![
@@ -839,6 +869,7 @@ fn skills_command_refreshes_registry_from_disk_before_listing() {
 
 #[test]
 fn skill_invocation_with_prompt_activates_and_submits_in_one_turn() {
+    let _home = SkillTestHome::new();
     let mut app = create_test_app();
     let temp = tempfile::tempdir().expect("tempdir");
     let skill_dir = temp.path().join(".jcode/skills/prompt-skill");
@@ -855,6 +886,13 @@ fn skill_invocation_with_prompt_activates_and_submits_in_one_turn() {
     app.submit_input();
 
     assert_eq!(app.active_skill.as_deref(), Some("prompt-skill"));
+    assert_eq!(app.session.active_skill_id(), Some("prompt-skill"));
+    assert!(
+        app.session
+            .active_skill
+            .as_ref()
+            .is_some_and(|skill| skill.rendered_text.contains("Use it."))
+    );
     assert!(app.is_processing, "the trailing prompt should start a turn");
     let submitted = app
         .session
@@ -869,6 +907,7 @@ fn skill_invocation_with_prompt_activates_and_submits_in_one_turn() {
 
 #[test]
 fn skill_invocation_with_prompt_attaches_pending_image_to_user_message() {
+    let _home = SkillTestHome::new();
     let mut app = create_test_app();
     let temp = tempfile::tempdir().expect("tempdir");
     let skill_dir = temp.path().join(".jcode/skills/image-skill");
@@ -906,6 +945,48 @@ fn skill_invocation_with_prompt_attaches_pending_image_to_user_message() {
             && data == "ZmFrZSBwbmcgYnl0ZXM="
             && text == "describe this screenshot"
     ));
+}
+
+#[test]
+fn local_active_skill_prompt_stays_frozen_and_reinvocation_uses_current_source() {
+    let _home = SkillTestHome::new();
+    let mut app = create_test_app();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let skill_dir = temp.path().join(".jcode/skills/frozen-skill");
+    std::fs::create_dir_all(&skill_dir).expect("skill dir");
+    let skill_path = skill_dir.join("SKILL.md");
+    std::fs::write(
+        &skill_path,
+        "---\nname: frozen-skill\ndescription: Frozen skill\n---\nFROZEN_V1\n",
+    )
+    .expect("v1");
+    app.session.working_dir = Some(temp.path().to_string_lossy().to_string());
+    app.input = "/frozen-skill".to_string();
+    app.cursor_pos = app.input.len();
+    app.submit_input();
+    let first = app.build_system_prompt_split(None).dynamic_part;
+    assert!(first.contains("FROZEN_V1"));
+
+    std::fs::write(
+        &skill_path,
+        "---\nname: frozen-skill\ndescription: Frozen skill\n---\nFROZEN_V2\n",
+    )
+    .expect("v2");
+    assert_eq!(app.build_system_prompt_split(None).dynamic_part, first);
+
+    let restored = App::new_minimal_with_session(
+        std::sync::Arc::clone(&app.provider),
+        app.registry.clone(),
+        app.session.clone(),
+    );
+    assert_eq!(restored.active_skill(), Some("frozen-skill"));
+
+    app.input = "/frozen-skill".to_string();
+    app.cursor_pos = app.input.len();
+    app.submit_input();
+    let second = app.build_system_prompt_split(None).dynamic_part;
+    assert!(second.contains("FROZEN_V2"));
+    assert!(!second.contains("FROZEN_V1"));
 }
 
 #[test]
