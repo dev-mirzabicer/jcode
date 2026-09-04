@@ -2922,14 +2922,31 @@ pub(super) async fn handle_client_with_instruction_repositories(
             }
 
             Request::GetAgentCatalog { id } => {
-                let agent_guard = agent.lock().await;
-                match agent_guard.list_primary_agents() {
-                    Ok(entries) => {
-                        let active = agent_guard.active_agent();
+                let catalog = match agent.try_lock() {
+                    Ok(agent_guard) => agent_guard
+                        .list_primary_agents()
+                        .map(|entries| (entries, agent_guard.active_agent().cloned()))
+                        .map_err(|error| error.to_string()),
+                    Err(_) => Session::load(&client_session_id)
+                        .map_err(|error| error.to_string())
+                        .and_then(|session| {
+                            let working_dir = session.working_dir.as_deref().map(Path::new);
+                            crate::instruction::SystemPromptComposer::from_repository_service(
+                                instruction_repositories.as_ref().clone(),
+                            )
+                            .list_primary_agents(working_dir)
+                            .map(|entries| (entries, session.active_agent().cloned()))
+                            .map_err(|error| error.to_string())
+                        }),
+                };
+                match catalog {
+                    Ok((entries, active)) => {
                         let agents = entries
                             .into_iter()
                             .map(|entry| crate::protocol::AgentProfileSummary {
-                                active: active.is_some_and(|current| current == &entry.agent),
+                                active: active
+                                    .as_ref()
+                                    .is_some_and(|current| current == &entry.agent),
                                 agent_id: entry.agent.id,
                                 display_name: entry.agent.display_name,
                                 scope: entry.agent.scope.to_string(),
@@ -2953,8 +2970,59 @@ pub(super) async fn handle_client_with_instruction_repositories(
                 id,
                 include_instructions,
             } => {
-                let agent_guard = agent.lock().await;
-                let Some(active) = agent_guard.active_agent().cloned() else {
+                let status = match agent.try_lock() {
+                    Ok(agent_guard) => Ok((
+                        agent_guard.active_agent().cloned(),
+                        agent_guard.first_provider_dispatch_at().is_some(),
+                        agent_guard
+                            .active_transition_message_id()
+                            .map(str::to_string),
+                        include_instructions
+                            .then(|| agent_guard.system_prompt_text().map(str::to_string))
+                            .flatten(),
+                        include_instructions
+                            .then(|| agent_guard.active_skill_text().map(str::to_string))
+                            .flatten(),
+                    )),
+                    Err(_) => Session::load(&client_session_id)
+                        .map(|session| {
+                            (
+                                session.active_agent().cloned(),
+                                session.first_provider_dispatch_at().is_some(),
+                                session.active_transition_message_id().map(str::to_string),
+                                include_instructions
+                                    .then(|| session.system_prompt_text().map(str::to_string))
+                                    .flatten(),
+                                include_instructions
+                                    .then(|| {
+                                        session
+                                            .active_skill
+                                            .as_ref()
+                                            .map(|skill| skill.rendered_text.clone())
+                                    })
+                                    .flatten(),
+                            )
+                        })
+                        .map_err(|error| error.to_string()),
+                };
+                let (
+                    active,
+                    first_provider_dispatched,
+                    active_transition_message_id,
+                    system_prompt,
+                    active_skill,
+                ) = match status {
+                    Ok(status) => status,
+                    Err(error) => {
+                        let _ = client_event_tx.send(ServerEvent::Error {
+                            id,
+                            message: format!("Agent inspection failed: {error}"),
+                            retry_after_secs: None,
+                        });
+                        continue;
+                    }
+                };
+                let Some(active) = active else {
                     let _ = client_event_tx.send(ServerEvent::Error {
                         id,
                         message: "Session has no active primary agent.".to_string(),
@@ -2967,16 +3035,10 @@ pub(super) async fn handle_client_with_instruction_repositories(
                     agent_id: active.id,
                     display_name: active.display_name,
                     scope: active.scope.to_string(),
-                    first_provider_dispatched: agent_guard.first_provider_dispatch_at().is_some(),
-                    active_transition_message_id: agent_guard
-                        .active_transition_message_id()
-                        .map(str::to_string),
-                    system_prompt: include_instructions
-                        .then(|| agent_guard.system_prompt_text().map(str::to_string))
-                        .flatten(),
-                    active_skill: include_instructions
-                        .then(|| agent_guard.active_skill_text().map(str::to_string))
-                        .flatten(),
+                    first_provider_dispatched,
+                    active_transition_message_id,
+                    system_prompt,
+                    active_skill,
                 });
                 let _ = client_event_tx.send(ServerEvent::Done { id });
             }
