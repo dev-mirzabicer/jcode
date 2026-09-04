@@ -470,15 +470,16 @@ fn load_startup_stub_preserves_metadata_but_skips_heavy_vectors() -> Result<()> 
     session.reasoning_effort = Some("high".to_string());
     session.provider_key = Some("openai".to_string());
     session.route_api_method = Some("openai-api".to_string());
+    let large_system_prompt = "S".repeat(4 * 1024 * 1024);
     session.install_system_prompt(StoredSystemPromptState {
-        text: "SYNTHETIC_STUB_SYSTEM".to_string(),
+        text: large_system_prompt,
         active_agent: StoredAgentReference {
             scope: crate::instruction::InstructionScope::Global,
             id: "synthetic".to_string(),
             display_name: "Synthetic".to_string(),
         },
         first_provider_dispatch_at: Some(Utc::now()),
-        active_transition_message_id: None,
+        active_transition_message_id: Some("transition-stub".to_string()),
     });
     session.active_skill = Some(StoredActiveSkill {
         skill_id: "synthetic-skill".to_string(),
@@ -526,7 +527,7 @@ fn load_startup_stub_preserves_metadata_but_skips_heavy_vectors() -> Result<()> 
     session.record_replay_display_message("system", Some("Launch".to_string()), "boot");
     session.save()?;
 
-    let stub = Session::load_startup_stub(session_id)?;
+    let mut stub = Session::load_startup_stub(session_id)?;
     assert_eq!(stub.id, session_id);
     assert_eq!(stub.parent_id.as_deref(), Some("parent_123"));
     assert_eq!(stub.title.as_deref(), Some("startup stub"));
@@ -534,17 +535,18 @@ fn load_startup_stub_preserves_metadata_but_skips_heavy_vectors() -> Result<()> 
     assert_eq!(stub.reasoning_effort.as_deref(), Some("high"));
     assert_eq!(stub.provider_key.as_deref(), Some("openai"));
     assert_eq!(stub.route_api_method.as_deref(), Some("openai-api"));
-    assert_eq!(stub.system_prompt_text(), Some("SYNTHETIC_STUB_SYSTEM"));
+    assert_eq!(stub.system_prompt_text(), None);
+    assert!(stub.system_prompt.is_none());
     assert_eq!(
         stub.active_agent().map(|agent| agent.id.as_str()),
         Some("synthetic")
     );
-    assert_eq!(
-        stub.active_skill
-            .as_ref()
-            .map(|skill| skill.rendered_text.as_str()),
-        Some("SYNTHETIC_SKILL")
-    );
+    assert!(stub.first_provider_dispatch_at().is_some());
+    assert_eq!(stub.active_transition_message_id(), Some("transition-stub"));
+    assert!(stub.active_skill.is_none());
+    assert_eq!(stub.active_skill_id(), Some("synthetic-skill"));
+    assert_eq!(stub.memory_profile_snapshot().system_prompt_bytes, 0);
+    assert_eq!(stub.memory_profile_snapshot().active_skill_bytes, 0);
     assert!(stub.is_canary);
     assert!(stub.messages.is_empty());
     assert!(stub.env_snapshots.is_empty());

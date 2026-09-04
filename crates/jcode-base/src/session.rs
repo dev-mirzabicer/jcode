@@ -133,11 +133,37 @@ pub struct StoredSystemPromptState {
     pub active_transition_message_id: Option<String>,
 }
 
+/// Lightweight frozen-prompt identity retained by metadata-only startup loads.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredSystemPromptMetadata {
+    pub active_agent: StoredAgentReference,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_provider_dispatch_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_transition_message_id: Option<String>,
+}
+
+impl From<&StoredSystemPromptState> for StoredSystemPromptMetadata {
+    fn from(state: &StoredSystemPromptState) -> Self {
+        Self {
+            active_agent: state.active_agent.clone(),
+            first_provider_dispatch_at: state.first_provider_dispatch_at,
+            active_transition_message_id: state.active_transition_message_id.clone(),
+        }
+    }
+}
+
 /// Exact rendered skill text retained while an invocation remains active.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoredActiveSkill {
     pub skill_id: String,
     pub rendered_text: String,
+}
+
+/// Lightweight active-skill identity retained by metadata-only startup loads.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredActiveSkillMetadata {
+    pub skill_id: String,
 }
 
 #[derive(Debug)]
@@ -193,6 +219,12 @@ pub struct Session {
     /// Exact active skill text. WP-05 owns activation semantics.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_skill: Option<StoredActiveSkill>,
+    /// Metadata-only startup projection. Full session loads leave this empty.
+    #[serde(skip)]
+    system_prompt_metadata: Option<StoredSystemPromptMetadata>,
+    /// Metadata-only active-skill projection. Full session loads leave this empty.
+    #[serde(skip)]
+    active_skill_metadata: Option<StoredActiveSkillMetadata>,
     /// Persisted compacted-view state so reload/resume can continue using the
     /// active summary + recent tail instead of re-sending the full transcript.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -312,9 +344,9 @@ struct SessionStartupStub {
     #[serde(default)]
     startup_context_block: Option<StoredStartupContextBlock>,
     #[serde(default)]
-    system_prompt: Option<StoredSystemPromptState>,
+    system_prompt: Option<StoredSystemPromptMetadata>,
     #[serde(default)]
-    active_skill: Option<StoredActiveSkill>,
+    active_skill: Option<StoredActiveSkillMetadata>,
     #[serde(default)]
     context_view: StoredContextViewState,
     #[serde(default)]
@@ -467,24 +499,59 @@ impl Session {
     }
 
     pub fn active_agent(&self) -> Option<&StoredAgentReference> {
-        self.system_prompt.as_ref().map(|state| &state.active_agent)
+        self.system_prompt
+            .as_ref()
+            .map(|state| &state.active_agent)
+            .or_else(|| {
+                self.system_prompt_metadata
+                    .as_ref()
+                    .map(|state| &state.active_agent)
+            })
     }
 
     pub fn first_provider_dispatch_at(&self) -> Option<DateTime<Utc>> {
         self.system_prompt
             .as_ref()
             .and_then(|state| state.first_provider_dispatch_at)
+            .or_else(|| {
+                self.system_prompt_metadata
+                    .as_ref()
+                    .and_then(|state| state.first_provider_dispatch_at)
+            })
+    }
+
+    pub fn active_transition_message_id(&self) -> Option<&str> {
+        self.system_prompt
+            .as_ref()
+            .and_then(|state| state.active_transition_message_id.as_deref())
+            .or_else(|| {
+                self.system_prompt_metadata
+                    .as_ref()
+                    .and_then(|state| state.active_transition_message_id.as_deref())
+            })
+    }
+
+    pub fn active_skill_id(&self) -> Option<&str> {
+        self.active_skill
+            .as_ref()
+            .map(|skill| skill.skill_id.as_str())
+            .or_else(|| {
+                self.active_skill_metadata
+                    .as_ref()
+                    .map(|skill| skill.skill_id.as_str())
+            })
     }
 
     pub fn install_system_prompt(&mut self, state: StoredSystemPromptState) {
         self.system_prompt = Some(state);
+        self.system_prompt_metadata = None;
         self.updated_at = Utc::now();
         self.persist_state.force_snapshot = true;
         self.mark_memory_profile_dirty();
     }
 
     pub fn clear_active_skill(&mut self) {
-        if self.active_skill.take().is_some() {
+        if self.active_skill.take().is_some() || self.active_skill_metadata.take().is_some() {
             self.updated_at = Utc::now();
             self.persist_state.force_snapshot = true;
             self.mark_memory_profile_dirty();
@@ -547,6 +614,8 @@ impl Session {
         self.startup_context_block = parent.startup_context_block.clone();
         self.system_prompt = parent.system_prompt.clone();
         self.active_skill = parent.active_skill.clone();
+        self.system_prompt_metadata = parent.system_prompt_metadata.clone();
+        self.active_skill_metadata = parent.active_skill_metadata.clone();
         self.compaction = parent.compaction.clone();
         self.context_view = parent.context_view.clone();
         self.provider_session_id = None;
@@ -574,8 +643,10 @@ impl Session {
         session.updated_at = stub.updated_at;
         session.startup_context = stub.startup_context;
         session.startup_context_block = stub.startup_context_block;
-        session.system_prompt = stub.system_prompt;
-        session.active_skill = stub.active_skill;
+        session.system_prompt = None;
+        session.active_skill = None;
+        session.system_prompt_metadata = stub.system_prompt;
+        session.active_skill_metadata = stub.active_skill;
         session.compaction = stub.compaction;
         session.context_view = stub.context_view;
         session.provider_session_id = stub.provider_session_id;
@@ -616,6 +687,8 @@ impl Session {
         session.startup_context_block = snapshot.startup_context_block;
         session.system_prompt = snapshot.system_prompt;
         session.active_skill = snapshot.active_skill;
+        session.system_prompt_metadata = None;
+        session.active_skill_metadata = None;
         session.compaction = snapshot.compaction;
         session.context_view = snapshot.context_view;
         session.provider_session_id = snapshot.provider_session_id;
@@ -1332,6 +1405,8 @@ impl Session {
             startup_context_block: None,
             system_prompt: None,
             active_skill: None,
+            system_prompt_metadata: None,
+            active_skill_metadata: None,
             compaction: None,
             context_view: StoredContextViewState::default(),
             provider_session_id: None,
@@ -1396,6 +1471,8 @@ impl Session {
             startup_context_block: None,
             system_prompt: None,
             active_skill: None,
+            system_prompt_metadata: None,
+            active_skill_metadata: None,
             compaction: None,
             context_view: StoredContextViewState::default(),
             provider_session_id: None,
