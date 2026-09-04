@@ -377,6 +377,33 @@ impl Agent {
         let preserve_testing_build = self.session.testing_build.clone();
         let preserve_debug = self.session.is_debug;
         let preserve_working_dir = self.session.working_dir.clone();
+        let caller = crate::agent::StartupContextCaller::Clear;
+        let selection = match self.session.active_agent() {
+            Some(active) => {
+                crate::instruction::AgentSelection::from_stored(active).map_err(|error| {
+                    crate::agent::StartupContextActivationError::Instruction {
+                        caller,
+                        source: crate::agent::PrimaryInstructionActivationError::Composition(
+                            crate::instruction::SystemPromptActivationError::Instruction(error),
+                        ),
+                    }
+                })?
+            }
+            None => crate::instruction::AgentSelection::Explicit(
+                crate::instruction::InstructionSelector::global(
+                    crate::instruction::InstructionKind::Agent,
+                    "jcode",
+                )
+                .map_err(|error| {
+                    crate::agent::StartupContextActivationError::Instruction {
+                        caller,
+                        source: crate::agent::PrimaryInstructionActivationError::Composition(
+                            crate::instruction::SystemPromptActivationError::Instruction(error),
+                        ),
+                    }
+                })?,
+            ),
+        };
 
         let mut new_session = Session::create(None, None);
         new_session.mark_active();
@@ -387,6 +414,29 @@ impl Agent {
         new_session.is_debug = preserve_debug;
         new_session.working_dir = preserve_working_dir;
         new_session.ensure_initial_session_context_message();
+
+        let prompt_activation = match self
+            .compose_primary_instructions_for_session(&new_session, selection)
+        {
+            Ok(activation) => activation,
+            Err(source) => {
+                let activation_error = source.to_string();
+                new_session.mark_closed();
+                if let Err(cleanup) = crate::session::remove_unpublished_session(&new_session.id) {
+                    return Err(crate::agent::StartupContextActivationError::Cleanup {
+                        caller,
+                        activation_error,
+                        source: cleanup,
+                    });
+                }
+                return Err(crate::agent::StartupContextActivationError::Instruction {
+                    caller,
+                    source,
+                });
+            }
+        };
+        new_session.install_system_prompt(prompt_activation.state);
+        new_session.clear_active_skill();
 
         let activation = if preserve_debug {
             crate::agent::StartupContextActivation::Disabled
@@ -414,6 +464,21 @@ impl Agent {
                 return Err(error);
             }
         };
+        if let Err(source) = new_session.save() {
+            let activation_error = source.to_string();
+            new_session.mark_closed();
+            if let Err(cleanup) = crate::session::remove_unpublished_session(&new_session.id) {
+                return Err(crate::agent::StartupContextActivationError::Cleanup {
+                    caller,
+                    activation_error,
+                    source: cleanup,
+                });
+            }
+            return Err(crate::agent::StartupContextActivationError::Instruction {
+                caller,
+                source: crate::agent::PrimaryInstructionActivationError::Persistence(source),
+            });
+        }
 
         let previous_session_id = self.session.id.clone();
         self.session.mark_closed();
@@ -919,6 +984,25 @@ impl Agent {
             )?;
         }
 
+        let migrated_system_prompt = session.system_prompt.is_none();
+        if migrated_system_prompt {
+            let selection = crate::instruction::AgentSelection::Explicit(
+                crate::instruction::InstructionSelector::global(
+                    crate::instruction::InstructionKind::Agent,
+                    "jcode",
+                )?,
+            );
+            let activation = self
+                .compose_primary_instructions_for_session(&session, selection)
+                .map_err(anyhow::Error::new)?;
+            session.install_system_prompt(activation.state);
+            // The previous runtime may have issued this continuation under a
+            // different true system prompt. It cannot remain valid after the
+            // one-time migration installs a new frozen system activation.
+            session.provider_session_id = None;
+            session.save()?;
+        }
+
         let assign_start = Instant::now();
         let previous_session_id = self.session.id.clone();
         // Restore provider_session_id for Claude CLI session resume
@@ -963,14 +1047,6 @@ impl Agent {
             self.session.model = Some(self.provider_model());
         }
         self.restore_reasoning_effort_from_session();
-        if self.session.system_prompt.is_none() {
-            self.activate_primary_instructions(crate::instruction::AgentSelection::Explicit(
-                crate::instruction::InstructionSelector::global(
-                    crate::instruction::InstructionKind::Agent,
-                    "jcode",
-                )?,
-            ))?;
-        }
         let model_ms = model_start.elapsed().as_millis();
 
         let mark_active_start = Instant::now();
