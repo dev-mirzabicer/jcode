@@ -118,7 +118,7 @@ impl SkillTool {
         let name = normalize_skill_name(name, "load")?;
 
         let registry = self.effective_registry(working_dir).await;
-        let skill = registry.get(&name).ok_or_else(|| {
+        let activation = registry.activate(&name)?.ok_or_else(|| {
             // Endorsed skills are advertised in `list` but are not bundled;
             // a bare "not found" here reads like a bug (issue #445). Point at
             // the actual install command instead.
@@ -144,19 +144,13 @@ impl SkillTool {
             }
         })?;
 
-        let base_dir = skill
-            .path
-            .parent()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| ".".to_string());
+        let base_dir = activation.source.package_root.display().to_string();
 
         Ok(ToolOutput::new(format!(
             "## Skill: {}\n\n**Base directory**: {}\n\n{}",
-            skill.name,
-            base_dir,
-            skill.get_prompt()
+            activation.skill_id, base_dir, activation.rendered_text
         ))
-        .with_title(format!("skill: {}", skill.name)))
+        .with_title(format!("skill: {}", activation.skill_id)))
     }
 
     async fn list_skills(&self, working_dir: Option<&std::path::Path>) -> Result<ToolOutput> {
@@ -187,6 +181,17 @@ impl SkillTool {
                 output.push_str(&format!("## /{}\n", skill.name));
                 output.push_str(&format!("  {}\n", skill.description));
                 output.push_str(&format!("  Path: {}\n", skill.path.display()));
+                if let Some(source) = registry.source(&skill.name) {
+                    output.push_str(&format!(
+                        "  Source: {}{}\n",
+                        source.kind,
+                        if source.kind.is_read_only() {
+                            " (read-only; Copy to manage)"
+                        } else {
+                            ""
+                        }
+                    ));
+                }
                 if let Some(ref tools) = skill.allowed_tools {
                     output.push_str(&format!("  Tools: {}\n", tools.join(", ")));
                 }
@@ -288,12 +293,23 @@ impl SkillTool {
 
         let registry = self.effective_registry(working_dir).await;
 
-        if let Some(skill) = registry.get(&name) {
+        if let Some(skill) = registry.resolve(&name)? {
             let mut output = format!("# Skill: {}\n\n", skill.name);
             output.push_str(&format!("**Description:** {}\n", skill.description));
             output.push_str(&format!("**Path:** {}\n", skill.path.display()));
             if let Some(ref tools) = skill.allowed_tools {
                 output.push_str(&format!("**Allowed tools:** {}\n", tools.join(", ")));
+            }
+            if let Some(source) = registry.source(&skill.name) {
+                output.push_str(&format!("**Source:** {}\n", source.kind));
+                output.push_str(&format!(
+                    "**Managed here:** {}\n",
+                    if source.kind.is_managed() {
+                        "yes"
+                    } else {
+                        "no"
+                    }
+                ));
             }
             output.push_str("\n---\n\n");
             output.push_str(&skill.content);
