@@ -525,10 +525,12 @@ pub fn build_ambient_system_prompt(
     prompt
 }
 
-pub fn format_scheduled_session_message(item: &ScheduledItem) -> String {
+pub fn format_scheduled_session_message(item: &ScheduledItem) -> anyhow::Result<String> {
+    let prose = crate::instruction::notification::Notification::ScheduledTaskDue
+        .render(item.working_dir.as_deref().map(std::path::Path::new))?;
     let mut lines = vec![
         "[Scheduled task]".to_string(),
-        "A scheduled task for this session is now due.".to_string(),
+        prose,
         String::new(),
         format!(
             "Task: {}",
@@ -553,7 +555,7 @@ pub fn format_scheduled_session_message(item: &ScheduledItem) -> String {
         lines.push(ctx.clone());
     }
 
-    lines.join("\n")
+    Ok(lines.join("\n"))
 }
 
 /// Format a chrono::Duration into a rough human-readable string.

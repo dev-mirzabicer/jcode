@@ -44,6 +44,13 @@ macro_rules! notifications {
 }
 
 notifications! {
+    BrowserStatusReady => ("browser-status-ready", "browser status", Plain),
+    BrowserStatusOutdated { missing_actions: &'a str } => ("browser-status-outdated", "browser status", Handlebars),
+    BrowserStatusUnresponsive => ("browser-status-unresponsive", "browser status", Plain),
+    BrowserStatusAbsent => ("browser-status-absent", "browser status", Plain),
+    BrowserReadinessBlocked { details: &'a str } => ("browser-readiness-blocked", "browser readiness gate", Handlebars),
+    ToolInterruptedWait { input: &'a str } => ("tool-interrupted-by-reload-wait", "agent reload tool-result completion", Handlebars),
+    ScheduledTaskDue => ("scheduled-task-due", "scheduled task delivery", Plain),
     MacosComputerPermissions => ("macos-computer-permissions", "macOS permission status", Plain),
     ConfigEditInvalid { path: &'a str, error: &'a str } => ("config-edit-invalid", "config edit result", Handlebars),
     ConfigEditLive => ("config-edit-live", "config edit result", Plain),

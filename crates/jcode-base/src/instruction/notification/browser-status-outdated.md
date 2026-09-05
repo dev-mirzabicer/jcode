@@ -1,0 +1,1 @@
+Browser bridge is connected, but the live Firefox extension is out of date and does not support required actions: {{missing_actions}}. Use action='setup' only to repair or update the existing install. You do not need to run setup before every browser task.

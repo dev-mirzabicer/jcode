@@ -106,7 +106,7 @@ trait BrowserProvider: Send + Sync {
 
     async fn status(&self, ctx: &ToolContext) -> Result<ToolOutput>;
     async fn setup(&self) -> Result<ToolOutput>;
-    async fn ensure_ready(&self) -> Result<Option<String>>;
+    async fn ensure_ready(&self, ctx: &ToolContext) -> Result<Option<String>>;
     async fn execute(
         &self,
         action: &str,
@@ -143,8 +143,8 @@ impl BrowserProvider for FirefoxBridgeProvider {
         ))
     }
 
-    async fn ensure_ready(&self) -> Result<Option<String>> {
-        ensure_firefox_ready().await
+    async fn ensure_ready(&self, ctx: &ToolContext) -> Result<Option<String>> {
+        ensure_firefox_ready(ctx.working_dir.as_deref()).await
     }
 
     async fn execute(
@@ -287,7 +287,7 @@ impl Tool for BrowserTool {
             "status" => provider.status(&ctx).await,
             "setup" => provider.setup().await,
             other => {
-                let setup_message = provider.ensure_ready().await?;
+                let setup_message = provider.ensure_ready(&ctx).await?;
                 let output = provider.execute(other, &params, &ctx).await?;
                 Ok(match setup_message {
                     Some(message) if !message.is_empty() => prepend_setup_message(output, &message),
@@ -350,11 +350,17 @@ fn resolve_provider(browser: Option<&str>) -> Result<&'static dyn BrowserProvide
     )
 }
 
-async fn firefox_status(
-    provider: &FirefoxBridgeProvider,
-    _ctx: &ToolContext,
-) -> Result<ToolOutput> {
+async fn firefox_status(provider: &FirefoxBridgeProvider, ctx: &ToolContext) -> Result<ToolOutput> {
     let status = crate::browser::ensure_browser_ready_noninteractive().await?;
+    format_firefox_status(provider, &status, ctx.working_dir.as_deref())
+}
+
+fn format_firefox_status(
+    provider: &FirefoxBridgeProvider,
+    status: &crate::browser::BrowserStatus,
+    working_dir: Option<&std::path::Path>,
+) -> Result<ToolOutput> {
+    use crate::instruction::notification::Notification;
     let mut metadata = json!({
         "setup_complete": status.setup_complete,
         "binary_installed": status.binary_installed,
@@ -372,7 +378,7 @@ async fn firefox_status(
 
     if status.ready {
         return Ok(
-            ToolOutput::new("Browser bridge is installed and responding.")
+            ToolOutput::new(Notification::BrowserStatusReady.render(working_dir)?)
                 .with_title("browser status")
                 .with_metadata(metadata),
         );
@@ -384,28 +390,30 @@ async fn firefox_status(
         } else {
             status.missing_actions.join(", ")
         };
-        return Ok(ToolOutput::new(format!(
-            "Browser bridge is connected, but the live Firefox extension is out of date and does not support required actions: {}. Use action='setup' only to repair or update the existing install. You do not need to run setup before every browser task.",
-            missing
-        ))
-        .with_title("browser status")
-        .with_metadata(metadata));
-    }
-
-    if status.binary_installed {
         return Ok(ToolOutput::new(
-            "Browser bridge binaries are installed, but the live bridge is not responding. Use action='setup' only if you want to repair the existing install. You do not need to run setup before every browser task.",
+            Notification::BrowserStatusOutdated {
+                missing_actions: &missing,
+            }
+            .render(working_dir)?,
         )
         .with_title("browser status")
         .with_metadata(metadata));
     }
 
+    if status.binary_installed {
+        return Ok(
+            ToolOutput::new(Notification::BrowserStatusUnresponsive.render(working_dir)?)
+                .with_title("browser status")
+                .with_metadata(metadata),
+        );
+    }
+
     metadata["backend"] = json!("unconfigured");
-    Ok(ToolOutput::new(
-        "Browser bridge is not installed yet. Use action='setup' only for first-time install or repair. You do not need to run setup before every browser task.",
+    Ok(
+        ToolOutput::new(Notification::BrowserStatusAbsent.render(working_dir)?)
+            .with_title("browser status")
+            .with_metadata(metadata),
     )
-    .with_title("browser status")
-    .with_metadata(metadata))
 }
 
 async fn firefox_setup(provider: &FirefoxBridgeProvider) -> Result<ToolOutput> {
@@ -428,35 +436,41 @@ async fn firefox_setup(provider: &FirefoxBridgeProvider) -> Result<ToolOutput> {
     })))
 }
 
-async fn ensure_firefox_ready() -> Result<Option<String>> {
+async fn ensure_firefox_ready(working_dir: Option<&std::path::Path>) -> Result<Option<String>> {
     // A setup marker only proves that installation once completed. Always
     // verify the live bridge before launching an action because Firefox or the
     // extension may have stopped or become incompatible since then.
     let status = crate::browser::ensure_browser_ready_noninteractive().await?;
+    require_firefox_ready(&status, working_dir)
+}
+
+fn require_firefox_ready(
+    status: &crate::browser::BrowserStatus,
+    working_dir: Option<&std::path::Path>,
+) -> Result<Option<String>> {
     if status.ready {
         return Ok(None);
     }
 
-    let mut message = String::from(
-        "Browser automation is not ready yet. Use the browser tool with action='status' to confirm current state. Only run action='setup' or `jcode browser setup` for first-time install or repair when the bridge is not already ready.\n",
-    );
+    let mut details = String::new();
     if !status.binary_installed {
-        message.push_str("Browser bridge binary is not installed yet.\n");
+        details.push_str("Browser bridge binary is not installed yet.\n");
     } else if status.responding && !status.compatible {
-        message.push_str("Browser bridge is connected, but the live Firefox extension is missing required actions.");
+        details.push_str("Browser bridge is connected, but the live Firefox extension is missing required actions.");
         if !status.missing_actions.is_empty() {
-            message.push_str(&format!(
+            details.push_str(&format!(
                 " Missing actions: {}.",
                 status.missing_actions.join(", ")
             ));
         }
-        message.push('\n');
+        details.push('\n');
     } else {
-        message.push_str("Browser bridge binaries are installed, but the live Firefox bridge is not responding.\n");
+        details.push_str("Browser bridge binaries are installed, but the live Firefox bridge is not responding.\n");
     }
-    message.push_str(
-        "Normal browser tool calls will not reopen the installer automatically anymore. Do not retry browser actions until status reports ready. Continue with another available capability; if the goal requires an external capability unavailable in this session, use capability discovery.",
-    );
+    let message = crate::instruction::notification::Notification::BrowserReadinessBlocked {
+        details: &details,
+    }
+    .render(working_dir)?;
     anyhow::bail!(message)
 }
 

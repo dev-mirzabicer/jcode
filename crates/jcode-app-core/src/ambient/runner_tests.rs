@@ -194,6 +194,40 @@ async fn spawn_target_creates_one_child_session_and_runs_task() {
     };
 
     let runner = AmbientRunnerHandle::new(Arc::new(crate::safety::SafetySystem::new()));
+    crate::instruction::SystemPromptComposer::new()
+        .ensure_global_store()
+        .unwrap();
+    let notice_source = temp
+        .path()
+        .join("instructions/notifications/scheduled-task-due.md");
+    let write_notice = |body: &str| {
+        std::fs::write(
+            &notice_source,
+            format!(
+                "---\nid: scheduled-task-due\nkind: notification\ntemplate: handlebars\n---\n{body}"
+            ),
+        )
+        .unwrap()
+    };
+    write_notice("{{invalid}}");
+    assert!(
+        runner
+            .spawn_session_for_scheduled_item(&provider, &item, &parent.id)
+            .await
+            .is_err()
+    );
+    for entry in std::fs::read_dir(temp.path().join("sessions")).unwrap() {
+        let path = entry.unwrap().path();
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "json")
+        {
+            let stored: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            assert_ne!(stored["parent_id"].as_str(), Some(parent.id.as_str()));
+        }
+    }
+    write_notice("SYNTHETIC-DUE");
     let child_session_id = runner
         .spawn_session_for_scheduled_item(&provider, &item, &parent.id)
         .await
@@ -202,6 +236,24 @@ async fn spawn_target_creates_one_child_session_and_runs_task() {
     assert_ne!(child_session_id, parent.id);
 
     let child = Session::load(&child_session_id).expect("load spawned child session");
+    assert!(
+        child
+            .messages
+            .iter()
+            .any(|message| message.content_preview().contains("SYNTHETIC-DUE"))
+    );
+    write_notice("LATER-DUE");
+    assert!(
+        crate::ambient::format_scheduled_session_message(&item)
+            .unwrap()
+            .contains("LATER-DUE")
+    );
+    assert!(
+        child
+            .messages
+            .iter()
+            .any(|message| message.content_preview().contains("SYNTHETIC-DUE"))
+    );
     assert_eq!(child.parent_id.as_deref(), Some(parent.id.as_str()));
     assert_eq!(child.working_dir, parent.working_dir);
     assert!(child.compaction.is_none());

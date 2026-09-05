@@ -1,6 +1,107 @@
 use super::*;
 
 #[test]
+fn managed_browser_readiness_preserves_state_and_uses_current_prose() {
+    let _lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    struct Restore(Option<std::ffi::OsString>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(old) => crate::env::set_var("JCODE_HOME", old),
+                None => crate::env::remove_var("JCODE_HOME"),
+            };
+            crate::config::Config::invalidate_cache();
+        }
+    }
+    let _restore = Restore(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::config::Config::invalidate_cache();
+    crate::instruction::SystemPromptComposer::new()
+        .ensure_global_store()
+        .unwrap();
+    let write = |id: &str, body: &str| {
+        std::fs::write(
+            home.path()
+                .join(format!("instructions/notifications/{id}.md")),
+            format!("---\nid: {id}\nkind: notification\ntemplate: handlebars\n---\n{body}"),
+        )
+        .unwrap()
+    };
+    for id in [
+        "browser-status-ready",
+        "browser-status-outdated",
+        "browser-status-unresponsive",
+        "browser-status-absent",
+    ] {
+        write(id, id);
+    }
+    write("browser-readiness-blocked", "BLOCKED-SYNTHETIC {{details}}");
+    let mut status = crate::browser::BrowserStatus {
+        backend: "firefox_agent_bridge",
+        browser: "firefox",
+        setup_complete: false,
+        binary_installed: false,
+        responding: false,
+        compatible: false,
+        missing_actions: vec![],
+        ready: false,
+    };
+    assert_eq!(
+        format_firefox_status(&FirefoxBridgeProvider, &status, None)
+            .unwrap()
+            .output,
+        "browser-status-absent"
+    );
+    assert!(
+        require_firefox_ready(&status, None)
+            .unwrap_err()
+            .to_string()
+            .starts_with("BLOCKED-SYNTHETIC")
+    );
+    status.binary_installed = true;
+    assert_eq!(
+        format_firefox_status(&FirefoxBridgeProvider, &status, None)
+            .unwrap()
+            .output,
+        "browser-status-unresponsive"
+    );
+    status.responding = true;
+    status.missing_actions = vec!["evaluate<&>".into()];
+    write("browser-status-outdated", "OUTDATED {{missing_actions}}");
+    let old = format_firefox_status(&FirefoxBridgeProvider, &status, None).unwrap();
+    assert_eq!(old.output, "OUTDATED evaluate<&>");
+    assert_eq!(old.metadata.as_ref().unwrap()["ready"], false);
+    write("browser-status-outdated", "CURRENT {{missing_actions}}");
+    assert_eq!(
+        format_firefox_status(&FirefoxBridgeProvider, &status, None)
+            .unwrap()
+            .output,
+        "CURRENT evaluate<&>"
+    );
+    assert_eq!(old.output, "OUTDATED evaluate<&>");
+    write("browser-readiness-blocked", "");
+    assert!(require_firefox_ready(&status, None).is_err());
+    write("browser-readiness-blocked", "{{invalid}}");
+    assert!(
+        require_firefox_ready(&status, None)
+            .unwrap_err()
+            .to_string()
+            .contains("browser-readiness-blocked")
+    );
+    status.ready = true;
+    status.compatible = true;
+    status.missing_actions.clear();
+    assert!(require_firefox_ready(&status, None).unwrap().is_none());
+    write("browser-status-ready", "");
+    let ready = format_firefox_status(&FirefoxBridgeProvider, &status, None).unwrap();
+    assert!(ready.output.is_empty());
+    assert_eq!(ready.metadata.as_ref().unwrap()["ready"], true);
+    write("browser-status-ready", "{{invalid}}");
+    assert!(format_firefox_status(&FirefoxBridgeProvider, &status, None).is_err());
+}
+
+#[test]
 fn press_script_uses_selector_when_present() {
     let script = build_press_script(Some("Enter"), Some("#email")).unwrap();
     assert!(script.contains("document.querySelector"));
@@ -245,16 +346,16 @@ async fn readiness_does_not_trust_a_stale_setup_marker_async() {
     std::fs::write(browser_dir.join("firefox-agent-bridge-host"), "host").expect("write fake host");
     std::fs::write(browser_dir.join(".setup-complete"), "complete").expect("write setup marker");
 
-    let error = ensure_firefox_ready()
+    crate::instruction::SystemPromptComposer::new()
+        .ensure_global_store()
+        .unwrap();
+    std::fs::write(temp.path().join("instructions/notifications/browser-readiness-blocked.md"), "---\nid: browser-readiness-blocked\nkind: notification\ntemplate: handlebars\n---\nSYNTHETIC-GATE {{details}}").unwrap();
+    let error = ensure_firefox_ready(None)
         .await
         .expect_err("stale setup marker must not bypass live readiness");
     let message = error.to_string();
     assert!(message.contains("not responding"), "{message}");
-    assert!(
-        message.contains("Do not retry browser actions"),
-        "{message}"
-    );
-    assert!(message.contains("capability discovery"), "{message}");
+    assert!(message.starts_with("SYNTHETIC-GATE"), "{message}");
 
     if let Some(prev_home) = prev_home {
         jcode_base::env::set_var("JCODE_HOME", prev_home);

@@ -1,0 +1,1 @@
+Browser bridge is installed and responding.

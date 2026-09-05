@@ -42,7 +42,11 @@ fn find_wrap_marker_incremental(accumulated: &str, appended_len: usize) -> Optio
         .map(|rel_idx| scan_start + rel_idx)
 }
 
-fn reload_interrupted_tool_result(tc: &ToolCall, elapsed_secs: f64) -> (String, bool) {
+fn reload_interrupted_tool_result(
+    tc: &ToolCall,
+    elapsed_secs: f64,
+    working_dir: Option<&std::path::Path>,
+) -> (String, bool) {
     if tc.name == "selfdev" {
         return ("Reload initiated. Process restarting...".to_string(), false);
     }
@@ -57,10 +61,16 @@ fn reload_interrupted_tool_result(tc: &ToolCall, elapsed_secs: f64) -> (String, 
 
     if is_wait_like {
         let input = serde_json::to_string(&tc.input).unwrap_or_else(|_| "{}".to_string());
+        let prose =
+            crate::instruction::notification::Notification::ToolInterruptedWait { input: &input }
+                .render(working_dir)
+                .unwrap_or_else(|error| format!("Reload notification rendering failed: {error}"));
+        // The interrupted tool must still receive its structural result during
+        // shutdown. A prose failure is explicit, not a missing tool receipt.
         return (
             format!(
-                "[Tool '{}' wait interrupted by server reload after {:.1}s. The underlying operation may still be running. Resume the wait by rerunning the same tool call with input: {}]",
-                tc.name, elapsed_secs, input
+                "[Tool '{}' wait interrupted by server reload after {:.1}s. {prose}]",
+                tc.name, elapsed_secs
             ),
             false,
         );
@@ -1481,8 +1491,14 @@ impl Agent {
                     // For selfdev reload and wait-like tools, the interruption is expected:
                     // selfdev initiated the restart, while wait-like tools should be resumed
                     // after reload rather than treated as failed work.
-                    let (interrupted_msg, is_error) =
-                        reload_interrupted_tool_result(tc, tool_elapsed.as_secs_f64());
+                    let (interrupted_msg, is_error) = reload_interrupted_tool_result(
+                        tc,
+                        tool_elapsed.as_secs_f64(),
+                        self.session
+                            .working_dir
+                            .as_deref()
+                            .map(std::path::Path::new),
+                    );
 
                     let _ = event_tx.send(ServerEvent::ToolDone {
                         id: tc.id.clone(),
@@ -1608,23 +1624,50 @@ mod tests {
 
     #[test]
     fn reload_interrupted_bg_wait_is_non_error_and_resumable() {
+        let _lock = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(old) => crate::env::set_var("JCODE_HOME", old),
+                    None => crate::env::remove_var("JCODE_HOME"),
+                };
+                crate::config::Config::invalidate_cache();
+            }
+        }
+        let _restore = Restore(std::env::var_os("JCODE_HOME"));
+        crate::env::set_var("JCODE_HOME", home.path());
+        crate::config::Config::invalidate_cache();
+        crate::instruction::SystemPromptComposer::new()
+            .ensure_global_store()
+            .unwrap();
+        let source = home
+            .path()
+            .join("instructions/notifications/tool-interrupted-by-reload-wait.md");
+        std::fs::write(&source, "---\nid: tool-interrupted-by-reload-wait\nkind: notification\ntemplate: handlebars\n---\nSYNTHETIC {{input}}").unwrap();
         let tc = tool_call(
             "bg",
             json!({"action": "wait", "task_id": "bg-123", "max_wait_seconds": 300}),
         );
 
-        let (message, is_error) = reload_interrupted_tool_result(&tc, 1.2);
+        let (message, is_error) = reload_interrupted_tool_result(&tc, 1.2, None);
 
         assert!(!is_error);
-        assert!(message.contains("Resume the wait"));
+        assert!(message.contains("SYNTHETIC"));
         assert!(message.contains("\"task_id\":\"bg-123\""));
+        std::fs::write(&source, "---\nid: tool-interrupted-by-reload-wait\nkind: notification\ntemplate: handlebars\n---\n{{invalid}}").unwrap();
+        let (failed, is_error) = reload_interrupted_tool_result(&tc, 1.2, None);
+        assert!(!is_error);
+        assert!(failed.contains("Reload notification rendering failed:"));
+        assert!(failed.starts_with("[Tool 'bg' wait interrupted by server reload after 1.2s."));
     }
 
     #[test]
     fn reload_interrupted_non_wait_tool_remains_error() {
         let tc = tool_call("bash", json!({"command": "sleep 10"}));
 
-        let (message, is_error) = reload_interrupted_tool_result(&tc, 1.2);
+        let (message, is_error) = reload_interrupted_tool_result(&tc, 1.2, None);
 
         assert!(is_error);
         assert!(message.contains("interrupted by server reload"));

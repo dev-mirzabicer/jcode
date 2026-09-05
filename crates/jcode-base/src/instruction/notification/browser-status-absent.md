@@ -1,0 +1,1 @@
+Browser bridge is not installed yet. Use action='setup' only for first-time install or repair. You do not need to run setup before every browser task.

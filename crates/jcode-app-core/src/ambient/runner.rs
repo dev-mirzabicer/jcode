@@ -457,6 +457,7 @@ impl AmbientRunnerHandle {
         provider: &Arc<dyn Provider>,
         item: &ScheduledItem,
         session_id: &str,
+        reminder: &str,
     ) -> anyhow::Result<()> {
         let session = Session::load(session_id)?;
         let cycle_provider = provider.fork();
@@ -469,11 +470,10 @@ impl AmbientRunnerHandle {
         agent.set_debug(session.is_debug);
         agent.restore_session(session_id)?;
 
-        let reminder = ambient::format_scheduled_session_message(item);
         let unattended_context = Self::scheduled_unattended_context(item);
         let turn_result = agent
             .run_once_capture_with_display_role_and_unattended(
-                &reminder,
+                reminder,
                 Some(crate::session::StoredDisplayRole::System),
                 unattended_context,
             )
@@ -490,6 +490,9 @@ impl AmbientRunnerHandle {
         item: &ScheduledItem,
         parent_session_id: &str,
     ) -> anyhow::Result<String> {
+        // Instruction failures happen before publishing an execution. The
+        // scheduler keeps its existing owning error and dequeue policy.
+        let reminder = ambient::format_scheduled_session_message(item)?;
         let mut child = match Session::load(parent_session_id) {
             Ok(parent) => {
                 let mut child = Session::create(
@@ -560,7 +563,6 @@ impl AmbientRunnerHandle {
             agent.set_working_dir_for_pending_context(item.working_dir.clone());
         }
 
-        let reminder = ambient::format_scheduled_session_message(item);
         let unattended_context = Self::scheduled_unattended_context(item);
         let turn_result = agent
             .run_once_capture_with_display_role_and_unattended(
@@ -583,7 +585,7 @@ impl AmbientRunnerHandle {
         match &item.target {
             ScheduleTarget::Ambient => Ok(()),
             ScheduleTarget::Session { session_id } => {
-                let reminder = ambient::format_scheduled_session_message(item);
+                let reminder = ambient::format_scheduled_session_message(item)?;
                 match self
                     .notify_live_session(
                         session_id,
@@ -604,8 +606,10 @@ impl AmbientRunnerHandle {
                             "Ambient runner: live delivery for {} fell back to headless resume: {}",
                             session_id, err
                         ));
-                        self.resume_dead_session_with_reminder(provider, item, session_id)
-                            .await
+                        self.resume_dead_session_with_reminder(
+                            provider, item, session_id, &reminder,
+                        )
+                        .await
                     }
                 }
             }
@@ -627,12 +631,12 @@ impl AmbientRunnerHandle {
         provider: &Arc<dyn Provider>,
         item: &ScheduledItem,
     ) -> anyhow::Result<()> {
+        let reminder = ambient::format_scheduled_session_message(item)?;
         let cycle_provider = provider.fork();
         let registry = tool::Registry::new(cycle_provider.clone()).await;
         registry.register_ambient_tools().await;
         let mut agent = Agent::new_with_disabled_startup_context(cycle_provider, registry, None);
         agent.set_debug(true);
-        let reminder = ambient::format_scheduled_session_message(item);
         let turn_result = agent
             .run_once_capture_with_display_role_and_unattended(
                 &reminder,

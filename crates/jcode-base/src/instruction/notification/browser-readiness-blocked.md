@@ -1,0 +1,2 @@
+Browser automation is not ready yet. Use the browser tool with action='status' to confirm current state. Only run action='setup' or `jcode browser setup` for first-time install or repair when the bridge is not already ready.
+{{details}}Normal browser tool calls will not reopen the installer automatically anymore. Do not retry browser actions until status reports ready. Continue with another available capability; if the goal requires an external capability unavailable in this session, use capability discovery.
