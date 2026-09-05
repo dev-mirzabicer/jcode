@@ -419,8 +419,13 @@ async fn prepare_transfer_session_local(
     provider: std::sync::Arc<dyn crate::provider::Provider>,
 ) -> anyhow::Result<super::PreparedTransferSession> {
     let messages = parent.projected_messages_for_provider()?;
-    let summary =
-        crate::transfer_handoff::build_transfer_handoff_summary(provider, messages).await?;
+    let summary = crate::transfer_handoff::build_transfer_handoff_summary(
+        provider,
+        messages,
+        &crate::instruction::InstructionRepositoryService::new(),
+        parent.working_dir.as_deref().map(std::path::Path::new),
+    )
+    .await?;
     let (session_id, session_name) =
         create_transfer_session_from_parent(parent.id.as_str(), &parent, summary)?;
     Ok(super::PreparedTransferSession {

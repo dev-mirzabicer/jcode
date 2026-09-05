@@ -920,30 +920,34 @@ pub(super) async fn handle_transfer(
             return;
         }
     };
-    let transfer_summary =
-        match crate::transfer_handoff::build_transfer_handoff_summary(provider, projected_messages)
-            .await
-        {
-            Ok(summary) => summary,
-            Err(error) => {
-                crate::logging::event_warn(
-                    "SESSION_LIFECYCLE",
-                    vec![
-                        ("phase", "transfer_summary_error".to_string()),
-                        ("request_id", id.to_string()),
-                        ("session_id", client_session_id.to_string()),
-                        ("error", crate::util::format_error_chain(&error)),
-                        ("elapsed_ms", started.elapsed().as_millis().to_string()),
-                    ],
-                );
-                let _ = client_event_tx.send(ServerEvent::Error {
-                    id,
-                    message: format!("Failed to summarize session for transfer: {error}"),
-                    retry_after_secs: None,
-                });
-                return;
-            }
-        };
+    let transfer_summary = match crate::transfer_handoff::build_transfer_handoff_summary(
+        provider,
+        projected_messages,
+        instruction_repositories,
+        parent.working_dir.as_deref().map(std::path::Path::new),
+    )
+    .await
+    {
+        Ok(summary) => summary,
+        Err(error) => {
+            crate::logging::event_warn(
+                "SESSION_LIFECYCLE",
+                vec![
+                    ("phase", "transfer_summary_error".to_string()),
+                    ("request_id", id.to_string()),
+                    ("session_id", client_session_id.to_string()),
+                    ("error", crate::util::format_error_chain(&error)),
+                    ("elapsed_ms", started.elapsed().as_millis().to_string()),
+                ],
+            );
+            let _ = client_event_tx.send(ServerEvent::Error {
+                id,
+                message: format!("Failed to summarize session for transfer: {error}"),
+                retry_after_secs: None,
+            });
+            return;
+        }
+    };
 
     let (new_session_id, new_session_name) = match create_transfer_child_session(
         client_session_id,

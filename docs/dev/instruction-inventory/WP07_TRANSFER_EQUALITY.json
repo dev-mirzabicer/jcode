@@ -1,0 +1,100 @@
+{
+  "source_revision": "99bba69497a04fa48fac675c5e40d05e39a929ca",
+  "inventory_ids": [
+    "INS-WFL-021",
+    "INS-WFL-022"
+  ],
+  "route": "Before/after production build_transfer_handoff_summary against recording Provider::complete; exact task/system bytes and returned result compared before hashing. Disposable baseline module/probe removed.",
+  "cases": [
+    {
+      "equal": true,
+      "fixture": "empty",
+      "outputs": [],
+      "window": 4500
+    },
+    {
+      "equal": true,
+      "fixture": "short",
+      "outputs": [
+        {
+          "system_bytes": 63,
+          "system_sha256": "2ab127dd1aac0807fa856410872a055ee7848b653e2bfc0ef82cc3ce9daa06e1",
+          "task_bytes": 813,
+          "task_sha256": "4c822490fd3601022b6288edc6231975b45bc50a67ba26c3125f386511fb460c"
+        }
+      ],
+      "window": 4500
+    },
+    {
+      "equal": true,
+      "fixture": "bounded",
+      "outputs": [
+        {
+          "system_bytes": 63,
+          "system_sha256": "2ab127dd1aac0807fa856410872a055ee7848b653e2bfc0ef82cc3ce9daa06e1",
+          "task_bytes": 1999,
+          "task_sha256": "76210e458502db0e521355942d11a590bcaba92ac0887b89170462ae6a422383"
+        }
+      ],
+      "window": 4500
+    },
+    {
+      "equal": true,
+      "fixture": "tool",
+      "outputs": [
+        {
+          "system_bytes": 63,
+          "system_sha256": "2ab127dd1aac0807fa856410872a055ee7848b653e2bfc0ef82cc3ce9daa06e1",
+          "task_bytes": 1320,
+          "task_sha256": "31629d54024d04976534afa35bbd9ed35b907ff24eaeb6302b3bdcdd2db5c8ec"
+        }
+      ],
+      "window": 4500
+    },
+    {
+      "equal": true,
+      "fixture": "empty",
+      "outputs": [],
+      "window": 100000
+    },
+    {
+      "equal": true,
+      "fixture": "short",
+      "outputs": [
+        {
+          "system_bytes": 63,
+          "system_sha256": "2ab127dd1aac0807fa856410872a055ee7848b653e2bfc0ef82cc3ce9daa06e1",
+          "task_bytes": 813,
+          "task_sha256": "4c822490fd3601022b6288edc6231975b45bc50a67ba26c3125f386511fb460c"
+        }
+      ],
+      "window": 100000
+    },
+    {
+      "equal": true,
+      "fixture": "bounded",
+      "outputs": [
+        {
+          "system_bytes": 63,
+          "system_sha256": "2ab127dd1aac0807fa856410872a055ee7848b653e2bfc0ef82cc3ce9daa06e1",
+          "task_bytes": 80776,
+          "task_sha256": "57788071c1b583ccb4eda6a0e7b9c93c1dcb575932fcf0ba7296fe7d8c57afc9"
+        }
+      ],
+      "window": 100000
+    },
+    {
+      "equal": true,
+      "fixture": "tool",
+      "outputs": [
+        {
+          "system_bytes": 63,
+          "system_sha256": "2ab127dd1aac0807fa856410872a055ee7848b653e2bfc0ef82cc3ce9daa06e1",
+          "task_bytes": 1320,
+          "task_sha256": "31629d54024d04976534afa35bbd9ed35b907ff24eaeb6302b3bdcdd2db5c8ec"
+        }
+      ],
+      "window": 100000
+    }
+  ]
+}

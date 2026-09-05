@@ -10,6 +10,7 @@ pub mod notification;
 mod repository;
 mod runtime;
 mod template;
+pub mod workflow;
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
