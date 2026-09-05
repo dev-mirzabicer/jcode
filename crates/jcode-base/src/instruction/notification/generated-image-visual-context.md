@@ -1,0 +1,1 @@
+A provider-native image generation call created `{{path}}`. Jcode attached the image pixels as visual context for future turns because the active provider supports image input and the file is under the safe {{limit_mb}} MB limit.

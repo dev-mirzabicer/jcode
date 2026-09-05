@@ -313,17 +313,21 @@ pub fn generated_image_visual_context_blocks(
     metadata_path: Option<&str>,
     output_format: &str,
     revised_prompt: Option<&str>,
+    working_dir: Option<&std::path::Path>,
 ) -> Option<Vec<ContentBlock>> {
     logging::debug(&format!(
         "building generated image visual context path={path} format={output_format}"
     ));
     let (media_type, data_b64) = generated_image_payload(path, output_format)?;
-    let mut reminder = format!(
-        "<system-reminder>\nA provider-native image generation call created `{}`. Jcode attached the image pixels as visual context for future turns because the active provider supports image input and the file is under the safe {} MB limit.\nFormat: {}",
+    let prose = crate::instruction::notification::Notification::GeneratedImageVisualContext {
         path,
-        GENERATED_IMAGE_MAX_AUTO_VISION_BYTES / 1024 / 1024,
-        output_format,
-    );
+        limit_mb: GENERATED_IMAGE_MAX_AUTO_VISION_BYTES / 1024 / 1024,
+    }
+    .render(working_dir)
+    .unwrap_or_else(|error| format!("Image context notification rendering failed: {error}"));
+    // Image generation already completed. Preserve pixels and factual metadata
+    // even when the optional explanation cannot be rendered.
+    let mut reminder = format!("<system-reminder>\n{prose}\nFormat: {output_format}");
     if let Some(metadata_path) = metadata_path.filter(|value| !value.trim().is_empty()) {
         reminder.push_str(&format!("\nMetadata: {}", metadata_path));
     }

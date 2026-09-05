@@ -2,6 +2,47 @@ use super::*;
 use anyhow::{Result, anyhow};
 use chrono::Utc;
 
+fn format_background_task_notification_markdown(task: &BackgroundTaskCompleted) -> String {
+    super::notifications::format_background_task_notification_with_prose(task, || {
+        "SYNTHETIC_NO_OUTPUT".into()
+    })
+}
+
+struct NotificationFixture {
+    home: tempfile::TempDir,
+    previous: Option<std::ffi::OsString>,
+}
+impl NotificationFixture {
+    fn new() -> Self {
+        let home = tempfile::tempdir().unwrap();
+        let previous = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", home.path());
+        crate::config::Config::invalidate_cache();
+        crate::instruction::SystemPromptComposer::new()
+            .ensure_global_store()
+            .unwrap();
+        Self { home, previous }
+    }
+    fn write(&self, id: &str, body: &str) {
+        std::fs::write(
+            self.home
+                .path()
+                .join(format!("instructions/notifications/{id}.md")),
+            format!("---\nid: {id}\nkind: notification\ntemplate: handlebars\n---\n{body}"),
+        )
+        .unwrap();
+    }
+}
+impl Drop for NotificationFixture {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(old) => crate::env::set_var("JCODE_HOME", old),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+        crate::config::Config::invalidate_cache();
+    }
+}
+
 #[test]
 fn sanitize_tool_id_alphanumeric_passthrough() {
     assert_eq!(
@@ -17,6 +58,12 @@ fn sanitize_tool_id_alphanumeric_passthrough() {
 
 #[test]
 fn generated_image_visual_context_blocks_attach_safe_image() {
+    let _guard = crate::storage::lock_test_env();
+    let source = NotificationFixture::new();
+    source.write(
+        "generated-image-visual-context",
+        "SYNTHETIC {{path}} {{limit_mb}}",
+    );
     let dir = tempfile::tempdir().expect("temp dir");
     let image_path = dir.path().join("generated.png");
     ::image::RgbaImage::from_pixel(2, 1, ::image::Rgba([0, 255, 0, 255]))
@@ -28,6 +75,7 @@ fn generated_image_visual_context_blocks_attach_safe_image() {
         Some("/tmp/generated.json"),
         "png",
         Some("a small green generated image"),
+        None,
     )
     .expect("safe generated image should attach");
 
@@ -35,7 +83,7 @@ fn generated_image_visual_context_blocks_attach_safe_image() {
     match &blocks[0] {
         ContentBlock::Text { text, .. } => {
             assert!(text.starts_with("<system-reminder>"));
-            assert!(text.contains("attached the image pixels as visual context"));
+            assert!(text.contains("SYNTHETIC"));
             assert!(text.contains("a small green generated image"));
         }
         other => panic!("expected text reminder, got {other:?}"),
@@ -50,6 +98,85 @@ fn generated_image_visual_context_blocks_attach_safe_image() {
         }
         other => panic!("expected image block, got {other:?}"),
     }
+    source.write("generated-image-visual-context", "{{invalid}}");
+    let failed = generated_image_visual_context_blocks(
+        image_path.to_str().unwrap(),
+        None,
+        "png",
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(&failed[1]).unwrap(),
+        serde_json::to_value(&blocks[1]).unwrap()
+    );
+    assert!(
+        matches!(&failed[0], ContentBlock::Text { text, .. } if text.contains("Image context notification rendering failed:"))
+    );
+    source.write("generated-image-visual-context", "");
+    let empty = generated_image_visual_context_blocks(
+        image_path.to_str().unwrap(),
+        None,
+        "png",
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(
+        matches!(&empty[0], ContentBlock::Text { text, .. } if text == "<system-reminder>\n\nFormat: png\n</system-reminder>")
+    );
+    assert!(
+        generated_image_visual_context_blocks("/missing/fixture.png", None, "png", None, None)
+            .is_none()
+    );
+}
+
+#[test]
+fn managed_background_result_preserves_record_fields_and_prior_occurrences() {
+    let _guard = crate::storage::lock_test_env();
+    let source = NotificationFixture::new();
+    let task = BackgroundTaskCompleted {
+        session_id: "synthetic-session".into(),
+        task_id: "synthetic-task".into(),
+        tool_name: "bash".into(),
+        display_name: None,
+        status: BackgroundTaskStatus::Completed,
+        exit_code: Some(0),
+        duration_secs: 1.2,
+        output_preview: String::new(),
+        output_file: std::path::PathBuf::from("synthetic.output"),
+        wake: false,
+        notify: true,
+    };
+    source.write("background-task-result-empty", "OLD-SYNTHETIC");
+    let old = super::format_background_task_notification_markdown(&task, None);
+    source.write("background-task-result-empty", "NEW-SYNTHETIC");
+    let current = super::format_background_task_notification_markdown(&task, None);
+    assert!(old.contains("OLD-SYNTHETIC"));
+    assert!(current.contains("NEW-SYNTHETIC"));
+    let parsed = parse_background_task_notification_markdown(&current).unwrap();
+    assert_eq!(parsed.task_id, task.task_id);
+    assert_eq!(
+        parsed.full_output_command,
+        "bg action=\"output\" task_id=\"synthetic-task\""
+    );
+    source.write("background-task-result-empty", "");
+    assert!(
+        parse_background_task_notification_markdown(
+            &super::format_background_task_notification_markdown(&task, None)
+        )
+        .is_some()
+    );
+    source.write("background-task-result-empty", "{{invalid}}");
+    let failed = super::format_background_task_notification_markdown(&task, None);
+    assert!(failed.contains("Background task notification rendering failed:"));
+    assert_eq!(
+        parse_background_task_notification_markdown(&failed)
+            .unwrap()
+            .task_id,
+        task.task_id
+    );
 }
 
 #[test]
@@ -528,7 +655,7 @@ fn format_background_task_notification_markdown_handles_empty_preview() {
     });
 
     assert!(rendered.contains("✗ failed"));
-    assert!(rendered.contains("_No output captured._"));
+    assert!(rendered.contains("_SYNTHETIC_NO_OUTPUT_"));
 }
 
 #[test]

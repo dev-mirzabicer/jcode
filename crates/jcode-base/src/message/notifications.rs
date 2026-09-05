@@ -239,7 +239,23 @@ fn background_task_failure_summary(preview: &str) -> Option<String> {
     fallback
 }
 
-pub fn format_background_task_notification_markdown(task: &BackgroundTaskCompleted) -> String {
+pub fn format_background_task_notification_markdown(
+    task: &BackgroundTaskCompleted,
+    working_dir: Option<&std::path::Path>,
+) -> String {
+    format_background_task_notification_with_prose(task, || {
+        crate::instruction::notification::Notification::BackgroundTaskResultEmpty
+            .render(working_dir)
+            .unwrap_or_else(|error| {
+                format!("Background task notification rendering failed: {error}")
+            })
+    })
+}
+
+pub(super) fn format_background_task_notification_with_prose(
+    task: &BackgroundTaskCompleted,
+    no_output_prose: impl FnOnce() -> String,
+) -> String {
     let exit_code = task
         .exit_code
         .map(|code| format!("exit {}", code))
@@ -266,7 +282,7 @@ pub fn format_background_task_notification_markdown(task: &BackgroundTaskComplet
     if let Some(preview) = normalize_background_task_preview(&task.output_preview) {
         message.push_str(&format!("\n\n```text\n{}\n```", preview));
     } else {
-        message.push_str("\n\n_No output captured._");
+        message.push_str(&format!("\n\n_{}_", no_output_prose()));
     }
 
     message.push_str(&format!(

@@ -29,7 +29,15 @@ pub(super) async fn dispatch_background_task_completion(
     event_counter: &Arc<AtomicU64>,
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
 ) {
-    let notification = format_background_task_notification_markdown(task);
+    if !task.notify && !task.wake {
+        return;
+    }
+    let working_dir = swarm_members
+        .read()
+        .await
+        .get(&task.session_id)
+        .and_then(|member| member.working_dir.clone());
+    let notification = format_background_task_notification_markdown(task, working_dir.as_deref());
 
     if task.notify
         && fanout_session_event(

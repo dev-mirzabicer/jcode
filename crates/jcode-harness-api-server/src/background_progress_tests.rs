@@ -35,7 +35,7 @@ fn indeterminate_progress_has_no_percent_but_still_reports() {
 #[test]
 fn completion_is_reported_as_done() {
     let progress = parse(
-        "**Background task** `t1` · `bash` · ✓ completed · 12.5s · exit 0\n\n_No output captured._",
+        "**Background task** `t1` · `bash` · ✓ completed · 12.5s · exit 0\n\n_synthetic body_",
     );
     assert!(progress.done);
     assert_eq!(progress.task_id, "t1");
@@ -106,11 +106,14 @@ fn the_daemons_own_formatter_round_trips() {
             status: jcode_background_types::BackgroundTaskStatus::Completed,
             exit_code: Some(0),
             duration_secs: 12.5,
-            output_preview: String::new(),
+            // This is a pure transport roundtrip. Empty-output instruction
+            // loading is covered by the base renderer's scoped tests.
+            output_preview: "synthetic output".into(),
             output_file: std::path::PathBuf::from("/tmp/t42.output"),
             wake: false,
             notify: false,
         },
+        None,
     );
     let parsed = parse(&done);
     assert_eq!(parsed.task_id, "t42");

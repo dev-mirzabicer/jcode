@@ -481,7 +481,10 @@ fn handle_background_task_completed(app: &mut App, task: BackgroundTaskCompleted
         return;
     }
 
-    let notification = format_background_task_notification_markdown(&task);
+    let notification = format_background_task_notification_markdown(
+        &task,
+        app.session.working_dir.as_deref().map(std::path::Path::new),
+    );
     app.push_display_message(DisplayMessage::background_task(notification.clone()));
     app.set_status_notice(background_task_status_notice(&task));
 
@@ -489,7 +492,7 @@ fn handle_background_task_completed(app: &mut App, task: BackgroundTaskCompleted
         app.add_provider_message(Message {
             role: Role::User,
             content: vec![ContentBlock::Text {
-                text: notification,
+                text: notification.clone(),
                 cache_control: None,
             }],
             timestamp: Some(chrono::Utc::now()),
@@ -498,7 +501,7 @@ fn handle_background_task_completed(app: &mut App, task: BackgroundTaskCompleted
         app.session.add_message_with_display_role(
             Role::User,
             vec![ContentBlock::Text {
-                text: format_background_task_notification_markdown(&task),
+                text: notification,
                 cache_control: None,
             }],
             Some(StoredDisplayRole::BackgroundTask),

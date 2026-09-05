@@ -672,6 +672,10 @@ impl Agent {
                                     metadata_path.as_deref(),
                                     &output_format,
                                     revised_prompt.as_deref(),
+                                    self.session
+                                        .working_dir
+                                        .as_deref()
+                                        .map(std::path::Path::new),
                                 )
                             {
                                 generated_image_contexts.push(blocks);

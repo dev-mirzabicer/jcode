@@ -44,6 +44,8 @@ macro_rules! notifications {
 }
 
 notifications! {
+    GeneratedImageVisualContext { path: &'a str, limit_mb: u64 } => ("generated-image-visual-context", "generated image attachment", Handlebars),
+    BackgroundTaskResultEmpty => ("background-task-result-empty", "background task result record", Plain),
     BrowserStatusReady => ("browser-status-ready", "browser status", Plain),
     BrowserStatusOutdated { missing_actions: &'a str } => ("browser-status-outdated", "browser status", Handlebars),
     BrowserStatusUnresponsive => ("browser-status-unresponsive", "browser status", Plain),

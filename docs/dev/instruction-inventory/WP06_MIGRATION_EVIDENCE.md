@@ -53,3 +53,15 @@ Reload completion retains its tool-result wrapper, input serialization, duration
 Scheduled announcements use the task's captured working directory. The live-to-headless fallback reuses the same rendered message. Failed rendering occurs before a spawned execution is published. The scheduler's existing dequeue-and-log failure policy is unchanged; this package does not add retries or redesign unattended execution. Phase 9 remains that policy's owner.
 
 [`WP06_READINESS_SCHEDULE_EQUALITY.json`](WP06_READINESS_SCHEDULE_EQUALITY.json) records 44 exact comparisons: nine browser outputs, three wait-like reload outputs and all 32 combinations of optional scheduled-message fields. The probes were removed. Browser, reload and real scheduled-child tests pass, including mutable prose, unchanged state/metadata, fail-closed browser actions, explicit reload diagnostics and no child on scheduled-render failure. Strict all-target Clippy passes for base, app-core and TUI.
+
+## Generated images and background result records
+
+Rows `INS-NTF-007` and `INS-NTF-033` use managed image explanation and empty-output prose. Image pixels, the 20 MiB attachment policy, supported-format checks, metadata/revised-prompt framing and caller image-support gating remain unchanged. A rendering failure is explicit while the completed image's pixels and metadata remain available.
+
+Background record headers, status fields, preview/failure data, retrieval commands and their parser remain code-owned. Only the separable empty-output sentence moves. Local delivery now reuses its one rendered occurrence for display, provider context and persistence rather than formatting twice. Server delivery uses recipient working-directory metadata and does no rendering when both notify and wake are disabled.
+
+[`WP06_IMAGE_BACKGROUND_EQUALITY.json`](WP06_IMAGE_BACKGROUND_EQUALITY.json) records ten exact comparisons, including nine image metadata/revised-prompt combinations and the complete empty background record. The probe was removed. Base message tests, real source-update/empty/failure tests, complete Harness bridge tests and background regressions pass. Strict all-target Clippy passes for base, app-core, TUI and Harness bridge.
+
+## Approved scope and UI clarification
+
+Mirza authorized the recommended corrections on 2026-09-05. `INS-NTF-001` remains a code-owned environment-fact record. Todo controls will receive structural queue/history identity and server-owned remote source rendering. The reproduced mixed-queue UI defect must retain the user's text without changing combined model-visible bytes. These clarifications do not constitute work-package acceptance.
