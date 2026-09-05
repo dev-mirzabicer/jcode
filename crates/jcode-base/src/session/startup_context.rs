@@ -1386,6 +1386,7 @@ fn stored_file_receipt(
 
 fn startup_stored_message(id: String, content: Vec<ContentBlock>) -> StoredMessage {
     StoredMessage {
+        origin: None,
         id,
         role: Role::User,
         content,
@@ -1846,6 +1847,7 @@ mod tests {
             StartupContextAcceptanceOutcome::Persisted { .. }
         ));
         session.append_stored_message(StoredMessage {
+            origin: None,
             id: "assistant-history".to_string(),
             role: Role::Assistant,
             content: vec![ContentBlock::Text {
@@ -2478,6 +2480,7 @@ mod tests {
         assert_eq!(session.messages.len(), initial_messages + 1);
 
         session.append_stored_message(StoredMessage {
+            origin: None,
             id: "synthetic-real-user-prompt".to_string(),
             role: Role::User,
             content: vec![ContentBlock::Text {

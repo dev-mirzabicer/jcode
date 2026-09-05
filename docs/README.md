@@ -29,3 +29,7 @@ Reference documentation for the jcode codebase.
 - Docs describing current behavior live at the top level; anything speculative goes in `plans/` or `proposals/`.
 - Prefer updating an existing doc over adding a near-duplicate.
 - Root of the repo should only hold README, CONTRIBUTING, RELEASING, AGENTS, LICENSE, and similar meta files. Put everything else here.
+
+## Managed notification and control prose
+
+See [managed notification and control prose](NOTIFICATIONS.md) for current-source occurrence rendering, structural ownership, typed todo queues, failures and recovery.

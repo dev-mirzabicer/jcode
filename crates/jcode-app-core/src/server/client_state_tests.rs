@@ -119,6 +119,7 @@ async fn handle_get_history_falls_back_to_persisted_snapshot_when_agent_is_busy(
     );
     session.model = Some("mock-model".to_string());
     session.append_stored_message(crate::session::StoredMessage {
+        origin: None,
         id: "msg-busy-fallback".to_string(),
         role: crate::message::Role::User,
         content: vec![crate::message::ContentBlock::Text {

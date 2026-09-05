@@ -505,6 +505,7 @@ fn test_new_for_remote_fresh_spawn_restores_local_transcript() {
         );
         session.model = Some("gpt-5.4".to_string());
         session.append_stored_message(crate::session::StoredMessage {
+            origin: None,
             id: "msg_spawn_fresh_skip".to_string(),
             role: crate::message::Role::Assistant,
             content: vec![crate::message::ContentBlock::Text {
@@ -572,6 +573,7 @@ fn test_new_for_remote_restores_display_history_without_retaining_session_transc
         );
         session.model = Some("gpt-5.4".to_string());
         session.append_stored_message(crate::session::StoredMessage {
+            origin: None,
             id: "msg_remote_restore_1".to_string(),
             role: crate::message::Role::Assistant,
             content: vec![crate::message::ContentBlock::Text {

@@ -82,6 +82,18 @@ Retention-hint idempotency now uses a typed in-process error marker rather than 
 
 `WP06_DISCOVERY_EQUALITY.json` compares eleven full production outputs against the exact pre-migration production functions. `WP06_DRIVER_EQUALITY.json` compares sixteen driver outputs/sections across provider routes, terminal states and recovery branches. Both probes were removed. Discovery's complete suite, local HTTP receipt tests, credential-wave tests, structural retention tests and terminal-summary tests pass. Strict all-target Clippy passes for base, app-core and TUI. Permanent managed-prose tests use synthetic sources.
 
+## Todo instructions and structural history
+
+Rows `INS-NTF-018` through `INS-NTF-025` use registered managed resources. `WP06_TODO_EQUALITY.json` records 257 complete byte comparisons against the pre-migration renderer, covering simple controls, count/plural cases, confidence histories, named-item limits, ownership facets, stopping evidence and digest state/group/repetition branches. The one-time probe was removed. Fixed old literals remain only for old history/queue decoding.
+
+Typed `TodoNoticeRequest` values carry captured policy data through local and remote queues. The existing policy still owns timers, selection, thresholds, counters and dequeue decisions. The server renders remote occurrences using the recipient session's scope. `StoredMessage.origin` records validated control/human text ranges outside provider content. Existing saved sessions omit it and remain readable. Mixed control/user history no longer hides the user's portion, as approved by Mirza. All-human queued history and unrelated system-reminder framing retain their existing presentation.
+
+The real Agent recording-provider test verifies project specificity, current-source edits, exact prior stored and transmitted bytes (including owner timestamps), stable system content, persistence and no provider call/append on invalid instructions. The actual remote sender test verifies typed wire input without client-source rendering, rejection preservation, explicit retry without duplicate work, reload recovery and retention of malformed saved input. Session tests verify raw-provider JSON equivalence, roles/timestamps, snapshot/journal/load/inheritance, mixed display, invalid origin safety and export redaction rebasing without source mutation.
+
+Bare `todo-auto-poke` prose cannot be empty because it is a provider turn without independent framing or facts. Its registration rejects empty content before dispatch. Other empty resources retain their owner framing where meaningful. Rendering failures preserve pending typed intent and block automatic redispatch until explicit user action. Already-persisted todo tool state remains visible if its immediate instruction suffix cannot render.
+
+The metadata field required mechanical `origin: None` additions to existing stored-message constructors, including context-control fixtures. Those changes do not alter curator prompts, projections, provider payloads or protected context semantics. No mixed-version client/server negotiation was added, following Mirza's clarification.
+
 ## Approved scope and UI clarification
 
 Mirza authorized the recommended corrections on 2026-09-05. `INS-NTF-001` remains a code-owned environment-fact record. Todo controls will receive structural queue/history identity and server-owned remote source rendering. The reproduced mixed-queue UI defect must retain the user's text without changing combined model-visible bytes. These clarifications do not constitute work-package acceptance.

@@ -1,0 +1,1 @@
+validate the result through its public interfaces and acceptance behavior, including its integration boundaries.

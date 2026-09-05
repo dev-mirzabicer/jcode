@@ -47,6 +47,17 @@ pub enum LegacyContextCommand {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Request {
+    /// Typed queued control intent. The server renders its current instruction
+    /// sources before accepting the combined user-authority message.
+    #[serde(rename = "queued_messages")]
+    QueuedMessages {
+        id: u64,
+        entries: Vec<jcode_task_types::QueuedMessage>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        system_reminder: Option<String>,
+        #[serde(default)]
+        observe_startup_context: bool,
+    },
     /// Send a message to the agent
     #[serde(rename = "message")]
     Message {
@@ -1025,6 +1036,8 @@ pub enum Request {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ServerEvent {
+    #[serde(rename = "queued_messages_rejected")]
+    QueuedMessagesRejected { id: u64, message: String },
     /// Acknowledgment of request
     #[serde(rename = "ack")]
     Ack { id: u64 },

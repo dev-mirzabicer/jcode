@@ -376,6 +376,7 @@ fn phase10_remote_action_restores_exact_prompt_pastes_and_images_only_for_matchi
         output_started: false,
     });
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        queued_messages: None,
         content: expanded.clone(),
         images: images.clone(),
         is_system: false,
@@ -452,6 +453,7 @@ fn phase10_blocked_prompt_waits_for_an_occupied_composer_and_cannot_be_bypassed(
         output_started: false,
     });
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        queued_messages: None,
         content: "blocked exact paste".to_string(),
         images: vec![("image/png".to_string(), "blocked-image".to_string())],
         is_system: false,
@@ -522,6 +524,7 @@ fn phase10_post_output_remote_action_preserves_turn_and_suppresses_terminal_erro
         output_started: true,
     });
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        queued_messages: None,
         content: "authoritative prompt".to_string(),
         images: Vec::new(),
         is_system: false,
@@ -647,6 +650,7 @@ fn phase10_system_remote_block_is_terminal_without_composer_restoration() {
     app.current_message_id = Some(704);
     app.is_processing = true;
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        queued_messages: None,
         content: "system follow-up".to_string(),
         images: Vec::new(),
         is_system: true,

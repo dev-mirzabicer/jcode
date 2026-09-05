@@ -13,6 +13,7 @@ fn test_metadata_only_history_preserves_fast_restored_startup_state() {
     );
     session.model = Some("gpt-5.4".to_string());
     session.append_stored_message(crate::session::StoredMessage {
+        origin: None,
         id: "msg-fast-resume".to_string(),
         role: crate::message::Role::Assistant,
         content: vec![crate::message::ContentBlock::Text {
@@ -355,6 +356,7 @@ fn test_remote_error_with_retry_after_keeps_pending_for_auto_retry() {
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
 
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        queued_messages: None,
         content: "retry me".to_string(),
         images: vec![],
         is_system: false,

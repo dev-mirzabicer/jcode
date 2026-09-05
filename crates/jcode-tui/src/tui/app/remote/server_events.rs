@@ -1253,11 +1253,36 @@ pub(in crate::tui::app) fn handle_server_event(
             }
             completed_current_message || auto_poked
         }
+        ServerEvent::QueuedMessagesRejected { id, message } => {
+            if app.current_message_id != Some(id) {
+                return false;
+            }
+            if let Some(mut pending) = app.rate_limit_pending_message.take() {
+                if let Some(mut entries) = pending.queued_messages.take() {
+                    entries.extend(std::mem::take(&mut app.queued_messages));
+                    app.queued_messages = entries;
+                }
+                if let Some(reminder) = pending.system_reminder {
+                    app.hidden_queued_system_messages.insert(0, reminder);
+                }
+            }
+            app.queued_instruction_error = Some(message.clone());
+            app.pending_queued_dispatch = false;
+            app.rate_limit_reset = None;
+            app.push_display_message(DisplayMessage::error(format!("Queued instruction rendering failed; input was preserved. Repair the instruction, then submit a message or use /poke to retry: {message}")));
+            true
+        }
         ServerEvent::Error {
             id,
             message,
             retry_after_secs,
         } => {
+            if app.current_message_id == Some(id) && app.queued_instruction_error.is_some() {
+                app.is_processing = false;
+                app.status = ProcessingStatus::Idle;
+                remote.clear_pending();
+                return true;
+            }
             if app.consume_startup_context_terminal_error(id) {
                 remote.clear_pending();
                 remote.reset_call_output_tokens_seen();
@@ -1342,6 +1367,7 @@ pub(in crate::tui::app) fn handle_server_event(
             // accepts a switch to a working route.
             let failed_fallback_payload = app.rate_limit_pending_message.as_ref().map(|pending| {
                 app_mod::FallbackResendPayload {
+                    queued_messages: pending.queued_messages.clone(),
                     content: pending.content.clone(),
                     images: pending.images.clone(),
                     is_system: pending.is_system,

@@ -425,6 +425,7 @@ mod tests {
 
     fn message(id: &str, role: Role, content: Vec<ContentBlock>) -> StoredMessage {
         StoredMessage {
+            origin: None,
             id: id.to_string(),
             role,
             content,

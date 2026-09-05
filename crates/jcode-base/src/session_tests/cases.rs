@@ -487,6 +487,7 @@ fn load_startup_stub_preserves_metadata_but_skips_heavy_vectors() -> Result<()> 
     });
     session.set_canary("self-dev");
     session.append_stored_message(StoredMessage {
+        origin: None,
         id: "msg_1".to_string(),
         role: Role::User,
         content: vec![ContentBlock::Text {
@@ -583,6 +584,7 @@ fn load_for_remote_startup_preserves_messages_and_replay_but_skips_heavy_vectors
         active_transition_message_id: None,
     });
     session.append_stored_message(StoredMessage {
+        origin: None,
         id: "msg_remote_1".to_string(),
         role: Role::Assistant,
         content: vec![ContentBlock::Text {
@@ -1681,7 +1683,8 @@ fn test_render_messages_shows_auto_poke_continuations_as_system_not_user() {
     session.add_message(
         Role::User,
         vec![ContentBlock::Text {
-            text: crate::todo::build_auto_poke_message(2),
+            text: "You have 2 incomplete todos. Continue working, or update the todo tool."
+                .to_string(),
             cache_control: None,
         }],
     );
@@ -2382,6 +2385,7 @@ fn reasoning_trace_survives_session_save_and_load() -> Result<()> {
     let session_id = "session_reasoning_trace_roundtrip";
     let mut session = Session::create_with_id(session_id.to_string(), None, None);
     session.append_stored_message(StoredMessage {
+        origin: None,
         id: "msg_assistant".to_string(),
         role: Role::Assistant,
         content: vec![
@@ -2842,3 +2846,5 @@ fn test_rewind_after_undo_uses_the_new_target_not_the_previous_one() {
     assert_eq!(after.last().unwrap(), "prompt-6");
     assert_eq!(session.rewind_target_count(), 11);
 }
+
+include!("notification_origin.rs");

@@ -484,6 +484,7 @@ fn remote_history_projection_omits_receipt_owned_secret_bodies_without_mutating_
     let stale_secret = "WP10_SYNTHETIC_STALE_HISTORY_SECRET";
     let mut session = installed_session(&coordinator, fixture.project.path(), secret);
     session.append_stored_message(crate::session::StoredMessage {
+        origin: None,
         id: "wp10-stale-marker".to_string(),
         role: crate::message::Role::User,
         content: vec![crate::message::ContentBlock::Text {

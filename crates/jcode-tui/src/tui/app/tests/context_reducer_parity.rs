@@ -516,6 +516,7 @@ fn prepare_context_parity_app(app: &mut App, event: &crate::protocol::ServerEven
                 output_started: false,
             });
             app.rate_limit_pending_message = Some(PendingRemoteMessage {
+                queued_messages: None,
                 content: "parity input".to_string(),
                 images: vec![("image/png".to_string(), "parity-image".to_string())],
                 is_system: false,

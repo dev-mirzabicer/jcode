@@ -245,18 +245,22 @@ fn cancel_overnight(app: &mut App) {
 impl App {
     pub(super) fn cancel_overnight_for_interrupt(&mut self) -> bool {
         if self.overnight_auto_poke.is_none()
-            && !self
-                .queued_messages
-                .iter()
-                .any(|message| is_overnight_auto_poke_message(message))
+            && !self.queued_messages.iter().any(|message| {
+                message
+                    .human_text()
+                    .is_some_and(is_overnight_auto_poke_message)
+            })
         {
             return false;
         }
 
         self.overnight_auto_poke = None;
         let before = self.queued_messages.len();
-        self.queued_messages
-            .retain(|message| !is_overnight_auto_poke_message(message));
+        self.queued_messages.retain(|message| {
+            !message
+                .human_text()
+                .is_some_and(is_overnight_auto_poke_message)
+        });
         if before != self.queued_messages.len() && !self.has_queued_followups() {
             self.pending_queued_dispatch = false;
         }

@@ -758,6 +758,7 @@ fn startup_context_blocked_action_restores_exact_composer_and_ignores_stale_stat
         output_started: false,
     });
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        queued_messages: None,
         content: expanded.clone(),
         images: images.clone(),
         is_system: false,

@@ -477,7 +477,7 @@ pub(super) fn pending_queue_preview(app: &dyn TuiState) -> Vec<String> {
         }
     }
     for msg in app.queued_messages() {
-        let normalized = normalize_repaint_sensitive_notice_text(msg);
+        let normalized = normalize_repaint_sensitive_notice_text(&msg);
         previews.push(format!(
             "⏳ {}",
             normalized.chars().take(100).collect::<String>()
@@ -500,7 +500,8 @@ pub(super) fn draw_queued(frame: &mut Frame, app: &dyn TuiState, area: Rect, sta
             items.push((QueuedMsgType::Interleave, msg));
         }
     }
-    for msg in app.queued_messages() {
+    let queued_previews = app.queued_messages();
+    for msg in &queued_previews {
         items.push((QueuedMsgType::Queued, msg.as_str()));
     }
 

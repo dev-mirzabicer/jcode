@@ -63,6 +63,7 @@ pub(super) fn current_feedback_target_session_id(app: &App) -> String {
 
 fn judge_transcript_text_message(role: Role, text: String) -> StoredMessage {
     StoredMessage {
+        origin: None,
         id: id::new_id("message"),
         role,
         content: vec![ContentBlock::Text {

@@ -1,0 +1,1 @@
+the goal{{label}} was worked on before its feedback loop was closed, so the loop you ended up with never ran over that earlier work. Run it over the whole result now and report what it actually reported back.

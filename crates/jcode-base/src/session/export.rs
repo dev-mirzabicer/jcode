@@ -169,6 +169,7 @@ mod tests {
 
     fn stored(id: &str, content: Vec<ContentBlock>) -> StoredMessage {
         StoredMessage {
+            origin: None,
             id: id.to_string(),
             role: Role::User,
             content,

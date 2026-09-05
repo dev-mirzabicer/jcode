@@ -643,6 +643,7 @@ fn test_loading_preview_refreshes_search_index_for_picker_filtering() {
         Some("Preview Search".to_string()),
     );
     session.append_stored_message(crate::session::StoredMessage {
+        origin: None,
         id: "msg1".to_string(),
         role: crate::message::Role::User,
         content: vec![crate::message::ContentBlock::Text {

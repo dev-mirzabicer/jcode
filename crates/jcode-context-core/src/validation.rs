@@ -446,6 +446,7 @@ mod tests {
 
     fn stored(role: Role, content: Vec<ContentBlock>) -> StoredMessage {
         StoredMessage {
+            origin: None,
             id: format!("m-{}", content.len()),
             role,
             content,

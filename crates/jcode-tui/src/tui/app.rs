@@ -133,6 +133,7 @@ fn active_runtime_provider_key() -> Option<String> {
 
 #[derive(Debug, Clone)]
 struct PendingRemoteMessage {
+    queued_messages: Option<crate::todo::QueuedMessages>,
     content: String,
     images: Vec<(String, String)>,
     is_system: bool,
@@ -376,6 +377,7 @@ struct PendingFallbackOffer {
 /// one-keypress accept can resend it after the route switch completes.
 #[derive(Debug, Clone)]
 struct FallbackResendPayload {
+    queued_messages: Option<crate::todo::QueuedMessages>,
     /// Expanded message content that was sent to the server.
     content: String,
     /// Inline image attachments that accompanied the message.
@@ -897,7 +899,8 @@ pub struct App {
     power_inhibitor: crate::power_inhibit::PowerInhibitor,
     should_quit: bool,
     // Message queueing
-    queued_messages: Vec<String>,
+    queued_messages: crate::todo::QueuedMessages,
+    queued_instruction_error: Option<String>,
     hidden_queued_system_messages: Vec<String>,
     current_turn_system_reminder: Option<String>,
     // Upstream provider (e.g., which provider OpenRouter routed to)

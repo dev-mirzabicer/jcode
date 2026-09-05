@@ -19,6 +19,7 @@ fn startup_export_session() -> Session {
     let now = Utc::now();
     let mut session = Session::create_with_id("replay-startup-export".to_string(), None, None);
     let stored = |id: &str, text: &str| StoredMessage {
+        origin: None,
         id: id.to_string(),
         role: Role::User,
         content: vec![ContentBlock::Text {
@@ -32,6 +33,7 @@ fn startup_export_session() -> Session {
     };
     session.append_stored_message(stored("replay-startup-control", "REPLAY_CONTROL_SENTINEL"));
     session.append_stored_message(StoredMessage {
+        origin: None,
         id: "replay-startup-file".to_string(),
         role: Role::User,
         content: vec![

@@ -1,0 +1,1 @@
+the checks{{label}} were not traced to every explicit requirement and changed public output. Map each one to a concrete check and report the observed result; aggregate test counts do not establish this mapping.

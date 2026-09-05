@@ -503,6 +503,7 @@ fn load_sessions_prefers_custom_title_over_generated_title() {
     );
     session.rename_title(Some("Custom release planning".to_string()));
     session.append_stored_message(crate::session::StoredMessage {
+        origin: None,
         id: "msg1".to_string(),
         role: crate::message::Role::User,
         content: vec![crate::message::ContentBlock::Text {
@@ -540,6 +541,7 @@ fn load_sessions_prefers_todo_group_over_generated_title() {
         Some("Generated first prompt".to_string()),
     );
     session.append_stored_message(crate::session::StoredMessage {
+        origin: None,
         id: "msg1".to_string(),
         role: crate::message::Role::User,
         content: vec![crate::message::ContentBlock::Text {
@@ -593,6 +595,7 @@ fn load_sessions_keeps_custom_title_over_todo_group() {
     );
     session.rename_title(Some("Manual session title".to_string()));
     session.append_stored_message(crate::session::StoredMessage {
+        origin: None,
         id: "msg1".to_string(),
         role: crate::message::Role::User,
         content: vec![crate::message::ContentBlock::Text {
@@ -645,6 +648,7 @@ fn load_sessions_includes_saved_sessions_beyond_scan_limit() {
     );
     saved_session.mark_saved(Some("Pinned Session".to_string()));
     saved_session.append_stored_message(crate::session::StoredMessage {
+        origin: None,
         id: "saved-msg".to_string(),
         role: crate::message::Role::User,
         content: vec![crate::message::ContentBlock::Text {
@@ -665,6 +669,7 @@ fn load_sessions_includes_saved_sessions_beyond_scan_limit() {
             Some(format!("Newer Unsaved {idx:03}")),
         );
         session.append_stored_message(crate::session::StoredMessage {
+            origin: None,
             id: format!("msg-{idx}"),
             role: crate::message::Role::User,
             content: vec![crate::message::ContentBlock::Text {
@@ -702,6 +707,7 @@ fn load_sessions_preserves_snapshot_saved_when_journal_meta_omits_saved() {
     );
     session.mark_saved(Some("Legacy Saved".to_string()));
     session.append_stored_message(crate::session::StoredMessage {
+        origin: None,
         id: "saved-legacy-msg".to_string(),
         role: crate::message::Role::User,
         content: vec![crate::message::ContentBlock::Text {
@@ -789,6 +795,7 @@ fn session_matches_query_searches_jcode_transcript_contents() {
         Some("Transcript Search".to_string()),
     );
     session.append_stored_message(crate::session::StoredMessage {
+        origin: None,
         id: "msg1".to_string(),
         role: crate::message::Role::User,
         content: vec![crate::message::ContentBlock::Text {
@@ -1058,6 +1065,7 @@ fn benchmark_resume_loading_reports_timings() {
             Some(format!("Resume Bench {idx:03}")),
         );
         session.append_stored_message(crate::session::StoredMessage {
+            origin: None,
             id: format!("msg-{idx}-1"),
             role: crate::message::Role::User,
             content: vec![crate::message::ContentBlock::Text {
@@ -1070,6 +1078,7 @@ fn benchmark_resume_loading_reports_timings() {
             token_usage: None,
         });
         session.append_stored_message(crate::session::StoredMessage {
+            origin: None,
             id: format!("msg-{idx}-2"),
             role: crate::message::Role::Assistant,
             content: vec![crate::message::ContentBlock::Text {
@@ -1127,6 +1136,7 @@ fn onboarding_scoped_loader_returns_only_codex_sessions() {
         Some("Jcode Onboarding".to_string()),
     );
     jcode_session.append_stored_message(crate::session::StoredMessage {
+        origin: None,
         id: "msg-1".to_string(),
         role: crate::message::Role::User,
         content: vec![crate::message::ContentBlock::Text {
@@ -1169,6 +1179,7 @@ fn parallel_fill_skips_many_recent_empty_sessions_to_reach_scan_limit() {
 
     let push_message = |session: &mut Session, text: &str| {
         session.append_stored_message(crate::session::StoredMessage {
+            origin: None,
             id: format!("msg-{text}"),
             role: crate::message::Role::User,
             content: vec![crate::message::ContentBlock::Text {
@@ -1231,6 +1242,7 @@ fn hidden_debug_sessions_do_not_consume_default_resume_budget() {
 
     let push_message = |session: &mut Session, text: &str| {
         session.append_stored_message(crate::session::StoredMessage {
+            origin: None,
             id: format!("msg-{text}"),
             role: crate::message::Role::User,
             content: vec![crate::message::ContentBlock::Text {
@@ -1299,6 +1311,7 @@ fn session_matches_picker_query_requires_all_tokens_order_independent() {
         Some("Token Match".to_string()),
     );
     session.append_stored_message(crate::session::StoredMessage {
+        origin: None,
         id: "msg1".to_string(),
         role: crate::message::Role::User,
         content: vec![crate::message::ContentBlock::Text {

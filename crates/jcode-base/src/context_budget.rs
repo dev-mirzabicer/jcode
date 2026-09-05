@@ -232,6 +232,7 @@ mod tests {
 
     fn stored_text_message(id: &str, text: &str) -> StoredMessage {
         StoredMessage {
+            origin: None,
             id: id.to_string(),
             role: Role::User,
             content: vec![ContentBlock::Text {

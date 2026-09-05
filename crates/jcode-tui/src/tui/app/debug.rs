@@ -80,7 +80,7 @@ pub(super) struct DebugSnapshot {
     state: serde_json::Value,
     frame: Option<crate::tui::visual_debug::FrameCapture>,
     recent_messages: Vec<DebugMessage>,
-    queued_messages: Vec<String>,
+    queued_messages: crate::todo::QueuedMessages,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -462,7 +462,7 @@ pub(super) struct ScrollTestState {
     diff_pane_auto_scroll: bool,
     is_processing: bool,
     streaming_text: String,
-    queued_messages: Vec<String>,
+    queued_messages: crate::todo::QueuedMessages,
     interleave_message: Option<String>,
     pending_soft_interrupts: Vec<String>,
     input: String,

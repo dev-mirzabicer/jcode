@@ -27,13 +27,90 @@ pub(in crate::tui::app) async fn begin_remote_send(
             should_observe_startup_context(is_system, retry_attempts),
         )
         .await?;
+    adopt_remote_send(
+        app,
+        remote,
+        msg_id,
+        PendingRemoteMessage {
+            content,
+            images,
+            is_system,
+            system_reminder,
+            auto_retry,
+            retry_attempts,
+            retry_at: None,
+            queued_messages: None,
+        },
+    );
+    Ok(msg_id)
+}
+
+pub(in crate::tui::app) async fn begin_remote_queued_send(
+    app: &mut App,
+    remote: &mut RemoteConnection,
+    entries: crate::todo::QueuedMessages,
+    system_reminder: Option<String>,
+    retry_attempts: u8,
+    auto_retry: bool,
+) -> Result<u64> {
+    if entries.is_empty() {
+        return begin_remote_send(
+            app,
+            remote,
+            String::new(),
+            Vec::new(),
+            true,
+            system_reminder,
+            true,
+            retry_attempts,
+        )
+        .await;
+    }
+    let id = remote
+        .send_queued_messages(
+            entries.clone().into_entries(),
+            system_reminder.clone(),
+            false,
+        )
+        .await?;
+    let content = entries
+        .iter()
+        .filter_map(|entry| entry.human_text())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    adopt_remote_send(
+        app,
+        remote,
+        id,
+        PendingRemoteMessage {
+            content,
+            images: Vec::new(),
+            is_system: true,
+            system_reminder,
+            auto_retry,
+            retry_attempts,
+            retry_at: None,
+            queued_messages: Some(entries),
+        },
+    );
+    Ok(id)
+}
+
+fn adopt_remote_send(
+    app: &mut App,
+    remote: &mut RemoteConnection,
+    msg_id: u64,
+    pending: PendingRemoteMessage,
+) {
+    let is_system = pending.is_system;
+    let has_content = !pending.content.is_empty() || pending.queued_messages.is_some();
     app.current_message_id = Some(msg_id);
     app.deferred_stream_done_id = None;
     app.is_processing = true;
     app.status = ProcessingStatus::Sending;
     app.status_detail = None;
     app.processing_started = Some(Instant::now());
-    if !content.is_empty() {
+    if has_content {
         if is_system {
             app.visible_turn_started.get_or_insert_with(Instant::now);
         } else {
@@ -50,19 +127,10 @@ pub(in crate::tui::app) async fn begin_remote_send(
     app.thought_line_inserted = false;
     app.thinking_prefix_emitted = false;
     app.thinking_buffer.clear();
-    app.rate_limit_pending_message = Some(PendingRemoteMessage {
-        content,
-        images,
-        is_system,
-        system_reminder,
-        auto_retry,
-        retry_attempts,
-        retry_at: None,
-    });
+    app.rate_limit_pending_message = Some(pending);
     app.autoreview_after_current_turn = !is_system;
     app.autojudge_after_current_turn = !is_system;
     remote.reset_call_output_tokens_seen();
-    Ok(msg_id)
 }
 
 #[cfg(test)]
@@ -109,6 +177,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_input(
     remote: &mut RemoteConnection,
     prepared: input::PreparedInput,
 ) -> Result<()> {
+    app.queued_instruction_error = None;
     if app.remote_model_switch_in_flight || app.auth_catalog_refresh_pending {
         app.pending_prompt_after_model_switch = Some(prepared);
         app.set_status_notice(if app.auth_catalog_refresh_pending {

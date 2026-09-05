@@ -134,7 +134,9 @@ pub(super) fn recover_undelivered_queued_continuation(app: &mut App, reason: &st
         .is_some_and(|pending| {
             pending.is_system
                 && !pending.auto_retry
-                && (!pending.content.trim().is_empty() || pending.system_reminder.is_some())
+                && (!pending.content.trim().is_empty()
+                    || pending.system_reminder.is_some()
+                    || pending.queued_messages.is_some())
         });
     if !is_recoverable {
         return false;
@@ -152,7 +154,10 @@ pub(super) fn recover_undelivered_queued_continuation(app: &mut App, reason: &st
     if let Some(reminder) = pending.system_reminder {
         app.hidden_queued_system_messages.insert(0, reminder);
     }
-    if !pending.content.trim().is_empty() {
+    if let Some(mut entries) = pending.queued_messages {
+        entries.extend(std::mem::take(&mut app.queued_messages));
+        app.queued_messages = entries;
+    } else if !pending.content.trim().is_empty() {
         app.queued_messages.insert(0, pending.content);
     }
     true
@@ -203,8 +208,8 @@ pub(super) async fn recover_stranded_soft_interrupts(
     ));
     app.pending_soft_interrupt_requests.clear();
 
-    let mut recovered_queue = recovered_interrupts;
-    recovered_queue.append(&mut app.queued_messages);
+    let mut recovered_queue: crate::todo::QueuedMessages = recovered_interrupts.into();
+    recovered_queue.extend(std::mem::take(&mut app.queued_messages));
     app.queued_messages = recovered_queue;
     app.set_status_notice("Recovered queued interleave after turn finished");
     true

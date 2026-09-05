@@ -2406,7 +2406,7 @@ fn test_poke_queues_when_turn_is_in_progress() {
 
         assert!(app.pending_queued_dispatch);
         assert_eq!(app.queued_messages().len(), 1);
-        assert!(app.queued_messages()[0].contains("You have 2 incomplete todos"));
+        assert!(matches!(&app.queued_messages[0], crate::todo::QueuedMessage::Current(crate::todo::QueuedMessageContent::Todo { request: crate::todo::TodoNoticeRequest::Incomplete { count: 2 } })));
         assert!(!app.queued_messages()[0].contains("Pick up the newly discovered task"));
         assert!(!app.queued_messages()[0].contains("/poke off"));
     });
@@ -2460,7 +2460,7 @@ fn test_finish_turn_auto_pokes_again_when_todos_remain() {
 
         assert!(app.pending_queued_dispatch);
         assert_eq!(app.queued_messages().len(), 1);
-        assert!(app.queued_messages()[0].contains("Continue working, or update the todo tool."));
+        assert!(matches!(&app.queued_messages[0], crate::todo::QueuedMessage::Current(crate::todo::QueuedMessageContent::Todo { request: crate::todo::TodoNoticeRequest::Incomplete { .. } })));
     });
 }
 
@@ -2529,16 +2529,13 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
         let summary = app.queued_messages[0].clone();
         let summary = &summary;
         assert!(super::commands::is_poke_message(summary));
-        assert!(super::commands::is_todo_confidence_summary_message(summary));
-        assert!(summary.starts_with(crate::todo::TODO_COMPLETION_CONTINUATION_MESSAGE));
+        assert!(matches!(summary, crate::todo::QueuedMessage::Current(crate::todo::QueuedMessageContent::Todo { request: crate::todo::TodoNoticeRequest::Completion { .. } })));
         // The continuation self-identifies as an automated follow-up so the model
         // does not mistake it for a user message, but never discloses private
         // calibration details.
-        assert!(summary.contains("automated follow-up"));
-        assert!(!summary.to_ascii_lowercase().contains("threshold"));
         // The model is told exactly which completed todos to recheck.
-        assert!(summary.contains("Finish risky provider path"));
-        assert!(summary.contains("Document straightforward behavior"));
+        assert!(serde_json::to_string(&summary).unwrap().contains("Finish risky provider path"));
+        assert!(serde_json::to_string(&summary).unwrap().contains("Document straightforward behavior"));
         assert!(
             app.display_messages()
                 .iter()
@@ -2679,8 +2676,7 @@ fn test_finish_turn_challenges_confidence_spike_once() {
         assert!(app.pending_queued_dispatch);
         assert_eq!(app.queued_messages.len(), 1);
         assert!(
-            app.queued_messages[0]
-                .starts_with(crate::todo::TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE)
+            matches!(app.queued_messages[0], crate::todo::QueuedMessage::Current(crate::todo::QueuedMessageContent::Todo { request: crate::todo::TodoNoticeRequest::Confidence { .. } }))
         );
         assert!(
             app.display_messages()
@@ -2709,7 +2705,7 @@ fn test_todo_confidence_summary_hidden_queue_is_not_user_prompt() {
             .to_string();
 
     let (user_messages, reminder, display_system_messages) =
-        super::helpers::partition_queued_messages(Vec::new(), vec![summary.clone()]);
+        super::helpers::partition_queued_messages(Vec::<String>::new(), vec![summary.clone()]);
 
     assert!(user_messages.is_empty());
     assert!(display_system_messages.is_empty());
@@ -2888,6 +2884,6 @@ fn test_overnight_start_queues_remote_turn_without_stuck_sending() {
             "remote overnight should not get stuck in local Sending"
         );
         assert_eq!(app.queued_messages.len(), 1);
-        assert!(app.queued_messages[0].contains("visible Overnight Coordinator"));
+        assert!(serde_json::to_string(&app.queued_messages[0]).unwrap().contains("visible Overnight Coordinator"));
     });
 }

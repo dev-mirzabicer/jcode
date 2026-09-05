@@ -1,9 +1,10 @@
 use super::{Tool, ToolContext, ToolOutput};
 use crate::bus::{Bus, BusEvent, TodoEvent};
+#[cfg(test)]
+use crate::todo::TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE;
 use crate::todo::{
-    GateObservation, GateObservationKind, SEVERE_INTENT_MISUNDERSTANDING,
-    TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE, TodoGoal, TodoGoalChange, TodoGoalField,
-    TodoItem, TodoPlan, TodoPlanChange, TodoPlanField, append_gate_observations,
+    GateObservation, GateObservationKind, SEVERE_INTENT_MISUNDERSTANDING, TodoGoal, TodoGoalChange,
+    TodoGoalField, TodoItem, TodoPlan, TodoPlanChange, TodoPlanField, append_gate_observations,
     feedback_loop_passes, intent_understanding_passes, load_goals, load_plan, load_todos,
     save_goals, save_plan, save_todos, update_todo_review_cycle,
 };
@@ -470,7 +471,7 @@ fn record_reframe_observations(
     goals: &[TodoGoal],
     todos: &[TodoItem],
     previous: &[TodoItem],
-) -> (Vec<GateObservation>, Vec<String>) {
+) -> (Vec<GateObservation>, Vec<crate::todo::TodoNoticeRequest>) {
     let mut observations = Vec::new();
     let mut immediate = Vec::new();
     let any_open = todos
@@ -492,7 +493,7 @@ fn record_reframe_observations(
                 .understands_user_intent
                 .is_some_and(|state| state <= SEVERE_INTENT_MISUNDERSTANDING)
         {
-            immediate.push(TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE.to_string());
+            immediate.push(crate::todo::TodoNoticeRequest::Intent);
         }
     }
     let closed_now = crate::todo::groups_closed_by_update(previous, todos);
@@ -554,7 +555,8 @@ fn build_todo_output(
     goals: Vec<TodoGoal>,
     plan_change: Option<TodoPlanChange>,
     goal_changes: Option<Vec<TodoGoalChange>>,
-    continuations: impl IntoIterator<Item = String>,
+    continuations: impl IntoIterator<Item = crate::todo::TodoNoticeRequest>,
+    working_dir: Option<&std::path::Path>,
 ) -> Result<ToolOutput> {
     let remaining = todos
         .iter()
@@ -577,11 +579,24 @@ fn build_todo_output(
         text.push_str("\n\nGoal updates:\n");
         text.push_str(&serde_json::to_string_pretty(goal_changes)?);
     }
+    let mut notice_kinds = Vec::new();
+    let mut notice_errors = Vec::new();
     for continuation in continuations {
         text.push_str("\n\n");
-        text.push_str(&continuation);
+        match crate::todo::render_todo_notice(&continuation, working_dir) {
+            Ok(notice) => {
+                notice_kinds.push(notice.kind);
+                text.push_str(&notice.text);
+            }
+            Err(error) => {
+                notice_errors.push(error.to_string());
+                text.push_str(&format!("[Todo instruction rendering failed: {error}]"));
+            }
+        }
     }
     let mut metadata = json!({"todos": todos, "plan": plan, "goals": goals});
+    metadata["todo_notice_kinds"] = serde_json::to_value(notice_kinds)?;
+    metadata["todo_notice_errors"] = serde_json::to_value(notice_errors)?;
     if let Some(plan_change) = plan_change {
         metadata["plan_update"] = serde_json::to_value(plan_change)?;
     }
@@ -912,6 +927,7 @@ impl Tool for TodoTool {
                     concise_plan_change,
                     concise_goal_changes,
                     nudges,
+                    ctx.working_dir.as_deref(),
                 )
             })()
         } else {
@@ -920,7 +936,15 @@ impl Tool for TodoTool {
                 let goals = load_goals(&ctx.session_id).unwrap_or_default();
                 let plan = load_plan(&ctx.session_id).unwrap_or_default();
                 record_todo_telemetry(&todos, &todos, &goals, &plan);
-                build_todo_output(todos, plan, goals, None, None, Vec::new())
+                build_todo_output(
+                    todos,
+                    plan,
+                    goals,
+                    None,
+                    None,
+                    Vec::new(),
+                    ctx.working_dir.as_deref(),
+                )
             })()
         };
         result.map_err(|err| {
@@ -1073,18 +1097,7 @@ mod tests {
         // The detailed calibration rubric moved out of the always-on schema
         // into deferred turn-finish continuation messages, which are paid only
         // when the completed turn needs another quality pass.
-        for required_concept in [
-            "requirement inventory",
-            "outcomes, deliverables, constraints, prohibited actions",
-            "integration paths, edge cases, and necessary follow-through",
-            "Do not ask the user",
-        ] {
-            assert!(
-                crate::todo::TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE
-                    .contains(required_concept),
-                "intent gate message omitted {required_concept}"
-            );
-        }
+
         let feedback_description = goal_props["feedback_loop"]
             .get("description")
             .and_then(Value::as_str)
@@ -1101,17 +1114,7 @@ mod tests {
             feedback_description_lower.contains("explicit observation or check"),
             "feedback_loop description omitted per-requirement check coverage: {feedback_description}"
         );
-        for required_concept in [
-            "reports back on each requirement",
-            "run tests, verify, or review count only",
-            "non-testable requirements",
-        ] {
-            assert!(
-                crate::todo::TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE
-                    .contains(required_concept),
-                "feedback gate message omitted {required_concept}"
-            );
-        }
+
         assert!(
             !alignment_description
                 .to_ascii_lowercase()
@@ -1570,6 +1573,8 @@ mod tests {
 
     #[test]
     fn ownership_gate_output_preserves_the_saved_todo_card() {
+        let source = crate::tool::background_notice::TestHome::new();
+        source.write("todo-ownership-review", "SYNTHETIC-OWNERSHIP");
         let todos = vec![open_todo(Some("ship"))];
         let plan = aligned_plan();
         let goals = vec![goal(Some("ship"), crate::todo::FeedbackLoopState::Closed)];
@@ -1579,21 +1584,23 @@ mod tests {
             goals.clone(),
             None,
             None,
-            [crate::todo::TODO_OWNERSHIP_CONTINUATION_MESSAGE.to_string()],
+            [crate::todo::TodoNoticeRequest::Ownership {
+                todos: todos.clone(),
+                goals: goals.clone(),
+            }],
+            None,
         )
         .expect("ownership gate should produce a structured todo result");
 
         assert_eq!(output.title.as_deref(), Some("1 todos"));
         assert!(output.output.starts_with('['));
         assert!(output.output.contains("\"status\": \"in_progress\""));
-        assert!(
-            output
-                .output
-                .contains(crate::todo::TODO_OWNERSHIP_CONTINUATION_MESSAGE)
-        );
+        assert!(output.output.contains("SYNTHETIC-OWNERSHIP"));
         assert_eq!(
             output.metadata,
-            Some(json!({"todos": todos, "plan": plan, "goals": goals}))
+            Some(
+                json!({"todos": todos, "plan": plan, "goals": goals, "todo_notice_kinds": ["ownership"], "todo_notice_errors": []})
+            )
         );
     }
 
@@ -1900,10 +1907,30 @@ mod tests {
         // re-check; the wording just reflects that it settled late.
         let observations = crate::todo::load_gate_observations(session).expect("observations");
         let goals = load_goals(session).expect("goals");
-        let digest = crate::todo::build_gate_digest(&observations, &plan, &goals)
-            .expect("both recorded points should be surfaced");
-        assert!(digest.contains("started this work without understanding"));
-        assert!(digest.contains("feedback loop"));
+        crate::instruction::SystemPromptComposer::new()
+            .ensure_global_store()
+            .unwrap();
+        for id in ["todo-digest-intent-cleared", "todo-digest-loop-open"] {
+            std::fs::write(
+                crate::storage::jcode_dir()
+                    .unwrap()
+                    .join(format!("instructions/notifications/{id}.md")),
+                format!("---\nid: {id}\nkind: notification\n---\nSYNTHETIC-{id}"),
+            )
+            .unwrap();
+        }
+        let digest = crate::todo::render_todo_notice(
+            &crate::todo::TodoNoticeRequest::Digest {
+                observations: observations.clone(),
+                plan,
+                goals,
+            },
+            None,
+        )
+        .unwrap()
+        .text;
+        assert!(digest.contains("SYNTHETIC-todo-digest-intent-cleared"));
+        assert!(digest.contains("SYNTHETIC-todo-digest-loop-open"));
 
         match previous_home {
             Some(value) => crate::env::set_var("JCODE_HOME", value),
@@ -2093,9 +2120,7 @@ mod tests {
             understands_user_intent_history: vec![crate::todo::IntentUnderstanding::Uncertain],
         };
         let (_, nudges) = record_reframe_observations(&plan, &[], &todos, &[]);
-        assert_eq!(nudges, vec![TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE]);
-        assert!(!nudges[0].contains("40"));
-        assert!(!nudges[0].to_ascii_lowercase().contains("threshold"));
+        assert_eq!(nudges, vec![crate::todo::TodoNoticeRequest::Intent]);
 
         // Once the plan has a history, the same severe score is deferred to the
         // digest rather than nudged again on every write.

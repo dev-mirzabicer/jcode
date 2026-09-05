@@ -570,6 +570,7 @@ mod auth_tool_smoke_tests {
         content: Vec<crate::message::ContentBlock>,
     ) -> crate::session::StoredMessage {
         crate::session::StoredMessage {
+            origin: None,
             id: "msg_test".to_string(),
             role,
             content,

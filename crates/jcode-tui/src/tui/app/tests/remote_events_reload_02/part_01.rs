@@ -85,7 +85,7 @@ fn test_remote_poke_queues_when_turn_is_in_progress() {
         assert!(needs_redraw);
         assert!(app.pending_queued_dispatch);
         assert_eq!(app.queued_messages().len(), 1);
-        assert!(app.queued_messages()[0].contains("You have 2 incomplete todos"));
+        assert!(matches!(&app.queued_messages[0], crate::todo::QueuedMessage::Current(crate::todo::QueuedMessageContent::Todo { request: crate::todo::TodoNoticeRequest::Incomplete { count: 2 } })));
         assert!(!app.queued_messages()[0].contains("Handle the newly discovered follow-up"));
         assert!(!app.queued_messages()[0].contains("/poke off"));
     });
@@ -180,7 +180,7 @@ fn test_remote_interrupted_auto_poke_requeues_after_deferred_poke() {
         assert!(needs_redraw);
         assert!(app.pending_queued_dispatch);
         assert_eq!(app.queued_messages().len(), 1);
-        assert!(app.queued_messages()[0].contains("You have 1 incomplete todo"));
+        assert!(matches!(&app.queued_messages[0], crate::todo::QueuedMessage::Current(crate::todo::QueuedMessageContent::Todo { request: crate::todo::TodoNoticeRequest::Incomplete { count: 1 } })));
         assert!(!app.queued_messages()[0].contains("/poke off"));
     });
 }
@@ -919,6 +919,7 @@ fn test_handle_remote_disconnect_flushes_streaming_text_and_sets_reconnect_state
     app.status = ProcessingStatus::Streaming;
     app.current_message_id = Some(7);
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        queued_messages: None,
         content: "retry me".to_string(),
         images: vec![],
         is_system: false,

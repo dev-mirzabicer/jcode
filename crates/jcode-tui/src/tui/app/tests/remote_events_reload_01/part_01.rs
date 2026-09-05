@@ -1672,7 +1672,7 @@ fn test_remote_done_auto_pokes_again_when_todos_remain() {
         assert!(needs_redraw);
         assert!(app.pending_queued_dispatch);
         assert_eq!(app.queued_messages().len(), 1);
-        assert!(app.queued_messages()[0].contains("Continue working, or update the todo tool."));
+        assert!(matches!(&app.queued_messages[0], crate::todo::QueuedMessage::Current(crate::todo::QueuedMessageContent::Todo { request: crate::todo::TodoNoticeRequest::Incomplete { .. } })));
     });
 }
 

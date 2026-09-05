@@ -1,0 +1,1 @@
+the broader checks{{label}} were identified only after earlier work was done. Run them over the whole result now, including edge cases, packaging, integration paths, and likely failure modes.

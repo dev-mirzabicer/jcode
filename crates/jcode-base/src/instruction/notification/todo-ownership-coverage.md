@@ -1,0 +1,1 @@
+exercise the main workflows, edge cases, packaging, and likely failure modes.

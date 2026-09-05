@@ -716,6 +716,7 @@ impl Session {
         system_prompt.active_transition_message_id = Some(message_id.clone());
         self.agent_profile_message_ids.push(message_id.clone());
         self.append_stored_message(StoredMessage {
+            origin: None,
             id: message_id.clone(),
             role: Role::User,
             content: vec![ContentBlock::Text {
@@ -746,6 +747,7 @@ impl Session {
         self.install_system_prompt(state);
         let audit_id = new_id("message");
         self.append_stored_message(StoredMessage {
+            origin: None,
             id: audit_id.clone(),
             role: Role::User,
             content: vec![ContentBlock::Text {
@@ -2127,6 +2129,47 @@ impl Session {
             {
                 continue;
             }
+            if let Some(parts) = msg.origin_parts().map(<[_]>::to_vec) {
+                let ContentBlock::Text { text, .. } = &msg.content[0] else {
+                    unreachable!()
+                };
+                let full = crate::message::redact_secrets(text);
+                let mut cursor = 0;
+                let mut exact = true;
+                let mut remapped = Vec::new();
+                for (index, mut part) in parts.into_iter().enumerate() {
+                    let body = crate::message::redact_secrets(&text[part.start..part.end]);
+                    while !full[cursor..].starts_with(&body) {
+                        let Some(ch) = full[cursor..].chars().next() else {
+                            exact = false;
+                            break;
+                        };
+                        if index == 0 || !ch.is_whitespace() {
+                            exact = false;
+                            break;
+                        }
+                        cursor += ch.len_utf8();
+                    }
+                    if !exact {
+                        break;
+                    }
+                    part.start = cursor;
+                    cursor += body.len();
+                    part.end = cursor;
+                    remapped.push(part);
+                }
+                // Whole-message redaction remains authoritative. Cross-part
+                // matches fall back to complete raw display, never stale spans.
+                msg.origin = Some(if exact && cursor == full.len() {
+                    jcode_session_types::StoredMessageOrigin::Composed(remapped)
+                } else {
+                    jcode_session_types::StoredMessageOrigin::Human
+                });
+                if let ContentBlock::Text { text, .. } = &mut msg.content[0] {
+                    *text = full;
+                }
+                continue;
+            }
             for block in &mut msg.content {
                 match block {
                     ContentBlock::Text { text, .. }
@@ -2247,6 +2290,7 @@ impl Session {
     ) -> String {
         let id = new_id("message");
         self.append_stored_message(StoredMessage {
+            origin: None,
             id: id.clone(),
             role,
             content,
@@ -2266,6 +2310,39 @@ impl Session {
             .merge_from(&summarize_blocks(&message.content));
         self.messages.push(message);
         self.mark_messages_append_dirty();
+    }
+
+    pub fn add_user_message_with_origin(
+        &mut self,
+        content: Vec<ContentBlock>,
+        display_role: Option<StoredDisplayRole>,
+        origin: Option<jcode_session_types::StoredMessageOrigin>,
+    ) -> anyhow::Result<String> {
+        let id = new_id("message");
+        let mut message = StoredMessage {
+            id: id.clone(),
+            role: Role::User,
+            content,
+            display_role,
+            timestamp: Some(Utc::now()),
+            tool_duration_ms: None,
+            token_usage: None,
+            origin: None,
+        };
+        if let Some(origin) = origin {
+            message.set_origin(origin).map_err(anyhow::Error::msg)?;
+        }
+        self.append_stored_message(message);
+        Ok(id)
+    }
+
+    pub fn add_human_message(&mut self, content: Vec<ContentBlock>) -> String {
+        self.add_user_message_with_origin(
+            content,
+            None,
+            Some(jcode_session_types::StoredMessageOrigin::Human),
+        )
+        .expect("human origin has no fallible ranges")
     }
 
     pub fn insert_message(&mut self, index: usize, message: StoredMessage) {

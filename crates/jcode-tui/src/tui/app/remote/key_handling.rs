@@ -742,17 +742,22 @@ async fn handle_remote_key_internal(
                                 app_mod::commands::poke_triggered_display_message(incomplete_count),
                             ));
 
-                            let _ = begin_remote_send(
+                            let entries: crate::todo::QueuedMessages = vec![poke_msg].into();
+                            if let Err(error) = super::input_dispatch::begin_remote_queued_send(
                                 app,
                                 remote,
-                                poke_msg,
-                                vec![],
-                                true,
+                                entries.clone(),
                                 None,
-                                true,
                                 0,
+                                true,
                             )
-                            .await;
+                            .await
+                            {
+                                app.queued_messages.extend(entries);
+                                app.push_display_message(DisplayMessage::error(format!(
+                                    "Poke send failed; intent was queued: {error}"
+                                )));
+                            }
                             app.visible_turn_started = Some(Instant::now());
                         }
                     }
@@ -2241,17 +2246,24 @@ async fn handle_remote_key_internal(
                                         ),
                                     ));
 
-                                    let _ = begin_remote_send(
-                                        app,
-                                        remote,
-                                        poke_msg,
-                                        vec![],
-                                        true,
-                                        None,
-                                        true,
-                                        0,
-                                    )
-                                    .await;
+                                    let entries: crate::todo::QueuedMessages =
+                                        vec![poke_msg].into();
+                                    if let Err(error) =
+                                        super::input_dispatch::begin_remote_queued_send(
+                                            app,
+                                            remote,
+                                            entries.clone(),
+                                            None,
+                                            0,
+                                            true,
+                                        )
+                                        .await
+                                    {
+                                        app.queued_messages.extend(entries);
+                                        app.push_display_message(DisplayMessage::error(format!(
+                                            "Poke send failed; intent was queued: {error}"
+                                        )));
+                                    }
                                     app.visible_turn_started = Some(Instant::now());
                                 }
                             }
@@ -2689,7 +2701,7 @@ async fn handle_remote_key_internal(
                     || app
                         .queued_messages
                         .iter()
-                        .any(|message| app_mod::commands::is_poke_message(message));
+                        .any(app_mod::commands::is_poke_message);
                 remote.cancel_with_reason("keyboard_escape").await?;
                 if disabled_auto_poke {
                     app_mod::commands::disable_auto_poke(app);

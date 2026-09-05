@@ -1,0 +1,1 @@
+Before you treat this turn as finished, double-check the weak points it surfaced. Do not reply conversationally or wait for the user.

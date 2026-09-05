@@ -65,6 +65,11 @@ fn is_internal_system_reminder(msg: &super::StoredMessage) -> bool {
 /// "last prompt" after a reload/resume/remote attach, so they render with the
 /// system role.
 fn is_auto_poke_user_message(msg: &super::StoredMessage) -> bool {
+    if msg.origin.is_some() {
+        return msg
+            .origin_parts()
+            .is_some_and(|parts| parts.iter().all(|part| part.notice.is_some()));
+    }
     matches!(msg.role, Role::User)
         && msg.display_role.is_none()
         && msg
@@ -80,6 +85,9 @@ fn is_auto_poke_user_message(msg: &super::StoredMessage) -> bool {
 /// Short user-facing stand-in for a synthetic gate continuation, when one
 /// exists. `None` means render the stored text as-is.
 fn auto_poke_user_message_display_summary(msg: &super::StoredMessage) -> Option<&'static str> {
+    if msg.origin.is_some() {
+        return None;
+    }
     if !is_auto_poke_user_message(msg) {
         return None;
     }
@@ -451,6 +459,37 @@ fn render_messages_and_images_with_compacted_history_inner(
 
     for (stored_index, msg) in session.messages.iter().enumerate().skip(render_start_idx) {
         if hidden_message_ids.contains(msg.id.as_str()) {
+            continue;
+        }
+        if let Some(parts) = msg
+            .origin_parts()
+            .filter(|parts| parts.iter().any(|part| part.notice.is_some()))
+        {
+            let ContentBlock::Text { text, .. } = &msg.content[0] else {
+                unreachable!()
+            };
+            for part in parts {
+                let body = &text[part.start..part.end];
+                let content = part
+                    .notice
+                    .and_then(crate::todo::todo_notice_display_summary)
+                    .unwrap_or(body);
+                if content.is_empty() {
+                    continue;
+                }
+                rendered.push(RenderedMessage {
+                    role: if part.notice.is_some() {
+                        "system"
+                    } else {
+                        "user"
+                    }
+                    .to_string(),
+                    content: content.to_string(),
+                    tool_calls: Vec::new(),
+                    tool_data: None,
+                    stored_index: Some(stored_index),
+                });
+            }
             continue;
         }
         if is_internal_system_reminder(msg) {

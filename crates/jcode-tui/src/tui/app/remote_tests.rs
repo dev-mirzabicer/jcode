@@ -1339,3 +1339,5 @@ fn remote_submit_input_never_strands_a_local_pending_turn() {
         "the prompt should be queued for the remote tick loop"
     );
 }
+
+include!("remote/notification_queue_tests.rs");

@@ -107,3 +107,7 @@ The global store is not initialized by ordinary server construction, read-only r
 ## Current boundary
 
 The repository service and primary activation path are live. Read-only and editing manager protocol/TUI surfaces arrive in WP-09 and WP-10. Network Git operations remain explicit and no parent-project gitlink is committed automatically.
+
+## Notification occurrence and todo history
+
+See [notification occurrence and todo history](NOTIFICATIONS.md) for current-source occurrence rendering, structural ownership, typed todo queues, failures and recovery.

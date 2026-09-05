@@ -85,8 +85,11 @@ impl App {
         self.queued_messages.len() + self.hidden_queued_system_messages.len()
     }
 
-    pub fn queued_messages(&self) -> &[String] {
-        &self.queued_messages
+    pub fn queued_messages(&self) -> Vec<String> {
+        self.queued_messages
+            .iter()
+            .map(crate::todo::queued_message_preview)
+            .collect()
     }
 
     pub fn streaming_tokens(&self) -> (u64, u64) {

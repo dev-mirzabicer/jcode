@@ -129,6 +129,7 @@ mod tests {
 
     fn message(id: &str, role: Role, reasoning: &str, text: &str) -> StoredMessage {
         StoredMessage {
+            origin: None,
             id: id.to_string(),
             role,
             content: vec![
@@ -264,6 +265,7 @@ mod tests {
 
         let raw = vec![
             StoredMessage {
+                origin: None,
                 id: "call-message".to_string(),
                 role: Role::Assistant,
                 content: vec![ContentBlock::ToolUse {
@@ -278,6 +280,7 @@ mod tests {
                 token_usage: None,
             },
             StoredMessage {
+                origin: None,
                 id: "result-message".to_string(),
                 role: Role::User,
                 content: vec![ContentBlock::ToolResult {

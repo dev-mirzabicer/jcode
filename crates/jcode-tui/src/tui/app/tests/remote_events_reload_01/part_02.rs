@@ -176,11 +176,10 @@ fn test_remote_auto_poke_challenges_abrupt_confidence_increase() {
         assert!(app.pending_queued_dispatch);
         assert_eq!(app.queued_messages.len(), 1);
         assert!(
-            app.queued_messages[0]
-                .starts_with(crate::todo::TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE)
+            matches!(app.queued_messages[0], crate::todo::QueuedMessage::Current(crate::todo::QueuedMessageContent::Todo { request: crate::todo::TodoNoticeRequest::Confidence { .. } }))
         );
         // The continuation names the specific todo whose confidence jumped.
-        assert!(app.queued_messages[0].contains("Finished work"));
+        assert!(serde_json::to_string(&app.queued_messages[0]).unwrap().contains("Finished work"));
         assert!(
             app.display_messages()
                 .iter()
@@ -236,9 +235,9 @@ fn test_remote_auto_poke_completion_below_threshold_tells_model_to_keep_working(
         assert!(app.pending_queued_dispatch);
         assert_eq!(app.queued_messages.len(), 1);
         assert!(
-            app.queued_messages[0].starts_with(crate::todo::TODO_COMPLETION_CONTINUATION_MESSAGE)
+            matches!(app.queued_messages[0], crate::todo::QueuedMessage::Current(crate::todo::QueuedMessageContent::Todo { request: crate::todo::TodoNoticeRequest::Completion { .. } }))
         );
-        assert!(app.queued_messages[0].contains("Needs validation"));
+        assert!(serde_json::to_string(&app.queued_messages[0]).unwrap().contains("Needs validation"));
         assert!(
             app.display_messages()
                 .iter()

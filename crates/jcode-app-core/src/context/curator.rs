@@ -2097,6 +2097,7 @@ mod tests {
 
     fn message_with_result(content: &str) -> Vec<StoredMessage> {
         vec![StoredMessage {
+            origin: None,
             id: "result".to_string(),
             role: Role::User,
             content: vec![ContentBlock::ToolResult {
@@ -2133,6 +2134,7 @@ mod tests {
     ) -> (Vec<StoredMessage>, ContextCuratorToolWork) {
         let messages = vec![
             StoredMessage {
+                origin: None,
                 id: "call-message".to_string(),
                 role: Role::Assistant,
                 content: vec![ContentBlock::ToolUse {
@@ -2147,6 +2149,7 @@ mod tests {
                 token_usage: None,
             },
             StoredMessage {
+                origin: None,
                 id: "result".to_string(),
                 role: Role::User,
                 content: vec![ContentBlock::ToolResult {
@@ -2414,6 +2417,7 @@ mod tests {
         let mut ranges = Vec::new();
         for index in 0..3 {
             messages.push(StoredMessage {
+                origin: None,
                 id: format!("range-message-{index}"),
                 role: Role::User,
                 content: vec![ContentBlock::Text {
@@ -2438,6 +2442,7 @@ mod tests {
         for index in 0..5 {
             let call_id = format!("call-{index}");
             messages.push(StoredMessage {
+                origin: None,
                 id: format!("tool-call-message-{index}"),
                 role: Role::Assistant,
                 content: vec![ContentBlock::ToolUse {
@@ -2452,6 +2457,7 @@ mod tests {
                 token_usage: None,
             });
             messages.push(StoredMessage {
+                origin: None,
                 id: format!("tool-result-message-{index}"),
                 role: Role::User,
                 content: vec![ContentBlock::ToolResult {
@@ -2621,6 +2627,7 @@ mod tests {
     #[test]
     fn complete_atomic_source_overflow_fails_before_any_provider_call() {
         let messages = vec![StoredMessage {
+            origin: None,
             id: "large-range".to_string(),
             role: Role::User,
             content: vec![ContentBlock::Text {
@@ -3078,6 +3085,7 @@ mod tests {
         let encrypted = "SECRET_ENCRYPTED_REASONING";
         let thought_signature = "SECRET_THOUGHT_SIGNATURE";
         let messages = vec![StoredMessage {
+            origin: None,
             id: "image-message".to_string(),
             role: Role::Assistant,
             content: vec![

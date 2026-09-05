@@ -22,6 +22,7 @@ fn test_disconnect_recovers_inflight_queued_continuation_to_queue() {
     app.status = ProcessingStatus::Streaming;
     app.current_message_id = Some(12);
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        queued_messages: None,
         content: "queued follow-up in flight".to_string(),
         images: vec![],
         is_system: true,
@@ -55,6 +56,7 @@ fn test_disconnect_still_clears_pending_for_non_queued_shapes() {
     // clear it rather than re-queueing as a system continuation.
     app.is_processing = true;
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        queued_messages: None,
         content: "user retry message".to_string(),
         images: vec![],
         is_system: false,
@@ -82,6 +84,7 @@ fn test_save_input_for_reload_persists_inflight_queued_continuation() {
     // already dequeued into the in-flight pending slot.
     app.queued_messages.push("still queued".to_string());
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        queued_messages: None,
         content: "dispatched but unfinished".to_string(),
         images: vec![],
         is_system: true,
@@ -258,7 +261,7 @@ fn low_ownership_is_gated_after_the_completed_todo_was_saved() {
         assert!(app.schedule_auto_poke_followup_if_needed());
         assert!(app.pending_queued_dispatch);
         assert_eq!(app.queued_messages.len(), 1);
-        assert!(app.queued_messages[0].contains("complete workflow"));
+        assert!(matches!(&app.queued_messages[0], crate::todo::QueuedMessage::Current(crate::todo::QueuedMessageContent::Todo { request: crate::todo::TodoNoticeRequest::Ownership { .. } })));
 
         let saved = crate::todo::load_todos(&app.session.id).expect("load saved todo");
         assert_eq!(saved[0].status, "completed");
@@ -522,7 +525,7 @@ fn test_gate_digest_is_delivered_at_turn_end_and_rearms_next_cycle() {
             .last()
             .expect("digest should be queued")
             .clone();
-        assert!(digest.starts_with(crate::todo::TODO_GATE_DIGEST_PREFIX));
+        assert!(matches!(digest, crate::todo::QueuedMessage::Current(crate::todo::QueuedMessageContent::Todo { request: crate::todo::TodoNoticeRequest::Digest { .. } })));
         assert!(app.todo_gate_digest_delivered);
         // Consumed, so the same points cannot be raised twice.
         assert!(

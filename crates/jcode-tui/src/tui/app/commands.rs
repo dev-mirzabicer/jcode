@@ -59,7 +59,7 @@ pub(super) enum PokeActivation {
     Queued,
     SendNow {
         incomplete_count: usize,
-        poke_msg: String,
+        poke_msg: crate::todo::QueuedMessage,
     },
 }
 
@@ -74,8 +74,8 @@ pub(super) fn parse_poke_command(trimmed: &str) -> Option<Result<PokeCommand, St
     }
 }
 
-pub(super) fn is_poke_message(message: &str) -> bool {
-    crate::todo::is_auto_poke_message(message)
+pub(super) fn is_poke_message(message: &crate::todo::QueuedMessage) -> bool {
+    crate::todo::queued_message_is_todo(message)
 }
 
 pub(super) fn is_todo_confidence_summary_message(message: &str) -> bool {
@@ -84,8 +84,8 @@ pub(super) fn is_todo_confidence_summary_message(message: &str) -> bool {
         || message.starts_with("All todos are done. Todo confidence summary:")
 }
 
-pub(super) fn queued_messages_are_only_pokes(messages: &[String]) -> bool {
-    !messages.is_empty() && messages.iter().all(|message| is_poke_message(message))
+pub(super) fn queued_messages_are_only_pokes(messages: &[crate::todo::QueuedMessage]) -> bool {
+    !messages.is_empty() && messages.iter().all(is_poke_message)
 }
 
 pub(super) fn clear_queued_poke_messages(app: &mut App) -> usize {
@@ -253,6 +253,11 @@ pub(super) fn activate_auto_poke(app: &mut App) -> PokeActivation {
     app.consecutive_guardrail_stops = 0;
     app.turn_guardrail_stopped = false;
     app.set_status_notice("Poke: ON");
+    let retrying_preserved_queue =
+        app.queued_instruction_error.take().is_some() && !app.queued_messages.is_empty();
+    if retrying_preserved_queue {
+        return PokeActivation::Queued;
+    }
 
     if incomplete.is_empty() {
         return PokeActivation::EnabledNoIncomplete;
@@ -285,19 +290,46 @@ pub(super) fn activate_auto_poke_local(app: &mut App) {
             incomplete_count,
             poke_msg,
         } => {
+            let prepared = crate::todo::render_queued_messages(
+                std::slice::from_ref(&poke_msg),
+                app.session.working_dir.as_deref().map(std::path::Path::new),
+            );
+            let (text, origin) = match prepared {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    app.queued_messages.push(poke_msg);
+                    app.queued_instruction_error = Some(error.to_string());
+                    app.push_display_message(DisplayMessage::error(format!(
+                        "Poke instructions could not render; intent was preserved: {error}"
+                    )));
+                    return;
+                }
+            };
+            let mut candidate = app.session.clone();
+            if let Err(error) = candidate
+                .add_user_message_with_origin(
+                    vec![ContentBlock::Text {
+                        text: text.clone(),
+                        cache_control: None,
+                    }],
+                    None,
+                    Some(origin),
+                )
+                .and_then(|_| candidate.save())
+            {
+                app.queued_messages.push(poke_msg);
+                app.queued_instruction_error = Some(error.to_string());
+                app.push_display_message(DisplayMessage::error(format!(
+                    "Poke could not be persisted; intent was preserved: {error}"
+                )));
+                return;
+            }
+            app.session = candidate;
             app.push_display_message(DisplayMessage::system(poke_triggered_display_message(
                 incomplete_count,
             )));
 
-            app.add_provider_message(Message::user(&poke_msg));
-            app.session.add_message(
-                Role::User,
-                vec![ContentBlock::Text {
-                    text: poke_msg,
-                    cache_control: None,
-                }],
-            );
-            let _ = app.session.save();
+            app.add_provider_message(Message::user(&text));
 
             app.is_processing = true;
             app.status = ProcessingStatus::Sending;
@@ -542,10 +574,7 @@ pub(super) fn handle_transfer_command_local(app: &mut App) {
 
 pub(super) fn poke_status_message(app: &App) -> String {
     let incomplete = incomplete_poke_todos(app);
-    let queued_followup = app
-        .queued_messages
-        .iter()
-        .any(|message| is_poke_message(message))
+    let queued_followup = app.queued_messages.iter().any(is_poke_message)
         || app
             .hidden_queued_system_messages
             .iter()
@@ -2754,8 +2783,12 @@ pub(super) fn incomplete_poke_todos(app: &App) -> Vec<crate::todo::TodoItem> {
         .collect()
 }
 
-pub(super) fn build_poke_message(incomplete: &[crate::todo::TodoItem]) -> String {
-    crate::todo::build_auto_poke_message(incomplete.len())
+pub(super) fn build_poke_message(
+    incomplete: &[crate::todo::TodoItem],
+) -> crate::todo::QueuedMessage {
+    crate::todo::QueuedMessage::todo(crate::todo::TodoNoticeRequest::Incomplete {
+        count: incomplete.len(),
+    })
 }
 
 fn todo_confidence_weight(priority: &str) -> u32 {
@@ -2780,12 +2813,18 @@ fn weighted_confidence_average(scores: impl IntoIterator<Item = (u8, u32)>) -> O
     }
 }
 
-pub(super) fn build_todo_confidence_summary_message(todos: &[crate::todo::TodoItem]) -> String {
+pub(super) fn build_todo_confidence_summary_message(
+    todos: &[crate::todo::TodoItem],
+) -> crate::todo::QueuedMessage {
     let summary = todo_confidence_summary(todos);
     if summary.confidence_spike_detected && !summary.completion_confidence_needs_validation {
-        crate::todo::build_todo_confidence_spike_continuation_message(todos)
+        crate::todo::QueuedMessage::todo(crate::todo::TodoNoticeRequest::Confidence {
+            todos: todos.to_vec(),
+        })
     } else {
-        crate::todo::build_todo_completion_continuation_message(todos)
+        crate::todo::QueuedMessage::todo(crate::todo::TodoNoticeRequest::Completion {
+            todos: todos.to_vec(),
+        })
     }
 }
 

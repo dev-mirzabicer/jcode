@@ -128,7 +128,7 @@ impl App {
                 },
                 "queued_messages": {
                     "visible_count": self.queued_messages.len(),
-                    "visible_text_bytes": estimate_string_vec_bytes(&self.queued_messages),
+                    "queued_payload_bytes": serde_json::to_vec(&self.queued_messages).map(|bytes| bytes.len()).unwrap_or_default(),
                     "hidden_count": self.hidden_queued_system_messages.len(),
                     "hidden_text_bytes": estimate_string_vec_bytes(&self.hidden_queued_system_messages),
                     "current_turn_system_reminder_bytes": self.current_turn_system_reminder.as_ref().map(|value| value.len()).unwrap_or(0),

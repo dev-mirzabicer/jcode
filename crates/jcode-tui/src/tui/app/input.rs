@@ -1,8 +1,8 @@
 #![cfg_attr(test, allow(clippy::items_after_test_module))]
 
 use super::{
-    App, ContentBlock, DisplayMessage, Message, PendingComposerInput, ProcessingStatus, Role,
-    SendAction, commands, ctrl_bracket_fallback_to_esc, remote,
+    App, ContentBlock, DisplayMessage, Message, PendingComposerInput, ProcessingStatus, SendAction,
+    commands, ctrl_bracket_fallback_to_esc, remote,
 };
 use crate::bus::{
     Bus, BusEvent, ClipboardPasteCompleted, ClipboardPasteContent, ClipboardPasteKind,
@@ -1402,7 +1402,15 @@ pub(super) fn retrieve_pending_message_for_edit(app: &mut App) -> bool {
         had_pending = true;
     }
     if !app.queued_messages.is_empty() {
-        parts.extend(std::mem::take(&mut app.queued_messages));
+        for entry in std::mem::take(&mut app.queued_messages) {
+            match entry {
+                crate::todo::QueuedMessage::Current(crate::todo::QueuedMessageContent::Human {
+                    text,
+                })
+                | crate::todo::QueuedMessage::Legacy(text) => parts.push(text),
+                control => app.queued_messages.push(control),
+            }
+        }
         if !app.has_queued_followups() {
             app.pending_queued_dispatch = false;
         }
@@ -1534,7 +1542,13 @@ impl App {
         }
         let plan = crate::todo::load_plan(&session_id).unwrap_or_default();
         let goals = crate::todo::load_goals(&session_id).unwrap_or_default();
-        let digest = crate::todo::build_gate_digest(&observations, &plan, &goals);
+        let digest = Some(crate::todo::QueuedMessage::todo(
+            crate::todo::TodoNoticeRequest::Digest {
+                observations: observations.clone(),
+                plan,
+                goals,
+            },
+        ));
         let _ = crate::todo::clear_gate_observations(&session_id);
         let Some(digest) = digest else {
             crate::logging::info(&format!(
@@ -1577,8 +1591,9 @@ impl App {
             self.push_display_message(DisplayMessage::system(
                 "🔍 Rechecking the plan and assessments after extended work...",
             ));
-            self.queued_messages
-                .push(crate::todo::TODO_LONG_SESSION_REVIEW_MESSAGE.to_string());
+            self.queued_messages.push(crate::todo::QueuedMessage::todo(
+                crate::todo::TodoNoticeRequest::LongReview,
+            ));
             self.pending_queued_dispatch = true;
             return true;
         }
@@ -1622,10 +1637,12 @@ impl App {
                 self.push_display_message(DisplayMessage::system(
                     "🔍 Checking end-to-end ownership before finishing...",
                 ));
-                self.queued_messages
-                    .push(crate::todo::build_todo_ownership_continuation_message(
-                        &todos, &goals,
-                    ));
+                self.queued_messages.push(crate::todo::QueuedMessage::todo(
+                    crate::todo::TodoNoticeRequest::Ownership {
+                        todos: todos.clone(),
+                        goals,
+                    },
+                ));
                 self.pending_queued_dispatch = true;
                 return true;
             }
@@ -1700,7 +1717,7 @@ impl App {
 
         let poke_message = super::commands::build_poke_message(&incomplete);
         let fingerprint =
-            serde_json::to_string(&incomplete).unwrap_or_else(|_| poke_message.clone());
+            serde_json::to_string(&incomplete).unwrap_or_else(|_| format!("{poke_message:?}"));
         if self.last_auto_poke_fingerprint.as_ref() == Some(&fingerprint) {
             crate::logging::info(&format!(
                 "AUTO_POKE_DECISION action=idle reason=unchanged_todos incomplete={}",
@@ -2722,7 +2739,7 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
                     || app
                         .queued_messages
                         .iter()
-                        .any(|message| super::commands::is_poke_message(message));
+                        .any(super::commands::is_poke_message);
                 app.cancel_requested = true;
                 app.interleave_message = None;
                 app.interleave_images.clear();
@@ -3588,6 +3605,7 @@ impl App {
 
     /// Submit input - just sets up message and flags, processing happens in next loop iteration
     pub(super) fn submit_input(&mut self) {
+        self.queued_instruction_error = None;
         promote_dropped_images(self);
         if self.activate_picker_from_preview() {
             return;
@@ -3842,13 +3860,10 @@ impl App {
         if images.is_empty() {
             self.current_turn_system_reminder = mission_turn_reminder(&self.session.id);
             self.add_provider_message(Message::user(&input));
-            self.session.add_message(
-                Role::User,
-                vec![ContentBlock::Text {
-                    text: input.clone(),
-                    cache_control: None,
-                }],
-            );
+            self.session.add_human_message(vec![ContentBlock::Text {
+                text: input.clone(),
+                cache_control: None,
+            }]);
         } else {
             self.current_turn_system_reminder = mission_turn_reminder(&self.session.id);
             self.add_provider_message(Message::user_with_images(&input, images.clone()));
@@ -3860,7 +3875,7 @@ impl App {
                 text: input.clone(),
                 cache_control: None,
             });
-            self.session.add_message(Role::User, blocks);
+            self.session.add_human_message(blocks);
         }
         crate::telemetry::record_turn();
         self.session_save_pending = true;
@@ -3908,6 +3923,9 @@ impl App {
         terminal: &mut DefaultTerminal,
         event_stream: &mut EventStream,
     ) {
+        if self.queued_instruction_error.is_some() {
+            return;
+        }
         while !self.queued_messages.is_empty() || !self.hidden_queued_system_messages.is_empty() {
             // Combine all currently queued messages into one, treating [SYSTEM: ...]
             // startup continuations as system reminders rather than user turns.
@@ -3915,7 +3933,27 @@ impl App {
             let hidden_reminders = std::mem::take(&mut self.hidden_queued_system_messages);
             let (messages, reminder, display_system_messages) =
                 super::helpers::partition_queued_messages(queued_messages, hidden_reminders);
-            let combined = messages.join("\n\n");
+            let (combined, origin) = match crate::todo::render_queued_messages(
+                &messages,
+                self.session
+                    .working_dir
+                    .as_deref()
+                    .map(std::path::Path::new),
+            ) {
+                Ok(rendered) => rendered,
+                Err(error) => {
+                    self.queued_instruction_error = Some(error.to_string());
+                    self.queued_messages = messages;
+                    if let Some(reminder) = reminder {
+                        self.hidden_queued_system_messages.push(reminder);
+                    }
+                    self.pending_queued_dispatch = false;
+                    self.push_display_message(DisplayMessage::error(format!(
+                        "Queued instruction rendering failed; queued input was preserved: {error}"
+                    )));
+                    break;
+                }
+            };
             let has_combined = !combined.is_empty();
             let preserve_visible_turn = super::commands::queued_messages_are_only_pokes(&messages);
 
@@ -3941,8 +3979,10 @@ impl App {
             }
 
             for msg in &messages {
-                if !super::commands::is_poke_message(msg) {
-                    self.push_display_message(DisplayMessage::user(msg.clone()));
+                if !super::commands::is_poke_message(msg)
+                    && let Some(text) = msg.human_text()
+                {
+                    self.push_display_message(DisplayMessage::user(text.to_string()));
                 }
             }
 
@@ -3953,14 +3993,23 @@ impl App {
                 if !preserve_visible_turn {
                     self.observe_local_startup_context_before_user_turn();
                 }
-                self.add_provider_message(Message::user(&combined));
-                self.session.add_message(
-                    Role::User,
+                if let Err(error) = self.session.add_user_message_with_origin(
                     vec![ContentBlock::Text {
                         text: combined.clone(),
                         cache_control: None,
                     }],
-                );
+                    None,
+                    Some(origin),
+                ) {
+                    self.queued_messages = messages;
+                    self.queued_instruction_error = Some(error.to_string());
+                    self.pending_queued_dispatch = false;
+                    self.push_display_message(DisplayMessage::error(format!(
+                        "Could not append queued message origin: {error}"
+                    )));
+                    break;
+                }
+                self.add_provider_message(Message::user(&combined));
             }
             self.session_save_pending = true;
             self.clear_streaming_render_state();

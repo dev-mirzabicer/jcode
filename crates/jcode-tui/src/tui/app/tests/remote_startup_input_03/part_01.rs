@@ -106,7 +106,7 @@ fn test_queue_message_combines_on_send() {
     app.queued_messages.push("message two".to_string());
 
     // Take and combine (simulating what process_queued_messages does)
-    let combined = std::mem::take(&mut app.queued_messages).join("\n\n");
+    let combined = std::mem::take(&mut app.queued_messages).iter().map(|entry| entry.human_text().unwrap()).collect::<Vec<_>>().join("\n\n");
 
     assert_eq!(combined, "message one\n\nmessage two");
     assert!(app.queued_messages.is_empty());
@@ -1008,6 +1008,7 @@ fn test_save_and_restore_reload_state_preserves_interleave_and_pending_retry() {
     ];
     app.pending_soft_interrupt_requests = vec![(17, "already sent two".to_string())];
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        queued_messages: None,
         content: "retry me".to_string(),
         images: vec![("image/png".to_string(), "abc123".to_string())],
         is_system: true,
@@ -1055,6 +1056,7 @@ fn test_save_and_restore_reload_state_promotes_inflight_prompt_to_startup_submis
     let session_id = format!("test-reload-inflight-prompt-{}", std::process::id());
 
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        queued_messages: None,
         content: "finish the refactor".to_string(),
         images: vec![("image/png".to_string(), "abc123".to_string())],
         is_system: false,

@@ -314,3 +314,7 @@ It deliberately excludes `AGENTS.md` and external skills. Import copies the comp
 ### Production boundary
 
 App-core `Server` owns the repository service. Construction performs no repository I/O. Primary activation is live across shared-server sessions, app-core turns, local prompt construction, CLI run, direct REPL, ACP, and Harness creation. Clear and transfer reuse the same server-owned service. WP-09 and WP-10 add the central manager protocol and TUI over the existing typed service.
+
+## Managed notification delivery
+
+See [managed notification delivery](../NOTIFICATIONS.md) for current-source occurrence rendering, structural ownership, typed todo queues, failures and recovery.

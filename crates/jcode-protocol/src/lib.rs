@@ -586,6 +586,7 @@ impl Request {
     pub fn id(&self) -> u64 {
         match self {
             Request::Message { id, .. } => *id,
+            Request::QueuedMessages { id, .. } => *id,
             Request::Cancel { id } => *id,
             Request::BackgroundTool { id } => *id,
             Request::SoftInterrupt { id, .. } => *id,

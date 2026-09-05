@@ -8,7 +8,7 @@ pub(super) struct RestoredReloadInput {
     pub cursor: usize,
     pub pending_images: Vec<(String, String)>,
     pub submit_on_restore: bool,
-    pub queued_messages: Vec<String>,
+    pub queued_messages: crate::todo::QueuedMessages,
     pub hidden_queued_system_messages: Vec<String>,
     pub startup_status_notice: Option<String>,
     pub startup_display_message: Option<(String, String)>,
@@ -213,7 +213,9 @@ impl App {
         let inflight_continuation = self.rate_limit_pending_message.as_ref().filter(|pending| {
             pending.is_system
                 && self.rate_limit_reset.is_none()
-                && (!pending.content.trim().is_empty() || pending.system_reminder.is_some())
+                && (!pending.content.trim().is_empty()
+                    || pending.system_reminder.is_some()
+                    || pending.queued_messages.is_some())
         });
         if self.input.is_empty()
             && self.pending_images.is_empty()
@@ -275,13 +277,18 @@ impl App {
                             "system_reminder": pending.system_reminder,
                             "auto_retry": pending.auto_retry,
                             "retry_attempts": pending.retry_attempts,
+                            "queued_messages": pending.queued_messages,
                         })
                     })
                 };
             let mut queued_messages = self.queued_messages.clone();
             let mut hidden_queued_system_messages = self.hidden_queued_system_messages.clone();
             if let Some(pending) = inflight_continuation {
-                if !pending.content.trim().is_empty() {
+                if let Some(entries) = pending.queued_messages.clone() {
+                    let mut restored = entries;
+                    restored.extend(queued_messages);
+                    queued_messages = restored;
+                } else if !pending.content.trim().is_empty() {
                     queued_messages.insert(0, pending.content.clone());
                 }
                 if let Some(reminder) = pending.system_reminder.clone() {
@@ -370,7 +377,6 @@ impl App {
             return None;
         }
         let data = std::fs::read_to_string(&path).ok()?;
-        let _ = std::fs::remove_file(&path);
 
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) {
             let input = value
@@ -398,16 +404,21 @@ impl App {
                 .get("submit_on_restore")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            let queued_messages = value
-                .get("queued_messages")
-                .and_then(|v| v.as_array())
-                .map(|items| {
-                    items
-                        .iter()
-                        .filter_map(|item| item.as_str().map(|s| s.to_string()))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
+            let queued_messages = match value.get("queued_messages") {
+                Some(value) => {
+                    match serde_json::from_value::<crate::todo::QueuedMessages>(value.clone()) {
+                        Ok(entries) => entries,
+                        Err(error) => {
+                            crate::logging::error(&format!(
+                                "Could not restore typed queued input; retained {} for recovery: {error}",
+                                path.display()
+                            ));
+                            return None;
+                        }
+                    }
+                }
+                None => Default::default(),
+            };
             let hidden_queued_system_messages = value
                 .get("hidden_queued_system_messages")
                 .and_then(|v| v.as_array())
@@ -461,10 +472,30 @@ impl App {
                         })
                         .unwrap_or_default()
                 });
+            let pending_queue = match value
+                .get("rate_limit_pending_message")
+                .and_then(|pending| pending.get("queued_messages"))
+                .filter(|value| !value.is_null())
+            {
+                Some(value) => {
+                    match serde_json::from_value::<crate::todo::QueuedMessages>(value.clone()) {
+                        Ok(entries) => Some(entries),
+                        Err(error) => {
+                            crate::logging::error(&format!(
+                                "Could not restore queued retry intent; retained {} for recovery: {error}",
+                                path.display()
+                            ));
+                            return None;
+                        }
+                    }
+                }
+                None => None,
+            };
             let rate_limit_pending_message = value
                 .get("rate_limit_pending_message")
                 .and_then(|pending| pending.as_object())
                 .map(|pending| super::PendingRemoteMessage {
+                    queued_messages: pending_queue,
                     content: pending
                         .get("content")
                         .and_then(|v| v.as_str())
@@ -539,6 +570,7 @@ impl App {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             let cursor = cursor.min(input.len());
+            let _ = std::fs::remove_file(&path);
             return Some(RestoredReloadInput {
                 input,
                 cursor,
@@ -565,12 +597,13 @@ impl App {
         let (cursor_str, input) = data.split_once('\n')?;
         let cursor = cursor_str.parse::<usize>().unwrap_or(0);
         let cursor = cursor.min(input.len());
+        let _ = std::fs::remove_file(&path);
         Some(RestoredReloadInput {
             input: input.to_string(),
             cursor,
             pending_images: Vec::new(),
             submit_on_restore: false,
-            queued_messages: Vec::new(),
+            queued_messages: Default::default(),
             hidden_queued_system_messages: Vec::new(),
             startup_status_notice: None,
             startup_display_message: None,

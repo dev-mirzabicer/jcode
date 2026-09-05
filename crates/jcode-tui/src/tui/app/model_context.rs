@@ -384,6 +384,7 @@ impl App {
             self.rate_limit_pending_message
                 .as_ref()
                 .map(|pending| super::FallbackResendPayload {
+                    queued_messages: pending.queued_messages.clone(),
                     content: pending.content.clone(),
                     images: pending.images.clone(),
                     is_system: pending.is_system,
@@ -526,6 +527,7 @@ impl App {
             self.rate_limit_pending_message
                 .as_ref()
                 .map(|pending| super::FallbackResendPayload {
+                    queued_messages: pending.queued_messages.clone(),
                     content: pending.content.clone(),
                     images: pending.images.clone(),
                     is_system: pending.is_system,

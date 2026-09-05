@@ -41,7 +41,7 @@ pub enum DebugEvent {
         output_tokens: u64,
         cache_read_input_tokens: Option<u64>,
         cache_creation_input_tokens: Option<u64>,
-        queued_messages: Vec<String>,
+        queued_messages: crate::todo::QueuedMessages,
     },
 
     /// Text delta appended to streaming_text
@@ -604,6 +604,25 @@ impl RemoteConnection {
         };
         self.next_request_id += 1;
         self.send_request(request).await?;
+        Ok(id)
+    }
+
+    pub async fn send_queued_messages(
+        &mut self,
+        entries: Vec<crate::todo::QueuedMessage>,
+        system_reminder: Option<String>,
+        observe_startup_context: bool,
+    ) -> Result<u64> {
+        self.reset_call_output_tokens_seen();
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::QueuedMessages {
+            id,
+            entries,
+            system_reminder,
+            observe_startup_context,
+        })
+        .await?;
         Ok(id)
     }
 

@@ -682,6 +682,7 @@ mod tests {
     ) -> Vec<StoredMessage> {
         vec![
             StoredMessage {
+                origin: None,
                 id: format!("use-{id}"),
                 role: Role::Assistant,
                 content: vec![ContentBlock::ToolUse {
@@ -696,6 +697,7 @@ mod tests {
                 token_usage: None,
             },
             StoredMessage {
+                origin: None,
                 id: format!("result-{id}"),
                 role: Role::User,
                 content: vec![ContentBlock::ToolResult {
@@ -713,6 +715,7 @@ mod tests {
 
     fn tool_use_only(id: &str, name: &str, input: Value) -> StoredMessage {
         StoredMessage {
+            origin: None,
             id: format!("use-{id}"),
             role: Role::Assistant,
             content: vec![ContentBlock::ToolUse {
@@ -872,6 +875,7 @@ mod tests {
         ));
         for suffix in ["a", "b"] {
             messages.push(StoredMessage {
+                origin: None,
                 id: format!("duplicate-result-{suffix}"),
                 role: Role::User,
                 content: vec![ContentBlock::ToolResult {

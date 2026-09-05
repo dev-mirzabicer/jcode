@@ -38,6 +38,7 @@ fn test_remote_error_without_retry_recovers_pending_followups() {
     remote.mark_history_loaded();
 
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        queued_messages: None,
         content: "retry me".to_string(),
         images: vec![],
         is_system: false,
@@ -104,6 +105,7 @@ fn test_remote_error_with_retryable_pending_schedules_retry() {
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
 
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        queued_messages: None,
         content: "retry me".to_string(),
         images: vec![],
         is_system: true,
@@ -155,8 +157,9 @@ fn test_remote_non_retryable_error_gets_short_auto_poke_retry() {
 
     app.auto_poke_incomplete_todos = true;
     app.queued_messages
-        .push("You have 1 incomplete todo. Continue working, or update the todo tool.".to_string());
+        .push(crate::todo::QueuedMessage::todo(crate::todo::TodoNoticeRequest::Incomplete { count: 1 }));
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        queued_messages: None,
         content: "You have 1 incomplete todo. Continue working, or update the todo tool."
             .to_string(),
         images: vec![],
@@ -222,8 +225,9 @@ fn test_remote_non_retryable_error_stops_auto_poke_after_short_retry_budget() {
 
     app.auto_poke_incomplete_todos = true;
     app.queued_messages
-        .push("You have 1 incomplete todo. Continue working, or update the todo tool.".to_string());
+        .push(crate::todo::QueuedMessage::todo(crate::todo::TodoNoticeRequest::Incomplete { count: 1 }));
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        queued_messages: None,
         content: "You have 1 incomplete todo. Continue working, or update the todo tool."
             .to_string(),
         images: vec![],
@@ -268,8 +272,9 @@ fn test_remote_fatal_model_endpoint_error_fails_fast_without_retry_budget() {
 
     app.auto_poke_incomplete_todos = true;
     app.queued_messages
-        .push("You have 1 incomplete todo. Continue working, or update the todo tool.".to_string());
+        .push(crate::todo::QueuedMessage::todo(crate::todo::TodoNoticeRequest::Incomplete { count: 1 }));
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        queued_messages: None,
         content: "continue".to_string(),
         images: vec![],
         is_system: true,
@@ -322,8 +327,9 @@ fn test_remote_connectivity_error_waits_for_network_without_retry_budget() {
 
     app.auto_poke_incomplete_todos = true;
     app.queued_messages
-        .push("You have 1 incomplete todo. Continue working, or update the todo tool.".to_string());
+        .push(crate::todo::QueuedMessage::todo(crate::todo::TodoNoticeRequest::Incomplete { count: 1 }));
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        queued_messages: None,
         content: "You have 1 incomplete todo. Continue working, or update the todo tool."
             .to_string(),
         images: vec![],
@@ -385,8 +391,9 @@ fn test_remote_connectivity_error_without_auto_retry_still_waits_for_network() {
 
     app.auto_poke_incomplete_todos = true;
     app.queued_messages
-        .push("You have 1 incomplete todo. Continue working, or update the todo tool.".to_string());
+        .push(crate::todo::QueuedMessage::todo(crate::todo::TodoNoticeRequest::Incomplete { count: 1 }));
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        queued_messages: None,
         content: "Continue working on the task.".to_string(),
         images: vec![],
         is_system: true,
@@ -471,6 +478,7 @@ fn test_remote_auth_error_arms_fallback_offer_with_resend_payload() {
         claude_oauth_route("claude-sonnet-4"),
     ];
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        queued_messages: None,
         content: "hi".to_string(),
         images: vec![],
         is_system: false,
@@ -532,6 +540,7 @@ fn test_remote_fallback_offer_accept_stages_switch_and_resends() {
         claude_oauth_route("claude-sonnet-4"),
     ];
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        queued_messages: None,
         content: "hi".to_string(),
         images: vec![],
         is_system: false,
@@ -603,6 +612,7 @@ fn test_remote_fallback_resend_dropped_when_switch_fails() {
 
     app.is_remote = true;
     app.pending_fallback_resend = Some(crate::tui::app::FallbackResendPayload {
+        queued_messages: None,
         content: "hi".to_string(),
         images: vec![],
         is_system: false,
@@ -636,6 +646,7 @@ fn test_remote_fallback_resend_dropped_when_switch_fails() {
 fn test_schedule_pending_remote_retry_respects_retry_limit() {
     let mut app = create_test_app();
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        queued_messages: None,
         content: "retry me".to_string(),
         images: vec![],
         is_system: true,
@@ -674,6 +685,7 @@ fn test_provider_guardrail_event_offers_opus_reroute_with_resend_payload() {
         claude_oauth_route("claude-opus-4-8"),
     ];
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        queued_messages: None,
         content: "please help".to_string(),
         images: vec![],
         is_system: false,
@@ -903,6 +915,7 @@ fn test_new_for_remote_uses_startup_stub_without_loading_full_transcript() {
     );
     session.model = Some("gpt-5.4".to_string());
     session.append_stored_message(crate::session::StoredMessage {
+        origin: None,
         id: "msg-startup-stub".to_string(),
         role: crate::message::Role::User,
         content: vec![crate::message::ContentBlock::Text {
@@ -953,6 +966,7 @@ fn remote_optimistic_history_omits_receipt_owned_startup_and_stale_bodies() {
         Some("remote Startup Context privacy".to_string()),
     );
     let startup_message = |id: &str, body: &str| crate::session::StoredMessage {
+        origin: None,
         id: id.to_string(),
         role: crate::message::Role::User,
         content: vec![crate::message::ContentBlock::Text {
@@ -2444,6 +2458,7 @@ fn test_credential_failure_breaker_trips_after_consecutive_auth_errors() {
 
     for attempt in 0..App::CREDENTIAL_FAILURE_BREAKER_THRESHOLD {
         app.rate_limit_pending_message = Some(PendingRemoteMessage {
+            queued_messages: None,
             content: "poke".to_string(),
             images: vec![],
             is_system: true,

@@ -243,6 +243,41 @@ pub struct StoredMessage {
     pub tool_duration_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_usage: Option<StoredTokenUsage>,
+    /// Absent on legacy history. This describes authorship, never prompt text
+    /// matching, and is omitted from provider messages by `to_message`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<StoredMessageOrigin>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TodoNoticeKind {
+    LongReview,
+    Intent,
+    FeedbackLoop,
+    Ownership,
+    Completion,
+    Confidence,
+    Digest,
+    Incomplete,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", content = "parts", rename_all = "snake_case")]
+pub enum StoredMessageOrigin {
+    Human,
+    /// Exact ranges in the single stored text block. Only whitespace may sit
+    /// between parts, including export-normalized queue separators.
+    Composed(Vec<StoredMessagePart>),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredMessagePart {
+    pub start: usize,
+    pub end: usize,
+    pub notice: Option<TodoNoticeKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incomplete_count: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -274,6 +309,53 @@ pub struct StoredCompactionState {
 }
 
 impl StoredMessage {
+    /// Return validated origin ranges only. Corrupt metadata never licenses
+    /// hiding arbitrary source text or indexing through a UTF-8 boundary.
+    pub fn origin_parts(&self) -> Option<&[StoredMessagePart]> {
+        let StoredMessageOrigin::Composed(parts) = self.origin.as_ref()? else {
+            return None;
+        };
+        let [ContentBlock::Text { text, .. }] = self.content.as_slice() else {
+            return None;
+        };
+        if self.role != Role::User || parts.is_empty() {
+            return None;
+        }
+        let mut end = 0;
+        for (index, part) in parts.iter().enumerate() {
+            if part.start > part.end
+                || part.end > text.len()
+                || !text.is_char_boundary(part.start)
+                || !text.is_char_boundary(part.end)
+            {
+                return None;
+            }
+            if index == 0 {
+                if part.start != 0 {
+                    return None;
+                }
+            } else if !text
+                .get(end..part.start)
+                .is_some_and(|gap| gap.chars().all(char::is_whitespace))
+            {
+                return None;
+            }
+            end = part.end;
+        }
+        (end == text.len()).then_some(parts.as_slice())
+    }
+
+    pub fn set_origin(&mut self, origin: StoredMessageOrigin) -> Result<(), &'static str> {
+        let previous = self.origin.replace(origin);
+        if matches!(self.origin, Some(StoredMessageOrigin::Composed(_)))
+            && self.origin_parts().is_none()
+        {
+            self.origin = previous;
+            return Err("message origin ranges do not match authoritative text");
+        }
+        Ok(())
+    }
+
     pub fn to_message(&self) -> Message {
         Message {
             role: self.role.clone(),

@@ -87,6 +87,7 @@ fn synthetic_startup_session(id: &str) -> Session {
     let file_id = format!("{id}-startup-file");
     let mut session = Session::create_with_id(id.to_string(), None, None);
     session.append_stored_message(StoredMessage {
+        origin: None,
         id: control_id.clone(),
         role: Role::User,
         content: vec![ContentBlock::Text {
@@ -99,6 +100,7 @@ fn synthetic_startup_session(id: &str) -> Session {
         token_usage: None,
     });
     session.append_stored_message(StoredMessage {
+        origin: None,
         id: file_id.clone(),
         role: Role::User,
         content: vec![
@@ -531,6 +533,7 @@ fn context_test_generator() -> StoredContextArtifactGenerator {
 
 fn context_test_message(id: &str, role: Role, content: Vec<ContentBlock>) -> StoredMessage {
     StoredMessage {
+        origin: None,
         id: id.to_string(),
         role,
         content,
@@ -1201,6 +1204,7 @@ fn startup_context_markdown_export_is_receipt_only_unless_contents_are_explicitl
         *text = file_body.to_string();
     }
     session.append_stored_message(StoredMessage {
+        origin: None,
         id: "session-markdown-export-stale".to_string(),
         role: Role::User,
         content: vec![ContentBlock::Text {
@@ -3550,6 +3554,7 @@ async fn env_snapshot_detail_is_minimal_for_empty_sessions_and_full_after_histor
     agent
         .session
         .append_stored_message(crate::session::StoredMessage {
+            origin: None,
             id: "msg_env_snapshot_detail".to_string(),
             role: crate::message::Role::User,
             content: vec![ContentBlock::Text {
@@ -4220,3 +4225,5 @@ async fn fable_guardrail_reconsideration_recovers_the_streaming_turn() {
         "{text:?}"
     );
 }
+
+include!("agent_tests/notification_queue.rs");

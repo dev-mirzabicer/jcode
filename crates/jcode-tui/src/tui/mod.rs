@@ -222,7 +222,7 @@ pub trait TuiState {
     fn input(&self) -> &str;
     fn cursor_pos(&self) -> usize;
     fn is_processing(&self) -> bool;
-    fn queued_messages(&self) -> &[String];
+    fn queued_messages(&self) -> Vec<String>;
     fn interleave_message(&self) -> Option<&str>;
     /// Messages sent as soft interrupt but not yet injected (shown in queue preview)
     fn pending_soft_interrupts(&self) -> &[String];

@@ -44,6 +44,35 @@ macro_rules! notifications {
 }
 
 notifications! {
+    TodoLongReview => ("todo-long-session-review", "todo notification", Plain),
+    TodoIntent => ("todo-intent-review", "todo notification", Plain),
+    TodoFeedbackLoop => ("todo-feedback-loop-review", "todo notification", Plain),
+    TodoOwnership => ("todo-ownership-review", "todo notification", Plain),
+    TodoCompletion => ("todo-completion-review", "todo notification", Plain),
+    TodoConfidence => ("todo-confidence-recheck", "todo notification", Plain),
+    TodoDigest => ("todo-quality-digest", "todo notification", Plain),
+    TodoCompletionLead => ("todo-completion-lead", "todo notification", Plain),
+    TodoConfidenceLead => ("todo-confidence-lead", "todo notification", Plain),
+    TodoDigestFinish => ("todo-quality-digest-finish", "todo notification", Plain),
+    TodoOwnershipClarify => ("todo-ownership-clarify", "todo notification", Plain),
+    TodoOwnershipDelivery => ("todo-ownership-delivery", "todo notification", Plain),
+    TodoOwnershipAutonomy => ("todo-ownership-autonomy", "todo notification", Plain),
+    TodoOwnershipIterate => ("todo-ownership-iterate", "todo notification", Plain),
+    TodoOwnershipRelevance => ("todo-ownership-relevance", "todo notification", Plain),
+    TodoOwnershipCoverage => ("todo-ownership-coverage", "todo notification", Plain),
+    TodoOwnershipTraceability => ("todo-ownership-traceability", "todo notification", Plain),
+    TodoOwnershipStop => ("todo-ownership-stop", "todo notification", Plain),
+    TodoIncomplete { count: usize, plural: &'a str } => ("todo-auto-poke", "todo continuation", Handlebars),
+    TodoDigestIntentOpen => ("todo-digest-intent-open", "todo digest", Plain),
+    TodoDigestIntentCleared => ("todo-digest-intent-cleared", "todo digest", Plain),
+    TodoDigestLoopOpen { label: &'a str } => ("todo-digest-loop-open", "todo digest", Handlebars),
+    TodoDigestLoopCleared { label: &'a str } => ("todo-digest-loop-cleared", "todo digest", Handlebars),
+    TodoDigestRelevanceOpen { label: &'a str } => ("todo-digest-relevance-open", "todo digest", Handlebars),
+    TodoDigestRelevanceCleared { label: &'a str } => ("todo-digest-relevance-cleared", "todo digest", Handlebars),
+    TodoDigestCoverageOpen { label: &'a str } => ("todo-digest-coverage-open", "todo digest", Handlebars),
+    TodoDigestCoverageCleared { label: &'a str } => ("todo-digest-coverage-cleared", "todo digest", Handlebars),
+    TodoDigestTraceabilityOpen { label: &'a str } => ("todo-digest-traceability-open", "todo digest", Handlebars),
+    TodoDigestTraceabilityCleared { label: &'a str } => ("todo-digest-traceability-cleared", "todo digest", Handlebars),
     SwarmDriverWake => ("swarm-driver-wake", "background swarm plan driver", Plain),
     SwarmDriverNotify => ("swarm-driver-notify", "background swarm plan driver", Plain),
     SwarmDriverSilent => ("swarm-driver-silent", "background swarm plan driver", Plain),
@@ -137,14 +166,18 @@ pub(super) fn module_seed_documents() -> Result<Vec<InstructionDocument>, Instru
 }
 
 fn registration(id: &str, owner: &str) -> Result<ConsumerRegistration, InstructionError> {
-    ConsumerRegistration::new(
+    let mut registration = ConsumerRegistration::new(
         id,
         id,
         InstructionKind::Notification,
         format!("notifications/{id}.md"),
         owner,
         "Occurrence-rendered prose. Project redefinition is high impact. Delivery, structure, runtime data and trigger policy remain code-owned.",
-    )
+    )?;
+    // This occurrence is a bare provider user turn, with no owner wrapper or
+    // factual payload. An empty body cannot represent a valid continuation.
+    registration.empty_is_meaningful = id != "todo-auto-poke";
+    Ok(registration)
 }
 
 impl Notification<'_> {
@@ -171,7 +204,7 @@ impl Notification<'_> {
     }
 }
 
-fn occurrence_runtime(
+pub(crate) fn occurrence_runtime(
     repositories: &InstructionRepositoryService,
     working_dir: Option<&Path>,
 ) -> Result<InstructionRuntime, SystemPromptActivationError> {

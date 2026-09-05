@@ -1277,6 +1277,7 @@ fn test_create_transfer_session_from_parent_copies_todos_and_uses_authoritative_
         app.session.model = Some("test-model".to_string());
         app.session.provider_key = Some("test-provider".to_string());
         app.session.messages.push(crate::session::StoredMessage {
+            origin: None,
             id: "msg-1".to_string(),
             role: Role::User,
             content: vec![ContentBlock::Text {

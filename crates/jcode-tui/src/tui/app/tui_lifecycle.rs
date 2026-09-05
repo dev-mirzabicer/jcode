@@ -56,8 +56,8 @@ impl App {
             recovered_followups.extend(recovered_interrupts);
         }
         if !recovered_followups.is_empty() {
-            let mut recovered_queue = recovered_followups;
-            recovered_queue.append(&mut queued_messages);
+            let mut recovered_queue: crate::todo::QueuedMessages = recovered_followups.into();
+            recovered_queue.extend(std::mem::take(&mut queued_messages));
             queued_messages = recovered_queue;
             self.set_status_notice("Recovered pending prompts after reload");
         }
@@ -405,6 +405,7 @@ impl App {
         let (local_context_event_tx, local_context_event_rx) =
             tokio::sync::mpsc::unbounded_channel();
         let mut app = Self {
+            queued_instruction_error: None,
             provider,
             registry,
             skills,
@@ -429,7 +430,7 @@ impl App {
             streaming: StreamingProgress::default(),
             power_inhibitor: crate::power_inhibit::PowerInhibitor::new(),
             should_quit: false,
-            queued_messages: Vec::new(),
+            queued_messages: Default::default(),
             hidden_queued_system_messages: Vec::new(),
             current_turn_system_reminder: None,
             upstream_provider: None,
@@ -867,6 +868,7 @@ impl App {
         let (local_context_event_tx, local_context_event_rx) =
             tokio::sync::mpsc::unbounded_channel();
         let mut app = Self {
+            queued_instruction_error: None,
             provider,
             registry,
             skills,
@@ -891,7 +893,7 @@ impl App {
             streaming: StreamingProgress::default(),
             power_inhibitor: crate::power_inhibit::PowerInhibitor::new(),
             should_quit: false,
-            queued_messages: Vec::new(),
+            queued_messages: Default::default(),
             hidden_queued_system_messages: Vec::new(),
             current_turn_system_reminder: None,
             upstream_provider: None,

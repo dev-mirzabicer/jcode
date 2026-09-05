@@ -1,9 +1,15 @@
+//! Todo policy and storage. Fixed prose literals in this module are retained
+//! only to decode old histories and queues without origin metadata. New
+//! occurrences use the managed renderer in `todo::notification`.
+
+mod notification;
 use crate::storage;
 use anyhow::Result;
+pub use notification::*;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// Generic mid-task reassessment prompt. The elapsed-time policy that triggers
+/// Historical mid-task reassessment recognition literal. The elapsed-time policy that triggers
 /// it is intentionally private so the model reassesses from evidence rather
 /// than targeting a timer or evaluator boundary.
 pub const TODO_LONG_SESSION_REVIEW_MESSAGE: &str = "[automated todo assessment review - not a user message] Re-read the original request and reconsider the current todo plan and every goal assessment using the evidence gathered during the work so far. Correct anything stale or overstated, including intent understanding, feedback-loop relevance and coverage, autonomy, difficulty, delivery, confidence, iteration maturity, and stopping evidence. Do not reply conversationally or wait for the user. Continue the work after saving an honest updated assessment.";
@@ -130,11 +136,11 @@ pub fn delivery_state_passes(goal: &TodoGoal) -> bool {
 /// transcripts still classify it as a synthetic gate message, not a user turn.
 const LEGACY_TODO_ALIGNMENT_CONTINUATION_MESSAGE: &str = "Your alignment score is not high enough. Build a requirement inventory from the user's request, including outcomes, deliverables, constraints, prohibited actions, integration paths, edge cases, and necessary follow-through. Revise the plan and its stated user intention to represent every material item. Then map each item to an explicit observation or check in a feedback loop. Generic instructions to run tests, verify, or review count only for requirements those checks actually enforce; add separate checks for non-testable requirements. Reassess the weaker link before continuing the task.";
 
-/// Model-facing continuation for the private intent-understanding check.
+/// Historical recognition literal for the private intent-understanding check.
 /// Deliberately small: think more about the user's intent, do not ask the user.
 pub const TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE: &str = "Your understanding of the user's intent is not high enough. Re-read the request and think harder about what the user actually wants and left implicit, using the conversation and codebase as evidence. Form a requirement inventory covering outcomes, deliverables, constraints, prohibited actions, integration paths, edge cases, and necessary follow-through, and check the plan represents every material item. Do not ask the user; resolve the ambiguity yourself, then update the plan's user intention and understands_user_intent.";
 
-/// Model-facing continuation for the private closed-feedback-loop check. Names
+/// Historical recognition literal for the private closed-feedback-loop check. Names
 /// the assessment category without disclosing the score or threshold.
 pub const TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE: &str = "Your feedback loop is not closed. First, improve the goal's objective and name the observation that reports back on each requirement, so progress can be measured across iterations. Generic phrases such as run tests, verify, or review count only for requirements those named checks demonstrably enforce; add separate explicit checks for non-testable requirements. Then call the todo tool again with the revised goal before continuing the task. The goal is to create a strong feedback loop you can iterate against.";
 
@@ -143,108 +149,18 @@ pub const TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE: &str = "Your feedback 
 /// synthetic gate message rather than a user turn.
 const LEGACY_TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE: &str = "Your hill-climbability is not high enough. First, improve the goal's objective and feedback loop so progress can be measured across iterations. Then call the todo tool again with the revised goal before continuing the task. The goal is to create a strong feedback loop you can iterate against.";
 
-/// Model-facing continuation for the private end-to-end ownership check. It
+/// Historical recognition literal for the private end-to-end ownership check. It
 /// asks for more work without revealing that an evaluator triggered it.
 pub const TODO_OWNERSHIP_CONTINUATION_MESSAGE: &str = "[automated follow-up - not a user message] Continue the work below. Keep the todo up to date; do not reply or wait for the user.";
-
-/// Build an ownership continuation that directs work toward each affected goal
-/// without exposing fields, scores, thresholds, or pass/fail language.
-pub fn build_todo_ownership_continuation_message(todos: &[TodoItem], goals: &[TodoGoal]) -> String {
-    let mut groups: Vec<Option<String>> = Vec::new();
-    for todo in todos {
-        let group = normalized_group(todo.group.as_deref());
-        if group_is_complete(todos, &group) && !groups.contains(&group) {
-            groups.push(group);
-        }
-    }
-
-    let mut message = String::from(TODO_OWNERSHIP_CONTINUATION_MESSAGE);
-    for group in groups {
-        let label = group.as_deref().unwrap_or("ungrouped goal");
-        let Some(goal) = goals
-            .iter()
-            .find(|goal| normalized_group(goal.group.as_deref()) == group)
-        else {
-            message.push_str(&format!(
-                "\n- Goal \"{}\": clarify the goal and track the work.",
-                label
-            ));
-            continue;
-        };
-        if !goal
-            .delivery_state
-            .is_some_and(|state| state >= required_delivery_state(goal.difficulty))
-        {
-            message.push_str(&format!(
-                "\n- Goal \"{}\": carry the work through the complete workflow.",
-                label
-            ));
-        }
-        if !goal
-            .autonomy
-            .is_some_and(|state| state >= Autonomy::NecessaryFollowthrough)
-        {
-            message.push_str(&format!(
-                "\n- Goal \"{}\": take ownership of the necessary follow-through.",
-                label
-            ));
-        }
-        if !goal
-            .iteration_maturity
-            .is_some_and(IterationMaturity::permits_completion)
-        {
-            message.push_str(&format!(
-                "\n- Goal \"{}\": keep iterating and test the remaining hypotheses.",
-                label
-            ));
-        }
-        if !feedback_loop_relevance_passes(goal) {
-            message.push_str(&format!(
-                "\n- Goal \"{}\": validate the result through its public interfaces and acceptance behavior, including its integration boundaries.",
-                label
-            ));
-        }
-        if !feedback_loop_coverage_passes(goal) {
-            message.push_str(&format!(
-                "\n- Goal \"{}\": exercise the main workflows, edge cases, packaging, and likely failure modes.",
-                label
-            ));
-        }
-        if !feedback_loop_traceability_passes(goal) {
-            message.push_str(&format!(
-                "\n- Goal \"{}\": map every explicit requirement and changed public output to a concrete check and report its observed result.",
-                label
-            ));
-        }
-        if matches!(
-            goal.iteration_maturity,
-            Some(
-                IterationMaturity::PlateauConfirmed
-                    | IterationMaturity::ConstraintsExhausted
-                    | IterationMaturity::BudgetExhausted
-            )
-        ) && !goal
-            .stopping_evidence
-            .as_deref()
-            .is_some_and(|evidence| !evidence.trim().is_empty())
-        {
-            message.push_str(&format!(
-                "\n- Goal \"{}\": gather more evidence about whether the work should stop.",
-                label
-            ));
-        }
-    }
-    message
-}
 
 /// Legacy ownership-gate wording (pre delivery_state rename). Kept only so
 /// persisted transcripts still classify it as a synthetic gate message.
 const LEGACY_TODO_OWNERSHIP_CONTINUATION_MESSAGE: &str = "[automated todo completion gate - not a user message] Your end-to-end ownership is not high enough to finish this goal.";
 
-/// Model-facing continuation for private completion-confidence checks.
+/// Historical recognition literal for private completion-confidence checks.
 pub const TODO_COMPLETION_CONTINUATION_MESSAGE: &str = "[automated follow-up - not a user message] Do more validation on the work below. Keep the todo up to date; do not reply or wait for the user.";
 
-/// Model-facing continuation requesting an independent recheck without saying
+/// Historical recognition literal requesting an independent recheck without saying
 /// why the private evaluator selected it.
 pub const TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE: &str = "[automated follow-up - not a user message] Independently recheck the work below. Keep the todo up to date; do not reply or wait for the user.";
 
@@ -259,38 +175,10 @@ pub const TODO_CONFIDENCE_SPIKE_LEVELS: u8 = 2;
 /// to the turn-end digest.
 pub const SEVERE_INTENT_MISUNDERSTANDING: IntentUnderstanding = IntentUnderstanding::Uncertain;
 
-/// Which deferred quality check a recorded observation came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GateObservationKind {
-    IntentUnderstanding,
-    ClosedFeedbackLoop,
-    FeedbackLoopRelevance,
-    FeedbackLoopCoverage,
-    FeedbackLoopTraceability,
-}
-
-/// A point during the turn that would previously have interrupted the model
-/// with a quality-gate continuation.
-///
-/// Recording instead of interrupting is the whole point: assessments like
-/// intent understanding start low and rise as the agent explores the codebase,
-/// so a check that fires the moment a score is low mostly punishes agents that
-/// are already in the process of fixing it. These observations are replayed
-/// once at turn end and filtered against the final scores, so only the points
-/// that never resolved are surfaced.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GateObservation {
-    pub kind: GateObservationKind,
-    /// Todo group for goal-scoped observations; `None` for plan-level ones.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub group: Option<String>,
-    /// The semantic state observed when this point was flagged, as its string
-    /// form. Legacy logs stored a numeric `score`; those entries load with
-    /// `state: None`, which the digest already treats as an unresolved point.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub state: Option<String>,
-}
+pub use jcode_task_types::{
+    GateObservation, GateObservationKind, QueuedMessage, QueuedMessageContent, QueuedMessages,
+    TodoNoticeRequest,
+};
 
 /// Header for the turn-end digest of unresolved quality-check points.
 ///
@@ -333,143 +221,6 @@ fn observation_score_later_cleared(
             .find(|goal| normalized_group(goal.group.as_deref()) == observation.group)
             .is_some_and(feedback_loop_traceability_passes),
     }
-}
-
-/// Build the turn-end reminder from this turn's recorded observations.
-///
-/// Every point recorded during the turn is surfaced, including ones whose score
-/// later rose past the threshold. A late climb is exactly the case worth
-/// raising: if the goal had no measurable loop while the work was being done,
-/// that work never benefited from the better loop the agent eventually wrote
-/// down, so the score reads as passing while the result behind it is unchecked.
-/// The score still decides the wording, so a late climb is asked to extend its
-/// loop back over the earlier work rather than being told it has no loop.
-///
-/// Repeats of the same point collapse into one line with a count, so a long
-/// iterative turn cannot generate a wall of duplicates. Returns `None` when
-/// nothing was recorded.
-pub fn build_gate_digest(
-    observations: &[GateObservation],
-    plan: &TodoPlan,
-    goals: &[TodoGoal],
-) -> Option<String> {
-    // (kind, group, times flagged, score later cleared)
-    let mut points: Vec<(GateObservationKind, Option<String>, usize, bool)> = Vec::new();
-    for observation in observations {
-        let cleared = observation_score_later_cleared(observation, plan, goals);
-        match points
-            .iter_mut()
-            .find(|(kind, group, _, _)| *kind == observation.kind && *group == observation.group)
-        {
-            Some((_, _, count, _)) => *count += 1,
-            None => points.push((observation.kind, observation.group.clone(), 1, cleared)),
-        }
-    }
-    if points.is_empty() {
-        return None;
-    }
-
-    let mut message = String::from(TODO_GATE_DIGEST_PREFIX);
-    for (kind, group, count, cleared) in &points {
-        let detail = match (kind, cleared) {
-            (GateObservationKind::IntentUnderstanding, false) => {
-                "your understanding of what the user actually wants never became solid. Re-read the request, confirm the work you did matches it, and state any interpretation you had to guess at.".to_string()
-            }
-            (GateObservationKind::IntentUnderstanding, true) => {
-                "you started this work without understanding what the user actually wants, and only settled it later. Re-check the work you did before it settled against the request you now understand, and state any interpretation you had to guess at.".to_string()
-            }
-            (GateObservationKind::ClosedFeedbackLoop, false) => {
-                let label = group
-                    .as_deref()
-                    .map(|group| format!(" for \"{}\"", group))
-                    .unwrap_or_default();
-                format!(
-                    "the goal{} never closed its feedback loop: no observation reported back on whether the work satisfied the requirements. Confirm the result is actually better, with concrete evidence rather than inspection.",
-                    label
-                )
-            }
-            (GateObservationKind::ClosedFeedbackLoop, true) => {
-                let label = group
-                    .as_deref()
-                    .map(|group| format!(" for \"{}\"", group))
-                    .unwrap_or_default();
-                format!(
-                    "the goal{} was worked on before its feedback loop was closed, so the loop you ended up with never ran over that earlier work. Run it over the whole result now and report what it actually reported back.",
-                    label
-                )
-            }
-            (GateObservationKind::FeedbackLoopRelevance, false) => {
-                let label = group
-                    .as_deref()
-                    .map(|group| format!(" for \"{}\"", group))
-                    .unwrap_or_default();
-                format!(
-                    "the checks{} did not directly represent how the result will be used or accepted. Exercise the real project's public interfaces, integration boundaries, or end-user acceptance path and report the observed behavior. A custom harness, stub, mock, copied source, or synthetic fixture is useful evidence but cannot replace that path; if the real path is externally blocked, record that constraint honestly.",
-                    label
-                )
-            }
-            (GateObservationKind::FeedbackLoopRelevance, true) => {
-                let label = group
-                    .as_deref()
-                    .map(|group| format!(" for \"{}\"", group))
-                    .unwrap_or_default();
-                format!(
-                    "the representative checks{} were identified only after earlier work was done. Run them over the whole result now, including public interfaces and integration boundaries.",
-                    label
-                )
-            }
-            (GateObservationKind::FeedbackLoopCoverage, false) => {
-                let label = group
-                    .as_deref()
-                    .map(|group| format!(" for \"{}\"", group))
-                    .unwrap_or_default();
-                format!(
-                    "the checks{} covered too narrow a path. Exercise the main workflows, edge cases, packaging, integration paths, and likely failure modes that could invalidate the result.",
-                    label
-                )
-            }
-            (GateObservationKind::FeedbackLoopCoverage, true) => {
-                let label = group
-                    .as_deref()
-                    .map(|group| format!(" for \"{}\"", group))
-                    .unwrap_or_default();
-                format!(
-                    "the broader checks{} were identified only after earlier work was done. Run them over the whole result now, including edge cases, packaging, integration paths, and likely failure modes.",
-                    label
-                )
-            }
-            (GateObservationKind::FeedbackLoopTraceability, false) => {
-                let label = group
-                    .as_deref()
-                    .map(|group| format!(" for \"{}\"", group))
-                    .unwrap_or_default();
-                format!(
-                    "the checks{} were not traced to every explicit requirement and changed public output. Map each one to a concrete check and report the observed result; aggregate test counts do not establish this mapping.",
-                    label
-                )
-            }
-            (GateObservationKind::FeedbackLoopTraceability, true) => {
-                let label = group
-                    .as_deref()
-                    .map(|group| format!(" for \"{}\"", group))
-                    .unwrap_or_default();
-                format!(
-                    "complete requirement-to-check traceability{} was identified only after earlier work was done. Run every mapped check over the whole result now and report what each requirement and changed public output actually did.",
-                    label
-                )
-            }
-        };
-        let repeats = if *count > 1 {
-            format!(" (flagged {} times this turn)", count)
-        } else {
-            String::new()
-        };
-        message.push_str(&format!("\n- {}{}", detail, repeats));
-    }
-    message.push_str(
-        "\nAddress the points above, then update the todo tool with the assessments that reflect what you verified.",
-    );
-    Some(message)
 }
 
 const LEGACY_TODO_CONFIDENCE_SUMMARY_PREFIX: &str = "All todos are done. Todo confidence summary:";
@@ -591,17 +342,6 @@ pub fn spike_completed_todos(todos: &[TodoItem]) -> Vec<&TodoItem> {
         .collect()
 }
 
-/// Build the synthetic auto-poke continuation prompt sent when the model
-/// stops with incomplete todos. Kept here so every producer (TUI auto-poke,
-/// `jcode run` auto-poke) and the transcript renderer agree on the exact text.
-pub fn build_auto_poke_message(incomplete_count: usize) -> String {
-    format!(
-        "You have {} incomplete todo{}. Continue working, or update the todo tool.",
-        incomplete_count,
-        if incomplete_count == 1 { "" } else { "s" },
-    )
-}
-
 /// Longest list of named todos a gate continuation will spell out, so a big
 /// plan cannot turn one nudge into a wall of text.
 const GATE_NAMED_TODO_LIMIT: usize = 6;
@@ -635,52 +375,8 @@ fn append_named_todos(message: &mut String, lead: &str, todos: &[&TodoItem]) {
     message.push('.');
 }
 
-/// Follow-up naming exactly which completed todos need more validation, without
-/// exposing evaluator language, scores, thresholds, or the internal reason.
-pub fn build_todo_completion_continuation_message(todos: &[TodoItem]) -> String {
-    let completed: Vec<&TodoItem> = todos
-        .iter()
-        .filter(|todo| todo.status == "completed")
-        .collect();
-    let missing: Vec<&TodoItem> = completed
-        .iter()
-        .copied()
-        .filter(|todo| todo.completion_confidence.is_none())
-        .collect();
-    let weak: Vec<&TodoItem> = completed
-        .iter()
-        .copied()
-        .filter(|todo| {
-            todo.completion_confidence
-                .is_some_and(|state| !completion_confidence_passes(Some(state)))
-        })
-        .collect();
-
-    let mut message = String::from(TODO_COMPLETION_CONTINUATION_MESSAGE);
-    let needs_validation: Vec<&TodoItem> = completed
-        .iter()
-        .copied()
-        .filter(|todo| missing.contains(todo) || weak.contains(todo))
-        .collect();
-    let targets = if needs_validation.is_empty() {
-        &completed
-    } else {
-        &needs_validation
-    };
-    append_named_todos(&mut message, "Validate further:", targets);
-    message
-}
-
-/// Spike-gate continuation naming the completed todos whose confidence jumped,
-/// so the recheck targets those items.
-pub fn build_todo_confidence_spike_continuation_message(todos: &[TodoItem]) -> String {
-    let spiked = spike_completed_todos(todos);
-    let mut message = String::from(TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE);
-    append_named_todos(&mut message, "Recheck:", &spiked);
-    message
-}
-
-/// True when `message` is a synthetic auto-poke continuation (the
+/// Legacy decoder for messages without structural origin. True when `message`
+/// is a historical synthetic auto-poke continuation (the
 /// incomplete-todos poke or the todo confidence summary) rather than a real
 /// user prompt.
 ///
@@ -1001,6 +697,7 @@ fn gate_observations_path(session_id: &str) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    include!("todo/notification_tests.rs");
 
     fn intent_observation(state: Option<IntentUnderstanding>) -> GateObservation {
         GateObservation {
@@ -1066,9 +763,9 @@ mod tests {
         // Worded as "you started without understanding", not "you never
         // understood": the latter would contradict the passing final state and
         // invite the model to argue with the reminder instead of acting on it.
-        assert!(digest.contains("started this work without understanding"));
+        assert!(digest.contains("SYNTHETIC:todo-digest-intent-cleared"));
         assert!(digest.contains("(flagged 3 times this turn)"));
-        assert!(!digest.contains("never became solid"));
+        assert!(!digest.contains("SYNTHETIC:todo-digest-intent-open"));
     }
 
     /// The late-climb wording is per point, so one turn can carry both a goal
@@ -1094,64 +791,35 @@ mod tests {
         let digest = build_gate_digest(&observations, &TodoPlan::default(), &goals)
             .expect("both goals should be surfaced");
         assert_eq!(digest.matches("\n- ").count(), 2);
-        assert!(digest.contains(
-            "the goal for \"closed late\" was worked on before its feedback loop was closed"
-        ));
-        assert!(digest.contains("the goal for \"never closed\" never closed its feedback loop"));
+        assert!(digest.contains("SYNTHETIC:todo-digest-loop-cleared for \"closed late\""));
+        assert!(digest.contains("SYNTHETIC:todo-digest-loop-open for \"never closed\""));
     }
 
     #[test]
-    fn digest_directs_weak_relevance_and_coverage_to_real_failure_surfaces() {
-        let observations = vec![
-            GateObservation {
-                kind: GateObservationKind::FeedbackLoopRelevance,
-                group: Some("release".to_string()),
-                state: Some("indirect".to_string()),
-            },
-            GateObservation {
-                kind: GateObservationKind::FeedbackLoopCoverage,
-                group: Some("release".to_string()),
-                state: Some("narrow".to_string()),
-            },
-        ];
-        let digest = build_gate_digest(&observations, &TodoPlan::default(), &[])
-            .expect("weak feedback-loop dimensions should be surfaced");
-
-        for guidance in [
-            "public interfaces",
-            "integration boundaries",
-            "custom harness",
-            "externally blocked",
-            "main workflows",
-            "edge cases",
-            "packaging",
-            "likely failure modes",
-        ] {
-            assert!(
-                digest.contains(guidance),
-                "digest omitted {guidance}: {digest}"
-            );
-        }
-        assert!(!digest.to_ascii_lowercase().contains("threshold"));
-        assert!(!digest.contains("representative+main_paths"));
+    fn digest_selects_relevance_and_coverage_resources() {
+        let observations = [
+            GateObservationKind::FeedbackLoopRelevance,
+            GateObservationKind::FeedbackLoopCoverage,
+        ]
+        .map(|kind| GateObservation {
+            kind,
+            group: Some("release".into()),
+            state: None,
+        });
+        let digest = build_gate_digest(&observations, &TodoPlan::default(), &[]).unwrap();
+        assert!(digest.contains("SYNTHETIC:todo-digest-relevance-open for \"release\""));
+        assert!(digest.contains("SYNTHETIC:todo-digest-coverage-open for \"release\""));
     }
 
     #[test]
     fn digest_reports_a_point_that_never_resolved() {
-        let observations = vec![intent_observation(Some(IntentUnderstanding::Partial))];
-        let unresolved = TodoPlan {
-            understands_user_intent: Some(IntentUnderstanding::Partial),
-            understands_user_intent_history: vec![IntentUnderstanding::Partial],
-            ..Default::default()
-        };
-        let digest = build_gate_digest(&observations, &unresolved, &[])
-            .expect("an unresolved point should be surfaced");
-        assert!(digest.starts_with(TODO_GATE_DIGEST_PREFIX));
-        assert!(digest.contains("what the user actually wants"));
-        // Framed as verification, since by turn end the work is already done.
-        assert!(digest.contains("double-check"));
-        // Private calibration stays private.
-        assert!(!digest.to_ascii_lowercase().contains("threshold"));
+        let digest = build_gate_digest(
+            &[intent_observation(Some(IntentUnderstanding::Partial))],
+            &TodoPlan::default(),
+            &[],
+        )
+        .unwrap();
+        assert!(digest.contains("SYNTHETIC:todo-digest-intent-open"));
     }
 
     /// A long iterative turn flags the same point on every write. The digest
@@ -1221,7 +889,7 @@ mod tests {
         )
         .expect("ungrouped goal should be surfaced");
         assert!(!digest.contains("\"\""));
-        assert!(digest.contains("the goal never closed its feedback loop"));
+        assert!(digest.contains("SYNTHETIC:todo-digest-loop-open"));
     }
 
     #[test]
@@ -1232,14 +900,14 @@ mod tests {
     /// The digest is persisted as a user-role message so the model treats it as
     /// a continuation, so reload must not re-render it as a user prompt.
     #[test]
-    fn digest_is_recognized_as_a_synthetic_message() {
-        let digest = build_gate_digest(
-            &[intent_observation(Some(IntentUnderstanding::Partial))],
-            &TodoPlan::default(),
-            &[],
-        )
-        .expect("digest");
-        assert!(is_auto_poke_message(&digest));
+    fn digest_carries_structural_notification_identity() {
+        let rendered = fixture_render(TodoNoticeRequest::Digest {
+            observations: vec![intent_observation(Some(IntentUnderstanding::Partial))],
+            plan: TodoPlan::default(),
+            goals: vec![],
+        });
+        assert_eq!(rendered.kind, TodoNoticeKind::Digest);
+        assert!(!is_auto_poke_message(&rendered.text));
     }
 
     #[test]
@@ -1312,8 +980,12 @@ mod tests {
 
     #[test]
     fn built_auto_poke_messages_are_detected() {
-        assert!(is_auto_poke_message(&build_auto_poke_message(1)));
-        assert!(is_auto_poke_message(&build_auto_poke_message(3)));
+        assert!(is_auto_poke_message(
+            "You have 1 incomplete todo. Continue working, or update the todo tool."
+        ));
+        assert!(is_auto_poke_message(
+            "You have 3 incomplete todos. Continue working, or update the todo tool."
+        ));
         assert!(is_auto_poke_message(
             TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE
         ));
@@ -1331,70 +1003,6 @@ mod tests {
         assert!(is_auto_poke_message(LEGACY_TODO_CONFIDENCE_SUMMARY_PREFIX));
     }
 
-    #[test]
-    fn quality_continuations_are_actionable_without_private_calibration() {
-        for (message, category) in [
-            (
-                TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE,
-                "feedback loop is not closed",
-            ),
-            (
-                TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE,
-                "understanding of the user's intent",
-            ),
-            (TODO_OWNERSHIP_CONTINUATION_MESSAGE, "continue the work"),
-            (TODO_COMPLETION_CONTINUATION_MESSAGE, "more validation"),
-            (
-                TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE,
-                "independently recheck",
-            ),
-        ] {
-            let lower = message.to_ascii_lowercase();
-            assert!(lower.contains(category));
-            assert!(!message.chars().any(|ch| ch.is_ascii_digit()));
-            for disclosure in ["threshold", "percent", "quality gate"] {
-                assert!(
-                    !lower.contains(disclosure),
-                    "category-only continuation disclosed {disclosure}: {message}"
-                );
-            }
-            if category != "alignment score" {
-                assert!(
-                    !lower.contains("score"),
-                    "category-only continuation disclosed score: {message}"
-                );
-            }
-        }
-
-        assert!(TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE.contains("strong feedback loop"));
-        assert!(TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE.contains("First, improve"));
-        assert!(
-            TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE.contains("call the todo tool again")
-        );
-        assert!(
-            TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE.contains("before continuing the task")
-        );
-        // Deliberately terse: think harder about intent, never block on the user.
-        assert!(TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE.contains("think harder"));
-        assert!(
-            TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE.contains("what the user actually wants")
-        );
-        assert!(TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE.contains("Do not ask the user"));
-        for message in [
-            TODO_OWNERSHIP_CONTINUATION_MESSAGE,
-            TODO_COMPLETION_CONTINUATION_MESSAGE,
-            TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE,
-        ] {
-            let lower = message.to_ascii_lowercase();
-            for evaluator_term in ["gate", "flagged", "failed", "threshold", "confidence"] {
-                assert!(
-                    !lower.contains(evaluator_term),
-                    "disclosed {evaluator_term}: {message}"
-                );
-            }
-        }
-    }
-
     /// The model must be told which items it should recheck, otherwise the
     /// nudge is a guess-the-weak-spot puzzle. Scores stay private.
     #[test]
@@ -1409,7 +1017,7 @@ mod tests {
 
         let message =
             build_todo_completion_continuation_message(&[missing, weak, strong.clone(), open]);
-        assert!(message.starts_with(TODO_COMPLETION_CONTINUATION_MESSAGE));
+        assert!(message.contains("SYNTHETIC:todo-completion-review"));
         assert!(message.contains("\"write the parser\""));
         assert!(message.contains("\"wire up the CLI flag\""));
         // Passing and unfinished todos are not what the gate is asking about.
@@ -1422,8 +1030,8 @@ mod tests {
         // Only the weighted average failed: no individual item is nameable, so
         // the fallback still tells the model what to do.
         let average_only = build_todo_completion_continuation_message(&[strong]);
-        assert!(average_only.starts_with(TODO_COMPLETION_CONTINUATION_MESSAGE));
-        assert!(average_only.contains("Validate further:"));
+        assert!(average_only.contains("SYNTHETIC:todo-completion-review"));
+        assert!(average_only.contains("SYNTHETIC:todo-completion-lead"));
         assert!(average_only.contains("rename the module"));
     }
 
@@ -1437,7 +1045,7 @@ mod tests {
         steady.confidence_history = vec![ConfidenceState::Plausible, ConfidenceState::Validated];
 
         let message = build_todo_confidence_spike_continuation_message(&[spiked, steady]);
-        assert!(message.starts_with(TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE));
+        assert!(message.contains("SYNTHETIC:todo-confidence-recheck"));
         assert!(message.contains("\"port the tests\""));
         assert!(!message.contains("\"update docs\""));
     }
@@ -1459,45 +1067,37 @@ mod tests {
     }
 
     #[test]
-    fn detailed_gate_continuations_are_not_mistaken_for_user_messages() {
-        let mut item = todo("do the thing", "completed", None);
-        item.completion_confidence = Some(ConfidenceState::Speculative);
-        item.confidence_history = vec![ConfidenceState::Speculative];
-        let todos = [item];
-        assert!(is_auto_poke_message(
-            &build_todo_completion_continuation_message(&todos)
-        ));
-        assert!(is_auto_poke_message(
-            &build_todo_confidence_spike_continuation_message(&todos)
-        ));
+    fn detailed_gate_continuations_carry_identity_independent_of_prose() {
+        let todos = vec![todo("do the thing", "completed", None)];
+        assert_eq!(
+            fixture_render(TodoNoticeRequest::Completion {
+                todos: todos.clone()
+            })
+            .kind,
+            TodoNoticeKind::Completion
+        );
+        assert_eq!(
+            fixture_render(TodoNoticeRequest::Confidence { todos }).kind,
+            TodoNoticeKind::Confidence
+        );
     }
 
     /// The transcript must not replay model-facing gate instructions at the
     /// user; they get a short "we are checking" line instead.
     #[test]
-    fn gate_continuations_have_short_user_facing_summaries() {
-        let mut item = todo("do the thing", "completed", None);
-        item.completion_confidence = Some(ConfidenceState::Speculative);
-        item.confidence_history = vec![ConfidenceState::Speculative];
-        let todos = [item];
-
-        for message in [
-            build_todo_completion_continuation_message(&todos),
-            build_todo_confidence_spike_continuation_message(&todos),
-            TODO_OWNERSHIP_CONTINUATION_MESSAGE.to_string(),
-            TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE.to_string(),
-            TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE.to_string(),
+    fn gate_continuations_have_typed_user_facing_summaries() {
+        for kind in [
+            TodoNoticeKind::Completion,
+            TodoNoticeKind::Confidence,
+            TodoNoticeKind::Ownership,
+            TodoNoticeKind::Intent,
+            TodoNoticeKind::FeedbackLoop,
+            TodoNoticeKind::Digest,
+            TodoNoticeKind::LongReview,
         ] {
-            let summary = auto_poke_display_summary(&message).expect("summary");
-            assert!(summary.chars().count() < 70, "too long: {summary}");
-            assert!(!summary.contains("do the thing"));
-            assert!(!summary.contains("completion_confidence"));
+            assert!(todo_notice_display_summary(kind).is_some());
         }
-
-        // The incomplete-todos poke is already short and its count is useful.
-        assert!(auto_poke_display_summary(&build_auto_poke_message(3)).is_none());
-        // Real user prompts are never rewritten.
-        assert!(auto_poke_display_summary("fix the login bug").is_none());
+        assert!(todo_notice_display_summary(TodoNoticeKind::Incomplete).is_none());
     }
 
     #[test]
@@ -1593,12 +1193,6 @@ mod tests {
         .expect("age cycle");
         assert!(take_long_session_review_if_due(session).expect("due review"));
         assert!(!take_long_session_review_if_due(session).expect("one shot"));
-        assert!(!TODO_LONG_SESSION_REVIEW_MESSAGE.contains("30"));
-        assert!(
-            !TODO_LONG_SESSION_REVIEW_MESSAGE
-                .to_ascii_lowercase()
-                .contains("threshold")
-        );
         assert!(is_auto_poke_message(TODO_LONG_SESSION_REVIEW_MESSAGE));
 
         match previous_home {
@@ -1864,28 +1458,6 @@ mod tests {
 
     /// The turn-finish gate must tell the model how to clear it without implying
     /// that the todo write which triggered the check was discarded.
-    #[test]
-    fn ownership_message_names_the_field_that_must_be_raised() {
-        assert!(TODO_OWNERSHIP_CONTINUATION_MESSAGE.contains("Continue the work below"));
-        for private_calibration in [
-            "necessary_followthrough",
-            "outcome_reached",
-            "plateau_confirmed",
-            "budget_exhausted",
-        ] {
-            assert!(!TODO_OWNERSHIP_CONTINUATION_MESSAGE.contains(private_calibration));
-        }
-        assert!(
-            TODO_OWNERSHIP_CONTINUATION_MESSAGE.contains("Keep the todo up to date"),
-            "the ownership nudge must say how to update the assessment"
-        );
-        assert!(
-            !TODO_OWNERSHIP_CONTINUATION_MESSAGE.contains("rejected")
-                && !TODO_OWNERSHIP_CONTINUATION_MESSAGE.contains("unchanged"),
-            "the turn-finish nudge must not claim the already-saved write was discarded"
-        );
-        assert!(TODO_COMPLETION_CONTINUATION_MESSAGE.contains("more validation"));
-    }
 
     #[test]
     fn ownership_continuation_identifies_each_failing_field_and_goal() {
@@ -1897,23 +1469,23 @@ mod tests {
 
         let message = build_todo_ownership_continuation_message(&todos, &[goal]);
         assert!(message.contains("Goal \"ship\""));
-        assert!(message.contains("complete workflow"));
-        assert!(message.contains("ownership of the necessary follow-through"));
-        assert!(message.contains("evidence about whether the work should stop"));
+        assert!(message.contains("SYNTHETIC:todo-ownership-delivery"));
+        assert!(message.contains("SYNTHETIC:todo-ownership-autonomy"));
+        assert!(message.contains("SYNTHETIC:todo-ownership-stop"));
         assert!(!message.contains("workflow_validated"));
         assert!(!message.contains("necessary_followthrough"));
         assert!(!message.contains("outcome_reached"));
         // PlateauConfirmed is terminal, so it must not also be diagnosed as an
         // iteration_maturity failure. Its missing evidence is the exact defect.
-        assert!(!message.contains("remaining hypotheses"));
-        assert!(is_auto_poke_message(&message));
+        assert!(!message.contains("SYNTHETIC:todo-ownership-iterate"));
+        assert!(message.contains("SYNTHETIC:todo-ownership-review"));
     }
 
     #[test]
     fn ownership_continuation_reports_missing_goal_assessment() {
         let todos = vec![todo("work", "completed", Some("ship"))];
         let message = build_todo_ownership_continuation_message(&todos, &[]);
-        assert!(message.contains("Goal \"ship\": clarify the goal and track the work"));
+        assert!(message.contains("Goal \"ship\": SYNTHETIC:todo-ownership-clarify"));
     }
 
     #[test]

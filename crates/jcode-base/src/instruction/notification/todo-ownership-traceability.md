@@ -1,0 +1,1 @@
+map every explicit requirement and changed public output to a concrete check and report its observed result.

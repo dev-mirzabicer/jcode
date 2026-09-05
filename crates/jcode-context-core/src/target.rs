@@ -656,6 +656,7 @@ mod tests {
 
     fn stored_with_role(id: &str, role: Role, blocks: Vec<ContentBlock>) -> StoredMessage {
         StoredMessage {
+            origin: None,
             id: id.to_string(),
             role,
             content: blocks,

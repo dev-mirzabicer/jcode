@@ -1,0 +1,1 @@
+the goal{{label}} never closed its feedback loop: no observation reported back on whether the work satisfied the requirements. Confirm the result is actually better, with concrete evidence rather than inspection.

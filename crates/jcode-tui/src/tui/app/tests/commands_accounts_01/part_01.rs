@@ -1150,13 +1150,13 @@ fn test_test_command_queues_layered_verification_prompt() {
 
     assert!(app.pending_queued_dispatch);
     let queued = app.queued_messages.last().expect("missing /test prompt");
-    assert!(queued.contains("browser control is reliable"));
-    assert!(queued.contains("Reproduction-first"));
-    assert!(queued.contains("End-to-end/user-flow smoke tests"));
-    assert!(queued.contains("Property-based tests"));
-    assert!(queued.contains("Static analysis"));
-    assert!(queued.contains("fault injection/chaos"));
-    assert!(queued.contains("Final proof packet"));
+    assert!(queued.human_text().unwrap().contains("browser control is reliable"));
+    assert!(queued.human_text().unwrap().contains("Reproduction-first"));
+    assert!(queued.human_text().unwrap().contains("End-to-end/user-flow smoke tests"));
+    assert!(queued.human_text().unwrap().contains("Property-based tests"));
+    assert!(queued.human_text().unwrap().contains("Static analysis"));
+    assert!(queued.human_text().unwrap().contains("fault injection/chaos"));
+    assert!(queued.human_text().unwrap().contains("Final proof packet"));
 }
 
 #[test]

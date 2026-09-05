@@ -11,6 +11,7 @@ use serde_json::json;
 
 fn stored(id: &str, role: Role, content: Vec<ContentBlock>) -> StoredMessage {
     StoredMessage {
+        origin: None,
         id: id.to_string(),
         role,
         content,

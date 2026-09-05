@@ -171,6 +171,7 @@ fn initial_subscribe_allows_fresh_fallback(request: &Request) -> bool {
 }
 
 struct ProcessingMessage {
+    queued_messages: Option<Vec<crate::todo::QueuedMessage>>,
     id: u64,
     content: String,
     images: Vec<(String, String)>,
@@ -1356,7 +1357,28 @@ pub(super) async fn handle_client_with_instruction_repositories(
             }
         }
 
+        let (request, queued_messages) = match request {
+            Request::QueuedMessages {
+                id,
+                entries,
+                system_reminder,
+                observe_startup_context,
+            } => (
+                Request::Message {
+                    id,
+                    content: String::new(),
+                    images: Vec::new(),
+                    system_reminder,
+                    no_reply: false,
+                    observe_startup_context,
+                    activate_skill: None,
+                },
+                Some(entries),
+            ),
+            request => (request, None),
+        };
         match request {
+            Request::QueuedMessages { .. } => unreachable!("queued request normalized above"),
             Request::Message {
                 id,
                 content,
@@ -1396,6 +1418,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
                 }
                 start_processing_message(
                     ProcessingMessage {
+                        queued_messages,
                         id,
                         content,
                         images,
@@ -4158,6 +4181,7 @@ async fn start_processing_message(
 ) {
     let ProcessingMessage {
         id,
+        queued_messages,
         content,
         images,
         system_reminder,
@@ -4259,6 +4283,7 @@ async fn start_processing_message(
                 agent,
                 startup_context,
                 ProcessingMessage {
+                    queued_messages,
                     id,
                     content,
                     images,
@@ -4637,6 +4662,7 @@ async fn process_message_streaming_mpsc_with_request_id(
 ) -> Result<()> {
     let ProcessingMessage {
         id: request_id,
+        queued_messages,
         content,
         images,
         system_reminder,
@@ -4679,15 +4705,26 @@ async fn process_message_streaming_mpsc_with_request_id(
             });
         }
     }
-    let result = agent
-        .run_once_streaming_mpsc_correlated(
-            request_id,
-            &content,
-            images,
-            system_reminder,
-            event_tx.clone(),
-        )
-        .await;
+    let result = if let Some(entries) = queued_messages {
+        agent
+            .run_queued_streaming_mpsc(
+                Some(request_id),
+                &entries,
+                system_reminder,
+                event_tx.clone(),
+            )
+            .await
+    } else {
+        agent
+            .run_once_streaming_mpsc_correlated(
+                request_id,
+                &content,
+                images,
+                system_reminder,
+                event_tx.clone(),
+            )
+            .await
+    };
     emit_startup_apply_drain_events(&startup_context, &mut agent, &event_tx);
     let startup_action = result
         .as_ref()

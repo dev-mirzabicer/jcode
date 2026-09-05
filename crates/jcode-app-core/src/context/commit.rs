@@ -1451,6 +1451,7 @@ mod tests {
         let provider = TestProvider::new(true);
         let now = Utc::now();
         let stored = |id: &str, content: Vec<ContentBlock>| StoredMessage {
+            origin: None,
             id: id.to_string(),
             role: Role::User,
             content,

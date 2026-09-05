@@ -306,11 +306,14 @@ fn run_auto_poke_followup_targets_below_threshold_todos() {
             ..
         }) => {
             assert_eq!(total_todos, 2);
-            assert!(message.starts_with(crate::todo::TODO_COMPLETION_CONTINUATION_MESSAGE));
-            assert!(message.contains("Validate further:"));
-            assert!(message.contains("todo a"));
-            assert!(message.contains("todo b"));
-            assert!(!message.to_ascii_lowercase().contains("threshold"));
+            assert!(matches!(
+                message,
+                crate::todo::QueuedMessage::Current(crate::todo::QueuedMessageContent::Todo {
+                    request: crate::todo::TodoNoticeRequest::Completion { .. }
+                })
+            ));
+            assert!(serde_json::to_string(&message).unwrap().contains("todo a"));
+            assert!(serde_json::to_string(&message).unwrap().contains("todo b"));
         }
         _ => panic!("expected confidence-summary follow-up"),
     }
@@ -335,7 +338,12 @@ fn run_auto_poke_followup_challenges_abrupt_confidence_once() {
             ..
         }) => {
             assert!(confidence_spike_challenge);
-            assert!(message.starts_with(crate::todo::TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE));
+            assert!(matches!(
+                message,
+                crate::todo::QueuedMessage::Current(crate::todo::QueuedMessageContent::Todo {
+                    request: crate::todo::TodoNoticeRequest::Confidence { .. }
+                })
+            ));
         }
         _ => panic!("expected confidence-spike challenge"),
     }
@@ -400,7 +408,9 @@ fn run_auto_poke_followup_prioritizes_incomplete_todos() {
             assert_eq!(count, 1);
             assert_eq!(
                 message,
-                "You have 1 incomplete todo. Continue working, or update the todo tool."
+                crate::todo::QueuedMessage::todo(crate::todo::TodoNoticeRequest::Incomplete {
+                    count: 1
+                })
             );
         }
         _ => panic!("expected incomplete-todo follow-up"),
@@ -428,7 +438,7 @@ fn run_auto_poke_delivers_the_deferred_gate_digest_before_confidence() {
     match build_run_auto_poke_follow_up_from_todos(
         &todos,
         false,
-        Some("review these points".to_string()),
+        Some(crate::todo::QueuedMessage::from("review these points")),
     ) {
         Some(RunAutoPokeFollowUp::GateDigest { message }) => {
             assert_eq!(message, "review these points");
@@ -452,7 +462,7 @@ fn run_auto_poke_prefers_incomplete_todos_over_the_gate_digest() {
         build_run_auto_poke_follow_up_from_todos(
             &todos,
             false,
-            Some("review these points".to_string())
+            Some(crate::todo::QueuedMessage::from("review these points"))
         ),
         Some(RunAutoPokeFollowUp::Incomplete { .. })
     ));
@@ -516,7 +526,12 @@ fn open_todos_do_not_consume_the_pending_gate_digest() {
         take_run_gate_digest_if_turn_ended(session, false, &done),
     ) {
         Some(RunAutoPokeFollowUp::GateDigest { message }) => {
-            assert!(message.starts_with(crate::todo::TODO_GATE_DIGEST_PREFIX));
+            assert!(matches!(
+                message,
+                crate::todo::QueuedMessage::Current(crate::todo::QueuedMessageContent::Todo {
+                    request: crate::todo::TodoNoticeRequest::Digest { .. }
+                })
+            ));
         }
         other => panic!("expected the preserved digest to be delivered, got {other:?}"),
     }
@@ -558,7 +573,12 @@ fn take_run_gate_digest_consumes_the_log_and_respects_delivery() {
     assert!(take_run_gate_digest(session, true).is_none());
 
     let digest = take_run_gate_digest(session, false).expect("unresolved point should surface");
-    assert!(digest.starts_with(crate::todo::TODO_GATE_DIGEST_PREFIX));
+    assert!(matches!(
+        digest,
+        crate::todo::QueuedMessage::Current(crate::todo::QueuedMessageContent::Todo {
+            request: crate::todo::TodoNoticeRequest::Digest { .. }
+        })
+    ));
     // Consumed, so the next turn starts clean.
     assert!(
         crate::todo::load_gate_observations(session)

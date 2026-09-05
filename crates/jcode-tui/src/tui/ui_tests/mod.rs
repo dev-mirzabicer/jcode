@@ -121,7 +121,7 @@ struct TestState {
     messages_version: u64,
     streaming_text: String,
     batch_progress: Option<crate::bus::BatchProgress>,
-    queued_messages: Vec<String>,
+    queued_messages: crate::todo::QueuedMessages,
     pending_soft_interrupts: Vec<String>,
     interleave_message: Option<String>,
     status: ProcessingStatus,
@@ -193,8 +193,11 @@ impl crate::tui::TuiState for TestState {
     fn is_processing(&self) -> bool {
         !matches!(self.status, ProcessingStatus::Idle)
     }
-    fn queued_messages(&self) -> &[String] {
-        &self.queued_messages
+    fn queued_messages(&self) -> Vec<String> {
+        self.queued_messages
+            .iter()
+            .map(crate::todo::queued_message_preview)
+            .collect()
     }
     fn interleave_message(&self) -> Option<&str> {
         self.interleave_message.as_deref()

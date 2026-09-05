@@ -65,6 +65,7 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("PrepareContextDraft", ClientInternal),
     ("PreviewContextDraftSelection", ClientInternal),
     ("PreviewContextRanges", ClientInternal),
+    ("QueuedMessages", ClientInternal),
     ("RefreshModels", ClientInternal),
     ("ReapplyContextTransaction", ClientInternal),
     ("Reload", ClientInternal),

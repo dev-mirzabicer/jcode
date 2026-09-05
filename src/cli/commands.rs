@@ -2631,18 +2631,16 @@ fn run_command_auto_poke_limit_reached(turns_completed: usize, max_turns: Option
 enum RunAutoPokeFollowUp {
     Incomplete {
         count: usize,
-        message: String,
+        message: crate::todo::QueuedMessage,
     },
     ConfidenceSummary {
         total_todos: usize,
-        message: String,
+        message: crate::todo::QueuedMessage,
         confidence_spike_challenge: bool,
     },
     /// Deferred quality-check reminder for the points this turn flagged and
     /// never resolved. Delivered once, ahead of the confidence summary.
-    GateDigest {
-        message: String,
-    },
+    GateDigest { message: crate::todo::QueuedMessage },
 }
 
 fn run_todos(session_id: &str) -> Vec<crate::todo::TodoItem> {
@@ -2655,7 +2653,10 @@ fn run_todos(session_id: &str) -> Vec<crate::todo::TodoItem> {
 /// The log is cleared whether or not a reminder results, so one turn's points
 /// cannot be raised again against the next turn's work. Returns `None` only when
 /// the turn recorded nothing.
-fn take_run_gate_digest(session_id: &str, already_delivered: bool) -> Option<String> {
+fn take_run_gate_digest(
+    session_id: &str,
+    already_delivered: bool,
+) -> Option<crate::todo::QueuedMessage> {
     if already_delivered {
         return None;
     }
@@ -2665,7 +2666,13 @@ fn take_run_gate_digest(session_id: &str, already_delivered: bool) -> Option<Str
     }
     let plan = crate::todo::load_plan(session_id).unwrap_or_default();
     let goals = crate::todo::load_goals(session_id).unwrap_or_default();
-    let digest = crate::todo::build_gate_digest(&observations, &plan, &goals);
+    let digest = Some(crate::todo::QueuedMessage::todo(
+        crate::todo::TodoNoticeRequest::Digest {
+            observations,
+            plan,
+            goals,
+        },
+    ));
     let _ = crate::todo::clear_gate_observations(session_id);
     digest
 }
@@ -2680,7 +2687,7 @@ fn take_run_gate_digest_if_turn_ended(
     session_id: &str,
     already_delivered: bool,
     todos: &[crate::todo::TodoItem],
-) -> Option<String> {
+) -> Option<crate::todo::QueuedMessage> {
     let work_remains = todos
         .iter()
         .any(|todo| todo.status != "completed" && todo.status != "cancelled");
@@ -2693,7 +2700,7 @@ fn take_run_gate_digest_if_turn_ended(
 fn build_run_auto_poke_follow_up_from_todos(
     todos: &[crate::todo::TodoItem],
     confidence_spike_challenged: bool,
-    gate_digest: Option<String>,
+    gate_digest: Option<crate::todo::QueuedMessage>,
 ) -> Option<RunAutoPokeFollowUp> {
     let incomplete: Vec<_> = todos
         .iter()
@@ -2724,14 +2731,16 @@ fn build_run_auto_poke_follow_up_from_todos(
     None
 }
 
-fn build_run_poke_message(incomplete: &[crate::todo::TodoItem]) -> String {
-    crate::todo::build_auto_poke_message(incomplete.len())
+fn build_run_poke_message(incomplete: &[crate::todo::TodoItem]) -> crate::todo::QueuedMessage {
+    crate::todo::QueuedMessage::todo(crate::todo::TodoNoticeRequest::Incomplete {
+        count: incomplete.len(),
+    })
 }
 
 fn build_run_todo_validation_message(
     todos: &[crate::todo::TodoItem],
     allow_confidence_spike_challenge: bool,
-) -> Option<(String, bool)> {
+) -> Option<(crate::todo::QueuedMessage, bool)> {
     let completed: Vec<&crate::todo::TodoItem> = todos
         .iter()
         .filter(|todo| todo.status == "completed")
@@ -2755,13 +2764,17 @@ fn build_run_todo_validation_message(
     if completion_confidence_needs_validation {
         crate::telemetry::record_todo_gate(crate::telemetry::TodoGateKind::Completion);
         Some((
-            crate::todo::build_todo_completion_continuation_message(todos),
+            crate::todo::QueuedMessage::todo(crate::todo::TodoNoticeRequest::Completion {
+                todos: todos.to_vec(),
+            }),
             false,
         ))
     } else {
         crate::telemetry::record_todo_gate(crate::telemetry::TodoGateKind::ConfidenceSpike);
         Some((
-            crate::todo::build_todo_confidence_spike_continuation_message(todos),
+            crate::todo::QueuedMessage::todo(crate::todo::TodoNoticeRequest::Confidence {
+                todos: todos.to_vec(),
+            }),
             true,
         ))
     }
@@ -2771,13 +2784,15 @@ async fn run_single_message_command_plain_with_auto_poke(
     agent: &mut crate::agent::Agent,
     message: &str,
 ) -> Result<()> {
-    let mut next_message = message.to_string();
+    let mut next_message = crate::todo::QueuedMessage::from(message);
     let max_turns = run_command_auto_poke_max_turns();
     let mut turns_completed = 0usize;
     let mut confidence_spike_challenged = false;
     let mut gate_digest_delivered = false;
     loop {
-        agent.run_once(&next_message).await?;
+        agent
+            .run_queued(std::slice::from_ref(&next_message))
+            .await?;
         turns_completed += 1;
         if !run_command_auto_poke_enabled() {
             break;
@@ -2852,14 +2867,18 @@ async fn run_single_message_command_capture_with_auto_poke(
     agent: &mut crate::agent::Agent,
     message: &str,
 ) -> Result<String> {
-    let mut next_message = message.to_string();
+    let mut next_message = crate::todo::QueuedMessage::from(message);
     let max_turns = run_command_auto_poke_max_turns();
     let mut outputs = Vec::new();
     let mut turns_completed = 0usize;
     let mut confidence_spike_challenged = false;
     let mut gate_digest_delivered = false;
     loop {
-        outputs.push(agent.run_once_capture(&next_message).await?);
+        outputs.push(
+            agent
+                .run_queued_capture(std::slice::from_ref(&next_message))
+                .await?,
+        );
         turns_completed += 1;
         if !run_command_auto_poke_enabled() {
             break;
@@ -2956,16 +2975,16 @@ async fn run_single_message_command_ndjson(
     )?;
 
     let max_turns = run_command_auto_poke_max_turns();
-    let mut next_message = message.to_string();
+    let mut next_message = crate::todo::QueuedMessage::from(message);
     let mut result: Result<()> = Ok(());
     let mut turns_completed = 0usize;
     let mut confidence_spike_challenged = false;
     let mut gate_digest_delivered = false;
     loop {
         let turn_result = {
-            let mut run_future = std::pin::pin!(agent.run_once_streaming_mpsc(
-                &next_message,
-                Vec::new(),
+            let mut run_future = std::pin::pin!(agent.run_queued_streaming_mpsc(
+                None,
+                std::slice::from_ref(&next_message),
                 None,
                 event_tx.clone(),
             ));

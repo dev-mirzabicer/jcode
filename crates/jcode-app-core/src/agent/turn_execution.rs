@@ -5,11 +5,76 @@ struct StreamingTurnContext {
     request_id: Option<u64>,
     display_role: Option<crate::session::StoredDisplayRole>,
     unattended_context: Option<jcode_session_types::StoredUnattendedContextAuthorization>,
+    origin: Option<jcode_session_types::StoredMessageOrigin>,
 }
 
 impl Agent {
+    pub async fn run_queued(&mut self, entries: &[crate::todo::QueuedMessage]) -> Result<()> {
+        let (text, origin) = crate::todo::render_queued_messages(
+            entries,
+            self.working_dir().map(std::path::Path::new),
+        )?;
+        self.run_once_with_origin(&text, origin).await
+    }
+
+    pub async fn run_queued_capture(
+        &mut self,
+        entries: &[crate::todo::QueuedMessage],
+    ) -> Result<String> {
+        let (text, origin) = crate::todo::render_queued_messages(
+            entries,
+            self.working_dir().map(std::path::Path::new),
+        )?;
+        self.run_once_capture_with_origin(&text, origin).await
+    }
+    pub async fn run_queued_streaming_mpsc(
+        &mut self,
+        request_id: Option<u64>,
+        entries: &[crate::todo::QueuedMessage],
+        system_reminder: Option<String>,
+        event_tx: mpsc::UnboundedSender<ServerEvent>,
+    ) -> Result<()> {
+        let (text, origin) = match crate::todo::render_queued_messages(
+            entries,
+            self.working_dir().map(std::path::Path::new),
+        ) {
+            Ok(rendered) => rendered,
+            Err(error) => {
+                let _ = event_tx.send(ServerEvent::QueuedMessagesRejected {
+                    id: request_id.unwrap_or(0),
+                    message: error.to_string(),
+                });
+                return Err(error);
+            }
+        };
+        self.run_once_streaming_mpsc_with_request_context(
+            &text,
+            Vec::new(),
+            system_reminder,
+            event_tx,
+            StreamingTurnContext {
+                request_id,
+                display_role: None,
+                unattended_context: None,
+                origin: Some(origin),
+            },
+        )
+        .await
+    }
     /// Run a single turn with the given user message
     pub async fn run_once(&mut self, user_message: &str) -> Result<()> {
+        self.run_once_with_origin(
+            user_message,
+            jcode_session_types::StoredMessageOrigin::Human,
+        )
+        .await
+    }
+
+    pub async fn run_once_with_origin(
+        &mut self,
+        user_message: &str,
+        origin: jcode_session_types::StoredMessageOrigin,
+    ) -> Result<()> {
         let blocks = Self::user_context_blocks(user_message, Vec::new());
         let pending_input_tokens = jcode_context_core::estimate_content_blocks_tokens(&blocks);
         self.begin_pending_turn(
@@ -20,7 +85,10 @@ impl Agent {
             self.message_count(),
             PendingTurnOptions::default(),
         );
-        self.add_message(Role::User, blocks);
+        if let Err(error) = self.add_user_message_with_origin(blocks, None, Some(origin)) {
+            self.abort_pending_turn_setup();
+            return Err(error);
+        }
         if let Err(error) = self.session.save() {
             self.abort_pending_turn_setup();
             return Err(error);
@@ -45,7 +113,19 @@ impl Agent {
     }
 
     pub async fn run_once_capture(&mut self, user_message: &str) -> Result<String> {
-        self.run_once_capture_with_display_role(user_message, None)
+        self.run_once_capture_with_origin(
+            user_message,
+            jcode_session_types::StoredMessageOrigin::Human,
+        )
+        .await
+    }
+
+    pub async fn run_once_capture_with_origin(
+        &mut self,
+        user_message: &str,
+        origin: jcode_session_types::StoredMessageOrigin,
+    ) -> Result<String> {
+        self.run_capture_context(user_message, None, None, Some(origin))
             .await
     }
 
@@ -74,20 +154,22 @@ impl Agent {
         .await
     }
 
-    pub(crate) async fn run_once_capture_with_display_role(
-        &mut self,
-        user_message: &str,
-        display_role: Option<crate::session::StoredDisplayRole>,
-    ) -> Result<String> {
-        self.run_once_capture_with_display_role_and_unattended(user_message, display_role, None)
-            .await
-    }
-
     pub(crate) async fn run_once_capture_with_display_role_and_unattended(
         &mut self,
         user_message: &str,
         display_role: Option<crate::session::StoredDisplayRole>,
         unattended_context: Option<jcode_session_types::StoredUnattendedContextAuthorization>,
+    ) -> Result<String> {
+        self.run_capture_context(user_message, display_role, unattended_context, None)
+            .await
+    }
+
+    async fn run_capture_context(
+        &mut self,
+        user_message: &str,
+        display_role: Option<crate::session::StoredDisplayRole>,
+        unattended_context: Option<jcode_session_types::StoredUnattendedContextAuthorization>,
+        origin: Option<jcode_session_types::StoredMessageOrigin>,
     ) -> Result<String> {
         let blocks = Self::user_context_blocks(user_message, Vec::new());
         let pending_input_tokens = jcode_context_core::estimate_content_blocks_tokens(&blocks);
@@ -102,7 +184,10 @@ impl Agent {
                 unattended_context,
             },
         );
-        self.add_message_with_display_role(Role::User, blocks, display_role);
+        if let Err(error) = self.add_user_message_with_origin(blocks, display_role, origin) {
+            self.abort_pending_turn_setup();
+            return Err(error);
+        }
         if let Err(error) = self.session.save() {
             self.abort_pending_turn_setup();
             return Err(error);
@@ -143,6 +228,7 @@ impl Agent {
                 request_id: None,
                 display_role: None,
                 unattended_context: None,
+                origin: Some(jcode_session_types::StoredMessageOrigin::Human),
             },
         )
         .await
@@ -165,6 +251,7 @@ impl Agent {
                 request_id: Some(request_id),
                 display_role: None,
                 unattended_context: None,
+                origin: Some(jcode_session_types::StoredMessageOrigin::Human),
             },
         )
         .await
@@ -188,6 +275,7 @@ impl Agent {
                 request_id: None,
                 display_role,
                 unattended_context,
+                origin: None,
             },
         )
         .await
@@ -236,9 +324,11 @@ impl Agent {
         self.current_turn_system_reminder =
             system_reminder.filter(|value| !value.trim().is_empty());
 
-        if let Err(error) =
-            self.append_user_context_blocks_with_display_role(blocks, context.display_role)
-        {
+        if let Err(error) = self.append_user_context_blocks_with_origin(
+            blocks,
+            context.display_role,
+            context.origin,
+        ) {
             self.abort_pending_turn_setup();
             self.current_turn_system_reminder = None;
             return Err(error);
@@ -302,6 +392,15 @@ impl Agent {
         blocks: Vec<ContentBlock>,
         display_role: Option<crate::session::StoredDisplayRole>,
     ) -> Result<()> {
+        self.append_user_context_blocks_with_origin(blocks, display_role, None)
+    }
+
+    fn append_user_context_blocks_with_origin(
+        &mut self,
+        blocks: Vec<ContentBlock>,
+        display_role: Option<crate::session::StoredDisplayRole>,
+        origin: Option<jcode_session_types::StoredMessageOrigin>,
+    ) -> Result<()> {
         if blocks.len() > 1 {
             crate::logging::info(&format!(
                 "Agent received message with {} image(s)",
@@ -309,7 +408,7 @@ impl Agent {
             ));
         }
 
-        self.add_message_with_display_role(Role::User, blocks, display_role);
+        self.add_user_message_with_origin(blocks, display_role, origin)?;
         self.session.save()
     }
 

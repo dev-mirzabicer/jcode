@@ -1,0 +1,1 @@
+the checks{{label}} covered too narrow a path. Exercise the main workflows, edge cases, packaging, integration paths, and likely failure modes that could invalidate the result.
