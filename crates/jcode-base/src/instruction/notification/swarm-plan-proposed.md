@@ -1,0 +1,1 @@
+Plan proposal from {{actor}} ({{count}} items). Summary: {{summary}}. Review with communicate read key '{{key}}'.

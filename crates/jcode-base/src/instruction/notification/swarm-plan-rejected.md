@@ -1,0 +1,1 @@
+Your plan proposal was rejected by the coordinator

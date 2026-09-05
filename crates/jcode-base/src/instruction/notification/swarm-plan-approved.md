@@ -1,0 +1,1 @@
+Plan approved by coordinator: {{count}} items added from {{proposer}}

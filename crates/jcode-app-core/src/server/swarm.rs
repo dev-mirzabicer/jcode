@@ -1099,7 +1099,10 @@ pub(super) async fn remove_session_from_swarm(
                         channel: None,
                         tldr: None,
                     },
-                    message: "You are now the coordinator for this swarm.".to_string(),
+                    message: super::notification::render(
+                        crate::instruction::notification::Notification::SwarmCoordinatorPromoted,
+                        member.working_dir.as_deref(),
+                    ),
                 });
             }
         }
@@ -2320,6 +2323,8 @@ mod tests {
 
     #[tokio::test]
     async fn remove_session_from_swarm_reassigns_to_non_headless_member() {
+        let source = crate::server::notification::TestHome::new();
+        source.write("swarm-coordinator-promoted", "SYNTHETIC-PROMOTION");
         let swarm_members = Arc::new(RwLock::new(HashMap::new()));
         let swarms_by_id = Arc::new(RwLock::new(HashMap::from([(
             "swarm-1".to_string(),
@@ -2415,7 +2420,7 @@ mod tests {
                     notification_type: NotificationType::Message { .. },
                     message,
                     ..
-                } if message == "You are now the coordinator for this swarm."
+                } if message == "SYNTHETIC-PROMOTION"
             )
         }));
 
@@ -2427,7 +2432,7 @@ mod tests {
                     notification_type: NotificationType::Message { .. },
                     message,
                     ..
-                } if message == "You are now the coordinator for this swarm."
+                } if message == "SYNTHETIC-PROMOTION"
             )
         }));
     }

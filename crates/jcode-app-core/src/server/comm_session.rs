@@ -1412,6 +1412,11 @@ async fn ensure_spawn_coordinator_swarm(
                 };
                 persist_swarm_state_for(&swarm_id, &swarm_state).await;
                 broadcast_swarm_status(&swarm_id, swarm_members, swarms_by_id).await;
+                let working_dir = swarm_members
+                    .read()
+                    .await
+                    .get(req_session_id)
+                    .and_then(|member| member.working_dir.clone());
                 let _ = client_event_tx.send(ServerEvent::Notification {
                     from_session: req_session_id.to_string(),
                     from_name,
@@ -1420,7 +1425,10 @@ async fn ensure_spawn_coordinator_swarm(
                         channel: None,
                         tldr: None,
                     },
-                    message: "You are the coordinator for this swarm.".to_string(),
+                    message: super::notification::render(
+                        crate::instruction::notification::Notification::SwarmCoordinatorInitial,
+                        working_dir.as_deref(),
+                    ),
                 });
             }
         }

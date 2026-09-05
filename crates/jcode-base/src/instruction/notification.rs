@@ -44,6 +44,15 @@ macro_rules! notifications {
 }
 
 notifications! {
+    SwarmCoordinatorInitial => ("swarm-coordinator-initial", "swarm coordinator election", Plain),
+    SwarmCoordinatorPromoted => ("swarm-coordinator-promoted", "swarm coordinator promotion", Plain),
+    SwarmPlanUpdated { actor: &'a str, count: usize, version: u64 } => ("swarm-plan-updated", "swarm plan update", Handlebars),
+    SwarmPlanProposed { actor: &'a str, count: usize, summary: &'a str, key: &'a str } => ("swarm-plan-proposed", "swarm plan proposal", Handlebars),
+    SwarmPlanPending => ("swarm-plan-pending", "swarm plan proposal receipt", Plain),
+    SwarmPlanApproved { count: usize, proposer: &'a str } => ("swarm-plan-approved", "swarm plan approval", Handlebars),
+    SwarmPlanRejected => ("swarm-plan-rejected", "swarm plan rejection", Plain),
+    FileActivityPrevious { actor: &'a str, operation: &'a str } => ("file-activity-previous", "file activity overlap", Handlebars),
+    FileActivityCurrent { actor: &'a str, operation: &'a str } => ("file-activity-current", "file activity overlap", Handlebars),
     BashTimeoutUnits => ("bash-timeout-units", "background command timeout", Plain),
     BashForegroundPromoted { task_id: &'a str } => ("bash-foreground-promoted", "foreground command promotion", Handlebars),
     BashDetachedPromoted { task_id: &'a str } => ("bash-detached-promoted", "detached command promotion", Handlebars),

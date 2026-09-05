@@ -9,7 +9,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 pub const INSTRUCTION_STORE_SCHEMA_VERSION: u32 = 1;
-pub const INSTRUCTION_STORE_SEED_VERSION: u32 = 10;
+pub const INSTRUCTION_STORE_SEED_VERSION: u32 = 11;
 
 fn initial_instruction_store_seed_version() -> u32 {
     1

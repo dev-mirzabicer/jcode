@@ -19,6 +19,7 @@ use tokio::sync::{RwLock, broadcast, mpsc};
 struct RuntimeEnvGuard {
     _guard: std::sync::MutexGuard<'static, ()>,
     prev_runtime: Option<std::ffi::OsString>,
+    prev_home: Option<std::ffi::OsString>,
 }
 
 impl RuntimeEnvGuard {
@@ -26,11 +27,35 @@ impl RuntimeEnvGuard {
         let guard = crate::storage::lock_test_env();
         let temp = tempfile::TempDir::new().expect("create runtime dir");
         let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
+        let prev_home = std::env::var_os("JCODE_HOME");
         crate::env::set_var("JCODE_RUNTIME_DIR", temp.path());
+        crate::env::set_var("JCODE_HOME", temp.path());
+        crate::config::Config::invalidate_cache();
+        crate::instruction::SystemPromptComposer::new()
+            .ensure_global_store()
+            .unwrap();
+        for (id, body) in [
+            (
+                "swarm-plan-proposed",
+                "SYNTHETIC-PROPOSAL {{actor}} {{count}} {{summary}} {{key}}",
+            ),
+            (
+                "swarm-plan-updated",
+                "SYNTHETIC-UPDATE {{actor}} {{count}} {{version}}",
+            ),
+        ] {
+            std::fs::write(
+                temp.path()
+                    .join(format!("instructions/notifications/{id}.md")),
+                format!("---\nid: {id}\nkind: notification\ntemplate: handlebars\n---\n{body}"),
+            )
+            .unwrap();
+        }
         (
             Self {
                 _guard: guard,
                 prev_runtime,
+                prev_home,
             },
             temp,
         )
@@ -39,6 +64,11 @@ impl RuntimeEnvGuard {
 
 impl Drop for RuntimeEnvGuard {
     fn drop(&mut self) {
+        match self.prev_home.take() {
+            Some(old) => crate::env::set_var("JCODE_HOME", old),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+        crate::config::Config::invalidate_cache();
         if let Some(prev_runtime) = self.prev_runtime.take() {
             crate::env::set_var("JCODE_RUNTIME_DIR", prev_runtime);
         } else {
@@ -518,7 +548,7 @@ async fn worker_proposal_is_lost_when_coordinator_cached_channel_is_closed() {
         "soft-interrupt fallback should queue once"
     );
     assert!(
-        pending[0].content.contains("Plan proposal from")
+        pending[0].content.contains("SYNTHETIC-PROPOSAL")
             && pending[0]
                 .content
                 .contains(&format!("plan_proposal:{worker}")),
@@ -639,7 +669,7 @@ async fn direct_update_notification_is_lost_on_stale_cached_event_tx() {
         let pending = interrupt_queue.lock().expect("queue lock");
         assert_eq!(pending.len(), 1, "soft-interrupt fallback should fire");
         assert!(
-            pending[0].content.contains("Plan updated"),
+            pending[0].content.contains("SYNTHETIC-UPDATE"),
             "unexpected fallback content: {}",
             pending[0].content
         );

@@ -762,6 +762,8 @@ async fn coordinator_identity_falls_back_to_persisted_session_when_agent_busy() 
 
 #[tokio::test]
 async fn spawn_bootstraps_coordinator_when_swarm_has_none() {
+    let source = crate::server::notification::TestHome::new();
+    source.write("swarm-coordinator-initial", "SYNTHETIC-COORDINATOR");
     let swarm_members = Arc::new(RwLock::new(HashMap::new()));
     let swarms_by_id = Arc::new(RwLock::new(HashMap::from([(
         "swarm-1".to_string(),
@@ -811,7 +813,7 @@ async fn spawn_bootstraps_coordinator_when_swarm_has_none() {
             notification_type: NotificationType::Message { .. },
             message,
             ..
-        }) if message == "You are the coordinator for this swarm."
+        }) if message == "SYNTHETIC-COORDINATOR"
     ));
 }
 

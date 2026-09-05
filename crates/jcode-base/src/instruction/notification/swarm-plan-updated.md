@@ -1,0 +1,1 @@
+Plan updated by {{actor}} ({{count}} items, v{{version}})

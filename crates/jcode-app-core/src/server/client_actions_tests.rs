@@ -467,6 +467,8 @@ fn transfer_capture_failure_leaves_no_child_session_or_todo_sidecar() {
 
 #[tokio::test]
 async fn enabling_swarm_does_not_auto_elect_coordinator() {
+    let source = crate::server::notification::TestHome::new();
+    source.write("swarm-coordinator-initial", "SYNTHETIC-COORDINATOR");
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider.clone()).await;
     let agent = Arc::new(Mutex::new(Agent::new(provider, registry)));
@@ -560,7 +562,7 @@ async fn enabling_swarm_does_not_auto_elect_coordinator() {
         !matches!(
             event,
             ServerEvent::Notification { message, .. }
-                if message == "You are the coordinator for this swarm."
+                if message == "SYNTHETIC-COORDINATOR"
         )
     }));
 }

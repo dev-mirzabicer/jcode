@@ -68,6 +68,12 @@ Rows `INS-NTF-029` and `INS-NTF-030` now use managed foreground promotion, detac
 
 [`WP06_BACKGROUND_TOOLS_EQUALITY.json`](WP06_BACKGROUND_TOOLS_EQUALITY.json) records 14 comparisons covering complete launch/promotion/reload records, all delivery combinations, timeout guidance and background selection/output prose. The one-time probes were removed. Existing Bash and bg suites pass, as do synthetic current-source/empty/failure tests and a 200,000-character instruction suffix beyond the unchanged 50,000-byte data preview limit. Strict all-target Clippy passes for base, app-core and TUI.
 
+## Coordination announcements
+
+Rows `INS-NTF-016`, `INS-NTF-017`, `INS-NTF-036` and `INS-NTF-038` now use managed coordinator, plan lifecycle and file-activity prose. Each recipient's server-owned working directory supplies specificity. Elections, cleanup, plan mutations, notification types, queue source, sender identities, file-conflict metadata, summary/intent suffixes and delivery order remain with the server. A rendering failure is explicit rather than undoing already-completed server state changes.
+
+[`WP06_COORDINATION_EQUALITY.json`](WP06_COORDINATION_EQUALITY.json) records 16 comparisons across all migrated announcements, rejection reason presence and both file-activity directions with all summary/intent combinations. The probe was removed. Plan, coordinator, file-activity and synthetic source-update/failure tests pass. Former coordinator/plan prose assertions use synthetic resources. Strict all-target Clippy passes for base, app-core and TUI.
+
 ## Approved scope and UI clarification
 
 Mirza authorized the recommended corrections on 2026-09-05. `INS-NTF-001` remains a code-owned environment-fact record. Todo controls will receive structural queue/history identity and server-owned remote source rendering. The reproduced mixed-queue UI defect must retain the user's text without changing combined model-visible bytes. These clarifications do not constitute work-package acceptance.

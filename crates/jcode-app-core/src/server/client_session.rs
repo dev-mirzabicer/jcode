@@ -803,7 +803,7 @@ pub(super) async fn handle_subscribe(
                                 channel: None,
                                 tldr: None,
                             },
-                            message: "You are now the coordinator for this swarm.".to_string(),
+                            message: super::notification::render(crate::instruction::notification::Notification::SwarmCoordinatorPromoted, member.working_dir.as_deref()),
                         });
                     }
                 }

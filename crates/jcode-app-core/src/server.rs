@@ -37,6 +37,7 @@ mod headless;
 mod jade_relay;
 mod lifecycle;
 mod live_turn;
+mod notification;
 mod provider_control;
 mod reload;
 mod reload_recovery;
@@ -2101,12 +2102,13 @@ impl Server {
                                     .as_ref()
                                     .map(|intent| format!(" — intent: {}", intent))
                                     .unwrap_or_default();
+                                let prose = self::notification::render(crate::instruction::notification::Notification::FileActivityPrevious {
+                                    actor: prev_name.as_deref().unwrap_or(&prev.session_id[..8]), operation: prev.op.as_str(),
+                                }, member.working_dir.as_deref());
                                 let alert_msg = format!(
-                                    "⚠ File activity: {} — {} — {} previously {} this file{}{}",
+                                    "⚠ File activity: {} — {} — {prose}{}{}",
                                     path.display(),
                                     scope,
-                                    prev_name.as_deref().unwrap_or(&prev.session_id[..8]),
-                                    prev.op.as_str(),
                                     prev.summary
                                         .as_ref()
                                         .map(|s| format!(": {}", s))
@@ -2154,14 +2156,13 @@ impl Server {
                                     .as_ref()
                                     .map(|intent| format!(" — intent: {}", intent))
                                     .unwrap_or_default();
+                                let prose = self::notification::render(crate::instruction::notification::Notification::FileActivityCurrent {
+                                    actor: current_name.as_deref().unwrap_or(&session_id[..8.min(session_id.len())]), operation: touch.op.as_str(),
+                                }, prev_member.working_dir.as_deref());
                                 let alert_msg = format!(
-                                    "⚠ File activity: {} — {} — {} just {} this file you previously worked with{}{}",
+                                    "⚠ File activity: {} — {} — {prose}{}{}",
                                     path.display(),
                                     scope,
-                                    current_name
-                                        .as_deref()
-                                        .unwrap_or(&session_id[..8.min(session_id.len())]),
-                                    touch.op.as_str(),
                                     touch
                                         .summary
                                         .as_ref()

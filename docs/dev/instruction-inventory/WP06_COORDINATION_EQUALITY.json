@@ -1,0 +1,98 @@
+[
+  {
+    "bytes": 39,
+    "case": "swarm-coordinator-initial",
+    "equal": true,
+    "sha256": "9c2e1343e9885538b9ef7902add14f23b5b14b4461b50fdd45da85892a3fd1a8"
+  },
+  {
+    "bytes": 43,
+    "case": "swarm-coordinator-promoted",
+    "equal": true,
+    "sha256": "c5249cbb9e49f51549439001be7e37c71e890fbcb99332e3e8d79808fcbb8120"
+  },
+  {
+    "bytes": 37,
+    "case": "swarm-plan-updated",
+    "equal": true,
+    "sha256": "74cc073018681dcdf8966db7712b35880b46465586a7f325192f6e67c055a0bf"
+  },
+  {
+    "bytes": 113,
+    "case": "swarm-plan-proposed",
+    "equal": true,
+    "sha256": "2878bf28be60c27c7745601b627a3029701498483cc327be236c8f78db327802"
+  },
+  {
+    "bytes": 52,
+    "case": "swarm-plan-pending",
+    "equal": true,
+    "sha256": "c340053a3a77b8008402b144eced356f290b3d950f24163dd4bb3bd23bd3c03d"
+  },
+  {
+    "bytes": 56,
+    "case": "swarm-plan-approved",
+    "equal": true,
+    "sha256": "0c4dc2d78fb37cadb0a4defe8dfd7347edb4a4db2b90a91ac1c3d28233fd90f2"
+  },
+  {
+    "bytes": 50,
+    "case": "plan-rejected",
+    "equal": true,
+    "sha256": "dcd6a91a50ac8fc5a920f33a8d3333d11766fc5d37a813a09a2e6c8c42ca5d04"
+  },
+  {
+    "bytes": 61,
+    "case": "plan-rejected",
+    "equal": true,
+    "sha256": "f7d38bc46726f225acf879f1b5bcfb0b4bbeef90dbcced46de2b7e2845d141ed"
+  },
+  {
+    "bytes": 76,
+    "case": "file-activity-previous",
+    "equal": true,
+    "sha256": "4c9cc67adf4cce8a440bfe3618bbd940068c9f8709e0833021aafcc12751afa5"
+  },
+  {
+    "bytes": 98,
+    "case": "file-activity-previous",
+    "equal": true,
+    "sha256": "6d11fbdf69a91a381e8a6f4d532b2c2155fdb119b6c69d73f794ed82f0db9b25"
+  },
+  {
+    "bytes": 88,
+    "case": "file-activity-previous",
+    "equal": true,
+    "sha256": "65ae7a1a9373e305337331adff53db8313377627aacb1bcfb2a836d50546ebd5"
+  },
+  {
+    "bytes": 110,
+    "case": "file-activity-previous",
+    "equal": true,
+    "sha256": "56c7531abac03a344ca7e7f191c3c47ede6bc528d644b53dc7a3667285b9f440"
+  },
+  {
+    "bytes": 97,
+    "case": "file-activity-current",
+    "equal": true,
+    "sha256": "36e0cbb313b21da90671c13668bbd38d6569be03c7816ac24df9098b7697e6d6"
+  },
+  {
+    "bytes": 119,
+    "case": "file-activity-current",
+    "equal": true,
+    "sha256": "ffd7803080570c2431cb3e9bc742f0d53c8cac0cab2c534af697d0f891e01b86"
+  },
+  {
+    "bytes": 109,
+    "case": "file-activity-current",
+    "equal": true,
+    "sha256": "70da0a6c76ceb8f1840dde52b50d65eb17f2cf4d15bf9ca7fcd9829590212392"
+  },
+  {
+    "bytes": 131,
+    "case": "file-activity-current",
+    "equal": true,
+    "sha256": "51a20f021fd1cc59e8d2715e47173db1f54a14a9cf8648802894dc52e4417a35"
+  }
+]

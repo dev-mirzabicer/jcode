@@ -8,6 +8,7 @@ use super::{
     record_swarm_event, summarize_plan_items,
 };
 use crate::agent::Agent;
+use crate::instruction::notification::Notification;
 use crate::plan::PlanItem;
 use crate::protocol::{NotificationType, ServerEvent};
 use jcode_agent_runtime::SoftInterruptSource;
@@ -130,16 +131,20 @@ pub(super) async fn handle_comm_propose_plan(
         };
 
         let members = swarm_members.read().await;
-        let notification_msg = format!(
-            "Plan updated by {} ({} items, v{})",
-            from_label,
-            items.len(),
-            version
-        );
         for sid in participant_ids {
             if sid == req_session_id {
                 continue;
             }
+            let notification_msg = super::notification::render(
+                Notification::SwarmPlanUpdated {
+                    actor: &from_label,
+                    count: items.len(),
+                    version,
+                },
+                members
+                    .get(&sid)
+                    .and_then(|member| member.working_dir.as_deref()),
+            );
             if let Some(member) = members.get(&sid) {
                 let _ = member.event_tx.send(ServerEvent::Notification {
                     from_session: req_session_id.clone(),
@@ -245,15 +250,18 @@ pub(super) async fn handle_comm_propose_plan(
     .await;
 
     let summary = summarize_plan_items(&items, 3);
-    let notification_msg = format!(
-        "Plan proposal from {} ({} items). Summary: {}. Review with communicate read key '{}'.",
-        from_label,
-        items.len(),
-        summary,
-        proposal_key
-    );
-
     let members = swarm_members.read().await;
+    let notification_msg = super::notification::render(
+        Notification::SwarmPlanProposed {
+            actor: &from_label,
+            count: items.len(),
+            summary: &summary,
+            key: &proposal_key,
+        },
+        members
+            .get(&coordinator_id)
+            .and_then(|member| member.working_dir.as_deref()),
+    );
     if let Some(member) = members.get(&coordinator_id) {
         let _ = member.event_tx.send(ServerEvent::Notification {
             from_session: req_session_id.clone(),
@@ -284,7 +292,12 @@ pub(super) async fn handle_comm_propose_plan(
     )
     .await;
 
-    let proposer_confirmation = "Plan proposal sent to coordinator (not yet applied).".to_string();
+    let proposer_confirmation = super::notification::render(
+        Notification::SwarmPlanPending,
+        members
+            .get(&req_session_id)
+            .and_then(|member| member.working_dir.as_deref()),
+    );
     if let Some(member) = members.get(&req_session_id) {
         let _ = member.event_tx.send(ServerEvent::Notification {
             from_session: req_session_id.clone(),
@@ -493,10 +506,12 @@ pub(super) async fn handle_comm_approve_plan(
         let members = swarm_members.read().await;
         for sid in participant_ids {
             if let Some(member) = members.get(&sid) {
-                let message = format!(
-                    "Plan approved by coordinator: {} items added from {}",
-                    items.len(),
-                    proposer_session
+                let message = super::notification::render(
+                    Notification::SwarmPlanApproved {
+                        count: items.len(),
+                        proposer: &proposer_session,
+                    },
+                    member.working_dir.as_deref(),
                 );
                 let _ = member.event_tx.send(ServerEvent::Notification {
                     from_session: req_session_id.clone(),
@@ -636,7 +651,11 @@ pub(super) async fn handle_comm_reject_plan(
             .as_ref()
             .map(|reason| format!(": {reason}"))
             .unwrap_or_default();
-        let message = format!("Your plan proposal was rejected by the coordinator{reason_msg}");
+        let prose = super::notification::render(
+            Notification::SwarmPlanRejected,
+            member.working_dir.as_deref(),
+        );
+        let message = format!("{prose}{reason_msg}");
         let _ = member.event_tx.send(ServerEvent::Notification {
             from_session: req_session_id.clone(),
             from_name: coordinator_name.clone(),
