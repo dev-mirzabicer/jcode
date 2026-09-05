@@ -16,7 +16,7 @@ pub use catalog::{
 };
 use catalog_service::{ModelCatalogService, RuntimeModelUnavailability};
 use jcode_provider_core::{
-    ALL_CLAUDE_MODELS, ALL_OPENAI_MODELS, CHATGPT_WEB_MODEL, ModelCapabilities,
+    ALL_CLAUDE_MODELS, ALL_OPENAI_MODELS, CHATGPT_WEB_MODEL, GPT_6_ASTRA_MODEL, ModelCapabilities,
     OPENAI_API_ONLY_PRO_MODELS, context_limit_for_model_with_provider_and_cache,
     core_provider_for_model_with_hint, is_openai_api_only_pro_model, provider_key_from_hint,
     shared_http_client,
@@ -1081,6 +1081,7 @@ pub fn model_availability_for_account(model: &str) -> AccountModelAvailability {
 /// If the desired model isn't available, we try these in order.
 const OPENAI_MODEL_PREFERENCE: &[&str] = &[
     "gpt-5.6-sol",
+    GPT_6_ASTRA_MODEL,
     "gpt-5.6-pro",
     "gpt-5.6",
     "gpt-5.6-terra",

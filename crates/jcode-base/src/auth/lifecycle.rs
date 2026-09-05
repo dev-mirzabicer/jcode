@@ -1950,10 +1950,11 @@ mod tests {
         let openai_routes = vec![
             route("gpt-5.6-sol", "OpenAI", "openai-api", false),
             route("gpt-5.5", "OpenAI", "openai-api", true),
+            route("gpt-6-astra", "OpenAI", "openai-api", true),
         ];
         assert_eq!(
             provider_model_to_select_after_auth(&openai, None, &openai_routes).as_deref(),
-            Some("gpt-5.5")
+            Some("gpt-6-astra")
         );
 
         let openai_routes_with_clean_release = vec![

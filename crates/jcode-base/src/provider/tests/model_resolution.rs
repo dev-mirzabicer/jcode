@@ -7,6 +7,7 @@ fn test_provider_for_model_claude() {
 
 #[test]
 fn test_provider_for_model_openai() {
+    assert_eq!(provider_for_model("gpt-6-astra"), Some("openai"));
     assert_eq!(provider_for_model("gpt-5.6-sol"), Some("openai"));
     assert_eq!(provider_for_model("gpt-5.6-sol[1m]"), Some("openai"));
     assert_eq!(provider_for_model("gpt-5.2-codex"), Some("openai"));
@@ -17,12 +18,38 @@ fn test_provider_for_model_openai() {
 }
 
 #[test]
+fn test_context_limit_gpt_6_astra_defaults_to_native_1m() {
+    assert_eq!(context_limit_for_model("gpt-6-astra"), Some(1_000_000));
+    assert_eq!(
+        resolve_model_capabilities("gpt-6-astra", Some("openai")),
+        ModelCapabilities {
+            provider: Some("openai".to_string()),
+            context_window: Some(1_000_000),
+        }
+    );
+}
+
+#[test]
+fn test_openai_fallback_prefers_astra_but_keeps_sol_as_default() {
+    with_clean_provider_test_env(|| {
+        populate_account_models(vec!["gpt-5.5".to_string(), "gpt-6-astra".to_string()]);
+        assert_eq!(
+            get_best_available_openai_model().as_deref(),
+            Some("gpt-6-astra")
+        );
+
+        populate_account_models(vec!["gpt-6-astra".to_string(), "gpt-5.6-sol".to_string()]);
+        assert_eq!(
+            get_best_available_openai_model().as_deref(),
+            Some("gpt-5.6-sol")
+        );
+    });
+}
+
+#[test]
 fn test_context_limit_gpt_5_6_sol_profiles_remain_distinct() {
     assert_eq!(context_limit_for_model("gpt-5.6-sol"), Some(372_000));
-    assert_eq!(
-        context_limit_for_model("gpt-5.6-sol[1m]"),
-        Some(1_000_000)
-    );
+    assert_eq!(context_limit_for_model("gpt-5.6-sol[1m]"), Some(1_000_000));
 }
 
 #[test]
@@ -1942,6 +1969,7 @@ fn test_normalize_model_id_strips_1m_suffix() {
 #[test]
 fn test_merge_openai_model_ids_appends_dynamic_oauth_models() {
     let models = models::merge_openai_model_ids(vec![
+        "gpt-6-astra".to_string(),
         "gpt-5.4".to_string(),
         "gpt-5.4-fast-preview".to_string(),
         "gpt-5.4-fast-preview".to_string(),
@@ -1951,6 +1979,13 @@ fn test_merge_openai_model_ids_appends_dynamic_oauth_models() {
     assert!(models.iter().any(|model| model == "gpt-5.4"));
     assert!(models.iter().any(|model| model == "gpt-5.6-sol"));
     assert!(models.iter().any(|model| model == "gpt-5.6-sol[1m]"));
+    assert_eq!(
+        models
+            .iter()
+            .filter(|model| model.as_str() == "gpt-6-astra")
+            .count(),
+        1
+    );
     assert!(models.iter().any(|model| model == "gpt-5.4-fast-preview"));
     assert!(models.iter().any(|model| model == "gpt-5.5-experimental"));
     assert_eq!(

@@ -2972,6 +2972,7 @@ fn compat_profile_serving_gpt_family_model_supports_reasoning_effort() {
     let provider = make_custom_compatible_provider();
 
     for model in [
+        "gpt-6-astra",
         "gpt-5.3-codex-spark",
         "gpt-5.5",
         "gpt-5.1-codex-mini",

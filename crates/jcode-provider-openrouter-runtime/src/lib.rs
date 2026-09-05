@@ -937,13 +937,14 @@ impl OpenRouterProvider {
         ) && Self::model_is_deepseek_family(&self.model_snapshot())
     }
 
-    /// GPT-family reasoning models (gpt-5.x, codex variants, o-series) accept
+    /// GPT-family reasoning models (gpt-5.x, gpt-6.x, codex variants, o-series) accept
     /// the standard OpenAI `reasoning_effort` request field on any
     /// OpenAI-compatible gateway that proxies them (e.g. OpenCode Zen serving
     /// `gpt-5.3-codex-spark`). Real OpenRouter uses unified reasoning instead.
     fn model_is_openai_reasoning_family(model: &str) -> bool {
         let model = model.trim().to_ascii_lowercase();
         model.starts_with("gpt-5")
+            || model.starts_with("gpt-6")
             || model.contains("codex")
             || model.starts_with("o1")
             || model.starts_with("o3")
