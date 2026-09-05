@@ -1,0 +1,1 @@
+Note: the `timeout` parameter is in MILLISECONDS, not seconds. If you meant a longer limit, pass a larger value (e.g. 600000 = 10min) or omit `timeout`.

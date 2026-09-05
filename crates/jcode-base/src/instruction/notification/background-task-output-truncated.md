@@ -1,0 +1,1 @@
+Use `read` tool on the output file for full content, or `bg action="tail"` for recent lines.

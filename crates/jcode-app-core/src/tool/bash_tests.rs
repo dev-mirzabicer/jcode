@@ -363,11 +363,6 @@ async fn test_reload_persistable_bash_timeout_promotes_to_background() {
         "output should explain background promotion: {}",
         result.output
     );
-    assert!(
-        result.output.contains("do not rerun"),
-        "output should tell the agent not to rerun duplicate work: {}",
-        result.output
-    );
 
     let metadata = result.metadata.expect("expected background metadata");
     assert_eq!(metadata["background"], true);

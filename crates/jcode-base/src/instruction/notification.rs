@@ -44,6 +44,21 @@ macro_rules! notifications {
 }
 
 notifications! {
+    BashTimeoutUnits => ("bash-timeout-units", "background command timeout", Plain),
+    BashForegroundPromoted { task_id: &'a str } => ("bash-foreground-promoted", "foreground command promotion", Handlebars),
+    BashDetachedPromoted { task_id: &'a str } => ("bash-detached-promoted", "detached command promotion", Handlebars),
+    BashReloadBackground { task_id: &'a str } => ("bash-reload-background", "command reload persistence", Handlebars),
+    BashBackgroundWake => ("bash-background-wake", "background command launch", Plain),
+    BashBackgroundNotify => ("bash-background-notify", "background command launch", Plain),
+    BashBackgroundSilent => ("bash-background-silent", "background command launch", Plain),
+    BashBackgroundProgress => ("bash-background-progress", "background command launch", Plain),
+    BashBackgroundStarted { task_id: &'a str } => ("bash-background-started", "background command launch", Handlebars),
+    BackgroundTaskActionRequired => ("background-task-action-required", "background action validation", Plain),
+    BackgroundTaskSelectRequired => ("background-task-select-required", "background task selection", Plain),
+    BackgroundTaskSelectMultiple => ("background-task-select-multiple", "background task selection", Plain),
+    BackgroundTaskIdRequired => ("background-task-id-required", "background task selection", Plain),
+    BackgroundTaskWaitTimeout { task_id: &'a str } => ("background-task-wait-timeout", "background task wait", Handlebars),
+    BackgroundTaskOutputTruncated => ("background-task-output-truncated", "background task output", Plain),
     GeneratedImageVisualContext { path: &'a str, limit_mb: u64 } => ("generated-image-visual-context", "generated image attachment", Handlebars),
     BackgroundTaskResultEmpty => ("background-task-result-empty", "background task result record", Plain),
     BrowserStatusReady => ("browser-status-ready", "browser status", Plain),

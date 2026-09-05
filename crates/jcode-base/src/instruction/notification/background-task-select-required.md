@@ -1,0 +1,1 @@
+Try `bg action="list" status_filter="running" session_only=true` or pass latest=true.

@@ -6,6 +6,7 @@
 use super::{Tool, ToolContext, ToolOutput};
 use crate::background;
 use crate::bus::BackgroundTaskStatus;
+use crate::instruction::notification::Notification;
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -134,9 +135,7 @@ fn resolve_action(params: &BgInput) -> Result<String> {
         return Ok(action.to_string());
     }
 
-    Err(anyhow::anyhow!(
-        "Missing required bg action. Use one of: list, status, output, tail, cancel, cleanup, delivery, subscribe, wait. For example: bg action=\"wait\"."
-    ))
+    Err(anyhow::anyhow!("Missing required bg action."))
 }
 
 fn status_label(status: &BackgroundTaskStatus) -> &'static str {
@@ -305,7 +304,11 @@ fn tail_lines(output: &str, lines: usize) -> String {
     collected.into_iter().rev().collect::<Vec<_>>().join("\n")
 }
 
-fn output_preview(output: &str, tail: Option<usize>) -> (String, bool) {
+fn output_preview(
+    output: &str,
+    tail: Option<usize>,
+    working_dir: Option<&std::path::Path>,
+) -> (String, bool) {
     if let Some(lines) = tail {
         let tailed = tail_lines(output, lines);
         let truncated = tailed.len() < output.len();
@@ -313,9 +316,13 @@ fn output_preview(output: &str, tail: Option<usize>) -> (String, bool) {
     }
 
     if output.len() > MAX_OUTPUT_BYTES {
+        let prose = super::background_notice::render(
+            Notification::BackgroundTaskOutputTruncated,
+            working_dir,
+        );
         (
             format!(
-                "{}...\n\n(Output truncated. Use `read` tool on the output file for full content, or `bg action=\"tail\"` for recent lines.)",
+                "{}...\n\n(Output truncated. {prose})",
                 crate::util::truncate_str(output, MAX_OUTPUT_BYTES)
             ),
             true,
@@ -384,11 +391,19 @@ async fn resolve_task_ids(
     match tasks.as_slice() {
         [task] => Ok(vec![task.task_id.clone()]),
         [] => Err(anyhow::anyhow!(
-            "task_id is required for {} action unless exactly one matching running task exists in this session. Try `bg action=\"list\" status_filter=\"running\" session_only=true` or pass latest=true.",
-            action
+            "task_id is required for {} action unless exactly one matching running task exists in this session. {}",
+            action,
+            super::background_notice::render(
+                Notification::BackgroundTaskSelectRequired,
+                ctx.working_dir.as_deref()
+            )
         )),
         _ => Err(anyhow::anyhow!(
-            "Multiple matching running tasks found; pass task_id, task_ids, or latest=true. Matching task IDs: {}",
+            "Multiple matching running tasks found; {} Matching task IDs: {}",
+            super::background_notice::render(
+                Notification::BackgroundTaskSelectMultiple,
+                ctx.working_dir.as_deref()
+            ),
             tasks
                 .iter()
                 .map(|task| task.task_id.as_str())
@@ -505,7 +520,15 @@ impl Tool for BgTool {
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: BgInput = serde_json::from_value(input)?;
-        let action = resolve_action(&params)?;
+        let action = resolve_action(&params).map_err(|error| {
+            anyhow::anyhow!(
+                "{error} {}",
+                super::background_notice::render(
+                    Notification::BackgroundTaskActionRequired,
+                    ctx.working_dir.as_deref()
+                )
+            )
+        })?;
         let manager = background::global();
 
         match action.as_str() {
@@ -607,7 +630,8 @@ impl Tool for BgTool {
                         task_id
                     )
                 })?;
-                let (rendered, truncated) = output_preview(&output, tail);
+                let (rendered, truncated) =
+                    output_preview(&output, tail, ctx.working_dir.as_deref());
                 let status = manager.status(&task_id).await;
                 Ok(ToolOutput::new(rendered)
                     .with_title(format!("bg {} {}", action, task_id))
@@ -729,7 +753,11 @@ impl Tool for BgTool {
 
                 let Some(task_id) = task_ids.into_iter().next() else {
                     return Err(anyhow::anyhow!(
-                        "Missing task_id; provide a task_id or use latest=true"
+                        "Missing task_id; {}",
+                        super::background_notice::render(
+                            Notification::BackgroundTaskIdRequired,
+                            ctx.working_dir.as_deref()
+                        )
                     ));
                 };
                 match manager
@@ -760,9 +788,12 @@ impl Tool for BgTool {
                                 "Background task emitted a checkpoint event.\n\n".to_string()
                             }
                             background::BackgroundTaskWaitReason::Timeout => format!(
-                                "No terminal event before max wait of {}s. Check again with `bg action=\"wait\" task_id=\"{}\"` or inspect status/output.\n\n",
+                                "No terminal event before max wait of {}s. {}\n\n",
                                 params.max_wait_seconds.unwrap_or_default(),
-                                task_id
+                                super::background_notice::render(
+                                    Notification::BackgroundTaskWaitTimeout { task_id: &task_id },
+                                    ctx.working_dir.as_deref()
+                                )
                             ),
                         };
                         output.push_str(&format_task_details(&task));
@@ -780,7 +811,8 @@ impl Tool for BgTool {
                                     .or(params.lines)
                                     .unwrap_or(DEFAULT_WAIT_PREVIEW_LINES),
                             );
-                            let (preview, truncated) = output_preview(&full_output, tail);
+                            let (preview, truncated) =
+                                output_preview(&full_output, tail, ctx.working_dir.as_deref());
                             if !preview.trim().is_empty() {
                                 output.push_str("\nOutput preview:\n```text\n");
                                 output.push_str(&preview);
@@ -830,6 +862,22 @@ impl Tool for BgTool {
 mod tests {
     use super::*;
     use anyhow::{Result, anyhow};
+
+    #[test]
+    fn output_data_limit_does_not_clip_managed_guidance() {
+        let source = crate::tool::background_notice::TestHome::new();
+        let prose = "synthetic ".repeat(20_000);
+        source.write("background-task-output-truncated", &prose);
+        let (output, truncated) = output_preview(&"x".repeat(MAX_OUTPUT_BYTES + 1), None, None);
+        assert!(truncated);
+        assert!(output.contains(&prose));
+        source.write("background-task-output-truncated", "{{invalid}}");
+        let (output, truncated) = output_preview(&"x".repeat(MAX_OUTPUT_BYTES + 1), None, None);
+        assert!(truncated);
+        assert!(output.starts_with(&"x".repeat(MAX_OUTPUT_BYTES)));
+        assert!(output.contains("Background instruction rendering failed:"));
+        assert_eq!(output_preview("a\nb\nc", Some(2), None).0, "b\nc");
+    }
 
     #[test]
     fn status_filter_schema_any_of_branches_have_types() -> Result<()> {

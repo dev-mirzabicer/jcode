@@ -1,0 +1,86 @@
+[
+  {
+    "bytes": 569,
+    "case": "foreground",
+    "equal": true,
+    "sha256": "1ef7d430708ad739860dceef1d043550b6842b9690326b896b7c5ea4574136e6"
+  },
+  {
+    "bytes": 454,
+    "case": "detached",
+    "equal": true,
+    "sha256": "b40155dae6e24e1ed957c934d8518103b7a0c8d401258712153765f24fc39d1b"
+  },
+  {
+    "bytes": 230,
+    "case": "reload",
+    "equal": true,
+    "sha256": "ca0cbb0ebef62ef301086ff999b3ecf3ef97bad005e33aea7c527065c1020e61"
+  },
+  {
+    "bytes": 1402,
+    "case": "started-false-false",
+    "equal": true,
+    "sha256": "ee166ec36a88d1efb9d4eeec4d6574c5607e498897441ffed67be1f667e32af3"
+  },
+  {
+    "bytes": 1393,
+    "case": "started-true-false",
+    "equal": true,
+    "sha256": "2bbc08bac55f5308b757c96f072a8e4cad2f93c79dd892cb8f4129165c886902"
+  },
+  {
+    "bytes": 1396,
+    "case": "started-false-true",
+    "equal": true,
+    "sha256": "fbde2665ee53a3a5b1193e68aa2fdc704fd180d86d6639c6826300678ac5bca3"
+  },
+  {
+    "bytes": 1396,
+    "case": "started-true-true",
+    "equal": true,
+    "sha256": "fbde2665ee53a3a5b1193e68aa2fdc704fd180d86d6639c6826300678ac5bca3"
+  },
+  {
+    "bytes": 152,
+    "case": "timeout-units",
+    "equal": true,
+    "sha256": "4f9c556e5380cbc4524ed17aae36f910a66b0fbcb4344a7d3ca39d73a5d49eca"
+  },
+  {
+    "bytes": 114,
+    "case": "background-task-action-required",
+    "equal": true,
+    "sha256": "42e7bb13ec11d8f4346f5727db2df5c1713850794869172fea310f2cfa7d6ec9"
+  },
+  {
+    "bytes": 85,
+    "case": "background-task-select-required",
+    "equal": true,
+    "sha256": "5d2f6071e20d0b0bb2b547813fbb2addbeed2c4ee9632693aa704d891739f739"
+  },
+  {
+    "bytes": 39,
+    "case": "background-task-select-multiple",
+    "equal": true,
+    "sha256": "dcba08544aa1995f8743e4002a9211f17b43b1c8ccec92d3663575b2030edfe0"
+  },
+  {
+    "bytes": 36,
+    "case": "background-task-id-required",
+    "equal": true,
+    "sha256": "129dd0dfe2c6687ed07b0101f461a33e606c42d52d9785afacb016bfa45b6377"
+  },
+  {
+    "bytes": 79,
+    "case": "background-task-wait-timeout",
+    "equal": true,
+    "sha256": "fa68df31b41012dc70d93944814426a23935798c241d5dc970b56eadd6dcb2ca"
+  },
+  {
+    "bytes": 50117,
+    "case": "background-output-truncated",
+    "equal": true,
+    "sha256": "ccc15202fadce828ed513874f830ac9d31ea202c480cd89c150deaff9426cc15"
+  }
+]

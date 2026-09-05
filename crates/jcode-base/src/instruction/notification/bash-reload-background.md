@@ -1,0 +1,1 @@
+Use `bg` with action="wait" and task_id="{{task_id}}" after reload to wait for completion or the next progress checkpoint.

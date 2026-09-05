@@ -62,6 +62,12 @@ Background record headers, status fields, preview/failure data, retrieval comman
 
 [`WP06_IMAGE_BACKGROUND_EQUALITY.json`](WP06_IMAGE_BACKGROUND_EQUALITY.json) records ten exact comparisons, including nine image metadata/revised-prompt combinations and the complete empty background record. The probe was removed. Base message tests, real source-update/empty/failure tests, complete Harness bridge tests and background regressions pass. Strict all-target Clippy passes for base, app-core, TUI and Harness bridge.
 
+## Background tool guidance
+
+Rows `INS-NTF-029` and `INS-NTF-030` now use managed foreground promotion, detached/reload continuation, background launch/delivery/progress guidance, task-selection hints, timeout followup and full-output retrieval guidance. The background result formatter owns task IDs, paths, durations, structural records and explicit rendering-failure diagnostics. A prose error cannot lose an already-started task receipt or change task execution, cancellation, delivery or wait policy.
+
+[`WP06_BACKGROUND_TOOLS_EQUALITY.json`](WP06_BACKGROUND_TOOLS_EQUALITY.json) records 14 comparisons covering complete launch/promotion/reload records, all delivery combinations, timeout guidance and background selection/output prose. The one-time probes were removed. Existing Bash and bg suites pass, as do synthetic current-source/empty/failure tests and a 200,000-character instruction suffix beyond the unchanged 50,000-byte data preview limit. Strict all-target Clippy passes for base, app-core and TUI.
+
 ## Approved scope and UI clarification
 
 Mirza authorized the recommended corrections on 2026-09-05. `INS-NTF-001` remains a code-owned environment-fact record. Todo controls will receive structural queue/history identity and server-owned remote source rendering. The reproduced mixed-queue UI defect must retain the user's text without changing combined model-visible bytes. These clarifications do not constitute work-package acceptance.

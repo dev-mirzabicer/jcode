@@ -28,7 +28,6 @@ const STDIN_POLL_INTERVAL_MS: u64 = 500;
 const STDIN_INITIAL_DELAY_MS: u64 = 300;
 const PROGRESS_MARKER_PREFIX: &str = "JCODE_PROGRESS ";
 const CHECKPOINT_MARKER_PREFIX: &str = "JCODE_CHECKPOINT ";
-const BACKGROUND_PROGRESS_GUIDANCE: &str = "For long-running background commands, prefer scripts or commands that periodically print progress updates. Best format: print lines starting with `JCODE_PROGRESS ` followed by JSON like {\"percent\":42,\"message\":\"Running\"} or {\"current\":120,\"total\":1000,\"unit\":\"batches\",\"message\":\"Epoch 2/5\",\"eta_seconds\":30}. Supported JSON fields are `percent`, `message`, `current`, `total`, `unit`, `eta_seconds`, and optional `kind`=`indeterminate` or `kind`=`checkpoint`. For milestone-style wakeups, print `JCODE_CHECKPOINT {\"message\":\"Unit tests passed\"}`. Generic fallback output that can be parsed includes `42%`, `3/10 tests`, `3 of 10 steps`, `1.5/3.0 GiB`, or phase lines like `Compiling ...`, `Downloading ...`, `Running ...`, and `Building ...`. If you are writing the script yourself, add these progress/checkpoint lines explicitly. Put large temporary files, worktrees, and virtual environments under `$JCODE_SCRATCH_DIR`, not `/tmp`, because `/tmp` may be RAM-backed.";
 const BASH_TOOL_DESCRIPTION: &str =
     "Run a bash command. Commands have no default deadline; set timeout only when intentional.";
 const WINDOWS_SHELL_TOOL_DESCRIPTION: &str = "Run a Windows cmd.exe command (compatibility name `bash`). Commands have no default deadline; set timeout only when intentional. Use cmd.exe syntax, not Bash.";
@@ -70,14 +69,15 @@ export -f cargo
 /// 1000s when it is 1s). Spell out the seconds equivalent and, for suspiciously
 /// short timeouts, hint that the unit is milliseconds so the next attempt uses a
 /// sane value instead of repeating the same mistake.
-fn timeout_message(timeout_ms: u64) -> String {
+fn timeout_message(timeout_ms: u64, working_dir: Option<&Path>) -> String {
     let secs = timeout_ms as f64 / 1000.0;
     let mut msg = format!("Command timed out after {}ms ({:.1}s)", timeout_ms, secs);
     if timeout_ms <= 5000 {
-        msg.push_str(
-            ". Note: the `timeout` parameter is in MILLISECONDS, not seconds. \
-             If you meant a longer limit, pass a larger value (e.g. 600000 = 10min) or omit `timeout`.",
-        );
+        msg.push_str(". ");
+        msg.push_str(&super::background_notice::render(
+            crate::instruction::notification::Notification::BashTimeoutUnits,
+            working_dir,
+        ));
     }
     msg
 }
@@ -947,23 +947,12 @@ impl BashTool {
                     )
                     .await;
 
-                let output = format!(
-                    "Command exceeded the foreground timeout after {:.1}s and is continuing in background (not killed).\n\n\
-                     Task ID: {}\n\
-                     Name: {}\n\
-                     Output file: {}\n\
-                     Status file: {}\n\n\
-                     The command is still running; do not rerun it unless you intentionally want a second copy.\n\
-                     Use `bg` with action=\"wait\" and task_id=\"{}\" to wait for completion or the next progress checkpoint.\n\
-                     Use `bg` with action=\"output\" and task_id=\"{}\" to inspect output.\n\
-                     If you expected it to finish quickly and it did not, the `timeout` parameter is in MILLISECONDS; pass a larger value or omit it.",
-                    timeout_ms as f64 / 1000.0,
-                    info.task_id,
-                    display_name,
-                    info.output_file.display(),
-                    info.status_file.display(),
-                    info.task_id,
-                    info.task_id,
+                let output = super::background_notice::promoted(
+                    &info,
+                    &display_name,
+                    timeout_ms,
+                    None,
+                    ctx.working_dir.as_deref(),
                 );
 
                 Ok(ToolOutput::new(output)
@@ -1057,24 +1046,12 @@ impl BashTool {
                     .await;
 
                 let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
-                let output = format!(
-                    "Command exceeded the foreground timeout after {:.1}s and is continuing in background.\n\n\
-                     Task ID: {}\n\
-                     Name: {}\n\
-                     Foreground time used: {:.1}s\n\
-                     Output file: {}\n\
-                     Status file: {}\n\n\
-                     The command is still running; do not rerun it unless you intentionally want a second copy.\n\
-                     Use `bg` with action=\"wait\" and task_id=\"{}\" to wait for completion or the next progress checkpoint.\n\
-                     Use `bg` with action=\"output\" and task_id=\"{}\" to inspect output.",
-                    timeout_ms as f64 / 1000.0,
-                    info.task_id,
-                    display_name,
-                    elapsed.as_secs_f64(),
-                    info.output_file.display(),
-                    info.status_file.display(),
-                    info.task_id,
-                    info.task_id,
+                let output = super::background_notice::promoted(
+                    &info,
+                    &display_name,
+                    timeout_ms,
+                    Some(elapsed),
+                    ctx.working_dir.as_deref(),
                 );
                 return Ok(ToolOutput::new(output)
                     .with_title(
@@ -1112,13 +1089,7 @@ impl BashTool {
                         params.wake,
                     )
                     .await;
-                let output = format!(
-                    "Command continued in background due to reload.\n\nTask ID: {}\nOutput file: {}\nStatus file: {}\n\nUse `bg` with action=\"wait\" and task_id=\"{}\" after reload to wait for completion or the next progress checkpoint.",
-                    info.task_id,
-                    info.output_file.display(),
-                    info.status_file.display(),
-                    info.task_id,
-                );
+                let output = super::background_notice::reloaded(&info, ctx.working_dir.as_deref());
                 return Ok(ToolOutput::new(output)
                     .with_title(
                         params
@@ -1255,7 +1226,7 @@ impl BashTool {
                         let _ = child.wait().await;
                         #[cfg(unix)]
                         process_group_guard.disarm();
-                        let msg = timeout_message(timeout_ms.unwrap_or_default());
+                        let msg = timeout_message(timeout_ms.unwrap_or_default(), working_dir.as_deref());
                         let timeout_line = format!("\n--- {} ---\n", msg);
                         file.write_all(timeout_line.as_bytes()).await.ok();
                         return Ok(TaskResult::failed(Some(124), msg));
@@ -1285,32 +1256,12 @@ impl BashTool {
             )
             .await;
 
-        let notify_msg = if wake {
-            "The agent will be woken when the task completes."
-        } else if notify {
-            "You will be notified when the task completes."
-        } else {
-            "Notifications disabled. Use `bg` tool to check status."
-        };
-        let output = format!(
-            "Command started in background.\n\n\
-             Task ID: {}\n\
-             Name: {}\n\
-             Output file: {}\n\
-             Status file: {}\n\n\
-             {}\n\
-             To wait for completion/checkpoints: use the `bg` tool with action=\"wait\" and task_id=\"{}\"\n\
-             To check progress immediately: use the `bg` tool with action=\"status\" and task_id=\"{}\"\n\
-             To see output: use the `read` tool on the output file, or `bg` with action=\"output\"\n\n\
-             {}",
-            info.task_id,
-            display_name,
-            info.output_file.display(),
-            info.status_file.display(),
-            notify_msg,
-            info.task_id,
-            info.task_id,
-            BACKGROUND_PROGRESS_GUIDANCE,
+        let output = super::background_notice::started(
+            &info,
+            &display_name,
+            notify,
+            wake,
+            ctx.working_dir.as_deref(),
         );
 
         Ok(ToolOutput::new(output)

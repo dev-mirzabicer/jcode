@@ -1,6 +1,7 @@
 mod agentgrep;
 pub mod ambient;
 mod apply_patch;
+mod background_notice;
 mod bash;
 mod batch;
 mod bg;
