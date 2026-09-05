@@ -1,6 +1,6 @@
 # WP-06 notification migration evidence
 
-**Status:** Implementation in progress. This is a migration ledger, not work-package acceptance.
+**Status:** WP-06 migration accepted by Mirza on 2026-09-05. This ledger records mechanism and byte-preservation evidence, not a prompt-quality benchmark.
 
 **Starting source:** `c3421a486bde8ea332f8c64696adb1db31a86f6f`, tree `3be2aa9161f01ad2a970410b3986f467d9663862`.
 
@@ -14,7 +14,7 @@ The one-time probe compared the original production format expressions with the 
 
 Synthetic permanent tests cover current-source rereads, earlier result preservation, typed substitutions without HTML escaping, project redefinition, intentional empty body, invalid shadowing, deletion revealing global, missing singleton failure, unrelated invalid-resource isolation, and actual fork delivery without mutation on render failure.
 
-The broader WP-06 inventory remains open until its remaining families and final integration checks are complete.
+The complete WP-06 inventory is reconciled: 38 notification rows, including the approved factual/structural exclusion for `INS-NTF-001`, with 407 recorded byte-equality comparisons.
 
 ## Startup Context
 
@@ -97,3 +97,13 @@ The metadata field required mechanical `origin: None` additions to existing stor
 ## Approved scope and UI clarification
 
 Mirza authorized the recommended corrections on 2026-09-05. `INS-NTF-001` remains a code-owned environment-fact record. Todo controls will receive structural queue/history identity and server-owned remote source rendering. The reproduced mixed-queue UI defect must retain the user's text without changing combined model-visible bytes. These clarifications do not constitute work-package acceptance.
+
+## Accepted runtime verification boundary
+
+Mirza accepted the candidate on 2026-09-05 after the reported verification and scope clarifications. Implementation commit `350f0caecd5e5df1134d5ecb454d2b8fa51e9954` is active as `v0.75.158-dev`, runtime identity `350f0caec-dirty-8652ce1ba2c0`, with matching current/shared channels and a passed canary. The global instruction store is clean at schema 1, seed 14. The dirty source identity consists only of the five protected pre-existing paths.
+
+The activated public daemon was exercised with a local recording HTTP provider, not a paid model call. It rendered OLD and then NEW notification source, preserved the prior provider-visible occurrence, rejected invalid source without another provider dispatch, and retained human text in mixed History. An attached headless TUI showed the same separate system/human rows in its actual terminal output and TUI history. The reproducible probe and captures are under `/Users/mirzabicer/.jcode/scratch/wp06/live-runtime-probe.py` and `live-4ccx6op2/`.
+
+Final focused instruction, Startup Context, context-core, todo, origin, Agent, TUI, CLI, protocol and Harness checks passed, as did formatting, diff checks and strict affected-target/root Clippy. The final app-todo rerun passed all 43 tests after correcting a synthetic fixture expectation; no production policy was changed to satisfy that fixture.
+
+Reported limits remain: the broad remote suite has the pre-existing disabled-memory expectation failure (38 passed, 1 failed), and root all-target aggregation has an unchanged stale ambient-test signature. JSON visual-debug frame capture returned no frames despite successful headless TUI startup; actual terminal output and TUI history supplied the available live display evidence. These limits were presented before approval and are not represented as passing checks.
