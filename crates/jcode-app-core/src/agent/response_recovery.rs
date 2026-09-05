@@ -1,4 +1,5 @@
 use super::*;
+use crate::instruction::notification::Notification;
 
 impl Agent {
     fn parse_text_wrapped_tool_call(
@@ -131,10 +132,10 @@ impl Agent {
             || reason.contains("policy_violation")
     }
 
-    pub(crate) const FABLE_GUARDRAIL_RECONSIDERATION_PROMPTS: [&'static str; 3] = [
-        "Reassess the user's request using its full context and likely intent rather than isolated keywords. Determine whether answering would enable a concrete harmful action. If no specific safety concern applies, answer normally. Preserve the refusal only when it is genuinely warranted, and briefly identify the specific concern.",
-        "Review the request again and distinguish legitimate coding, debugging, defensive, educational, or analytical work from instructions that facilitate harm. If only part of the request is unsafe, help with the safe portions and narrowly limit the rest instead of issuing a blanket refusal.",
-        "Perform one final, independent policy check. Prefer a safe and useful constrained response when possible. Refuse only the specific content that creates a concrete safety risk; otherwise continue with the user's actual task. Do not weaken a refusal that remains genuinely necessary.",
+    pub(crate) const FABLE_GUARDRAIL_RECONSIDERATIONS: [Notification<'static>; 3] = [
+        Notification::FableGuardrailFirst,
+        Notification::FableGuardrailSecond,
+        Notification::FableGuardrailThird,
     ];
 
     /// Try a small sequence of differently framed policy checks after Fable
@@ -150,23 +151,28 @@ impl Agent {
             &model,
             stop_reason,
             *attempts,
-            Self::FABLE_GUARDRAIL_RECONSIDERATION_PROMPTS.len() as u32,
+            Self::FABLE_GUARDRAIL_RECONSIDERATIONS.len() as u32,
         ) {
             return Ok(false);
         }
 
-        let prompt = Self::FABLE_GUARDRAIL_RECONSIDERATION_PROMPTS[*attempts as usize];
+        let prompt = Self::FABLE_GUARDRAIL_RECONSIDERATIONS[*attempts as usize].render(
+            self.session
+                .working_dir
+                .as_deref()
+                .map(std::path::Path::new),
+        )?;
         *attempts += 1;
         logging::warn(&format!(
             "Fable 5 guardrail stopped the response (stop_reason={:?}); trying reconsideration prompt {}/{}",
             stop_reason,
             attempts,
-            Self::FABLE_GUARDRAIL_RECONSIDERATION_PROMPTS.len(),
+            Self::FABLE_GUARDRAIL_RECONSIDERATIONS.len(),
         ));
         self.add_message(
             Role::User,
             vec![ContentBlock::Text {
-                text: prompt.to_string(),
+                text: prompt,
                 cache_control: None,
             }],
         );
@@ -255,6 +261,12 @@ impl Agent {
         if *attempts >= Self::MAX_EMPTY_POST_TOOL_CONTINUATION_ATTEMPTS {
             return Ok(false);
         }
+        let prose = Notification::EmptyPostToolContinuation.render(
+            self.session
+                .working_dir
+                .as_deref()
+                .map(std::path::Path::new),
+        )?;
         *attempts += 1;
         logging::warn(&format!(
             "Provider returned whitespace-only final response after tool results (stop_reason={:?}); requesting final answer continuation (attempt {}/{})",
@@ -268,7 +280,7 @@ impl Agent {
                 // Keep this as a user-role message for provider compatibility,
                 // but mark it as internal so transcript renderers never present
                 // the synthetic recovery instruction as a prompt from the user.
-                text: "<system-reminder>The previous provider response was empty after tool results. Provide the final answer to the user's last request using the tool results above. Do not call more tools unless absolutely necessary.</system-reminder>".to_string(),
+                text: format!("<system-reminder>{prose}</system-reminder>"),
                 cache_control: None,
             }],
         );
@@ -276,11 +288,17 @@ impl Agent {
         Ok(true)
     }
 
-    fn continuation_prompt_for_stop_reason(stop_reason: &str) -> String {
-        format!(
-            "[System reminder: your previous response ended before completion (stop_reason: {}). Continue exactly where you left off, do not repeat completed content, and if the next step is a tool call, emit the tool call now.]",
-            stop_reason.trim()
-        )
+    fn continuation_prompt_for_stop_reason(&self, stop_reason: &str) -> Result<String> {
+        let prose = Notification::IncompleteResponseContinuation {
+            stop_reason: stop_reason.trim(),
+        }
+        .render(
+            self.session
+                .working_dir
+                .as_deref()
+                .map(std::path::Path::new),
+        )?;
+        Ok(format!("[System reminder: {prose}]"))
     }
 
     pub(crate) fn maybe_continue_incomplete_response(
@@ -307,6 +325,7 @@ impl Agent {
             return Ok(false);
         }
 
+        let text = self.continuation_prompt_for_stop_reason(stop_reason)?;
         *attempts += 1;
         logging::warn(&format!(
             "Response ended with stop_reason='{}'; requesting continuation (attempt {}/{})",
@@ -318,7 +337,7 @@ impl Agent {
         self.add_message(
             Role::User,
             vec![ContentBlock::Text {
-                text: Self::continuation_prompt_for_stop_reason(stop_reason),
+                text,
                 cache_control: None,
             }],
         );
@@ -357,6 +376,12 @@ impl Agent {
             ));
             return Ok(false);
         }
+        let prose = Notification::StrandedToolUse.render(
+            self.session
+                .working_dir
+                .as_deref()
+                .map(std::path::Path::new),
+        )?;
         *attempts += 1;
         logging::warn(&format!(
             "Provider reported stop_reason='tool_use' but no tool call was parsed; requesting continuation (attempt {}/{})",
@@ -366,8 +391,7 @@ impl Agent {
         self.add_message(
             Role::User,
             vec![ContentBlock::Text {
-                text: "[System reminder: your previous response ended with stop_reason \"tool_use\" but no tool call arrived. Nothing was executed. Re-issue the tool call you intended, do not repeat completed work, and continue the task.]"
-                    .to_string(),
+                text: format!("[System reminder: {prose}]"),
                 cache_control: None,
             }],
         );

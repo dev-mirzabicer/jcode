@@ -733,7 +733,7 @@ fn read_nonblank(path: PathBuf) -> Result<Option<String>, SystemPromptActivation
 }
 
 pub fn shipped_instruction_seed() -> Result<InstructionStoreSeed, InstructionError> {
-    let documents = [
+    let mut documents = vec![
         InstructionDocument {
             id: InstructionId::parse(KERNEL_ID)?,
             kind: InstructionKind::System,
@@ -790,6 +790,7 @@ pub fn shipped_instruction_seed() -> Result<InstructionStoreSeed, InstructionErr
             path: PathBuf::from("notifications/agent-replacement.md"),
         },
     ];
+    documents.extend(super::notification::seed_documents()?);
     Ok(InstructionStoreSeed {
         manifest: InstructionStoreManifest::current(),
         files: documents

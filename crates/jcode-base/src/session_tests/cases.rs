@@ -2555,6 +2555,16 @@ fn test_render_images_attached_label_message_does_not_shift_prompt_ordinals() {
 
 #[test]
 fn fork_notice_is_model_visible_but_hidden_from_transcript() {
+    let _lock = lock_env();
+    let temp = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+    crate::instruction::SystemPromptComposer::new()
+        .ensure_global_store()
+        .unwrap();
+    let source = temp
+        .path()
+        .join("instructions/notifications/session-fork.md");
+    std::fs::write(&source, "---\nid: session-fork\nkind: notification\ntemplate: handlebars\n---\nSYNTHETIC {{parent}} {{parent_id}}").unwrap();
     let mut session = Session::create(None, None);
     session.add_message(
         Role::User,
@@ -2564,16 +2574,25 @@ fn fork_notice_is_model_visible_but_hidden_from_transcript() {
         }],
     );
 
-    session.append_fork_notice("session_parent_abc", "otter");
+    session
+        .append_fork_notice("session_parent_abc", "otter")
+        .unwrap();
 
     let notice = session.messages.last().expect("fork notice appended");
     assert_eq!(notice.role, Role::User);
     assert_eq!(notice.display_role, Some(StoredDisplayRole::System));
-    let text = notice.content_preview();
-    assert!(text.contains("<system-reminder>"));
-    assert!(text.contains("forked"));
-    assert!(text.contains("session_parent_abc"));
-    assert!(text.contains("otter"));
+    let text = notice
+        .content
+        .iter()
+        .find_map(|block| match block {
+            ContentBlock::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        text,
+        "<system-reminder>\nSYNTHETIC otter session_parent_abc\n</system-reminder>"
+    );
 
     // Model-visible: included in the provider message list.
     let provider_messages = session.raw_messages_for_provider_uncached();
@@ -2582,7 +2601,7 @@ fn fork_notice_is_model_visible_but_hidden_from_transcript() {
             message.content.iter().any(|block| {
                 matches!(
                     block,
-                    ContentBlock::Text { text, .. } if text.contains("forked")
+                    ContentBlock::Text { text, .. } if text.contains("SYNTHETIC otter session_parent_abc")
                 )
             })
         }),
@@ -2594,9 +2613,17 @@ fn fork_notice_is_model_visible_but_hidden_from_transcript() {
     assert!(
         !rendered
             .iter()
-            .any(|message| message.role == "user" && message.content.contains("forked")),
+            .any(|message| message.role == "user" && message.content.contains("SYNTHETIC")),
         "fork notice must not render as a visible user message"
     );
+    let prior = serde_json::to_value(&session.messages).unwrap();
+    std::fs::write(
+        &source,
+        "---\nid: session-fork\nkind: notification\ntemplate: handlebars\n---\n{{missing}}",
+    )
+    .unwrap();
+    assert!(session.append_fork_notice("another", "other").is_err());
+    assert_eq!(serde_json::to_value(&session.messages).unwrap(), prior);
 }
 
 #[cfg(target_os = "macos")]

@@ -676,7 +676,7 @@ fn clone_split_session(parent_session_id: &str) -> anyhow::Result<(String, Strin
     // The parent agent keeps ownership of any in-flight request; tell the
     // forked agent so it treats the next prompt as fresh work instead of
     // continuing (and duplicating) the parent's current turn.
-    child.append_fork_notice(parent_session_id, parent.display_name());
+    child.append_fork_notice(parent_session_id, parent.display_name())?;
     child.save()?;
 
     let name = child.display_name().to_string();
@@ -779,15 +779,17 @@ fn create_transfer_child_session(
     }
 
     let handoff_result = match summary {
-        Some(summary) => {
-            if child.append_transfer_handoff(parent_session_id, &summary) {
-                Ok(())
-            } else {
-                Err(anyhow::anyhow!(
-                    "transfer summary was empty; refusing to create a contextless child"
-                ))
-            }
-        }
+        Some(summary) => child
+            .append_transfer_handoff(parent_session_id, &summary)
+            .and_then(|appended| {
+                if appended {
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!(
+                        "transfer summary was empty; refusing to create a contextless child"
+                    ))
+                }
+            }),
         None if !parent.messages.is_empty() => Err(anyhow::anyhow!(
             "transfer produced no readable summary for a non-empty parent session"
         )),

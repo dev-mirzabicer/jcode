@@ -1,0 +1,1 @@
+The parent transcript is intentionally not copied. Continue from this authoritative handoff summary:

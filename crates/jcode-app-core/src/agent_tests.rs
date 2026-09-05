@@ -3889,14 +3889,14 @@ fn fable_guardrail_reconsideration_is_narrow_and_bounded() {
 }
 
 #[test]
-fn fable_guardrail_prompt_suite_is_distinct_and_safety_preserving() {
-    let prompts = Agent::FABLE_GUARDRAIL_RECONSIDERATION_PROMPTS;
-    assert_eq!(prompts.len(), 3);
-    assert_ne!(prompts[0], prompts[1]);
-    assert_ne!(prompts[1], prompts[2]);
-    assert!(prompts[0].contains("full context"));
-    assert!(prompts[1].contains("safe portions"));
-    assert!(prompts[2].contains("Do not weaken a refusal"));
+fn fable_guardrail_attempts_select_distinct_registered_resources() {
+    let consumers = Agent::FABLE_GUARDRAIL_RECONSIDERATIONS;
+    assert_eq!(consumers.len(), 3);
+    let ids = consumers
+        .iter()
+        .map(|consumer| consumer.registration().unwrap().id)
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(ids.len(), consumers.len());
 }
 
 #[test]

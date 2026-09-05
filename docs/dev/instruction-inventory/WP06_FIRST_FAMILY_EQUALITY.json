@@ -1,0 +1,92 @@
+[
+  {
+    "bytes": 280,
+    "equal": true,
+    "resource": "batch-nudge",
+    "sha256": "c39972575311223be891c18b239d021a625c6aeab5d6dfa23f066962da1631d3"
+  },
+  {
+    "bytes": 229,
+    "equal": true,
+    "resource": "empty-post-tool-continuation",
+    "sha256": "c7ade48a4ba483fe756585ea812e8911932bd496082cf8ca994dee1a2b3074a4"
+  },
+  {
+    "bytes": 213,
+    "equal": true,
+    "resource": "stranded-tool-use",
+    "sha256": "407b9004de1d7ebccfdbd9585c0d37bb55200103aa415f9821352b31f74c2fd4"
+  },
+  {
+    "bytes": 324,
+    "equal": true,
+    "resource": "fable-guardrail-reconsideration-1",
+    "sha256": "e46cb2e5701994a0ff3dacecf09cab8bace0dcc271e9fed7c4ebd0bd6ae1fd40"
+  },
+  {
+    "bytes": 286,
+    "equal": true,
+    "resource": "fable-guardrail-reconsideration-2",
+    "sha256": "9ee145c43839a9cf037156e11c93780d4528e85be417d009b21ef06eed53667b"
+  },
+  {
+    "bytes": 281,
+    "equal": true,
+    "resource": "fable-guardrail-reconsideration-3",
+    "sha256": "daa1360c0a90fb9da66b8d63d1832aa81d5b58e7cf627e5fa28e34b369871b78"
+  },
+  {
+    "bytes": 223,
+    "equal": true,
+    "input": "max_tokens",
+    "resource": "incomplete-response-continuation",
+    "sha256": "0dc73fd05863d793bd9d75328ed75e565970216e7b58977077e8037a4f2fe454"
+  },
+  {
+    "bytes": 219,
+    "equal": true,
+    "input": " length ",
+    "resource": "incomplete-response-continuation",
+    "sha256": "c8607a0e815b1a215e9bb366c6c53027f9940175593abbe57728259bc6d21553"
+  },
+  {
+    "bytes": 223,
+    "equal": true,
+    "input": "incomplete",
+    "resource": "incomplete-response-continuation",
+    "sha256": "320259f9838ea4c60613035fbed3341de48d78b5a2f6136ae70da7bbbee434ec"
+  },
+  {
+    "bytes": 223,
+    "equal": true,
+    "input": "commentary",
+    "resource": "incomplete-response-continuation",
+    "sha256": "d0b7328848a84ccafacfe0dca44750e9fc3694056a8538bdf3192a62753234b1"
+  },
+  {
+    "bytes": 225,
+    "equal": true,
+    "input": "<&\"runtime\">",
+    "resource": "incomplete-response-continuation",
+    "sha256": "ec753000deba6d5b3651da42a1ff5ac83a4dae1bc92aa129c3de8a2ba91a779e"
+  },
+  {
+    "bytes": 213,
+    "equal": true,
+    "input": "",
+    "resource": "incomplete-response-continuation",
+    "sha256": "6f47119872a07e5e9b95f2388b74e8c8566c4b1a6ca3f9aeaf33c9de54a251cb"
+  },
+  {
+    "bytes": 481,
+    "equal": true,
+    "resource": "session-fork",
+    "sha256": "c37af25a8c556fb3fa5d4ec34ba8083455bf2d183ca46d4240e4f2cf9c2ae568"
+  },
+  {
+    "bytes": 177,
+    "equal": true,
+    "resource": "session-transfer-handoff",
+    "sha256": "a15eefd8206eab75c1b9d5125d64ac244daecd89172dcc950cf642e8f21c39a9"
+  }
+]

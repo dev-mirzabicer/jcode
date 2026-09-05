@@ -695,7 +695,7 @@ fn clone_session_for_prompt(app: &App) -> anyhow::Result<(String, String)> {
     // The parent agent keeps ownership of any in-flight request; tell the
     // forked agent so it treats the next prompt as fresh work instead of
     // continuing (and duplicating) the parent's current turn.
-    child.append_fork_notice(&parent_session_id, app.session.display_name());
+    child.append_fork_notice(&parent_session_id, app.session.display_name())?;
     child.save()?;
     Ok((child.id.clone(), child.display_name().to_string()))
 }

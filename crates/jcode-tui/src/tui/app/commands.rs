@@ -353,9 +353,10 @@ pub(super) fn create_transfer_session_from_parent(
     child.messages.clear();
     child.compaction = None;
     child.context_view = Default::default();
+    child.working_dir = parent.working_dir.clone();
     match summary {
         Some(summary) => {
-            if !child.append_transfer_handoff(parent_session_id, &summary) {
+            if !child.append_transfer_handoff(parent_session_id, &summary)? {
                 anyhow::bail!("transfer summary was empty; refusing to create a contextless child");
             }
         }

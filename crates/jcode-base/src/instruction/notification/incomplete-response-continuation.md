@@ -1,0 +1,1 @@
+your previous response ended before completion (stop_reason: {{stop_reason}}). Continue exactly where you left off, do not repeat completed content, and if the next step is a tool call, emit the tool call now.

@@ -1,0 +1,1 @@
+your previous response ended with stop_reason "tool_use" but no tool call arrived. Nothing was executed. Re-issue the tool call you intended, do not repeat completed work, and continue the task.

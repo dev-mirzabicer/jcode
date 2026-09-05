@@ -1946,16 +1946,17 @@ impl Session {
     /// it owns the in-flight request, duplicating the parent's work. The
     /// notice is wrapped in `<system-reminder>` so it stays out of the visible
     /// transcript while still reaching the model on the next turn.
-    pub fn append_fork_notice(&mut self, parent_session_id: &str, parent_display_name: &str) {
-        let text = format!(
-            "<system-reminder>\nThis session was forked (split) from session {parent} ({parent_id}) by the user. \
-The full conversation above is inherited from that session, but the original agent in {parent} \
-is still active and will continue handling whatever request or work was in progress there. \
-Do NOT continue or duplicate that in-flight work here. Treat the next user message as a fresh \
-request in this new forked session, using the inherited conversation only as context.\n</system-reminder>",
-            parent = parent_display_name,
-            parent_id = parent_session_id,
-        );
+    pub fn append_fork_notice(
+        &mut self,
+        parent_session_id: &str,
+        parent_display_name: &str,
+    ) -> anyhow::Result<()> {
+        let prose = crate::instruction::notification::Notification::SessionFork {
+            parent: parent_display_name,
+            parent_id: parent_session_id,
+        }
+        .render(self.working_dir.as_deref().map(Path::new))?;
+        let text = format!("<system-reminder>\n{prose}\n</system-reminder>");
         self.add_message_with_display_role(
             Role::User,
             vec![ContentBlock::Text {
@@ -1964,19 +1965,24 @@ request in this new forked session, using the inherited conversation only as con
             }],
             Some(StoredDisplayRole::System),
         );
+        Ok(())
     }
 
     /// Append a self-contained, model-visible handoff from a transferred parent
     /// session without retaining the parent's raw transcript or legacy compaction
     /// state. Returns false when no readable summary was supplied.
-    pub fn append_transfer_handoff(&mut self, parent_session_id: &str, summary: &str) -> bool {
+    pub fn append_transfer_handoff(
+        &mut self,
+        parent_session_id: &str,
+        summary: &str,
+    ) -> anyhow::Result<bool> {
         if summary.trim().is_empty() {
-            return false;
+            return Ok(false);
         }
+        let prose = crate::instruction::notification::Notification::SessionTransferHandoff
+            .render(self.working_dir.as_deref().map(Path::new))?;
         let text = format!(
-            "## Transferred Session Handoff\n\nSource session: {parent_session_id}\n\n\
-             The parent transcript is intentionally not copied. Continue from this authoritative \
-             handoff summary:\n\n{summary}"
+            "## Transferred Session Handoff\n\nSource session: {parent_session_id}\n\n{prose}\n\n{summary}"
         );
         self.add_message_with_display_role(
             Role::User,
@@ -1986,7 +1992,7 @@ request in this new forked session, using the inherited conversation only as con
             }],
             Some(StoredDisplayRole::System),
         );
-        true
+        Ok(true)
     }
 
     /// Mark this session as a canary tester

@@ -6,6 +6,7 @@
 //! editing. Those callers receive finished text and retain their own behavior.
 
 mod composition;
+pub mod notification;
 mod repository;
 mod runtime;
 mod template;
