@@ -591,8 +591,30 @@ fn test_format_duration_rough() {
     assert_eq!(format_duration_rough(Duration::seconds(-5)), "0s");
 }
 
+fn managed_ambient_test_sources() -> crate::auth::test_sandbox::AuthTestSandbox {
+    let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    crate::instruction::SystemPromptComposer::new()
+        .ensure_global_store()
+        .unwrap();
+    for id in [
+        "ambient-identity",
+        "ambient-empty-queue",
+        "ambient-directives",
+        "ambient-instructions",
+        "ambient-cycle-start",
+    ] {
+        std::fs::write(
+            sandbox.root().join(format!("instructions/modules/{id}.md")),
+            format!("---\nid: {id}\nkind: module\n---\nSYNTHETIC-{id}\n"),
+        )
+        .unwrap();
+    }
+    sandbox
+}
+
 #[test]
 fn test_build_ambient_system_prompt_minimal() {
+    let _sandbox = managed_ambient_test_sources();
     let state = AmbientState::default();
     let queue = vec![];
     let health = MemoryGraphHealth::default();
@@ -610,28 +632,27 @@ fn test_build_ambient_system_prompt_minimal() {
         graph_health: health,
         feedback,
     };
-    let prompt = build_ambient_system_prompt(&state, &queue, Some(&memory), &sessions, &budget, 0);
+    let prompt =
+        build_ambient_system_prompt(&state, &queue, Some(&memory), &sessions, &budget, 0).unwrap();
 
-    assert!(prompt.contains("ambient agent for jcode"));
+    assert!(prompt.starts_with("SYNTHETIC-ambient-identity\n"));
+    assert!(prompt.contains("SYNTHETIC-ambient-empty-queue\n"));
+    assert!(prompt.contains("SYNTHETIC-ambient-instructions\n"));
     assert!(prompt.contains("## Current State"));
     assert!(prompt.contains("never (first run)"));
     assert!(prompt.contains("Active user sessions: none"));
     assert!(prompt.contains("## Scheduled Queue"));
-    assert!(prompt.contains("Empty"));
     assert!(prompt.contains("## Memory Graph Health"));
     assert!(prompt.contains("Total memories: 0"));
     assert!(prompt.contains("## User Feedback History"));
     assert!(prompt.contains("No feedback memories"));
     assert!(prompt.contains("## Resource Budget"));
     assert!(prompt.contains("anthropic-oauth"));
-    assert!(prompt.contains("## Instructions"));
-    assert!(prompt.contains("end_ambient_cycle"));
-    assert!(prompt.contains("reviewer-ready"));
-    assert!(prompt.contains("context.why_permission_needed"));
 }
 
 #[test]
 fn test_build_ambient_system_prompt_with_data() {
+    let _sandbox = managed_ambient_test_sources();
     let state = AmbientState {
         last_run: Some(Utc::now() - Duration::minutes(15)),
         total_cycles: 7,
@@ -690,7 +711,8 @@ fn test_build_ambient_system_prompt_with_data() {
         graph_health: health,
         feedback,
     };
-    let prompt = build_ambient_system_prompt(&state, &queue, Some(&memory), &sessions, &budget, 2);
+    let prompt =
+        build_ambient_system_prompt(&state, &queue, Some(&memory), &sessions, &budget, 2).unwrap();
 
     assert!(prompt.contains("15m ago"));
     assert!(prompt.contains("Active user sessions: 2"));
@@ -716,6 +738,7 @@ fn test_build_ambient_system_prompt_with_data() {
 
 #[test]
 fn ambient_prompt_omits_memory_when_globally_unavailable() {
+    let _sandbox = managed_ambient_test_sources();
     let state = AmbientState::default();
     let queue = vec![];
     let sessions = vec![];
@@ -727,7 +750,7 @@ fn ambient_prompt_omits_memory_when_globally_unavailable() {
         cycle_budget_desc: "small".into(),
     };
 
-    let prompt = build_ambient_system_prompt(&state, &queue, None, &sessions, &budget, 0);
+    let prompt = build_ambient_system_prompt(&state, &queue, None, &sessions, &budget, 0).unwrap();
     assert!(!prompt.contains("## Memory Graph Health"));
     assert!(!prompt.contains("## User Feedback History"));
     assert!(!prompt.contains("`memory`"));
@@ -759,4 +782,57 @@ fn test_scheduled_queue_items_accessor() {
     let items = queue.items();
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].id, "s1");
+}
+
+#[test]
+fn managed_ambient_failure_preserves_directives_and_later_occurrences_read_current_source() {
+    let sandbox = managed_ambient_test_sources();
+    add_directive("DIRECTIVE <&界>".into(), "cycle1".into()).unwrap();
+    let source = sandbox
+        .root()
+        .join("instructions/modules/ambient-directives.md");
+    std::fs::write(
+        &source,
+        "---\nid: ambient-directives\nkind: module\ntemplate: handlebars\n---\n{{missing}}",
+    )
+    .unwrap();
+    let render = || {
+        build_ambient_system_prompt(
+            &AmbientState::default(),
+            &[],
+            None,
+            &[],
+            &ResourceBudget::default(),
+            0,
+        )
+    };
+    assert!(render().is_err());
+    assert!(has_pending_directives());
+    assert!(!load_directives()[0].consumed);
+    std::fs::write(
+        &source,
+        "---\nid: ambient-directives\nkind: module\n---\nFIRST-DIRECTIVES\n",
+    )
+    .unwrap();
+    let first = render().unwrap();
+    assert!(first.contains("FIRST-DIRECTIVES\n"));
+    assert!(first.contains("DIRECTIVE <&界>"));
+    assert!(!has_pending_directives());
+    std::fs::remove_file(&source).unwrap();
+    // No pending directive needs this resource. Missing optional-branch prose
+    // cannot suppress an otherwise valid cycle.
+    let second = render().unwrap();
+    assert!(!second.contains("FIRST-DIRECTIVES"));
+    let identity = sandbox
+        .root()
+        .join("instructions/modules/ambient-identity.md");
+    std::fs::write(
+        &identity,
+        "---\nid: ambient-identity\nkind: module\n---\nSECOND-IDENTITY\n",
+    )
+    .unwrap();
+    assert!(render().unwrap().starts_with("SECOND-IDENTITY\n"));
+    assert!(first.starts_with("SYNTHETIC-ambient-identity\n"));
+    std::fs::write(&identity, "---\nid: ambient-identity\nkind: module\n---\n").unwrap();
+    assert!(render().unwrap().starts_with("## Current State\n"));
 }

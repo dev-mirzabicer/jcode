@@ -38,6 +38,11 @@ macro_rules! workflows {
 }
 
 workflows! {
+    AmbientIdentity => ("ambient-identity", Module, "modules", "ambient cycle", Plain),
+    AmbientEmptyQueue => ("ambient-empty-queue", Module, "modules", "ambient cycle", Plain),
+    AmbientDirectives => ("ambient-directives", Module, "modules", "ambient cycle", Plain),
+    AmbientInstructions => ("ambient-instructions", Module, "modules", "ambient cycle", Plain),
+    AmbientCycleStart => ("ambient-cycle-start", Module, "modules", "ambient cycle", Plain),
     TransferHandoffTask => ("transfer-handoff-task", Module, "modules", "transfer summarizer user prompt", Plain),
     TransferHandoffSystem => ("transfer-handoff-system", System, "system", "transfer summarizer system prompt", Plain),
 }

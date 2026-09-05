@@ -286,14 +286,22 @@ pub fn build_ambient_system_prompt(
     recent_sessions: &[RecentSessionInfo],
     budget: &ResourceBudget,
     active_user_sessions: usize,
-) -> String {
+) -> anyhow::Result<String> {
+    use crate::instruction::workflow::Workflow;
+    // Complete every selected render before consuming reply directives. Ambient
+    // cycles have global scope, not the working directory of a queued task.
+    let identity = Workflow::AmbientIdentity.render(None)?;
+    let empty_queue = queue
+        .is_empty()
+        .then(|| Workflow::AmbientEmptyQueue.render(None))
+        .transpose()?;
+    let instructions = Workflow::AmbientInstructions.render(None)?;
+    let directives = super::has_pending_directives()
+        .then(|| Workflow::AmbientDirectives.render(None))
+        .transpose()?;
     let mut prompt = String::with_capacity(4096);
 
-    prompt.push_str(
-        "You are the ambient agent for jcode. You operate autonomously without \
-         user prompting. Your job is to maintain and improve the user's \
-         development environment.\n\n",
-    );
+    prompt.push_str(&identity);
 
     // --- Current State ---
     prompt.push_str("## Current State\n");
@@ -325,7 +333,7 @@ pub fn build_ambient_system_prompt(
     // --- Scheduled Queue ---
     prompt.push_str("## Scheduled Queue\n");
     if queue.is_empty() {
-        prompt.push_str("Empty -- do general ambient work.\n");
+        prompt.push_str(empty_queue.as_deref().unwrap_or_default());
     } else {
         for item in queue {
             let age = Utc::now() - item.created_at;
@@ -452,13 +460,14 @@ pub fn build_ambient_system_prompt(
     prompt.push('\n');
 
     // --- User Directives (from email/Telegram replies) ---
-    let pending_directives = take_pending_directives();
+    let pending_directives = if directives.is_some() {
+        take_pending_directives()
+    } else {
+        Vec::new()
+    };
     if !pending_directives.is_empty() {
         prompt.push_str("## User Directives (from replies)\n");
-        prompt.push_str(
-            "The user replied to ambient notifications with these instructions. \
-             Address them as your **top priority** this cycle.\n\n",
-        );
+        prompt.push_str(directives.as_deref().unwrap_or_default());
         for dir in &pending_directives {
             let ago = format_duration_rough(Utc::now() - dir.received_at);
             prompt.push_str(&format!(
@@ -470,51 +479,7 @@ pub fn build_ambient_system_prompt(
     }
 
     // --- Instructions ---
-    prompt.push_str(
-        "## Instructions\n\n\
-         Use the tools that are already available to you in this session. Do \
-         not search for tools — there is no tool-search/discovery tool, and \
-         the tools you need are listed below and in your tool definitions.\n\n\
-         Key tools for this cycle (use these exact names):\n\
-         - `todo` — plan and track what you'll do this cycle.\n\
-         - `end_ambient_cycle` — REQUIRED to finish the cycle (see below).\n\
-         - `schedule_ambient` — schedule your next wake time.\n\
-         - `request_permission` — get approval before any code change.\n\
-         - `send_message` — keep the user informed.\n\
-         Standard tools (`bash`, `read`, `write`, `edit`, etc.) are \
-         also available.\n\n\
-         Start by using the `todo` tool to plan what you'll do this cycle.\n\n\
-         Priority order:\n\
-         1. Execute any scheduled queue items first.\n\
-         2. Scout for proactive work (only if enabled and past cold start) -- \
-            look at recent sessions and git history to identify useful work \
-            the user would appreciate.\n\n\
-         For proactive work: be conservative. A bad surprise is worse than \
-         no surprise. Code changes must go on a worktree \
-         branch with a PR via request_permission.\n\n\
-         Every request_permission call must be reviewer-ready. Include:\n\
-         - description: concise summary of what you are about to do\n\
-         - rationale: why approval is needed right now\n\
-         - context.summary: what you are working on in this cycle\n\
-         - context.why_permission_needed: explicit justification for permission\n\
-         - context.planned_steps, context.files, context.commands (if known)\n\
-         - context.risks and context.rollback_plan (if relevant)\n\n\
-         Good sources for scouting proactive work:\n\
-         - Todoist (via MCP) — check for relevant tasks and deadlines\n\
-         - Canvas (via MCP) — check for upcoming assignments or deadlines\n\
-         - Git history — recent commits, open branches, stale PRs\n\
-         - Session history — patterns in what the user works on\n\n\
-         When done, you MUST call end_ambient_cycle with a summary of \
-         everything you did, including compaction count. Always schedule \
-         your next wake time with context for what you plan to do next.\n\n\
-         ## Messaging Check-ins\n\n\
-         You have a `send_message` tool. Use it to keep the user informed \
-         about what you're doing. Send a brief message when you start a cycle \
-         and when you finish significant work. Keep messages short and useful — \
-         the user should be able to glance at their messages and know what's happening \
-         without opening jcode. You can optionally target a specific channel \
-         (e.g. telegram, discord) or omit channel to send to all.\n",
-    );
+    prompt.push_str(&instructions);
 
     if memory.is_some() {
         prompt.push_str(
@@ -522,7 +487,7 @@ pub fn build_ambient_system_prompt(
         );
     }
 
-    prompt
+    Ok(prompt)
 }
 
 pub fn format_scheduled_session_message(item: &ScheduledItem) -> anyhow::Result<String> {

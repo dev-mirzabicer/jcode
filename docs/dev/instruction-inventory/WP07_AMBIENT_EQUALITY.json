@@ -1,0 +1,160 @@
+{
+  "source_revision": "99bba69497a04fa48fac675c5e40d05e39a929ca",
+  "inventory_ids": [
+    "INS-WFL-025",
+    "INS-WFL-045"
+  ],
+  "route": "Old and migrated production ambient system builders, identical domain fixtures and restored directive state. Compared full bytes before hashing. Non-memory initial user turn compared independently. Disposable probe removed.",
+  "cases": [
+    {
+      "active": 0,
+      "bytes": 2952,
+      "directive": false,
+      "equal": true,
+      "queue": false,
+      "sha256": "962b41aa8bbbbad0386a422c8b136d5f01f7f22c27724b2684e3369e472e5f8c",
+      "state": false
+    },
+    {
+      "active": 2,
+      "bytes": 2949,
+      "directive": false,
+      "equal": true,
+      "queue": false,
+      "sha256": "6d5412bbb1d555d614ed2a9ece927b23e52aafa5b396de6c3696c8ce2f4d181f",
+      "state": false
+    },
+    {
+      "active": 0,
+      "bytes": 3163,
+      "directive": true,
+      "equal": true,
+      "queue": false,
+      "sha256": "50e525a582d416937c692e6e8cd1282373887954ba8a7ca390e451df658ee9fd",
+      "state": false
+    },
+    {
+      "active": 2,
+      "bytes": 3160,
+      "directive": true,
+      "equal": true,
+      "queue": false,
+      "sha256": "a2b2a6fccc08207741e2800d78b1c9d5ed5cdf36c0f5430f8d1e4af732310188",
+      "state": false
+    },
+    {
+      "active": 0,
+      "bytes": 3086,
+      "directive": false,
+      "equal": true,
+      "queue": true,
+      "sha256": "f92b4cab13e48e9b1258820198ab148741e53a8b1b53b38648467ba6a3005cdc",
+      "state": false
+    },
+    {
+      "active": 2,
+      "bytes": 3083,
+      "directive": false,
+      "equal": true,
+      "queue": true,
+      "sha256": "49128a8e701a0cd1c48790cc1463e81b94209a74c6447c448b64a017eb25f0bc",
+      "state": false
+    },
+    {
+      "active": 0,
+      "bytes": 3297,
+      "directive": true,
+      "equal": true,
+      "queue": true,
+      "sha256": "1951534fa829e3be9cde341081e0bbb401f51cc9aecb896d21d0ad10c629b3a8",
+      "state": false
+    },
+    {
+      "active": 2,
+      "bytes": 3294,
+      "directive": true,
+      "equal": true,
+      "queue": true,
+      "sha256": "107601437c4596667756eee4bb84a3835cbf9b2700ff26a9e8e8dee23c07445e",
+      "state": false
+    },
+    {
+      "active": 0,
+      "bytes": 2991,
+      "directive": false,
+      "equal": true,
+      "queue": false,
+      "sha256": "bd75bb69b6180b08e7f3a503f4e43096564ffccf40311c84be8558d51aace410",
+      "state": true
+    },
+    {
+      "active": 2,
+      "bytes": 2988,
+      "directive": false,
+      "equal": true,
+      "queue": false,
+      "sha256": "b88f8791b0600756a92c28daacbc53220d66e91181a4c5ea81fb8b45a09c4286",
+      "state": true
+    },
+    {
+      "active": 0,
+      "bytes": 3202,
+      "directive": true,
+      "equal": true,
+      "queue": false,
+      "sha256": "67b7e6de9753a2baa3f2c21470fcb11244d45d61ced0f7afbb9c173027add171",
+      "state": true
+    },
+    {
+      "active": 2,
+      "bytes": 3199,
+      "directive": true,
+      "equal": true,
+      "queue": false,
+      "sha256": "1b8b84f4dafd6820b3ad520f1bf816717612d4d7ae4837a70341b92f223e84aa",
+      "state": true
+    },
+    {
+      "active": 0,
+      "bytes": 3125,
+      "directive": false,
+      "equal": true,
+      "queue": true,
+      "sha256": "b330008802ac1dee6638a91e30f7b3e9867efec40f61ad1f5c18ad9c9f5e56a5",
+      "state": true
+    },
+    {
+      "active": 2,
+      "bytes": 3122,
+      "directive": false,
+      "equal": true,
+      "queue": true,
+      "sha256": "0e653c957c15d346d42a700c533ee8c2b09b6d89146c1289c8f504bc90af11d4",
+      "state": true
+    },
+    {
+      "active": 0,
+      "bytes": 3336,
+      "directive": true,
+      "equal": true,
+      "queue": true,
+      "sha256": "832ae3d94f97a5c21f2420162c9dd3b38823dd3a35185c4a6e6b189122fdd4c0",
+      "state": true
+    },
+    {
+      "active": 2,
+      "bytes": 3333,
+      "directive": true,
+      "equal": true,
+      "queue": true,
+      "sha256": "4bd485ba75b8edd1ceb2095d411dfaf1c75d34d53ee0b95aefdc5d4c8b7eb86e",
+      "state": true
+    },
+    {
+      "bytes": 93,
+      "equal": true,
+      "initial_user_turn": true,
+      "sha256": "6cfbc9d33d6107a38b87f84af7928226e78e4524afaf2b079de52a81dc8b36eb"
+    }
+  ]
+}

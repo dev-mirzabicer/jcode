@@ -1051,6 +1051,12 @@ impl AmbientRunnerHandle {
 
         let active_sessions = *self.inner.active_user_sessions.read().await;
 
+        let initial_message = if memory.is_some() {
+            "Begin your ambient cycle. Check the scheduled queue, assess memory graph health, and plan your work using the `todo` tool.".to_string()
+        } else {
+            crate::instruction::workflow::Workflow::AmbientCycleStart.render(None)?
+        };
+
         let system_prompt = ambient::build_ambient_system_prompt(
             &state,
             &queue_items,
@@ -1058,14 +1064,7 @@ impl AmbientRunnerHandle {
             &recent_sessions,
             &budget,
             active_sessions,
-        );
-
-        let initial_message = if memory.is_some() {
-            "Begin your ambient cycle. Check the scheduled queue, assess memory graph health, and plan your work using the `todo` tool."
-        } else {
-            "Begin your ambient cycle. Check the scheduled queue and plan your work using the `todo` tool."
-        }
-        .to_string();
+        )?;
 
         Ok((system_prompt, initial_message))
     }
