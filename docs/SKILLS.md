@@ -17,6 +17,14 @@ A present invalid or ambiguous managed skill blocks fallback for its invocation 
 
 Removing a managed skill reveals the next valid source under the same deterministic order.
 
+Stable managed resource IDs are distinct from invocation names. When a managed
+file is unreadable or its metadata cannot identify the invocation reliably,
+skill resolution reports an explicit catalog error until the file is repaired.
+It never assumes the filename or stable ID is the missing invocation name and
+thereby exposes another source. Recoverable names remain tied to the same
+captured bytes as catalog validation, so unrelated invalid resources remain
+isolated when their invocation identity is known.
+
 ## Managed layout
 
 Global managed skills live at:
@@ -57,6 +65,7 @@ Copy:
 - Accepts an effective external skill or an explicitly selected shadowed external source, plus a global or configured project destination
 - Copies every nested regular file, including binary reference files
 - Preserves the original external `SKILL.md` under `.jcode-source/original-SKILL.md`
+- Parses managed metadata and body from those exact captured `SKILL.md` bytes, not from a cached discovery entry. If the captured invocation name differs from the selected name, Copy fails and asks for refreshed discovery.
 - Writes a canonical managed `SKILL.md` whose model-facing output preserves the current name, description, allowed tools, and body
 - Records a stable typed non-model-facing source class, source skill name, and package digest in `.jcode-source.toml`
 - Rejects symlinks and unsupported file types rather than following paths outside the package
@@ -80,6 +89,10 @@ Supported invocation forms remain:
 
 A bare invocation activates the skill without a model call. A trailing prompt activates the skill and submits the trailing text as the user turn. Images and paste payloads remain attached to that same turn.
 
+Built-in commands such as `/skills` and `/config` retain their normal handlers
+before the slash parser's unknown-name fallback is treated as a skill. This
+ordering applies to the real remote Enter-key path as well as local input.
+
 For a local session or direct REPL, Jcode:
 
 1. Builds the latest effective catalog for the session working directory.
@@ -96,6 +109,13 @@ For a local session or direct REPL, Jcode:
 
 4. Persists the invocation name and complete rendered text in `Session.active_skill` before accepting a trailing turn.
 5. Uses the stored text in the dynamic prompt slot.
+
+External source discovery may be cached, but invocation rereads and parses the
+selected external `SKILL.md` each time, including global and plugin sources.
+No registry reload is required to invoke a body edited since discovery. A
+missing, unreadable, malformed, or renamed selected source fails explicitly
+without replacing the previous active snapshot or falling through to another
+source.
 
 For a remote TUI, a bare invocation uses a dedicated `ActivateSkill` control request. A trailing prompt carries `activate_skill` on the message request so the server renders and persists the skill before accepting the turn. Failure rejects the turn before provider dispatch. `SkillActivated` is the authoritative UI confirmation, and reconnect snapshots restore the active skill identity.
 

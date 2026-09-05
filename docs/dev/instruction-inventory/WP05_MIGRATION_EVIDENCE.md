@@ -42,3 +42,31 @@ fe0427bb421c2ea1089aa7af2b0f0d59242e876926a83b9a73359641e4f7fddd  3382  .jcode/s
 ```
 
 The two historical OpenCode skill files observed during grounding were not current Jcode skill sources and were not modified or imported.
+
+## Expert-review corrections, 2026-09-05
+
+The expert reviewed WP-05 through `82b9af2c7` and exercised the combined
+WP-05/Astra tree at `501f0738a`. Four findings reproduced before correction:
+
+| Finding | Correction owner | Regression evidence |
+|---|---|---|
+| Remote `/skills` sent `ActivateSkill("skills")` | Remote slash input calls the shared built-in dispatcher before unknown-name skill fallback | `remote_enter_preserves_shared_builtin_command_dispatch` exercises real remote Enter for `/skills`, `/config`, `/help`, `/version`, and `/config show` |
+| External global invocation returned cached OLD after a disk edit | `SkillRegistry::activate` rereads the selected external file, validates the invocation name, and returns a new independent activation | `external_invocation_rereads_selected_source_without_registry_reload`, app-core and local TUI global-source lifecycle tests, and `skill_manage load` shared-registry test |
+| Copy paired a captured NEW original with an OLD managed body | Copy parses metadata and body from the exact captured `SKILL.md` bytes, using the same compatibility parser as invocation | `copy_parses_captured_skill_bytes_and_rejects_changed_identity` verifies body, description, permissions, references, retained original, and name-change rejection |
+| Invalid UTF-8 managed source exposed external fallback when ID differed from name | Catalog captures recoverable invocation hints from the same bytes as validation; unknown invocation identity is an explicit catalog error, not a stable-ID fallback | Both-scope `unreadable_managed_name_cannot_expose_external_fallback` and captured-hint regression cover invalid UTF-8, malformed/empty metadata, nonregular targets, and unidentifiable paths |
+
+The expert's three original standalone source probes also passed unchanged
+against the corrected production APIs. Their disposable test file was removed
+after execution. Permanent regression fixtures contain synthetic instructions.
+
+The complete remote client family yielded 35 passes and one failure in
+`handle_server_event_applies_remote_memory_activity_snapshot`, which expects
+memory activity while downstream memory is disabled. That test and the
+production remote event handler are unchanged from `501f0738a`; the existing
+disabled-memory test boundary is not counted as a pass. The specific built-in
+command regression and all local/remote skill tests passed.
+
+These corrections do not change Astra, the accepted skill lifecycle, prompt
+prose, provider projection, or disabled-memory policy. They correct the
+mechanisms required by the existing contract. This record is verification
+evidence, not a statement of Mirza's work-package acceptance.
