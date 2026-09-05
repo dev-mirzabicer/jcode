@@ -13,7 +13,7 @@ The effective skill with a given invocation name is selected in this order:
 
 The implementation loads lower-precedence sources first, then replaces them with higher-precedence sources. Project scope remains more specific than global scope. Within one scope, managed source wins over external source.
 
-A present invalid or ambiguous managed skill blocks fallback for its invocation name. An unrelated invalid skill does not block a valid skill. Repository or project-configuration damage that prevents Jcode from knowing the managed catalog fails activation rather than pretending an external fallback is authoritative.
+A present invalid or ambiguous managed skill blocks fallback for its invocation name. A managed package directory whose `SKILL.md` is missing or not a regular file is also an invalid scoped candidate. An unrelated invalid skill does not block a valid skill. Repository or project-configuration damage that prevents Jcode from knowing the managed catalog fails activation rather than pretending an external fallback is authoritative.
 
 Removing a managed skill reveals the next valid source under the same deterministic order.
 
@@ -46,7 +46,7 @@ Supported external sources remain discoverable and invocable:
 
 External packages are read-only through the future central instruction manager. Jcode does not edit or commit them in place.
 
-`/skills` and `skill_manage list` identify local source class. External entries are labeled read-only and point to Copy rather than Edit. Ordinary remote History currently carries skill names for compact display. The complete central manager protocol and UI arrive in Phase 3 WP-09 and WP-10.
+`/skills` identifies effective and shadowed local candidates. `skill_manage list` identifies each effective source class. External entries are labeled read-only and point to Copy rather than Edit. Ordinary remote History currently carries effective skill names for compact display. The complete central manager protocol and UI arrive in Phase 3 WP-09 and WP-10.
 
 ## Copy skill backend
 
@@ -54,16 +54,16 @@ The backend Copy operation is available to the later central instruction manager
 
 Copy:
 
-- Accepts an effective external skill and a global or configured project destination
+- Accepts an effective external skill or an explicitly selected shadowed external source, plus a global or configured project destination
 - Copies every nested regular file, including binary reference files
 - Preserves the original external `SKILL.md` under `.jcode-source/original-SKILL.md`
 - Writes a canonical managed `SKILL.md` whose model-facing output preserves the current name, description, allowed tools, and body
-- Records non-model-facing source class, source skill name, and package digest in `.jcode-source.toml`
+- Records a stable typed non-model-facing source class, source skill name, and package digest in `.jcode-source.toml`
 - Rejects symlinks and unsupported file types rather than following paths outside the package
 - Validates the complete destination instruction store before publication
 - Creates one isolated instruction-repository commit without staging unrelated state
 - Refuses to overwrite a different existing managed package
-- Returns no change for an identical repeated Copy
+- Returns the structurally identified commit for a same-operation retry and no change for an identical new Copy operation
 - Distinguishes an identical committed package from matching working files and completes a matching partial or pre-commit interrupted Copy instead of reporting false success
 
 A project-scoped external source remains more specific than a global managed copy. The Copy outcome reports whether the selected destination becomes effective for the source project, allowing the manager to explain that a project destination is required when appropriate.

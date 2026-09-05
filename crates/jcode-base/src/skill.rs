@@ -1,6 +1,6 @@
 use anyhow::Result;
 use chrono::Utc;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -22,7 +22,8 @@ pub use managed::{
 /// Scope precedence is project before global. Within one scope, managed
 /// instruction-store skills override the existing external compatibility
 /// sources. Existing external ordering remains unchanged.
-#[derive(Debug, Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum SkillSourceKind {
     ManagedGlobal,
     ManagedProject,
@@ -99,6 +100,7 @@ pub struct SkillCatalogEntry {
     pub description: Option<String>,
     pub source: SkillSource,
     pub state: SkillCatalogState,
+    pub effective: bool,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -148,8 +150,9 @@ struct SkillFrontmatter {
 /// Registry of available skills
 #[derive(Debug, Default, Clone)]
 pub struct SkillRegistry {
-    skills: HashMap<String, Skill>,
+    skills: HashMap<String, Arc<Skill>>,
     sources: HashMap<String, SkillSource>,
+    candidates: Vec<(Arc<Skill>, SkillSource)>,
     blocked: HashMap<String, SkillCatalogDiagnostic>,
     diagnostics: Vec<SkillCatalogDiagnostic>,
 }
@@ -395,6 +398,7 @@ impl SkillRegistry {
     /// over same-named global skills, mirroring the historical load order
     /// (project dirs loaded last).
     pub fn merge_overlay(&mut self, overlay: Self) {
+        self.candidates.extend(overlay.candidates);
         for (name, skill) in overlay.skills {
             self.blocked.remove(&name);
             if let Some(source) = overlay.sources.get(&name) {
@@ -671,7 +675,7 @@ impl SkillRegistry {
 
     /// Get a skill by name
     pub fn get(&self, name: &str) -> Option<&Skill> {
-        self.skills.get(name)
+        self.skills.get(name).map(Arc::as_ref)
     }
 
     /// List all available skills.
@@ -684,7 +688,7 @@ impl SkillRegistry {
     /// system prompt with identical length but different bytes, silently busting
     /// the Anthropic strict-prefix KV cache mid-conversation.
     pub fn list(&self) -> Vec<&Skill> {
-        let mut skills: Vec<&Skill> = self.skills.values().collect();
+        let mut skills: Vec<&Skill> = self.skills.values().map(Arc::as_ref).collect();
         skills.sort_by(|a, b| a.name.cmp(&b.name));
         skills
     }
@@ -700,16 +704,20 @@ impl SkillRegistry {
                 let skill = Self::parse_skill(&path)?;
                 self.skills.remove(name);
                 self.sources.remove(name);
+                self.candidates
+                    .retain(|(candidate, _)| candidate.name != name || candidate.path != path);
                 if let Some(source) = source {
                     self.insert_valid(skill, source.kind, source.managed_resource);
                 } else {
-                    self.skills.insert(skill.name.clone(), skill);
+                    self.skills.insert(skill.name.clone(), Arc::new(skill));
                 }
                 Ok(true)
             } else {
                 // Skill file was deleted
                 self.skills.remove(name);
                 self.sources.remove(name);
+                self.candidates
+                    .retain(|(candidate, _)| candidate.name != name || candidate.path != path);
                 Ok(false)
             }
         } else {
@@ -735,6 +743,7 @@ impl SkillRegistry {
         // and active-skill text are exact session snapshots.
         self.skills.clear();
         self.sources.clear();
+        self.candidates.clear();
         self.blocked.clear();
         self.diagnostics.clear();
 
@@ -842,18 +851,15 @@ impl SkillRegistry {
 
     pub fn catalog_entries(&self) -> Vec<SkillCatalogEntry> {
         let mut entries = self
-            .skills
-            .values()
-            .filter_map(|skill| {
-                self.sources
-                    .get(&skill.name)
-                    .cloned()
-                    .map(|source| SkillCatalogEntry {
-                        name: skill.name.clone(),
-                        description: Some(skill.description.clone()),
-                        source,
-                        state: SkillCatalogState::Valid,
-                    })
+            .candidates
+            .iter()
+            .map(|(skill, source)| SkillCatalogEntry {
+                name: skill.name.clone(),
+                description: Some(skill.description.clone()),
+                source: source.clone(),
+                state: SkillCatalogState::Valid,
+                effective: !self.blocked.contains_key(&skill.name)
+                    && self.sources.get(&skill.name) == Some(source),
             })
             .collect::<Vec<_>>();
         entries.extend(self.blocked.values().filter_map(|diagnostic| {
@@ -862,10 +868,24 @@ impl SkillRegistry {
                 description: None,
                 source: diagnostic.source.clone()?,
                 state: SkillCatalogState::Invalid(diagnostic.detail.clone()),
+                effective: true,
             })
         }));
-        entries.sort_by(|left, right| left.name.cmp(&right.name));
+        entries.sort_by(|left, right| {
+            left.name
+                .cmp(&right.name)
+                .then_with(|| right.effective.cmp(&left.effective))
+                .then_with(|| left.source.kind.cmp(&right.source.kind))
+                .then_with(|| left.source.package_root.cmp(&right.source.package_root))
+        });
         entries
+    }
+
+    pub fn candidate(&self, name: &str, source: &SkillSource) -> Option<&Skill> {
+        self.candidates
+            .iter()
+            .find(|(skill, candidate_source)| skill.name == name && candidate_source == source)
+            .map(|(skill, _)| skill.as_ref())
     }
 
     pub fn resolve(&self, name: &str) -> std::result::Result<Option<&Skill>, SkillResolutionError> {
@@ -923,14 +943,14 @@ impl SkillRegistry {
         let name = skill.name.clone();
         let package_root = skill.path.parent().unwrap_or(&skill.path).to_path_buf();
         self.blocked.remove(&name);
-        self.sources.insert(
-            name.clone(),
-            SkillSource {
-                kind: source_kind,
-                package_root,
-                managed_resource,
-            },
-        );
+        let source = SkillSource {
+            kind: source_kind,
+            package_root,
+            managed_resource,
+        };
+        let skill = Arc::new(skill);
+        self.candidates.push((Arc::clone(&skill), source.clone()));
+        self.sources.insert(name.clone(), source);
         self.skills.insert(name, skill);
     }
 
@@ -948,7 +968,12 @@ impl SkillRegistry {
             self.insert_invalid(diagnostic);
         }
         for (skill, source) in layer.valid.into_values() {
-            self.insert_valid(skill, source.kind, source.managed_resource);
+            let name = skill.name.clone();
+            self.blocked.remove(&name);
+            let skill = Arc::new(skill);
+            self.candidates.push((Arc::clone(&skill), source.clone()));
+            self.sources.insert(name.clone(), source);
+            self.skills.insert(name, skill);
         }
     }
 }
@@ -1305,7 +1330,7 @@ mod tests {
         for name in names {
             reg_a
                 .skills
-                .insert(name.to_string(), test_skill(name, "d", "c"));
+                .insert(name.to_string(), Arc::new(test_skill(name, "d", "c")));
         }
 
         // Build a second registry with the reverse insertion order to maximize
@@ -1314,7 +1339,7 @@ mod tests {
         for name in names.iter().rev() {
             reg_b
                 .skills
-                .insert(name.to_string(), test_skill(name, "d", "c"));
+                .insert(name.to_string(), Arc::new(test_skill(name, "d", "c")));
         }
 
         let order_a: Vec<&str> = reg_a.list().iter().map(|s| s.name.as_str()).collect();
@@ -1393,9 +1418,10 @@ mod tests {
 
         // Effective set = base globals + overlay, with overlay winning on name.
         let mut base = SkillRegistry::default();
-        base.skills.insert(
-            "session-skill".to_string(),
+        base.insert_valid(
             test_skill("session-skill", "global variant", "global body"),
+            SkillSourceKind::ExternalJcodeGlobal,
+            None,
         );
         let effective = SkillRegistry::effective_for_working_dir(&base, Some(temp.path()));
         let skill = effective

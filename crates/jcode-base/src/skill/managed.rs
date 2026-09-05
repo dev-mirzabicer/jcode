@@ -77,15 +77,110 @@ impl ManagedSkillLayers {
                 InstructionScope::Global,
                 SkillSourceKind::ManagedGlobal,
             );
+            mark_incomplete_packages(
+                &global,
+                InstructionScope::Global,
+                SkillSourceKind::ManagedGlobal,
+                &mut layers.global,
+                &mut layers.diagnostics,
+            );
         }
-        if project_ready {
+        if project_ready && let Some(project) = project.as_ref() {
             layers.project = load_scope(
                 &runtime,
                 InstructionScope::Project,
                 SkillSourceKind::ManagedProject,
             );
+            mark_incomplete_packages(
+                project,
+                InstructionScope::Project,
+                SkillSourceKind::ManagedProject,
+                &mut layers.project,
+                &mut layers.diagnostics,
+            );
         }
         layers
+    }
+}
+
+fn mark_incomplete_packages(
+    repository: &InstructionRepositoryRef,
+    scope: InstructionScope,
+    source_kind: SkillSourceKind,
+    layer: &mut ManagedSkillLayer,
+    diagnostics: &mut Vec<SkillCatalogDiagnostic>,
+) {
+    let skills_root = repository.root.join("skills");
+    let entries = match std::fs::read_dir(&skills_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => {
+            diagnostics.push(SkillCatalogDiagnostic {
+                name: None,
+                source: Some(SkillSource {
+                    kind: source_kind,
+                    package_root: skills_root,
+                    managed_resource: None,
+                }),
+                detail: format!("read managed skill packages: {error}"),
+            });
+            return;
+        }
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                diagnostics.push(SkillCatalogDiagnostic {
+                    name: None,
+                    source: Some(SkillSource {
+                        kind: source_kind,
+                        package_root: skills_root.clone(),
+                        managed_resource: None,
+                    }),
+                    detail: format!("read managed skill package entry: {error}"),
+                });
+                continue;
+            }
+        };
+        let package_root = entry.path();
+        if !package_root.is_dir() || package_root.is_symlink() {
+            continue;
+        }
+        let skill_path = package_root.join("SKILL.md");
+        if skill_path.is_file() && !skill_path.is_symlink() {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            diagnostics.push(SkillCatalogDiagnostic {
+                name: None,
+                source: Some(SkillSource {
+                    kind: source_kind,
+                    package_root,
+                    managed_resource: None,
+                }),
+                detail: "managed skill package directory is not valid UTF-8".to_string(),
+            });
+            continue;
+        };
+        let managed_resource =
+            InstructionId::parse(name.clone())
+                .ok()
+                .map(|id| InstructionResourceRef {
+                    scope,
+                    kind: InstructionKind::Skill,
+                    id,
+                });
+        insert_layer_error(
+            layer,
+            name,
+            SkillSource {
+                kind: source_kind,
+                package_root,
+                managed_resource,
+            },
+            "managed skill package is missing a regular SKILL.md".to_string(),
+        );
     }
 }
 
@@ -289,6 +384,7 @@ pub enum ManagedSkillDestination {
 #[derive(Clone, Debug)]
 pub struct ManagedSkillCopyRequest<'a> {
     pub skill_name: &'a str,
+    pub source: Option<&'a SkillSource>,
     pub working_dir: Option<&'a Path>,
     pub destination: ManagedSkillDestination,
     pub destination_id: Option<&'a str>,
@@ -317,7 +413,7 @@ pub struct ManagedSkillCopyOutcome {
 #[serde(rename_all = "kebab-case")]
 struct SkillSourceAttribution<'a> {
     schema_version: u32,
-    source_kind: String,
+    source_kind: SkillSourceKind,
     source_skill: &'a str,
     source_package_sha256: String,
 }
@@ -327,21 +423,26 @@ pub fn copy_external_skill(
     registry: &SkillRegistry,
     request: ManagedSkillCopyRequest<'_>,
 ) -> Result<ManagedSkillCopyOutcome, InstructionRepositoryError> {
-    let skill = registry
-        .resolve(request.skill_name)
-        .map_err(|error| copy_error(error.to_string()))?
-        .ok_or_else(|| copy_error(format!("skill '{}' was not found", request.skill_name)))?;
-    let source = registry
-        .source(request.skill_name)
-        .cloned()
-        .ok_or_else(|| copy_error("effective skill has no source identity"))?;
-    if source.kind.is_managed() {
-        return Err(copy_error(format!(
-            "skill '{}' is already managed in {} scope",
-            request.skill_name,
-            source.kind.scope()
-        )));
-    }
+    let (skill, source) = match request.source {
+        Some(source) => (
+            registry
+                .candidate(request.skill_name, source)
+                .ok_or_else(|| copy_error("selected skill source is no longer in the catalog"))?,
+            source.clone(),
+        ),
+        None => (
+            registry
+                .resolve(request.skill_name)
+                .map_err(|error| copy_error(error.to_string()))?
+                .ok_or_else(|| {
+                    copy_error(format!("skill '{}' was not found", request.skill_name))
+                })?,
+            registry
+                .source(request.skill_name)
+                .cloned()
+                .ok_or_else(|| copy_error("effective skill has no source identity"))?,
+        ),
+    };
 
     let repository = destination_repository(repositories, &request)?;
     let skill_id = match request.destination_id {
@@ -351,6 +452,40 @@ pub fn copy_external_skill(
         None => copied_skill_id(skill)?,
     };
     let package_root = PathBuf::from("skills").join(skill_id.as_str());
+    if let Some(commit) =
+        repositories.completed_operation_commit(&repository, request.operation_id)?
+    {
+        let changed_paths = repositories
+            .files_at_revision_under(&repository, &commit, &package_root)?
+            .into_keys()
+            .collect::<Vec<_>>();
+        if changed_paths.is_empty() {
+            return Err(copy_error(format!(
+                "operation ID '{}' is already committed but does not contain Copy target {}",
+                request.operation_id,
+                package_root.display()
+            )));
+        }
+        return Ok(ManagedSkillCopyOutcome {
+            disposition: ManagedSkillCopyDisposition::AlreadyCommitted,
+            repository,
+            skill_id: skill_id.to_string(),
+            invocation_name: skill.name.clone(),
+            commit,
+            changed_paths,
+            effective_for_source_project: destination_is_effective(
+                request.destination,
+                source.kind,
+            ),
+        });
+    }
+    if source.kind.is_managed() {
+        return Err(copy_error(format!(
+            "skill '{}' is already managed in {} scope",
+            request.skill_name,
+            source.kind.scope()
+        )));
+    }
     let desired = copied_package(skill, &source, &package_root, &skill_id)?;
     let existing = existing_package_files(&repository.root, &package_root)?;
     let head = repositories
@@ -507,7 +642,7 @@ fn copied_package(
     );
     let attribution = SkillSourceAttribution {
         schema_version: 1,
-        source_kind: source.kind.to_string(),
+        source_kind: source.kind,
         source_skill: &skill.name,
         source_package_sha256: hash_package(&files),
     };
@@ -622,7 +757,7 @@ fn copy_collision(
 #[serde(rename_all = "kebab-case")]
 struct AttributionProbe {
     schema_version: u32,
-    source_kind: String,
+    source_kind: SkillSourceKind,
     source_skill: String,
     source_package_sha256: String,
 }
@@ -822,6 +957,11 @@ mod tests {
     fn invalid_managed_specific_skill_does_not_fall_back_to_external() {
         let fixture = Fixture::new();
         fixture.external_global("blocked-skill", "external", "EXTERNAL_FALLBACK");
+        fixture.external_global(
+            "incomplete-skill",
+            "external incomplete fallback",
+            "EXTERNAL_INCOMPLETE_FALLBACK",
+        );
         let base = fixture.external_registry();
         fixture.write_global_document(
             skill_document(
@@ -866,6 +1006,18 @@ mod tests {
                 .rendered_text
                 .contains("HEALTHY_MANAGED")
         );
+
+        let incomplete = fixture
+            .global_repository()
+            .root
+            .join("skills/incomplete-skill");
+        std::fs::create_dir_all(&incomplete).expect("incomplete package");
+        std::fs::write(incomplete.join("reference.md"), "PARTIAL").expect("partial file");
+        let effective = fixture.effective(&base);
+        let error = effective
+            .activate("incomplete-skill")
+            .expect_err("incomplete managed package must block fallback");
+        assert!(error.to_string().contains("missing a regular SKILL.md"));
     }
 
     #[test]
@@ -940,6 +1092,7 @@ mod tests {
             &initial,
             ManagedSkillCopyRequest {
                 skill_name: "Copy Skill",
+                source: None,
                 working_dir: Some(&fixture.project),
                 destination: ManagedSkillDestination::Global,
                 destination_id: None,
@@ -982,7 +1135,10 @@ mod tests {
         .expect("parse attribution");
         assert_eq!(attribution.schema_version, 1);
         assert_eq!(attribution.source_skill, "Copy Skill");
-        assert_eq!(attribution.source_kind, "external Jcode global");
+        assert_eq!(
+            attribution.source_kind,
+            SkillSourceKind::ExternalJcodeGlobal
+        );
         assert_eq!(attribution.source_package_sha256.len(), 64);
 
         let effective = fixture.effective(&base);
@@ -995,12 +1151,65 @@ mod tests {
             activation.rendered_text,
             "# Skill: Copy Skill\n\nCopy description\n\nCopy body {{literal}}"
         );
+        let catalog = effective.catalog_entries();
+        let managed_entry = catalog
+            .iter()
+            .find(|entry| {
+                entry.name == "Copy Skill" && entry.source.kind == SkillSourceKind::ManagedGlobal
+            })
+            .expect("managed catalog entry");
+        assert!(managed_entry.effective);
+        let external_entry = catalog
+            .iter()
+            .find(|entry| {
+                entry.name == "Copy Skill"
+                    && entry.source.kind == SkillSourceKind::ExternalJcodeGlobal
+            })
+            .expect("shadowed external catalog entry");
+        assert!(!external_entry.effective);
+
+        let same_operation = copy_external_skill(
+            &fixture.service,
+            &effective,
+            ManagedSkillCopyRequest {
+                skill_name: "Copy Skill",
+                source: None,
+                working_dir: Some(&fixture.project),
+                destination: ManagedSkillDestination::Global,
+                destination_id: None,
+                operation_id: "copy-external-skill",
+            },
+        )
+        .expect("same operation retry");
+        assert_eq!(
+            same_operation.disposition,
+            ManagedSkillCopyDisposition::AlreadyCommitted
+        );
+        let mismatched_retry = copy_external_skill(
+            &fixture.service,
+            &effective,
+            ManagedSkillCopyRequest {
+                skill_name: "Copy Skill",
+                source: Some(&external_entry.source),
+                working_dir: Some(&fixture.project),
+                destination: ManagedSkillDestination::Global,
+                destination_id: Some("different-copy-target"),
+                operation_id: "copy-external-skill",
+            },
+        )
+        .expect_err("operation retry must retain its original target");
+        assert!(
+            mismatched_retry
+                .detail
+                .contains("does not contain Copy target")
+        );
 
         let repeated = copy_external_skill(
             &fixture.service,
-            &initial,
+            &effective,
             ManagedSkillCopyRequest {
                 skill_name: "Copy Skill",
+                source: Some(&external_entry.source),
                 working_dir: Some(&fixture.project),
                 destination: ManagedSkillDestination::Global,
                 destination_id: None,
@@ -1017,6 +1226,7 @@ mod tests {
             &initial,
             ManagedSkillCopyRequest {
                 skill_name: "Copy Skill",
+                source: None,
                 working_dir: Some(&fixture.project),
                 destination: ManagedSkillDestination::Global,
                 destination_id: None,
@@ -1101,6 +1311,7 @@ mod tests {
             &initial,
             ManagedSkillCopyRequest {
                 skill_name: "project-copy",
+                source: None,
                 working_dir: Some(&fixture.project),
                 destination: ManagedSkillDestination::Project,
                 destination_id: None,
@@ -1141,6 +1352,7 @@ mod tests {
             &registry,
             ManagedSkillCopyRequest {
                 skill_name: "partial-copy",
+                source: None,
                 working_dir: Some(&fixture.project),
                 destination: ManagedSkillDestination::Global,
                 destination_id: None,
@@ -1179,6 +1391,7 @@ mod tests {
             &registry,
             ManagedSkillCopyRequest {
                 skill_name: "symlink-skill",
+                source: None,
                 working_dir: Some(&fixture.project),
                 destination: ManagedSkillDestination::Global,
                 destination_id: None,

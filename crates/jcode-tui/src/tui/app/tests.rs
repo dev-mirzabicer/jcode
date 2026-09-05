@@ -76,6 +76,10 @@ impl SkillTestHome {
             _home: home,
         }
     }
+
+    fn path(&self) -> &std::path::Path {
+        self._home.path()
+    }
 }
 
 impl Drop for SkillTestHome {
@@ -806,6 +810,56 @@ fn skills_command_lists_loaded_and_endorsed_skills() {
         app.display_messages().last().unwrap().title.as_deref(),
         Some("Skills")
     );
+}
+
+#[test]
+fn skills_command_labels_effective_and_shadowed_sources() {
+    let home = SkillTestHome::new();
+    let external = home.path().join("skills/source-demo");
+    std::fs::create_dir_all(&external).expect("external skill");
+    std::fs::write(
+        external.join("SKILL.md"),
+        "---\nname: source-demo\ndescription: External source\n---\nEXTERNAL\n",
+    )
+    .expect("external skill file");
+    let service = crate::instruction::InstructionRepositoryService::new();
+    crate::instruction::SystemPromptComposer::from_repository_service(service.clone())
+        .ensure_global_store()
+        .expect("global store");
+    let managed = crate::instruction::InstructionDocument {
+        id: crate::instruction::InstructionId::parse("source-demo").expect("id"),
+        kind: crate::instruction::InstructionKind::Skill,
+        scope: crate::instruction::InstructionScope::Global,
+        template_mode: crate::instruction::TemplateMode::Plain,
+        metadata: crate::instruction::InstructionMetadata {
+            display_name: Some("source-demo".to_string()),
+            description: Some("Managed source".to_string()),
+            ..crate::instruction::InstructionMetadata::default()
+        },
+        body: "MANAGED".to_string(),
+        path: std::path::PathBuf::from("skills/source-demo/SKILL.md"),
+    };
+    std::fs::create_dir_all(home.path().join("instructions/skills/source-demo"))
+        .expect("managed skill");
+    std::fs::write(
+        home.path().join("instructions/skills/source-demo/SKILL.md"),
+        managed.to_markdown().expect("managed markdown"),
+    )
+    .expect("managed skill file");
+
+    let mut app = create_test_app();
+    assert!(super::state_ui::handle_info_command(&mut app, "/skills"));
+    let content = &app
+        .display_messages()
+        .last()
+        .expect("skills report")
+        .content;
+    assert!(content.contains("source: managed global"), "{content}");
+    assert!(
+        content.contains("source: external Jcode global"),
+        "{content}"
+    );
+    assert!(content.contains("/source-demo (shadowed)"), "{content}");
 }
 
 #[test]

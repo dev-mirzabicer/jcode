@@ -1671,8 +1671,10 @@ fn build_skills_report(app: &App) -> String {
             );
         } else {
             for entry in entries {
-                let marker = if active.as_deref() == Some(entry.name.as_str()) {
+                let marker = if entry.effective && active.as_deref() == Some(entry.name.as_str()) {
                     " (active)"
+                } else if !entry.effective {
+                    " (shadowed)"
                 } else {
                     ""
                 };

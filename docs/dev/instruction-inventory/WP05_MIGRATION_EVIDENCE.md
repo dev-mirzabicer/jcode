@@ -23,8 +23,8 @@ The hashes exactly match the Phase 3 starting-revision artifacts. No wording exc
 Permanent synthetic mechanism tests cover:
 
 - Managed project, external project, managed global, and external global precedence
-- Existing external source ordering and read-only source identity
-- Invalid managed specificity without silent external fallback
+- Effective and shadowed candidate inspection, existing external source ordering, stable read-only source identity, and explicit shadowed-source Copy
+- Invalid or incomplete managed specificity without silent external fallback
 - Isolation of unrelated invalid skills
 - Plain literal braces and opt-in restricted Handlebars modules
 - Complete global and project package Copy, nested and binary reference files, original source preservation, non-model-facing attribution, collisions, idempotency, matching partial/pre-commit retry completion, removal fallback, and symlink rejection

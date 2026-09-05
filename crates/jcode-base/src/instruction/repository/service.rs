@@ -946,6 +946,15 @@ impl InstructionRepositoryService {
         Ok(files)
     }
 
+    pub fn completed_operation_commit(
+        &self,
+        repository: &InstructionRepositoryRef,
+        operation_id: &str,
+    ) -> InstructionRepositoryResult<Option<String>> {
+        validate_operation_id(operation_id)?;
+        GitRepository::new(&repository.root).find_operation_commit(operation_id)
+    }
+
     pub fn compare_revisions(
         &self,
         repository: &InstructionRepositoryRef,
