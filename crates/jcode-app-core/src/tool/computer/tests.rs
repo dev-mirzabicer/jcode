@@ -97,6 +97,54 @@ fn cap_output_truncates() {
 }
 
 #[test]
+fn managed_permission_prose_is_complete_and_does_not_change_status_facts() {
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    struct Restore(Option<std::ffi::OsString>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(old) => crate::env::set_var("JCODE_HOME", old),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+            crate::config::Config::invalidate_cache();
+        }
+    }
+    let _restore = Restore(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::config::Config::invalidate_cache();
+    assert!(super::setup::permission_status(true, true, false, None).is_ok());
+    assert!(!home.path().join("instructions").exists());
+    crate::instruction::SystemPromptComposer::new()
+        .ensure_global_store()
+        .unwrap();
+    let source = home
+        .path()
+        .join("instructions/notifications/macos-computer-permissions.md");
+    let write = |body: &str| {
+        std::fs::write(&source, format!("---\nid: macos-computer-permissions\nkind: notification\ntemplate: handlebars\n---\n{body}")).unwrap()
+    };
+    let large = "synthetic ".repeat(20_000);
+    write(&large);
+    let output = super::finish_result(
+        "check_permissions",
+        super::setup::permission_status(false, true, false, None),
+    )
+    .unwrap();
+    assert!(output.output.ends_with(&large));
+    assert_eq!(
+        output.metadata.unwrap(),
+        json!({"accessibility":false,"screen_recording":true,"swift":false})
+    );
+    write("");
+    let output = super::setup::permission_status(false, true, false, None).unwrap();
+    assert_eq!(output.output.lines().count(), 3);
+    write("{{invalid}}");
+    assert!(super::setup::permission_status(false, true, false, None).is_err());
+    assert!(super::setup::permission_status(true, true, false, None).is_ok());
+}
+
+#[test]
 fn is_mutating_classifies() {
     assert!(super::is_mutating("click"));
     assert!(super::is_mutating("quit_app"));

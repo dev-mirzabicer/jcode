@@ -1,11 +1,33 @@
 use super::*;
 
+fn config_edit_notice(path: &Path, before: &str, after: &str) -> Option<String> {
+    super::config_edit_notice(path, before, after, None).expect("valid synthetic notification")
+}
+
 /// Point the process at a temp jcode home and return it with a restore guard.
 fn temp_jcode_home() -> (tempfile::TempDir, Option<std::ffi::OsString>) {
     let dir = tempfile::TempDir::new().expect("tempdir");
     let prev = std::env::var_os("JCODE_HOME");
     crate::env::set_var("JCODE_HOME", dir.path());
     crate::config::Config::invalidate_cache();
+    crate::instruction::SystemPromptComposer::new()
+        .ensure_global_store()
+        .unwrap();
+    for (id, body) in [
+        ("config-edit-live", "SYNTHETIC_LIVE"),
+        ("config-edit-restart", "SYNTHETIC_RESTART {{keys}}"),
+        (
+            "config-edit-invalid",
+            "SYNTHETIC_INVALID {{path}} {{error}}",
+        ),
+    ] {
+        std::fs::write(
+            dir.path()
+                .join(format!("instructions/notifications/{id}.md")),
+            format!("---\nid: {id}\nkind: notification\ntemplate: handlebars\n---\n{body}"),
+        )
+        .unwrap();
+    }
     (dir, prev)
 }
 
@@ -57,6 +79,53 @@ fn writing_an_unrelated_file_reports_nothing() {
 }
 
 #[test]
+fn failed_managed_notice_preserves_the_successful_config_write() {
+    use crate::tool::{Tool, ToolContext, ToolExecutionMode};
+    let _guard = crate::storage::lock_test_env();
+    let (dir, prev) = temp_jcode_home();
+    let path = crate::config::Config::path().unwrap();
+    std::fs::write(&path, "[display]\ncentered = false\n").unwrap();
+    let source = dir
+        .path()
+        .join("instructions/notifications/config-edit-live.md");
+    std::fs::write(
+        source,
+        "---\nid: config-edit-live\nkind: notification\ntemplate: handlebars\n---\n{{invalid}}",
+    )
+    .unwrap();
+    let ctx = ToolContext {
+        session_id: "test".into(),
+        message_id: "test".into(),
+        tool_call_id: "test".into(),
+        working_dir: Some(dir.path().to_path_buf()),
+        stdin_request_tx: None,
+        graceful_shutdown_signal: None,
+        execution_mode: ToolExecutionMode::Direct,
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let after = "[display]\ncentered = true\n";
+    let output = runtime
+        .block_on(
+            crate::tool::write::WriteTool
+                .execute(serde_json::json!({"file_path":path,"content":after}), ctx),
+        )
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), after);
+    assert!(output.output.contains("[Config edit notification failed:"));
+    assert!(output.output.contains("config-edit-live"));
+    assert!(crate::config::config().display.centered);
+    assert!(
+        super::config_edit_notice(&path, after, after, None)
+            .unwrap()
+            .is_none()
+    );
+    restore_jcode_home(prev);
+}
+
+#[test]
 fn comment_only_config_edit_reports_nothing() {
     let _guard = crate::storage::lock_test_env();
     let (_dir, prev) = temp_jcode_home();
@@ -87,7 +156,7 @@ fn restart_required_sections_say_so() {
     let notice =
         config_edit_notice(&path, "[gateway]\nport = 7777\n", after).expect("report expected");
     assert!(
-        notice.contains("Restart required for: gateway.port"),
+        notice.contains("SYNTHETIC_RESTART gateway.port"),
         "{notice}"
     );
 
@@ -132,8 +201,15 @@ fn a_config_write_that_breaks_toml_syntax_is_reported_loudly() {
 
     let notice = config_edit_notice(&path, "[display]\ncentered = true\n", broken)
         .expect("a config file that stopped parsing must never be silent");
-    assert!(notice.contains("WARNING"), "{notice}");
-    assert!(notice.contains("no longer parses"), "{notice}");
+    assert!(notice.contains("SYNTHETIC_INVALID"), "{notice}");
+    assert!(
+        notice.contains(
+            &crate::config::Config::load_strict()
+                .unwrap_err()
+                .to_string()
+        ),
+        "{notice}"
+    );
 
     restore_jcode_home(prev);
 }
@@ -187,10 +263,7 @@ async fn the_write_tool_reports_config_changes_end_to_end_async() {
     let body = output.output;
     assert!(body.contains("display.centered"), "{body}");
     assert!(body.contains("live now"), "{body}");
-    assert!(
-        body.contains("Restart required for: gateway.port"),
-        "{body}"
-    );
+    assert!(body.contains("SYNTHETIC_RESTART gateway.port"), "{body}");
     assert!(
         crate::config::config().display.centered,
         "the display change should be live in-process immediately after the write"

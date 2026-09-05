@@ -26,9 +26,9 @@ pub enum GateOutcome {
     /// Run it.
     Allow,
     /// Refuse this attempt and make the model justify itself first.
-    Reflect { prompt: String },
+    Reflect,
     /// Refuse permanently. No justification unlocks this.
-    Deny { reason: String },
+    Deny,
 }
 
 /// A justification supplied by the model on a second attempt.
@@ -78,47 +78,15 @@ const MIN_JUSTIFICATION_LEN: usize = 25;
 pub fn gate(assessment: &RiskAssessment, justification: &Justification) -> GateOutcome {
     match assessment.level {
         RiskLevel::Safe | RiskLevel::Low => GateOutcome::Allow,
-        RiskLevel::Catastrophic => GateOutcome::Deny {
-            reason: format!(
-                "This command is blocked and cannot be confirmed.\n\n{}\n\
-                 If the user genuinely wants this, they must run it themselves \
-                 outside the agent.",
-                assessment.explanation()
-            ),
-        },
+        RiskLevel::Catastrophic => GateOutcome::Deny,
         RiskLevel::Confirm => {
             if justification.is_substantive() {
                 GateOutcome::Allow
             } else {
-                GateOutcome::Reflect {
-                    prompt: reflection_prompt(assessment),
-                }
+                GateOutcome::Reflect
             }
         }
     }
-}
-
-/// The text handed back to the model on a refused first attempt.
-///
-/// Phrasing is deliberate: it asks the model to compare the command against
-/// **what the user actually asked for**, which is a checkable claim about a
-/// specific message, rather than a vague appeal to good judgement that invites
-/// a reflexive "yes, this is fine".
-fn reflection_prompt(assessment: &RiskAssessment) -> String {
-    format!(
-        "This command was not run. It is irreversible:\n\n{}\n\
-         Before it can proceed, stop and check it against the user's actual \
-         request:\n\
-         - Which specific thing the user asked for requires deleting this?\n\
-         - Did the user name this path, or did you infer it?\n\
-         - If you inferred it, is a narrower target enough?\n\
-         - If this is wrong, nothing here can be recovered.\n\n\
-         If it is genuinely what the user asked for, re-issue the same call \
-         with a `justification` field explaining which request it serves. If \
-         you are not sure, ask the user instead: that costs one message, and \
-         being wrong costs their data.",
-        assessment.explanation()
-    )
 }
 
 #[cfg(test)]

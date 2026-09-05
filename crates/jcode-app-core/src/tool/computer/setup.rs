@@ -36,7 +36,7 @@ fn yes_no(b: bool) -> &'static str {
 }
 
 /// Report status only.
-pub fn check_permissions() -> Result<ToolOutput> {
+pub fn check_permissions(working_dir: Option<&std::path::Path>) -> Result<ToolOutput> {
     let ax = accessibility_ok();
     let screen = screen_recording_ok();
     let swift = std::path::Path::new("/usr/bin/swift").exists()
@@ -46,6 +46,15 @@ pub fn check_permissions() -> Result<ToolOutput> {
             .map(|s| s.success())
             .unwrap_or(false);
 
+    permission_status(ax, screen, swift, working_dir)
+}
+
+pub(super) fn permission_status(
+    ax: bool,
+    screen: bool,
+    swift: bool,
+    working_dir: Option<&std::path::Path>,
+) -> Result<ToolOutput> {
     let mut lines = vec![
         format!("Accessibility (input + AX control): {}", yes_no(ax)),
         format!("Screen Recording (screenshots/OCR): {}", yes_no(screen)),
@@ -55,7 +64,10 @@ pub fn check_permissions() -> Result<ToolOutput> {
         ),
     ];
     if !ax || !screen {
-        lines.push("Run action='setup' to request these and open the right settings pane.".into());
+        lines.push(
+            crate::instruction::notification::Notification::MacosComputerPermissions
+                .render(working_dir)?,
+        );
     }
     Ok(ToolOutput::new(lines.join("\n")).with_metadata(json!({
         "accessibility": ax, "screen_recording": screen, "swift": swift,

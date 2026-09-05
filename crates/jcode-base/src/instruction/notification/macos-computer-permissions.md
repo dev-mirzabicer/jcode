@@ -1,0 +1,1 @@
+Run action='setup' to request these and open the right settings pane.

@@ -1,0 +1,86 @@
+[
+  {
+    "bytes": 209,
+    "case": "permissions-false-false-false",
+    "equal": true,
+    "sha256": "c9541b3c902817cc6b3062470928f13d5df5daef9c629ed3f93c156a58426c6d"
+  },
+  {
+    "bytes": 209,
+    "case": "permissions-false-false-true",
+    "equal": true,
+    "sha256": "552df2832736766ea26736ef005fdf41342ba8326cac01c679b8ffd2cbe6c647"
+  },
+  {
+    "bytes": 205,
+    "case": "permissions-false-true-false",
+    "equal": true,
+    "sha256": "cb206c587bd524aed7064317c4a9327b2f16da46b8b685a6786bb7737f6f06c6"
+  },
+  {
+    "bytes": 205,
+    "case": "permissions-false-true-true",
+    "equal": true,
+    "sha256": "63ff9844900d4587bd0806ded3af9ffd979fa569132f73beaf399b44ca1044a1"
+  },
+  {
+    "bytes": 205,
+    "case": "permissions-true-false-false",
+    "equal": true,
+    "sha256": "bc9c83b6153c713cf1bc658fb2ec2cd9ccc81cde69435f1f4340f46f1a65bcd0"
+  },
+  {
+    "bytes": 205,
+    "case": "permissions-true-false-true",
+    "equal": true,
+    "sha256": "ef2ad4a4a761297afbb828d508af9a49e2aff3d4ffdf5ab40cc8603e255dfbae"
+  },
+  {
+    "bytes": 131,
+    "case": "permissions-true-true-false",
+    "equal": true,
+    "sha256": "35a00b33db304aad9385372419e87233e4ec6c27ef7254fc235f18c29b5c9b91"
+  },
+  {
+    "bytes": 131,
+    "case": "permissions-true-true-true",
+    "equal": true,
+    "sha256": "aeade9e2fcda91e61c6fad661fb55f3b5049f3265d4d4f130d285058a4f50947"
+  },
+  {
+    "bytes": 177,
+    "case": "config-live",
+    "equal": true,
+    "sha256": "7de0e56ccd62d03d19196d514aa9786135bf0da8246242ec0cc7b5b60615fb1d"
+  },
+  {
+    "bytes": 132,
+    "case": "config-restart",
+    "equal": true,
+    "sha256": "d7e367320aa04be9e4f23d3d0cfea9438792ddb5c4b6fdbdda52a1a46dec387d"
+  },
+  {
+    "bytes": 179,
+    "case": "config-mixed",
+    "equal": true,
+    "sha256": "a61df852ffcb79c5a8b7b95c8487be480495ee1183f1eada3cb539971131b297"
+  },
+  {
+    "bytes": 433,
+    "case": "config-invalid",
+    "equal": true,
+    "sha256": "00bb1b7e658433a77d7d9a119f7d6fab5a7cb24091d945ce4aa1dd54e9a7fb97"
+  },
+  {
+    "bytes": 705,
+    "case": "destructive-command-gate-reflect",
+    "equal": true,
+    "sha256": "9c8d54ed64e1abea281d8a1d9b9a3b6af9de1d4ec603b239b2ce7926b8c2bff9"
+  },
+  {
+    "bytes": 214,
+    "case": "destructive-command-gate-deny",
+    "equal": true,
+    "sha256": "b95e1bae7aa3a66477ab0cfb50e5b13414f35858ab284f1e431f2dc1f55468ff"
+  }
+]

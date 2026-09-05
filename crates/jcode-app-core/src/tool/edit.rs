@@ -149,6 +149,7 @@ impl Tool for EditTool {
             &path,
             &content,
             &new_content,
+            ctx.working_dir.as_deref(),
         );
 
         Ok(ToolOutput::new(body).with_title(params.file_path.clone()))

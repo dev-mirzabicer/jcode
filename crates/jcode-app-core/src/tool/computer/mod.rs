@@ -250,22 +250,22 @@ impl Tool for ComputerTool {
         })
     }
 
-    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
+    async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let parsed: ComputerInput =
             serde_json::from_value(input).context("invalid `macos_computer_use` tool input")?;
-        tokio::task::spawn_blocking(move || run(parsed))
+        tokio::task::spawn_blocking(move || run(parsed, ctx.working_dir))
             .await
             .context("macos_computer_use tool task panicked")?
     }
 }
 
 #[cfg(not(target_os = "macos"))]
-fn run(_input: ComputerInput) -> Result<ToolOutput> {
+fn run(_input: ComputerInput, _working_dir: Option<std::path::PathBuf>) -> Result<ToolOutput> {
     bail!("The `macos_computer_use` tool is only supported on macOS.")
 }
 
 #[cfg(target_os = "macos")]
-fn run(input: ComputerInput) -> Result<ToolOutput> {
+fn run(input: ComputerInput, working_dir: Option<std::path::PathBuf>) -> Result<ToolOutput> {
     let action = input.action.as_str();
 
     // dry_run: for mutating actions, report the intended target and stop.
@@ -276,9 +276,26 @@ fn run(input: ComputerInput) -> Result<ToolOutput> {
         )));
     }
 
-    let result = dispatch(action, &input);
+    let result = if action == "check_permissions" {
+        // Status fields are fixed-size facts. Managed instructions must remain
+        // complete rather than passing through the general data-output cap.
+        setup::check_permissions(working_dir.as_deref())
+    } else {
+        dispatch(action, &input)
+    };
+    finish_result(action, result)
+}
+
+#[cfg(target_os = "macos")]
+fn finish_result(action: &str, result: Result<ToolOutput>) -> Result<ToolOutput> {
     // Cap large textual outputs to protect context (images are unaffected).
-    result.map(|o| cap_output(o, 16_000))
+    result.map(|o| {
+        if action == "check_permissions" {
+            o
+        } else {
+            cap_output(o, 16_000)
+        }
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -287,7 +304,6 @@ fn dispatch(action: &str, input: &ComputerInput) -> Result<ToolOutput> {
         // ---- discovery & setup ----
         "discover" => discover::discover(input.category.as_deref()),
         "setup" => setup::setup(),
-        "check_permissions" => setup::check_permissions(),
 
         // ---- observe ----
         "screenshot" => screen::screenshot(),

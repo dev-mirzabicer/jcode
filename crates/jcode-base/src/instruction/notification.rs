@@ -44,6 +44,12 @@ macro_rules! notifications {
 }
 
 notifications! {
+    MacosComputerPermissions => ("macos-computer-permissions", "macOS permission status", Plain),
+    ConfigEditInvalid { path: &'a str, error: &'a str } => ("config-edit-invalid", "config edit result", Handlebars),
+    ConfigEditLive => ("config-edit-live", "config edit result", Plain),
+    ConfigEditRestart { keys: &'a str } => ("config-edit-restart", "config edit result", Handlebars),
+    DestructiveCommandDeny { explanation: &'a str } => ("destructive-command-gate-deny", "bash command risk gate", Handlebars),
+    DestructiveCommandReflect { explanation: &'a str } => ("destructive-command-gate-reflect", "bash command risk gate", Handlebars),
     BackgroundTaskCompleted => ("background-task-completed", "server background completion wake", Plain),
     SwarmAwaitCompleted => ("swarm-await-completed", "server swarm await wake", Plain),
     SwarmMessageDirect { sender: String } => ("swarm-message-delivery-dm", "server peer-message wake", Handlebars),

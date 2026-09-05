@@ -3,6 +3,10 @@
 //! Kept in its own file so the policy seam is easy to find and review: this is
 //! the only thing standing between a model's `rm -rf` and the user's data.
 
+#[cfg(test)]
+#[path = "bash_destructive_gate_tests.rs"]
+mod tests;
+
 /// Apply the deterministic destructive-command gate, returning refusal text
 /// when the command must not run as-issued.
 ///
@@ -15,7 +19,7 @@ pub(super) fn destructive_command_refusal(
     justification: Option<&str>,
     working_dir: Option<std::path::PathBuf>,
 ) -> Option<String> {
-    let risk_ctx = jcode_command_risk::RiskContext::from_env(working_dir);
+    let risk_ctx = jcode_command_risk::RiskContext::from_env(working_dir.clone());
     let assessment = jcode_command_risk::assess(command, &risk_ctx);
     if assessment.level.runs_immediately() {
         return None;
@@ -24,19 +28,36 @@ pub(super) fn destructive_command_refusal(
     let justification = jcode_command_risk::Justification {
         text: justification.map(str::to_string),
     };
-    match jcode_command_risk::gate(&assessment, &justification) {
-        jcode_command_risk::GateOutcome::Allow => None,
-        jcode_command_risk::GateOutcome::Deny { reason } => {
+    let explanation = assessment.explanation();
+    use crate::instruction::notification::Notification;
+    let notification = match jcode_command_risk::gate(&assessment, &justification) {
+        jcode_command_risk::GateOutcome::Allow => return None,
+        jcode_command_risk::GateOutcome::Deny => {
             crate::logging::warn(&format!("[bash] denied destructive command: {command}"));
-            Some(reason)
+            Notification::DestructiveCommandDeny {
+                explanation: &explanation,
+            }
         }
-        jcode_command_risk::GateOutcome::Reflect { prompt } => {
+        jcode_command_risk::GateOutcome::Reflect => {
             crate::logging::info(&format!(
                 "[bash] destructive command held for justification: {command}"
             ));
-            Some(prompt)
+            Notification::DestructiveCommandReflect {
+                explanation: &explanation,
+            }
         }
-    }
+    };
+    // Rendering cannot authorize execution. Even empty prose is still Some,
+    // and a damaged instruction produces a visible refusal diagnostic.
+    Some(
+        notification
+            .render(working_dir.as_deref())
+            .unwrap_or_else(|error| {
+                format!(
+                    "Command was not run. Could not render command-refusal notification: {error}"
+                )
+            }),
+    )
 }
 
 /// The `bash` tool's JSON schema, including the `justification` field the

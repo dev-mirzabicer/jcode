@@ -127,11 +127,7 @@ pub fn summarize_toml_change(before: &str, after: &str) -> Option<String> {
 
 /// Render an already-computed change list.
 pub fn summarize_changes(changes: &[ConfigChange]) -> String {
-    let mut out = String::from("Config changes:\n");
-    for change in changes {
-        out.push_str(&change.render());
-        out.push('\n');
-    }
+    let mut out = render_change_rows(changes);
 
     let restart: Vec<&ConfigChange> = changes
         .iter()
@@ -149,6 +145,18 @@ pub fn summarize_changes(changes: &[ConfigChange]) -> String {
             keys.join(", ")
         ));
     }
+    out
+}
+
+/// Code-owned configuration facts shared by human reports and model notices.
+/// The caller supplies its own human or managed instruction suffix.
+pub fn render_change_rows(changes: &[ConfigChange]) -> String {
+    let mut out = String::from("Config changes:\n");
+    for change in changes {
+        out.push_str(&change.render());
+        out.push('\n');
+    }
+
     out
 }
 

@@ -43,26 +43,13 @@ fn catastrophic_is_denied_even_with_a_perfect_justification() {
         "The user explicitly asked me to wipe their entire home directory \
          because they are decommissioning this machine today.",
     );
-    match gate(&assessment, &elaborate) {
-        GateOutcome::Deny { reason } => {
-            assert!(reason.contains("cannot be confirmed"), "{reason}");
-        }
-        other => panic!("catastrophic must be unconditional, got {other:?}"),
-    }
+    assert_eq!(gate(&assessment, &elaborate), GateOutcome::Deny);
 }
 
 #[test]
 fn first_attempt_at_a_risky_command_is_refused_with_a_reflection_prompt() {
     let assessment = assess("rm -rf $TARGET", &ctx());
-    match gate(&assessment, &none()) {
-        GateOutcome::Reflect { prompt } => {
-            // The prompt must point at the user's request, not at generic caution.
-            assert!(prompt.contains("user's actual"), "{prompt}");
-            assert!(prompt.contains("justification"), "{prompt}");
-            assert!(prompt.contains("ask the user"), "{prompt}");
-        }
-        other => panic!("expected a reflection prompt, got {other:?}"),
-    }
+    assert_eq!(gate(&assessment, &none()), GateOutcome::Reflect);
 }
 
 #[test]
@@ -73,7 +60,7 @@ fn a_blind_retry_does_not_satisfy_the_gate() {
     let first = gate(&assessment, &none());
     let second = gate(&assessment, &none());
     assert_eq!(first, second);
-    assert!(matches!(second, GateOutcome::Reflect { .. }));
+    assert_eq!(second, GateOutcome::Reflect);
 }
 
 #[test]
@@ -82,10 +69,7 @@ fn empty_affirmations_are_rejected() {
     let assessment = assess("rm -rf $TARGET", &ctx());
     for token in ["yes", "ok", "confirmed", "proceed.", "Go ahead!", "y", ""] {
         assert!(
-            matches!(
-                gate(&assessment, &saying(token)),
-                GateOutcome::Reflect { .. }
-            ),
+            matches!(gate(&assessment, &saying(token)), GateOutcome::Reflect),
             "{token:?} must not unlock the gate"
         );
     }
@@ -111,13 +95,13 @@ fn justification_substance_check_is_a_low_but_real_bar() {
 }
 
 #[test]
-fn reflection_prompt_names_the_specific_path() {
+fn reflection_assessment_retains_the_specific_path() {
     let assessment = assess("rm -rf $TARGET", &ctx());
-    let GateOutcome::Reflect { prompt } = gate(&assessment, &none()) else {
+    let GateOutcome::Reflect = gate(&assessment, &none()) else {
         panic!("expected reflection");
     };
     assert!(
-        prompt.contains("$TARGET"),
-        "the model needs to see what it was about to destroy: {prompt}"
+        assessment.explanation().contains("$TARGET"),
+        "the renderer must receive the assessed target as runtime data"
     );
 }

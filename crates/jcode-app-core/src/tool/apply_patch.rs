@@ -84,7 +84,8 @@ impl Tool for ApplyPatchTool {
         // A patch can reach config.toml through any hunk kind (add, update,
         // move), so watch the file across the whole invocation rather than
         // threading before/after content through each branch.
-        let config_watch = super::config_edit_notice::ConfigEditWatch::begin();
+        let config_watch =
+            super::config_edit_notice::ConfigEditWatch::begin(ctx.working_dir.clone());
 
         let mut results = Vec::new();
         let mut touched_paths = Vec::new();

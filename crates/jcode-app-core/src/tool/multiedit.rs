@@ -162,6 +162,7 @@ impl Tool for MultiEditTool {
             &path,
             &original_content,
             &content,
+            ctx.working_dir.as_deref(),
         );
 
         Ok(ToolOutput::new(output).with_title(params.file_path.clone()))
