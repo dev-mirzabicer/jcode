@@ -27,6 +27,7 @@ pub(super) struct ManagedSkillLayers {
 pub(super) struct ManagedSkillLayer {
     pub(super) valid: HashMap<String, (Skill, SkillSource)>,
     pub(super) blocked: HashMap<String, SkillCatalogDiagnostic>,
+    pub(super) diagnostics: Vec<SkillCatalogDiagnostic>,
 }
 
 impl ManagedSkillLayers {
@@ -76,6 +77,7 @@ impl ManagedSkillLayers {
                 &runtime,
                 InstructionScope::Global,
                 SkillSourceKind::ManagedGlobal,
+                &global.root.join("skills"),
             );
             mark_incomplete_packages(
                 &global,
@@ -90,6 +92,7 @@ impl ManagedSkillLayers {
                 &runtime,
                 InstructionScope::Project,
                 SkillSourceKind::ManagedProject,
+                &project.root.join("skills"),
             );
             mark_incomplete_packages(
                 project,
@@ -151,6 +154,15 @@ fn mark_incomplete_packages(
         if skill_path.is_file() && !skill_path.is_symlink() {
             continue;
         }
+        // Removing every file of a managed package reveals the next source.
+        // Empty directories are Git-untracked remnants, not an instruction.
+        // Partial packages and nonregular SKILL.md targets still have unknown
+        // invocation identity and cannot safely expose a fallback by name.
+        if matches!(std::fs::symlink_metadata(&skill_path), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+            && !package_has_content(&package_root)
+        {
+            continue;
+        }
         let Some(name) = entry.file_name().to_str().map(str::to_string) else {
             diagnostics.push(SkillCatalogDiagnostic {
                 name: None,
@@ -171,9 +183,9 @@ fn mark_incomplete_packages(
                     kind: InstructionKind::Skill,
                     id,
                 });
-        insert_layer_error(
+        insert_invalid_candidate(
             layer,
-            name,
+            None,
             SkillSource {
                 kind: source_kind,
                 package_root,
@@ -182,6 +194,27 @@ fn mark_incomplete_packages(
             "managed skill package is missing a regular SKILL.md".to_string(),
         );
     }
+}
+
+fn package_has_content(root: &Path) -> bool {
+    let mut directories = vec![root.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            return true;
+        };
+        for entry in entries {
+            let Ok(entry) = entry else { return true };
+            let Ok(kind) = entry.file_type() else {
+                return true;
+            };
+            if kind.is_dir() {
+                directories.push(entry.path());
+            } else {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn repository_ready(
@@ -223,6 +256,7 @@ fn load_scope(
     runtime: &crate::instruction::InstructionRuntime,
     scope: InstructionScope,
     source_kind: SkillSourceKind,
+    skills_root: &Path,
 ) -> ManagedSkillLayer {
     let mut layer = ManagedSkillLayer::default();
     let mut resources = runtime
@@ -233,6 +267,30 @@ fn load_scope(
         })
         .collect::<Vec<_>>();
     resources.sort_by(|left, right| left.resource.id.cmp(&right.resource.id));
+    let identified_paths = resources
+        .iter()
+        .flat_map(|summary| summary.paths.iter())
+        .collect::<BTreeSet<_>>();
+    for diagnostic in runtime.diagnostics().iter().filter(|diagnostic| {
+        diagnostic.scope == scope
+            && diagnostic.path.starts_with(skills_root)
+            && !identified_paths.contains(&diagnostic.path)
+    }) {
+        insert_invalid_candidate(
+            &mut layer,
+            None,
+            SkillSource {
+                kind: source_kind,
+                package_root: diagnostic
+                    .path
+                    .parent()
+                    .unwrap_or(skills_root)
+                    .to_path_buf(),
+                managed_resource: None,
+            },
+            diagnostic.detail.clone(),
+        );
+    }
     for summary in resources {
         let path = summary.paths.first().cloned().unwrap_or_default();
         let source = SkillSource {
@@ -267,28 +325,52 @@ fn load_scope(
                 });
                 match loaded {
                     Ok(skill) => insert_layer_skill(&mut layer, skill, source),
-                    Err(error) => insert_layer_error(
+                    Err(error) => insert_invalid_candidate(
                         &mut layer,
-                        skill_name_hint(&path).unwrap_or_else(|| summary.resource.id.to_string()),
+                        runtime.resolve(&selector).ok().map(|document| {
+                            document
+                                .metadata
+                                .display_name
+                                .clone()
+                                .unwrap_or_else(|| document.id.to_string())
+                        }),
                         source,
                         error.to_string(),
                     ),
                 }
             }
-            ResourceValidationState::Invalid(detail) => insert_layer_error(
+            ResourceValidationState::Invalid(detail) => insert_invalid_candidate(
                 &mut layer,
-                skill_name_hint(&path).unwrap_or_else(|| summary.resource.id.to_string()),
+                runtime
+                    .skill_invocation_hint(&summary.resource, &path)
+                    .map(str::to_string),
                 source,
                 detail,
             ),
             ResourceValidationState::Ambiguous => {
-                let mut names = summary
+                let names = summary
                     .paths
                     .iter()
-                    .filter_map(|path| skill_name_hint(path))
+                    .filter_map(|path| {
+                        runtime
+                            .skill_invocation_hint(&summary.resource, path)
+                            .map(str::to_string)
+                    })
                     .collect::<BTreeSet<_>>();
-                if names.is_empty() {
-                    names.insert(summary.resource.id.to_string());
+                if summary.paths.iter().any(|path| {
+                    runtime
+                        .skill_invocation_hint(&summary.resource, path)
+                        .is_none()
+                }) {
+                    insert_invalid_candidate(
+                        &mut layer,
+                        None,
+                        source.clone(),
+                        format!(
+                            "ambiguous managed skill {} has an unreadable invocation identity",
+                            summary.resource.id
+                        ),
+                    );
                 }
                 for name in names {
                     insert_layer_error(
@@ -340,6 +422,29 @@ fn insert_layer_error(
     );
 }
 
+fn insert_invalid_candidate(
+    layer: &mut ManagedSkillLayer,
+    name: Option<String>,
+    source: SkillSource,
+    detail: String,
+) {
+    if let Some(name) = name {
+        insert_layer_error(layer, name, source, detail);
+    } else {
+        // A stable resource ID is not an invocation name. Without trustworthy
+        // metadata we cannot prove which lower-precedence skill is shadowed.
+        // Fail catalog resolution rather than silently activating another body.
+        layer.diagnostics.push(SkillCatalogDiagnostic {
+            name: None,
+            detail: format!(
+                "cannot resolve invocation identity for managed skill {}: {detail}; repair SKILL.md before invoking skills",
+                source.package_root.display()
+            ),
+            source: Some(source),
+        });
+    }
+}
+
 fn selector_for(resource: &InstructionResourceRef) -> InstructionSelector {
     match resource.scope {
         InstructionScope::Global => {
@@ -358,21 +463,6 @@ fn source_error(error: InstructionRepositoryError) -> SkillCatalogDiagnostic {
         source: None,
         detail: error.to_string(),
     }
-}
-
-fn skill_name_hint(path: &Path) -> Option<String> {
-    let source = std::fs::read_to_string(path).ok()?;
-    let source = source.strip_prefix('\u{feff}').unwrap_or(&source);
-    let rest = source
-        .strip_prefix("---\r\n")
-        .or_else(|| source.strip_prefix("---\n"))?;
-    let end = rest.find("\n---\r\n").or_else(|| rest.find("\n---\n"))?;
-    let value: serde_yaml::Value = serde_yaml::from_str(&rest[..end]).ok()?;
-    value
-        .as_mapping()?
-        .get(serde_yaml::Value::String("name".to_string()))
-        .and_then(serde_yaml::Value::as_str)
-        .map(str::to_string)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -611,6 +701,18 @@ fn copied_package(
     let original_skill = files
         .remove(&package_root.join("SKILL.md"))
         .ok_or_else(|| copy_error("external skill package is missing SKILL.md"))?;
+    let captured = std::str::from_utf8(&original_skill)
+        .map_err(|error| copy_error(format!("captured SKILL.md is not UTF-8: {error}")))?;
+    let captured =
+        SkillRegistry::parse_skill_source(&source.package_root.join("SKILL.md"), captured)
+            .map_err(|error| copy_error(format!("parse captured SKILL.md: {error}")))?;
+    if captured.name != skill.name {
+        return Err(copy_error(format!(
+            "captured SKILL.md names '{}', not selected skill '{}'; refresh discovery before Copy",
+            captured.name, skill.name
+        )));
+    }
+    let skill = &captured;
     let preserved_source = package_root.join(".jcode-source/original-SKILL.md");
     if files.contains_key(&preserved_source) {
         return Err(copy_error(format!(
@@ -884,6 +986,188 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn external_invocation_rereads_selected_source_without_registry_reload() {
+        let fixture = Fixture::new();
+        let root = fixture.external_global("fresh-skill", "Old description", "OLD");
+        let base = fixture.external_registry();
+        let old = fixture
+            .effective(&base)
+            .activate("fresh-skill")
+            .unwrap()
+            .unwrap();
+        fixture.external_global("fresh-skill", "New description", "NEW");
+        let effective = fixture.effective(&base);
+        let new = effective.activate("fresh-skill").unwrap().unwrap();
+        assert_eq!(
+            new.rendered_text,
+            "# Skill: fresh-skill\n\nNew description\n\nNEW"
+        );
+        assert_eq!(
+            old.rendered_text,
+            "# Skill: fresh-skill\n\nOld description\n\nOLD"
+        );
+        std::fs::write(
+            root.join("SKILL.md"),
+            "---\nname: renamed\ndescription: new\n---\nNEW",
+        )
+        .unwrap();
+        assert!(effective.activate("fresh-skill").is_err());
+        std::fs::write(root.join("SKILL.md"), [0xff]).unwrap();
+        assert!(effective.activate("fresh-skill").is_err());
+        std::fs::remove_file(root.join("SKILL.md")).unwrap();
+        assert!(effective.activate("fresh-skill").is_err());
+    }
+
+    #[test]
+    fn copy_parses_captured_skill_bytes_and_rejects_changed_identity() {
+        let fixture = Fixture::new();
+        let root = fixture.external_global("capture-skill", "Old description", "OLD");
+        let registry = fixture.effective(&fixture.external_registry());
+        let latest = "---\nname: capture-skill\ndescription: New description\nallowed-tools: read, bash\n---\nNEW\n";
+        std::fs::write(root.join("SKILL.md"), latest).unwrap();
+        std::fs::write(root.join("reference.txt"), "NEW_REFERENCE").unwrap();
+        let request = |operation_id| ManagedSkillCopyRequest {
+            skill_name: "capture-skill",
+            source: None,
+            working_dir: Some(&fixture.project),
+            destination: ManagedSkillDestination::Global,
+            destination_id: None,
+            operation_id,
+        };
+        let outcome =
+            copy_external_skill(&fixture.service, &registry, request("capture-copy")).unwrap();
+        let package = outcome.repository.root.join("skills/capture-skill");
+        let document = std::fs::read_to_string(package.join("SKILL.md")).unwrap();
+        assert!(document.contains("New description"), "{document}");
+        assert!(document.ends_with("NEW"), "{document}");
+        assert!(document.contains("read") && document.contains("bash"));
+        assert_eq!(
+            std::fs::read_to_string(package.join(".jcode-source/original-SKILL.md")).unwrap(),
+            latest
+        );
+        assert_eq!(
+            std::fs::read_to_string(package.join("reference.txt")).unwrap(),
+            "NEW_REFERENCE"
+        );
+        std::fs::write(
+            root.join("SKILL.md"),
+            "---\nname: changed-name\ndescription: renamed\n---\nNEW",
+        )
+        .unwrap();
+        let head = fixture.service.inspect(&outcome.repository).unwrap().head;
+        assert!(
+            copy_external_skill(
+                &fixture.service,
+                &registry,
+                request("changed-identity-copy")
+            )
+            .is_err()
+        );
+        assert_eq!(
+            fixture.service.inspect(&outcome.repository).unwrap().head,
+            head
+        );
+    }
+
+    #[test]
+    fn unreadable_managed_name_cannot_expose_external_fallback() {
+        for scope in [InstructionScope::Global, InstructionScope::Project] {
+            let fixture = Fixture::new();
+            fixture.external_global("Human Skill", "external", "EXTERNAL");
+            let base = fixture.external_registry();
+            let document = skill_document(
+                scope,
+                "stable-id",
+                "Human Skill",
+                "MANAGED",
+                TemplateMode::Plain,
+            );
+            let repository = if scope == InstructionScope::Global {
+                fixture.write_global_document(document, "managed-human-skill");
+                fixture.global_repository()
+            } else {
+                fixture
+                    .service
+                    .configure_non_git_project(
+                        &fixture.project,
+                        "managed-project-human-skill",
+                        None,
+                        &project_seed(vec![document]),
+                        &[],
+                    )
+                    .unwrap()
+                    .repository
+            };
+            assert!(
+                fixture
+                    .effective(&base)
+                    .activate("Human Skill")
+                    .unwrap()
+                    .unwrap()
+                    .rendered_text
+                    .contains("MANAGED")
+            );
+            let path = repository.root.join("skills/stable-id/SKILL.md");
+            for broken in [
+                vec![0xff, 0xfe],
+                Vec::new(),
+                b"---\nid: stable-id\nname: [broken\n---\n".to_vec(),
+            ] {
+                std::fs::write(&path, broken).unwrap();
+                let effective = fixture.effective(&base);
+                assert!(
+                    effective.activate("Human Skill").is_err(),
+                    "must not activate external fallback"
+                );
+            }
+            std::fs::remove_file(&path).unwrap();
+            std::fs::create_dir(&path).unwrap();
+            assert!(fixture.effective(&base).activate("Human Skill").is_err());
+            std::fs::remove_dir(&path).unwrap();
+            std::fs::write(&path, [0xff]).unwrap();
+            std::fs::rename(
+                path.parent().unwrap(),
+                path.parent().unwrap().with_file_name("Unidentifiable"),
+            )
+            .unwrap();
+            assert!(fixture.effective(&base).activate("Human Skill").is_err());
+        }
+    }
+
+    #[test]
+    fn invalid_managed_name_hint_uses_captured_source_not_a_second_read() {
+        let fixture = Fixture::new();
+        let root = fixture.global_repository().root;
+        let path = root.join("skills/stable-id/SKILL.md");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "---\nid: stable-id\nname: Human Skill\nkind: skill\nunsupported: true\n---\nBODY",
+        )
+        .unwrap();
+        let runtime = crate::instruction::InstructionRuntime::discover(
+            crate::instruction::InstructionSources::new(&root),
+        );
+        std::fs::write(
+            &path,
+            "---\nid: stable-id\nname: Different Skill\nkind: skill\n---\nBODY",
+        )
+        .unwrap();
+        let layer = load_scope(
+            &runtime,
+            InstructionScope::Global,
+            SkillSourceKind::ManagedGlobal,
+            &root.join("skills"),
+        );
+        assert!(layer.blocked.contains_key("Human Skill"));
+        assert!(!layer.blocked.contains_key("Different Skill"));
+        assert!(
+            layer.diagnostics.is_empty(),
+            "recoverable name should isolate the error"
+        );
     }
 
     #[test]

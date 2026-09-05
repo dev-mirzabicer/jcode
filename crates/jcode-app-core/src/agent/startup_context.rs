@@ -818,9 +818,22 @@ mod tests {
 
     #[tokio::test]
     async fn active_skill_text_is_frozen_until_reinvocation_and_survives_resume_and_split() {
-        let _home = TestHome::new();
+        assert_active_skill_snapshot_lifecycle(false).await;
+    }
+
+    #[tokio::test]
+    async fn external_global_active_skill_is_frozen_until_fresh_reinvocation() {
+        assert_active_skill_snapshot_lifecycle(true).await;
+    }
+
+    async fn assert_active_skill_snapshot_lifecycle(external_global: bool) {
+        let home = TestHome::new();
         let project = tempfile::tempdir().expect("project");
-        let skill_dir = project.path().join(".jcode/skills/snapshot-skill");
+        let skill_dir = if external_global {
+            home.path().join("skills/snapshot-skill")
+        } else {
+            project.path().join(".jcode/skills/snapshot-skill")
+        };
         std::fs::create_dir_all(&skill_dir).expect("skill dir");
         let skill_path = skill_dir.join("SKILL.md");
         std::fs::write(
@@ -828,10 +841,13 @@ mod tests {
             "---\nname: snapshot-skill\ndescription: Snapshot skill\n---\nSKILL_V1\n",
         )
         .expect("skill v1");
+        let registry = crate::tool::Registry::empty();
+        *registry.skills().write().await =
+            crate::skill::SkillRegistry::load_global().expect("initial global discovery");
         let provider = RecordingProvider::default();
         let (mut agent, _) = Agent::new_with_startup_context_and_agent(
             std::sync::Arc::new(provider.clone()),
-            crate::tool::Registry::empty(),
+            registry.clone(),
             project.path().to_str(),
             StartupContextActivation::primary(StartupContextCaller::RunCommand),
             crate::instruction::AgentSelection::Default,
@@ -904,7 +920,7 @@ mod tests {
         let loaded = Session::load(agent.session_id()).expect("load active session");
         let mut resumed = Agent::new_with_session(
             std::sync::Arc::new(provider.clone()),
-            crate::tool::Registry::empty(),
+            registry.clone(),
             loaded,
             None,
         );
@@ -925,12 +941,8 @@ mod tests {
         let mut split = Session::create(Some(resumed.session_id().to_string()), None);
         split.inherit_continuation_state_from(&resumed.session);
         split.save().expect("save split");
-        let split_agent = Agent::new_with_session(
-            std::sync::Arc::new(provider),
-            crate::tool::Registry::empty(),
-            split,
-            None,
-        );
+        let split_agent =
+            Agent::new_with_session(std::sync::Arc::new(provider), registry.clone(), split, None);
         assert_eq!(
             split_agent.build_system_prompt_split(None).dynamic_part,
             second_dynamic,

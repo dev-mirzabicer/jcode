@@ -481,6 +481,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn load_rereads_external_source_from_shared_registry() {
+        let (tool, source) = create_test_tool_with_skill("fresh-tool-skill");
+        // Use a different project so no project overlay can refresh the
+        // shared registry entry. This is the external-global cache path.
+        let caller = tempfile::tempdir().unwrap();
+        let input = json!({"action": "load", "name": "fresh-tool-skill"});
+        let old = tool
+            .execute(input.clone(), context_with_working_dir(caller.path()))
+            .await
+            .unwrap();
+        assert!(old.output.contains("Use this test skill."));
+        std::fs::write(
+            source
+                .path()
+                .join(".jcode/skills/fresh-tool-skill/SKILL.md"),
+            "---\nname: fresh-tool-skill\ndescription: Current description\n---\nLATEST_TOOL_BODY",
+        )
+        .unwrap();
+        let new = tool
+            .execute(input, context_with_working_dir(caller.path()))
+            .await
+            .unwrap();
+        assert!(new.output.contains("LATEST_TOOL_BODY"));
+        assert!(new.output.contains("Current description"));
+        assert!(!new.output.contains("Use this test skill."));
+    }
+
+    #[tokio::test]
     async fn test_load_missing_name() {
         let tool = create_test_tool();
         let ctx = create_test_context();

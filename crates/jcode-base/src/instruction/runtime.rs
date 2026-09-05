@@ -12,6 +12,7 @@ struct CatalogCandidate {
     path: PathBuf,
     parsed: Result<InstructionDocument, String>,
     addendum_target_hint: Option<InstructionSelector>,
+    skill_invocation_hint: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -69,6 +70,22 @@ impl InstructionRuntime {
 
     pub fn diagnostics(&self) -> &[InstructionDiagnostic] {
         &self.diagnostics
+    }
+
+    /// Even an invalid skill can have recoverable invocation metadata. Keep
+    /// that identity tied to its captured source, not a second filesystem read.
+    pub(crate) fn skill_invocation_hint(
+        &self,
+        resource: &InstructionResourceRef,
+        path: &Path,
+    ) -> Option<&str> {
+        self.entries
+            .get(&(resource.kind, resource.id.clone()))?
+            .for_scope(resource.scope)
+            .iter()
+            .find(|candidate| candidate.path == path)?
+            .skill_invocation_hint
+            .as_deref()
     }
 
     pub fn external_agents(&self) -> &[ExternalAgentsInstruction] {
@@ -677,12 +694,18 @@ impl InstructionRuntime {
                             path,
                             parsed: Err(detail),
                             addendum_target_hint: None,
+                            skill_invocation_hint: None,
                         });
                 }
                 return;
             }
         };
         let addendum_target_hint = frontmatter_addendum_target_hint(expected_kind, &source);
+        let skill_invocation_hint = if expected_kind == InstructionKind::Skill {
+            frontmatter_skill_invocation_hint(&source)
+        } else {
+            None
+        };
         let parsed = parse_document(scope, expected_kind, &path, &source);
         let candidate_id = parsed
             .as_ref()
@@ -716,6 +739,7 @@ impl InstructionRuntime {
                 path,
                 parsed,
                 addendum_target_hint,
+                skill_invocation_hint,
             });
     }
 
@@ -1035,6 +1059,19 @@ fn frontmatter_candidate_id(kind: InstructionKind, source: &str) -> Option<Instr
                 .flatten()
         })?;
     InstructionId::parse(id.to_string()).ok()
+}
+
+fn frontmatter_skill_invocation_hint(source: &str) -> Option<String> {
+    let (frontmatter, _) = split_frontmatter(source).ok()?;
+    let value: serde_yaml::Value = serde_yaml::from_str(frontmatter).ok()?;
+    let mapping = value.as_mapping()?;
+    let name = match mapping.get(serde_yaml::Value::String("name".to_string())) {
+        Some(name) => name.as_str()?,
+        None => mapping
+            .get(serde_yaml::Value::String("id".to_string()))?
+            .as_str()?,
+    };
+    (!name.is_empty()).then(|| name.to_string())
 }
 
 fn frontmatter_addendum_target_hint(

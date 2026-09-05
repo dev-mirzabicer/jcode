@@ -1003,10 +1003,22 @@ fn skill_invocation_with_prompt_attaches_pending_image_to_user_message() {
 
 #[test]
 fn local_active_skill_prompt_stays_frozen_and_reinvocation_uses_current_source() {
-    let _home = SkillTestHome::new();
-    let mut app = create_test_app();
+    assert_local_skill_snapshot_lifecycle(false);
+}
+
+#[test]
+fn local_external_global_active_skill_uses_fresh_reinvocation() {
+    assert_local_skill_snapshot_lifecycle(true);
+}
+
+fn assert_local_skill_snapshot_lifecycle(external_global: bool) {
+    let home = SkillTestHome::new();
     let temp = tempfile::tempdir().expect("tempdir");
-    let skill_dir = temp.path().join(".jcode/skills/frozen-skill");
+    let skill_dir = if external_global {
+        home.path().join("skills/frozen-skill")
+    } else {
+        temp.path().join(".jcode/skills/frozen-skill")
+    };
     std::fs::create_dir_all(&skill_dir).expect("skill dir");
     let skill_path = skill_dir.join("SKILL.md");
     std::fs::write(
@@ -1014,6 +1026,7 @@ fn local_active_skill_prompt_stays_frozen_and_reinvocation_uses_current_source()
         "---\nname: frozen-skill\ndescription: Frozen skill\n---\nFROZEN_V1\n",
     )
     .expect("v1");
+    let mut app = create_test_app();
     app.session.working_dir = Some(temp.path().to_string_lossy().to_string());
     app.input = "/frozen-skill".to_string();
     app.cursor_pos = app.input.len();

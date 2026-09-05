@@ -628,9 +628,13 @@ impl SkillRegistry {
     /// Parse a SKILL.md file
     fn parse_skill(path: &Path) -> Result<Skill> {
         let content = std::fs::read_to_string(path)?;
+        Self::parse_skill_source(path, &content)
+    }
 
-        // Parse YAML frontmatter
-        let (frontmatter, body) = Self::parse_frontmatter(&content)?;
+    /// Parse one captured source. Copy and invocation share the compatibility
+    /// parser so metadata and body always describe the same SKILL.md bytes.
+    fn parse_skill_source(path: &Path, content: &str) -> Result<Skill> {
+        let (frontmatter, body) = Self::parse_frontmatter(content)?;
 
         let SkillFrontmatter {
             name,
@@ -926,6 +930,29 @@ impl SkillRegistry {
                 skill_name: Some(name.to_string()),
                 detail: "effective skill has no source identity".to_string(),
             })?;
+        let latest;
+        let skill = if source.kind.is_read_only() {
+            latest = Self::parse_skill(&skill.path).map_err(|error| SkillResolutionError {
+                skill_name: Some(name.to_string()),
+                detail: format!(
+                    "read selected external source {}: {error}",
+                    skill.path.display()
+                ),
+            })?;
+            if latest.name != name {
+                return Err(SkillResolutionError {
+                    skill_name: Some(name.to_string()),
+                    detail: format!(
+                        "selected external source {} now names '{}'; refresh discovery before invoking the renamed skill",
+                        skill.path.display(),
+                        latest.name
+                    ),
+                });
+            }
+            &latest
+        } else {
+            skill
+        };
         Ok(Some(SkillActivation {
             skill_id: skill.name.clone(),
             description: skill.description.clone(),
@@ -964,6 +991,7 @@ impl SkillRegistry {
     }
 
     fn merge_layer(&mut self, layer: managed::ManagedSkillLayer) {
+        self.diagnostics.extend(layer.diagnostics);
         for diagnostic in layer.blocked.into_values() {
             self.insert_invalid(diagnostic);
         }
