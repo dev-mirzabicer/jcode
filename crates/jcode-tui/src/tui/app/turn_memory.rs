@@ -5,13 +5,16 @@ impl App {
     pub(super) fn build_system_prompt_split(
         &mut self,
         memory_prompt: Option<&str>,
-    ) -> crate::prompt::SplitSystemPrompt {
+    ) -> std::result::Result<
+        crate::prompt::SplitSystemPrompt,
+        crate::instruction::SystemPromptActivationError,
+    > {
         // Ambient mode: use the full override prompt directly
         if let Some(ref prompt) = self.ambient_system_prompt {
-            return crate::prompt::SplitSystemPrompt {
+            return Ok(crate::prompt::SplitSystemPrompt {
                 static_part: prompt.clone(),
                 dynamic_part: String::new(),
-            };
+            });
         }
 
         let skill_prompt = self
@@ -65,9 +68,13 @@ impl App {
         crate::prompt::append_swarm_effort_directive(
             &mut split,
             self.provider.reasoning_effort().as_deref(),
-        );
+            self.session
+                .working_dir
+                .as_deref()
+                .map(std::path::Path::new),
+        )?;
         self.context_info = context_info;
-        split
+        Ok(split)
     }
 
     pub(in crate::tui::app) fn show_injected_memory_context(

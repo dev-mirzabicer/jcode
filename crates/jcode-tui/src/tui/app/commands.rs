@@ -3597,7 +3597,9 @@ pub(super) fn apply_local_primary_agent_change(
             let projected = candidate
                 .projected_messages_for_provider()
                 .map_err(|error| error.to_string())?;
-            let mut split = app.build_system_prompt_split(None);
+            let mut split = app
+                .build_system_prompt_split(None)
+                .map_err(|error| error.to_string())?;
             split.static_part = candidate
                 .system_prompt_text()
                 .unwrap_or_default()

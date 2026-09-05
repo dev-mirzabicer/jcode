@@ -1,0 +1,35 @@
+{
+  "source_revision": "99bba69497a04fa48fac675c5e40d05e39a929ca",
+  "baseline_revision": "6860452868b26ae534635a12753c789cd177b3ca",
+  "route": "Production dynamic append compared against the immutable pre-migration capture with empty/nonempty existing dynamic content. Static prefix unchanged. Disposable probe removed.",
+  "cases": [
+    {
+      "bytes": 519,
+      "dynamic_before": "",
+      "equal": true,
+      "id": "INS-SYS-004",
+      "sha256": "03c6018af9209073b43c2c45c6329341cf5a241c4effc496c14f45c8b500c449"
+    },
+    {
+      "bytes": 528,
+      "dynamic_before": "DYNAMIC",
+      "equal": true,
+      "id": "INS-SYS-004",
+      "sha256": "ff095c1bcaf324f17e488f41871c6282cf804ae3ab2830046c69da73daf43f9a"
+    },
+    {
+      "bytes": 2677,
+      "dynamic_before": "",
+      "equal": true,
+      "id": "INS-SYS-005",
+      "sha256": "aabcb317d3495d06acb8a11895f66a55a3de2c2681f7a3e9686db76f467d48fe"
+    },
+    {
+      "bytes": 2686,
+      "dynamic_before": "DYNAMIC",
+      "equal": true,
+      "id": "INS-SYS-005",
+      "sha256": "b6f2ece25562026c6fbcccf16afd8d6528f0496829b21e67786408bef1db4aa1"
+    }
+  ]
+}

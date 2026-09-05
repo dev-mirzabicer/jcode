@@ -67,12 +67,24 @@ impl App {
         let pending_memory = self.build_memory_prompt_nonblocking(&provider_messages);
         let memory_pending =
             crate::memory::PendingMemoryReservation::new(self.session.id.clone(), pending_memory);
-        let base_split_prompt = self.build_system_prompt_split(None);
-        let split_prompt = self.build_system_prompt_split(
-            memory_pending
-                .as_ref()
-                .map(|pending| pending.prompt.as_str()),
-        );
+        let base_split_prompt = self
+            .build_system_prompt_split(None)
+            .map_err(|error| error.to_string())?;
+        // Capture occurrence-rendered instructions once. Accounting and the
+        // actual request must not read different files during the same send.
+        let mut split_prompt = base_split_prompt.clone();
+        if self.ambient_system_prompt.is_none()
+            && let Some(memory) = memory_pending.as_ref()
+            && !memory.prompt.is_empty()
+        {
+            let separator = if split_prompt.dynamic_part.is_empty() {
+                ""
+            } else {
+                "\n\n"
+            };
+            split_prompt.dynamic_part =
+                format!("{}{separator}{}", memory.prompt, split_prompt.dynamic_part);
+        }
         self.context_info.tool_defs_count = tools.len();
         self.context_info.tool_defs_chars = ToolDefinition::aggregate_prompt_chars(&tools);
 

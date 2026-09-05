@@ -444,7 +444,9 @@ impl Agent {
                         )),
                     )
                 })?;
-                let mut split = self.build_system_prompt_split(None);
+                let mut split = self
+                    .build_system_prompt_split(None)
+                    .map_err(PrimaryInstructionActivationError::Composition)?;
                 split.static_part = candidate
                     .system_prompt_text()
                     .unwrap_or_default()
@@ -659,6 +661,8 @@ mod tests {
         calls: std::sync::Arc<AtomicUsize>,
         invalidations: std::sync::Arc<AtomicUsize>,
         systems: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        requests: std::sync::Arc<std::sync::Mutex<Vec<Vec<Message>>>>,
+        effort: Option<String>,
     }
 
     #[async_trait]
@@ -671,6 +675,7 @@ mod tests {
             _resume_session_id: Option<&str>,
         ) -> anyhow::Result<EventStream> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            self.requests.lock().unwrap().push(_messages.to_vec());
             self.systems
                 .lock()
                 .expect("record systems")
@@ -683,6 +688,10 @@ mod tests {
 
         fn name(&self) -> &str {
             "recording-startup-provider"
+        }
+
+        fn reasoning_effort(&self) -> Option<String> {
+            self.effort.clone()
         }
 
         fn fork(&self) -> std::sync::Arc<dyn Provider> {
@@ -754,6 +763,70 @@ mod tests {
         session.working_dir = Some(project.to_string_lossy().into_owned());
         session.ensure_initial_session_context_message();
         session
+    }
+
+    #[tokio::test]
+    async fn managed_effort_fails_before_provider_and_preserves_frozen_static_text() {
+        let home = TestHome::new();
+        let project = tempfile::tempdir().unwrap();
+        let provider = RecordingProvider {
+            effort: Some("swarm".into()),
+            ..Default::default()
+        };
+        let (mut agent, _) = Agent::new_with_startup_context_and_agent(
+            std::sync::Arc::new(provider.clone()),
+            crate::tool::Registry::empty(),
+            project.path().to_str(),
+            StartupContextActivation::primary(StartupContextCaller::RunCommand),
+            crate::instruction::AgentSelection::Default,
+            false,
+        )
+        .unwrap();
+        let path = home.path().join("instructions/system/swarm-effort.md");
+        let write = |body: &str| {
+            std::fs::write(
+                &path,
+                format!("---\nid: swarm-effort\nkind: system\ntemplate: handlebars\n---\n{body}"),
+            )
+            .unwrap()
+        };
+        let frozen = agent.system_prompt_text().unwrap().to_string();
+        write("EFFORT-FIRST");
+        agent.run_once("first").await.unwrap();
+        write("EFFORT-SECOND");
+        agent.run_once("second").await.unwrap();
+        let requests = provider.requests.lock().unwrap().clone();
+        let text = |messages: &[Message]| {
+            messages
+                .iter()
+                .flat_map(|m| m.content.iter())
+                .filter_map(|block| match block {
+                    crate::message::ContentBlock::Text { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert!(text(&requests[0]).contains("EFFORT-FIRST"));
+        assert!(text(&requests[1]).contains("EFFORT-SECOND"));
+        assert!(!text(&requests[1]).contains("EFFORT-FIRST"));
+        assert!(
+            provider
+                .systems
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|s| s == &frozen)
+        );
+        write("{{missing}}");
+        assert!(
+            agent
+                .run_once("preserve pending user intent")
+                .await
+                .is_err()
+        );
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(agent.system_prompt_text(), Some(frozen.as_str()));
     }
 
     #[tokio::test]
@@ -857,7 +930,7 @@ mod tests {
 
         let first = agent.activate_skill("snapshot-skill").expect("activate v1");
         assert!(first.rendered_text.contains("SKILL_V1"));
-        let first_dynamic = agent.build_system_prompt_split(None).dynamic_part;
+        let first_dynamic = agent.build_system_prompt_split(None).unwrap().dynamic_part;
         assert!(first_dynamic.contains("SKILL_V1"));
         let frozen_system = agent
             .system_prompt_text()
@@ -886,7 +959,7 @@ mod tests {
         )
         .expect("skill v2");
         assert_eq!(
-            agent.build_system_prompt_split(None).dynamic_part,
+            agent.build_system_prompt_split(None).unwrap().dynamic_part,
             first_dynamic,
             "disk edits must not mutate active rendered text"
         );
@@ -925,7 +998,10 @@ mod tests {
             None,
         );
         assert_eq!(
-            resumed.build_system_prompt_split(None).dynamic_part,
+            resumed
+                .build_system_prompt_split(None)
+                .unwrap()
+                .dynamic_part,
             first_dynamic,
             "resume must use exact stored text without source access"
         );
@@ -935,7 +1011,10 @@ mod tests {
             .expect("reinvoke v2");
         assert!(reinvoked.rendered_text.contains("SKILL_V2"));
         assert!(!reinvoked.rendered_text.contains("SKILL_V1"));
-        let second_dynamic = resumed.build_system_prompt_split(None).dynamic_part;
+        let second_dynamic = resumed
+            .build_system_prompt_split(None)
+            .unwrap()
+            .dynamic_part;
         assert!(second_dynamic.contains("SKILL_V2"));
 
         let mut split = Session::create(Some(resumed.session_id().to_string()), None);
@@ -944,7 +1023,10 @@ mod tests {
         let split_agent =
             Agent::new_with_session(std::sync::Arc::new(provider), registry.clone(), split, None);
         assert_eq!(
-            split_agent.build_system_prompt_split(None).dynamic_part,
+            split_agent
+                .build_system_prompt_split(None)
+                .unwrap()
+                .dynamic_part,
             second_dynamic,
             "split must clone exact active rendered text"
         );

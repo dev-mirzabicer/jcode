@@ -1031,7 +1031,7 @@ fn assert_local_skill_snapshot_lifecycle(external_global: bool) {
     app.input = "/frozen-skill".to_string();
     app.cursor_pos = app.input.len();
     app.submit_input();
-    let first = app.build_system_prompt_split(None).dynamic_part;
+    let first = app.build_system_prompt_split(None).unwrap().dynamic_part;
     assert!(first.contains("FROZEN_V1"));
 
     std::fs::write(
@@ -1039,7 +1039,10 @@ fn assert_local_skill_snapshot_lifecycle(external_global: bool) {
         "---\nname: frozen-skill\ndescription: Frozen skill\n---\nFROZEN_V2\n",
     )
     .expect("v2");
-    assert_eq!(app.build_system_prompt_split(None).dynamic_part, first);
+    assert_eq!(
+        app.build_system_prompt_split(None).unwrap().dynamic_part,
+        first
+    );
 
     let restored = App::new_minimal_with_session(
         std::sync::Arc::clone(&app.provider),
@@ -1051,7 +1054,7 @@ fn assert_local_skill_snapshot_lifecycle(external_global: bool) {
     app.input = "/frozen-skill".to_string();
     app.cursor_pos = app.input.len();
     app.submit_input();
-    let second = app.build_system_prompt_split(None).dynamic_part;
+    let second = app.build_system_prompt_split(None).unwrap().dynamic_part;
     assert!(second.contains("FROZEN_V2"));
     assert!(!second.contains("FROZEN_V1"));
 }
@@ -1831,4 +1834,61 @@ fn assert_clear_swarm_plan_reset(app: &App) {
     assert!(app.swarm_plan_items.is_empty());
     assert_eq!(app.swarm_plan_version, None);
     assert_eq!(app.swarm_plan_swarm_id, None);
+}
+
+#[derive(Clone)]
+struct ManagedEffortProvider;
+
+#[async_trait::async_trait]
+impl Provider for ManagedEffortProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[crate::message::ToolDefinition],
+        _system: &str,
+        _resume: Option<&str>,
+    ) -> Result<crate::provider::EventStream> {
+        panic!("invalid managed effort must not reach a provider")
+    }
+    fn name(&self) -> &str {
+        "managed-effort-fixture"
+    }
+    fn reasoning_effort(&self) -> Option<String> {
+        Some("swarm".into())
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+#[test]
+fn local_managed_effort_error_blocks_provider_preparation_without_changing_static_state() {
+    let home = SkillTestHome::new();
+    crate::instruction::SystemPromptComposer::new()
+        .ensure_global_store()
+        .unwrap();
+    let mut app = create_test_app();
+    app.provider = Arc::new(ManagedEffortProvider);
+    let source = home.path().join("instructions/system/swarm-effort.md");
+    std::fs::write(
+        &source,
+        "---\nid: swarm-effort\nkind: system\n---\nLOCAL-EFFORT",
+    )
+    .unwrap();
+    let first = app.build_system_prompt_split(None).unwrap();
+    assert!(first.dynamic_part.ends_with("LOCAL-EFFORT"));
+    let state = app.session.system_prompt.clone();
+    std::fs::write(
+        &source,
+        "---\nid: swarm-effort\nkind: system\ntemplate: handlebars\n---\n{{missing}}",
+    )
+    .unwrap();
+    app.input = "PENDING-INPUT".into();
+    app.cursor_pos = app.input.len();
+    app.submit_input();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let result = runtime.block_on(app.prepare_local_provider_invocation());
+    assert!(result.is_err());
+    assert_eq!(app.session.system_prompt, state);
+    assert!(app.pending_composer_input.is_some());
 }

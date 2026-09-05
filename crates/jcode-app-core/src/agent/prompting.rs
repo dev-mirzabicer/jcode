@@ -85,12 +85,15 @@ impl Agent {
     pub(super) fn build_system_prompt_split(
         &self,
         memory_prompt: Option<&str>,
-    ) -> crate::prompt::SplitSystemPrompt {
+    ) -> std::result::Result<
+        crate::prompt::SplitSystemPrompt,
+        crate::instruction::SystemPromptActivationError,
+    > {
         if let Some(ref override_prompt) = self.system_prompt_override {
-            return crate::prompt::SplitSystemPrompt {
+            return Ok(crate::prompt::SplitSystemPrompt {
                 static_part: override_prompt.clone(),
                 dynamic_part: String::new(),
-            };
+            });
         }
 
         let skill_prompt = self
@@ -143,9 +146,13 @@ impl Agent {
         crate::prompt::append_swarm_effort_directive(
             &mut split,
             self.provider.reasoning_effort().as_deref(),
-        );
+            self.session
+                .working_dir
+                .as_deref()
+                .map(std::path::Path::new),
+        )?;
 
-        split
+        Ok(split)
     }
 
     /// Non-blocking memory prompt - takes pending result and spawns check for next turn

@@ -354,50 +354,51 @@ fn split_prompt_estimated_tokens_is_positive_when_populated() {
 }
 
 #[test]
-fn swarm_effort_directive_is_appended_only_for_swarm_sentinel() {
-    assert!(is_swarm_effort("swarm"));
-    assert!(is_swarm_effort("  Swarm "));
-    assert!(!is_swarm_effort("xhigh"));
-
-    let mut split = SplitSystemPrompt {
-        static_part: "base".to_string(),
-        dynamic_part: String::new(),
+fn swarm_effort_directives_use_current_synthetic_sources_without_changing_static_prefix() {
+    let home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    crate::instruction::SystemPromptComposer::new()
+        .ensure_global_store()
+        .unwrap();
+    let write = |id: &str, body: &str| {
+        std::fs::write(
+            home.root().join(format!("instructions/system/{id}.md")),
+            format!("---\nid: {id}\nkind: system\ntemplate: handlebars\n---\n{body}"),
+        )
+        .unwrap()
     };
-    append_swarm_effort_directive(&mut split, Some("xhigh"));
-    assert!(!split.dynamic_part.contains("Swarm Effort"));
-
-    append_swarm_effort_directive(&mut split, Some("swarm"));
-    assert!(split.dynamic_part.contains("# Swarm Effort"));
-    assert!(split.dynamic_part.contains("swarm` tool"));
-
-    // None / empty effort should not inject.
-    let mut other = SplitSystemPrompt::default();
-    append_swarm_effort_directive(&mut other, None);
-    assert!(other.dynamic_part.is_empty());
-}
-
-#[test]
-fn swarm_deep_effort_injects_task_graph_directive() {
-    use crate::prompt::is_deep_swarm_effort;
-
-    assert!(is_swarm_effort("swarm-deep"));
-    assert!(is_deep_swarm_effort("swarm-deep"));
-    assert!(is_deep_swarm_effort("  Swarm-Deep "));
-    assert!(!is_deep_swarm_effort("swarm"));
-    assert!(!is_deep_swarm_effort("xhigh"));
-
-    // Deep sentinel injects the DAG-first task-graph directive, not the light one.
-    let mut split = SplitSystemPrompt::default();
-    append_swarm_effort_directive(&mut split, Some("swarm-deep"));
-    assert!(split.dynamic_part.contains("# Deep Task Graph"));
-    assert!(split.dynamic_part.contains("swarm task_graph"));
-    assert!(!split.dynamic_part.contains("# Swarm Effort"));
-
-    // Light sentinel still injects the fan-out directive, not the deep one.
-    let mut light = SplitSystemPrompt::default();
-    append_swarm_effort_directive(&mut light, Some("swarm"));
-    assert!(light.dynamic_part.contains("# Swarm Effort"));
-    assert!(!light.dynamic_part.contains("# Deep Task Graph"));
+    write("swarm-effort", "LIGHT");
+    write("swarm-deep-effort", "DEEP");
+    for (effort, expected) in [
+        (None, "DYNAMIC"),
+        (Some("xhigh"), "DYNAMIC"),
+        (Some(" Swarm "), "DYNAMIC\n\nLIGHT"),
+        (Some("swarm-deep"), "DYNAMIC\n\nDEEP"),
+    ] {
+        let mut split = SplitSystemPrompt {
+            static_part: "STATIC".into(),
+            dynamic_part: "DYNAMIC".into(),
+        };
+        append_swarm_effort_directive(&mut split, effort, None).unwrap();
+        assert_eq!(split.static_part, "STATIC");
+        assert_eq!(split.dynamic_part, expected);
+    }
+    write("swarm-effort", "NEXT");
+    let mut next = SplitSystemPrompt::default();
+    append_swarm_effort_directive(&mut next, Some("swarm"), None).unwrap();
+    assert_eq!(next.dynamic_part, "NEXT");
+    write("swarm-effort", "{{missing}}");
+    let mut failed = SplitSystemPrompt {
+        static_part: "STATIC".into(),
+        dynamic_part: "DYNAMIC".into(),
+    };
+    assert!(append_swarm_effort_directive(&mut failed, Some("swarm"), None).is_err());
+    assert_eq!(failed.static_part, "STATIC");
+    assert_eq!(failed.dynamic_part, "DYNAMIC");
+    append_swarm_effort_directive(&mut failed, Some("low"), None).unwrap();
+    write("swarm-effort", "");
+    let mut empty = SplitSystemPrompt::default();
+    append_swarm_effort_directive(&mut empty, Some("swarm"), None).unwrap();
+    assert!(empty.dynamic_part.is_empty());
 }
 
 #[test]

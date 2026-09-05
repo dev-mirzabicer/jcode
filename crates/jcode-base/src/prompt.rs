@@ -97,7 +97,7 @@ pub fn load_swarm_prompt(working_dir: Option<&Path>) -> String {
 /// supports, AND actively orchestrate the work with the swarm tool". Providers
 /// translate this to their strongest real effort when building API requests,
 /// while the UI/session keep the literal `swarm` marker so the agent knows to
-/// inject [`SWARM_EFFORT_DIRECTIVE`].
+/// render the managed swarm-effort directive.
 pub const SWARM_EFFORT: &str = "swarm";
 
 /// Reasoning-effort sentinel for the **deep task graph** mode: strongest model
@@ -106,17 +106,8 @@ pub const SWARM_EFFORT: &str = "swarm";
 /// one rung above [`SWARM_EFFORT`] on the effort ladder: `... xhigh`, `swarm`
 /// (light fan-out), `swarm-deep` (deep task graph). Providers translate this to
 /// their strongest real effort, while the UI/session keep the literal marker so
-/// the agent knows to inject [`SWARM_DEEP_EFFORT_DIRECTIVE`].
+/// the agent knows to render the managed swarm-deep-effort directive.
 pub const SWARM_DEEP_EFFORT: &str = "swarm-deep";
-
-/// System-prompt directive injected when the active reasoning effort is
-/// [`SWARM_EFFORT`]. Instructs the agent to lean on the swarm tooling.
-pub const SWARM_EFFORT_DIRECTIVE: &str = "# Swarm Effort\n\nYou are running at the maximum reasoning effort with swarm orchestration enabled. For any non-trivial task, decompose the work and use the `swarm` tool to spawn and coordinate parallel agents (spawn workers with concrete prompts, assign tasks, and collect their reports) instead of doing everything yourself in one thread. Prefer parallelizing independent subtasks across swarm members, and use a coordinator/plan when the work has multiple stages. Only skip the swarm for trivial, single-step requests.";
-
-/// System-prompt directive injected when the active reasoning effort is
-/// [`SWARM_DEEP_EFFORT`]. Instructs the agent to run the comprehensive DAG-first
-/// task-graph workflow.
-pub const SWARM_DEEP_EFFORT_DIRECTIVE: &str = "# Deep Task Graph\n\nYou are running at maximum reasoning effort with the deep task-graph swarm workflow. Treat the task DAG as the primary object, not ad hoc agent chat. Workflow:\n\n1. Seed a graph with `swarm task_graph` using `mode: \"deep\"`: lay out nodes (kind explore|implement|verify|fix|synthesize) and `depends_on` edges instead of answering directly. (At this effort the server already defaults the plan to deep, but pass `mode: \"deep\"` explicitly anyway.) The engine auto-inserts a plan-wide root gate over your seed: the plan cannot finish until a final adversarial audit passes, and that audit can inject new top-level work.\n2. For any node that is too big, `swarm expand_node` to decompose it into a child sub-DAG (you become its planner/integrator). In deep mode a critique/verify gate is auto-inserted before a composite node can close. The graph is EXPECTED to outgrow its seed, often by several times: growth (expansions and gate-injected gaps) is the system working, not scope creep. plan_status reports seeded-vs-grown counts.\n3. Finish each node with `swarm complete_node` and a typed artifact: `findings`, `evidence` (file:line / commit refs), `validation`, `open_questions`, a required `confidence` (low|medium|high; report low honestly, it routes follow-up work to shore up that scope), and an honest `what_i_did_not_check`. Downstream nodes are hydrated with these artifacts automatically. There is no other way to close a deep node: a turn ending without expand_node/complete_node re-queues the node to a fresh worker and fails it on repeat.\n4. When a critique/verify gate finds gaps or failures, use `swarm inject_gap` to add new nodes; the parent cannot close until they drain. A passing gate artifact must account for EVERY node it audited by id (the server rejects rubber stamps), and cannot pass over a low-confidence sibling without addressing it explicitly, so treat low-confidence siblings as priority probe targets.\n5. Use `swarm run_plan` to drive the graph to completion. It returns immediately and drives the plan as a background task (progress card + wake on completion), so keep working or answer the user while it runs; check `swarm plan_status` or `bg` for progress. Deep mode fans out wide automatically (many workers run in parallel, bounded only by the swarm member cap), so prefer decomposing into MANY independent sibling nodes rather than a few serial ones: keep the ready set wide so run_plan can dispatch lots of agents at once. Only add `depends_on` edges for real data dependencies.\n\nComprehensiveness is structural: prefer decomposition + gates over a single thorough answer, so it is very unlikely any nook or cranny is missed.";
 
 /// Returns true when `effort` is either swarm sentinel (light or deep),
 /// case-insensitive. Used by providers to map to the strongest real effort.
@@ -176,16 +167,23 @@ pub fn is_swarm_mode_effort(effort: &str) -> bool {
 /// the active reasoning effort is a swarm sentinel. The deep sentinel injects the
 /// DAG-first task-graph directive; the light sentinel injects the fan-out
 /// directive. No-op otherwise.
-pub fn append_swarm_effort_directive(split: &mut SplitSystemPrompt, effort: Option<&str>) {
-    let directive = match effort {
-        Some(effort) if is_deep_swarm_effort(effort) => SWARM_DEEP_EFFORT_DIRECTIVE,
-        Some(effort) if is_swarm_effort(effort) => SWARM_EFFORT_DIRECTIVE,
-        _ => return,
+pub fn append_swarm_effort_directive(
+    split: &mut SplitSystemPrompt,
+    effort: Option<&str>,
+    working_dir: Option<&Path>,
+) -> Result<(), crate::instruction::SystemPromptActivationError> {
+    use crate::instruction::workflow::Workflow;
+    let resource = match effort {
+        Some(effort) if is_deep_swarm_effort(effort) => Workflow::SwarmDeepEffort,
+        Some(effort) if is_swarm_effort(effort) => Workflow::SwarmEffort,
+        _ => return Ok(()),
     };
+    let directive = resource.render(working_dir)?;
     if !split.dynamic_part.is_empty() {
         split.dynamic_part.push_str("\n\n");
     }
-    split.dynamic_part.push_str(directive);
+    split.dynamic_part.push_str(&directive);
+    Ok(())
 }
 /// Mission-continuation template (embedded at compile time). Consumed by the
 /// `mission` module in the upper `jcode-app-core` layer; the asset lives here

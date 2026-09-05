@@ -72,7 +72,7 @@ impl Agent {
                 pending_memory,
             );
             // Use split prompt for better caching - static content cached, dynamic not
-            let split_prompt = self.build_system_prompt_split(None);
+            let split_prompt = self.build_system_prompt_split(None)?;
             self.log_prompt_prefix_accounting(&split_prompt, &tools);
 
             // Build the complete ephemeral request before recording cache state,
