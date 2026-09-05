@@ -791,6 +791,7 @@ pub fn shipped_instruction_seed() -> Result<InstructionStoreSeed, InstructionErr
         },
     ];
     documents.extend(super::notification::seed_documents()?);
+    documents.extend(super::notification::module_seed_documents()?);
     Ok(InstructionStoreSeed {
         manifest: InstructionStoreManifest::current(),
         files: documents

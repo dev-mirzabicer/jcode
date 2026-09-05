@@ -1,0 +1,1 @@
+You can continue using that snapshot and move on with your process. If the file is critical to your work and you suspect that the file's change may affect your progress, you can re-read it. Ignore this notification if you are the one that changed this file.

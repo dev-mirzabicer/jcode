@@ -1,0 +1,38 @@
+[
+  {
+    "bytes": 662,
+    "equal": true,
+    "resource": "startup-context-initial",
+    "sha256": "21f95a2b336f370d5f608e1886a3a1441ea96f906ad2ff5427ffaf4e1c8cbef0"
+  },
+  {
+    "bytes": 636,
+    "equal": true,
+    "resource": "startup-context-update",
+    "sha256": "00d0bb728c302a7fbc2154c65fbb6e7bd7e9cc8b48b21d6f4d2b9e1084157654"
+  },
+  {
+    "bytes": 538,
+    "equal": true,
+    "resource": "startup-context-stale-changed",
+    "sha256": "9cfe1d045de43f34275cab02793c7e314b8fbb71ac74336e8ef01b909dc1be34"
+  },
+  {
+    "bytes": 568,
+    "equal": true,
+    "resource": "startup-context-stale-missing",
+    "sha256": "8c43ee746cb84bb715061ef2d077c38678be63a1455a4d184b168cea65b7f217"
+  },
+  {
+    "bytes": 577,
+    "equal": true,
+    "resource": "startup-context-stale-unreadable",
+    "sha256": "71cb9df6553d3a45618f0c81c93ad34d45b91873c0e2eed99b66e7d429c7c725"
+  },
+  {
+    "bytes": 584,
+    "equal": true,
+    "resource": "startup-context-stale-unsupported",
+    "sha256": "b1416e40d9ede0c596feb7d8d7e7149f0d6147b46ecf0f71568266b56871a4cb"
+  }
+]

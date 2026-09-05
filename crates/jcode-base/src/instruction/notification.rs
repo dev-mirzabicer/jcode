@@ -44,6 +44,13 @@ macro_rules! notifications {
 }
 
 notifications! {
+    StartupContextInitial => ("startup-context-initial", "Startup Context session install", Plain),
+    StartupContextUpdate => ("startup-context-update", "Startup Context late apply", Plain),
+    StartupContextStaleChanged => ("startup-context-stale-changed", "Startup Context observation", Handlebars),
+    StartupContextStaleMissing => ("startup-context-stale-missing", "Startup Context observation", Handlebars),
+    StartupContextStaleUnreadable => ("startup-context-stale-unreadable", "Startup Context observation", Handlebars),
+    StartupContextStaleUnsupported => ("startup-context-stale-unsupported", "Startup Context observation", Handlebars),
+    StartupContextStaleCurrent => ("startup-context-stale-current", "Startup Context observation", Handlebars),
     SessionFork { parent: &'a str, parent_id: &'a str } => ("session-fork", "session fork", Handlebars),
     SessionTransferHandoff => ("session-transfer-handoff", "session transfer", Plain),
     BatchNudge => ("batch-nudge", "agent turn loop", Plain),
@@ -53,6 +60,18 @@ notifications! {
     FableGuardrailFirst => ("fable-guardrail-reconsideration-1", "agent response recovery", Plain),
     FableGuardrailSecond => ("fable-guardrail-reconsideration-2", "agent response recovery", Plain),
     FableGuardrailThird => ("fable-guardrail-reconsideration-3", "agent response recovery", Plain),
+}
+
+pub(super) fn module_seed_documents() -> Result<Vec<InstructionDocument>, InstructionError> {
+    Ok(vec![InstructionDocument {
+        id: InstructionId::parse("startup-context-stale-remainder")?,
+        kind: InstructionKind::Module,
+        scope: InstructionScope::Global,
+        template_mode: TemplateMode::Plain,
+        metadata: InstructionMetadata::default(),
+        body: include_str!("notification/startup-context-stale-remainder.md").to_string(),
+        path: std::path::PathBuf::from("modules/startup-context-stale-remainder.md"),
+    }])
 }
 
 fn registration(id: &str, owner: &str) -> Result<ConsumerRegistration, InstructionError> {

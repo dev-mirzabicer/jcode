@@ -15,3 +15,13 @@ The one-time probe compared the original production format expressions with the 
 Synthetic permanent tests cover current-source rereads, earlier result preservation, typed substitutions without HTML escaping, project redefinition, intentional empty body, invalid shadowing, deletion revealing global, missing singleton failure, unrelated invalid-resource isolation, and actual fork delivery without mutation on render failure.
 
 The broader WP-06 inventory remains open until its remaining families and final integration checks are complete.
+
+## Startup Context
+
+Rows `INS-NTF-004` through `INS-NTF-006` now render managed initial, late-update and state-specific stale prose. The common stale remainder is one managed module. The session owner still supplies the exact XML tags and attributes, escaping, timestamps, roles, IDs, file order, receipts and two-notice limit.
+
+Control rendering is lazy inside the existing batch builders. Empty plans and receipt-only late updates never read notification sources. Prepared late applies retain their complete rendered message through persistence/recovery instead of rendering again at apply. A failed render returns a typed instruction error before installation, preparation or observation publication. Observation failure restores the prior complete session, including earlier file observations in that transaction.
+
+[`WP06_STARTUP_EQUALITY.json`](WP06_STARTUP_EQUALITY.json) records six passing one-time comparisons using the real owner formatters: initial, late and all four active stale states. Attribute fixtures include XML metacharacters. The diagnostic `Current` arm remains unreachable for real stale notifications and retains its existing debug assertion. No prose exception was taken. The disposable equality test was removed.
+
+The final run for this slice passed 55 permanent Startup Context tests plus the disposable equality test. New production-path synthetic journeys cover later-occurrence freshness, exact earlier messages, receipt IDs and counts, unchanged roles/timestamps/order, empty content, invalid-content rollback, lazy no-event behavior, and prepared late-text persistence after source edits. Strict library Clippy passed for base, app-core and TUI.

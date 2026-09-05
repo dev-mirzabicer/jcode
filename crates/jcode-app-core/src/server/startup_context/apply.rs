@@ -1371,6 +1371,7 @@ fn session_apply_failure(error: StartupContextSessionApplyError) -> StartupConte
             StartupContextFailureKind::InvalidRequest
         }
         StartupContextSessionApplyError::InvalidExistingReceipt { .. }
+        | StartupContextSessionApplyError::Instruction(_)
         | StartupContextSessionApplyError::StaleSession
         | StartupContextSessionApplyError::InvalidContextProjection { .. }
         | StartupContextSessionApplyError::Persistence(_) => StartupContextFailureKind::Recovery,
