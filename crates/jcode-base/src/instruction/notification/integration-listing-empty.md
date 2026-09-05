@@ -1,0 +1,1 @@
+After deciding what to use, call integration_tools again with action `select` and the public product name, even when it is off-catalog. Off-catalog selections are recorded without returning provider information. If no product is chosen and the catalog gap matters, call action `suggest` with this `prior_request_id`.

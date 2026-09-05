@@ -61,13 +61,27 @@ fn listing_has_no_tool_entry(listing: &Value) -> bool {
 /// Error shown when the server cannot return a valid receipt for a selection.
 /// Off-catalog choices are legitimate, but they still must be recorded before
 /// the agent can claim that Discovery observed the choice.
-fn selection_receipt_error(category: &str, tool_name: &str) -> anyhow::Error {
+fn discovery_notice(
+    notice: crate::instruction::notification::Notification<'_>,
+    working_dir: Option<&std::path::Path>,
+) -> String {
+    notice
+        .render(working_dir)
+        .unwrap_or_else(|error| format!("Integration instruction rendering failed: {error}"))
+}
+
+fn selection_receipt_error(
+    category: &str,
+    tool_name: &str,
+    working_dir: Option<&std::path::Path>,
+) -> anyhow::Error {
+    let prose = discovery_notice(
+        crate::instruction::notification::Notification::IntegrationReceiptFailure { tool_name },
+        working_dir,
+    );
     anyhow::anyhow!(
         "Discovery could not record the selection of '{tool_name}' for '{category}' because the \
-         server returned no valid selection receipt. Retry action `select` with the same product, \
-         including off-catalog products. Until a receipt is returned, do not claim the choice was \
-         recorded or treat '{tool_name}' as vetted, and do not invent setup instructions from \
-         memory."
+         server returned no valid selection receipt. {prose}"
     )
 }
 
@@ -657,8 +671,14 @@ impl Tool for DiscoverToolsTool {
                     return Err(err.into());
                 }
             };
-            let rendered =
-                render_suggestion(&category, &query, &reason, &suggestion, &fetched.listing)?;
+            let rendered = render_suggestion(
+                &category,
+                &query,
+                &reason,
+                &suggestion,
+                &fetched.listing,
+                ctx.working_dir.as_deref(),
+            )?;
             record_discovery_telemetry(
                 &request_id,
                 started_at,
@@ -709,7 +729,11 @@ impl Tool for DiscoverToolsTool {
                             query_present,
                             reason_present,
                         );
-                        return Err(selection_receipt_error(&category, &tool_name));
+                        return Err(selection_receipt_error(
+                            &category,
+                            &tool_name,
+                            ctx.working_dir.as_deref(),
+                        ));
                     }
                     record_discovery_telemetry(
                         &request_id,
@@ -747,9 +771,18 @@ impl Tool for DiscoverToolsTool {
                     query_present,
                     reason_present,
                 );
-                return Err(selection_receipt_error(&category, &tool_name));
+                return Err(selection_receipt_error(
+                    &category,
+                    &tool_name,
+                    ctx.working_dir.as_deref(),
+                ));
             }
-            let rendered = match render_selection(&category, &tool_name, &fetched.listing) {
+            let rendered = match render_selection(
+                &category,
+                &tool_name,
+                &fetched.listing,
+                ctx.working_dir.as_deref(),
+            ) {
                 Ok(rendered) => rendered,
                 Err(err) => {
                     record_discovery_telemetry(
@@ -835,7 +868,12 @@ impl Tool for DiscoverToolsTool {
                 return Err(err.into());
             }
         };
-        let rendered = match render_listing(&category, &fetched.listing, &request_id) {
+        let rendered = match render_listing(
+            &category,
+            &fetched.listing,
+            &request_id,
+            ctx.working_dir.as_deref(),
+        ) {
             Ok(rendered) => rendered,
             Err(err) => {
                 record_discovery_telemetry(
@@ -1296,19 +1334,26 @@ fn extract_mcp_setups_from(tools: &[Value]) -> Vec<crate::sponsors::provenance::
 /// `{ "tools": [{ "name": "...", "blurb": "...", "url": "..." }] }`. Setup
 /// instructions are not part of browse results: the agent selects a tool
 /// (with a reason) to get them.
-fn render_listing(category: &str, listing: &Value, request_id: &str) -> Result<String> {
+fn render_listing(
+    category: &str,
+    listing: &Value,
+    request_id: &str,
+    working_dir: Option<&std::path::Path>,
+) -> Result<String> {
+    use crate::instruction::notification::Notification;
     let tools = listing
         .get("tools")
         .and_then(|v| v.as_array())
         .ok_or_else(|| anyhow::anyhow!("discovery returned no tool list"))?;
     if tools.is_empty() {
+        let prose = discovery_notice(Notification::IntegrationListingEmpty, working_dir);
         return Ok(format!(
-            "No integrations in category '{category}' right now.\n\nSearch request ID: `{request_id}`\n\nAfter deciding what to use, call integration_tools again with action `select` and the public product name, even when it is off-catalog. Off-catalog selections are recorded without returning provider information. If no product is chosen and the catalog gap matters, call action `suggest` with this `prior_request_id`."
+            "No integrations in category '{category}' right now.\n\nSearch request ID: `{request_id}`\n\n{prose}"
         ));
     }
+    let disclosure = discovery_notice(Notification::IntegrationListingDisclosure, working_dir);
     let mut out = format!(
-        "Available integrations in '{category}' (Jcode integration directory; recommendations must be based \
-         only on fit; details: {}):\n",
+        "Available integrations in '{category}' (Jcode integration directory; {disclosure}; details: {}):\n",
         crate::sponsors::DISCOVERY_PARTNERS_URL
     );
     for tool in tools {
@@ -1319,15 +1364,11 @@ fn render_listing(category: &str, listing: &Value, request_id: &str) -> Result<S
             out.push_str(&format!(" ({url})"));
         }
     }
-    out.push_str(
-        "\n\nOnly use one of these if it is genuinely the best option for the task. \
-         Next step: after deciding, call integration_tools again with action `select` and `tool` set to \
-         the product actually chosen. Catalog integrations provide setup instructions designed to connect seamlessly with this agent; an \
-         off-catalog selection records the choice but returns no provider information. If no \
-         product is chosen, action `suggest` with the search request ID below can report the gap. Consequential \
-         actions (signups, spending) must note that setup is provided through a Jcode integration in the confirmation \
-         shown to the user.",
-    );
+    out.push_str("\n\n");
+    out.push_str(&discovery_notice(
+        Notification::IntegrationListingNext,
+        working_dir,
+    ));
     out.push_str(&format!("\n\nSearch request ID: `{request_id}`"));
     Ok(out)
 }
@@ -1338,6 +1379,7 @@ fn render_suggestion(
     reason: &str,
     suggestion: &ValidatedSuggestion,
     response: &Value,
+    working_dir: Option<&std::path::Path>,
 ) -> Result<String> {
     let status = response
         .get("status")
@@ -1376,9 +1418,11 @@ fn render_suggestion(
             out.push_str(&format!("\n- {requirement}"));
         }
     }
-    out.push_str(
-        "\n\nStatus: received for Jcode maintainer review. Suggestions are not sent to integration providers. This does not mean the tool has integrated with Jcode or that it is approved or available.",
-    );
+    out.push_str("\n\n");
+    out.push_str(&discovery_notice(
+        crate::instruction::notification::Notification::IntegrationSuggestionStatus,
+        working_dir,
+    ));
     Ok(out)
 }
 
@@ -1386,7 +1430,13 @@ fn render_suggestion(
 /// and return its setup instructions. Off-catalog selections contain receipt
 /// metadata but no provider or setup fields: they are acknowledged for demand
 /// attribution without inventing, fetching, or endorsing provider data.
-fn render_selection(category: &str, tool_name: &str, listing: &Value) -> Result<String> {
+fn render_selection(
+    category: &str,
+    tool_name: &str,
+    listing: &Value,
+    working_dir: Option<&std::path::Path>,
+) -> Result<String> {
+    use crate::instruction::notification::Notification;
     let receipt_category = listing
         .get("category")
         .and_then(Value::as_str)
@@ -1422,11 +1472,9 @@ fn render_selection(category: &str, tool_name: &str, listing: &Value) -> Result<
                 ));
             }
         }
+        let prose = discovery_notice(Notification::IntegrationOffCatalog, working_dir);
         return Ok(format!(
-            "Selected off-catalog product '{selected_tool}' for '{category}'.\n\n\
-             Selection recorded as demand data. Jcode does not list an integration for this \
-             product, so no provider information, recommendation, or setup instructions \
-             are provided. Continue using only information independently available to you."
+            "Selected off-catalog product '{selected_tool}' for '{category}'.\n\n{prose}"
         ));
     }
 
@@ -1454,25 +1502,103 @@ fn render_selection(category: &str, tool_name: &str, listing: &Value) -> Result<
             anyhow::anyhow!("catalog selection receipt for '{name}' omitted setup instructions")
         })?;
     let blurb = tool.get("blurb").and_then(|v| v.as_str()).unwrap_or("");
+    let disclosure = discovery_notice(Notification::IntegrationSelectionDisclosure, working_dir);
     let mut out = format!(
-        "Selected '{name}' from '{category}' (Jcode integration directory; the choice must be based only \
-         on fit; details: {}):\n\n{name}: {blurb}",
+        "Selected '{name}' from '{category}' (Jcode integration directory; {disclosure}; details: {}):\n\n{name}: {blurb}",
         crate::sponsors::DISCOVERY_PARTNERS_URL
     );
     if let Some(url) = tool.get("url").and_then(|v| v.as_str()) {
         out.push_str(&format!(" ({url})"));
     }
     out.push_str(&format!("\n\nSetup: {setup}"));
-    out.push_str(
-        "\n\nConsequential actions (signups, spending) must note that setup is provided through a Jcode integration in \
-         the confirmation shown to the user.",
-    );
+    out.push_str("\n\n");
+    out.push_str(&discovery_notice(
+        Notification::IntegrationConfirmation,
+        working_dir,
+    ));
     Ok(out)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const NOTICE_IDS: &[&str] = &[
+        "integration-listing-empty",
+        "integration-listing-next",
+        "integration-listing-disclosure",
+        "integration-selection-disclosure",
+        "integration-suggestion-status",
+        "integration-off-catalog",
+        "integration-confirmation",
+        "integration-receipt-failure",
+    ];
+    fn synthetic_source() -> crate::tool::background_notice::TestHome {
+        let source = crate::tool::background_notice::TestHome::new();
+        for id in NOTICE_IDS {
+            source.write(id, &format!("SYNTHETIC-{id}"));
+        }
+        source
+    }
+    fn seed_discovery_test_source(home: &std::path::Path) {
+        crate::instruction::SystemPromptComposer::new()
+            .ensure_global_store()
+            .unwrap();
+        for id in NOTICE_IDS {
+            std::fs::write(
+                home.join(format!("instructions/notifications/{id}.md")),
+                format!("---\nid: {id}\nkind: notification\n---\nSYNTHETIC-{id}"),
+            )
+            .unwrap();
+        }
+    }
+    fn render_listing(category: &str, listing: &Value, request_id: &str) -> Result<String> {
+        let _source = synthetic_source();
+        super::render_listing(category, listing, request_id, None)
+    }
+    fn render_selection(category: &str, name: &str, listing: &Value) -> Result<String> {
+        let _source = synthetic_source();
+        super::render_selection(category, name, listing, None)
+    }
+    fn render_suggestion(
+        category: &str,
+        query: &str,
+        reason: &str,
+        suggestion: &ValidatedSuggestion,
+        response: &Value,
+    ) -> Result<String> {
+        let _source = synthetic_source();
+        super::render_suggestion(category, query, reason, suggestion, response, None)
+    }
+    fn selection_receipt_error(category: &str, name: &str) -> anyhow::Error {
+        let _source = synthetic_source();
+        super::selection_receipt_error(category, name, None)
+    }
+
+    #[test]
+    fn managed_discovery_prose_is_current_without_mutating_receipt_data() {
+        let source = synthetic_source();
+        let receipt = json!({"category":"other","selected_tool":"fixture","listed":true,"tool":{"name":"fixture","blurb":"data","setup":"COMPLETE {{raw}} setup"}});
+        source.write("integration-confirmation", "OLD-SYNTHETIC");
+        let old = super::render_selection("other", "fixture", &receipt, None).unwrap();
+        source.write("integration-confirmation", "NEW-SYNTHETIC");
+        assert!(
+            super::render_selection("other", "fixture", &receipt, None)
+                .unwrap()
+                .ends_with("NEW-SYNTHETIC")
+        );
+        assert!(old.ends_with("OLD-SYNTHETIC"));
+        source.write("integration-confirmation", "{{invalid}}");
+        let failed = super::render_selection("other", "fixture", &receipt, None).unwrap();
+        assert!(failed.contains("Integration instruction rendering failed:"));
+        assert!(failed.contains("Setup: COMPLETE {{raw}} setup"));
+        source.write("integration-confirmation", "");
+        assert!(
+            super::render_selection("other", "fixture", &receipt, None)
+                .unwrap()
+                .ends_with("Setup: COMPLETE {{raw}} setup\n\n")
+        );
+    }
 
     fn header_test_provenance(correlation_id: Option<&str>) -> DiscoveryRequestProvenance {
         DiscoveryRequestProvenance {
@@ -1533,7 +1659,7 @@ mod tests {
         assert!(out.contains("virtual payment cards"));
         assert!(out.contains("Jcode integration directory"));
         assert!(!out.to_ascii_lowercase().contains("partner"));
-        assert!(out.contains("recommendations must be based only on fit"));
+        assert!(out.contains("SYNTHETIC-integration-listing-disclosure"));
     }
 
     /// The browse listing must not carry setup instructions. When it did, the
@@ -1561,10 +1687,10 @@ mod tests {
         );
         assert!(!out.contains("AGENTCARD_KEY"));
         assert!(!out.contains("setup:"));
-        assert!(out.contains("Next step"));
-        assert!(out.contains("action `select`"));
-        assert!(out.contains("Catalog integrations provide setup instructions"));
-        assert!(out.contains("connect seamlessly with this agent"));
+        assert!(out.contains("SYNTHETIC-integration-listing-next"));
+        assert!(out.contains("SYNTHETIC-integration-listing-next"));
+        assert!(out.contains("SYNTHETIC-integration-listing-next"));
+        assert!(out.contains("SYNTHETIC-integration-listing-next"));
     }
 
     #[test]
@@ -1589,9 +1715,9 @@ mod tests {
         .unwrap();
         assert!(out.contains("No integrations"));
         assert!(out.contains("Search request ID"));
-        assert!(out.contains("action `select`"));
-        assert!(out.contains("off-catalog"));
-        assert!(out.contains("action `suggest`"));
+        assert!(out.contains("SYNTHETIC-integration-listing-empty"));
+        assert!(out.contains("SYNTHETIC-integration-listing-empty"));
+        assert!(out.contains("SYNTHETIC-integration-listing-empty"));
     }
 
     #[test]
@@ -1601,9 +1727,9 @@ mod tests {
         });
         let out =
             render_listing("payments", &listing, "11111111-2222-4333-8444-555555555555").unwrap();
-        assert!(out.contains("action `select`"));
-        assert!(out.contains("off-catalog selection"));
-        assert!(out.contains("action `suggest`"));
+        assert!(out.contains("SYNTHETIC-integration-listing-next"));
+        assert!(out.contains("SYNTHETIC-integration-listing-next"));
+        assert!(out.contains("SYNTHETIC-integration-listing-next"));
         assert!(out.contains("Search request ID"));
     }
 
@@ -1625,7 +1751,7 @@ mod tests {
         assert!(out.contains("Setup: npm install -g agentcard"));
         assert!(out.contains("Jcode integration directory"));
         assert!(!out.to_ascii_lowercase().contains("partner"));
-        assert!(out.contains("the choice must be based only on fit"));
+        assert!(out.contains("SYNTHETIC-integration-selection-disclosure"));
         assert!(render_selection("payments", "ghost", &json!({})).is_err());
     }
 
@@ -1688,9 +1814,9 @@ mod tests {
         });
         let out = render_selection("web-data", "firecrawl", &listing).unwrap();
         assert!(out.contains("Selected off-catalog product 'firecrawl'"));
-        assert!(out.contains("Selection recorded as demand data"));
-        assert!(out.contains("no provider information"));
-        assert!(out.contains("no provider information, recommendation, or setup instructions"));
+        assert!(out.contains("SYNTHETIC-integration-off-catalog"));
+        assert!(out.contains("SYNTHETIC-integration-off-catalog"));
+        assert!(out.contains("SYNTHETIC-integration-off-catalog"));
         assert!(!out.contains("http"));
         assert!(render_selection("web-data", "other", &listing).is_err());
 
@@ -1756,7 +1882,7 @@ mod tests {
         assert!(rendered.contains("\"source\":\"jcode\""));
         assert!(rendered.contains("\"referrer\":\"https://jcode.sh/discovery-tools\""));
         assert!(rendered.contains("agentmail-mcp@1.0.0"));
-        assert!(rendered.contains("setup is provided through a Jcode integration"));
+        assert!(rendered.contains("SYNTHETIC-integration-confirmation"));
 
         let setups = extract_mcp_setups_from(std::slice::from_ref(&listing["tool"]));
         assert_eq!(
@@ -1789,10 +1915,10 @@ mod tests {
         let message = selection_receipt_error("payments", "stripe").to_string();
         assert!(message.contains("could not record"));
         assert!(message.contains("stripe"));
-        assert!(message.contains("action `select`"));
-        assert!(message.contains("including off-catalog products"));
-        assert!(message.contains("do not claim the choice was recorded"));
-        assert!(message.contains("do not invent setup instructions"));
+        assert!(message.contains("SYNTHETIC-integration-receipt-failure"));
+        assert!(message.contains("SYNTHETIC-integration-receipt-failure"));
+        assert!(message.contains("SYNTHETIC-integration-receipt-failure"));
+        assert!(message.contains("SYNTHETIC-integration-receipt-failure"));
     }
 
     #[test]
@@ -1996,8 +2122,7 @@ mod tests {
         .unwrap();
         assert!(out.contains("Catalog suggestion submitted"));
         assert!(out.contains("Product: Stripe sandbox MCP"));
-        assert!(out.contains("Suggestions are not sent to integration providers"));
-        assert!(out.contains("does not mean the tool has integrated with Jcode"));
+        assert!(out.contains("SYNTHETIC-integration-suggestion-status"));
         assert!(!out.to_ascii_lowercase().contains("partner"));
     }
 
@@ -2302,6 +2427,7 @@ mod tests {
         let prev_home = std::env::var_os("JCODE_HOME");
         let temp = tempfile::tempdir().unwrap();
         crate::env::set_var("JCODE_HOME", temp.path());
+        seed_discovery_test_source(temp.path());
 
         let body = json!({
             "category": "web-data",
@@ -2336,7 +2462,7 @@ mod tests {
                 .output
                 .contains("Selected off-catalog product 'firecrawl'")
         );
-        assert!(output.output.contains("no provider information"));
+        assert!(output.output.contains("SYNTHETIC-integration-off-catalog"));
         assert!(!output.output.contains("Setup:"));
         let metadata = output.metadata.unwrap();
         assert_eq!(metadata["selected_tool"], "firecrawl");
@@ -2369,6 +2495,7 @@ mod tests {
         let prev_home = std::env::var_os("JCODE_HOME");
         let temp = tempfile::tempdir().unwrap();
         crate::env::set_var("JCODE_HOME", temp.path());
+        seed_discovery_test_source(temp.path());
 
         let body = json!({"tools": [{"name": "agentcard", "blurb": "single-use virtual visa cards", "url": "https://agentcard.example", "setup": "MCP server: npx agentcard-mcp"}]}).to_string();
         let (endpoint, _server) = one_shot_server("HTTP/1.1 200 OK", body).await;
@@ -2397,7 +2524,7 @@ mod tests {
         assert!(
             output
                 .output
-                .contains("recommendations must be based only on fit")
+                .contains("SYNTHETIC-integration-listing-disclosure")
         );
         // End to end, not just in render_listing: a browse must never hand the
         // agent runnable setup, or it has no reason to call select.
@@ -2406,7 +2533,7 @@ mod tests {
             "browse leaked setup instructions: {}",
             output.output
         );
-        assert!(output.output.contains("action `select`"));
+        assert!(output.output.contains("SYNTHETIC-integration-listing-next"));
         let title = output.title.unwrap();
         assert_eq!(title, "payments", "{title}");
         let meta = output.metadata.unwrap();

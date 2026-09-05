@@ -1,0 +1,1 @@
+A notification will appear when the plan reaches a terminal state.

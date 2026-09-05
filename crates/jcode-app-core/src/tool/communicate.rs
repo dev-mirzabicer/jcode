@@ -894,27 +894,33 @@ async fn run_swarm_plan_in_background(
         .await;
     claim.record_task(&info.task_id);
 
-    let delivery_note = if wake {
-        "You'll be woken with the result when the plan reaches a terminal state."
-    } else if notify {
-        "A notification will appear when the plan reaches a terminal state."
-    } else {
-        "Notifications disabled. Use the `bg` tool to check status."
-    };
+    use crate::instruction::notification::Notification;
+    let delivery_note = super::background_notice::render(
+        if wake {
+            Notification::SwarmDriverWake
+        } else if notify {
+            Notification::SwarmDriverNotify
+        } else {
+            Notification::SwarmDriverSilent
+        },
+        ctx.working_dir.as_deref(),
+    );
+    let guidance = super::background_notice::render(
+        Notification::SwarmDriverBackground {
+            task_id: &info.task_id,
+        },
+        ctx.working_dir.as_deref(),
+    );
     let output = format!(
         "🐝 Swarm plan running in background.\n\n\
          Task ID: {}\n\
          Plan: {} node(s), {} mode\n\
          Output file: {}\n\n\
-         {}\n\
-         Check progress: use the `bg` tool with action=\"status\" and task_id=\"{}\", or `swarm plan_status`.\n\
-         Note: a server reload stops this driver (workers keep running); rerun `swarm run_plan` to resume driving the same plan.",
+         {delivery_note}\n{guidance}",
         info.task_id,
         initial_summary.item_count,
         initial_summary.mode,
         info.output_file.display(),
-        delivery_note,
-        info.task_id,
     );
 
     Ok(ToolOutput::new(output)
@@ -932,15 +938,29 @@ async fn run_swarm_plan_in_background(
 /// Hint appended to every `run_plan` driver failure: the driver exits without
 /// the end-of-run cleanup, so spawned workers keep running even when
 /// `retain_agents=false`, and the caller must know how to stop or resume them.
-const RUN_PLAN_WORKER_RETENTION_HINT: &str = "\nSpawned workers were retained; run `swarm cleanup` to stop them, rerun `swarm run_plan` to resume driving the same plan, or `swarm plan_status` to inspect.";
+#[derive(Debug)]
+struct WorkerRetentionError(String);
+impl std::fmt::Display for WorkerRetentionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for WorkerRetentionError {}
 
 /// Append the worker-retention hint to a driver failure message, idempotently
 /// so wrappers that re-report an already-hinted error do not duplicate it.
-fn with_worker_retention_hint(message: String) -> String {
-    if message.contains("swarm cleanup") {
-        message
+fn with_worker_retention_hint(
+    error: anyhow::Error,
+    working_dir: Option<&std::path::Path>,
+) -> anyhow::Error {
+    if error.is::<WorkerRetentionError>() {
+        error
     } else {
-        format!("{message}{RUN_PLAN_WORKER_RETENTION_HINT}")
+        let prose = super::background_notice::render(
+            crate::instruction::notification::Notification::SwarmDriverRetention,
+            working_dir,
+        );
+        anyhow::Error::new(WorkerRetentionError(format!("{error}\n{prose}")))
     }
 }
 
@@ -1044,6 +1064,7 @@ fn format_run_plan_terminal_summary(
     loop_count: usize,
     summary: &PlanGraphStatus,
     assignment_count: usize,
+    working_dir: Option<&std::path::Path>,
 ) -> String {
     let mut output = format!(
         "Swarm plan reached terminal/blocked state after {} loop(s). completed={} failed={} blocked={} cycles={} active={} assignments={}",
@@ -1063,8 +1084,12 @@ fn format_run_plan_terminal_summary(
     }
     if !summary.failed_ids.is_empty() {
         output.push_str(&format!(
-            "\nFailed nodes: {}. This run did NOT finish cleanly; inspect them with `swarm plan_status` and retry or salvage before trusting the result.",
-            summary.failed_ids.join(", ")
+            "\nFailed nodes: {}. {}",
+            summary.failed_ids.join(", "),
+            super::background_notice::render(
+                crate::instruction::notification::Notification::SwarmDriverFailedNodes,
+                working_dir
+            )
         ));
         // Recorded failure reasons make the summary self-explanatory: a wave
         // of "task failed: ... 401 Unauthorized" lines names the root cause
@@ -1180,14 +1205,21 @@ fn credential_login_fix_hint(provider: Option<&str>) -> String {
 /// Actionable pause message for a credential-failure wave: names the failed
 /// workers, the credential-shaped root cause, and the fix. Pure for unit
 /// testing; used both as the run error and as the swarm broadcast body.
-fn format_credential_failure_wave_error(wave: &CredentialFailureWave, window_secs: u64) -> String {
+fn format_credential_failure_wave_error(
+    wave: &CredentialFailureWave,
+    window_secs: u64,
+    working_dir: Option<&std::path::Path>,
+) -> String {
+    let login_hint = credential_login_fix_hint(wave.provider.as_deref());
+    let prose = super::background_notice::render(
+        crate::instruction::notification::Notification::SwarmDriverCredentials {
+            login_hint: &login_hint,
+        },
+        working_dir,
+    );
     format!(
         "run_plan paused dispatching: {count} worker(s) failed within {window_secs}s with \
-         credential/auth failures and no plan node has completed (e.g. {first}: \"{sample}\"). \
-         A broken credential (expired OAuth session, revoked refresh token, or invalid API key) \
-         fails every worker on that route, so assigning more nodes would only fail more of the \
-         plan. Fix auth first: run {login_hint} (or pin a working API-key route), then requeue \
-         the failed nodes (`swarm retry`) and run `swarm run_plan` again.",
+         credential/auth failures and no plan node has completed (e.g. {first}: \"{sample}\"). {prose}",
         count = wave.session_ids.len(),
         first = wave
             .session_ids
@@ -1195,7 +1227,6 @@ fn format_credential_failure_wave_error(wave: &CredentialFailureWave, window_sec
             .map(String::as_str)
             .unwrap_or("worker"),
         sample = wave.sample_detail,
-        login_hint = credential_login_fix_hint(wave.provider.as_deref()),
     )
 }
 
@@ -1230,9 +1261,10 @@ async fn run_swarm_plan_to_terminal(
     // path can forget it.
     match run_swarm_plan_loop(ctx, params, reporter).await {
         Ok(output) => Ok(output),
-        Err(error) => Err(anyhow::anyhow!(with_worker_retention_hint(
-            error.to_string()
-        ))),
+        Err(error) => Err(with_worker_retention_hint(
+            error,
+            ctx.working_dir.as_deref(),
+        )),
     }
 }
 
@@ -1297,8 +1329,11 @@ async fn run_swarm_plan_loop(
             summary.completed_ids.len(),
             CREDENTIAL_FAILURE_WAVE_WINDOW_SECS,
         ) {
-            let message =
-                format_credential_failure_wave_error(&wave, CREDENTIAL_FAILURE_WAVE_WINDOW_SECS);
+            let message = format_credential_failure_wave_error(
+                &wave,
+                CREDENTIAL_FAILURE_WAVE_WINDOW_SECS,
+                ctx.working_dir.as_deref(),
+            );
             reporter.checkpoint(&message).await;
             if let Err(error) = broadcast_plan_alert(ctx, &message).await {
                 reporter
@@ -1320,18 +1355,22 @@ async fn run_swarm_plan_loop(
             && summary.next_ready_ids.is_empty()
             && in_flight_sessions.is_empty();
         if no_more_runnable || terminal_count >= summary.item_count {
-            let mut output =
-                format_run_plan_terminal_summary(loop_count, &summary, assignment_count);
+            let mut output = format_run_plan_terminal_summary(
+                loop_count,
+                &summary,
+                assignment_count,
+                ctx.working_dir.as_deref(),
+            );
             output.push_str(&format!(
                 "\n{}",
                 utilization.report(concurrency_limit, is_deep)
             ));
             if !summary.low_confidence_ids.is_empty() {
                 output.push_str(&format!(
-                    "\nConfidence coverage: {} completed node(s) self-reported LOW confidence: {}. \
-                     Consider seeding follow-up nodes to shore these up before trusting the result.",
+                    "\nConfidence coverage: {} completed node(s) self-reported LOW confidence: {}. {}",
                     summary.low_confidence_ids.len(),
-                    summary.low_confidence_ids.join(", ")
+                    summary.low_confidence_ids.join(", "),
+                    super::background_notice::render(crate::instruction::notification::Notification::SwarmDriverLowConfidence, ctx.working_dir.as_deref())
                 ));
             }
             if retain_agents {
@@ -1473,9 +1512,13 @@ async fn run_swarm_plan_loop(
                     continue;
                 }
                 return Err(anyhow::anyhow!(
-                    "run_plan found {} active task(s) but no running swarm members to await after {} re-checks; inspect plan_status and member list before retrying",
+                    "run_plan found {} active task(s) but no running swarm members to await after {} re-checks; {}",
                     active_count,
-                    max_transient_stall_loops
+                    max_transient_stall_loops,
+                    super::background_notice::render(
+                        crate::instruction::notification::Notification::SwarmDriverNoMembers,
+                        ctx.working_dir.as_deref()
+                    )
                 ));
             }
             // Nothing was assigned this loop, nothing is in flight, yet the plan is
@@ -1500,9 +1543,13 @@ async fn run_swarm_plan_loop(
                 )
             };
             return Err(anyhow::anyhow!(
-                "run_plan stalled after {} loop(s): {}. This usually means a task is assigned to a session run_plan cannot drive (foreign or stale member). Reassign with an explicit target_session, or clear the stale assignment, then retry.",
+                "run_plan stalled after {} loop(s): {}. {}",
                 loop_count,
-                detail
+                detail,
+                super::background_notice::render(
+                    crate::instruction::notification::Notification::SwarmDriverStalled,
+                    ctx.working_dir.as_deref()
+                )
             ));
         }
         // Baseline for requeue pickup: everything ready at the top of this

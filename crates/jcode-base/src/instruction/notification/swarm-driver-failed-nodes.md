@@ -1,0 +1,1 @@
+This run did NOT finish cleanly; inspect them with `swarm plan_status` and retry or salvage before trusting the result.

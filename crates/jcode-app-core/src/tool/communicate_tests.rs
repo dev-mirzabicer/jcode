@@ -598,26 +598,24 @@ fn cap_recovery_prefers_cleanup_then_reuse_then_gives_up() {
 
 #[test]
 fn run_plan_driver_failures_carry_worker_retention_hint() {
-    // Every driver-failure path must tell the caller the spawned workers are
-    // still running and how to stop them.
+    let source = crate::tool::background_notice::TestHome::new();
+    source.write("swarm-driver-retention", "SYNTHETIC-RETENTION");
     let hinted = super::with_worker_retention_hint(
-        "run_plan stalled after 3 loop(s): no ready tasks and no in-flight workers.".to_string(),
+        anyhow::anyhow!("original failure mentions swarm cleanup as data"),
+        None,
     );
-    assert!(hinted.contains("Spawned workers were retained"));
-    assert!(hinted.contains("swarm cleanup"));
-
-    // Max-loops keeps its intentional retention-for-inspection wording but
-    // still gains the actionable hint.
-    let max_loops = super::with_worker_retention_hint(
-        "run_plan exceeded 200 coordination loops; leaving workers untouched for inspection"
-            .to_string(),
+    let once = hinted.to_string();
+    assert!(once.ends_with("\nSYNTHETIC-RETENTION"));
+    let twice = super::with_worker_retention_hint(hinted, None);
+    assert_eq!(twice.to_string(), once);
+    source.write("swarm-driver-retention", "{{invalid}}");
+    let failed = super::with_worker_retention_hint(anyhow::anyhow!("original failure"), None);
+    assert!(failed.to_string().starts_with("original failure\n"));
+    assert!(
+        failed
+            .to_string()
+            .contains("Background instruction rendering failed:")
     );
-    assert!(max_loops.contains("swarm cleanup"));
-
-    // Idempotent: re-wrapping (e.g. the background wrapper re-reporting the
-    // error) must not duplicate the hint.
-    let twice = super::with_worker_retention_hint(hinted.clone());
-    assert_eq!(twice.matches("Spawned workers were retained").count(), 1);
 }
 
 #[test]
@@ -642,11 +640,11 @@ fn run_plan_terminal_summary_reports_failed_nodes() {
         grown_count: 0,
     };
 
-    let with_failures = super::format_run_plan_terminal_summary(5, &base, 7);
+    let with_failures = synthetic_terminal_summary(5, &base, 7);
     assert!(with_failures.contains("completed=2"));
     assert!(with_failures.contains("failed=2"));
     assert!(with_failures.contains("Failed nodes: c, d"));
-    assert!(with_failures.contains("did NOT finish cleanly"));
+    assert!(with_failures.contains("SYNTHETIC-FAILED-NODES"));
 
     // A clean run reports failed=0 and no failure callout.
     let clean = crate::protocol::PlanGraphStatus {
@@ -660,7 +658,7 @@ fn run_plan_terminal_summary_reports_failed_nodes() {
         failed_reasons: Default::default(),
         ..base
     };
-    let clean_summary = super::format_run_plan_terminal_summary(5, &clean, 7);
+    let clean_summary = synthetic_terminal_summary(5, &clean, 7);
     assert!(clean_summary.contains("failed=0"));
     assert!(!clean_summary.contains("Failed nodes"));
 }
@@ -1659,7 +1657,7 @@ fn credential_failure_wave_detected_for_recent_auth_failed_workers() {
     assert_eq!(wave.sample_detail, "Anthropic API error (401 Unauthorized)");
     assert_eq!(wave.provider.as_deref(), Some("anthropic"));
 
-    let message = super::format_credential_failure_wave_error(&wave, 60);
+    let message = synthetic_credential_error(&wave, 60);
     assert!(message.contains("paused dispatching"));
     assert!(message.contains("3 worker(s)"));
     assert!(message.contains("401 Unauthorized"));
@@ -1781,7 +1779,7 @@ fn run_plan_terminal_summary_includes_recorded_failure_reasons() {
         seeded_count: 0,
         grown_count: 0,
     };
-    let output = super::format_run_plan_terminal_summary(3, &summary, 2);
+    let output = synthetic_terminal_summary(3, &summary, 2);
     assert!(output.contains("Failed nodes: c"));
     assert!(
         output.contains("c: task failed: Anthropic API error (401 Unauthorized)"),
@@ -1798,3 +1796,18 @@ fn run_plan_terminal_summary_includes_recorded_failure_reasons() {
 include!("communicate_tests/input_format.rs");
 include!("communicate_tests/end_to_end.rs");
 include!("communicate_tests/assignment.rs");
+
+fn synthetic_terminal_summary(
+    loops: usize,
+    summary: &crate::protocol::PlanGraphStatus,
+    assignments: usize,
+) -> String {
+    let source = crate::tool::background_notice::TestHome::new();
+    source.write("swarm-driver-failed-nodes", "SYNTHETIC-FAILED-NODES");
+    super::format_run_plan_terminal_summary(loops, summary, assignments, None)
+}
+fn synthetic_credential_error(wave: &super::CredentialFailureWave, window: u64) -> String {
+    let source = crate::tool::background_notice::TestHome::new();
+    source.write("swarm-driver-credentials", "SYNTHETIC {{login_hint}}");
+    super::format_credential_failure_wave_error(wave, window, None)
+}

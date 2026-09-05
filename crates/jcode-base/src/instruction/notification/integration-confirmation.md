@@ -1,0 +1,1 @@
+Consequential actions (signups, spending) must note that setup is provided through a Jcode integration in the confirmation shown to the user.

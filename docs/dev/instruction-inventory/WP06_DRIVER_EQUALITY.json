@@ -1,0 +1,98 @@
+[
+  {
+    "bytes": 503,
+    "case": "credentials",
+    "equal": true,
+    "sha256": "8086694d479d343479eaa99d1255013b19af01c5390dd09ce988e8c07a59eb24"
+  },
+  {
+    "bytes": 499,
+    "case": "credentials",
+    "equal": true,
+    "sha256": "1b02b4b6811860957a8e230b52b2c0b35e06550e19a3f25473d5ab11da9d780d"
+  },
+  {
+    "bytes": 499,
+    "case": "credentials",
+    "equal": true,
+    "sha256": "702b4f00bcb1a202cc78652d258b28077ff7d241e34ccec72018cafc86c86b25"
+  },
+  {
+    "bytes": 499,
+    "case": "credentials",
+    "equal": true,
+    "sha256": "3d9397ffc009039dbec9d0a36d562b588b92b1ad79f49dc0438b25377ebbc927"
+  },
+  {
+    "bytes": 499,
+    "case": "credentials",
+    "equal": true,
+    "sha256": "7b146b59c5ec6024aeef0c68abfe7536cc5ad4eaa04a0d52e0d5ece8cf997ccb"
+  },
+  {
+    "bytes": 379,
+    "case": "terminal-failed",
+    "equal": true,
+    "sha256": "2c5506c9befe420f27d5e42d63715876b35c7d625950ad1c24cacbf0c6bd3495"
+  },
+  {
+    "bytes": 291,
+    "case": "terminal-failed",
+    "equal": true,
+    "sha256": "c054b6b7f697c530cc1fdf579555b2a0e06d4e7a181b20d65682676aee9759c2"
+  },
+  {
+    "bytes": 121,
+    "case": "terminal-clean",
+    "equal": true,
+    "sha256": "9248dc850089465ed63f2e855a4ef5bdeb1d131d12502131aed9fc2d72d47bd3"
+  },
+  {
+    "bytes": 173,
+    "case": "retention",
+    "equal": true,
+    "sha256": "8d6db9b6e8fb7ab13ee0d4a5b75ae8dac404be46c9877d1034db1902acbaa8db"
+  },
+  {
+    "bytes": 71,
+    "case": "swarm-driver-wake",
+    "equal": true,
+    "sha256": "0dae255de11bf1f55d5482a88444498d236222ed2a371d9f02918fda73593f09"
+  },
+  {
+    "bytes": 66,
+    "case": "swarm-driver-notify",
+    "equal": true,
+    "sha256": "eb2ada44f2d8c31ba6b59fd36460a6fc859cca65a74f2f36f805847f73d1cf18"
+  },
+  {
+    "bytes": 58,
+    "case": "swarm-driver-silent",
+    "equal": true,
+    "sha256": "b084bfcac6d183c344ddcd86eae29f61508a8162028c835fb6d65c66f959e708"
+  },
+  {
+    "bytes": 221,
+    "case": "background-guidance",
+    "equal": true,
+    "sha256": "08ad5946a36cc1e66b05fdd6e16a350b6cc06755ca938f2c20ef4aeb206af175"
+  },
+  {
+    "bytes": 78,
+    "case": "swarm-driver-low-confidence",
+    "equal": true,
+    "sha256": "35295d8acd97458046f34b8b5a429c0c486cdf7aac85abc2dfc668f9a645a515"
+  },
+  {
+    "bytes": 51,
+    "case": "swarm-driver-no-members",
+    "equal": true,
+    "sha256": "fe28e2ab081c09efc2500d18c2eb4396e9d8f1e05c7c61b14a977ed1ab5c2aa8"
+  },
+  {
+    "bytes": 184,
+    "case": "swarm-driver-stalled",
+    "equal": true,
+    "sha256": "2ff464f8faacd1960f35b591ebb4c7c22816212fd039bb5d63ed39ea6b447b6c"
+  }
+]

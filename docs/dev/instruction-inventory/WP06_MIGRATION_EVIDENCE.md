@@ -74,6 +74,14 @@ Rows `INS-NTF-016`, `INS-NTF-017`, `INS-NTF-036` and `INS-NTF-038` now use manag
 
 [`WP06_COORDINATION_EQUALITY.json`](WP06_COORDINATION_EQUALITY.json) records 16 comparisons across all migrated announcements, rejection reason presence and both file-activity directions with all summary/intent combinations. The probe was removed. Plan, coordinator, file-activity and synthetic source-update/failure tests pass. Former coordinator/plan prose assertions use synthetic resources. Strict all-target Clippy passes for base, app-core and TUI.
 
+## Integration selection and plan-driver recovery
+
+Rows `INS-NTF-031` and `INS-NTF-032` now use managed integration guidance and plan-driver continuation/recovery prose. Validated catalog receipts, provider/setup data, IDs, error causes, failure counts, login-route selection, task state, driver limits and cleanup policies remain code-owned. Instruction rendering failures are explicit without discarding an already-recorded selection or started driver receipt.
+
+Retention-hint idempotency now uses a typed in-process error marker rather than searching error prose for `swarm cleanup`. This allows arbitrary edited guidance and stops incidental error data from suppressing the hint. It does not change driver retry or worker-retention policy. A previously untyped error containing that phrase now correctly receives guidance, which is a narrow recognition correction, not a seed wording change.
+
+`WP06_DISCOVERY_EQUALITY.json` compares eleven full production outputs against the exact pre-migration production functions. `WP06_DRIVER_EQUALITY.json` compares sixteen driver outputs/sections across provider routes, terminal states and recovery branches. Both probes were removed. Discovery's complete suite, local HTTP receipt tests, credential-wave tests, structural retention tests and terminal-summary tests pass. Strict all-target Clippy passes for base, app-core and TUI. Permanent managed-prose tests use synthetic sources.
+
 ## Approved scope and UI clarification
 
 Mirza authorized the recommended corrections on 2026-09-05. `INS-NTF-001` remains a code-owned environment-fact record. Todo controls will receive structural queue/history identity and server-owned remote source rendering. The reproduced mixed-queue UI defect must retain the user's text without changing combined model-visible bytes. These clarifications do not constitute work-package acceptance.

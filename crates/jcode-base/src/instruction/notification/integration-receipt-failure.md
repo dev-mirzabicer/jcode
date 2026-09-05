@@ -1,0 +1,1 @@
+Retry action `select` with the same product, including off-catalog products. Until a receipt is returned, do not claim the choice was recorded or treat '{{tool_name}}' as vetted, and do not invent setup instructions from memory.

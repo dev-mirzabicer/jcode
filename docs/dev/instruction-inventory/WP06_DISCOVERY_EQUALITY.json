@@ -1,0 +1,68 @@
+[
+  {
+    "bytes": 397,
+    "case": "listing",
+    "equal": true,
+    "sha256": "9c410780c6ee74b833164773ae2ee65050ccf1983f45ed3d1ab2b511967d9ecc"
+  },
+  {
+    "bytes": 813,
+    "case": "listing",
+    "equal": true,
+    "sha256": "7b57b30bfd678738e6e0d6f4a10534bb5b6ce2c9709fa771331bdd0735a707e6"
+  },
+  {
+    "bytes": 836,
+    "case": "listing",
+    "equal": true,
+    "sha256": "8b6a6510c304fbc697d20de2637dc86308c81801a22d1376d50b46e222c38769"
+  },
+  {
+    "bytes": 284,
+    "case": "selection",
+    "equal": true,
+    "sha256": "b5abcf7267fbe3f843467f7f848d54206cf9112a4027079abeb4c25242708a56"
+  },
+  {
+    "bytes": 323,
+    "case": "selection",
+    "equal": true,
+    "sha256": "ff3e0f1a1f831148b8c7f4a4dc098343708f47b2f74305e1275e5aab49e24f8e"
+  },
+  {
+    "bytes": 345,
+    "case": "selection",
+    "equal": true,
+    "sha256": "bbcda33cab6c7d5c263bfd2a437d4e48c6d820c1226b59566ce8c596c64c2654"
+  },
+  {
+    "bytes": 344,
+    "case": "receipt-failure",
+    "equal": true,
+    "sha256": "f9d3d1cf8d5c5e481cb75e4da19df71210770873a98c46001f541e1ecae024de"
+  },
+  {
+    "bytes": 323,
+    "case": "suggestion",
+    "equal": true,
+    "sha256": "f5314ad77ff50e5c2cabbdd5ab08ca50026de2273391a3bd91aa0b9ccecf75be"
+  },
+  {
+    "bytes": 330,
+    "case": "suggestion",
+    "equal": true,
+    "sha256": "03c3332bfa931474a71ae19c9a20710def3e27a4f8090087bd4697ff9b06843e"
+  },
+  {
+    "bytes": 433,
+    "case": "suggestion",
+    "equal": true,
+    "sha256": "d70751abb5a82d70b95042ebae7f0ea1173992336f44703889bf54f26e4a4055"
+  },
+  {
+    "bytes": 440,
+    "case": "suggestion",
+    "equal": true,
+    "sha256": "b5278b8efc67c116ad73eec697c7dcb3aa4abb96893327cb0832c588edcdec5e"
+  }
+]

@@ -1,0 +1,2 @@
+Check progress: use the `bg` tool with action="status" and task_id="{{task_id}}", or `swarm plan_status`.
+Note: a server reload stops this driver (workers keep running); rerun `swarm run_plan` to resume driving the same plan.

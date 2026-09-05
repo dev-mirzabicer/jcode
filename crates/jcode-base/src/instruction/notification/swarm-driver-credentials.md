@@ -1,0 +1,1 @@
+A broken credential (expired OAuth session, revoked refresh token, or invalid API key) fails every worker on that route, so assigning more nodes would only fail more of the plan. Fix auth first: run {{login_hint}} (or pin a working API-key route), then requeue the failed nodes (`swarm retry`) and run `swarm run_plan` again.
