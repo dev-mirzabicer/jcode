@@ -19,6 +19,7 @@ use super::{
     update_member_status_with_report,
 };
 use crate::agent::Agent;
+use crate::instruction::notification::Notification;
 use crate::protocol::ServerEvent;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -29,11 +30,28 @@ type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
 
 pub(super) struct TrackedLiveTurn {
     pub(super) message: String,
-    pub(super) system_reminder: Option<String>,
+    pub(super) system_reminder: Option<LiveTurnReminder>,
     pub(super) display_role: Option<crate::session::StoredDisplayRole>,
     pub(super) unattended_context:
         Option<jcode_session_types::StoredUnattendedContextAuthorization>,
     pub(super) status_detail: Option<String>,
+}
+
+pub(super) enum LiveTurnReminder {
+    /// Already-rendered recovery text remains owned by the recovery subsystem.
+    Rendered(String),
+    Managed(Notification<'static>),
+}
+
+impl LiveTurnReminder {
+    fn render(self, agent: &Agent) -> anyhow::Result<String> {
+        match self {
+            Self::Rendered(text) => Ok(text),
+            Self::Managed(notification) => {
+                Ok(notification.render(agent.working_dir().map(std::path::Path::new))?)
+            }
+        }
+    }
 }
 
 /// Swarm bookkeeping handles needed to keep member status accurate around a
@@ -121,32 +139,43 @@ pub(super) async fn spawn_tracked_live_turn(
     let session_id = session_id.to_string();
     tokio::spawn(async move {
         let unattended = turn.unattended_context.is_some();
-        let start_message_index = {
+        let (start_message_index, reminder) = {
             let agent_guard = agent.lock().await;
-            agent_guard.message_count()
+            (
+                agent_guard.message_count(),
+                turn.system_reminder
+                    .map(|reminder| reminder.render(&agent_guard))
+                    .transpose(),
+            )
         };
-        let result = if let Some(display_role) = turn.display_role {
-            let mut agent = agent.lock().await;
-            agent
-                .run_once_streaming_mpsc_with_display_role_and_unattended(
+        // A render failure follows the same visible terminal-error path as a
+        // failed turn. It must not masquerade as a busy-session queue fallback.
+        let result = async {
+            let system_reminder = reminder?;
+            if let Some(display_role) = turn.display_role {
+                let mut agent = agent.lock().await;
+                agent
+                    .run_once_streaming_mpsc_with_display_role_and_unattended(
+                        &turn.message,
+                        vec![],
+                        system_reminder,
+                        event_tx.clone(),
+                        Some(display_role),
+                        turn.unattended_context,
+                    )
+                    .await
+            } else {
+                process_message_streaming_mpsc(
+                    Arc::clone(&agent),
                     &turn.message,
                     vec![],
-                    turn.system_reminder,
+                    system_reminder,
                     event_tx.clone(),
-                    Some(display_role),
-                    turn.unattended_context,
                 )
                 .await
-        } else {
-            process_message_streaming_mpsc(
-                Arc::clone(&agent),
-                &turn.message,
-                vec![],
-                turn.system_reminder,
-                event_tx.clone(),
-            )
-            .await
-        };
+            }
+        }
+        .await;
         match result {
             Ok(()) => {
                 let completion_report = {
@@ -209,7 +238,7 @@ pub(super) async fn spawn_tracked_live_turn(
 pub(super) async fn run_live_turn_if_idle(
     session_id: &str,
     message: &str,
-    system_reminder: Option<String>,
+    system_reminder: Option<LiveTurnReminder>,
     sessions: &SessionAgents,
     swarm: LiveTurnSwarmContext,
 ) -> bool {

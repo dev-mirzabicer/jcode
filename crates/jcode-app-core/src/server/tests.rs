@@ -204,6 +204,7 @@ fn configure_test_env(root: &tempfile::TempDir) -> EnvGuard {
 #[derive(Default, Clone)]
 struct StreamingMockProvider {
     responses: Arc<StdMutex<Vec<Vec<StreamEvent>>>>,
+    requests: Arc<StdMutex<Vec<Vec<Message>>>>,
 }
 
 impl StreamingMockProvider {
@@ -219,11 +220,12 @@ impl StreamingMockProvider {
 impl Provider for StreamingMockProvider {
     async fn complete(
         &self,
-        _messages: &[Message],
+        messages: &[Message],
         _tools: &[ToolDefinition],
         _system: &str,
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
+        self.requests.lock().unwrap().push(messages.to_vec());
         let response = self
             .responses
             .lock()
@@ -245,6 +247,8 @@ async fn test_agent(provider: Arc<dyn Provider>) -> Arc<Mutex<Agent>> {
     let registry = Registry::new(provider.clone()).await;
     Arc::new(Mutex::new(Agent::new(provider, registry)))
 }
+
+include!("notification_wake_tests.rs");
 
 #[allow(clippy::type_complexity)]
 fn empty_swarm_status_state() -> (
@@ -449,7 +453,9 @@ async fn wake_turn_tracks_member_status_and_emits_terminal_done() {
     let started = super::live_turn::run_live_turn_if_idle(
         &session_id,
         "DM from coordinator: please respond",
-        Some("You received a direct swarm message.".to_string()),
+        Some(super::live_turn::LiveTurnReminder::Rendered(
+            "synthetic reminder".to_string(),
+        )),
         &sessions,
         super::live_turn::LiveTurnSwarmContext::new(
             &swarm_members,

@@ -1106,7 +1106,7 @@ pub(super) async fn handle_resume_all_sessions(
             Arc::clone(&agent),
             super::live_turn::TrackedLiveTurn {
                 message: String::new(),
-                system_reminder: Some(reminder),
+                system_reminder: Some(super::live_turn::LiveTurnReminder::Rendered(reminder)),
                 display_role: None,
                 unattended_context: None,
                 status_detail: Some("resuming interrupted session".to_string()),

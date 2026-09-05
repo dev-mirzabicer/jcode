@@ -1,0 +1,1 @@
+You just received a swarm channel message in #{{channel}} from {{sender}}. Review it and respond or act if useful.

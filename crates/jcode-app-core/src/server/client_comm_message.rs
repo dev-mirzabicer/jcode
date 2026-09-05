@@ -1,9 +1,10 @@
-use super::live_turn::{LiveTurnSwarmContext, run_live_turn_if_idle};
+use super::live_turn::{LiveTurnReminder, LiveTurnSwarmContext, run_live_turn_if_idle};
 use super::{
     ClientConnectionInfo, SessionInterruptQueues, SwarmEvent, SwarmEventType, SwarmMember,
     fanout_session_event, queue_soft_interrupt_for_session, record_swarm_event, truncate_detail,
 };
 use crate::agent::Agent;
+use crate::instruction::notification::Notification;
 use crate::protocol::{CommDeliveryMode, NotificationType, ServerEvent};
 use jcode_agent_runtime::SoftInterruptSource;
 use jcode_swarm_core::ChannelIndex;
@@ -306,21 +307,18 @@ pub(super) async fn handle_comm_message(
                 let sender_name = friendly_name
                     .clone()
                     .unwrap_or_else(|| from_session.clone());
-                let reminder = match scope {
-                    "dm" => Some(format!(
-                        "You just received a direct swarm message from {}. Review it and respond or act if useful.",
-                        sender_name
-                    )),
-                    "channel" => Some(format!(
-                        "You just received a swarm channel message in #{} from {}. Review it and respond or act if useful.",
-                        channel.clone().unwrap_or_else(|| "channel".to_string()),
-                        sender_name
-                    )),
-                    _ => Some(format!(
-                        "You just received a swarm broadcast from {}. Review it and respond or act if useful.",
-                        sender_name
-                    )),
-                };
+                let reminder = Some(LiveTurnReminder::Managed(match scope {
+                    "dm" => Notification::SwarmMessageDirect {
+                        sender: sender_name,
+                    },
+                    "channel" => Notification::SwarmMessageChannel {
+                        channel: channel.clone().unwrap_or_else(|| "channel".to_string()),
+                        sender: sender_name,
+                    },
+                    _ => Notification::SwarmMessageBroadcast {
+                        sender: sender_name,
+                    },
+                }));
 
                 match delivery_mode {
                     CommDeliveryMode::Notify => {}

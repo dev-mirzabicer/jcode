@@ -1,0 +1,1 @@
+You just received a swarm broadcast from {{sender}}. Review it and respond or act if useful.

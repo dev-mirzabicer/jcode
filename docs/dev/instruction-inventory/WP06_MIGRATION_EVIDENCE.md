@@ -25,3 +25,11 @@ Control rendering is lazy inside the existing batch builders. Empty plans and re
 [`WP06_STARTUP_EQUALITY.json`](WP06_STARTUP_EQUALITY.json) records six passing one-time comparisons using the real owner formatters: initial, late and all four active stale states. Attribute fixtures include XML metacharacters. The diagnostic `Current` arm remains unreachable for real stale notifications and retains its existing debug assertion. No prose exception was taken. The disposable equality test was removed.
 
 The final run for this slice passed 55 permanent Startup Context tests plus the disposable equality test. New production-path synthetic journeys cover later-occurrence freshness, exact earlier messages, receipt IDs and counts, unchanged roles/timestamps/order, empty content, invalid-content rollback, lazy no-event behavior, and prepared late-text persistence after source edits. Strict library Clippy passed for base, app-core and TUI.
+
+## Server wake reminders
+
+Rows `INS-NTF-014`, `INS-NTF-015` and the instruction portion of `INS-NTF-037` use managed background-completion, Swarm-await and DM/channel/broadcast wake guidance. Existing peer envelopes and raw peer text remain delivery-owned runtime data. Notification fanout, busy-session soft queues and wake selection remain unchanged.
+
+The tracked-turn owner resolves a managed reminder using the recipient Agent's working directory only after the wake path selects that live session. An invalid reminder produces the existing terminal Error event and failed status without a provider call or transcript append. It is not converted into the busy-session fallback queue. Already-rendered reload recovery text remains with its excluded owner.
+
+[`WP06_WAKE_EQUALITY.json`](WP06_WAKE_EQUALITY.json) records five exact comparisons, including channel/sender substitution without escaping. The one-time probe was removed. A real tracked-turn test with a recording provider verifies invalid project shadowing, zero provider calls on failure, current project prose on the next occurrence, and no rendering/dispatch while busy. Existing wake and background delivery suites pass. Strict all-target Clippy passed for base, app-core and TUI.

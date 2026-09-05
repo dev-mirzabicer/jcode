@@ -44,6 +44,11 @@ macro_rules! notifications {
 }
 
 notifications! {
+    BackgroundTaskCompleted => ("background-task-completed", "server background completion wake", Plain),
+    SwarmAwaitCompleted => ("swarm-await-completed", "server swarm await wake", Plain),
+    SwarmMessageDirect { sender: String } => ("swarm-message-delivery-dm", "server peer-message wake", Handlebars),
+    SwarmMessageChannel { channel: String, sender: String } => ("swarm-message-delivery-channel", "server peer-message wake", Handlebars),
+    SwarmMessageBroadcast { sender: String } => ("swarm-message-delivery-broadcast", "server peer-message wake", Handlebars),
     StartupContextInitial => ("startup-context-initial", "Startup Context session install", Plain),
     StartupContextUpdate => ("startup-context-update", "Startup Context late apply", Plain),
     StartupContextStaleChanged => ("startup-context-stale-changed", "Startup Context observation", Handlebars),

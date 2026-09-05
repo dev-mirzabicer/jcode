@@ -1,9 +1,10 @@
-use super::live_turn::{LiveTurnSwarmContext, run_live_turn_if_idle};
+use super::live_turn::{LiveTurnReminder, LiveTurnSwarmContext, run_live_turn_if_idle};
 use super::state::SwarmEvent;
 use super::{
     SessionAgents, SessionInterruptQueues, SwarmMember, fanout_session_event,
     queue_soft_interrupt_for_session,
 };
+use crate::instruction::notification::Notification;
 use crate::message::{
     format_background_task_notification_markdown, format_background_task_progress_markdown,
 };
@@ -58,10 +59,9 @@ pub(super) async fn dispatch_background_task_completion(
         && !run_live_turn_if_idle(
             &task.session_id,
             &notification,
-            Some(
-                "A background task for this session just finished. Review the completion message and continue if useful."
-                    .to_string(),
-            ),
+            Some(LiveTurnReminder::Managed(
+                Notification::BackgroundTaskCompleted,
+            )),
             sessions,
             LiveTurnSwarmContext::new(
                 swarm_members,
@@ -138,10 +138,7 @@ pub(super) async fn dispatch_swarm_await_completion(
     if !run_live_turn_if_idle(
         &event.session_id,
         &event.notification,
-        Some(
-            "A swarm await you started just resolved. Review the result and continue if useful."
-                .to_string(),
-        ),
+        Some(LiveTurnReminder::Managed(Notification::SwarmAwaitCompleted)),
         sessions,
         LiveTurnSwarmContext::new(
             swarm_members,

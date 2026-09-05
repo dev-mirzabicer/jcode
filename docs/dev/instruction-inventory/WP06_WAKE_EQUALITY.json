@@ -1,0 +1,32 @@
+[
+  {
+    "bytes": 103,
+    "equal": true,
+    "resource": "background-task-completed",
+    "sha256": "36473950fd60e3e31e3688136109280300df58d4147c5d3de84b1df2c40cfc27"
+  },
+  {
+    "bytes": 82,
+    "equal": true,
+    "resource": "swarm-await-completed",
+    "sha256": "6d52a8311b7938867c8c92e6b289467c48b307bf4b535ac0394814bd916b4041"
+  },
+  {
+    "bytes": 96,
+    "equal": true,
+    "resource": "swarm-message-delivery-dm",
+    "sha256": "85de212d8be1167c5aaa226c74929a8de7ca766298d9d512cf2ecc7e0e32ffc5"
+  },
+  {
+    "bytes": 112,
+    "equal": true,
+    "resource": "swarm-message-delivery-channel",
+    "sha256": "ac34ae113709d6402fae9fc6bb961e8574756964e7b54558bc88ec4e0bf1ed54"
+  },
+  {
+    "bytes": 91,
+    "equal": true,
+    "resource": "swarm-message-delivery-broadcast",
+    "sha256": "613d5c843ed1f60f1d169ebc0b8bd5381cb892a0fee74df8e6891db8e72e94b5"
+  }
+]
