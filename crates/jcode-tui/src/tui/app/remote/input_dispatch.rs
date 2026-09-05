@@ -229,6 +229,15 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
 ) -> Result<()> {
     let raw_input = prepared.raw_input.clone();
 
+    // The skill parser returns a fallback for every identifier-shaped slash
+    // token. Built-ins must get their existing dispatcher first, just as they
+    // do in local submit_input, or /skills and /config become skill names.
+    if super::super::commands_dispatch::dispatch_local_command(app, prepared.expanded.trim()) {
+        app.pending_images.extend(prepared.images);
+        crate::telemetry::record_command_family(prepared.expanded.trim());
+        return Ok(());
+    }
+
     // Text that merely starts with `/` is not necessarily a command. A terminal
     // file drop (`/tmp/shot.png`) or a bare path (`/home/me/notes`) is ordinary
     // user input. Routing those through `App::submit_input` stages a *local*

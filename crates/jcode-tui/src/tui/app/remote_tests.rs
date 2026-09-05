@@ -76,6 +76,53 @@ fn ensure_test_jcode_home_if_unset() {
 }
 
 #[test]
+fn remote_enter_preserves_shared_builtin_command_dispatch() {
+    let _env = crate::storage::lock_test_env();
+    for command in ["/skills", "/config", "/help", "/version", "/config show"] {
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.runtime_mode = crate::tui::app::AppRuntimeMode::RemoteClient;
+        app.input = command.to_string();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        let peer = remote.take_dummy_peer().unwrap();
+        remote.mark_history_loaded();
+        runtime
+            .block_on(crate::tui::app::remote::handle_remote_key(
+                &mut app,
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+                &mut remote,
+            ))
+            .unwrap();
+        let line = runtime.block_on(async {
+            use tokio::io::AsyncBufReadExt;
+            let mut reader = tokio::io::BufReader::new(peer);
+            let mut line = String::new();
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                reader.read_line(&mut line),
+            )
+            .await;
+            line
+        });
+        assert!(
+            !line.contains("activate_skill"),
+            "builtin {command} routed as skill: {line}"
+        );
+        assert!(!app.is_processing, "builtin {command} started a turn");
+        assert!(app.active_skill.is_none());
+        assert!(
+            !app.display_messages().is_empty()
+                || app.inline_interactive_state.is_some()
+                || app.help_scroll.is_some(),
+            "builtin {command} produced no UI result"
+        );
+    }
+}
+
+#[test]
 fn reload_handoff_active_when_server_flag_is_set() {
     let state = RemoteRunState {
         server_reload_in_progress: true,
