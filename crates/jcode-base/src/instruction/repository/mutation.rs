@@ -169,7 +169,9 @@ where
     let git = GitRepository::new(&repository.root);
     if let Some(commit) = git.find_operation_commit(&request.operation_id)? {
         let changed_paths = affected_paths(&request.mutations);
-        git.refresh_index_paths(&changed_paths)?;
+        // Completion is evidence, not permission to overwrite index entries
+        // staged after the original action. Inspection exposes any remaining
+        // index/worktree difference after an interrupted publication.
         return Ok(InstructionCommitOutcome {
             disposition: InstructionCommitDisposition::AlreadyCommitted,
             commit,
@@ -179,7 +181,6 @@ where
     let _lease = acquire_mutation_lease(state_root, repository, &request.operation_id)?;
     if let Some(commit) = git.find_operation_commit(&request.operation_id)? {
         let changed_paths = affected_paths(&request.mutations);
-        git.refresh_index_paths(&changed_paths)?;
         return Ok(InstructionCommitOutcome {
             disposition: InstructionCommitDisposition::AlreadyCommitted,
             commit,

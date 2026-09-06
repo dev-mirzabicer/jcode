@@ -71,6 +71,12 @@ Submodule, external-checkout, and standalone setup also carry operation identiti
 
 Ordinary operations do not offer reset, rebase, force push, commit deletion, or history rewrite.
 
+Completed-operation recovery matches the exact operation trailer, not an ID
+prefix or incidental commit-subject text. Recognizing a published Save does not
+refresh the ordinary index again: the user may have staged newer target content
+since that Save. If interruption left an index/worktree difference, inspection
+shows it rather than silently resetting it during a retry.
+
 ## Explicit synchronization
 
 Fetch, pull, push, branch checkout, branch creation, remote configuration, and repository setup are explicit operations. Jcode never automatically pulls or pushes.

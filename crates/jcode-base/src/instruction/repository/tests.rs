@@ -689,6 +689,60 @@ fn generic_commit_rejects_an_invalid_store_manifest() {
 }
 
 #[test]
+fn completed_operation_lookup_requires_exact_identity() {
+    let fixture = Fixture::new();
+    let repository = fixture.initialize().repository;
+    draft_commit(
+        &fixture.service,
+        &repository,
+        "modules/common.md",
+        &managed("common", "module", "first"),
+        "save-longer",
+    );
+    assert_eq!(
+        fixture
+            .service
+            .completed_operation_commit(&repository, "save")
+            .unwrap(),
+        None
+    );
+}
+
+#[test]
+fn completed_save_retry_preserves_newer_staged_target() {
+    let fixture = Fixture::new();
+    let repository = fixture.initialize().repository;
+    let draft = fixture
+        .service
+        .open_draft(&repository, "modules/common.md")
+        .unwrap();
+    let request = InstructionCommitRequest {
+        operation_id: "save-preserve-stage".into(),
+        message: "instruction: update common".into(),
+        expected_head: draft.base_head,
+        expected_files: vec![draft.base],
+        mutations: vec![InstructionFileMutation::Write {
+            relative_path: "modules/common.md".into(),
+            content: managed("common", "module", "saved").into_bytes(),
+        }],
+    };
+    let committed = fixture.service.commit(&repository, &request).unwrap();
+    std::fs::write(
+        repository.root.join("modules/common.md"),
+        managed("common", "module", "new staged intent"),
+    )
+    .unwrap();
+    git(&repository.root, &["add", "modules/common.md"]);
+    let index = std::fs::read(repository.root.join(".git/index")).unwrap();
+    let retry = fixture.service.commit(&repository, &request).unwrap();
+    assert_eq!(retry.commit, committed.commit);
+    assert_eq!(
+        std::fs::read(repository.root.join(".git/index")).unwrap(),
+        index
+    );
+}
+
+#[test]
 fn history_compare_restore_clear_rename_and_multi_delete_create_new_commits() {
     let fixture = Fixture::new();
     let initialized = fixture.initialize();

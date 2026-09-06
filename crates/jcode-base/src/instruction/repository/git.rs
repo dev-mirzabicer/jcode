@@ -350,15 +350,23 @@ impl GitRepository {
             "--grep",
             &pattern,
             "--format=%H",
-            "-n",
-            "1",
         ])?;
         if !output.status.success() {
             return Err(git_failure("find completed operation", &self.root, output));
         }
-        let commit = utf8_stdout("find completed operation", output)?;
-        let commit = commit.trim();
-        Ok((!commit.is_empty()).then(|| commit.to_string()))
+        // Git's fixed-string grep still matches substrings. An operation is a
+        // complete trailer value, not a prefix or incidental subject text.
+        for commit in utf8_stdout("find completed operation", output)?.lines() {
+            validate_commit_id(commit)?;
+            let body = self.checked_utf8(
+                "read operation identity",
+                ["show", "-s", "--format=%B", commit],
+            )?;
+            if body.lines().rev().find(|line| !line.trim().is_empty()) == Some(pattern.as_str()) {
+                return Ok(Some(commit.to_string()));
+            }
+        }
+        Ok(None)
     }
 
     pub(super) fn commit_paths(
