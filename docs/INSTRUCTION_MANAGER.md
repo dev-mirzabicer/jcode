@@ -24,50 +24,79 @@ successful inference request.
 
 ## Navigation
 
-The three panes are repositories/session, resources, and detail. Wide terminals
-show all three. Narrow terminals show the focused pane. Tab or Shift-Tab cycles
-panes, F1/F2/F3 selects one directly, and Z expands/collapses the focused pane.
-The same state machine and actions apply at every width.
+Start by browsing or searching the resource list, then **Enter** to read a file.
+**Space** opens searchable **Actions**, and **T** opens **Choose a view**. Every
+inspection workflow has a named entry, shortcut and explanation. Unavailable
+views explain why instead of starting an operation that cannot apply.
+
+**F** opens **Filters**. Choose a field, then an explicit value. The selected
+value is labeled, other filters stay unchanged, and active filters remain visible.
+Use **C** to clear every filter. Search filters the resource list by ID, name,
+type or scope; it never edits source.
+
+The spatial model is repositories/session, resource list, and reading pane:
+
+- At 140+ columns, all three panes are visible.
+- At 90–139 columns, the list and reading pane share the screen. F1 exchanges the
+  left navigator for repositories/session.
+- At 80 columns, in a 60-column split, and down to 24×8, the focused pane occupies
+  the available width. No operation requires a hidden pane or unlabeled button.
+- Below 24×8, a truthful size message replaces the layout. Resize to continue or
+  Q/Escape to close. No resource size limit is involved.
+
+The focused pane has a text marker and strong selection styling, not color alone.
+Z expands or collapses the focused pane. Source identity, view and content position
+stay visible while reading. Lists scroll continuously and show a scrollbar.
 
 | Input | Action |
 |---|---|
-| Up/Down or J/K | Select a row or scroll detail |
+| Enter / Right on resource | Read complete source |
+| Enter / Right on repository or session | Open its readable Overview |
+| Space / `:` / Ctrl-P | Searchable Actions |
+| T or Enter in reading pane | Choose a view |
+| F | Explicit filter fields and values |
+| `/` | Search the resource list |
+| Enter/Escape in search | Finish search and retain results |
+| Left/Right, Home/End, Delete, Backspace, Ctrl-U in search | Edit search text; Ctrl-U clears it |
+| Tab / Shift-Tab | Move between panes |
+| F1 / F2 / F3 | Repositories / resources / reading |
+| Up/Down or J/K | Navigate a list or scroll |
 | PageUp/PageDown | Move farther within the current page |
-| Home/End | Start/end of the current page |
-| Enter on resource | Open metadata |
-| Enter on repository | Filter resources to that repository |
-| Space on repository/session | Inspect complete repository state or session/default metadata |
-| `/` | Edit search by ID, name, kind, or scope |
-| Enter/Escape in search | Leave search without closing the manager |
-| Ctrl-U in search | Clear the search text |
-| F | Cycle resource kinds |
-| S | Cycle global/project/all scopes |
-| V | Cycle valid/invalid/all |
-| E | Cycle effective/shadowed/all |
-| O | Cycle managed/legacy/external/all origins |
-| G | Group project redefinitions (or other resources) |
-| C | Clear filters, including repository filter |
-| N/P | Next/previous resource, history, or exact text page |
-| R | Capture fresh authoritative inspection state |
-| X | Cancel loading |
-| `?` | Scrollable help, including current filters |
-| Q/Escape | Close the manager |
+| Home/End outside search | Start/end of this transport page |
+| N/P | Next/previous resource, history, or captured content page |
+| Escape / Left / Backspace outside text entry | Back to history or browsing, then repositories |
+| S / V / E / O | Direct scope / validation / effectiveness / origin filter menu |
+| G | Toggle project-redefinition grouping |
+| C | Clear all filters, including search and repository |
+| R / X | Refresh sources / cancel inspection loading |
+| `?` | Complete, scrollable help |
+| Q | Close directly and return to chat |
 
-Pane labels, filter controls, numbered detail tabs, and footer controls are
-clickable. Click list rows to select them and use the detail tabs or Enter
-control to inspect them. The wheel navigates the pane under the pointer.
-Search and filter actions focus the resource list, so a new query cannot keep
-targeting an older detail selection. Pasted text belongs to the open search
-field, never the hidden composer or file/image drop handlers.
+Menus use arrows and Enter, or type to filter their named entries. Escape backs
+out without applying a choice. `?` shows a complete scrollable explanation of a
+menu entry. Selecting a disabled entry opens its reason, without a request.
+Pasted text belongs to the search/menu field, not the hidden composer or file-drop
+handler. Search supports Unicode cursor editing.
+
+Visible pane labels, controls, menu entries and list rows are clickable. The mouse
+wheel scrolls the surface under the pointer. A menu clears underlying hit regions,
+so clicks cannot trigger invisible actions. Most terminals allow Shift to bypass
+mouse capture for terminal-native selection.
+
+Back from a revision returns to the same history selection and comparison base.
+Back from a completed reading view keeps its captured content and position; help
+has a separate scroll position. Canceling an in-flight request rejects its stale
+reply. Refresh/reconnect recaptures source state rather than claiming the old view
+is fresh. None of these operations activates instructions.
 
 ## Detail views
 
 Select a resource, then press:
 
 1. **Source:** complete original UTF-8 file, including exact frontmatter.
-2. **Metadata:** identity, availability, template mode, scope, source path,
+2. **Overview:** identity, availability, template mode, scope, source path,
    validation, owner, code-consumer contracts, and complete frontmatter.
-3. **Rendered:** plain/Handlebars result, effective agent component with addenda,
+3. **Rendered preview:** plain/Handlebars result, effective agent component with addenda,
    skill body, or model-roster availability and resolution preview. Available
    typed skill-catalog values are supplied. Occurrence-specific values that do
    not exist in an inspection produce an explicit error, not invented values.
@@ -77,17 +106,17 @@ Select a resource, then press:
    For the Session row, this retrieves the exact **stored** system prompt instead.
    An isolated-only agent's component can be inspected but cannot be previewed as
    an eligible primary activation.
-5. **Relations:** render dependencies, validation-only references, validated reverse
+5. **Dependencies:** render dependencies, validation-only references, validated reverse
    resource consumers, registered code consumers, and explicit unresolved-graph
    diagnostics. Failed graphs are not silently treated as an exhaustive empty
    consumer list. Structural framing stays code-owned.
 6. **History:** repository or per-resource commits, pinned at inspected HEAD.
-7. **Diff:** working changes against HEAD, or a selected two-revision comparison.
-8. **Scopes:** complete global and project source versions with explicit headings.
+7. **Working changes:** working changes against HEAD, or a selected two-revision comparison.
+8. **Compare scopes:** complete global and project source versions with explicit headings.
 
-In History, Enter reads a selected revision. A chooses the comparison base.
-Select another commit and press B to compare them. The A/B footer controls offer
-the same actions. Commit details include author, date, subject, and changed paths.
+In History, Enter reads exact revision content. I opens complete commit details,
+including author, date, subject and changed paths. A chooses the comparison base.
+Select another commit and press B to compare them. The named Actions menu and contextual footer offer the same actions. Commit details include author, date, subject, and changed paths.
 
 ## Source truth
 
@@ -143,7 +172,8 @@ external diffs and text conversion. It does not run repository scripts or fetch
 remote state. Ahead/behind reflects already available local tracking refs.
 
 The content-safe `instruction-manager` client debug command reports selection,
-layout, validation flags, page counts, repository flags and pending IDs. It does
+layout, open menu, scroll, validation flags, page counts, repository flags and
+pending IDs. It does
 not include source or rendered instruction bodies.
 
 ## Implementation and verification
@@ -160,3 +190,12 @@ history, cancellation, real physical input routers, and terminal-cell rendering.
 It does not grade or freeze central prompt prose. See
 [the acceptance record](dev/INSTRUCTION_MANAGER_ACCEPTANCE.md) for observed
 verification and activated-runtime evidence.
+
+## Interaction ownership for later manager work
+
+WP-10 extends this same navigation/action model for drafts, metadata forms, diff
+review, Save, restore, Copy, setup and explicit sync. Its own mutation safety and
+recovery work remains the primary task. Each added action must state its target,
+consequence and availability; do not introduce a competing hotkey-only workflow.
+WP-11 evaluates complete combined journeys and repairs inconsistencies during
+its existing integration acceptance, without starting another UI redesign.

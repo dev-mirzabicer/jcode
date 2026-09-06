@@ -185,7 +185,7 @@ def tester_state(tid, predicate=lambda state: True):
             raise TimeoutError('manager state did not converge: ' + result)
         time.sleep(0.1)
 
-def frame(tid, expected_text='WORKING'):
+def frame(tid, expected_text='WORKING', motion='end'):
     """Wait for a fresh selected-source viewport. Legacy tester IPC may acknowledge a key before rendering. End is idempotent for this one-page fixture."""
     first = debug(f'tester:{tid}:frame')
     try:
@@ -194,7 +194,7 @@ def frame(tid, expected_text='WORKING'):
         first_id = -1
     deadline = time.monotonic() + 15
     while True:
-        debug(f'tester:{tid}:keys:end')
+        debug(f'tester:{tid}:keys:{motion}')
         time.sleep(0.08)
         result = debug(f'tester:{tid}:frame')
         try:
@@ -295,12 +295,12 @@ try:
     saved_after = json.loads((home / 'sessions' / (session + '.json')).read_text())
     for key in ['system_prompt', 'active_skill', 'messages', 'model', 'reasoning_effort', 'route_api_method']:
         assert saved_before.get(key) == saved_after.get(key), key
-    print('JCODE_PROGRESS ' + json.dumps({'message': 'Read-only API, complete paging, Git and provider-state checks passed', 'current': 1, 'total': 5}), flush=True)
+    print('JCODE_PROGRESS ' + json.dumps({'message': 'Read-only API, complete paging, Git and provider-state checks passed', 'current': 1, 'total': 6}), flush=True)
     wrapper = ROOT / 'tester.sh'
     wrapper.write_text('#!/bin/sh\nexec ' + shlex.quote(BIN) + ' --no-update --no-selfdev --provider-profile wp09-fixture --model fixture --socket ' + shlex.quote(str(sockpath)) + ' --resume ' + shlex.quote(session) + ' "$@"\n')
     wrapper.chmod(448)
     frames = []
-    for cols, lines in [(150, 40), (72, 24), (24, 10)]:
+    for cols, lines in [(150, 40), (80, 24), (60, 24), (24, 10)]:
         debug('tester:spawn ' + json.dumps({'cwd': str(project), 'binary': str(wrapper), 'cols': cols, 'rows': lines}))
         tid = json.loads((home / 'testers.json').read_text())[-1]['id']
         testers.append(tid)
@@ -333,9 +333,41 @@ try:
         image = frame(tid)
         frames.append(image)
         (ROOT / f'frame-{cols}x{lines}.json').write_text(json.dumps(image, indent=2))
-        pane_y = 1 if lines >= 16 else 0
-        debug(f'tester:{tid}:mouse:click:6,{pane_y}')
+        control=next(item['rect'] for item in image['layout']['widget_placements'] if item['kind']=='instruction-action-F2')
+        debug(f"tester:{tid}:mouse:click:{control['x']},{control['y']}")
         tester_state(tid, lambda s: s.get('pane') == 'Resources')
+        debug(f'tester:{tid}:keys:space')
+        tester_state(tid,lambda state:state.get('menu')=='Actions')
+        actions_frame=frame(tid,'Actions',motion='home')
+        (ROOT/f'actions-{cols}x{lines}.json').write_text(json.dumps(actions_frame,indent=2))
+        debug(f'tester:{tid}:keys:o,v,e,r,v,i,e,w,enter')
+        tester_state(tid,lambda state:state.get('section')=='Metadata' and state.get('pending_id') is None and state.get('menu') is None)
+        overview_frame=frame(tid,'RESOURCE OVERVIEW',motion='home')
+        (ROOT/f'overview-{cols}x{lines}.json').write_text(json.dumps(overview_frame,indent=2))
+        debug(f'tester:{tid}:keys:esc')
+        tester_state(tid,lambda state:state.get('pane')=='Resources')
+        debug(f'tester:{tid}:keys:f')
+        tester_state(tid,lambda state:state.get('menu')=='Filters')
+        debug(f'tester:{tid}:keys:s,c,o,p,e,enter')
+        tester_state(tid,lambda state:state.get('menu')=='Source scope')
+        filter_frame=frame(tid,'Source scope',motion='home')
+        (ROOT/f'filters-{cols}x{lines}.json').write_text(json.dumps(filter_frame,indent=2))
+        debug(f'tester:{tid}:keys:g,l,o,b,a,l,enter')
+        tester_state(tid,lambda state:state.get('scope')=='global' and state.get('pending_id') is None)
+        debug(f'tester:{tid}:keys:6')
+        tester_state(tid,lambda state:state.get('section')=='History' and state.get('pending_id') is None)
+        debug(f'tester:{tid}:keys:a,down,b')
+        tester_state(tid,lambda state:state.get('detail_view')=='Revision comparison' and state.get('pending_id') is None)
+        comparison_frame=frame(tid,'FIRST')
+        (ROOT/f'comparison-{cols}x{lines}.json').write_text(json.dumps(comparison_frame,indent=2))
+        debug(f'tester:{tid}:keys:esc')
+        tester_state(tid,lambda state:state.get('section')=='History')
+        debug(f'tester:{tid}:keys:i')
+        tester_state(tid,lambda state:state.get('detail_view')=='Commit details' and state.get('pending_id') is None)
+        commit_frame=frame(tid,'COMMIT DETAILS',motion='home')
+        (ROOT/f'commit-{cols}x{lines}.json').write_text(json.dumps(commit_frame,indent=2))
+        debug(f'tester:{tid}:keys:esc,esc')
+        tester_state(tid,lambda state:state.get('pane')=='Resources')
         debug(f'tester:{tid}:keys:r')
         tester_state(tid, lambda s: s.get('rows_loaded') == 1 and s.get('pending_id') is None)
         debug(f'tester:{tid}:keys:x')
@@ -347,7 +379,7 @@ try:
             assert ui_before.get(key) == ui_after.get(key), key
         debug(f'tester:{tid}:stop')
         testers.remove(tid)
-        print('JCODE_PROGRESS ' + json.dumps({'message': f'Physical TUI keys, mouse and fresh source frame passed at {cols}x{lines}', 'current': len(frames) + 1, 'total': 5}), flush=True)
+        print('JCODE_PROGRESS ' + json.dumps({'message': f'Physical TUI keys, mouse and fresh source frame passed at {cols}x{lines}', 'current': len(frames) + 1, 'total': 6}), flush=True)
     assert not posts
     assert baseline == {str(root): fingerprints(root) for root in [store, project_store]}
     client.close()
@@ -361,7 +393,7 @@ try:
     old = inspect({'operation': 'text', 'snapshot': snapshot['snapshot'], 'document': stored['document'], 'offset': 0})
     assert old['result']['result'] == 'failed'
     assert not posts
-    result = {'binary': subprocess.check_output([BIN, '--version'], text=True).strip(), 'catalog_rows': len(catalog), 'complete_content_pages': pages, 'source_and_index_unchanged': True, 'session_instructions_and_messages_unchanged': True, 'provider_requests': len(posts), 'actual_remote_keys_mouse_frames': [[150, 40], [72, 24], [24, 10]], 'server_restart_reconnect_and_stale_rejection': True, 'artifact': str(ROOT)}
+    result = {'binary': subprocess.check_output([BIN, '--version'], text=True).strip(), 'catalog_rows': len(catalog), 'complete_content_pages': pages, 'source_and_index_unchanged': True, 'session_instructions_and_messages_unchanged': True, 'provider_requests': len(posts), 'actual_remote_keys_mouse_frames': [[150, 40], [80, 24], [60, 24], [24, 10]], 'ux_named_actions_explicit_filters_history_back_and_sticky_context':True, 'server_restart_reconnect_and_stale_rejection': True, 'artifact': str(ROOT)}
     (ROOT / 'result.json').write_text(json.dumps(result, indent=2))
     print(json.dumps(result))
 finally:
