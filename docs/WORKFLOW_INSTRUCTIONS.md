@@ -10,7 +10,7 @@ The Phase 3 migration is in progress. The authoritative row-by-row status is [th
 
 `modules/transfer-handoff-task.md` supplies the specialist's user-task instructions. `system/transfer-handoff-system.md` supplies its true system prompt. They render from current working files in the transferring session's project scope, with global fallback. They are not selectable primary-agent profiles.
 
-Empty history needs no source access or specialist call. Invalid or missing selected instructions fail before the specialist call or child publication. The existing conversation formatting and bounded excerpt remain owned by transfer. Managed instructions are never truncated. The complete-input budget correction is under WP-07 review, rather than claimed complete by the initial migration.
+Empty history needs no source access or specialist call. Invalid or missing selected instructions fail before the specialist call or child publication. The conversation formatting and bounded excerpt remain owned by transfer. The input budget includes both system and user instructions, the existing output reserve, and any stricter provider route budget. Managed instructions are never truncated. Near-capacity conversations receive a shorter excerpt. Preparation blocks when complete instructions cannot fit.
 
 ### Ambient cycles
 

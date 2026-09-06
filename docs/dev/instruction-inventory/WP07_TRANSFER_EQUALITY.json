@@ -96,5 +96,10 @@
       ],
       "window": 100000
     }
-  ]
+  ],
+  "approved_exception": {
+    "date": "2026-09-06",
+    "scope": "Subsequent complete-input accounting includes the system prompt and any stricter provider route budget. Complete instructions are unchanged. Near-capacity excerpts may shorten or preparation may block.",
+    "evidence": "transfer_accounts_for_complete_system_and_user_instructions_before_dispatch, recording-provider test"
+  }
 }

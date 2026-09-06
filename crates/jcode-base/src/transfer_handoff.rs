@@ -29,10 +29,15 @@ pub async fn build_transfer_handoff_summary(
     let runtime = crate::instruction::notification::occurrence_runtime(repositories, working_dir)?;
     let task = Workflow::TransferHandoffTask.render_in(&runtime)?;
     let system = Workflow::TransferHandoffSystem.render_in(&runtime)?;
+    // Keep the transfer owner's existing output reserve and conservative byte
+    // estimator, while respecting any stricter route budget. Complete managed
+    // system instructions consume input capacity just like the user prompt.
     let max_prompt_chars = provider
         .context_window()
         .saturating_sub(OUTPUT_RESERVE_TOKENS)
-        .saturating_mul(CHARS_PER_TOKEN);
+        .min(provider.context_request_budget().safe_input_budget())
+        .saturating_mul(CHARS_PER_TOKEN)
+        .saturating_sub(system.len());
     let minimum_prompt_chars = task.len().saturating_add(8);
     if max_prompt_chars <= minimum_prompt_chars {
         bail!(
@@ -136,6 +141,7 @@ mod tests {
     struct RecordingProvider {
         calls: Arc<std::sync::Mutex<Vec<(String, String)>>>,
         window: usize,
+        budget: Option<jcode_provider_core::ContextRequestBudget>,
     }
 
     #[async_trait::async_trait]
@@ -169,6 +175,10 @@ mod tests {
         fn context_window(&self) -> usize {
             self.window
         }
+        fn context_request_budget(&self) -> jcode_provider_core::ContextRequestBudget {
+            self.budget
+                .unwrap_or_else(|| jcode_provider_core::ContextRequestBudget::unknown(self.window))
+        }
         fn fork(&self) -> Arc<dyn Provider> {
             Arc::new(self.clone())
         }
@@ -181,6 +191,84 @@ mod tests {
             format!("---\nid: {id}\nkind: {kind}\ntemplate: handlebars\n---\n{body}"),
         )
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn transfer_accounts_for_complete_system_and_user_instructions_before_dispatch() {
+        let temp = tempfile::tempdir().unwrap();
+        let repositories = InstructionRepositoryService::from_paths(
+            temp.path().join("home"),
+            temp.path().join("state"),
+        );
+        crate::instruction::SystemPromptComposer::from_repository_service(repositories.clone())
+            .ensure_global_store()
+            .unwrap();
+        let root = repositories.global_repository().unwrap().root;
+        let task = "TASK".repeat(100);
+        let system = "SYSTEM".repeat(200);
+        write_workflow(&root, "modules/transfer-handoff-task.md", "module", &task);
+        write_workflow(
+            &root,
+            "system/transfer-handoff-system.md",
+            "system",
+            &system,
+        );
+        let provider = RecordingProvider {
+            window: 4_500,
+            ..Default::default()
+        };
+        let messages = vec![Message::user(&"界".repeat(10_000))];
+        build_transfer_handoff_summary(provider.fork(), messages.clone(), &repositories, None)
+            .await
+            .unwrap();
+        let calls = provider.calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].1, system);
+        assert!(calls[0].0.ends_with(&task));
+        assert!(calls[0].0.len() + calls[0].1.len() <= 2_000);
+        assert!(calls[0].0.contains("conversation truncated"));
+        write_workflow(
+            &root,
+            "system/transfer-handoff-system.md",
+            "system",
+            &"S".repeat(2_000),
+        );
+        assert!(
+            build_transfer_handoff_summary(provider.fork(), messages.clone(), &repositories, None)
+                .await
+                .is_err()
+        );
+        assert_eq!(provider.calls.lock().unwrap().len(), 1);
+        write_workflow(&root, "system/transfer-handoff-system.md", "system", "S");
+        write_workflow(
+            &root,
+            "modules/transfer-handoff-task.md",
+            "module",
+            &"T".repeat(2_000),
+        );
+        assert!(
+            build_transfer_handoff_summary(provider.fork(), messages.clone(), &repositories, None)
+                .await
+                .is_err()
+        );
+        assert_eq!(provider.calls.lock().unwrap().len(), 1);
+        write_workflow(&root, "modules/transfer-handoff-task.md", "module", &task);
+        let restricted = RecordingProvider {
+            window: 100_000,
+            budget: Some(jcode_provider_core::ContextRequestBudget {
+                context_window: 100_000,
+                semantics: jcode_provider_core::ContextWindowSemantics::InputPlusOutput,
+                requested_max_output_tokens: Some(99_900),
+                estimator_margin_tokens: 50,
+            }),
+            ..Default::default()
+        };
+        assert!(
+            build_transfer_handoff_summary(restricted.fork(), messages, &repositories, None)
+                .await
+                .is_err()
+        );
+        assert!(restricted.calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
