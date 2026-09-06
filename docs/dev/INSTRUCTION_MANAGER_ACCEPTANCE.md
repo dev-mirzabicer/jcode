@@ -1,8 +1,9 @@
 # Instruction manager verification record
 
-This records Phase 3 WP-09 implementation evidence. It is **not** user acceptance
-of the work package. The external program progress report is written only after
-Mirza approves the activated candidate.
+This records Phase 3 WP-09 implementation evidence. Mirza approved the original
+candidate on 2026-09-06 at 21:52 UTC, then authorized a bounded same-package UX
+refinement at 22:02 UTC. The refined activated candidate below is ready for renewed
+UX review. Durable accepted closeout follows that review.
 
 ## Scope and ownership
 
@@ -149,9 +150,63 @@ successful narrow-body evidence.
 
 Machine-readable summary: [WP09_EVIDENCE.json](instruction-manager/WP09_EVIDENCE.json).
 
+## Approved UX refinement and final revised candidate
+
+Mirza requested a clearer, more intuitive read-only manager before closing WP-09.
+The user-provided `~/skills-temp/tui-design/` reference informed the work without
+superseding program authority. No new work package or mutation workflow was added.
+
+The refined interface provides:
+
+- Searchable, named Actions and Views with shortcuts and availability reasons.
+- Explicit filter choices with selected values, rather than blind letter cycling.
+- Contextual repository browsing and readable repository/resource/roster summaries.
+- Complete commit metadata alongside unchanged exact historical source content.
+- Back from revision to the same history cursor and comparison base, then back to
+  browsing. Help retains a separate scroll position.
+- Persistent source identity, view and content position; continuous lists and
+  scrollbars; complete paged reading remains unchanged.
+- Cursor-aware Unicode search, safe paste ownership, grapheme-safe wrapping, and
+  semantic focus that remains clear under `NO_COLOR`.
+- Menus whose mouse regions replace underlying controls, whose revision actions
+  reject changed selections, and whose full explanations are scrollable.
+- Three panes at 140+ columns, two at 90–139, and a single-pane drilldown at 80,
+  60 and down to 24×8. Smaller terminals show a truthful escapable size state.
+
+The final code boundary is `17aab5629`, activated as
+`jcode v0.75.194-dev (17aab5629, dirty)` with runtime
+`17aab5629-dirty-46a92ee96435`. Current/shared match and canary passed.
+The final inspection suite passed **13 tests**, the UI/UX suite passed **19 tests**,
+and strict all-target base/TUI Clippy, workspace formatting and diff checks passed.
+No new third-party dependency was added. Existing broad-suite boundaries above
+remain unchanged, not reclassified as passing.
+
+The updated production probe passed against that exact activated binary:
+`~/.jcode/scratch/wp09/ux-final/live-gl1voxam/`. It retains the 226-row/55-page
+complete-content checks and verifies named Actions -> Overview, explicit scope
+selection, revision comparison, complete commit details, Back navigation, repeated
+search and mouse actions derived from the actual rendered hit regions. All **28
+source/menu/filter/overview/comparison/commit/group viewports** at 150×40, 80×24,
+60×24 and 24×10 were inspected and matched their expected visible content.
+
+Source files, Git HEAD/index/status, and session instructions/messages/model remained
+unchanged. The fixture recorded **zero inference requests**. The real current
+session's system, active skill, frozen routing text, concrete model, route and effort
+still equal the original pre-activation hashes. Owned test processes were stopped.
+An earlier narrow-diff probe incorrectly expected the changed line to be at End;
+Git's no-final-newline notice followed it. The probe now scrolls to the actual changed
+line and retains the assertion. This was not a source/UX defect or a weakened check.
+
+Machine-readable refined evidence:
+[WP09_UX_EVIDENCE.json](instruction-manager/WP09_UX_EVIDENCE.json).
+
+The authorized later allocation stays bounded: WP-10 extends this interaction model
+while delivering its own safe editing/setup/sync workflows. WP-11 evaluates complete
+combined journeys and repairs usability inconsistencies during existing integration
+acceptance. Neither receives an unrelated redesign assignment.
+
 ## Acceptance boundary
 
-This source/runtime result is a candidate, not accepted completion. User
-approval, downstream publication, the external accepted progress report, and
-WP-10 authorization remain separate lifecycle steps. The final evidence-only
-commit does not change the activated runtime implementation.
+The original candidate is accepted. This refined candidate awaits its agreed
+activated UX review before final integration/publication and durable work-package
+closeout. The next evidence-only commit changes no runtime implementation.

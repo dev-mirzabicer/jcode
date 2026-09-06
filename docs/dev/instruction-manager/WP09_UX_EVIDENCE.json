@@ -1,0 +1,215 @@
+{
+  "status": "Refined candidate verified; revised user approval pending",
+  "original_candidate_approved_at": "2026-09-06T21:52:48Z",
+  "refinement_authorized_at": "2026-09-06T22:02:25Z",
+  "source_commit": "17aab562929c43289ef502a4c53b9be0156fc998",
+  "runtime": "17aab5629-dirty-46a92ee96435",
+  "current_shared_equal": true,
+  "canary": "passed",
+  "tests": {
+    "manager_ux": 19,
+    "inspection_domain": 13
+  },
+  "strict_all_target_lint": "passed",
+  "format": "passed",
+  "active_instruction_and_model_identity_preserved": true,
+  "production_probe": {
+    "binary": "jcode v0.75.194-dev (17aab5629, dirty)",
+    "catalog_rows": 226,
+    "complete_content_pages": 55,
+    "source_and_index_unchanged": true,
+    "session_instructions_and_messages_unchanged": true,
+    "provider_requests": 0,
+    "actual_remote_keys_mouse_frames": [
+      [
+        150,
+        40
+      ],
+      [
+        80,
+        24
+      ],
+      [
+        60,
+        24
+      ],
+      [
+        24,
+        10
+      ]
+    ],
+    "ux_named_actions_explicit_filters_history_back_and_sticky_context": true,
+    "server_restart_reconnect_and_stale_rejection": true,
+    "artifact": "/Users/mirzabicer/.jcode/scratch/wp09/ux-final/live-gl1voxam"
+  },
+  "frames": [
+    {
+      "view": "group",
+      "size": "150x40",
+      "frame_id": 0,
+      "sha256": "6c0d6db58783d7a64e773694f6a294b900abb85476f90d1cb1b7f86a82a50f68"
+    },
+    {
+      "view": "frame",
+      "size": "150x40",
+      "frame_id": 14,
+      "sha256": "dff74fa95e8b8b0f7d727f6ca5fc5d5661e66614daae08415c01c95c31176c06"
+    },
+    {
+      "view": "actions",
+      "size": "150x40",
+      "frame_id": 16,
+      "sha256": "5ff6fbfbd6db1ec1a2db7dd8eb921ac96b906c52c4b1c26e5af80e8b0e01b7fe"
+    },
+    {
+      "view": "overview",
+      "size": "150x40",
+      "frame_id": 18,
+      "sha256": "1d55377a3a63affe7488a8ea77bd688d7160e0c7b41a631756dc9499b6eb2fdb"
+    },
+    {
+      "view": "filters",
+      "size": "150x40",
+      "frame_id": 21,
+      "sha256": "a3277f41fce67e9a434dbcf227fa1eefc4ea5f14abb80b48fdf63ede35fd8e62"
+    },
+    {
+      "view": "comparison",
+      "size": "150x40",
+      "frame_id": 27,
+      "sha256": "1fa4485f452cc68fc474084f2f960af8d75c17f2d835546eafc31ab14e9835df"
+    },
+    {
+      "view": "commit",
+      "size": "150x40",
+      "frame_id": 30,
+      "sha256": "db3ee614894875068cf6bcb0729eb217a45ba43950d179ada40ecfb1bb2a817b"
+    },
+    {
+      "view": "group",
+      "size": "80x24",
+      "frame_id": 0,
+      "sha256": "0ee373d1df43c015c6cc7c55bf686041e072044ff2a125c17637a86dc9e2ef71"
+    },
+    {
+      "view": "frame",
+      "size": "80x24",
+      "frame_id": 14,
+      "sha256": "d29cd1513ae67590b76836f01651b54b5b1b239786703bb701bb8fccff2da693"
+    },
+    {
+      "view": "actions",
+      "size": "80x24",
+      "frame_id": 16,
+      "sha256": "d9314c5c1649ba68c6907a8661f0e1165bedfec1998db86198e646a70bd92a23"
+    },
+    {
+      "view": "overview",
+      "size": "80x24",
+      "frame_id": 18,
+      "sha256": "be00e3f3eadbf2e31975f683253200b0ebb2f1678318f3720544faf536dc6262"
+    },
+    {
+      "view": "filters",
+      "size": "80x24",
+      "frame_id": 21,
+      "sha256": "22863d646c5fb35ad5562287e567557a7f4c3ca450754c0a7dbdbfd428913fd0"
+    },
+    {
+      "view": "comparison",
+      "size": "80x24",
+      "frame_id": 27,
+      "sha256": "656dd35ae950d1d8b596bf867367da6d87cb80fea5b640f0729e9e709b08e128"
+    },
+    {
+      "view": "commit",
+      "size": "80x24",
+      "frame_id": 30,
+      "sha256": "cb1fe47d372c376c2df82c288be737a98a5f17f3654efb0a1f255604444ab0e2"
+    },
+    {
+      "view": "group",
+      "size": "60x24",
+      "frame_id": 0,
+      "sha256": "46a6f179a4591fc448feaaaab3606805b57a72056eb49b12ec40e441d34a3a7f"
+    },
+    {
+      "view": "frame",
+      "size": "60x24",
+      "frame_id": 14,
+      "sha256": "27f6b58a601fa832cd99b1e6119f9b234b8bb45ee5919823d95295bc114d95a9"
+    },
+    {
+      "view": "actions",
+      "size": "60x24",
+      "frame_id": 16,
+      "sha256": "62b3bb63620cc42492e562f6e13902b85245b87617cd2cc4ff03c23195dde6bb"
+    },
+    {
+      "view": "overview",
+      "size": "60x24",
+      "frame_id": 18,
+      "sha256": "07fb6b75fb1b4a0107be867f63e6b11073726c9b476378c0a48329a4693aee28"
+    },
+    {
+      "view": "filters",
+      "size": "60x24",
+      "frame_id": 21,
+      "sha256": "462f41063bc5b4ab719092ce03dcd9c339eedc3494c46406ebb78e295132765f"
+    },
+    {
+      "view": "comparison",
+      "size": "60x24",
+      "frame_id": 27,
+      "sha256": "a1f6bbed39c0edcfe1f36a9266a21b58ec84d8bfcb0df46195ef8b8b250858b0"
+    },
+    {
+      "view": "commit",
+      "size": "60x24",
+      "frame_id": 30,
+      "sha256": "7d94cc19709b234512a3f3c16e903a643900e8074a3db9a7c8f4bcdfd504b256"
+    },
+    {
+      "view": "group",
+      "size": "24x10",
+      "frame_id": 0,
+      "sha256": "056c76c99676da05d253084acdd4f08eef85a7cb4e751e13e9d292d84d4e840b"
+    },
+    {
+      "view": "frame",
+      "size": "24x10",
+      "frame_id": 15,
+      "sha256": "eaf8fc3b4af7b57c6c3d2a65c4c331a699015a178ea150856b81abd01183f23c"
+    },
+    {
+      "view": "actions",
+      "size": "24x10",
+      "frame_id": 17,
+      "sha256": "d2cbfcf07f7c1569e6ca22cf3db2ac19f8f9c74bf84395715baa295bb8c74cca"
+    },
+    {
+      "view": "overview",
+      "size": "24x10",
+      "frame_id": 19,
+      "sha256": "c14584a3c24abb5d09962ca937d207a96019d831bf307f666ed073c43d7e091d"
+    },
+    {
+      "view": "filters",
+      "size": "24x10",
+      "frame_id": 22,
+      "sha256": "f1521d993a172acf9f1958128e3c1d8d637578e7c27afee3d3738e127cfeacb1"
+    },
+    {
+      "view": "comparison",
+      "size": "24x10",
+      "frame_id": 42,
+      "sha256": "24f44b40edd7c55f18cfa95d8cd08d243668779bc89a50e75c04c90fa08a7c65"
+    },
+    {
+      "view": "commit",
+      "size": "24x10",
+      "frame_id": 45,
+      "sha256": "0f3016988af3bdc513e7176ffb53d5429a0987b804ef2dcce765d9053b0a2f81"
+    }
+  ]
+}
