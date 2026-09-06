@@ -1126,7 +1126,7 @@ pub(crate) fn legacy_source_eligibility(
     scope: InstructionScope,
     kind: LegacyInstructionSourceKind,
     imported: bool,
-) -> Result<(bool, &'static str), InstructionError> {
+) -> Result<(bool, &'static str), SystemPromptActivationError> {
     if imported {
         return Ok((
             false,
@@ -1166,15 +1166,14 @@ pub(crate) fn legacy_source_eligibility(
             true,
             "Eligible project compatibility input for its owning consumer. Full system preview shows the selected profile's exact contribution.",
         )),
-        Ok(_) if kind == LegacyInstructionSourceKind::SystemPrompt => Ok((
-            false,
-            "Conflicting managed project:jcode and unimported legacy system prompt. Affected compatibility selection fails; inspect full system preview.",
+        Ok(_) if matches!(kind, LegacyInstructionSourceKind::SystemPrompt | LegacyInstructionSourceKind::PromptOverlay) => Err(SystemPromptActivationError::Compatibility(
+            "Project legacy source and its managed target both exist without an import receipt. Affected system composition is blocked.".into(),
         )),
         Ok(_) => Ok((
             false,
             "Inactive: the managed project target takes precedence.",
         )),
-        Err(error) => Err(error),
+        Err(error) => Err(error.into()),
     }
 }
 

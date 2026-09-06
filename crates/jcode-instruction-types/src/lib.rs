@@ -14,6 +14,7 @@ pub struct InstructionFilter {
     pub origin: Option<InstructionOrigin>,
     pub effective: Option<bool>,
     pub valid: Option<bool>,
+    pub redefinitions: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,6 +36,10 @@ pub struct InstructionRow {
     pub repository: String,
     pub origin: InstructionOrigin,
     pub effective: bool,
+    #[serde(default)]
+    pub redefines_global: bool,
+    #[serde(default)]
+    pub high_impact: bool,
     pub valid: bool,
     pub warning: Option<String>,
 }

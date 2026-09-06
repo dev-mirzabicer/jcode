@@ -58,6 +58,20 @@ impl InspectionWorker {
                         result: InstructionInspectionResult::Closed,
                     });
                 }
+                if matches!(request, InstructionInspectionRequest::Cancel) {
+                    let snapshot = state
+                        .as_mut()
+                        .filter(|inspector| inspector.context.session_id == session_id)
+                        .map(|inspector| {
+                            inspector.document = None;
+                            inspector.snapshot.clone()
+                        });
+                    return Ok(InstructionInspectionReply {
+                        session_id: session_id.clone(),
+                        snapshot,
+                        result: InstructionInspectionResult::Canceled,
+                    });
+                }
                 let inspector = state
                     .as_mut()
                     .filter(|inspector| inspector.context.session_id == session_id)

@@ -18,7 +18,7 @@ const VIEWS: [(InstructionInspectionView, &str); 8] = [
     (InstructionInspectionView::WorkingDiff, "Diff"),
     (InstructionInspectionView::ScopeComparison, "Scopes"),
 ];
-const HELP: &str = "INSTRUCTION INSPECTION · READ ONLY\n\nTab / Shift-Tab: change pane. F1/F2/F3: repository, resources, detail.\nUp/Down or J/K: navigate. PageUp/PageDown: scroll. Home/End: page start/end.\nEnter: open resource metadata; repository filters its resources. Space: inspect repository/session.\n1 Source · 2 Metadata · 3 Rendered preview · 4 Full system / exact stored system\n5 Dependencies and consumers · 6 Git history · 7 Working diff · 8 Global/project comparison\n/ Search by ID/name/kind/scope. Enter or Escape leaves search.\nF: kind filter · S: scope · V: validity · E: effective/shadowed · O: managed/legacy/external\nC: clear all filters. Z: expand/collapse the focused pane.\nN/P: next/previous resource, history, or exact text page.\nHistory: Enter reads selected revision. A selects the base. B compares base to selected.\nR: fresh authoritative snapshot. X: cancel pending loading. Q/Escape: close.\nMouse: click panes, rows and view tabs; wheel scrolls the pointed pane.\n\nNo editor, save, commit, restore, copy, setup, branch or network Git action exists here.\nPreviews do not activate a profile, change the model, or make an inference request.\nPlain and typed templates use existing owners. Missing occurrence values produce a clear failure, never fabricated input.\nDetail is an exact captured document. The visible byte range is one transport page, not a clipped complete file. N/P and scrolling traverse every byte.\nRefresh/reconnect discards captured detail and retains safe navigation. Existing session instructions stay frozen.\nExternal skill Copy and all mutations belong to WP-10.\n\n? or Escape closes this help. Arrow keys scroll.";
+const HELP: &str = "INSTRUCTION INSPECTION · READ ONLY\n\nTab / Shift-Tab: change pane. F1/F2/F3: repository, resources, detail.\nUp/Down or J/K: navigate. PageUp/PageDown: scroll. Home/End: page start/end.\nEnter: open resource metadata; repository filters its resources. Space: inspect repository/session.\n1 Source · 2 Metadata · 3 Rendered preview · 4 Full system / exact stored system\n5 Dependencies and consumers · 6 Git history · 7 Working diff · 8 Global/project comparison\n/ Search by ID/name/kind/scope. Enter or Escape leaves search.\nF: kind filter · S: scope · V: validity · E: effective/shadowed · O: managed/legacy/external\nG: group project redefinitions ([HIGH] marks high-impact system/profile/control overrides).\nC: clear all filters. Z: expand/collapse the focused pane.\nN/P: next/previous resource, history, or exact text page.\nHistory: Enter reads selected revision. A selects the base. B compares base to selected.\nR: fresh authoritative snapshot. X: cancel pending loading. Q/Escape: close.\nMouse: click panes, rows and view tabs; wheel scrolls the pointed pane.\n\nNo editor, save, commit, restore, copy, setup, branch or network Git action exists here.\nPreviews do not activate a profile, change the model, or make an inference request.\nPlain and typed templates use existing owners. Missing occurrence values produce a clear failure, never fabricated input.\nDetail is an exact captured document. The visible byte range is one transport page, not a clipped complete file. N/P and scrolling traverse every byte.\nRefresh/reconnect discards captured detail and retains safe navigation. Existing session instructions stay frozen.\nExternal skill Copy and all mutations belong to WP-10.\n\n? or Escape closes this help. Arrow keys scroll.";
 
 impl InstructionManager {
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
@@ -91,6 +91,7 @@ impl InstructionManager {
                     (KeyCode::Char('e'), "E"),
                     (KeyCode::Char('o'), "O"),
                     (KeyCode::Char('c'), "C"),
+                    (KeyCode::Char('g'), "G"),
                 ],
             );
             if regions[1].width > 28 {
@@ -196,6 +197,7 @@ impl InstructionManager {
             };
             let mut capture = FrameCaptureBuilder::new(area.width, area.height);
             capture.state.status = "instruction manager (read-only)".into();
+            capture.state.scroll_offset = self.scroll;
             capture.render_order.push("instruction_manager".into());
             let cells = frame.buffer_mut();
             let mut viewport = String::new();
@@ -290,9 +292,16 @@ impl InstructionManager {
             .iter()
             .map(|row| {
                 format!(
-                    "{}{} {}:{} / {}",
+                    "{}{}{} {}:{} / {}",
                     if row.valid { " " } else { "!" },
                     if row.effective { "●" } else { "○" },
+                    if row.high_impact {
+                        "[HIGH]"
+                    } else if row.redefines_global {
+                        "[R]"
+                    } else {
+                        ""
+                    },
                     row.scope,
                     row.id,
                     row.kind
@@ -300,7 +309,12 @@ impl InstructionManager {
             })
             .collect::<Vec<_>>();
         let title = format!(
-            "F2 Resources {}-{}/{}",
+            "F2 {} {}-{}/{}",
+            if self.filter.redefinitions == Some(true) {
+                "Redefinitions"
+            } else {
+                "Resources"
+            },
             if self.rows.is_empty() {
                 0
             } else {
@@ -436,15 +450,16 @@ fn draw_list(
 }
 
 fn safe(text: &str) -> String {
-    text.chars()
-        .map(|ch| {
-            if ch.is_control() && ch != '\n' && ch != '\t' {
-                '�'
-            } else {
-                ch
-            }
-        })
-        .collect()
+    let mut out = String::new();
+    for ch in text.chars() {
+        if ch.is_control() && !matches!(ch, '\n' | '\t') {
+            use std::fmt::Write as _;
+            let _ = write!(out, "\\u{{{:04X}}}", u32::from(ch));
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 /// Wrap only the current bounded transport page. No u16 scroll offset can make

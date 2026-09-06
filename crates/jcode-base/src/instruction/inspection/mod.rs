@@ -237,6 +237,9 @@ impl InstructionInspector {
                     .effective
                     .is_none_or(|effective| effective == row.effective)
                 && filter.valid.is_none_or(|valid| valid == row.valid)
+                && filter
+                    .redefinitions
+                    .is_none_or(|value| value == row.redefines_global)
                 && (search.is_empty()
                     || [&row.id, &row.name, &row.kind, &row.scope]
                         .iter()

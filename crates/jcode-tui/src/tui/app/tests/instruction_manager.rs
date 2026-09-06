@@ -45,7 +45,7 @@ fn instruction_manager_remote_physical_enter_keys_and_replies_use_server_authori
         tokio::time::timeout(Duration::from_secs(2),reader.read_line(&mut line)).await.unwrap().unwrap();
         let request:crate::protocol::Request=serde_json::from_str(&line).unwrap();
         let crate::protocol::Request::InspectInstructions {id,request:crate::protocol::InstructionInspectionRequest::Open {..}}=request else {panic!("{request:?}")};
-        let snapshot=crate::protocol::InstructionInspectionSnapshot {snapshot:"authoritative".into(),session_id:"inspection-fixture".into(),active_agent:Some("global:fixture".into()),repositories:vec![],resources:crate::protocol::InstructionRowsPage {offset:0,total:1,next:None,rows:vec![crate::protocol::InstructionRow {key:"server-resource".into(),id:"fixture".into(),name:"Server".into(),kind:"agent".into(),scope:"project".into(),repository:"project".into(),origin:crate::protocol::InstructionOrigin::Managed,effective:true,valid:true,warning:None}]}};
+        let snapshot=crate::protocol::InstructionInspectionSnapshot {snapshot:"authoritative".into(),session_id:"inspection-fixture".into(),active_agent:Some("global:fixture".into()),repositories:vec![],resources:crate::protocol::InstructionRowsPage {offset:0,total:1,next:None,rows:vec![crate::protocol::InstructionRow {key:"server-resource".into(),id:"fixture".into(),name:"Server".into(),kind:"agent".into(),scope:"project".into(),repository:"project".into(),origin:crate::protocol::InstructionOrigin::Managed,effective:true,redefines_global:true,high_impact:true,valid:true,warning:None}]}};
         assert!(app.handle_server_event(crate::protocol::ServerEvent::InstructionInspection {id,reply:Box::new(crate::protocol::InstructionInspectionReply {session_id:"inspection-fixture".into(),snapshot:Some("authoritative".into()),result:crate::protocol::InstructionInspectionResult::Opened(snapshot)})},&mut remote));
         super::remote::handle_remote_key_event(&mut app,KeyEvent::new(KeyCode::Char('1'),KeyModifiers::NONE),&mut remote).await.unwrap();
         line.clear();tokio::time::timeout(Duration::from_secs(2),reader.read_line(&mut line)).await.unwrap().unwrap();
@@ -90,4 +90,27 @@ fn instruction_manager_history_updates_preserve_detail_but_reconnect_refreshes()
     assert!(manager.text.is_none());
     assert!(matches!(manager.queued, Some(crate::protocol::InstructionInspectionRequest::Open { .. })));
     assert_eq!(manager.filter.search, "retained filter");
+}
+
+#[test]
+fn instruction_manager_search_and_paste_cannot_modify_the_hidden_composer() {
+    let _home = SkillTestHome::new();
+    let mut app = create_test_app();
+    assert!(app.handle_instruction_command("/instructions"));
+    app.input = "PRESERVED COMPOSER".into();
+    app.cursor_pos = app.input.len();
+    app.instruction_ui.manager.as_ref().unwrap().borrow_mut().pane = crate::tui::instruction_manager::Pane::Detail;
+    app.handle_paste("NOT A COMPOSER PASTE".into());
+    assert_eq!(app.input, "PRESERVED COMPOSER");
+    app.handle_key(KeyCode::Char('/'), KeyModifiers::NONE).unwrap();
+    app.handle_paste("search 界".into());
+    assert_eq!(app.input, "PRESERVED COMPOSER");
+    {
+        let manager = app.instruction_ui.manager.as_ref().unwrap().borrow();
+        assert_eq!(manager.filter.search, "search 界");
+        assert_eq!(manager.pane, crate::tui::instruction_manager::Pane::Resources);
+    }
+    app.handle_key(KeyCode::Char('u'), KeyModifiers::CONTROL).unwrap();
+    assert!(app.instruction_ui.manager.as_ref().unwrap().borrow().filter.search.is_empty());
+    assert_eq!(app.input, "PRESERVED COMPOSER");
 }

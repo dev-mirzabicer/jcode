@@ -48,6 +48,13 @@ impl App {
             .is_some_and(|manager| manager.borrow().visible)
     }
 
+    pub(super) fn handle_instruction_paste(&mut self, text: &str) -> bool {
+        let Some(manager) = &self.instruction_ui.manager else {
+            return false;
+        };
+        manager.borrow_mut().paste(text)
+    }
+
     pub(super) fn handle_instruction_key(
         &mut self,
         code: KeyCode,

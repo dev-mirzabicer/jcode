@@ -626,6 +626,9 @@ pub(in crate::tui::app) use paste_guard::expire_for_test as paste_guard_expire_f
 use paste_guard::image_media_type;
 
 pub(super) fn handle_paste(app: &mut App, text: String) {
+    if app.handle_instruction_paste(&text) {
+        return;
+    }
     paste_guard::note_paste();
     // Note: clipboard_image() is NOT checked here. Bracketed paste events from the
     // terminal always deliver text. Checking clipboard_image() here caused a bug where

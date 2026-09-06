@@ -21,6 +21,8 @@ pub(super) fn populated() -> InstructionManager {
         repository: "global".into(),
         origin: InstructionOrigin::Managed,
         effective: true,
+        redefines_global: false,
+        high_impact: false,
         valid: true,
         warning: None,
     }];
@@ -193,7 +195,7 @@ fn instruction_manager_all_layouts_preserve_complete_scrolling_and_mouse_control
 #[test]
 fn instruction_manager_filters_history_cancel_and_render_only_fixture_are_structural() {
     let mut manager = populated();
-    for ch in ['f', 's', 'v', 'e', 'o'] {
+    for ch in ['f', 's', 'v', 'e', 'o', 'g'] {
         key(&mut manager, ch);
         assert!(matches!(
             manager.queued,
@@ -277,6 +279,7 @@ fn instruction_manager_explicit_visual_frames_capture_only_the_visible_viewport(
     let cells = render(&mut manager, 80, 24);
     let capture = crate::tui::visual_debug::latest_frame().unwrap();
     assert_eq!(capture.render_order, vec!["instruction_manager"]);
+    assert_eq!(capture.state.scroll_offset, manager.scroll);
     assert_eq!(
         capture.rendered_text.recent_messages[0].content_preview,
         cells
@@ -285,4 +288,57 @@ fn instruction_manager_explicit_visual_frames_capture_only_the_visible_viewport(
     if !previously_enabled {
         crate::tui::visual_debug::disable();
     }
+}
+
+#[test]
+fn instruction_manager_control_characters_are_visible_without_terminal_execution() {
+    let mut manager = populated();
+    manager.pane = Pane::Detail;
+    let text = "A\u{001b}[31mB\rC".to_string();
+    manager.text = Some(InstructionTextPage {
+        document: "controls".into(),
+        title: "Fixture".into(),
+        offset: 0,
+        total_bytes: text.len(),
+        next: None,
+        text: text.clone(),
+    });
+    let cells = render(&mut manager, 80, 24);
+    assert!(cells.contains("\\u{001B}") && cells.contains("\\u{000D}"));
+    assert!(!cells.contains('\u{001b}'));
+    assert_eq!(manager.text.as_ref().unwrap().text, text);
+}
+
+#[test]
+fn instruction_manager_search_from_detail_targets_the_new_result() {
+    let mut manager = populated();
+    key(&mut manager, '1');
+    assert_eq!(manager.pane, Pane::Detail);
+    key(&mut manager, '/');
+    manager.paste("another");
+    let request = manager.reserve(20).unwrap();
+    assert!(matches!(
+        request,
+        InstructionInspectionRequest::Resources { .. }
+    ));
+    let mut row = manager.rows[0].clone();
+    row.key = "another-key".into();
+    row.id = "another".into();
+    assert!(manager.accept(
+        20,
+        reply(
+            "snapshot",
+            InstructionInspectionResult::Resources(InstructionRowsPage {
+                offset: 0,
+                total: 1,
+                next: None,
+                rows: vec![row]
+            })
+        )
+    ));
+    manager.key(KeyCode::Enter, KeyModifiers::NONE);
+    key(&mut manager, '1');
+    assert!(
+        matches!(&manager.queued, Some(InstructionInspectionRequest::Detail { target: InstructionInspectionTarget::Resource(key), .. }) if key == "another-key")
+    );
 }

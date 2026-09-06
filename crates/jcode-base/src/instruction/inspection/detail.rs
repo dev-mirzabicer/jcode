@@ -302,6 +302,12 @@ impl InstructionInspector {
                 },
             );
         }
+        if resource.row.origin == InstructionOrigin::Managed {
+            return Err(fail(
+                "render preview",
+                "This row has no renderable instruction identity. Use Source/Metadata, or select a model-roster alias for resolution preview.",
+            ));
+        }
         let source = self.read_source(resource)?;
         if resource.row.kind == "skill" {
             return crate::skill::SkillRegistry::parse_skill_source(&resource.path, &source)
@@ -341,16 +347,33 @@ impl InstructionInspector {
             }
             Err(error) => text.push_str(&format!("Validation error: {error}\n")),
         }
-        text.push_str("\nReverse resource consumers:\n");
+        text.push_str("\nReverse resource consumers from validated graphs:\n");
+        let mut reverse = std::collections::BTreeSet::new();
+        let mut unresolved = Vec::new();
         for other in runtime.resources() {
             canceled(cancel)?;
-            if let Ok(graph) = runtime.validate_graph(&selector(&other.resource))
-                && let Some(consumers) = graph.reverse_consumers.get(managed)
-            {
-                for consumer in consumers {
-                    text.push_str(&format!("{consumer}\n"));
+            match runtime.validate_graph(&selector(&other.resource)) {
+                Ok(graph) => {
+                    if let Some(consumers) = graph.reverse_consumers.get(managed) {
+                        reverse.extend(consumers.iter().map(ToString::to_string));
+                    }
                 }
+                Err(error) => unresolved.push(format!("{}: {error}", other.resource)),
             }
+        }
+        for consumer in reverse {
+            text.push_str(&format!("{consumer}\n"));
+        }
+        unresolved.extend(
+            runtime
+                .diagnostics()
+                .iter()
+                .map(|error| format!("{}: {}", error.path.display(), error.detail)),
+        );
+        if !unresolved.is_empty() {
+            text.push_str("\nUnresolved graphs may contain additional consumers. Inspect these source failures before treating the list as exhaustive:\n");
+            text.push_str(&unresolved.join("\n"));
+            text.push('\n');
         }
         text.push_str("\nRegistered code consumers:\n");
         for consumer in &self.consumers {

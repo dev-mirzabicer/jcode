@@ -239,6 +239,15 @@ fn catalog_keeps_project_shadow_invalid_resources_and_every_source_class_visible
     )
     .unwrap();
     let inspector = fixture.open();
+    let legacy = inspector
+        .resources
+        .values()
+        .find(|resource| resource.path.ends_with("prompt-overlay.md"))
+        .unwrap();
+    assert!(
+        !legacy.row.valid && !legacy.row.effective,
+        "Unimported overlay conflicts must be visible, not silently labeled shadowed"
+    );
     let shared = inspector
         .resources
         .values()
@@ -299,6 +308,21 @@ fn catalog_keeps_project_shadow_invalid_resources_and_every_source_class_visible
         0,
     );
     assert!(shadowed.rows.iter().all(|row| !row.effective));
+    let redefinitions = inspector.rows(
+        &InstructionFilter {
+            redefinitions: Some(true),
+            ..Default::default()
+        },
+        0,
+    );
+    assert!(!redefinitions.rows.is_empty());
+    assert!(redefinitions.rows.iter().all(|row| row.redefines_global));
+    assert!(
+        redefinitions
+            .rows
+            .iter()
+            .any(|row| row.high_impact && row.kind == "agent")
+    );
 }
 
 #[test]
@@ -472,6 +496,16 @@ async fn worker_cancel_and_cross_session_requests_cannot_publish_old_context() {
     ));
     assert!(open.await.is_err());
     assert!(!fixture.root.exists());
+    let canceled = worker.submit(
+        fixture.repositories.clone(),
+        "fixture-session".into(),
+        || unreachable!(),
+        InstructionInspectionRequest::Cancel,
+    );
+    assert!(matches!(
+        canceled.await.unwrap().result,
+        InstructionInspectionResult::Canceled
+    ));
 }
 
 #[test]
@@ -479,6 +513,11 @@ fn invalid_external_skills_and_nonregular_managed_resources_remain_visible() {
     let fixture = Fixture::new();
     fixture.seed();
     std::fs::create_dir_all(fixture.root.join("modules/not-a-file.md")).unwrap();
+    std::fs::write(
+        fixture.root.join("modules/unidentified name.md"),
+        "not frontmatter",
+    )
+    .unwrap();
     std::fs::create_dir_all(fixture.project.join(".jcode/skills/invalid")).unwrap();
     std::fs::write(
         fixture.project.join(".jcode/skills/invalid/SKILL.md"),
@@ -654,4 +693,65 @@ fn repository_history_paging_has_no_hidden_tail_and_detached_inspection_is_reado
         before,
         std::fs::read(fixture.root.join(".git/index")).unwrap()
     );
+}
+
+#[test]
+fn unidentified_managed_source_is_inspectable_but_not_a_fake_render() {
+    let fixture = Fixture::new();
+    fixture.seed();
+    let path = fixture.root.join("modules/not an id.md");
+    std::fs::write(&path, "UNPARSED SOURCE").unwrap();
+    let mut inspector = fixture.open();
+    let key = inspector
+        .resources
+        .values()
+        .find(|resource| resource.path == path)
+        .unwrap()
+        .row
+        .key
+        .clone();
+    assert_eq!(
+        detail(&mut inspector, &key, InstructionInspectionView::Source).text,
+        "UNPARSED SOURCE"
+    );
+    let result = inspector.request(
+        InstructionInspectionRequest::Detail {
+            snapshot: inspector.snapshot.clone(),
+            target: InstructionInspectionTarget::Resource(key),
+            view: InstructionInspectionView::Rendered,
+            revision: None,
+        },
+        &AtomicBool::new(false),
+    );
+    assert!(matches!(
+        result.result,
+        InstructionInspectionResult::Failed(_)
+    ));
+}
+
+#[test]
+fn reverse_consumer_inspection_exposes_unresolved_graphs() {
+    let fixture = Fixture::new();
+    fixture.seed();
+    std::fs::write(
+        fixture.root.join("modules/broken-consumer.md"),
+        "---\nid: broken-consumer\nkind: module\nincludes: [shared, missing]\n---\nBODY",
+    )
+    .unwrap();
+    let mut inspector = fixture.open();
+    let key = inspector
+        .resources
+        .values()
+        .find(|resource| resource.row.id == "shared")
+        .unwrap()
+        .row
+        .key
+        .clone();
+    let text = detail(
+        &mut inspector,
+        &key,
+        InstructionInspectionView::Dependencies,
+    )
+    .text;
+    assert!(text.contains("global:module:broken-consumer") && text.contains("missing"));
 }

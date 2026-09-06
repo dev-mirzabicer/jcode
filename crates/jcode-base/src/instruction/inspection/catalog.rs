@@ -117,6 +117,20 @@ impl InstructionInspector {
                         && other.resource.kind == resource.kind
                         && other.resource.id == resource.id
                 });
+            let redefines_global = !paired
+                && resource.scope == InstructionScope::Project
+                && summaries.iter().any(|other| {
+                    other.resource.scope == InstructionScope::Global
+                        && other.resource.kind == resource.kind
+                        && other.resource.id == resource.id
+                });
+            let high_impact = redefines_global
+                && matches!(
+                    resource.kind,
+                    InstructionKind::System
+                        | InstructionKind::Agent
+                        | InstructionKind::Notification
+                );
             for path in &summary.paths {
                 let key = format!("{}:{}", resource, path.display());
                 let repository = inspector.repository_for(path);
@@ -159,6 +173,8 @@ impl InstructionInspector {
                             repository,
                             origin: InstructionOrigin::Managed,
                             effective,
+                            redefines_global,
+                            high_impact,
                             valid: warning.is_none(),
                             warning: warning.clone(),
                         },
@@ -414,6 +430,8 @@ impl InstructionInspector {
                     repository,
                     origin,
                     effective,
+                    redefines_global: false,
+                    high_impact: false,
                     valid: warning.is_none(),
                     warning,
                 },
@@ -597,7 +615,14 @@ impl InstructionInspector {
                 let regular = std::fs::metadata(&path).is_ok_and(|metadata| metadata.is_file());
                 let blank = regular
                     && std::fs::read_to_string(&path).is_ok_and(|text| text.trim().is_empty());
-                let eligibility = legacy_source_eligibility(runtime, scope, kind, imported);
+                let eligibility = if blank && !imported {
+                    Ok((
+                        false,
+                        "Blank legacy input is inactive; managed empty bodies have distinct semantics.",
+                    ))
+                } else {
+                    legacy_source_eligibility(runtime, scope, kind, imported)
+                };
                 let (eligible, activity) = eligibility.as_ref().copied().unwrap_or((false, "Managed target is invalid. It does not silently expose this compatibility file."));
                 self.add_external(
                     path.clone(),
@@ -612,7 +637,7 @@ impl InstructionInspector {
                     .values_mut()
                     .find(|resource| resource.path == path)
                 {
-                    resource.annotation = if blank { "Blank legacy input is inactive; managed empty bodies have distinct semantics." } else { activity }.into();
+                    resource.annotation = activity.into();
                 }
             }
         }
@@ -671,7 +696,7 @@ impl InstructionInspector {
         for (alias, warning) in entries {
             let key = format!("model-roster:{alias}");
             self.resources.insert(key.clone(), Resource {
-                row: InstructionRow { key, id: alias.clone(), name: alias.clone(), kind: "model-roster".into(), scope: "global".into(), repository: global.id.clone(), origin: InstructionOrigin::Managed, effective: true, valid: warning.is_none(), warning },
+                row: InstructionRow { key, id: alias.clone(), name: alias.clone(), kind: "model-roster".into(), scope: "global".into(), repository: global.id.clone(), origin: InstructionOrigin::Managed, effective: true, redefines_global: false, high_impact: false, valid: warning.is_none(), warning },
                 path: path.clone(), managed: None, alias: Some(alias), annotation: "Global-only launch policy. Preview uses independent provider construction, without inference or modifying the primary provider.".into(),
             });
         }

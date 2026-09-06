@@ -292,6 +292,7 @@ impl InstructionManager {
     }
 
     fn filter_changed(&mut self) {
+        self.pane = Pane::Resources;
         self.pending = None;
         if let Some(snapshot) = self.snapshot_id() {
             self.queued = Some(InstructionInspectionRequest::Resources {
@@ -446,6 +447,19 @@ impl InstructionManager {
         }
     }
 
+    pub fn paste(&mut self, text: &str) -> bool {
+        if !self.visible {
+            return false;
+        }
+        if self.search_editing {
+            self.filter.search.push_str(text);
+            self.filter_changed();
+        } else {
+            self.status = "Read-only view: press / before pasting search text.".into();
+        }
+        true
+    }
+
     pub fn key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
         if !self.visible {
             return false;
@@ -453,6 +467,10 @@ impl InstructionManager {
         if self.search_editing {
             match code {
                 KeyCode::Esc | KeyCode::Enter => self.search_editing = false,
+                KeyCode::Char('u' | 'U') if modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.filter.search.clear();
+                    self.filter_changed();
+                }
                 KeyCode::Backspace => {
                     self.filter.search.pop();
                     self.filter_changed();
@@ -477,6 +495,10 @@ impl InstructionManager {
             }
             return true;
         }
+        let code = match code {
+            KeyCode::Char(ch) => KeyCode::Char(ch.to_ascii_lowercase()),
+            other => other,
+        };
         match code {
             KeyCode::Esc | KeyCode::Char('q') => {
                 self.visible = false;
@@ -490,7 +512,10 @@ impl InstructionManager {
             KeyCode::F(1) => self.pane = Pane::Repositories,
             KeyCode::F(2) => self.pane = Pane::Resources,
             KeyCode::F(3) => self.pane = Pane::Detail,
-            KeyCode::Char('/') => self.search_editing = true,
+            KeyCode::Char('/') => {
+                self.search_editing = true;
+                self.pane = Pane::Resources;
+            }
             KeyCode::Char('r' | 'R') => self.refresh(&self.session.clone()),
             KeyCode::Char('x') => {
                 self.pending = None;
@@ -558,6 +583,10 @@ impl InstructionManager {
                     Some("global") => Some("project".into()),
                     _ => None,
                 };
+                self.filter_changed();
+            }
+            KeyCode::Char('g') => {
+                self.filter.redefinitions = cycle_bool(self.filter.redefinitions);
                 self.filter_changed();
             }
             KeyCode::Char('v') => {
