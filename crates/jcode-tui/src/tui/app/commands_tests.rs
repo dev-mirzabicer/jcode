@@ -71,7 +71,7 @@ fn swarm_prompt_edit_path_prefers_nonblank_project_override() {
 
     let path = ensure_swarm_prompt_edit_path(project.path().to_str(), jcode_home.path())
         .expect("resolve prompt path");
-    assert_eq!(path, project_prompt);
+    assert_eq!(path, project_prompt.canonicalize().unwrap());
 }
 
 #[test]
@@ -87,7 +87,16 @@ fn swarm_prompt_edit_path_falls_back_to_nonblank_global_override() {
 
     let path = ensure_swarm_prompt_edit_path(project.path().to_str(), jcode_home.path())
         .expect("resolve prompt path");
-    assert_eq!(path, global_prompt);
+    assert_eq!(
+        path,
+        jcode_home
+            .path()
+            .join("instructions/tools/swarm-routing.md")
+    );
+    assert_eq!(
+        std::fs::read_to_string(global_prompt).unwrap(),
+        "global routing"
+    );
 }
 
 #[test]
@@ -97,9 +106,21 @@ fn swarm_prompt_edit_path_materializes_builtin_default_globally() {
 
     let path = ensure_swarm_prompt_edit_path(project.path().to_str(), jcode_home.path())
         .expect("create editable prompt");
-    assert_eq!(path, jcode_home.path().join("swarm-prompt.md"));
-    let content = std::fs::read_to_string(path).expect("read created prompt");
-    assert_eq!(content.trim(), crate::prompt::DEFAULT_SWARM_PROMPT.trim());
+    assert_eq!(
+        path,
+        jcode_home
+            .path()
+            .join("instructions/tools/swarm-routing.md")
+    );
+    let runtime = crate::instruction::InstructionRuntime::discover(
+        crate::instruction::InstructionSources::new(jcode_home.path().join("instructions")),
+    );
+    let selector = crate::instruction::InstructionSelector::global(
+        crate::instruction::InstructionKind::ToolGuidance,
+        "swarm-routing",
+    )
+    .unwrap();
+    assert_eq!(runtime.resolve(&selector).unwrap().path, path);
 }
 
 #[test]

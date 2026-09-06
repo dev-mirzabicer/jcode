@@ -277,6 +277,9 @@ pub struct Session {
     /// Exact active skill text. WP-05 owns activation semantics.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_skill: Option<StoredActiveSkill>,
+    /// Exact Swarm tool description captured after successful preflight. No source access on resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swarm_routing_prompt: Option<String>,
     /// Metadata-only startup projection. Full session loads leave this empty.
     #[serde(skip)]
     system_prompt_metadata: Option<StoredSystemPromptMetadata>,
@@ -804,6 +807,13 @@ impl Session {
         }
     }
 
+    pub fn set_swarm_routing_prompt(&mut self, text: String) {
+        self.swarm_routing_prompt = Some(text);
+        self.updated_at = Utc::now();
+        self.persist_state.force_snapshot = true;
+        self.mark_memory_profile_dirty();
+    }
+
     pub fn set_active_skill(&mut self, skill: StoredActiveSkill) {
         self.active_skill = Some(skill);
         self.active_skill_metadata = None;
@@ -869,6 +879,7 @@ impl Session {
         self.startup_context_block = parent.startup_context_block.clone();
         self.system_prompt = parent.system_prompt.clone();
         self.active_skill = parent.active_skill.clone();
+        self.swarm_routing_prompt = parent.swarm_routing_prompt.clone();
         self.system_prompt_metadata = parent.system_prompt_metadata.clone();
         self.active_skill_metadata = parent.active_skill_metadata.clone();
         self.compaction = parent.compaction.clone();
@@ -944,6 +955,7 @@ impl Session {
         session.startup_context_block = snapshot.startup_context_block;
         session.system_prompt = snapshot.system_prompt;
         session.active_skill = snapshot.active_skill;
+        session.swarm_routing_prompt = snapshot.swarm_routing_prompt;
         session.system_prompt_metadata = None;
         session.active_skill_metadata = None;
         session.compaction = snapshot.compaction;
@@ -1331,7 +1343,12 @@ impl Session {
             system_prompt_bytes,
             active_skill_bytes,
             payload_text_bytes: self.memory_profile_cache.message_stats.payload_text_bytes(),
-            total_json_bytes: self.memory_profile_cache.messages_json_bytes
+            total_json_bytes: self
+                .swarm_routing_prompt
+                .as_ref()
+                .map(estimate_json_bytes)
+                .unwrap_or_default()
+                + self.memory_profile_cache.messages_json_bytes
                 + self.memory_profile_cache.provider_cache_json_bytes
                 + self.memory_profile_cache.env_snapshots_json_bytes
                 + self.memory_profile_cache.memory_injections_json_bytes
@@ -1663,6 +1680,7 @@ impl Session {
             startup_context_block: None,
             system_prompt: None,
             active_skill: None,
+            swarm_routing_prompt: None,
             system_prompt_metadata: None,
             active_skill_metadata: None,
             compaction: None,
@@ -1730,6 +1748,7 @@ impl Session {
             startup_context_block: None,
             system_prompt: None,
             active_skill: None,
+            swarm_routing_prompt: None,
             system_prompt_metadata: None,
             active_skill_metadata: None,
             compaction: None,
@@ -2844,6 +2863,8 @@ struct RemoteStartupSessionSnapshot {
     system_prompt: Option<StoredSystemPromptState>,
     #[serde(default)]
     active_skill: Option<StoredActiveSkill>,
+    #[serde(default)]
+    swarm_routing_prompt: Option<String>,
     #[serde(default)]
     compaction: Option<StoredCompactionState>,
     #[serde(default)]

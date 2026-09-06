@@ -39,6 +39,7 @@ macro_rules! workflows {
 }
 
 workflows! {
+    SwarmRouting => ("swarm-routing", ToolGuidance, "tools", "swarm tool routing guidance", Plain, ProjectThenGlobal),
     SwarmComposite { item_id: &'a str } => ("swarm-composite-synthesis", Notification, "notifications", "swarm task control", Handlebars, ProjectThenGlobal),
     SwarmAssignmentAddendum => ("swarm-coordinator-assignment-addendum", Notification, "notifications", "swarm task control", Plain, ProjectThenGlobal),
     SwarmTaskResume => ("swarm-task-resume", Notification, "notifications", "swarm task control", Plain, ProjectThenGlobal),

@@ -80,6 +80,14 @@ Global legacy content imports exactly through a committed receipt when the store
 
 Compatibility prompt APIs now propagate instruction failures before provider use. TUI construction derives initial accounting from installed prompt state instead of reading or initializing a client-local instruction store merely for an estimate.
 
+### Swarm routing guidance
+
+`tools/swarm-routing.md` replaces the process-wide cached prose in the Swarm tool definition. It resolves in the session's scope. Nonblank global legacy guidance imports once at the seed-26 cutover, retaining the original file. Unimported project legacy overrides remain compatible. A managed empty project definition suppresses global guidance, while an invalid one blocks rather than falling back.
+
+The implementation adds one optional session string, not another Swarm manager. Request preparation renders the current complete description only when Swarm is actually exposed. Successful preflight is followed by an atomic capture before dispatch. A budget-blocked or invalid source is not frozen. Later turns, tool-list rebuilds, resume and split reuse that exact description without source access. Fresh contexts, clear and transfer capture again. Source edits do not change running snapshots. First adoption by an already dispatched session resets native continuation and attributes one intentional cache transition. Tool locking and its one-time late-MCP rebuild remain independent.
+
+Raw session export, Markdown export, replay instruction state and full tool introspection retain the captured description. Lightweight startup metadata skips the body. `/swarm-prompt` remains a local external-editor compatibility command and selects the effective managed or unimported project source. On a genuinely remote connection, this local editor does not edit the server's filesystem. Central remote editing remains the manager's later-phase responsibility. Swarm enablement, routing policy and launch semantics remain unchanged; Phase 4 decides whether to disable or replace it.
+
 ## Source and failure semantics
 
 Working files are authoritative, including intentionally empty bodies where the owner retains meaningful structure. A present invalid project redefinition fails rather than exposing global prose. Missing previously adopted singleton resources are damage, not permission to recreate defaults. New shipped paths use the existing versioned, scoped Git seed-adoption transaction. It preserves current files and does not push a repository.

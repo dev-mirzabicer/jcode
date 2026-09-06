@@ -1311,6 +1311,11 @@ impl Agent {
                 active_skill.skill_id, active_skill.rendered_text
             ));
         }
+        if let Some(guidance) = session.swarm_routing_prompt.as_ref() {
+            md.push_str(&format!(
+                "## Swarm tool instructions\n\n```text\n{guidance}\n```\n\n"
+            ));
+        }
         for msg in &session.messages {
             let role_label = if startup_message_ids.contains(msg.id.as_str()) {
                 "Startup Context"

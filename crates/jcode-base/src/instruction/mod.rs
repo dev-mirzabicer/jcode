@@ -8,6 +8,7 @@
 mod composition;
 pub mod notification;
 mod repository;
+pub mod routing;
 mod runtime;
 mod template;
 pub mod workflow;

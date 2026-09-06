@@ -115,6 +115,9 @@ pub enum TimelineEventKind {
         system_prompt: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         active_skill: Option<String>,
+
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        swarm_routing: Option<String>,
     },
 }
 
@@ -177,6 +180,7 @@ fn export_projected_timeline(session: &Session) -> Vec<TimelineEvent> {
                     .active_skill
                     .as_ref()
                     .map(|skill| skill.rendered_text.clone()),
+                swarm_routing: session.swarm_routing_prompt.clone(),
             },
         });
     }

@@ -18,6 +18,7 @@ mod edit;
 mod gmail;
 mod goal;
 pub mod inflight;
+pub mod instruction_guidance;
 mod invalid;
 mod jcode_docs;
 mod ls;

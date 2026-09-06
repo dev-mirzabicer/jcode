@@ -222,7 +222,7 @@ pub(super) async fn execute_debug_command(
 
     if trimmed == "tools:full" {
         let agent = agent.lock().await;
-        let definitions = agent.tool_definitions_for_debug().await;
+        let definitions = agent.tool_definitions_for_debug().await?;
         return Ok(serde_json::to_string_pretty(&definitions).unwrap_or_else(|_| "[]".to_string()));
     }
 

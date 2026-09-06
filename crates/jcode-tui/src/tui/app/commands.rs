@@ -2821,34 +2821,21 @@ fn parse_agents_target(raw: &str) -> Option<crate::tui::AgentModelTarget> {
     }
 }
 
-fn file_has_nonblank_content(path: &std::path::Path) -> bool {
-    std::fs::read_to_string(path)
-        .map(|content| !content.trim().is_empty())
-        .unwrap_or(false)
-}
-
 fn ensure_swarm_prompt_edit_path(
     working_dir: Option<&str>,
     jcode_dir: &std::path::Path,
-) -> std::io::Result<PathBuf> {
-    let project_dir = match working_dir {
-        Some(path) => PathBuf::from(path),
-        None => std::env::current_dir()?,
-    };
-    let project_path = project_dir.join(".jcode").join("swarm-prompt.md");
-    if file_has_nonblank_content(&project_path) {
-        return Ok(project_path);
-    }
-
-    let global_path = jcode_dir.join("swarm-prompt.md");
-    if file_has_nonblank_content(&global_path) {
-        return Ok(global_path);
-    }
-
-    std::fs::create_dir_all(jcode_dir)?;
-    let contents = format!("{}\n", crate::prompt::DEFAULT_SWARM_PROMPT.trim());
-    std::fs::write(&global_path, contents)?;
-    Ok(global_path)
+) -> anyhow::Result<PathBuf> {
+    let repositories = crate::instruction::InstructionRepositoryService::from_paths(
+        jcode_dir,
+        jcode_dir.join("state"),
+    );
+    let working_dir = working_dir
+        .map(PathBuf::from)
+        .map(Ok)
+        .unwrap_or_else(std::env::current_dir)?;
+    let (_, path) =
+        crate::instruction::routing::swarm_routing_source(&repositories, Some(&working_dir))?;
+    Ok(path)
 }
 
 pub(super) fn handle_swarm_prompt_command(app: &mut App, trimmed: &str) -> bool {
@@ -2900,7 +2887,7 @@ pub(super) fn handle_swarm_prompt_command(app: &mut App, trimmed: &str) -> bool 
     match run_interactive_editor(&mut command) {
         Ok(status) if status.success() => {
             app.push_display_message(DisplayMessage::system(format!(
-                "Edited the active swarm routing prompt in {}:\n{}\n\nChanges apply after restarting or reloading Jcode because running agent tool registries cache the prompt.",
+                "Edited the active swarm routing prompt in {}:\n{}\n\nChanges apply to newly exposed Swarm tools in new contexts. Existing session snapshots remain unchanged. This editor operates on local sources; a remote server uses its own instruction store.",
                 editor,
                 path.display()
             )));
@@ -3339,7 +3326,9 @@ pub(super) fn apply_local_primary_agent_change(
                 .system_prompt_text()
                 .unwrap_or_default()
                 .to_string();
-            let tools = app.registry.try_definitions(None).map_err(str::to_string)?;
+            let mut tools = app.registry.try_definitions(None).map_err(str::to_string)?;
+            crate::tool::instruction_guidance::preview(&app.session, &mut tools)
+                .map_err(|error| error.to_string())?;
             let breakdown =
                 crate::context::request_token_breakdown(&projected, 0, 0, &split, &tools);
             let preflight = crate::context::evaluate_context_preflight(

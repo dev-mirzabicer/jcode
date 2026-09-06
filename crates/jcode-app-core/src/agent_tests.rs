@@ -2883,7 +2883,7 @@ async fn gmail_is_exposed_by_default_and_can_be_explicitly_disabled() {
     let provider: Arc<dyn Provider> = Arc::new(ImmediateEmptyProvider);
     let registry = Registry::new(provider.clone()).await;
     let mut agent = Agent::new(provider, registry);
-    let definitions = agent.tool_definitions().await;
+    let definitions = agent.tool_definitions().await.unwrap();
     let tool_names = agent.tool_names().await;
     let tool_name = "gmail";
 
@@ -2916,7 +2916,7 @@ async fn gmail_is_exposed_by_default_and_can_be_explicitly_disabled() {
     let provider: Arc<dyn Provider> = Arc::new(ImmediateEmptyProvider);
     let registry = Registry::new(provider.clone()).await;
     let mut agent = Agent::new(provider, registry);
-    let definitions = agent.tool_definitions().await;
+    let definitions = agent.tool_definitions().await.unwrap();
     let tool_names = agent.tool_names().await;
 
     assert!(
@@ -3611,7 +3611,7 @@ async fn mcp_tools_registered_after_lock_are_visible_to_agent() {
 
     // First turn locks the snapshot (this is what happens before the async MCP
     // registration spawn completes).
-    let before = agent.tool_definitions().await;
+    let before = agent.tool_definitions().await.unwrap();
     let before_len = before.len();
     assert!(
         !before.iter().any(|t| t.name.starts_with("mcp__")),
@@ -3631,7 +3631,7 @@ async fn mcp_tools_registered_after_lock_are_visible_to_agent() {
         .await;
 
     // The next turn should now advertise the MCP tool to the provider.
-    let after = agent.tool_definitions().await;
+    let after = agent.tool_definitions().await.unwrap();
     assert!(
         after.iter().any(|t| t.name == "mcp__test__write_memory"),
         "regression #206: MCP tool registered after the first turn never reaches \
@@ -3644,8 +3644,8 @@ async fn mcp_tools_registered_after_lock_are_visible_to_agent() {
     // (the whole point of locked_tools). The #206 fix must not flap.
     let names =
         |defs: &[ToolDefinition]| -> Vec<String> { defs.iter().map(|t| t.name.clone()).collect() };
-    let stable_a = agent.tool_definitions().await;
-    let stable_b = agent.tool_definitions().await;
+    let stable_a = agent.tool_definitions().await.unwrap();
+    let stable_b = agent.tool_definitions().await.unwrap();
     assert_eq!(
         names(&stable_a),
         names(&stable_b),
@@ -3672,7 +3672,7 @@ async fn mcp_late_registration_rebuild_happens_at_most_once() {
     let mut agent = Agent::new(provider, registry);
 
     // First turn locks the snapshot with no MCP tools yet.
-    let _ = agent.tool_definitions().await;
+    let _ = agent.tool_definitions().await.unwrap();
 
     // First MCP tool arrives -> one accepted rebuild exposes it.
     agent
@@ -3684,7 +3684,7 @@ async fn mcp_late_registration_rebuild_happens_at_most_once() {
             }) as Arc<dyn crate::tool::Tool>,
         )
         .await;
-    let after_first = agent.tool_definitions().await;
+    let after_first = agent.tool_definitions().await.unwrap();
     assert!(
         after_first.iter().any(|t| t.name == "mcp__test__first"),
         "first late MCP tool must be picked up by the one accepted rebuild"
@@ -3707,7 +3707,7 @@ async fn mcp_late_registration_rebuild_happens_at_most_once() {
             }) as Arc<dyn crate::tool::Tool>,
         )
         .await;
-    let after_second = agent.tool_definitions().await;
+    let after_second = agent.tool_definitions().await.unwrap();
     let names: Vec<String> = after_second.iter().map(|t| t.name.clone()).collect();
     assert!(
         names.iter().any(|n| n == "mcp__test__first"),
@@ -3725,7 +3725,7 @@ async fn mcp_late_registration_rebuild_happens_at_most_once() {
         !agent.mcp_late_register_resolved,
         "explicit unlock must re-arm the one-shot guard"
     );
-    let after_unlock = agent.tool_definitions().await;
+    let after_unlock = agent.tool_definitions().await.unwrap();
     let unlocked_names: Vec<String> = after_unlock.iter().map(|t| t.name.clone()).collect();
     assert!(
         unlocked_names.iter().any(|n| n == "mcp__test__second"),
@@ -3743,7 +3743,7 @@ async fn tool_snapshot_is_stable_without_new_mcp_tools() {
     let registry = Registry::new(provider.clone()).await;
     let mut agent = Agent::new(provider, registry);
 
-    let first = agent.tool_definitions().await;
+    let first = agent.tool_definitions().await.unwrap();
     // Register a NON-mcp tool after locking — this should NOT trigger a rebuild,
     // because the cache-stability optimization only yields to MCP arrival.
     agent
@@ -3755,7 +3755,7 @@ async fn tool_snapshot_is_stable_without_new_mcp_tools() {
             }) as Arc<dyn crate::tool::Tool>,
         )
         .await;
-    let second = agent.tool_definitions().await;
+    let second = agent.tool_definitions().await.unwrap();
     let first_names: Vec<String> = first.iter().map(|t| t.name.clone()).collect();
     let second_names: Vec<String> = second.iter().map(|t| t.name.clone()).collect();
     assert_eq!(

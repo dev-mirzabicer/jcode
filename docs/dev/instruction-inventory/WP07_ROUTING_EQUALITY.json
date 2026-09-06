@@ -1,0 +1,169 @@
+{
+  "source_revision": "0ba6ebed1",
+  "route": "Original production routing loader compared with managed source selection for new and prior-seed stores across all absent/blank/nonblank global and project combinations. Disposable probe removed.",
+  "approved_refinement": "Mirza authorized the minimal robust routing fix on 2026-09-06 at 12:41 UTC. Routing prose is unchanged. The code-owned description wrapper now points to /swarm-prompt instead of the inactive legacy global path. One optional session scalar captures the complete validated tool description, with one attributed continuation reset when an existing dispatched session first adopts it.",
+  "cases": [
+    {
+      "bytes": 1630,
+      "equal": true,
+      "existing": false,
+      "global": null,
+      "id": "INS-TGD-001",
+      "project": null,
+      "sha256": "8282967816b313e4a9c09c3f1a85cafd811d29cb5778a6900306c3df1b3c59b9"
+    },
+    {
+      "bytes": 1630,
+      "equal": true,
+      "existing": false,
+      "global": null,
+      "id": "INS-TGD-001",
+      "project": " \n",
+      "sha256": "8282967816b313e4a9c09c3f1a85cafd811d29cb5778a6900306c3df1b3c59b9"
+    },
+    {
+      "bytes": 10,
+      "equal": true,
+      "existing": false,
+      "global": null,
+      "id": "INS-TGD-001",
+      "project": " PROJECT<&> \n",
+      "sha256": "01196704dd224b4058118b4e22d87fce09d855cb0109eb2c67544c2e9e61c914"
+    },
+    {
+      "bytes": 1630,
+      "equal": true,
+      "existing": false,
+      "global": " \n",
+      "id": "INS-TGD-001",
+      "project": null,
+      "sha256": "8282967816b313e4a9c09c3f1a85cafd811d29cb5778a6900306c3df1b3c59b9"
+    },
+    {
+      "bytes": 1630,
+      "equal": true,
+      "existing": false,
+      "global": " \n",
+      "id": "INS-TGD-001",
+      "project": " \n",
+      "sha256": "8282967816b313e4a9c09c3f1a85cafd811d29cb5778a6900306c3df1b3c59b9"
+    },
+    {
+      "bytes": 10,
+      "equal": true,
+      "existing": false,
+      "global": " \n",
+      "id": "INS-TGD-001",
+      "project": " PROJECT<&> \n",
+      "sha256": "01196704dd224b4058118b4e22d87fce09d855cb0109eb2c67544c2e9e61c914"
+    },
+    {
+      "bytes": 9,
+      "equal": true,
+      "existing": false,
+      "global": " GLOBAL<&> \n",
+      "id": "INS-TGD-001",
+      "project": null,
+      "sha256": "3831a9ab96477e0a30d69abd79439668294d35e6ea5bde1a09654c4cbba9ab44"
+    },
+    {
+      "bytes": 9,
+      "equal": true,
+      "existing": false,
+      "global": " GLOBAL<&> \n",
+      "id": "INS-TGD-001",
+      "project": " \n",
+      "sha256": "3831a9ab96477e0a30d69abd79439668294d35e6ea5bde1a09654c4cbba9ab44"
+    },
+    {
+      "bytes": 10,
+      "equal": true,
+      "existing": false,
+      "global": " GLOBAL<&> \n",
+      "id": "INS-TGD-001",
+      "project": " PROJECT<&> \n",
+      "sha256": "01196704dd224b4058118b4e22d87fce09d855cb0109eb2c67544c2e9e61c914"
+    },
+    {
+      "bytes": 1630,
+      "equal": true,
+      "existing": true,
+      "global": null,
+      "id": "INS-TGD-001",
+      "project": null,
+      "sha256": "8282967816b313e4a9c09c3f1a85cafd811d29cb5778a6900306c3df1b3c59b9"
+    },
+    {
+      "bytes": 1630,
+      "equal": true,
+      "existing": true,
+      "global": null,
+      "id": "INS-TGD-001",
+      "project": " \n",
+      "sha256": "8282967816b313e4a9c09c3f1a85cafd811d29cb5778a6900306c3df1b3c59b9"
+    },
+    {
+      "bytes": 10,
+      "equal": true,
+      "existing": true,
+      "global": null,
+      "id": "INS-TGD-001",
+      "project": " PROJECT<&> \n",
+      "sha256": "01196704dd224b4058118b4e22d87fce09d855cb0109eb2c67544c2e9e61c914"
+    },
+    {
+      "bytes": 1630,
+      "equal": true,
+      "existing": true,
+      "global": " \n",
+      "id": "INS-TGD-001",
+      "project": null,
+      "sha256": "8282967816b313e4a9c09c3f1a85cafd811d29cb5778a6900306c3df1b3c59b9"
+    },
+    {
+      "bytes": 1630,
+      "equal": true,
+      "existing": true,
+      "global": " \n",
+      "id": "INS-TGD-001",
+      "project": " \n",
+      "sha256": "8282967816b313e4a9c09c3f1a85cafd811d29cb5778a6900306c3df1b3c59b9"
+    },
+    {
+      "bytes": 10,
+      "equal": true,
+      "existing": true,
+      "global": " \n",
+      "id": "INS-TGD-001",
+      "project": " PROJECT<&> \n",
+      "sha256": "01196704dd224b4058118b4e22d87fce09d855cb0109eb2c67544c2e9e61c914"
+    },
+    {
+      "bytes": 9,
+      "equal": true,
+      "existing": true,
+      "global": " GLOBAL<&> \n",
+      "id": "INS-TGD-001",
+      "project": null,
+      "sha256": "3831a9ab96477e0a30d69abd79439668294d35e6ea5bde1a09654c4cbba9ab44"
+    },
+    {
+      "bytes": 9,
+      "equal": true,
+      "existing": true,
+      "global": " GLOBAL<&> \n",
+      "id": "INS-TGD-001",
+      "project": " \n",
+      "sha256": "3831a9ab96477e0a30d69abd79439668294d35e6ea5bde1a09654c4cbba9ab44"
+    },
+    {
+      "bytes": 10,
+      "equal": true,
+      "existing": true,
+      "global": " GLOBAL<&> \n",
+      "id": "INS-TGD-001",
+      "project": " PROJECT<&> \n",
+      "sha256": "01196704dd224b4058118b4e22d87fce09d855cb0109eb2c67544c2e9e61c914"
+    }
+  ]
+}

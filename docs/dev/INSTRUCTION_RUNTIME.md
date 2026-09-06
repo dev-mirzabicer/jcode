@@ -318,3 +318,7 @@ App-core `Server` owns the repository service. Construction performs no reposito
 ## Managed notification delivery
 
 See [managed notification delivery](../NOTIFICATIONS.md) for current-source occurrence rendering, structural ownership, typed todo queues, failures and recovery.
+
+## Workflow consumers
+
+[Workflow instructions](../WORKFLOW_INSTRUCTIONS.md) describes managed specialist, command, task-control and tool-guidance consumers. Swarm routing uses one optional `Session.swarm_routing_prompt` scalar containing its complete validated tool description. It is captured only after successful preflight and persisted before dispatch. It is not a generic tool-schema store or source-version tracker.

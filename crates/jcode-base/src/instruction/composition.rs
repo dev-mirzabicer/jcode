@@ -215,14 +215,17 @@ impl SystemPromptComposer {
         let legacy = global_legacy_imports(&self.repositories, prior.as_ref())?;
         let initialized = self.repositories.initialize_global(&seed, &legacy)?;
         if !initialized.created {
-            for spec in legacy
-                .iter()
-                .filter(|spec| spec.source_kind == LegacyInstructionSourceKind::PreferredTools)
-            {
+            for spec in legacy.iter().filter(|spec| {
+                matches!(
+                    spec.source_kind,
+                    LegacyInstructionSourceKind::PreferredTools
+                        | LegacyInstructionSourceKind::SwarmPrompt
+                )
+            }) {
                 self.repositories.import_legacy(
                     &initialized.repository,
                     spec,
-                    "wp07-global-preferred-tools",
+                    &format!("wp07-{}", spec.import_id),
                 )?;
             }
         }
@@ -964,6 +967,26 @@ fn global_legacy_imports(
                 target: InstructionLegacyImportTarget {
                     relative_path: "tools/preferred-tools.md".into(),
                     id: InstructionId::parse("preferred-tools")?,
+                    kind: InstructionKind::ToolGuidance,
+                    scope: InstructionScope::Global,
+                    template_mode: TemplateMode::Plain,
+                    metadata: InstructionMetadata::default(),
+                },
+            });
+        }
+    }
+    if prior.is_none_or(|manifest| {
+        manifest.seed_version < 26 && !manifest.legacy_imports.contains_key("global-swarm-routing")
+    }) {
+        let source_path = jcode_home.join("swarm-prompt.md");
+        if read_nonblank(source_path.clone())?.is_some() {
+            imports.push(InstructionLegacyImportSpec {
+                import_id: "global-swarm-routing".into(),
+                source_kind: LegacyInstructionSourceKind::SwarmPrompt,
+                source_path,
+                target: InstructionLegacyImportTarget {
+                    relative_path: "tools/swarm-routing.md".into(),
+                    id: InstructionId::parse("swarm-routing")?,
                     kind: InstructionKind::ToolGuidance,
                     scope: InstructionScope::Global,
                     template_mode: TemplateMode::Plain,

@@ -63,7 +63,9 @@ impl App {
             pending.request_payload_pressure =
                 Some(crate::context::request_payload_pressure(&provider_messages));
         }
-        let tools = self.registry.definitions(None).await;
+        let mut tools = self.registry.definitions(None).await;
+        crate::tool::instruction_guidance::preview(&self.session, &mut tools)
+            .map_err(|error| error.to_string())?;
         let pending_memory = self.build_memory_prompt_nonblocking(&provider_messages);
         let memory_pending =
             crate::memory::PendingMemoryReservation::new(self.session.id.clone(), pending_memory);
@@ -265,6 +267,16 @@ impl App {
                     "Startup Context receipt metadata repair remains pending for session {}: {}",
                     self.session.id, error
                 ));
+            }
+            if crate::tool::instruction_guidance::commit(&mut self.session, &invocation.tools)? {
+                self.provider_session_id = None;
+                invocation.session_id = None;
+                self.provider
+                    .invalidate_context_continuation("managed swarm routing migration");
+                crate::cache_invalidation::record(
+                    "managed swarm routing migration",
+                    "captured session-owned tool instructions",
+                );
             }
             let dispatch_result = if self.session.system_prompt.is_some() {
                 self.session

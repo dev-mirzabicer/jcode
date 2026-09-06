@@ -453,7 +453,13 @@ impl Agent {
                     .to_string();
                 let tools = match self.locked_tools.as_ref() {
                     Some(tools) => tools.clone(),
-                    None => self.tool_definitions_for_debug().await,
+                    None => self.tool_definitions_for_debug().await.map_err(|error| {
+                        PrimaryInstructionActivationError::Composition(
+                            crate::instruction::SystemPromptActivationError::Compatibility(
+                                error.to_string(),
+                            ),
+                        )
+                    })?,
                 };
                 let breakdown =
                     crate::context::request_token_breakdown(&projected, 0, 0, &split, &tools);
@@ -661,6 +667,7 @@ mod tests {
         calls: std::sync::Arc<AtomicUsize>,
         invalidations: std::sync::Arc<AtomicUsize>,
         systems: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        tool_snapshots: std::sync::Arc<std::sync::Mutex<Vec<Vec<ToolDefinition>>>>,
         requests: std::sync::Arc<std::sync::Mutex<Vec<Vec<Message>>>>,
         effort: Option<String>,
     }
@@ -675,6 +682,7 @@ mod tests {
             _resume_session_id: Option<&str>,
         ) -> anyhow::Result<EventStream> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            self.tool_snapshots.lock().unwrap().push(_tools.to_vec());
             self.requests.lock().unwrap().push(_messages.to_vec());
             self.systems
                 .lock()
@@ -763,6 +771,60 @@ mod tests {
         session.working_dir = Some(project.to_string_lossy().into_owned());
         session.ensure_initial_session_context_message();
         session
+    }
+
+    #[tokio::test]
+    async fn routing_guidance_preflight_and_provider_requests_use_one_session_snapshot() {
+        let home = TestHome::new();
+        let project = tempfile::tempdir().unwrap();
+        let provider = RecordingProvider::default();
+        let handle: std::sync::Arc<dyn Provider> = std::sync::Arc::new(provider.clone());
+        let registry = crate::tool::Registry::new(handle.clone()).await;
+        let (mut agent, _) = Agent::new_with_startup_context_and_agent(
+            handle,
+            registry,
+            project.path().to_str(),
+            StartupContextActivation::primary(StartupContextCaller::RunCommand),
+            crate::instruction::AgentSelection::Default,
+            false,
+        )
+        .unwrap();
+        let path = home.path().join("instructions/tools/swarm-routing.md");
+        let write = |body: &str| {
+            std::fs::write(
+                &path,
+                format!("---\nid: swarm-routing\nkind: tool-guidance\n---\n{body}"),
+            )
+            .unwrap()
+        };
+        write(&"X".repeat(2_000_000));
+        assert!(agent.run_once("preflight block").await.is_err());
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+        assert!(agent.session.swarm_routing_prompt.is_none());
+        write("FIRST ROUTING");
+        agent.run_once("first").await.unwrap();
+        let saved = agent.session.swarm_routing_prompt.clone().unwrap();
+        assert!(saved.ends_with("FIRST ROUTING"));
+        write("NEW ROUTING");
+        agent.run_once("second").await.unwrap();
+        let tools = provider.tool_snapshots.lock().unwrap();
+        assert_eq!(tools.len(), 2);
+        for request in tools.iter() {
+            assert_eq!(
+                request
+                    .iter()
+                    .find(|tool| tool.name == "swarm")
+                    .unwrap()
+                    .description,
+                saved
+            );
+        }
+        assert_eq!(
+            Session::load(agent.session_id())
+                .unwrap()
+                .swarm_routing_prompt,
+            Some(saved)
+        );
     }
 
     #[tokio::test]
@@ -1504,7 +1566,7 @@ mod tests {
         agent.session.reasoning_effort = Some("high".to_string());
         agent.session.provider_session_id = Some("stored-continuation".to_string());
         agent.provider_session_id = Some("live-continuation".to_string());
-        let _ = agent.tool_definitions().await;
+        let _ = agent.tool_definitions().await.unwrap();
         assert!(agent.locked_tools.is_some());
         let invalidations_before = provider.invalidations.load(Ordering::SeqCst);
 
@@ -1594,7 +1656,7 @@ mod tests {
             agent.active_transition_message_id(),
             Some(message_id.as_str())
         );
-        let _ = agent.tool_definitions().await;
+        let _ = agent.tool_definitions().await.unwrap();
         assert!(agent.locked_tools.is_some());
 
         let moved_store = home.path().join("instructions-away");

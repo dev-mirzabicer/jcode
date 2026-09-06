@@ -817,7 +817,7 @@ impl Agent {
         self.stdin_request_tx = Some(tx);
     }
 
-    pub(super) async fn tool_definitions(&mut self) -> Vec<ToolDefinition> {
+    pub(super) async fn tool_definitions(&mut self) -> Result<Vec<ToolDefinition>> {
         if self.session.is_canary {
             self.registry.register_selfdev_tools().await;
         }
@@ -842,7 +842,7 @@ impl Agent {
         // not rescan the registry on every subsequent turn.
         if let Some(ref locked) = self.locked_tools {
             if self.mcp_late_register_resolved {
-                return locked.clone();
+                return Ok(locked.clone());
             }
             if self.registry_has_new_mcp_tools(locked).await {
                 logging::info(
@@ -862,11 +862,12 @@ impl Agent {
                 // No MCP tools have appeared. They may still be connecting, so
                 // leave the guard unset and re-check on the next turn. Once they
                 // appear (or never do, after the registry settles) we stop.
-                return locked.clone();
+                return Ok(locked.clone());
             }
         }
 
-        let tools = self.build_filtered_tool_definitions().await;
+        let mut tools = self.build_filtered_tool_definitions().await;
+        crate::tool::instruction_guidance::preview(&self.session, &mut tools)?;
 
         // Lock the tool list to prevent cache invalidation when more tools
         // arrive asynchronously mid-session.
@@ -875,7 +876,7 @@ impl Agent {
             tools.len()
         ));
         self.locked_tools = Some(tools.clone());
-        tools
+        Ok(tools)
     }
 
     /// Build the agent's tool definitions from the registry, applying the
@@ -926,8 +927,25 @@ impl Agent {
         })
     }
 
+    pub(super) fn commit_routing_guidance(&mut self, tools: &[ToolDefinition]) -> Result<()> {
+        if crate::tool::instruction_guidance::commit(&mut self.session, tools)? {
+            self.provider_session_id = None;
+            self.provider
+                .invalidate_context_continuation("managed swarm routing migration");
+            self.cache_tracker.reset();
+            crate::cache_invalidation::record(
+                "managed swarm routing migration",
+                "captured session-owned tool instructions",
+            );
+        }
+        Ok(())
+    }
+
     pub async fn tool_names(&self) -> Vec<String> {
-        self.tool_definitions_for_debug()
+        if self.session.is_canary {
+            self.registry.register_selfdev_tools().await;
+        }
+        self.build_filtered_tool_definitions()
             .await
             .into_iter()
             .map(|tool| tool.name)
@@ -935,7 +953,7 @@ impl Agent {
     }
 
     /// Get full tool definitions for debug introspection (bypasses lock)
-    pub async fn tool_definitions_for_debug(&self) -> Vec<crate::message::ToolDefinition> {
+    pub async fn tool_definitions_for_debug(&self) -> Result<Vec<crate::message::ToolDefinition>> {
         if self.session.is_canary {
             self.registry.register_selfdev_tools().await;
         }
@@ -946,7 +964,8 @@ impl Agent {
             });
         }
         Self::apply_selfdev_tool_surface(&mut tools, self.session.is_canary);
-        tools
+        crate::tool::instruction_guidance::preview(&self.session, &mut tools)?;
+        Ok(tools)
     }
 
     pub async fn execute_tool(

@@ -127,7 +127,7 @@ impl Agent {
             }
             let messages = self.messages_for_provider()?;
 
-            let tools = self.tool_definitions().await;
+            let tools = self.tool_definitions().await?;
             let messages: std::sync::Arc<[Message]> = messages.into();
             // Non-blocking memory: uses pending result from last turn, spawns check for next turn
             let pending_memory = self.build_memory_prompt_nonblocking_shared(
@@ -200,6 +200,7 @@ impl Agent {
                 return Err(self.block_for_preflight(preflight, Some(&event_tx))?);
             }
 
+            self.commit_routing_guidance(&tools)?;
             if let Err(error) = self.prepare_startup_context_provider_dispatch() {
                 memory_pending.restore_now();
                 return Err(self.block_for_startup_context_dispatch(error));

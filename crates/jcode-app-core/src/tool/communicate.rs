@@ -1825,26 +1825,14 @@ fn format_swarm_model_list(
     out
 }
 
-pub struct CommunicateTool {
-    /// Full tool description including the user-tunable swarm prompt
-    /// (model-routing guidance loaded from `swarm-prompt.md`). Computed once at
-    /// registry construction so `description()` can hand out a borrowed str.
-    description: String,
-}
+pub struct CommunicateTool;
+
+pub(super) const BASE_DESCRIPTION: &str =
+    "Coordinate agents: spawn workers with a prompt, message them, and manage swarm plans.";
 
 impl CommunicateTool {
     pub fn new() -> Self {
-        const BASE_DESCRIPTION: &str =
-            "Coordinate agents: spawn workers with a prompt, message them, and manage swarm plans.";
-        let swarm_prompt = crate::prompt::load_swarm_prompt(None);
-        let description = if swarm_prompt.is_empty() {
-            BASE_DESCRIPTION.to_string()
-        } else {
-            format!(
-                "{BASE_DESCRIPTION}\n\nSwarm prompt (user-tunable via ~/.jcode/swarm-prompt.md):\n{swarm_prompt}"
-            )
-        };
-        Self { description }
+        Self
     }
 }
 
@@ -1989,7 +1977,7 @@ impl Tool for CommunicateTool {
     }
 
     fn description(&self) -> &str {
-        &self.description
+        BASE_DESCRIPTION
     }
 
     fn parameters_schema(&self) -> Value {

@@ -33,3 +33,5 @@ Reference documentation for the jcode codebase.
 ## Managed notification and control prose
 
 See [managed notification and control prose](NOTIFICATIONS.md) for current-source occurrence rendering, structural ownership, typed todo queues, failures and recovery.
+
+See [managed workflow and specialist instructions](WORKFLOW_INSTRUCTIONS.md) for command preparation, transfer/review/overnight/Swarm consumers, source cutover, routing snapshots and failure recovery.
