@@ -57,3 +57,7 @@ WP-09/WP-10 consume the final resource/consumer catalog, high-impact scoped rede
 ### Verification tail
 
 Coordinated task `482976kh39` completed the combined matrix, including successful root all-target check, corrected root ambient E2E, affected-crate strict lint and root library/binary strict lint. Task `811104ijwa` passed the corrected spawn filter and final synthetic-test cleanup. TypeScript `npm run check` passed all 47 tests. Raw logs preserve the known failures and every zero-match correction rather than relabeling them as successful.
+
+### Activated integration correction
+
+The first activated TUI command journey exposed a real wake-up gap: typed command preparation was queued without requesting the idle event-loop dispatcher. Command creation, render replies and reconnect now request the existing dispatch wake-up. The main event loop and regression test share its flag-clearing boundary, and waiting for a reply does not spin. Task `838766nuc5` passed actual Enter/reply dispatch, command recovery, adjacent follow-up tests and strict TUI lint. The same activated journey must pass after rebuilding this correction.

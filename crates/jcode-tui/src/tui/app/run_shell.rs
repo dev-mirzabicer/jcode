@@ -895,9 +895,7 @@ impl App {
                     break 'outer;
                 }
 
-                if self.pending_queued_dispatch {
-                    self.pending_queued_dispatch = false;
-                    remote::process_remote_followups(&mut self, &mut remote_conn).await;
+                if remote::flush_requested_followups(&mut self, &mut remote_conn).await {
                     needs_redraw = true;
                     continue;
                 }

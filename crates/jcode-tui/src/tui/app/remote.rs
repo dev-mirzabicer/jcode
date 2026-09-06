@@ -1202,6 +1202,20 @@ async fn dispatch_pending_server_reload(app: &mut App, remote: &mut RemoteConnec
     }
 }
 
+/// The event loop and mechanism tests share this wake-up boundary. Clearing
+/// the flag before dispatch is essential because the dispatcher guards reentry.
+pub(super) async fn flush_requested_followups(
+    app: &mut App,
+    remote: &mut RemoteConnection,
+) -> bool {
+    if !app.pending_queued_dispatch {
+        return false;
+    }
+    app.pending_queued_dispatch = false;
+    process_remote_followups(app, remote).await;
+    true
+}
+
 pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteConnection) {
     // A pending *server* reload must be dispatched even when the bootstrap
     // History payload was intentionally deferred. The runtime-identity /

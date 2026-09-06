@@ -718,7 +718,10 @@ pub(in crate::tui::app) async fn handle_post_connect<B: ratatui::backend::Backen
     // would show its prompt in the input box but never actually submit it,
     // because `process_remote_followups` (the only production dispatcher) was
     // never invoked post-connect. See issues #267/#268/#76.
-    if !app.is_processing && (app.has_queued_followups() || app.has_pending_startup_submission()) {
+    if crate::tui::app::commands_workflow::has_ready(app)
+        || (!app.is_processing
+            && (app.has_queued_followups() || app.has_pending_startup_submission()))
+    {
         crate::logging::info(
             "Post-connect has queued followups or startup submission; dispatching immediately",
         );

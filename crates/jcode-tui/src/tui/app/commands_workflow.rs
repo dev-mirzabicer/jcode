@@ -191,6 +191,7 @@ pub(super) fn handle(app: &mut App, text: &str) -> bool {
             request_id: None,
             rendered: None,
         });
+        app.pending_queued_dispatch = true;
         app.set_status_notice("Preparing managed workflow instructions");
         app.save_input_for_reload(&commands::active_session_id(app));
     } else {
@@ -431,6 +432,7 @@ pub(super) fn accept_event(
         E::Error { message, .. } => Err(message),
         _ => unreachable!(),
     });
+    app.pending_queued_dispatch = true;
     Ok(())
 }
 
@@ -450,6 +452,7 @@ pub(super) async fn poll(
     };
     if app.pending_workflow_commands[index].session_id != current {
         app.pending_workflow_commands[index].cancelled = true;
+        app.pending_queued_dispatch |= has_ready(app);
         app.push_display_message(DisplayMessage::error(
             "Pending workflow cancelled because the active session changed.",
         ));
@@ -463,6 +466,7 @@ pub(super) async fn poll(
             &original,
             "working directory changed during preparation",
         );
+        app.pending_queued_dispatch |= has_ready(app);
         return true;
     }
     if let Some(result) = app.pending_workflow_commands[index].rendered.take() {
@@ -475,6 +479,7 @@ pub(super) async fn poll(
             }
             Err(error) => restore_failed(app, &pending.original, &error),
         }
+        app.pending_queued_dispatch |= has_ready(app);
         app.save_input_for_reload(&commands::active_session_id(app));
         return true;
     }
@@ -509,12 +514,21 @@ pub(super) fn cancel_pending(app: &mut App) -> bool {
     changed
 }
 
+pub(super) fn has_ready(app: &App) -> bool {
+    app.pending_workflow_commands.iter().any(|pending| {
+        !pending.cancelled
+            && !pending.suspended
+            && (pending.request_id.is_none() || pending.rendered.is_some())
+    })
+}
+
 pub(super) fn reset_connection(app: &mut App) {
     app.pending_workflow_commands.retain(|p| !p.cancelled);
     for pending in &mut app.pending_workflow_commands {
         pending.request_id = None;
         pending.rendered = None;
     }
+    app.pending_queued_dispatch |= has_ready(app);
 }
 
 impl PendingCommand {
@@ -706,5 +720,67 @@ mod tests {
         assert!(handle(&mut app, "/refactor plan preserve"));
         assert_eq!(app.pending_workflow_commands.len(), 1);
         assert!(!app.pending_workflow_commands[0].suspended);
+    }
+}
+
+#[cfg(test)]
+mod dispatcher_tests {
+    use super::*;
+    use crate::protocol::{Request, ServerEvent};
+    use crossterm::event::{KeyCode, KeyModifiers};
+    use tokio::io::AsyncBufReadExt;
+    #[test]
+    fn actual_enter_and_render_reply_wake_the_shared_event_loop_dispatcher() {
+        let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        let mut app = crate::tui::app::tests::create_test_app();
+        app.is_remote = true;
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _enter = runtime.enter();
+        let mut connection = crate::tui::backend::RemoteConnection::dummy();
+        connection.mark_history_loaded();
+        let mut reader = tokio::io::BufReader::new(connection.take_dummy_peer().unwrap());
+        app.input = "/plan EXPLICIT".into();
+        app.cursor_pos = app.input.len();
+        runtime
+            .block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut connection))
+            .unwrap();
+        assert!(app.pending_queued_dispatch);
+        assert!(!app.is_processing);
+        assert!(runtime.block_on(remote::flush_requested_followups(&mut app, &mut connection)));
+        assert!(!app.pending_queued_dispatch);
+        let mut line = String::new();
+        runtime.block_on(reader.read_line(&mut line)).unwrap();
+        let Request::RenderWorkflowPrompt {
+            id,
+            workflow:
+                WorkflowPromptRequest::Command {
+                    command: C::Plan { goal },
+                },
+        } = serde_json::from_str(&line).unwrap()
+        else {
+            panic!("expected render request")
+        };
+        assert_eq!(goal.as_deref(), Some("EXPLICIT"));
+        assert!(
+            !runtime.block_on(remote::flush_requested_followups(&mut app, &mut connection)),
+            "waiting for a reply must not spin"
+        );
+        app.handle_server_event(
+            ServerEvent::WorkflowPromptRendered {
+                id,
+                content: "SYNTHETIC-PLAN".into(),
+            },
+            &mut connection,
+        );
+        assert!(app.pending_queued_dispatch);
+        assert!(runtime.block_on(remote::flush_requested_followups(&mut app, &mut connection)));
+        line.clear();
+        runtime.block_on(reader.read_line(&mut line)).unwrap();
+        assert!(
+            matches!(serde_json::from_str::<Request>(&line).unwrap(),Request::Message{content,..} if content=="SYNTHETIC-PLAN")
+        );
+        assert!(app.is_processing);
+        assert!(app.pending_workflow_commands.is_empty());
+        assert!(!app.pending_queued_dispatch);
     }
 }
