@@ -16,6 +16,7 @@ name = "jcode_base"
 path = "src/lib.rs"
 
 [dependencies]
+jcode-instruction-types = { path = "../jcode-instruction-types" }
 # Memory allocator (reduces fragmentation for long-running server)
 tikv-jemalloc-ctl = { version = "0.6", optional = true }
 tikv-jemalloc-sys = { version = "0.6", optional = true }

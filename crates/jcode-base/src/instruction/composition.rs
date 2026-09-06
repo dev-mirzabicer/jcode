@@ -302,6 +302,44 @@ impl SystemPromptComposer {
         compose_activation(&environment, request)
     }
 
+    /// Compose current source for inspection only. Unlike activation, this never
+    /// initializes, upgrades, imports, persists, or replaces session state.
+    pub fn preview(
+        &self,
+        request: SystemPromptActivationRequest<'_>,
+    ) -> Result<SystemPromptActivation, SystemPromptActivationError> {
+        let environment = self.inspect_environment(request.working_dir)?;
+        compose_activation(&environment, request)
+    }
+
+    pub fn preview_agent_component(
+        &self,
+        working_dir: Option<&Path>,
+        selection: AgentSelection,
+    ) -> Result<String, SystemPromptActivationError> {
+        let environment = self.inspect_environment(working_dir)?;
+        let profile = render_agent_profile(&environment, selection)?;
+        let mut parts = vec![profile.text];
+        push_project_addenda(&environment.runtime, &profile.resource, &mut parts)?;
+        Ok(parts.join("\n\n"))
+    }
+
+    fn inspect_environment(
+        &self,
+        working_dir: Option<&Path>,
+    ) -> Result<CompositionEnvironment, SystemPromptActivationError> {
+        let global = self.repositories.global_repository()?;
+        if !matches!(
+            self.repositories.inspect(&global)?.health,
+            super::InstructionRepositoryHealth::Ready
+        ) {
+            return Err(SystemPromptActivationError::Compatibility(
+                "Global instruction store is unavailable. Inspection never initializes or repairs stores.".into(),
+            ));
+        }
+        self.environment_from_sources(working_dir, &global, false)
+    }
+
     pub fn render_agent_transition(
         &self,
         working_dir: Option<&Path>,
@@ -406,6 +444,15 @@ impl SystemPromptComposer {
         working_dir: Option<&Path>,
     ) -> Result<CompositionEnvironment, SystemPromptActivationError> {
         let (global_repository, initialized_global_store) = self.prepare_global_store_for_read()?;
+        self.environment_from_sources(working_dir, &global_repository, initialized_global_store)
+    }
+
+    fn environment_from_sources(
+        &self,
+        working_dir: Option<&Path>,
+        global_repository: &super::InstructionRepositoryRef,
+        initialized_global_store: bool,
+    ) -> Result<CompositionEnvironment, SystemPromptActivationError> {
         let project_root = working_dir
             .map(|working_dir| self.repositories.resolve_project_root(working_dir))
             .transpose()?;
@@ -422,7 +469,7 @@ impl SystemPromptComposer {
             sources = sources.with_project_agents_md(root.join("AGENTS.md"));
         }
         let runtime = super::InstructionRuntime::discover(sources);
-        let global_manifest = self.repositories.load_manifest(&global_repository)?;
+        let global_manifest = self.repositories.load_manifest(global_repository)?;
         let project_manifest = project_repository
             .as_ref()
             .map(|repository| self.repositories.load_manifest(repository))

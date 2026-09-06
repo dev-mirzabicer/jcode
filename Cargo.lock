@@ -3509,6 +3509,7 @@ dependencies = [
  "jcode-embedding",
  "jcode-gateway-types",
  "jcode-import-core",
+ "jcode-instruction-types",
  "jcode-logging",
  "jcode-memory-types",
  "jcode-message-types",
@@ -3710,6 +3711,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "jcode-instruction-types"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "jcode-logging"
 version = "0.1.0"
 dependencies = [
@@ -3808,6 +3816,7 @@ dependencies = [
  "chrono",
  "jcode-batch-types",
  "jcode-config-types",
+ "jcode-instruction-types",
  "jcode-message-types",
  "jcode-plan",
  "jcode-provider-core",

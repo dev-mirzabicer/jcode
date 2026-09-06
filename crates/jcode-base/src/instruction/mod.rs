@@ -6,6 +6,7 @@
 //! editing. Those callers receive finished text and retain their own behavior.
 
 mod composition;
+pub mod inspection;
 pub mod notification;
 mod repository;
 pub mod routing;

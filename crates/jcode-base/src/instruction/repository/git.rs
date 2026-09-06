@@ -161,7 +161,24 @@ impl GitRepository {
         &self,
         relative_path: Option<&Path>,
     ) -> InstructionRepositoryResult<Vec<InstructionHistoryEntry>> {
-        let mut args = vec![OsString::from("rev-list"), OsString::from("HEAD")];
+        self.history_page(relative_path, "HEAD", 0, None)
+    }
+
+    pub(super) fn history_page(
+        &self,
+        relative_path: Option<&Path>,
+        revision: &str,
+        offset: usize,
+        limit: Option<usize>,
+    ) -> InstructionRepositoryResult<Vec<InstructionHistoryEntry>> {
+        if revision != "HEAD" {
+            validate_commit_id(revision)?;
+        }
+        let mut args = vec![OsString::from("rev-list"), OsString::from(revision)];
+        args.push(format!("--skip={offset}").into());
+        if let Some(limit) = limit {
+            args.push(format!("--max-count={limit}").into());
+        }
         if let Some(path) = relative_path {
             args.push(OsString::from("--"));
             args.push(path.as_os_str().to_os_string());
@@ -272,6 +289,7 @@ impl GitRepository {
         let mut args = vec![
             OsString::from("diff"),
             OsString::from("--no-ext-diff"),
+            OsString::from("--no-textconv"),
             OsString::from("--no-color"),
             OsString::from(from),
             OsString::from(to),
@@ -281,6 +299,42 @@ impl GitRepository {
             args.push(path.as_os_str().to_os_string());
         }
         self.checked_utf8_os("compare revisions", &args)
+    }
+
+    pub(super) fn working_diff(&self, path: Option<&Path>) -> InstructionRepositoryResult<String> {
+        let mut args: Vec<OsString> = [
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            "HEAD",
+            "--",
+        ]
+        .into_iter()
+        .map(Into::into)
+        .collect();
+        if let Some(path) = path {
+            args.push(path.as_os_str().into());
+        }
+        self.checked_utf8_os("inspect working diff", &args)
+    }
+
+    pub(super) fn enclosing_root(path: &Path) -> InstructionRepositoryResult<Option<PathBuf>> {
+        let directory = if path.is_dir() {
+            path
+        } else {
+            path.parent().unwrap_or(path)
+        };
+        if !directory.exists() {
+            return Ok(None);
+        }
+        let output = Self::new(directory).run(["rev-parse", "--show-toplevel"])?;
+        if !output.status.success() {
+            return Ok(None);
+        }
+        Ok(Some(PathBuf::from(
+            utf8_stdout("inspect enclosing repository", output)?.trim(),
+        )))
     }
 
     pub(super) fn find_operation_commit(
@@ -992,7 +1046,9 @@ where
 {
     let mut command = Command::new("git");
     command
+        .args(["-c", "core.fsmonitor=false"])
         .args(args)
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_PAGER", "cat")
         .env("LC_ALL", "C")

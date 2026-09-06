@@ -874,6 +874,75 @@ impl InstructionRepositoryService {
         GitRepository::new(&repository.root).history(relative_path)
     }
 
+    /// A pinned history page, independent of subsequent branch movement.
+    pub fn history_page(
+        &self,
+        repository: &InstructionRepositoryRef,
+        path: Option<&Path>,
+        head: &str,
+        offset: usize,
+        limit: usize,
+    ) -> InstructionRepositoryResult<Vec<InstructionHistoryEntry>> {
+        if let Some(path) = path {
+            validate_relative_path(path)?;
+        }
+        GitRepository::new(&repository.root).history_page(path, head, offset, Some(limit))
+    }
+
+    pub fn working_diff(
+        &self,
+        repository: &InstructionRepositoryRef,
+        path: Option<&Path>,
+    ) -> InstructionRepositoryResult<String> {
+        if let Some(path) = path {
+            validate_relative_path(path)?;
+        }
+        GitRepository::new(&repository.root).working_diff(path)
+    }
+
+    /// Git facts for a dedicated ecosystem input, without applying managed-store
+    /// schema or ever adopting the enclosing project as an instruction store.
+    pub fn inspect_external_source(
+        &self,
+        path: &Path,
+    ) -> InstructionRepositoryResult<Option<(InstructionRepositoryRef, InstructionRepositoryState)>>
+    {
+        let Some(root) = GitRepository::enclosing_root(path)? else {
+            return Ok(None);
+        };
+        let git = GitRepository::new(&root);
+        let head = git.head()?;
+        let branch = git.branch()?;
+        let changes = git.changes()?;
+        let state = InstructionRepositoryState {
+            health: InstructionRepositoryHealth::Ready,
+            detached: head.is_some() && branch.is_none(),
+            head,
+            branch,
+            upstream: git.upstream()?,
+            conflicts: changes
+                .iter()
+                .filter(|change| change.conflicted)
+                .map(|change| change.path.clone())
+                .collect(),
+            changes,
+            parent_gitlink: None,
+            active_mutation: None,
+            configuration_warnings: Vec::new(),
+        };
+        let repository = InstructionRepositoryRef {
+            id: format!("external:{}", root.display()),
+            kind: InstructionRepositoryKind::ProjectExternal,
+            root,
+            project_root: None,
+            project_config_path: None,
+            configured_branch: None,
+            configured_remote: None,
+            owner_only: false,
+        };
+        Ok(Some((repository, state)))
+    }
+
     pub fn content_at_revision(
         &self,
         repository: &InstructionRepositoryRef,

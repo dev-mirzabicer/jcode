@@ -355,6 +355,11 @@ impl SkillRegistry {
         // First-run import from Claude Code / Codex CLI
         Self::import_from_external();
 
+        Self::inspect_global_sources()
+    }
+
+    /// Discover current sources without first-run copying or changing any registry.
+    pub fn inspect_global_sources() -> Result<Self> {
         let mut registry = Self::default();
 
         // Load skills provided by Claude Code plugins/marketplace installs
@@ -633,7 +638,7 @@ impl SkillRegistry {
 
     /// Parse one captured source. Copy and invocation share the compatibility
     /// parser so metadata and body always describe the same SKILL.md bytes.
-    fn parse_skill_source(path: &Path, content: &str) -> Result<Skill> {
+    pub(crate) fn parse_skill_source(path: &Path, content: &str) -> Result<Skill> {
         let (frontmatter, body) = Self::parse_frontmatter(content)?;
 
         let SkillFrontmatter {

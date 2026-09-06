@@ -18,6 +18,7 @@ members = [
     "crates/jcode-embedding",
     "crates/jcode-gateway-types",
     "crates/jcode-import-core",
+    "crates/jcode-instruction-types",
     "crates/jcode-pdf",
     "crates/jcode-logging",
     "crates/jcode-background-types",
