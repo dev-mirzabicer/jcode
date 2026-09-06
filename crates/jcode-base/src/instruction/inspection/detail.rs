@@ -1,4 +1,5 @@
 use super::catalog::selector;
+use super::overview::*;
 use super::*;
 
 impl InstructionInspector {
@@ -10,6 +11,34 @@ impl InstructionInspector {
         cancel: &AtomicBool,
     ) -> Result<(String, String)> {
         if let Some(revision) = revision {
+            if view == InstructionInspectionView::Metadata && revision.to.is_none() {
+                let (repository, _, _) = self.git_target(target)?;
+                let entries = self
+                    .repositories
+                    .history_page(repository, None, &revision.from, 0, 1)
+                    .map_err(|error| fail("commit details", error))?;
+                let entry = entries
+                    .first()
+                    .ok_or_else(|| fail("commit details", "Commit not found"))?;
+                return Ok((
+                    format!("Commit {}", entry.commit),
+                    format!(
+                        "COMMIT DETAILS\n\nCommit: {}\nParents: {}\nAuthor: {} <{}>\nDate: {}\n\n{}\n\nCHANGED PATHS\n{}",
+                        entry.commit,
+                        entry.parents.join(", "),
+                        entry.author_name,
+                        entry.author_email,
+                        entry.authored_at,
+                        entry.subject,
+                        entry
+                            .changed_paths
+                            .iter()
+                            .map(|path| path.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    ),
+                ));
+            }
             return self.revision(target, revision);
         }
         match target {
@@ -46,7 +75,7 @@ impl InstructionInspector {
                         .working_diff(repository, None)
                         .map_err(|error| fail("working diff", error))?
                 } else {
-                    format!("{}\n{}\n\n{}", store.row.kind, store.row.root, store.detail)
+                    repository_overview(store)
                 };
                 Ok((format!("Repository: {}", store.row.kind), text))
             }
@@ -167,7 +196,7 @@ impl InstructionInspector {
                 .working_dir
                 .as_deref()
                 .map_or_else(|| "none".into(), |path| path.display().to_string()),
-            self.context.is_selfdev
+            yes(self.context.is_selfdev)
         );
         for store in self
             .stores
@@ -177,9 +206,12 @@ impl InstructionInspector {
         {
             match self.repositories.load_manifest(store) {
                 Ok(manifest) => text.push_str(&format!(
-                    "\n{} default: {:?}\nSchema: {}  Seed: {}\n",
+                    "\n{} default agent: {}\nSchema: {}  Seed: {}\n",
                     store.kind,
-                    manifest.default_agent,
+                    manifest
+                        .default_agent
+                        .as_deref()
+                        .unwrap_or("Not configured; continue to the next precedence tier"),
                     manifest.schema_version,
                     manifest.seed_version
                 )),
@@ -192,7 +224,7 @@ impl InstructionInspector {
     fn metadata(&self, resource: &Resource, runtime: &InstructionRuntime) -> String {
         let row = &resource.row;
         let mut text = format!(
-            "ID: {}\nName: {}\nKind: {}\nScope: {}\nOrigin: {:?}\nRepository: {}\nPath: {}\nEffective at catalog capture: {}\nValidation at catalog capture: {}\n{}\n",
+            "RESOURCE OVERVIEW\n\nID: {}\nName: {}\nType: {}\nScope: {}\nOrigin: {:?}\nRepository: {}\nPath: {}\nLookup at catalog capture: {}\nValidation at catalog capture: {}\n\n{}\n",
             row.id,
             row.name,
             row.kind,
@@ -200,14 +232,18 @@ impl InstructionInspector {
             row.origin,
             row.repository,
             resource.path.display(),
-            row.effective,
+            if row.effective {
+                "Effective definition"
+            } else {
+                "Shadowed definition (still inspectable)"
+            },
             row.warning.as_deref().unwrap_or("valid"),
             resource.annotation
         );
         if let Some(managed) = &resource.managed {
             match runtime.resolve(&selector(managed)) {
                 Ok(document) => {
-                    text.push_str(&format!("Template: {:?}\nDescription: {}\nAvailability: {:?}\nAddendum target: {}\nIncludes: {}\nAllowed tools: {:?}\n", document.template_mode, document.metadata.description.as_deref().unwrap_or("none"), document.metadata.agent.as_ref().map(|agent| agent.availability), document.metadata.addendum.as_ref().map_or_else(|| "none".into(), |addendum| addendum.target.to_string()), document.metadata.includes.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "), document.metadata.allowed_tools));
+                    text.push_str(&document_overview(document));
                 }
                 Err(error) => text.push_str(&format!("Current validation error: {error}\n")),
             }
@@ -216,7 +252,7 @@ impl InstructionInspector {
                 .iter()
                 .filter(|consumer| consumer.kind == managed.kind && consumer.id == managed.id)
             {
-                text.push_str(&format!("\nConsumer: {}\nDelivery owner: {}\nScope policy: {:?}\nRequired: {}\nEmpty meaningful: {}\n{}\n", consumer.key, consumer.delivery_owner, consumer.scope_policy, consumer.required, consumer.empty_is_meaningful, consumer.inventory_note));
+                text.push_str(&format!("\nCONSUMER: {}\nDelivery owner: {}\nSource policy: {}\nRequired when invoked: {}\nEmpty prose allowed: {}\n{}\n", consumer.key, consumer.delivery_owner, scope_policy(consumer.scope_policy), yes(consumer.required), yes(consumer.empty_is_meaningful), consumer.inventory_note));
             }
         }
         if let Some(alias) = &resource.alias {
@@ -225,9 +261,7 @@ impl InstructionInspector {
                     .map_err(|error| fail("parse roster", error))
             }) {
                 Ok(roster) => match roster.inspect(alias) {
-                    Ok(entry) => {
-                        text.push_str(&serde_json::to_string_pretty(entry).unwrap_or_default())
-                    }
+                    Ok(entry) => text.push_str(&roster_entry(alias, entry)),
                     Err(error) => text.push_str(&error.to_string()),
                 },
                 Err(error) => text.push_str(&error.detail),
@@ -258,16 +292,40 @@ impl InstructionInspector {
                 &crate::model_roster::ModelRosterRequest::alias(alias),
                 catalog,
             );
-            return Ok(format!(
-                "Availability (catalog/constructor evidence, not quota or inference):\n{}\n\nResolution:\n{}",
-                serde_json::to_string_pretty(&availability)
-                    .map_err(|error| fail("format availability", error))?,
-                match resolution {
-                    Ok(preview) => serde_json::to_string_pretty(&preview)
-                        .map_err(|error| fail("format resolution", error))?,
-                    Err(error) => error.to_string(),
+            let mut text = format!(
+                "MODEL RESOLUTION PREVIEW: {alias}\n\nThis is catalog/constructor evidence, not quota or inference.\nNo execution was launched; the primary model is unchanged.\n\nCANDIDATES IN PRIORITY ORDER\n"
+            );
+            for (index, candidate) in availability.iter().enumerate() {
+                text.push_str(&format!("\n{}. {}\n", index + 1, candidate.model));
+                match &candidate.result {
+                    Ok(value) => {
+                        text.push_str(&format!("Available\n{}", resolution_summary(value)))
+                    }
+                    Err(error) => text.push_str(&format!("Unavailable: {error}\n")),
                 }
-            ));
+            }
+            match resolution {
+                Ok(preview) => {
+                    text.push_str(&format!(
+                        "\nSELECTED FOR A NEW EXECUTION\n{}",
+                        resolution_summary(&preview.resolution)
+                    ));
+                    for candidate in preview.rejected_candidates {
+                        text.push_str(&format!(
+                            "Skipped {}: {}\n",
+                            candidate.model, candidate.reason
+                        ));
+                    }
+                    // Complete provider-pin identity remains reachable as technical data.
+                    text.push_str("\nExact resolved selection (technical record):\n");
+                    text.push_str(
+                        &serde_json::to_string_pretty(&preview.resolution)
+                            .map_err(|error| fail("format resolution", error))?,
+                    );
+                }
+                Err(error) => text.push_str(&format!("\nNO CANDIDATE SELECTED\n{error}")),
+            }
+            return Ok(text);
         }
         if let Some(managed) = &resource.managed {
             if managed.kind == InstructionKind::Agent {

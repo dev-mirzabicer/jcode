@@ -2,6 +2,7 @@
 //! roster owners. Nothing in this module installs instructions or publishes Git.
 mod catalog;
 mod detail;
+mod overview;
 mod worker;
 pub use worker::InspectionWorker;
 

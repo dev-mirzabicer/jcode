@@ -755,3 +755,82 @@ fn reverse_consumer_inspection_exposes_unresolved_graphs() {
     .text;
     assert!(text.contains("global:module:broken-consumer") && text.contains("missing"));
 }
+
+#[test]
+fn readable_overviews_preserve_repository_facts_and_exact_revision_source() {
+    let fixture = Fixture::new();
+    fixture.seed();
+    let mut inspector = fixture.open();
+    let head = git(&fixture.root, &["rev-parse", "HEAD"]);
+    let store = inspector.stores.get_mut("global").unwrap();
+    let state = store.state.as_mut().unwrap();
+    state.upstream = Some(InstructionRepositoryUpstream {
+        reference: "origin/main".into(),
+        remote: Some("origin".into()),
+        branch: Some("main".into()),
+        ahead: 3,
+        behind: 2,
+    });
+    state
+        .configuration_warnings
+        .push("SYNTHETIC CONFIGURATION WARNING".into());
+    state.parent_gitlink = Some(ParentGitlinkState {
+        path: ".jcode/instructions".into(),
+        gitmodules_changed: true,
+        gitlink_changed: true,
+        recorded_commit: Some("recorded".into()),
+        checked_out_commit: Some("checkout".into()),
+    });
+    let (_, overview) = inspector
+        .detail(
+            &InstructionInspectionTarget::Repository("global".into()),
+            InstructionInspectionView::Metadata,
+            None,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    for fact in [
+        "Branch: main",
+        "Ahead: 3",
+        "Behind: 2",
+        "recorded",
+        "checkout",
+        "SYNTHETIC CONFIGURATION WARNING",
+    ] {
+        assert!(overview.contains(fact), "{fact}");
+    }
+    assert!(!overview.contains("\"branch\":"));
+    let resource = inspector
+        .resources
+        .values()
+        .find(|resource| resource.row.id == "shared")
+        .unwrap()
+        .row
+        .key
+        .clone();
+    let (_, metadata) = inspector
+        .detail(
+            &InstructionInspectionTarget::Resource(resource.clone()),
+            InstructionInspectionView::Metadata,
+            Some(&InstructionRevisionSelection {
+                from: head.clone(),
+                to: None,
+            }),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    assert!(metadata.contains(&head));
+    assert!(metadata.contains("modules/shared.md"));
+    assert!(metadata.contains("Author:"));
+    let (_, source) = inspector
+        .revision(
+            &InstructionInspectionTarget::Resource(resource),
+            &InstructionRevisionSelection {
+                from: head.clone(),
+                to: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(source, document("shared", "module", "SHARED"));
+    assert_eq!(git(&fixture.root, &["rev-parse", "HEAD"]), head);
+}
