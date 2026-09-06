@@ -224,13 +224,15 @@ impl InstructionInspector {
     fn metadata(&self, resource: &Resource, runtime: &InstructionRuntime) -> String {
         let row = &resource.row;
         let mut text = format!(
-            "RESOURCE OVERVIEW\n\nID: {}\nName: {}\nType: {}\nScope: {}\nOrigin: {:?}\nRepository: {}\nPath: {}\nLookup at catalog capture: {}\nValidation at catalog capture: {}\n\n{}\n",
+            "RESOURCE OVERVIEW\n\nID: {}\nDisplay name: {}\nType: {}\nScope: {}\nOrigin: {:?}\nRepository: {}\nPath: {}\nLookup at catalog capture: {}\nValidation at catalog capture: {}\n\n{}\n",
             row.id,
             row.name,
             row.kind,
             row.scope,
             row.origin,
-            row.repository,
+            self.stores
+                .get(&row.repository)
+                .map_or(row.repository.as_str(), |store| store.row.kind.as_str()),
             resource.path.display(),
             if row.effective {
                 "Effective definition"

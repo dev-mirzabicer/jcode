@@ -358,7 +358,7 @@ try:
         tester_state(tid,lambda state:state.get('section')=='History' and state.get('pending_id') is None)
         debug(f'tester:{tid}:keys:a,down,b')
         tester_state(tid,lambda state:state.get('detail_view')=='Revision comparison' and state.get('pending_id') is None)
-        comparison_frame=frame(tid,'FIRST')
+        comparison_frame=frame(tid,'FIRST',motion='down')
         (ROOT/f'comparison-{cols}x{lines}.json').write_text(json.dumps(comparison_frame,indent=2))
         debug(f'tester:{tid}:keys:esc')
         tester_state(tid,lambda state:state.get('section')=='History')

@@ -712,12 +712,21 @@ impl InstructionManager {
     }
 
     fn render_menu(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        let menu = self.menu.as_ref().expect("menu open");
         let popup = if area.width >= 70 && area.height >= 20 {
+            let height = if menu.explanation {
+                area.height - 4
+            } else {
+                u16::try_from(menu.matches().len().saturating_add(8))
+                    .unwrap_or(u16::MAX)
+                    .max(10)
+                    .min(area.height - 4)
+            };
             Rect::new(
                 area.x + (area.width - 68) / 2,
-                area.y + 2,
+                area.y + (area.height - height) / 2,
                 68,
-                area.height - 4,
+                height,
             )
         } else {
             area
