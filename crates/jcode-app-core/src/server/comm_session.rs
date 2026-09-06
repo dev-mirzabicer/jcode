@@ -617,7 +617,13 @@ pub(super) async fn spawn_swarm_agent(
 
     let startup_message = initial_message
         .as_deref()
-        .map(append_swarm_completion_report_instructions);
+        .map(|message| {
+            append_swarm_completion_report_instructions(
+                message,
+                resolved_working_dir.as_deref().map(std::path::Path::new),
+            )
+        })
+        .transpose()?;
 
     let visible_spawn = match resolved_spawn_mode {
         // Inline workers run in-process like headless ones; the difference is
@@ -911,7 +917,7 @@ pub(super) async fn handle_comm_spawn(
         return;
     };
 
-    let response = match spawn_swarm_agent(
+    let result = spawn_swarm_agent(
         &req_session_id,
         &swarm_id,
         working_dir,
@@ -934,8 +940,11 @@ pub(super) async fn handle_comm_spawn(
         soft_interrupt_queues,
         client_connections,
     )
-    .await
-    {
+    .await;
+    let instruction_failure = result
+        .as_ref()
+        .is_err_and(|error| error.is::<super::workflow::WorkerContractError>());
+    let response = match result {
         Ok(new_session_id) => PersistedSwarmMutationResponse::Spawn { new_session_id },
         Err(error) => PersistedSwarmMutationResponse::Error {
             message: format!("Failed to spawn agent: {error}"),
@@ -947,7 +956,18 @@ pub(super) async fn handle_comm_spawn(
     // check can safely observe the updated population.
     drop(admission_guard);
 
-    finish_request(swarm_mutation_runtime, &mutation_state, response).await;
+    if instruction_failure {
+        if let PersistedSwarmMutationResponse::Error { message, .. } = response {
+            super::swarm_mutation_state::finish_unapplied_request(
+                swarm_mutation_runtime,
+                &mutation_state,
+                message,
+            )
+            .await;
+        }
+    } else {
+        finish_request(swarm_mutation_runtime, &mutation_state, response).await;
+    }
 }
 
 /// Handle `comm_list_models`: report the model routes available for spawning

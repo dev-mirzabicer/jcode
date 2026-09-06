@@ -1,0 +1,1 @@
+Salvage prior progress from {{label}}. Review this before continuing the task.

@@ -200,17 +200,15 @@ fn light_turn_disposition_matches_legacy_auto_complete() {
 use super::composite_synthesis_content;
 
 #[test]
-fn composite_synthesis_content_injects_complete_node_instruction() {
-    let out = composite_synthesis_content("root", "explore the thing", true);
-    assert!(out.contains("Synthesis turn for composite node 'root'"));
-    assert!(out.contains("complete_node"));
-    assert!(out.contains("Do NOT"));
-    // The original brief is preserved for context.
-    assert!(out.contains("explore the thing"));
+fn composite_synthesis_content_uses_managed_prose_and_keeps_original_brief() {
+    let home=crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    crate::instruction::SystemPromptComposer::new().ensure_global_store().unwrap();
+    std::fs::write(home.root().join("instructions/notifications/swarm-composite-synthesis.md"),"---\nid: swarm-composite-synthesis\nkind: notification\ntemplate: handlebars\n---\nSYNTHESIS {{item_id}}").unwrap();
+    assert_eq!(composite_synthesis_content("root","BRIEF",true,None).unwrap(),"SYNTHESIS root Original brief: BRIEF");
 }
 
 #[test]
 fn non_composite_content_is_verbatim() {
-    let out = composite_synthesis_content("leaf", "just do this", false);
+    let out = composite_synthesis_content("leaf", "just do this", false, None).unwrap();
     assert_eq!(out, "just do this");
 }

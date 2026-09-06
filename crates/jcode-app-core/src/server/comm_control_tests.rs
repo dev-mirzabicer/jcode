@@ -22,6 +22,7 @@ use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 struct RuntimeEnvGuard {
     _guard: std::sync::MutexGuard<'static, ()>,
     prev_runtime: Option<std::ffi::OsString>,
+    prev_home: Option<std::ffi::OsString>,
 }
 
 impl RuntimeEnvGuard {
@@ -29,11 +30,14 @@ impl RuntimeEnvGuard {
         let guard = crate::storage::lock_test_env();
         let temp = tempfile::TempDir::new().expect("create runtime dir");
         let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
+        let prev_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp.path().join("home"));
         crate::env::set_var("JCODE_RUNTIME_DIR", temp.path());
         (
             Self {
                 _guard: guard,
                 prev_runtime,
+                prev_home,
             },
             temp,
         )
@@ -42,6 +46,10 @@ impl RuntimeEnvGuard {
 
 impl Drop for RuntimeEnvGuard {
     fn drop(&mut self) {
+        match self.prev_home.take() {
+            Some(home) => crate::env::set_var("JCODE_HOME", home),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
         if let Some(prev_runtime) = self.prev_runtime.take() {
             crate::env::set_var("JCODE_RUNTIME_DIR", prev_runtime);
         } else {

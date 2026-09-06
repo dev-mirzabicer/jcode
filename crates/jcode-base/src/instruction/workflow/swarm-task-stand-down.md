@@ -1,0 +1,1 @@
+Task '{{task_id}}' has been handed off to '{{target}}' by the coordinator ({{action}}). Stop working on it immediately: do not make further edits or commits for that task. If you have uncommitted progress worth keeping, note it in a brief message to the coordinator, then stand down.

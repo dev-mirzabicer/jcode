@@ -1,0 +1,1 @@
+You are the coordinator. Complete the original request using the subagent outputs below. Do not stop early; run any requested tests and fix failures.

@@ -1,0 +1,629 @@
+{
+  "source_revision": "b20ef6c78",
+  "route": "Original production functions/expressions captured before source movement and compared to scoped managed consumers. Code-owned structural wrappers and runtime values preserved. Disposable probes removed.",
+  "cases": [
+    {
+      "bytes": 0,
+      "equal": true,
+      "fixture": "\"\"/None",
+      "id": "INS-WFL-040",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 0,
+      "equal": true,
+      "fixture": "\"\"/None/start",
+      "id": "INS-WFL-041",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 0,
+      "equal": true,
+      "fixture": "\"\"/None/wake",
+      "id": "INS-WFL-041",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 83,
+      "equal": true,
+      "fixture": "\"\"/None/resume",
+      "id": "INS-WFL-041",
+      "sha256": "59590df6a4560b7505a7c16228de264a96410c8a77cf01d94686dad8030f9d46"
+    },
+    {
+      "bytes": 82,
+      "equal": true,
+      "fixture": "\"\"/None/retry",
+      "id": "INS-WFL-041",
+      "sha256": "babe9e52ba33e1df2df0d119645cfde54021c36359442f72dd49b0d365d978a3"
+    },
+    {
+      "bytes": 0,
+      "equal": true,
+      "fixture": "\"\"/None/reassign",
+      "id": "INS-WFL-041",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 0,
+      "equal": true,
+      "fixture": "\"\"/None/replace",
+      "id": "INS-WFL-041",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 0,
+      "equal": true,
+      "fixture": "\"\"/None/salvage",
+      "id": "INS-WFL-041",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 37,
+      "equal": true,
+      "fixture": "\"\"/None",
+      "id": "INS-WFL-043",
+      "sha256": "cf9e742b9ef24aa516f2a475369c31523af61c8e6b9635cd484f6a6fcd0f8ff7"
+    },
+    {
+      "bytes": 39,
+      "equal": true,
+      "fixture": "\"\"/Some(\"\")",
+      "id": "INS-WFL-040",
+      "sha256": "8200cea32c58d5eb24eba70c5f81396d425168377dcee766c9d3a5aab85ab7b1"
+    },
+    {
+      "bytes": 39,
+      "equal": true,
+      "fixture": "\"\"/Some(\"\")/start",
+      "id": "INS-WFL-041",
+      "sha256": "8200cea32c58d5eb24eba70c5f81396d425168377dcee766c9d3a5aab85ab7b1"
+    },
+    {
+      "bytes": 39,
+      "equal": true,
+      "fixture": "\"\"/Some(\"\")/wake",
+      "id": "INS-WFL-041",
+      "sha256": "8200cea32c58d5eb24eba70c5f81396d425168377dcee766c9d3a5aab85ab7b1"
+    },
+    {
+      "bytes": 122,
+      "equal": true,
+      "fixture": "\"\"/Some(\"\")/resume",
+      "id": "INS-WFL-041",
+      "sha256": "1a69831a964a80d426bd82f0993ce84aa06e758daf7f80907da9ab91ee4dc944"
+    },
+    {
+      "bytes": 121,
+      "equal": true,
+      "fixture": "\"\"/Some(\"\")/retry",
+      "id": "INS-WFL-041",
+      "sha256": "ad74f762898d695527c1149e192fd439eb2ba6f7797463cce0872dbbb9407841"
+    },
+    {
+      "bytes": 39,
+      "equal": true,
+      "fixture": "\"\"/Some(\"\")/reassign",
+      "id": "INS-WFL-041",
+      "sha256": "8200cea32c58d5eb24eba70c5f81396d425168377dcee766c9d3a5aab85ab7b1"
+    },
+    {
+      "bytes": 39,
+      "equal": true,
+      "fixture": "\"\"/Some(\"\")/replace",
+      "id": "INS-WFL-041",
+      "sha256": "8200cea32c58d5eb24eba70c5f81396d425168377dcee766c9d3a5aab85ab7b1"
+    },
+    {
+      "bytes": 39,
+      "equal": true,
+      "fixture": "\"\"/Some(\"\")/salvage",
+      "id": "INS-WFL-041",
+      "sha256": "8200cea32c58d5eb24eba70c5f81396d425168377dcee766c9d3a5aab85ab7b1"
+    },
+    {
+      "bytes": 42,
+      "equal": true,
+      "fixture": "\"\"/Some(\"\")",
+      "id": "INS-WFL-043",
+      "sha256": "367307b6d3e6d0738e42081749af7381bdce63806df42b0bf6baf0382593e53b"
+    },
+    {
+      "bytes": 48,
+      "equal": true,
+      "fixture": "\"\"/Some(\"EXTRA <&>\")",
+      "id": "INS-WFL-040",
+      "sha256": "14299accceb3b0e87424a73027ee1601b26635085eec78ae4099ade97fac1ca8"
+    },
+    {
+      "bytes": 48,
+      "equal": true,
+      "fixture": "\"\"/Some(\"EXTRA <&>\")/start",
+      "id": "INS-WFL-041",
+      "sha256": "14299accceb3b0e87424a73027ee1601b26635085eec78ae4099ade97fac1ca8"
+    },
+    {
+      "bytes": 48,
+      "equal": true,
+      "fixture": "\"\"/Some(\"EXTRA <&>\")/wake",
+      "id": "INS-WFL-041",
+      "sha256": "14299accceb3b0e87424a73027ee1601b26635085eec78ae4099ade97fac1ca8"
+    },
+    {
+      "bytes": 131,
+      "equal": true,
+      "fixture": "\"\"/Some(\"EXTRA <&>\")/resume",
+      "id": "INS-WFL-041",
+      "sha256": "01546fdc22b2abf2bfd0fde1e91b1c6d386f5f919e527ec08922d7f221683ad9"
+    },
+    {
+      "bytes": 130,
+      "equal": true,
+      "fixture": "\"\"/Some(\"EXTRA <&>\")/retry",
+      "id": "INS-WFL-041",
+      "sha256": "147e46c690b200cee27eef5789b9cf6253a16efde712871db69f661b29c2caf8"
+    },
+    {
+      "bytes": 48,
+      "equal": true,
+      "fixture": "\"\"/Some(\"EXTRA <&>\")/reassign",
+      "id": "INS-WFL-041",
+      "sha256": "14299accceb3b0e87424a73027ee1601b26635085eec78ae4099ade97fac1ca8"
+    },
+    {
+      "bytes": 48,
+      "equal": true,
+      "fixture": "\"\"/Some(\"EXTRA <&>\")/replace",
+      "id": "INS-WFL-041",
+      "sha256": "14299accceb3b0e87424a73027ee1601b26635085eec78ae4099ade97fac1ca8"
+    },
+    {
+      "bytes": 48,
+      "equal": true,
+      "fixture": "\"\"/Some(\"EXTRA <&>\")/salvage",
+      "id": "INS-WFL-041",
+      "sha256": "14299accceb3b0e87424a73027ee1601b26635085eec78ae4099ade97fac1ca8"
+    },
+    {
+      "bytes": 51,
+      "equal": true,
+      "fixture": "\"\"/Some(\"EXTRA <&>\")",
+      "id": "INS-WFL-043",
+      "sha256": "28e8813d6b0b103b249bfe772fa6db041260ca1b660ede524dcece2345fca651"
+    },
+    {
+      "bytes": 0,
+      "equal": true,
+      "fixture": "\"\"/false",
+      "id": "INS-WFL-039",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 355,
+      "equal": true,
+      "fixture": "\"\"/true",
+      "id": "INS-WFL-039",
+      "sha256": "83010db169e4da235dda342ffe7409e0e78eb75bf86268eecb5f424b51a805ee"
+    },
+    {
+      "bytes": 58,
+      "equal": true,
+      "fixture": "",
+      "id": "INS-WFL-042",
+      "sha256": "c71bd15706f204dbfff790e8c4130e0a5afe6845fb56fbba9bee6fedd5938684"
+    },
+    {
+      "bytes": 169,
+      "equal": true,
+      "fixture": "\"\"/None",
+      "id": "INS-WFL-034",
+      "sha256": "31ab2f7201f25ab20badfb34ac7e67098f722a1594677e4af6ca08308efb9b04"
+    },
+    {
+      "bytes": 276,
+      "equal": true,
+      "fixture": "\"\"/Some(\"/var/folders/xy/8dz2_x5d5gq2ndm5c9y1d8480000gn/T/jcode-auth-lifecycle-9wmz8R/fixture<&>\")",
+      "id": "INS-WFL-034",
+      "sha256": "f24a5dbb64f0f997d3ba2f772f73542945c8eb5a673439427cc0c74c9ab31c92"
+    },
+    {
+      "bytes": 213,
+      "equal": true,
+      "fixture": "\"\"/0",
+      "id": "INS-WFL-035",
+      "sha256": "2c68026d6833c2ec9c8fabd8d2ccb13d876bbfc741c51577b38552fb1016397c"
+    },
+    {
+      "bytes": 250,
+      "equal": true,
+      "fixture": "\"\"/2",
+      "id": "INS-WFL-035",
+      "sha256": "4007d9ee5846f41829fc53adcaa975d6511bbfb7648d50cf55f1cb5a585db82c"
+    },
+    {
+      "bytes": 22,
+      "equal": true,
+      "fixture": "\"CONTENT <&{{literal}}>\"/None",
+      "id": "INS-WFL-040",
+      "sha256": "0a91932e4b36cb878ff0b70e4af034f7bf3e849390ad159bdd522e97a77e55ad"
+    },
+    {
+      "bytes": 22,
+      "equal": true,
+      "fixture": "\"CONTENT <&{{literal}}>\"/None/start",
+      "id": "INS-WFL-041",
+      "sha256": "0a91932e4b36cb878ff0b70e4af034f7bf3e849390ad159bdd522e97a77e55ad"
+    },
+    {
+      "bytes": 22,
+      "equal": true,
+      "fixture": "\"CONTENT <&{{literal}}>\"/None/wake",
+      "id": "INS-WFL-041",
+      "sha256": "0a91932e4b36cb878ff0b70e4af034f7bf3e849390ad159bdd522e97a77e55ad"
+    },
+    {
+      "bytes": 105,
+      "equal": true,
+      "fixture": "\"CONTENT <&{{literal}}>\"/None/resume",
+      "id": "INS-WFL-041",
+      "sha256": "ec923bf064f5cb0b9b5fbb910306fdc92d702909d93aa199204a921eca34034b"
+    },
+    {
+      "bytes": 104,
+      "equal": true,
+      "fixture": "\"CONTENT <&{{literal}}>\"/None/retry",
+      "id": "INS-WFL-041",
+      "sha256": "79e7b531bf7c13b3e37206fca35c021978c201c9573266c679dae3c6a51b5781"
+    },
+    {
+      "bytes": 22,
+      "equal": true,
+      "fixture": "\"CONTENT <&{{literal}}>\"/None/reassign",
+      "id": "INS-WFL-041",
+      "sha256": "0a91932e4b36cb878ff0b70e4af034f7bf3e849390ad159bdd522e97a77e55ad"
+    },
+    {
+      "bytes": 22,
+      "equal": true,
+      "fixture": "\"CONTENT <&{{literal}}>\"/None/replace",
+      "id": "INS-WFL-041",
+      "sha256": "0a91932e4b36cb878ff0b70e4af034f7bf3e849390ad159bdd522e97a77e55ad"
+    },
+    {
+      "bytes": 22,
+      "equal": true,
+      "fixture": "\"CONTENT <&{{literal}}>\"/None/salvage",
+      "id": "INS-WFL-041",
+      "sha256": "0a91932e4b36cb878ff0b70e4af034f7bf3e849390ad159bdd522e97a77e55ad"
+    },
+    {
+      "bytes": 59,
+      "equal": true,
+      "fixture": "\"CONTENT <&{{literal}}>\"/None",
+      "id": "INS-WFL-043",
+      "sha256": "156b2cac75ef60dbd2c6e60a373e4c3b889d666e64b217abd3522007a13bf3d6"
+    },
+    {
+      "bytes": 61,
+      "equal": true,
+      "fixture": "\"CONTENT <&{{literal}}>\"/Some(\"\")",
+      "id": "INS-WFL-040",
+      "sha256": "d753396cdacde83ca2fc051420b6a440f6360d0e7f1d1431fb2fe1156bcf7f9e"
+    },
+    {
+      "bytes": 61,
+      "equal": true,
+      "fixture": "\"CONTENT <&{{literal}}>\"/Some(\"\")/start",
+      "id": "INS-WFL-041",
+      "sha256": "d753396cdacde83ca2fc051420b6a440f6360d0e7f1d1431fb2fe1156bcf7f9e"
+    },
+    {
+      "bytes": 61,
+      "equal": true,
+      "fixture": "\"CONTENT <&{{literal}}>\"/Some(\"\")/wake",
+      "id": "INS-WFL-041",
+      "sha256": "d753396cdacde83ca2fc051420b6a440f6360d0e7f1d1431fb2fe1156bcf7f9e"
+    },
+    {
+      "bytes": 144,
+      "equal": true,
+      "fixture": "\"CONTENT <&{{literal}}>\"/Some(\"\")/resume",
+      "id": "INS-WFL-041",
+      "sha256": "2b634df7825d43d39b04ef64a5289212b2f1a4aa0525ab8eb0ae8d55c3d9fa6c"
+    },
+    {
+      "bytes": 143,
+      "equal": true,
+      "fixture": "\"CONTENT <&{{literal}}>\"/Some(\"\")/retry",
+      "id": "INS-WFL-041",
+      "sha256": "c8d0c99028913d90d8235f94e9af08deec55cc74b6db0463f25bf20010a5116a"
+    },
+    {
+      "bytes": 61,
+      "equal": true,
+      "fixture": "\"CONTENT <&{{literal}}>\"/Some(\"\")/reassign",
+      "id": "INS-WFL-041",
+      "sha256": "d753396cdacde83ca2fc051420b6a440f6360d0e7f1d1431fb2fe1156bcf7f9e"
+    },
+    {
+      "bytes": 61,
+      "equal": true,
+      "fixture": "\"CONTENT <&{{literal}}>\"/Some(\"\")/replace",
+      "id": "INS-WFL-041",
+      "sha256": "d753396cdacde83ca2fc051420b6a440f6360d0e7f1d1431fb2fe1156bcf7f9e"
+    },
+    {
+      "bytes": 61,
+      "equal": true,
+      "fixture": "\"CONTENT <&{{literal}}>\"/Some(\"\")/salvage",
+      "id": "INS-WFL-041",
+      "sha256": "d753396cdacde83ca2fc051420b6a440f6360d0e7f1d1431fb2fe1156bcf7f9e"
+    },
+    {
+      "bytes": 64,
+      "equal": true,
+      "fixture": "\"CONTENT <&{{literal}}>\"/Some(\"\")",
+      "id": "INS-WFL-043",
+      "sha256": "5bf5a55c79d93474b242590b978a54e109c32e2bbb4863aa96a76dc38fdd9ca2"
+    },
+    {
+      "bytes": 70,
+      "equal": true,
+      "fixture": "\"CONTENT <&{{literal}}>\"/Some(\"EXTRA <&>\")",
+      "id": "INS-WFL-040",
+      "sha256": "9cd683bc8de68a585847075747ba16918b648b778a158418d0ebe2695268974a"
+    },
+    {
+      "bytes": 70,
+      "equal": true,
+      "fixture": "\"CONTENT <&{{literal}}>\"/Some(\"EXTRA <&>\")/start",
+      "id": "INS-WFL-041",
+      "sha256": "9cd683bc8de68a585847075747ba16918b648b778a158418d0ebe2695268974a"
+    },
+    {
+      "bytes": 70,
+      "equal": true,
+      "fixture": "\"CONTENT <&{{literal}}>\"/Some(\"EXTRA <&>\")/wake",
+      "id": "INS-WFL-041",
+      "sha256": "9cd683bc8de68a585847075747ba16918b648b778a158418d0ebe2695268974a"
+    },
+    {
+      "bytes": 153,
+      "equal": true,
+      "fixture": "\"CONTENT <&{{literal}}>\"/Some(\"EXTRA <&>\")/resume",
+      "id": "INS-WFL-041",
+      "sha256": "573fa9eeafde39931b8d02d66063de80d4e3efa4aae06051b51afd2555474c92"
+    },
+    {
+      "bytes": 152,
+      "equal": true,
+      "fixture": "\"CONTENT <&{{literal}}>\"/Some(\"EXTRA <&>\")/retry",
+      "id": "INS-WFL-041",
+      "sha256": "ad729cd34a24d1aecc30613195f8b01bdd4dedb6205b542ceba559e1f95bb255"
+    },
+    {
+      "bytes": 70,
+      "equal": true,
+      "fixture": "\"CONTENT <&{{literal}}>\"/Some(\"EXTRA <&>\")/reassign",
+      "id": "INS-WFL-041",
+      "sha256": "9cd683bc8de68a585847075747ba16918b648b778a158418d0ebe2695268974a"
+    },
+    {
+      "bytes": 70,
+      "equal": true,
+      "fixture": "\"CONTENT <&{{literal}}>\"/Some(\"EXTRA <&>\")/replace",
+      "id": "INS-WFL-041",
+      "sha256": "9cd683bc8de68a585847075747ba16918b648b778a158418d0ebe2695268974a"
+    },
+    {
+      "bytes": 70,
+      "equal": true,
+      "fixture": "\"CONTENT <&{{literal}}>\"/Some(\"EXTRA <&>\")/salvage",
+      "id": "INS-WFL-041",
+      "sha256": "9cd683bc8de68a585847075747ba16918b648b778a158418d0ebe2695268974a"
+    },
+    {
+      "bytes": 73,
+      "equal": true,
+      "fixture": "\"CONTENT <&{{literal}}>\"/Some(\"EXTRA <&>\")",
+      "id": "INS-WFL-043",
+      "sha256": "8518105997817efbc4a2182a008ec4271a8a7efe44565481495717e4b3191781"
+    },
+    {
+      "bytes": 22,
+      "equal": true,
+      "fixture": "\"CONTENT <&{{literal}}>\"/false",
+      "id": "INS-WFL-039",
+      "sha256": "0a91932e4b36cb878ff0b70e4af034f7bf3e849390ad159bdd522e97a77e55ad"
+    },
+    {
+      "bytes": 377,
+      "equal": true,
+      "fixture": "\"CONTENT <&{{literal}}>\"/true",
+      "id": "INS-WFL-039",
+      "sha256": "e734b14eccfc702d93f2d903078dff117aba8c1bef41dd1f0f6db3ccad6004e0"
+    },
+    {
+      "bytes": 80,
+      "equal": true,
+      "fixture": "CONTENT <&{{literal}}>",
+      "id": "INS-WFL-042",
+      "sha256": "8c1d950b735f472042737d2594422ae5bef4bd892ba0d1cb440e0f63647f9f6d"
+    },
+    {
+      "bytes": 191,
+      "equal": true,
+      "fixture": "\"CONTENT <&{{literal}}>\"/None",
+      "id": "INS-WFL-034",
+      "sha256": "ff2963d389c67ff5f95773a4b72a4f77777f4318aa394cc6b7dbdefc9d19888d"
+    },
+    {
+      "bytes": 298,
+      "equal": true,
+      "fixture": "\"CONTENT <&{{literal}}>\"/Some(\"/var/folders/xy/8dz2_x5d5gq2ndm5c9y1d8480000gn/T/jcode-auth-lifecycle-9wmz8R/fixture<&>\")",
+      "id": "INS-WFL-034",
+      "sha256": "d2b6c8fc6a383af1f26497aab44f4f989de50bb5913fd92bde99e3f5563caf53"
+    },
+    {
+      "bytes": 235,
+      "equal": true,
+      "fixture": "\"CONTENT <&{{literal}}>\"/0",
+      "id": "INS-WFL-035",
+      "sha256": "147a5e032c16d6d13fdfa350ea8dabb9955375dbd4469ccba681a5eb478241c3"
+    },
+    {
+      "bytes": 294,
+      "equal": true,
+      "fixture": "\"CONTENT <&{{literal}}>\"/2",
+      "id": "INS-WFL-035",
+      "sha256": "9fbe65933a7dc7b33b6bd255da295a35231e66cb1e7af8348ac8d94f50aa9083"
+    },
+    {
+      "bytes": 270,
+      "equal": true,
+      "fixture": "reassign",
+      "id": "INS-WFL-044",
+      "sha256": "d99d8613392aa7693b102c0827f2a25e08b4305a6b84727a83bf2da3121761a9"
+    },
+    {
+      "bytes": 269,
+      "equal": true,
+      "fixture": "replace",
+      "id": "INS-WFL-044",
+      "sha256": "80d0346e48f36bc750635bb168d6ff795039adc44027bbf9f7de02ceae6f4c3c"
+    },
+    {
+      "bytes": 269,
+      "equal": true,
+      "fixture": "salvage",
+      "id": "INS-WFL-044",
+      "sha256": "06a71709e4f4eb171a5a341b744843402ced24c2d250bf12670133d23435b8fc"
+    },
+    {
+      "bytes": 22,
+      "equal": true,
+      "fixture": "retry/None",
+      "id": "INS-WFL-041",
+      "sha256": "b907adf6fb4db8050b3c02fb2ae109a72a32ada2cbd7b81329ddf00db179b941"
+    },
+    {
+      "bytes": 44,
+      "equal": true,
+      "fixture": "replace/None",
+      "id": "INS-WFL-046",
+      "sha256": "0240865542a44daea719620a565b8a377870a9cf250c7fc98d7496fdeb13b75c"
+    },
+    {
+      "bytes": 145,
+      "equal": true,
+      "fixture": "salvage/None/None/0",
+      "id": "INS-WFL-046",
+      "sha256": "cc7fa9780806a76e73b652b90578930f92a500e5ea8a6c51457d957abca70891"
+    },
+    {
+      "bytes": 640,
+      "equal": true,
+      "fixture": "salvage/None/None/1",
+      "id": "INS-WFL-046",
+      "sha256": "715652511bba5a2f1d4da89505b6ec60d94d5e573d3e12169b8a223950a85840"
+    },
+    {
+      "bytes": 149,
+      "equal": true,
+      "fixture": "salvage/Some(\"NAME<&>\")/None/0",
+      "id": "INS-WFL-046",
+      "sha256": "29ce8c1246f0b7aca4993dd40de107e1f6a455f3e8d23007bf35416829ccde47"
+    },
+    {
+      "bytes": 644,
+      "equal": true,
+      "fixture": "salvage/Some(\"NAME<&>\")/None/1",
+      "id": "INS-WFL-046",
+      "sha256": "8ff483c0ffab753cf026cf62a35ff7d8c21cca80714610aa5b2c95868fef620d"
+    },
+    {
+      "bytes": 61,
+      "equal": true,
+      "fixture": "retry/Some(\"\")",
+      "id": "INS-WFL-041",
+      "sha256": "39f2b38779875276cb312d54728358bcad527835d1c2e8f1d067e2cafe72cafe"
+    },
+    {
+      "bytes": 83,
+      "equal": true,
+      "fixture": "replace/Some(\"\")",
+      "id": "INS-WFL-046",
+      "sha256": "fbfa3febcf0308430aaa2bf002f09edccf16a91e5f073e9aebd20d592a74e7b4"
+    },
+    {
+      "bytes": 184,
+      "equal": true,
+      "fixture": "salvage/None/Some(\"\")/0",
+      "id": "INS-WFL-046",
+      "sha256": "9341fce43a18c0b9d17d24b4bc8a747ee779cdb0b96c76dcc114cc67727191da"
+    },
+    {
+      "bytes": 679,
+      "equal": true,
+      "fixture": "salvage/None/Some(\"\")/1",
+      "id": "INS-WFL-046",
+      "sha256": "ca1f1f69414f4cf3afad116bd3f0e05d1f58c44f7602ebb8efe9f2b514119e05"
+    },
+    {
+      "bytes": 188,
+      "equal": true,
+      "fixture": "salvage/Some(\"NAME<&>\")/Some(\"\")/0",
+      "id": "INS-WFL-046",
+      "sha256": "6854f8dcf6856412da2a59cadab0daf6a8c28daaae0d160ffbe65177a7f2bf3c"
+    },
+    {
+      "bytes": 683,
+      "equal": true,
+      "fixture": "salvage/Some(\"NAME<&>\")/Some(\"\")/1",
+      "id": "INS-WFL-046",
+      "sha256": "e10b3d45648e104b6a143cf33307d45a3f8f587ad68f225b353f4a7ceef05b07"
+    },
+    {
+      "bytes": 66,
+      "equal": true,
+      "fixture": "retry/Some(\"EXTRA\")",
+      "id": "INS-WFL-041",
+      "sha256": "d6128f590e3f7ae6068bbafca2ee6117b19aa026e059367cdd6b4e9bd5dcbdca"
+    },
+    {
+      "bytes": 88,
+      "equal": true,
+      "fixture": "replace/Some(\"EXTRA\")",
+      "id": "INS-WFL-046",
+      "sha256": "96435b1a8c27bcbbf22859bdba680dcfd3af1271f8350a33c2b3decde7167837"
+    },
+    {
+      "bytes": 189,
+      "equal": true,
+      "fixture": "salvage/None/Some(\"EXTRA\")/0",
+      "id": "INS-WFL-046",
+      "sha256": "383e50b3216777c9f5bae8a13b5b5552cb3c4b3eba608186e80332d61d41daec"
+    },
+    {
+      "bytes": 684,
+      "equal": true,
+      "fixture": "salvage/None/Some(\"EXTRA\")/1",
+      "id": "INS-WFL-046",
+      "sha256": "75145a1280b600ed0a14c638dad35a92d69117c5087d56b0861f8f691d43fb98"
+    },
+    {
+      "bytes": 193,
+      "equal": true,
+      "fixture": "salvage/Some(\"NAME<&>\")/Some(\"EXTRA\")/0",
+      "id": "INS-WFL-046",
+      "sha256": "a2572b17776b081ad775d2bc31f4a6816e63934480eb134523d303b860c140a2"
+    },
+    {
+      "bytes": 688,
+      "equal": true,
+      "fixture": "salvage/Some(\"NAME<&>\")/Some(\"EXTRA\")/1",
+      "id": "INS-WFL-046",
+      "sha256": "db8143b1a917b8b8eedac1961d36623cbc2db72a23dc2fce2b1a63720fe8ffd8"
+    }
+  ]
+}

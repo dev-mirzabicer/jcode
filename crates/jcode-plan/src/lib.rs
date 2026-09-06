@@ -335,45 +335,6 @@ impl TaskControlAction {
     }
 }
 
-pub fn combine_assignment_text(content: &str, message: Option<&str>) -> String {
-    if let Some(extra) = message {
-        format!(
-            "{}\n\nAdditional coordinator instructions:\n{}",
-            content, extra
-        )
-    } else {
-        content.to_string()
-    }
-}
-
-fn restart_instruction_prefix(action: TaskControlAction) -> Option<&'static str> {
-    match action {
-        TaskControlAction::Resume => Some(
-            "Resume your assigned task from the current session context and continue the work.",
-        ),
-        TaskControlAction::Retry => {
-            Some("Retry your assigned task. Fix any earlier issues and continue toward completion.")
-        }
-        _ => None,
-    }
-}
-
-pub fn build_control_assignment_text(
-    action: TaskControlAction,
-    content: &str,
-    message: Option<&str>,
-) -> String {
-    let mut parts = Vec::new();
-    if let Some(prefix) = restart_instruction_prefix(action) {
-        parts.push(prefix.to_string());
-    }
-    parts.push(content.to_string());
-    if let Some(extra) = message {
-        parts.push(format!("Additional coordinator instructions:\n{}", extra));
-    }
-    parts.join("\n\n")
-}
-
 pub fn task_control_action_allows_status(action: TaskControlAction, status: &str) -> bool {
     match action {
         TaskControlAction::Start | TaskControlAction::Wake => status == "queued",

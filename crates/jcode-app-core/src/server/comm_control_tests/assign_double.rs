@@ -389,6 +389,34 @@ async fn task_control_reassign_tells_displaced_worker_to_stand_down() {
     let (swarm_event_tx, _swarm_event_rx) = broadcast::channel(32);
     let mutation_runtime = SwarmMutationRuntime::default();
 
+    crate::instruction::SystemPromptComposer::new().ensure_global_store().unwrap();
+    let source=crate::storage::jcode_dir().unwrap().join("instructions/notifications/swarm-task-stand-down.md");
+    std::fs::write(&source,"---\nid: swarm-task-stand-down\nkind: notification\ntemplate: handlebars\n---\n{{missing}}").unwrap();
+    handle_comm_task_control(
+        93,
+        requester.to_string(),
+        "reassign".to_string(),
+        "contested".to_string(),
+        Some(intruder.to_string()),
+        None,
+        &client_tx,
+        &sessions,
+        &soft_interrupt_queues,
+        &client_connections,
+        &swarm_members,
+        &swarms_by_id,
+        &swarm_plans,
+        &swarm_coordinators,
+        &event_history,
+        &event_counter,
+        &swarm_event_tx,
+        &mutation_runtime,
+    )
+    .await;
+    assert!(matches!(client_rx.recv().await.unwrap(),ServerEvent::Error {..}));
+    assert_eq!(swarm_plans.read().await[swarm_id].items[0].assigned_to.as_deref(),Some(holder));
+    assert!(soft_interrupt_queues.read().await.is_empty());
+    std::fs::write(&source,"---\nid: swarm-task-stand-down\nkind: notification\ntemplate: handlebars\n---\nSTAND-DOWN '{{task_id}}' '{{target}}' {{action}}").unwrap();
     handle_comm_task_control(
         93,
         requester.to_string(),
@@ -441,7 +469,7 @@ async fn task_control_reassign_tells_displaced_worker_to_stand_down() {
                 pending
                     .iter()
                     .map(|msg| msg.content.clone())
-                    .find(|content| content.contains("handed off"))
+                    .find(|content| content.contains("STAND-DOWN"))
             })
         })
     };
@@ -451,16 +479,11 @@ async fn task_control_reassign_tells_displaced_worker_to_stand_down() {
         stand_down.contains("'contested'") && stand_down.contains("'penguin'"),
         "stand-down order must name the task and the new assignee: {stand_down}"
     );
-    assert!(
-        stand_down.contains("Stop working"),
-        "stand-down order must tell the worker to stop: {stand_down}"
-    );
-
     // And the DM notification reaches its event stream.
     let mut saw_dm = false;
     while let Ok(event) = holder_rx.try_recv() {
         if let ServerEvent::Notification { message, .. } = event
-            && message.contains("handed off")
+            && message.contains("STAND-DOWN")
         {
             saw_dm = true;
         }

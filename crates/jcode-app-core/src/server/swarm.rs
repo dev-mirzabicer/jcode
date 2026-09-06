@@ -1632,14 +1632,12 @@ pub(super) async fn run_swarm_message(agent: Arc<Mutex<Agent>>, message: &str) -
     };
     let working_dir_hint = working_dir
         .as_deref()
-        .map(|dir| format!("Working directory: {}\n", dir))
+        .map(|dir| format!("Working directory: {dir}\n"))
         .unwrap_or_default();
-
-    let planner_prompt = format!(
-        "{working_dir_hint}You are a task planner. Break the request into 2-4 subtasks. \
-Return ONLY a JSON array of objects with keys: description, prompt, subagent_type. \
-No extra text.\n\nRequest:\n{message}"
-    );
+    let planner_prompt = super::workflow::planner_message(
+        message,
+        working_dir.as_deref().map(std::path::Path::new),
+    )?;
 
     let plan_text = {
         let mut agent = agent.lock().await;
@@ -1678,18 +1676,7 @@ No extra text.\n\nRequest:\n{message}"
     });
     let task_outputs = try_join_all(task_futures).await?;
 
-    let mut integration_prompt = String::new();
-    integration_prompt.push_str(
-        "You are the coordinator. Complete the original request using the subagent outputs below. ",
-    );
-    integration_prompt.push_str("Do not stop early; run any requested tests and fix failures.\n\n");
-    integration_prompt.push_str("Original request:\n");
-    integration_prompt.push_str(message);
-    integration_prompt.push_str("\n\nSubagent outputs:\n");
-    for (desc, output) in &task_outputs {
-        integration_prompt.push_str(&format!("\n--- {} ---\n{}\n", desc, output));
-    }
-    integration_prompt.push_str("\nNow complete the task.\n");
+    let integration_prompt=super::workflow::integration_message(message,&task_outputs,working_dir.as_deref().map(std::path::Path::new)).map_err(|error|anyhow::anyhow!("Worker tasks completed, but integration instructions could not render: {error}. Completed outputs: {task_outputs:?}"))?;
 
     let final_output = {
         let mut agent = agent.lock().await;
@@ -1744,9 +1731,7 @@ mod tests {
     use crate::plan::PlanItem;
     use crate::protocol::{NotificationType, ServerEvent};
     use crate::server::{SwarmMember, VersionedPlan};
-    use jcode_swarm_core::{
-        append_swarm_completion_report_instructions, summarize_plan_items, truncate_detail,
-    };
+    use jcode_swarm_core::{summarize_plan_items, truncate_detail};
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
@@ -1794,20 +1779,6 @@ mod tests {
         assert_eq!(tasks[0].description, "A");
         assert_eq!(tasks[0].prompt, "B");
         assert_eq!(tasks[0].subagent_type.as_deref(), Some("general"));
-    }
-
-    #[test]
-    fn append_swarm_completion_report_instructions_is_idempotent() {
-        let prompt = "Implement the task.";
-        let with_instructions = append_swarm_completion_report_instructions(prompt);
-
-        assert!(with_instructions.starts_with(prompt));
-        assert!(with_instructions.contains("SWARM COMPLETION REPORT REQUIRED"));
-        assert!(with_instructions.contains("swarm tool with action=\"report\""));
-        assert_eq!(
-            append_swarm_completion_report_instructions(&with_instructions),
-            with_instructions
-        );
     }
 
     fn swarm_member(

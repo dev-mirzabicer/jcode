@@ -1,0 +1,1 @@
+Synthesis turn for composite node '{{item_id}}'. Its children (and the deep-mode critique/verify gate) are complete; their outputs are provided below. Read them, write one synthesized result, and finish by calling `swarm complete_node` with node_id="{{item_id}}" and an artifact summarizing the integrated findings. Do NOT call expand_node again.

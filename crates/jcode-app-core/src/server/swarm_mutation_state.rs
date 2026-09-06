@@ -261,6 +261,35 @@ pub(super) async fn finish_request(
     // able to observe the persisted final state and replay it instead of
     // re-executing the mutation.
     let persisted = persist_final_response(state, response.clone());
+    notify_waiters(runtime, &persisted, response).await;
+}
+
+/// A source failure before any mutation is retryable after repair. Notify
+/// coalesced callers, but never cache it as a successfully completed action.
+pub(super) async fn finish_unapplied_request(
+    runtime: &SwarmMutationRuntime,
+    state: &PersistedSwarmMutationState,
+    message: String,
+) {
+    let mut pending = state.clone();
+    pending.final_response = None;
+    save_state(&pending);
+    notify_waiters(
+        runtime,
+        &pending,
+        PersistedSwarmMutationResponse::Error {
+            message,
+            retry_after_secs: None,
+        },
+    )
+    .await;
+}
+
+async fn notify_waiters(
+    runtime: &SwarmMutationRuntime,
+    persisted: &PersistedSwarmMutationState,
+    response: PersistedSwarmMutationResponse,
+) {
     let waiters = {
         let mut sync = runtime.sync.write().await;
         let waiters = sync.waiters.remove(&persisted.key).unwrap_or_default();

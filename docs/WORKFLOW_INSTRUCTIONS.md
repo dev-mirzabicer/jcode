@@ -64,6 +64,14 @@ Local commands render before changing loop mode, appending a turn or requesting 
 
 Pending preparation is request/session/working-directory correlated and cancellable. Source failures preserve the current mode/turn and retain the command for explicit repair and retry. Reconnect reissues only unresolved read-only rendering. Process reload restores interrupted preparation as unconfirmed, suspended intent, not automatic execution. The UI tells the user to verify whether a command was dispatched before explicitly re-running it. This avoids blindly repeating a commit, push or release after an uncertain interruption.
 
+### Swarm worker and task-control instructions
+
+Worker report, deep-node/gate, assignment, restart, wake, synthesis, salvage, replacement and stand-down prose uses `swarm-*` managed resources. The existing planner/integrator uses its coordinator's scope. Worker and displaced-worker guidance uses their respective member working directories. Data hydration, status/assignment rules, admission limits, scheduling, model selection and delivery channels remain unchanged.
+
+Swarm core retains the structural report/deep markers, wrapper spacing, idempotency and existing bounded-node selector. It accepts lazy render callbacks rather than owning another loader. Already-framed contracts do not read sources again. Assignment contracts render before plan mutation, and stand-down guidance renders before takeover. An invalid source leaves the prior assignment intact. Pre-mutation source failures notify duplicate waiters without caching the failure as a completed mutation, allowing an identical explicit retry after repair. Successful operation replay remains unchanged.
+
+If integration instructions fail after workers completed, the error preserves their outputs rather than implying those tasks were rolled back. No new delegation system or roster adoption was introduced. Phase 4 still owns future isolated delegation and Phase 9 owns future async policy.
+
 ## Source and failure semantics
 
 Working files are authoritative, including intentionally empty bodies where the owner retains meaningful structure. A present invalid project redefinition fails rather than exposing global prose. Missing previously adopted singleton resources are damage, not permission to recreate defaults. New shipped paths use the existing versioned, scoped Git seed-adoption transaction. It preserves current files and does not push a repository.

@@ -45,6 +45,43 @@ async fn assign_task_without_task_id_picks_highest_priority_runnable_task() {
     let (swarm_event_tx, _swarm_event_rx) = broadcast::channel(32);
     let mutation_runtime = SwarmMutationRuntime::default();
 
+    crate::instruction::SystemPromptComposer::new().ensure_global_store().unwrap();
+    let project=_runtime.path().join("worker-project");std::fs::create_dir(&project).unwrap();
+    let repositories=crate::instruction::InstructionRepositoryService::new();
+    let seed=crate::instruction::InstructionStoreSeed {manifest:crate::instruction::InstructionStoreManifest::current(),files:vec![crate::instruction::InstructionSeedFile{relative_path:"notifications/swarm-worker-report-contract.md".into(),content:b"---\nid: swarm-worker-report-contract\nkind: notification\n---\nPROJECT-REPORT".to_vec()}]};
+    let configured=repositories.configure_non_git_project(&project,"worker-source-fixture",None,&seed,&[]).unwrap();
+    swarm_members.write().await.get_mut(worker).unwrap().working_dir=Some(project);
+    let contract=configured.repository.root.join("notifications/swarm-worker-report-contract.md");
+    std::fs::write(crate::storage::jcode_dir().unwrap().join("instructions/notifications/swarm-worker-report-contract.md"),"---\nid: swarm-worker-report-contract\nkind: notification\ntemplate: handlebars\n---\n{{global_missing}}").unwrap();
+    let original = std::fs::read(&contract).unwrap();
+    std::fs::write(&contract, "---\nid: swarm-worker-report-contract\nkind: notification\ntemplate: handlebars\n---\n{{missing}}").unwrap();
+    let snapshot = |plans: &HashMap<String,VersionedPlan>| { let plan=&plans[swarm_id]; (plan.version, serde_json::to_value(&plan.items).unwrap(),serde_json::to_value(&plan.task_progress).unwrap(),plan.participants.clone()) };
+    let before = snapshot(&*swarm_plans.read().await);
+    handle_comm_assign_task(
+        77,
+        requester.to_string(),
+        Some(worker.to_string()),
+        None,
+        Some("Pick the next task".to_string()),
+        &client_tx,
+        &sessions,
+        &soft_interrupt_queues,
+        &client_connections,
+        &swarm_members,
+        &swarms_by_id,
+        &swarm_plans,
+        &swarm_coordinators,
+        &event_history,
+        &event_counter,
+        &swarm_event_tx,
+        &mutation_runtime,
+    )
+    .await;
+    assert!(matches!(client_rx.recv().await.unwrap(), ServerEvent::Error { .. }));
+    assert_eq!(snapshot(&*swarm_plans.read().await), before);
+    assert!(soft_interrupt_queues.read().await.is_empty());
+    std::fs::write(&contract, original).unwrap();
+    // Retry the identical semantic request after repair, without changing its key.
     handle_comm_assign_task(
         77,
         requester.to_string(),

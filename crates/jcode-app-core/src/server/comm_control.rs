@@ -9,6 +9,9 @@ use super::swarm_mutation_state::{
     begin_or_replay as begin_swarm_mutation_or_replay,
     finish_request as finish_swarm_mutation_request, request_key as swarm_mutation_request_key,
 };
+use super::workflow::{
+    build_control_assignment_text, combine_assignment_text, composite_synthesis_content,
+};
 use super::{
     ClientConnectionInfo, SwarmEvent, SwarmEventType, SwarmMember, SwarmMutationRuntime,
     SwarmState, SwarmTaskProgress, VersionedPlan, broadcast_swarm_plan,
@@ -17,11 +20,11 @@ use super::{
     set_member_task_label, truncate_detail, update_member_status, update_member_status_with_report,
 };
 use crate::agent::Agent;
+use crate::instruction::workflow::Workflow;
 use crate::plan::{
     TaskControlAction, assignment_affinities_for_task, assignment_loads,
-    build_control_assignment_text, combine_assignment_text, explicit_task_blocked_reason,
-    next_unassigned_runnable_item_id, task_control_action_allows_status, task_control_status_error,
-    task_control_target_item_id,
+    explicit_task_blocked_reason, next_unassigned_runnable_item_id,
+    task_control_action_allows_status, task_control_status_error, task_control_target_item_id,
 };
 use crate::protocol::{NotificationType, PlanGraphStatus, ServerEvent};
 use jcode_agent_runtime::SoftInterruptSource;
@@ -310,24 +313,6 @@ fn turn_end_should_auto_complete(status: &str, expanded: bool) -> bool {
 /// content is the now-stale decomposition brief, so replace it with an explicit
 /// synthesis instruction that tells the planner to integrate its children and
 /// finish with `complete_node`. Otherwise the original content is used verbatim.
-fn composite_synthesis_content(
-    item_id: &str,
-    raw_content: &str,
-    is_composite_synthesis: bool,
-) -> String {
-    if is_composite_synthesis {
-        format!(
-            "Synthesis turn for composite node '{item_id}'. Its children (and the deep-mode \
-             critique/verify gate) are complete; their outputs are provided below. Read them, \
-             write one synthesized result, and finish by calling `swarm complete_node` with \
-             node_id=\"{item_id}\" and an artifact summarizing the integrated findings. Do NOT \
-             call expand_node again. Original brief: {raw_content}"
-        )
-    } else {
-        raw_content.to_string()
-    }
-}
-
 #[derive(Clone, Debug)]
 struct TaskSnapshot {
     content: String,
@@ -352,9 +337,10 @@ fn deep_mode_assignment_content(
     item_id: &str,
     is_composite_synthesis: bool,
     content: &str,
-) -> String {
+    working_dir: Option<&std::path::Path>,
+) -> anyhow::Result<String> {
     if !plan.mode.eq_ignore_ascii_case("deep") || is_composite_synthesis {
-        return content.to_string();
+        return Ok(content.to_string());
     }
     let is_gate = plan
         .node_meta
@@ -392,14 +378,15 @@ fn deep_mode_assignment_content(
                 .into_iter()
                 .filter(|id| audited.contains(id.as_str()))
                 .collect();
-        jcode_swarm_core::append_deep_gate_instructions(
+        super::workflow::append_deep_gate_instructions(
             content,
             item_id,
             &audited_ids,
             &low_confidence_siblings,
+            working_dir,
         )
     } else {
-        jcode_swarm_core::append_deep_node_instructions(content, item_id)
+        super::workflow::append_deep_node_instructions(content, item_id, working_dir)
     }
 }
 
@@ -407,10 +394,22 @@ async fn task_snapshot_for(
     swarm_id: &str,
     task_id: &str,
     swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
-) -> Option<TaskSnapshot> {
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    action: TaskControlAction,
+) -> anyhow::Result<Option<TaskSnapshot>> {
+    let directories = swarm_members
+        .read()
+        .await
+        .iter()
+        .map(|(id, member)| (id.clone(), member.working_dir.clone()))
+        .collect::<HashMap<_, _>>();
     let plans = swarm_plans.read().await;
-    let plan = plans.get(swarm_id)?;
-    let item = plan.items.iter().find(|item| item.id == task_id)?;
+    let Some(plan) = plans.get(swarm_id) else {
+        return Ok(None);
+    };
+    let Some(item) = plan.items.iter().find(|item| item.id == task_id) else {
+        return Ok(None);
+    };
     // Hydrate with forward dataflow from completed upstream dependencies so
     // resume/start/wake re-injects the same artifact context an initial
     // assignment would carry, then attach the deep-mode contract the same way
@@ -421,12 +420,33 @@ async fn task_snapshot_for(
         .get(task_id)
         .map(|meta| meta.expanded && !meta.is_gate)
         .unwrap_or(false);
-    Some(TaskSnapshot {
-        content: deep_mode_assignment_content(plan, task_id, is_composite_synthesis, &hydrated),
+    let content = if matches!(
+        action,
+        TaskControlAction::Start | TaskControlAction::Wake | TaskControlAction::Resume
+    ) && task_control_action_allows_status(action, &item.status)
+        && item.assigned_to.is_some()
+    {
+        let working_dir = item
+            .assigned_to
+            .as_ref()
+            .and_then(|id| directories.get(id))
+            .and_then(|dir| dir.as_deref());
+        deep_mode_assignment_content(
+            plan,
+            task_id,
+            is_composite_synthesis,
+            &hydrated,
+            working_dir,
+        )?
+    } else {
+        hydrated
+    };
+    Ok(Some(TaskSnapshot {
+        content,
         status: item.status.clone(),
         assigned_to: item.assigned_to.clone(),
         progress: plan.task_progress.get(task_id).cloned(),
-    })
+    }))
 }
 
 async fn plan_graph_status_for(
@@ -771,7 +791,6 @@ fn spawn_assigned_task_run(
     event_counter: Arc<std::sync::atomic::AtomicU64>,
     swarm_event_tx: broadcast::Sender<SwarmEvent>,
 ) {
-    let assignment_text = append_swarm_completion_report_instructions(&assignment_text);
     tokio::spawn(async move {
         {
             let now_ms = now_unix_ms();
@@ -1097,11 +1116,12 @@ fn format_salvage_message(
     source_name: Option<&str>,
     summaries: &[crate::protocol::ToolCallSummary],
     extra_message: Option<&str>,
-) -> String {
+    working_dir: Option<&std::path::Path>,
+) -> anyhow::Result<String> {
     let label = source_name.unwrap_or(source_session);
     let mut output = format!(
-        "Salvage prior progress from {}. Review this before continuing the task.\n\n",
-        label
+        "{}\n\n",
+        Workflow::SwarmSalvage { label }.render(working_dir)?
     );
     if summaries.is_empty() {
         output.push_str("No recorded tool call summary was available from the previous assignee.");
@@ -1120,11 +1140,7 @@ fn format_salvage_message(
             ));
         }
     }
-    if let Some(extra) = extra_message {
-        output.push_str("\n\nAdditional coordinator instructions:\n");
-        output.push_str(extra);
-    }
-    output
+    combine_assignment_text(&output, extra_message, working_dir)
 }
 
 #[expect(
@@ -1544,6 +1560,21 @@ async fn handle_comm_assign_task_with_mode(
         }
     };
 
+    enum AssignmentFailure {
+        State(String),
+        Instructions(anyhow::Error),
+    }
+    struct PreparedAssignment {
+        notification: String,
+        queued: String,
+        summary: String,
+        worker: String,
+    }
+    let working_dir = swarm_members
+        .read()
+        .await
+        .get(&target_session)
+        .and_then(|member| member.working_dir.clone());
     let (selected_task_id, task_content, participant_ids, plan_item_count, blocked_reason) = {
         let now_ms = now_unix_ms();
         let mut plans = swarm_plans.write().await;
@@ -1609,41 +1640,84 @@ async fn handle_comm_assign_task_with_mode(
                 .get(&item_id)
                 .map(|meta| meta.expanded && !meta.is_gate)
                 .unwrap_or(false);
-            let effective_content =
-                composite_synthesis_content(&item_id, &raw_content, is_composite_synthesis);
-            let hydrated =
-                jcode_plan::bridge::hydrate_assignment(plan, &item_id, &effective_content);
-            let content =
-                deep_mode_assignment_content(plan, &item_id, is_composite_synthesis, &hydrated);
-
-            // Index resolved under this same plan lock, so it stays valid.
-            let item = &mut plan.items[found_idx];
-            item.assigned_to = Some(target_session.clone());
-            item.status = "queued".to_string();
-            plan.task_progress.insert(
-                item_id.clone(),
-                SwarmTaskProgress {
-                    assigned_session_id: Some(target_session.clone()),
-                    assignment_summary: Some(truncate_detail(
-                        &combine_assignment_text(&content, message.as_deref()),
-                        120,
-                    )),
-                    assigned_at_unix_ms: Some(now_ms),
-                    ..SwarmTaskProgress::default()
-                },
-            );
-            plan.version += 1;
-            plan.participants.insert(req_session_id.clone());
-            plan.participants.insert(target_session.clone());
-            (
-                Some(item_id.clone()),
-                Some(content),
-                plan.participants.clone(),
-                plan.items.len(),
-                None,
-            )
+            let prepared = (|| -> anyhow::Result<PreparedAssignment> {
+                let effective_content = composite_synthesis_content(
+                    &item_id,
+                    &raw_content,
+                    is_composite_synthesis,
+                    working_dir.as_deref(),
+                )?;
+                let hydrated =
+                    jcode_plan::bridge::hydrate_assignment(plan, &item_id, &effective_content);
+                let content = deep_mode_assignment_content(
+                    plan,
+                    &item_id,
+                    is_composite_synthesis,
+                    &hydrated,
+                    working_dir.as_deref(),
+                )?;
+                let notification = super::workflow::assigned_notification(
+                    &content,
+                    message.as_deref(),
+                    working_dir.as_deref(),
+                )?;
+                let summary =
+                    combine_assignment_text(&content, message.as_deref(), working_dir.as_deref())?;
+                Ok(PreparedAssignment {
+                    queued: append_swarm_completion_report_instructions(
+                        &notification,
+                        working_dir.as_deref(),
+                    )?,
+                    worker: append_swarm_completion_report_instructions(
+                        &summary,
+                        working_dir.as_deref(),
+                    )?,
+                    notification,
+                    summary,
+                })
+            })();
+            match prepared {
+                Err(error) => (
+                    None,
+                    None,
+                    HashSet::new(),
+                    0,
+                    Some(AssignmentFailure::Instructions(error)),
+                ),
+                Ok(prepared) => {
+                    // Index resolved under this same plan lock, so it stays valid.
+                    let item = &mut plan.items[found_idx];
+                    item.assigned_to = Some(target_session.clone());
+                    item.status = "queued".to_string();
+                    plan.task_progress.insert(
+                        item_id.clone(),
+                        SwarmTaskProgress {
+                            assigned_session_id: Some(target_session.clone()),
+                            assignment_summary: Some(truncate_detail(&prepared.summary, 120)),
+                            assigned_at_unix_ms: Some(now_ms),
+                            ..SwarmTaskProgress::default()
+                        },
+                    );
+                    plan.version += 1;
+                    plan.participants.insert(req_session_id.clone());
+                    plan.participants.insert(target_session.clone());
+                    (
+                        Some(item_id.clone()),
+                        Some(prepared),
+                        plan.participants.clone(),
+                        plan.items.len(),
+                        None,
+                    )
+                }
+            }
         } else {
-            (None, None, HashSet::new(), 0, blocked_reason)
+            (
+                None,
+                None,
+                HashSet::new(),
+                0,
+                blocked_reason.map(AssignmentFailure::State),
+            )
         }
     };
 
@@ -1657,12 +1731,24 @@ async fn handle_comm_assign_task_with_mode(
     }
 
     let Some(selected_task_id) = selected_task_id else {
-        let message = blocked_reason.unwrap_or_else(|| {
-            requested_task_id.as_ref().map_or_else(
+        let failure = blocked_reason.unwrap_or_else(|| {
+            AssignmentFailure::State(requested_task_id.as_ref().map_or_else(
                 || "No runnable unassigned tasks are available in the swarm plan".to_string(),
                 |task_id| format!("Task '{}' not found in swarm plan", task_id),
-            )
+            ))
         });
+        let message = match failure {
+            AssignmentFailure::State(message) => message,
+            AssignmentFailure::Instructions(error) => {
+                super::swarm_mutation_state::finish_unapplied_request(
+                    swarm_mutation_runtime,
+                    &mutation_state,
+                    format!("Could not render worker assignment: {error}"),
+                )
+                .await;
+                return;
+            }
+        };
         finish_swarm_mutation_request(
             swarm_mutation_runtime,
             &mutation_state,
@@ -1674,7 +1760,7 @@ async fn handle_comm_assign_task_with_mode(
         .await;
         return;
     };
-    let Some(content) = task_content else {
+    let Some(prepared) = task_content else {
         finish_swarm_mutation_request(
             swarm_mutation_runtime,
             &mutation_state,
@@ -1726,16 +1812,12 @@ async fn handle_comm_assign_task_with_mode(
             .get(&req_session_id)
             .and_then(|member| member.friendly_name.clone())
     };
-    let notification = if let Some(ref extra) = message {
-        format!(
-            "Task assigned to you by coordinator: {} — {}",
-            content, extra
-        )
-    } else {
-        format!("Task assigned to you by coordinator: {}", content)
-    };
-    let queued_task_prompt = append_swarm_completion_report_instructions(&notification);
-    let assignment_text = combine_assignment_text(&content, message.as_deref());
+    let PreparedAssignment {
+        notification,
+        queued: queued_task_prompt,
+        summary: assignment_text,
+        worker: report_assignment_text,
+    } = prepared;
     set_member_task_label(&target_session, &assignment_text, swarm_members).await;
     update_member_status(
         &target_session,
@@ -1797,7 +1879,7 @@ async fn handle_comm_assign_task_with_mode(
             target_session_for_run,
             swarm_id_for_run,
             task_id_for_run,
-            assignment_text,
+            report_assignment_text,
             swarm_members_for_run,
             swarms_for_run,
             swarm_plans_for_run,
@@ -2112,7 +2194,19 @@ pub(super) async fn handle_comm_task_control(
         task_id
     };
 
-    let Some(snapshot) = task_snapshot_for(&swarm_id, &task_id, swarm_plans).await else {
+    let snapshot =
+        match task_snapshot_for(&swarm_id, &task_id, swarm_plans, swarm_members, action).await {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                let _ = client_event_tx.send(ServerEvent::Error {
+                    id,
+                    message: format!("Could not render task restart: {error}"),
+                    retry_after_secs: None,
+                });
+                return;
+            }
+        };
+    let Some(snapshot) = snapshot else {
         let _ = client_event_tx.send(ServerEvent::Error {
             id,
             message: format!("Task '{}' not found in swarm plan", task_id),
@@ -2180,8 +2274,27 @@ pub(super) async fn handle_comm_task_control(
                 return;
             }
 
-            let assignment_text =
-                build_control_assignment_text(action, &snapshot.content, message.as_deref());
+            let working_dir = swarm_members
+                .read()
+                .await
+                .get(&assignee)
+                .and_then(|member| member.working_dir.clone());
+            let assignment_text = match build_control_assignment_text(
+                action,
+                &snapshot.content,
+                message.as_deref(),
+                working_dir.as_deref(),
+            ) {
+                Ok(text) => text,
+                Err(error) => {
+                    let _ = client_event_tx.send(ServerEvent::Error {
+                        id,
+                        message: format!("Could not render task restart: {error}"),
+                        retry_after_secs: None,
+                    });
+                    return;
+                }
+            };
             // Validate the assignee is actually available BEFORE mutating any
             // plan state. Resuming a plain-'running' task used to requeue it
             // (flipping it to 'queued' and rewriting its progress record)
@@ -2219,6 +2332,29 @@ pub(super) async fn handle_comm_task_control(
                 Err(_) => false,
             };
 
+            let working_dir = swarm_members
+                .read()
+                .await
+                .get(&assignee)
+                .and_then(|member| member.working_dir.clone());
+            let reported_assignment = if agent_is_idle || action == TaskControlAction::Wake {
+                match append_swarm_completion_report_instructions(
+                    &assignment_text,
+                    working_dir.as_deref(),
+                ) {
+                    Ok(text) => Some(text),
+                    Err(error) => {
+                        let _ = client_event_tx.send(ServerEvent::Error {
+                            id,
+                            message: format!("Could not render worker contract: {error}"),
+                            retry_after_secs: None,
+                        });
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
             if agent_is_idle {
                 if snapshot.status != "queued"
                     && requeue_existing_assignment(
@@ -2254,7 +2390,7 @@ pub(super) async fn handle_comm_task_control(
                     assignee.clone(),
                     swarm_id.clone(),
                     task_id.clone(),
-                    assignment_text,
+                    reported_assignment.unwrap_or(assignment_text),
                     Arc::clone(swarm_members),
                     Arc::clone(swarms_by_id),
                     Arc::clone(swarm_plans),
@@ -2276,11 +2412,22 @@ pub(super) async fn handle_comm_task_control(
             }
 
             if action == TaskControlAction::Wake {
-                let assignment_text = append_swarm_completion_report_instructions(&assignment_text);
-                let wake_message = format!(
-                    "Coordinator requested you wake and continue task '{}'.\n\n{}",
-                    task_id, assignment_text
-                );
+                let assignment_text = reported_assignment.unwrap_or(assignment_text);
+                let wake_message = match super::workflow::wake_message(
+                    &task_id,
+                    &assignment_text,
+                    working_dir.as_deref(),
+                ) {
+                    Ok(text) => text,
+                    Err(error) => {
+                        let _ = client_event_tx.send(ServerEvent::Error {
+                            id,
+                            message: format!("Could not render task wake: {error}"),
+                            retry_after_secs: None,
+                        });
+                        return;
+                    }
+                };
                 let _ = queue_soft_interrupt_for_session(
                     &assignee,
                     wake_message,
@@ -2322,15 +2469,27 @@ pub(super) async fn handle_comm_task_control(
                 });
                 return;
             };
-            let retry_note = message.as_ref().map_or_else(
-                || "Retry this assignment.".to_string(),
-                |extra| {
-                    format!(
-                        "Retry this assignment.\n\nAdditional coordinator instructions:\n{}",
-                        extra
-                    )
-                },
-            );
+            let working_dir = swarm_members
+                .read()
+                .await
+                .get(&assignee)
+                .and_then(|member| member.working_dir.clone());
+            let retry_note = match Workflow::SwarmTaskRetry
+                .render(working_dir.as_deref())
+                .map_err(anyhow::Error::new)
+                .and_then(|text| {
+                    combine_assignment_text(&text, message.as_deref(), working_dir.as_deref())
+                }) {
+                Ok(text) => text,
+                Err(error) => {
+                    let _ = client_event_tx.send(ServerEvent::Error {
+                        id,
+                        message: format!("Could not render task retry: {error}"),
+                        retry_after_secs: None,
+                    });
+                    return;
+                }
+            };
             handle_comm_assign_task_with_mode(
                 id,
                 req_session_id,
@@ -2412,6 +2571,33 @@ pub(super) async fn handle_comm_task_control(
                 return;
             }
 
+            let target_dir = swarm_members
+                .read()
+                .await
+                .get(&new_target)
+                .and_then(|m| m.working_dir.clone());
+            let displaced_dir = swarm_members
+                .read()
+                .await
+                .get(&assignee)
+                .and_then(|m| m.working_dir.clone());
+            let stand_down = match (Workflow::SwarmStandDown {
+                task_id: &task_id,
+                target: &new_target,
+                action: action.as_str(),
+            })
+            .render(displaced_dir.as_deref())
+            {
+                Ok(text) => text,
+                Err(error) => {
+                    let _ = client_event_tx.send(ServerEvent::Error {
+                        id,
+                        message: format!("Could not render displaced worker instructions: {error}"),
+                        retry_after_secs: None,
+                    });
+                    return;
+                }
+            };
             let forwarded_message = if action == TaskControlAction::Salvage {
                 let prior_name = active_swarm_member(&assignee, swarm_members)
                     .await
@@ -2426,12 +2612,24 @@ pub(super) async fn handle_comm_task_control(
                     } else {
                         vec![]
                     };
-                let mut salvage = format_salvage_message(
+                let salvage = format_salvage_message(
                     &assignee,
                     prior_name.as_deref(),
                     &summaries,
                     message.as_deref(),
+                    target_dir.as_deref(),
                 );
+                let mut salvage = match salvage {
+                    Ok(text) => text,
+                    Err(error) => {
+                        let _ = client_event_tx.send(ServerEvent::Error {
+                            id,
+                            message: format!("Could not render salvage instructions: {error}"),
+                            retry_after_secs: None,
+                        });
+                        return;
+                    }
+                };
                 if let Some(progress) = snapshot.progress.as_ref() {
                     if let Some(summary) = progress.checkpoint_summary.as_deref() {
                         salvage.push_str("\n\nLatest checkpoint summary:\n");
@@ -2444,13 +2642,25 @@ pub(super) async fn handle_comm_task_control(
                 }
                 Some(salvage)
             } else if action == TaskControlAction::Replace {
-                Some(message.as_ref().map_or_else(
-                    || format!("This task is replacing prior assignee '{}'.", assignee),
-                    |extra| format!(
-                        "This task is replacing prior assignee '{}'.\n\nAdditional coordinator instructions:\n{}",
-                        assignee, extra
-                    ),
-                ))
+                let replacement = Workflow::SwarmReplace {
+                    assignee: &assignee,
+                }
+                .render(target_dir.as_deref())
+                .map_err(anyhow::Error::new)
+                .and_then(|text| {
+                    combine_assignment_text(&text, message.as_deref(), target_dir.as_deref())
+                });
+                match replacement {
+                    Ok(text) => Some(text),
+                    Err(error) => {
+                        let _ = client_event_tx.send(ServerEvent::Error {
+                            id,
+                            message: format!("Could not render replacement instructions: {error}"),
+                            retry_after_secs: None,
+                        });
+                        return;
+                    }
+                }
             } else {
                 message
             };
@@ -2495,15 +2705,6 @@ pub(super) async fn handle_comm_task_control(
                     })
             };
             if takeover_landed {
-                let stand_down = format!(
-                    "Task '{}' has been handed off to '{}' by the coordinator ({}). Stop working \
-                     on it immediately: do not make further edits or commits for that task. If \
-                     you have uncommitted progress worth keeping, note it in a brief message to \
-                     the coordinator, then stand down.",
-                    displaced_task_id,
-                    displaced_new_target,
-                    action.as_str()
-                );
                 let _ = queue_soft_interrupt_for_session(
                     &assignee,
                     stand_down.clone(),
