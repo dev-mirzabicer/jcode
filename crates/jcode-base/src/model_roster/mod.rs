@@ -10,7 +10,6 @@ use std::collections::BTreeMap;
 pub use store::ModelRosterService;
 
 pub const ROSTER_PATH: &str = "model-roster.toml";
-pub const ROSTER_SEED_VERSION: u32 = 27;
 pub const SHIPPED_ROSTER: &str = include_str!("seed.toml");
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

@@ -215,6 +215,12 @@ Synthetic tests cover:
 
 The fixtures use synthetic prose. They do not snapshot, require, forbid, or judge Mirza-approved instruction wording.
 
+## Model roster and ordinary source reads
+
+The separate [`model_roster`](../MODEL_ROSTER.md) domain owns global TOML policy, ordered route/effort resolution, inspection, and reusable concrete execution state. Provider-core owns explicit model qualification. Provider runtime factories own independent construction and effort aliases. The roster is not an instruction kind and no existing workflow adopts it implicitly.
+
+Primary composition, notifications and roster loading share `prepare_global_store_for_read`. A ready current-seed store validates only selected resources at runtime. Initialization, seed adoption and repository publication retain complete validation. This prevents an unrelated invalid roster from disabling valid primary instructions without weakening selected-source or repository-damage failures.
+
 ## Handoff to later packages
 
 - WP-02 supplies validated Git-backed global and project roots plus import receipts through `InstructionRepositoryService`.

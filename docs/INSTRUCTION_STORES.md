@@ -100,7 +100,7 @@ Import leaves the original untouched, records its SHA-256 and empty/blank semant
 
 ## Primary activation
 
-The first new primary session initializes or validates the global store, resolves any configured project repository, and passes those roots to the typed composer. The same working-tree authority and complete validation rules therefore control default selection, explicit selection, direct and server clear, transfer, and staged old-session migration. A damaged initialized global store or invalid configured project store blocks activation rather than falling back to shipped seed or global-only behavior.
+The first new primary session initializes the global store, resolves any configured project repository, and passes those roots to the typed composer. Initialization, seed upgrades, and Git publication retain full-store validation. Ordinary reads of a ready, current-seed store validate only selected resources and dependencies, so an invalid unrelated roster alias or agent cannot block valid composition or notification rendering. This shared read policy covers primary selection, clear, transfer, notification occurrences, and roster loading. Repository/manifest damage and invalid selected sources still fail visibly, without seed or global-only fallback.
 
 The global store is not initialized by ordinary server construction, read-only repository service access, internal non-primary agents, or documentation commands. See [`AGENT_PROFILES.md`](AGENT_PROFILES.md) for composition and lifecycle.
 
