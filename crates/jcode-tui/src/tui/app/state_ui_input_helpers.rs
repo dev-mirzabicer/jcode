@@ -52,6 +52,27 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::hidden("/agents", "Compatibility alias for /agent-models"),
     RegisteredCommand::public("/agent", "Select, replace, or inspect the primary agent"),
     RegisteredCommand::public(
+        "/instructions",
+        "Inspect all instructions, sources, previews and Git history",
+    ),
+    RegisteredCommand::public("/prompts", "Alias for the read-only instruction manager"),
+    RegisteredCommand::public(
+        "/model-roster",
+        "Inspect global model policy and resolution previews",
+    ),
+    RegisteredCommand::public(
+        "/agent instructions",
+        "Inspect agent sources in the instruction manager",
+    ),
+    RegisteredCommand::public(
+        "/skills instructions",
+        "Inspect managed and external skill sources",
+    ),
+    RegisteredCommand::public(
+        "/swarm-prompt inspect",
+        "Inspect managed routing without editing",
+    ),
+    RegisteredCommand::public(
         "/swarm-prompt",
         "Open the active swarm routing prompt in your editor",
     ),
@@ -720,6 +741,10 @@ impl App {
                 input,
                 vec![
                     ("/agent inspect".into(), "Inspect exact active instructions"),
+                    (
+                        "/agent instructions".into(),
+                        "Browse agent sources, previews, and history",
+                    ),
                     (
                         "/agent replace ".into(),
                         "Explicitly replace the true system prompt",

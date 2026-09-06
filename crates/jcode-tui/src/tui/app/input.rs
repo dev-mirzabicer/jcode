@@ -2503,6 +2503,9 @@ pub(super) fn handle_modal_key(
     code: KeyCode,
     modifiers: KeyModifiers,
 ) -> Result<bool> {
+    if app.handle_instruction_key(code, modifiers) {
+        return Ok(true);
+    }
     if app.handle_context_editor_key(code, modifiers) {
         return Ok(true);
     }

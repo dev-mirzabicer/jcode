@@ -3522,6 +3522,9 @@ fn handle_reasoning_display_command(app: &mut App, trimmed: &str) -> bool {
 }
 
 pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
+    if app.handle_instruction_command(trimmed) {
+        return true;
+    }
     if handle_alignment_command(app, trimmed) {
         return true;
     }

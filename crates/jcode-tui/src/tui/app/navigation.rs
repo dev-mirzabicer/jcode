@@ -1344,6 +1344,13 @@ impl App {
             }};
         }
 
+        if self.instruction_manager_visible() {
+            if let Some(manager) = &self.instruction_ui.manager {
+                manager.borrow_mut().mouse(mouse);
+            }
+            finish_mouse_event!(false, "instruction_manager");
+        }
+
         if self.context_editor_overlay.is_some() {
             self.handle_context_editor_mouse(mouse);
             finish_mouse_event!(is_mouse_scroll_kind(mouse.kind), "context_editor_overlay");

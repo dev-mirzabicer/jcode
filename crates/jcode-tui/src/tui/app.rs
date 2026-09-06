@@ -98,6 +98,7 @@ mod split_view;
 mod state_ui;
 mod state_ui_input_helpers;
 pub(crate) use state_ui_input_helpers::registered_command_entries;
+mod instruction_ui;
 mod startup_context_ui;
 mod state_ui_maintenance;
 mod state_ui_messages;
@@ -1235,6 +1236,7 @@ pub struct App {
     /// `None` means the connected server predates Startup Context support.
     /// New servers always send a bounded status, including for empty projects.
     startup_context_ui: startup_context_ui::StartupContextUiState,
+    instruction_ui: instruction_ui::InstructionUi,
     // Total session token usage (from server in remote mode)
     remote_total_tokens: Option<(u64, u64)>,
     // Detailed persisted token/cache usage totals (from server in remote mode)

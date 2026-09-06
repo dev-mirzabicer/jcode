@@ -702,6 +702,9 @@ pub(in crate::tui::app) fn handle_server_event(
     let call_output_tokens_seen = remote.call_output_tokens_seen();
 
     match event {
+        ServerEvent::InstructionInspection { id, reply } => {
+            app.accept_instruction_reply(id, *reply)
+        }
         ServerEvent::TextDelta { text } => {
             if let Some(thought_line) = App::extract_thought_line(&text) {
                 let ops = app.stream_buffer.flush();
@@ -2014,6 +2017,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.persist_remote_model_catalog_cache();
             }
             app.remote_skills = skills;
+            app.reconnect_instruction_manager(&session_id);
             app.accept_remote_startup_context_history(
                 &session_id,
                 startup_context.map(|status| *status),

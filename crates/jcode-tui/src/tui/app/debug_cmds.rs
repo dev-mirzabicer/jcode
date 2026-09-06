@@ -134,6 +134,9 @@ impl App {
             return serde_json::to_string_pretty(&self.startup_context_debug_summary())
                 .unwrap_or_else(|_| "{}".to_string());
         }
+        if cmd == "instruction-manager" {
+            return self.instruction_debug().to_string();
+        }
         if cmd == "startup-context-fixtures" {
             return serde_json::to_string_pretty(&serde_json::json!({
                 "fixtures": Self::startup_context_debug_fixture_names(),

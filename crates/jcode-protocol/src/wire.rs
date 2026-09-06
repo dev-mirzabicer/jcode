@@ -131,6 +131,14 @@ pub enum Request {
         workflow: jcode_task_types::WorkflowPromptRequest,
     },
 
+    /// Connection-local read-only instruction inspection. No client paths or
+    /// mutation operations are accepted by this protocol.
+    #[serde(rename = "inspect_instructions")]
+    InspectInstructions {
+        id: u64,
+        request: InstructionInspectionRequest,
+    },
+
     /// List currently valid primary agents for the active project.
     #[serde(rename = "get_agent_catalog")]
     GetAgentCatalog { id: u64 },
@@ -1368,6 +1376,12 @@ pub enum ServerEvent {
 
     #[serde(rename = "workflow_prompt_rendered")]
     WorkflowPromptRendered { id: u64, content: String },
+
+    #[serde(rename = "instruction_inspection")]
+    InstructionInspection {
+        id: u64,
+        reply: Box<InstructionInspectionReply>,
+    },
 
     #[serde(rename = "agent_catalog")]
     AgentCatalog {

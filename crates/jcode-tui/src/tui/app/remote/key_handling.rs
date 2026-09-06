@@ -288,6 +288,11 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
 
+    if app.handle_instruction_key(code, modifiers) {
+        app.dispatch_remote_instruction_request(remote).await;
+        return Ok(());
+    }
+
     if app.handle_context_editor_key(code, modifiers) {
         app.dispatch_remote_context_editor_actions(remote).await;
         return Ok(());
@@ -1081,6 +1086,11 @@ async fn handle_remote_key_internal(
                 }
 
                 if app_mod::commands::handle_usage_command(app, trimmed) {
+                    return Ok(());
+                }
+
+                if app.handle_instruction_command(trimmed) {
+                    app.dispatch_remote_instruction_request(remote).await;
                     return Ok(());
                 }
 

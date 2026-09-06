@@ -16,6 +16,9 @@ mod startup_context;
 
 pub use comm_format::*;
 pub use context::*;
+pub use jcode_instruction_types::*;
+#[cfg(test)]
+mod instruction_inspection_tests;
 pub use notifications::{FeatureToggle, NotificationType};
 pub use startup_context::*;
 
@@ -596,7 +599,8 @@ impl Request {
             Request::SetAgent { id, .. } => *id,
             Request::GetAgentCatalog { id }
             | Request::GetAgentStatus { id, .. }
-            | Request::RenderWorkflowPrompt { id, .. } => *id,
+            | Request::RenderWorkflowPrompt { id, .. }
+            | Request::InspectInstructions { id, .. } => *id,
             Request::Rewind { id, .. } => *id,
             Request::RewindUndo { id } => *id,
             Request::Ping { id } => *id,

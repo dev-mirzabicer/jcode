@@ -962,6 +962,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
     // otherwise monopolize the select loop before the initial subscribe/read.
     let mut client_subscribed = false;
     let mut pending_request = Some(initial_request);
+    let mut instruction_inspection = crate::instruction::inspection::InspectionWorker::default();
 
     loop {
         let request = if let Some(request) = pending_request.take() {
@@ -3058,6 +3059,62 @@ pub(super) async fn handle_client_with_instruction_repositories(
                         });
                     }
                 }
+            }
+
+            Request::InspectInstructions { id, request } => {
+                use crate::instruction::inspection::{
+                    InspectionContext, InstructionInspectionFailure,
+                };
+                let session_id = client_session_id.clone();
+                let provider = agent
+                    .try_lock()
+                    .map(|current| current.provider_handle())
+                    .unwrap_or_else(|_| Arc::clone(&provider_template));
+                let captured = if matches!(
+                    &request,
+                    crate::protocol::InstructionInspectionRequest::Open { .. }
+                ) {
+                    agent.try_lock().ok().map(|current| {
+                        InspectionContext::from_session(
+                            current.startup_context_session(),
+                            provider.as_ref(),
+                            current.is_canary(),
+                        )
+                    })
+                } else {
+                    None
+                };
+                let receiver = instruction_inspection.submit(
+                    instruction_repositories.as_ref().clone(),
+                    client_session_id.clone(),
+                    move || {
+                        if let Some(context) = captured {
+                            return Ok(context);
+                        }
+                        let session = Session::load(&session_id).map_err(|error| {
+                            InstructionInspectionFailure {
+                                operation: "capture session".into(),
+                                detail: error.to_string(),
+                                refresh_required: true,
+                            }
+                        })?;
+                        Ok(InspectionContext::from_session(
+                            &session,
+                            provider.as_ref(),
+                            session.is_canary,
+                        ))
+                    },
+                    request,
+                );
+                let events = client_event_tx.clone();
+                tokio::spawn(async move {
+                    if let Ok(reply) = receiver.await {
+                        let _ = events.send(ServerEvent::InstructionInspection {
+                            id,
+                            reply: Box::new(reply),
+                        });
+                    }
+                });
             }
 
             Request::GetAgentCatalog { id } => {

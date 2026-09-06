@@ -608,6 +608,21 @@ impl crate::tui::TuiState for App {
         true
     }
 
+    fn draw_instruction_manager(
+        &self,
+        frame: &mut ratatui::prelude::Frame,
+        area: ratatui::layout::Rect,
+    ) -> bool {
+        let Some(manager) = &self.instruction_ui.manager else {
+            return false;
+        };
+        if !manager.borrow().visible {
+            return false;
+        }
+        manager.borrow_mut().render(frame, area);
+        true
+    }
+
     fn display_messages(&self) -> &[DisplayMessage] {
         &self.display_messages
     }

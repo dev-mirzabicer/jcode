@@ -721,6 +721,15 @@ impl RemoteConnection {
         id
     }
 
+    pub async fn send_instruction_inspection(
+        &self,
+        id: u64,
+        request: crate::protocol::InstructionInspectionRequest,
+    ) -> Result<()> {
+        self.send_request(Request::InspectInstructions { id, request })
+            .await
+    }
+
     /// Reserve an ID before installing Startup Context response correlation.
     pub fn reserve_startup_context_request_id(&mut self) -> u64 {
         let id = self.next_request_id;

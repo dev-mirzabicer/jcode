@@ -59,6 +59,7 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("GetHistory", Covered),
     ("GetModelCatalog", Covered),
     ("InputShell", ClientInternal),
+    ("InspectInstructions", ClientInternal),
     ("ListContextTransactions", ClientInternal),
     ("Message", Covered),
     ("NotifyAuthChanged", Covered),
