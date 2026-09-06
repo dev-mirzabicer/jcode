@@ -278,15 +278,29 @@ impl InstructionInspector {
                     )
                     .map_err(|error| fail("effective agent component", error));
             }
-            return runtime
-                .render(&selector(managed), &serde_json::json!({}))
-                .map(|rendered| rendered.text)
-                .map_err(|error| {
+            for consumer in self
+                .consumers
+                .iter()
+                .filter(|consumer| consumer.kind == managed.kind && consumer.id == managed.id)
+            {
+                let mut scoped = consumer.clone();
+                scoped.scope_policy = if managed.scope == InstructionScope::Global {
+                    ConsumerScopePolicy::GlobalOnly
+                } else {
+                    ConsumerScopePolicy::ProjectOnly
+                };
+                runtime
+                    .validate_registered_graph(&scoped)
+                    .map_err(|error| fail("validate consumer contract", error))?;
+            }
+            return render_inspection_resource(runtime, &selector(managed), &self.skills).map_err(
+                |error| {
                     fail(
                         "render preview (occurrence-specific values are not available)",
                         error,
                     )
-                });
+                },
+            );
         }
         let source = self.read_source(resource)?;
         if resource.row.kind == "skill" {

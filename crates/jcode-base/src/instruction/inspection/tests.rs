@@ -473,3 +473,186 @@ async fn worker_cancel_and_cross_session_requests_cannot_publish_old_context() {
     assert!(open.await.is_err());
     assert!(!fixture.root.exists());
 }
+
+#[test]
+fn invalid_external_skills_and_nonregular_managed_resources_remain_visible() {
+    let fixture = Fixture::new();
+    fixture.seed();
+    std::fs::create_dir_all(fixture.root.join("modules/not-a-file.md")).unwrap();
+    std::fs::create_dir_all(fixture.project.join(".jcode/skills/invalid")).unwrap();
+    std::fs::write(
+        fixture.project.join(".jcode/skills/invalid/SKILL.md"),
+        [0xff],
+    )
+    .unwrap();
+    let inspector = fixture.open();
+    assert!(
+        inspector
+            .resources
+            .values()
+            .any(|resource| resource.path.ends_with("not-a-file.md") && !resource.row.valid)
+    );
+    assert!(
+        inspector
+            .resources
+            .values()
+            .any(|resource| resource.path.ends_with("invalid/SKILL.md") && !resource.row.valid)
+    );
+    assert!(
+        inspector
+            .resources
+            .values()
+            .any(|resource| resource.row.id == "shared" && resource.row.valid)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn unsafe_managed_symlinks_do_not_render_or_expose_global_fallback() {
+    let fixture = Fixture::new();
+    fixture.seed();
+    let outside = fixture.temp.path().join("outside.md");
+    std::fs::write(&outside, document("linked", "module", "OUTSIDE")).unwrap();
+    std::os::unix::fs::symlink(&outside, fixture.root.join("modules/linked.md")).unwrap();
+    let inspector = fixture.open();
+    assert!(
+        inspector
+            .resources
+            .values()
+            .any(|resource| resource.row.id == "linked" && !resource.row.valid)
+    );
+    assert!(
+        inspector
+            .runtime
+            .render(
+                &InstructionSelector::global(InstructionKind::Module, "linked").unwrap(),
+                &()
+            )
+            .is_err()
+    );
+    let project_root = fixture.temp.path().join("project-store");
+    std::fs::create_dir_all(&project_root).unwrap();
+    std::os::unix::fs::symlink(fixture.root.join("modules"), project_root.join("modules")).unwrap();
+    let runtime = InstructionRuntime::discover(
+        InstructionSources::new(&fixture.root).with_project_root(project_root),
+    );
+    assert!(
+        runtime
+            .render(
+                &InstructionSelector::unqualified(InstructionKind::Module, "shared").unwrap(),
+                &()
+            )
+            .is_err()
+    );
+    assert!(
+        runtime
+            .render(
+                &InstructionSelector::global(InstructionKind::Module, "shared").unwrap(),
+                &()
+            )
+            .is_ok()
+    );
+}
+
+#[test]
+fn registered_empty_contract_available_values_and_isolated_preview_are_truthful() {
+    let fixture = Fixture::new();
+    fixture.seed();
+    std::fs::write(
+        fixture.root.join("notifications/todo-auto-poke.md"),
+        document("todo-auto-poke", "notification", ""),
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.root.join("system/available-skills.md"),
+        "---\nid: available-skills\nkind: system\ntemplate: handlebars\n---\n{{skills}}",
+    )
+    .unwrap();
+    std::fs::write(fixture.root.join("agents/isolated.md"), "---\nid: isolated\nkind: agent\nname: Isolated\ndescription: Fixture\navailability: isolated\n---\nISOLATED-BODY").unwrap();
+    let mut inspector = fixture.open();
+    let empty = inspector
+        .resources
+        .values()
+        .find(|resource| resource.row.id == "todo-auto-poke")
+        .unwrap();
+    assert!(!empty.row.valid);
+    let skill_key = inspector
+        .resources
+        .values()
+        .find(|resource| resource.row.id == "available-skills")
+        .unwrap()
+        .row
+        .key
+        .clone();
+    assert!(
+        detail(
+            &mut inspector,
+            &skill_key,
+            InstructionInspectionView::Rendered
+        )
+        .text
+        .contains("Sample")
+    );
+    let isolated = inspector
+        .resources
+        .values()
+        .find(|resource| resource.row.id == "isolated")
+        .unwrap()
+        .row
+        .key
+        .clone();
+    assert_eq!(
+        detail(
+            &mut inspector,
+            &isolated,
+            InstructionInspectionView::Rendered
+        )
+        .text,
+        "ISOLATED-BODY"
+    );
+    let before = git(&fixture.root, &["rev-parse", "HEAD"]);
+    let result = inspector.request(
+        InstructionInspectionRequest::Detail {
+            snapshot: inspector.snapshot.clone(),
+            target: InstructionInspectionTarget::Resource(isolated),
+            view: InstructionInspectionView::System,
+            revision: None,
+        },
+        &AtomicBool::new(false),
+    );
+    assert!(matches!(
+        result.result,
+        InstructionInspectionResult::Failed(_)
+    ));
+    assert_eq!(before, git(&fixture.root, &["rev-parse", "HEAD"]));
+}
+
+#[test]
+fn repository_history_paging_has_no_hidden_tail_and_detached_inspection_is_readonly() {
+    let fixture = Fixture::new();
+    fixture.seed();
+    for index in 0..66 {
+        git(
+            &fixture.root,
+            &["commit", "--allow-empty", "-m", &format!("fixture-{index}")],
+        );
+    }
+    git(&fixture.root, &["checkout", "--detach", "HEAD"]);
+    let before = std::fs::read(fixture.root.join(".git/index")).unwrap();
+    let inspector = fixture.open();
+    assert!(inspector.stores["global"].row.detached);
+    let target = InstructionInspectionTarget::Repository("global".into());
+    let first = inspector.history(&target, 0).unwrap();
+    assert_eq!(first.commits.len(), ROW_PAGE_SIZE);
+    let second = inspector.history(&target, first.next.unwrap()).unwrap();
+    assert_eq!(second.commits.len(), 3);
+    assert!(second.next.is_none());
+    assert_ne!(
+        first.commits.last().unwrap().commit,
+        second.commits.first().unwrap().commit
+    );
+    assert_eq!(
+        before,
+        std::fs::read(fixture.root.join(".git/index")).unwrap()
+    );
+}

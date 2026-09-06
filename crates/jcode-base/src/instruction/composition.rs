@@ -318,7 +318,7 @@ impl SystemPromptComposer {
         selection: AgentSelection,
     ) -> Result<String, SystemPromptActivationError> {
         let environment = self.inspect_environment(working_dir)?;
-        let profile = render_agent_profile(&environment, selection)?;
+        let profile = render_agent_profile_with_availability(&environment, selection, None)?;
         let mut parts = vec![profile.text];
         push_project_addenda(&environment.runtime, &profile.resource, &mut parts)?;
         Ok(parts.join("\n\n"))
@@ -595,6 +595,14 @@ fn render_agent_profile(
     environment: &CompositionEnvironment,
     selection: AgentSelection,
 ) -> Result<RenderedAgentProfile, SystemPromptActivationError> {
+    render_agent_profile_with_availability(environment, selection, Some(AgentAvailability::Primary))
+}
+
+fn render_agent_profile_with_availability(
+    environment: &CompositionEnvironment,
+    selection: AgentSelection,
+    requested: Option<AgentAvailability>,
+) -> Result<RenderedAgentProfile, SystemPromptActivationError> {
     let selection = resolve_selection(
         selection,
         environment.project_manifest.as_ref(),
@@ -642,10 +650,24 @@ fn render_agent_profile(
     } else {
         selection
     };
-    let mut rendered =
-        environment
-            .runtime
-            .render_agent(&render_selection, AgentAvailability::Primary, &())?;
+    let mut rendered = environment.runtime.render_agent(
+        &render_selection,
+        requested.unwrap_or_else(|| {
+            environment
+                .runtime
+                .resolve(&render_selection)
+                .ok()
+                .and_then(|document| {
+                    document
+                        .metadata
+                        .agent
+                        .as_ref()
+                        .map(|agent| agent.availability)
+                })
+                .unwrap_or(AgentAvailability::Primary)
+        }),
+        &(),
+    )?;
     let document = environment.runtime.resolve(&render_selection)?;
     let display_name = document
         .metadata
@@ -681,6 +703,12 @@ fn render_notification<T: Serialize>(
     id: &str,
     values: &T,
 ) -> Result<String, InstructionError> {
+    InstructionConsumer::<T>::new(profile_notification_registration(id)?)
+        .render(runtime, values)
+        .map(|rendered| rendered.text)
+}
+
+fn profile_notification_registration(id: &str) -> Result<ConsumerRegistration, InstructionError> {
     let path = match id {
         AGENT_TRANSITION_ID => "notifications/agent-transition.md",
         AGENT_REPLACEMENT_ID => "notifications/agent-replacement.md",
@@ -691,17 +719,14 @@ fn render_notification<T: Serialize>(
             });
         }
     };
-    let consumer = InstructionConsumer::<T>::new(ConsumerRegistration::new(
+    ConsumerRegistration::new(
         format!("agent-profile-{id}"),
         id,
         InstructionKind::Notification,
         path,
         "session agent-profile lifecycle",
         "Managed profile transition or true-system replacement prose; session owns framing, structural identity, persistence, and cache behavior.",
-    )?);
-    consumer
-        .render(runtime, values)
-        .map(|rendered| rendered.text)
+    )
 }
 
 fn render_available_skills(
@@ -712,6 +737,12 @@ fn render_available_skills(
         .iter()
         .map(|skill| format!("\n- `/{} ` - {}", skill.name, skill.description))
         .collect::<String>();
+    InstructionConsumer::<AvailableSkillsValues>::new(available_skills_registration()?)
+        .render(runtime, &AvailableSkillsValues { skills: rows })
+        .map(|rendered| rendered.text)
+}
+
+fn available_skills_registration() -> Result<ConsumerRegistration, InstructionError> {
     let mut registration = ConsumerRegistration::new(
         "available-skills-catalog",
         AVAILABLE_SKILLS_ID,
@@ -721,9 +752,7 @@ fn render_available_skills(
         "Managed available-skills prose; activation supplies the sorted effective skill names and descriptions and freezes the complete result.",
     )?;
     registration.required = true;
-    InstructionConsumer::<AvailableSkillsValues>::new(registration)
-        .render(runtime, &AvailableSkillsValues { skills: rows })
-        .map(|rendered| rendered.text)
+    Ok(registration)
 }
 
 fn resolve_selection(
@@ -1086,6 +1115,125 @@ fn legacy_target(document: &InstructionDocument) -> InstructionLegacyImportTarge
         scope: document.scope,
         template_mode: document.template_mode,
         metadata: document.metadata.clone(),
+    }
+}
+
+/// Current compatibility source eligibility. This belongs beside the composer,
+/// not in UI precedence code. Global legacy input is imported at bootstrap;
+/// project compatibility is active only when its managed target is absent.
+pub(crate) fn legacy_source_eligibility(
+    runtime: &super::InstructionRuntime,
+    scope: InstructionScope,
+    kind: LegacyInstructionSourceKind,
+    imported: bool,
+) -> Result<(bool, &'static str), InstructionError> {
+    if imported {
+        return Ok((
+            false,
+            "Imported and inactive. The managed source is authoritative; the original is retained.",
+        ));
+    }
+    if scope == InstructionScope::Global {
+        return Ok((
+            false,
+            "Inactive compatibility file. An initialized global store uses managed sources, not a newly added legacy file.",
+        ));
+    }
+    let selector = match kind {
+        LegacyInstructionSourceKind::SystemPrompt => {
+            InstructionSelector::project(InstructionKind::Agent, COMPATIBILITY_AGENT_ID)?
+        }
+        LegacyInstructionSourceKind::PromptOverlay => {
+            InstructionSelector::project(InstructionKind::System, COMMON_ID)?
+        }
+        LegacyInstructionSourceKind::PreferredTools => InstructionSelector::project(
+            InstructionKind::ToolGuidance,
+            preferred_tools_registration(scope)?.id.to_string(),
+        )?,
+        LegacyInstructionSourceKind::SwarmPrompt => InstructionSelector::project(
+            InstructionKind::ToolGuidance,
+            super::workflow::Workflow::SwarmRouting
+                .registration()?
+                .id
+                .to_string(),
+        )?,
+        LegacyInstructionSourceKind::InventoryApproved => {
+            return Ok((false, "No active compatibility consumer registered."));
+        }
+    };
+    match runtime.resolve(&selector) {
+        Err(InstructionError::ResourceNotFound { .. }) => Ok((
+            true,
+            "Eligible project compatibility input for its owning consumer. Full system preview shows the selected profile's exact contribution.",
+        )),
+        Ok(_) if kind == LegacyInstructionSourceKind::SystemPrompt => Ok((
+            false,
+            "Conflicting managed project:jcode and unimported legacy system prompt. Affected compatibility selection fails; inspect full system preview.",
+        )),
+        Ok(_) => Ok((
+            false,
+            "Inactive: the managed project target takes precedence.",
+        )),
+        Err(error) => Err(error),
+    }
+}
+
+/// Code-owned composition consumers, shared with central inspection.
+pub fn composition_registrations() -> Result<Vec<ConsumerRegistration>, InstructionError> {
+    let mut registrations = vec![
+        available_skills_registration()?,
+        profile_notification_registration(AGENT_TRANSITION_ID)?,
+        profile_notification_registration(AGENT_REPLACEMENT_ID)?,
+    ];
+    for id in [KERNEL_ID, MERMAID_ID] {
+        registrations.push(ConsumerRegistration::new(format!("primary-system-{id}"), id, InstructionKind::System, format!("system/{id}.md"), "primary system composer", "Required when the owning composition slot is selected; capability policy remains code-owned.")?);
+    }
+    registrations.push(ConsumerRegistration::new("compatibility-agent", COMPATIBILITY_AGENT_ID, InstructionKind::Agent, "agents/jcode.md", "default profile fallback", "Required only when the compatibility agent is selected. Other agent identities remain independent.")?);
+    for scope in [InstructionScope::Global, InstructionScope::Project] {
+        let mut common = ConsumerRegistration::new(
+            format!("common-{scope}"),
+            COMMON_ID,
+            InstructionKind::System,
+            "system/common.md",
+            "paired common system sections",
+            "Both scopes contribute independently, global before project.",
+        )?;
+        common.required = false;
+        common.scope_policy = if scope == InstructionScope::Global {
+            ConsumerScopePolicy::GlobalOnly
+        } else {
+            ConsumerScopePolicy::ProjectOnly
+        };
+        registrations.push(common);
+        registrations.push(preferred_tools_registration(scope)?);
+    }
+    Ok(registrations)
+}
+
+pub(crate) fn paired_composition_resource(kind: InstructionKind, id: &InstructionId) -> bool {
+    (kind == InstructionKind::System && id.as_str() == COMMON_ID)
+        || (kind == InstructionKind::ToolGuidance && id.as_str() == "preferred-tools")
+}
+
+pub(crate) fn render_inspection_resource(
+    runtime: &super::InstructionRuntime,
+    selector: &InstructionSelector,
+    skills: &[SkillInfo],
+) -> Result<String, InstructionError> {
+    if selector.kind == InstructionKind::System && selector.id.as_str() == AVAILABLE_SKILLS_ID {
+        let values = AvailableSkillsValues {
+            skills: skills
+                .iter()
+                .map(|skill| format!("\n- `/{} ` - {}", skill.name, skill.description))
+                .collect(),
+        };
+        runtime
+            .render(selector, &values)
+            .map(|rendered| rendered.text)
+    } else {
+        runtime
+            .render(selector, &serde_json::json!({}))
+            .map(|rendered| rendered.text)
     }
 }
 

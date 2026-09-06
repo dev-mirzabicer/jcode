@@ -35,6 +35,10 @@ impl InstructionInspector {
         consumers.extend(
             workflow::registrations().map_err(|error| fail("list workflow consumers", error))?,
         );
+        consumers.extend(
+            composition_registrations()
+                .map_err(|error| fail("list composition consumers", error))?,
+        );
         let mut inspector = Self {
             repositories,
             context,
@@ -76,11 +80,26 @@ impl InstructionInspector {
             canceled(cancel)?;
             let resource = &summary.resource;
             let selector = selector(resource);
-            let graph_error = inspector
+            let mut graph_error = inspector
                 .runtime
                 .validate_graph(&selector)
                 .err()
                 .map(|error| error.to_string());
+            for consumer in inspector
+                .consumers
+                .iter()
+                .filter(|consumer| consumer.kind == resource.kind && consumer.id == resource.id)
+            {
+                let mut scoped = consumer.clone();
+                scoped.scope_policy = if resource.scope == InstructionScope::Global {
+                    ConsumerScopePolicy::GlobalOnly
+                } else {
+                    ConsumerScopePolicy::ProjectOnly
+                };
+                if let Err(error) = inspector.runtime.validate_registered_graph(&scoped) {
+                    graph_error = Some(error.to_string());
+                }
+            }
             let warning = match &summary.state {
                 ResourceValidationState::Valid => graph_error,
                 ResourceValidationState::Invalid(error) => Some(error.clone()),
@@ -92,7 +111,9 @@ impl InstructionInspector {
             let name = doc
                 .and_then(|doc| doc.metadata.display_name.clone())
                 .unwrap_or_else(|| resource.id.to_string());
-            let effective = resource.scope == InstructionScope::Project
+            let paired = paired_composition_resource(resource.kind, &resource.id);
+            let effective = paired
+                || resource.scope == InstructionScope::Project
                 || !summaries.iter().any(|other| {
                     other.resource.scope == InstructionScope::Project
                         && other.resource.kind == resource.kind
@@ -101,8 +122,14 @@ impl InstructionInspector {
             for path in &summary.paths {
                 let key = format!("{}:{}", resource, path.display());
                 let repository = inspector.repository_for(path);
-                let mut annotation = String::new();
-                if resource.scope == InstructionScope::Project
+                let mut annotation = if paired {
+                    "Additive paired source: global and project both contribute independently.\n"
+                        .into()
+                } else {
+                    String::new()
+                };
+                if !paired
+                    && resource.scope == InstructionScope::Project
                     && summaries.iter().any(|other| {
                         other.resource.scope == InstructionScope::Global
                             && other.resource.kind == resource.kind
@@ -196,6 +223,22 @@ impl InstructionInspector {
             } else {
                 "project"
             };
+            if scope == "project"
+                && std::fs::symlink_metadata(repository.root.join(crate::model_roster::ROSTER_PATH))
+                    .is_ok()
+            {
+                inspector.add_external(
+                    repository.root.join(crate::model_roster::ROSTER_PATH),
+                    scope,
+                    "model-roster",
+                    InstructionOrigin::Managed,
+                    false,
+                    Some(
+                        "Model roster is global-only. Project aliases are not active policy."
+                            .into(),
+                    ),
+                );
+            }
             inspector.add_external(
                 repository.root.join("instruction-store.toml"),
                 scope,
@@ -227,6 +270,17 @@ impl InstructionInspector {
                         registration.key, registration.delivery_owner
                     )),
                 );
+                if let Some(resource) = inspector.resources.values_mut().find(|resource| {
+                    resource.path == global.root.join(&registration.default_relative_path)
+                }) {
+                    resource.row.id = registration.id.to_string();
+                    resource.managed = Some(InstructionResourceRef {
+                        scope: InstructionScope::Global,
+                        kind: registration.kind,
+                        id: registration.id.clone(),
+                    });
+                    resource.annotation = registration.inventory_note.clone();
+                }
             }
         }
         canceled(cancel)?;
@@ -333,7 +387,16 @@ impl InstructionInspector {
     ) {
         let key = format!("{scope}:{kind}:{}", path.display());
         let repository = self.repository_for(&path);
-        let read_error = std::fs::read_to_string(&path)
+        let read_error = std::fs::symlink_metadata(&path)
+            .and_then(|metadata| {
+                if origin == InstructionOrigin::Managed && metadata.file_type().is_symlink() {
+                    return Err(std::io::Error::other("Managed source is a symlink"));
+                }
+                if !std::fs::metadata(&path)?.is_file() {
+                    return Err(std::io::Error::other("Source is not a regular file"));
+                }
+                std::fs::read_to_string(&path)
+            })
             .err()
             .map(|error| error.to_string());
         let warning = warning.or(read_error);
@@ -441,7 +504,9 @@ impl InstructionInspector {
                 );
             }
         }
-        for diagnostic in registry.diagnostics() {
+        let external_diagnostics =
+            SkillRegistry::inspection_diagnostics(self.context.working_dir.as_deref());
+        for diagnostic in registry.diagnostics().iter().chain(&external_diagnostics) {
             let path = diagnostic
                 .source
                 .as_ref()
@@ -526,21 +591,25 @@ impl InstructionInspector {
                         .values()
                         .any(|receipt| receipt.source_kind == kind)
                 });
-                let blank = std::fs::read_to_string(&path).is_ok_and(|text| text.trim().is_empty());
+                let regular = std::fs::metadata(&path).is_ok_and(|metadata| metadata.is_file());
+                let blank = regular
+                    && std::fs::read_to_string(&path).is_ok_and(|text| text.trim().is_empty());
+                let eligibility = legacy_source_eligibility(&self.runtime, scope, kind, imported);
+                let (eligible, activity) = eligibility.as_ref().copied().unwrap_or((false, "Managed target is invalid. It does not silently expose this compatibility file."));
                 self.add_external(
                     path.clone(),
                     &scope.to_string(),
                     "legacy-prompt",
                     InstructionOrigin::Legacy,
-                    !imported && !blank,
-                    None,
+                    regular && eligible && !blank,
+                    eligibility.err().map(|error| error.to_string()),
                 );
                 if let Some(resource) = self
                     .resources
                     .values_mut()
                     .find(|resource| resource.path == path)
                 {
-                    resource.annotation = if imported { "Imported and inactive. Original retained. Managed source is authoritative." } else if blank { "Blank legacy compatibility input is inactive. Managed empty content has separate semantics." } else { "Legacy compatibility input. Applicability follows the consuming composer and import receipts. Preview the full selected agent for exact effective composition." }.into();
+                    resource.annotation = if blank { "Blank legacy input is inactive; managed empty bodies have distinct semantics." } else { activity }.into();
                 }
             }
         }
@@ -567,7 +636,20 @@ impl InstructionInspector {
             "model-roster",
             InstructionOrigin::Managed,
             true,
-            parsed.as_ref().err().cloned(),
+            parsed.as_ref().err().cloned().or_else(|| {
+                parsed
+                    .as_ref()
+                    .ok()
+                    .filter(|roster| !roster.validate().is_empty())
+                    .map(|roster| {
+                        roster
+                            .validate()
+                            .iter()
+                            .map(|error| error.detail.as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+            }),
         );
         let Ok(roster) = parsed else {
             return;

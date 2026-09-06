@@ -272,6 +272,41 @@ impl InstructionRuntime {
         &self,
         selector: &InstructionSelector,
     ) -> Result<&InstructionDocument, InstructionError> {
+        for scope in [InstructionScope::Project, InstructionScope::Global] {
+            if matches!(
+                (selector.scope, scope),
+                (InstructionScopeSelector::Global, InstructionScope::Project)
+                    | (InstructionScopeSelector::Project, InstructionScope::Global)
+            ) {
+                continue;
+            }
+            let root = match scope {
+                InstructionScope::Global => Some(&self.sources.global_root),
+                InstructionScope::Project => self.sources.project_root.as_ref(),
+            };
+            if let Some(root) = root
+                && let Some(error) = self.diagnostics.iter().find(|error| {
+                    error.scope == scope
+                        && (error.path == *root
+                            || error.path == root.join(selector.kind.directory()))
+                })
+            {
+                return Err(InstructionError::Io {
+                    operation: "discover scoped resources",
+                    path: error.path.clone(),
+                    detail: error.detail.clone(),
+                });
+            }
+            if selector.scope == InstructionScopeSelector::Unqualified
+                && scope == InstructionScope::Project
+                && self
+                    .entries
+                    .get(&(selector.kind, selector.id.clone()))
+                    .is_some_and(|scopes| !scopes.project.is_empty())
+            {
+                break;
+            }
+        }
         let Some(scopes) = self.entries.get(&(selector.kind, selector.id.clone())) else {
             return Err(InstructionError::ResourceNotFound {
                 selector: selector.clone(),
@@ -349,6 +384,22 @@ impl InstructionRuntime {
         registration: &ConsumerRegistration,
         values: &T,
     ) -> Result<RenderedInstruction, InstructionError> {
+        let document = self.registered_document(registration)?;
+        self.render_root(self.document_ref(document), values)
+    }
+
+    pub fn validate_registered_graph(
+        &self,
+        registration: &ConsumerRegistration,
+    ) -> Result<InstructionGraph, InstructionError> {
+        let document = self.registered_document(registration)?;
+        Ok(self.build_plan(&self.document_ref(document))?.graph)
+    }
+
+    fn registered_document(
+        &self,
+        registration: &ConsumerRegistration,
+    ) -> Result<&InstructionDocument, InstructionError> {
         let selector = InstructionSelector {
             scope: match registration.scope_policy {
                 ConsumerScopePolicy::GlobalOnly => InstructionScopeSelector::Global,
@@ -388,7 +439,7 @@ impl InstructionRuntime {
                 resource: self.document_ref(document),
             });
         }
-        self.render_root(self.document_ref(document), values)
+        Ok(document)
     }
 
     fn resolve_scoped<'a>(
@@ -619,6 +670,9 @@ impl InstructionRuntime {
     }
 
     fn discover_scope(&mut self, scope: InstructionScope, root: PathBuf) {
+        if !self.inspect_directory(scope, &root) {
+            return;
+        }
         for kind in [
             InstructionKind::System,
             InstructionKind::Agent,
@@ -628,6 +682,9 @@ impl InstructionRuntime {
             InstructionKind::ToolGuidance,
         ] {
             let directory = root.join(kind.directory());
+            if !self.inspect_directory(scope, &directory) {
+                continue;
+            }
             let entries = match fs::read_dir(&directory) {
                 Ok(entries) => entries,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
@@ -643,7 +700,7 @@ impl InstructionRuntime {
             let mut paths = entries
                 .filter_map(Result::ok)
                 .map(|entry| entry.path())
-                .filter(|path| path.is_file() && path.extension().is_some_and(|ext| ext == "md"))
+                .filter(|path| path.extension().is_some_and(|ext| ext == "md"))
                 .collect::<Vec<_>>();
             paths.sort();
             for path in paths {
@@ -652,6 +709,9 @@ impl InstructionRuntime {
         }
 
         let skills_root = root.join(InstructionKind::Skill.directory());
+        if !self.inspect_directory(scope, &skills_root) {
+            return;
+        }
         let entries = match fs::read_dir(&skills_root) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
@@ -667,7 +727,7 @@ impl InstructionRuntime {
         let mut paths = entries
             .filter_map(Result::ok)
             .map(|entry| entry.path().join("SKILL.md"))
-            .filter(|path| path.is_file())
+            .filter(|path| fs::symlink_metadata(path).is_ok())
             .collect::<Vec<_>>();
         paths.sort();
         for path in paths {
@@ -682,7 +742,7 @@ impl InstructionRuntime {
         path: PathBuf,
     ) {
         let fallback_id = fallback_id(&path, expected_kind);
-        let source = match fs::read_to_string(&path) {
+        let source = match self.read_regular_managed_source(scope, &path) {
             Ok(source) => source,
             Err(error) => {
                 let detail = format!("could not read complete UTF-8 resource: {error}");
@@ -747,6 +807,52 @@ impl InstructionRuntime {
                 addendum_target_hint,
                 skill_invocation_hint,
             });
+    }
+
+    fn inspect_directory(&mut self, scope: InstructionScope, path: &Path) -> bool {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            result => {
+                let detail = match result { Err(error) => error.to_string(), Ok(_) => "Managed instruction directory must be a real directory, not a symlink or special file".into() };
+                self.diagnostics.push(InstructionDiagnostic {
+                    scope,
+                    path: path.to_path_buf(),
+                    detail,
+                });
+                false
+            }
+        }
+    }
+
+    fn read_regular_managed_source(
+        &self,
+        scope: InstructionScope,
+        path: &Path,
+    ) -> std::io::Result<String> {
+        let root = match scope {
+            InstructionScope::Global => &self.sources.global_root,
+            InstructionScope::Project => self
+                .sources
+                .project_root
+                .as_ref()
+                .expect("project discovery has root"),
+        };
+        let relative = path.strip_prefix(root).map_err(std::io::Error::other)?;
+        let mut current = root.clone();
+        for part in relative.components() {
+            current.push(part);
+            let metadata = fs::symlink_metadata(&current)?;
+            if metadata.file_type().is_symlink()
+                || (current == path && !metadata.is_file())
+                || (current != path && !metadata.is_dir())
+            {
+                return Err(std::io::Error::other(
+                    "Managed instruction source must use regular files and real directories, not symlinks or special files",
+                ));
+            }
+        }
+        fs::read_to_string(path)
     }
 
     fn load_external_agents(&mut self) {

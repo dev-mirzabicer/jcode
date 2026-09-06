@@ -58,6 +58,7 @@ impl App {
         });
         self.input.clear();
         self.cursor_pos = 0;
+        self.set_status_notice("Agent source, composition and history: /agent instructions");
     }
 
     pub(crate) fn open_agents_picker(&mut self) {

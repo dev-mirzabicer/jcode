@@ -632,8 +632,75 @@ impl SkillRegistry {
 
     /// Parse a SKILL.md file
     fn parse_skill(path: &Path) -> Result<Skill> {
+        if !std::fs::metadata(path)?.is_file() {
+            anyhow::bail!("Skill source is not a regular file");
+        }
         let content = std::fs::read_to_string(path)?;
         Self::parse_skill_source(path, &content)
+    }
+
+    /// Read-only inspection of failures the external compatibility loader skips.
+    /// This does not add blockers or change effective invocation precedence.
+    pub fn inspection_diagnostics(working_dir: Option<&Path>) -> Vec<SkillCatalogDiagnostic> {
+        let mut roots = Vec::new();
+        if let Some(plugins) = Self::claude_plugins_root() {
+            roots.extend(
+                Self::plugin_skill_dirs_under(&plugins)
+                    .into_iter()
+                    .map(|path| (path, SkillSourceKind::ExternalPlugin)),
+            );
+        }
+        if let Ok(home) = crate::storage::jcode_dir() {
+            roots.push((home.join("skills"), SkillSourceKind::ExternalJcodeGlobal));
+        }
+        if let Ok(path) = crate::storage::user_home_path(".agents/skills") {
+            roots.push((path, SkillSourceKind::ExternalAgentsGlobal));
+        }
+        for (name, kind) in [
+            (".jcode", SkillSourceKind::ExternalJcodeProject),
+            (".agents", SkillSourceKind::ExternalAgentsProject),
+            (".claude", SkillSourceKind::ExternalClaudeProject),
+        ] {
+            roots.push((Self::project_local_dir(working_dir, name), kind));
+        }
+        let mut diagnostics = Vec::new();
+        for (root, kind) in roots {
+            let entries = match std::fs::read_dir(&root) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    diagnostics.push(SkillCatalogDiagnostic {
+                        name: None,
+                        source: Some(SkillSource {
+                            kind,
+                            package_root: root,
+                            managed_resource: None,
+                        }),
+                        detail: error.to_string(),
+                    });
+                    continue;
+                }
+            };
+            for entry in entries.flatten() {
+                let package_root = entry.path();
+                let path = package_root.join("SKILL.md");
+                if std::fs::symlink_metadata(&path).is_err() {
+                    continue;
+                }
+                if let Err(error) = Self::parse_skill(&path) {
+                    diagnostics.push(SkillCatalogDiagnostic {
+                        name: None,
+                        source: Some(SkillSource {
+                            kind,
+                            package_root,
+                            managed_resource: None,
+                        }),
+                        detail: error.to_string(),
+                    });
+                }
+            }
+        }
+        diagnostics
     }
 
     /// Parse one captured source. Copy and invocation share the compatibility
