@@ -1,7 +1,10 @@
 use super::*;
 use ratatui::{Terminal, backend::TestBackend};
 
-fn reply(snapshot: &str, result: InstructionInspectionResult) -> InstructionInspectionReply {
+pub(super) fn reply(
+    snapshot: &str,
+    result: InstructionInspectionResult,
+) -> InstructionInspectionReply {
     InstructionInspectionReply {
         session_id: "fixture".into(),
         snapshot: Some(snapshot.into()),
@@ -54,7 +57,7 @@ pub(super) fn populated() -> InstructionManager {
     ));
     manager
 }
-fn render(manager: &mut InstructionManager, width: u16, height: u16) -> String {
+pub(super) fn render(manager: &mut InstructionManager, width: u16, height: u16) -> String {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     terminal
         .draw(|frame| manager.render(frame, frame.area()))
@@ -160,7 +163,7 @@ fn instruction_manager_all_layouts_preserve_complete_scrolling_and_mouse_control
             manager
                 .controls
                 .iter()
-                .any(|(_, key)| *key == KeyCode::Char('q'))
+                .any(|(_, key)| *key == KeyCode::Char(' '))
         );
         manager.key(KeyCode::End, KeyModifiers::NONE);
         assert!(render(&mut manager, width, height).contains("END-SENTINEL"));
@@ -195,13 +198,21 @@ fn instruction_manager_all_layouts_preserve_complete_scrolling_and_mouse_control
 #[test]
 fn instruction_manager_filters_history_cancel_and_render_only_fixture_are_structural() {
     let mut manager = populated();
-    for ch in ['f', 's', 'v', 'e', 'o', 'g'] {
+    // Approved UX refinement replaces blind cycling with explicit choices.
+    for ch in ['f', 's', 'v', 'e', 'o'] {
         key(&mut manager, ch);
-        assert!(matches!(
-            manager.queued,
-            Some(InstructionInspectionRequest::Resources { offset: 0, .. })
-        ));
+        assert!(manager.menu.is_some());
+        assert!(manager.queued.is_none());
+        manager.key(KeyCode::Esc, KeyModifiers::NONE);
+        if manager.menu.is_some() {
+            manager.key(KeyCode::Esc, KeyModifiers::NONE);
+        }
     }
+    key(&mut manager, 'g');
+    assert!(matches!(
+        manager.queued,
+        Some(InstructionInspectionRequest::Resources { offset: 0, .. })
+    ));
     key(&mut manager, '/');
     for ch in "a界b".chars() {
         key(&mut manager, ch);
@@ -212,6 +223,20 @@ fn instruction_manager_filters_history_cancel_and_render_only_fixture_are_struct
     manager.key(KeyCode::Enter, KeyModifiers::NONE);
     key(&mut manager, 'c');
     assert_eq!(manager.filter, InstructionFilter::default());
+    let rows = manager.rows.clone();
+    manager.reserve(4);
+    assert!(manager.accept(
+        4,
+        reply(
+            "snapshot",
+            InstructionInspectionResult::Resources(InstructionRowsPage {
+                offset: 0,
+                total: rows.len(),
+                next: None,
+                rows
+            })
+        )
+    ));
     key(&mut manager, '6');
     manager.reserve(5);
     let commits = vec![

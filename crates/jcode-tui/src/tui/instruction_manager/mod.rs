@@ -1,7 +1,11 @@
 //! One read-only state machine for wide and narrow local/remote inspection.
+mod menu;
 mod render;
+use menu::{FilterField, Menu};
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod ux_tests;
 use crate::protocol::*;
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
@@ -55,6 +59,18 @@ pub(crate) struct InstructionManager {
     pub wrapped: Vec<String>,
     pub wrap_key: Option<(String, usize, u16)>,
     pub expanded: bool,
+    small: bool,
+    menu: Option<Menu>,
+    pub menu_hits: Vec<(Rect, usize)>,
+    pub list_hits: Vec<(Rect, Pane, usize)>,
+    pub detail_row: Option<InstructionRow>,
+    pub revision_open: bool,
+    pub revision_selection: Option<InstructionRevisionSelection>,
+    pub return_pane: Pane,
+    pub detail_height: usize,
+    pub help_scroll: usize,
+    pub last_error: bool,
+    pub search_cursor: usize,
 }
 
 impl InstructionManager {
@@ -98,10 +114,34 @@ impl InstructionManager {
             wrapped: Vec::new(),
             wrap_key: None,
             expanded: false,
+            small: false,
+            menu: None,
+            menu_hits: Vec::new(),
+            list_hits: Vec::new(),
+            detail_row: None,
+            revision_open: false,
+            revision_selection: None,
+            return_pane: Pane::Resources,
+            detail_height: 1,
+            help_scroll: 0,
+            last_error: false,
+            search_cursor: 0,
         }
     }
 
     pub fn refresh(&mut self, session: &str) {
+        let same_session = self.session == session;
+        if !same_session {
+            self.rows.clear();
+            self.target = None;
+            self.detail_row = None;
+            self.history_base = None;
+            self.filter.repository = None;
+        }
+        self.menu = None;
+        self.pane = Pane::Resources;
+        self.revision_open = false;
+        self.last_error = false;
         self.session = session.into();
         self.pending = None;
         self.snapshot = None;
@@ -122,6 +162,7 @@ impl InstructionManager {
             return None;
         }
         let request = self.queued.take()?;
+        self.last_error = false;
         self.pending = Some(Pending {
             id,
             session: self.session.clone(),
@@ -222,7 +263,12 @@ impl InstructionManager {
                     self.text_offsets.push(page.offset);
                 }
                 self.text = Some(page);
-                self.scroll = 0;
+                self.scroll = if matches!(&pending.request, InstructionInspectionRequest::Text {offset,..} if self.text_offsets.iter().any(|previous| previous > offset))
+                {
+                    usize::MAX
+                } else {
+                    0
+                };
                 self.wrap_key = None;
                 self.history_visible = false;
                 self.status =
@@ -242,6 +288,8 @@ impl InstructionManager {
                 self.status = "History pinned at inspected HEAD. Enter: revision. A: base. B: compare base to selected.".into();
             }
             InstructionInspectionResult::Failed(error) => {
+                self.last_error = true;
+                self.pane = Pane::Detail;
                 self.status = format!(
                     "{}: {}{}",
                     error.operation,
@@ -292,6 +340,7 @@ impl InstructionManager {
     }
 
     fn filter_changed(&mut self) {
+        self.last_error = false;
         self.pane = Pane::Resources;
         self.pending = None;
         if let Some(snapshot) = self.snapshot_id() {
@@ -333,12 +382,35 @@ impl InstructionManager {
         view: InstructionInspectionView,
         revision: Option<InstructionRevisionSelection>,
     ) {
+        if revision.is_none()
+            && let Some(reason) = self.view_unavailable(view)
+        {
+            self.status = reason;
+            return;
+        }
         let Some(snapshot) = self.snapshot_id() else {
             return;
         };
         let Some(target) = self.selected_target() else {
             return;
         };
+        if self.target.as_ref() != Some(&target) {
+            self.history.clear();
+            self.history_base = None;
+            self.revision_open = false;
+            self.detail_row = match &target {
+                InstructionInspectionTarget::Resource(key) => {
+                    self.rows.iter().find(|row| &row.key == key).cloned()
+                }
+                _ => None,
+            };
+        }
+        if self.pane != Pane::Detail {
+            self.return_pane = self.pane;
+        }
+        self.revision_open = revision.is_some();
+        self.revision_selection = revision.clone();
+        self.last_error = false;
         self.target = Some(target.clone());
         self.view = view;
         self.pane = Pane::Detail;
@@ -423,6 +495,7 @@ impl InstructionManager {
     }
 
     fn navigate(&mut self, down: bool, amount: usize) {
+        let max_scroll = self.wrapped.len().saturating_sub(self.detail_height);
         let (position, count) = match self.pane {
             Pane::Repositories => (
                 &mut self.repository_selected,
@@ -434,7 +507,7 @@ impl InstructionManager {
             Pane::Detail if self.history_visible => {
                 (&mut self.history_selected, self.history.len())
             }
-            Pane::Detail => (&mut self.scroll, self.wrapped.len()),
+            Pane::Detail => (&mut self.scroll, max_scroll.saturating_add(1)),
         };
         let previous = *position;
         *position = if down {
@@ -442,7 +515,7 @@ impl InstructionManager {
         } else {
             position.saturating_sub(amount)
         };
-        if *position == previous && self.pane != Pane::Repositories {
+        if *position == previous && amount != usize::MAX && self.pane != Pane::Repositories {
             self.page(down);
         }
     }
@@ -451,8 +524,14 @@ impl InstructionManager {
         if !self.visible {
             return false;
         }
+        if let Some(menu) = self.menu.as_mut() {
+            menu.query.push_str(text);
+            menu.selected = 0;
+            return true;
+        }
         if self.search_editing {
-            self.filter.search.push_str(text);
+            self.filter.search.insert_str(self.search_cursor, text);
+            self.search_cursor += text.len();
             self.filter_changed();
         } else {
             self.status = "Read-only view: press / before pasting search text.".into();
@@ -464,19 +543,75 @@ impl InstructionManager {
         if !self.visible {
             return false;
         }
+        if self.small {
+            if matches!(code, KeyCode::Esc | KeyCode::Char('q' | 'Q')) {
+                self.visible = false;
+                self.pending = None;
+                self.queued = Some(InstructionInspectionRequest::Close);
+            }
+            return true;
+        }
+        if self.menu.is_some() {
+            self.menu_key(code, modifiers);
+            return true;
+        }
+        if code == KeyCode::Char('p')
+            && modifiers.contains(KeyModifiers::CONTROL)
+            && !self.search_editing
+        {
+            self.open_actions(false);
+            return true;
+        }
         if self.search_editing {
             match code {
                 KeyCode::Esc | KeyCode::Enter => self.search_editing = false,
                 KeyCode::Char('u' | 'U') if modifiers.contains(KeyModifiers::CONTROL) => {
                     self.filter.search.clear();
+                    self.search_cursor = 0;
                     self.filter_changed();
                 }
                 KeyCode::Backspace => {
-                    self.filter.search.pop();
-                    self.filter_changed();
+                    if self.search_cursor > 0 {
+                        let start = self.filter.search[..self.search_cursor]
+                            .char_indices()
+                            .last()
+                            .map_or(0, |(i, _)| i);
+                        self.filter.search.drain(start..self.search_cursor);
+                        self.search_cursor = start;
+                        self.filter_changed();
+                    }
                 }
-                KeyCode::Char(ch) if !modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.filter.search.push(ch);
+                KeyCode::Delete => {
+                    if self.search_cursor < self.filter.search.len() {
+                        let end = self.search_cursor
+                            + self.filter.search[self.search_cursor..]
+                                .chars()
+                                .next()
+                                .expect("character")
+                                .len_utf8();
+                        self.filter.search.drain(self.search_cursor..end);
+                        self.filter_changed();
+                    }
+                }
+                KeyCode::Left => {
+                    self.search_cursor = self.filter.search[..self.search_cursor]
+                        .char_indices()
+                        .last()
+                        .map_or(0, |(i, _)| i)
+                }
+                KeyCode::Right => {
+                    self.search_cursor += self.filter.search[self.search_cursor..]
+                        .chars()
+                        .next()
+                        .map_or(0, char::len_utf8)
+                }
+                KeyCode::Home => self.search_cursor = 0,
+                KeyCode::End => self.search_cursor = self.filter.search.len(),
+                KeyCode::Char(ch)
+                    if !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    self.filter.search.insert(self.search_cursor, ch);
+                    self.search_cursor += ch.len_utf8();
                     self.filter_changed();
                 }
                 _ => {}
@@ -487,10 +622,16 @@ impl InstructionManager {
             match code {
                 KeyCode::Esc | KeyCode::Char('?') | KeyCode::Enter => {
                     self.help = false;
-                    self.scroll = 0;
+                    self.help_scroll = 0;
                 }
-                KeyCode::Up | KeyCode::PageUp => self.scroll = self.scroll.saturating_sub(1),
-                KeyCode::Down | KeyCode::PageDown => self.scroll = self.scroll.saturating_add(1),
+                KeyCode::Up | KeyCode::PageUp => {
+                    self.help_scroll = self.help_scroll.saturating_sub(1)
+                }
+                KeyCode::Down | KeyCode::PageDown => {
+                    self.help_scroll = self.help_scroll.saturating_add(1)
+                }
+                KeyCode::Home => self.help_scroll = 0,
+                KeyCode::End => self.help_scroll = usize::MAX,
                 _ => {}
             }
             return true;
@@ -500,20 +641,24 @@ impl InstructionManager {
             other => other,
         };
         match code {
-            KeyCode::Esc | KeyCode::Char('q') => {
+            KeyCode::Esc | KeyCode::Left | KeyCode::Backspace => self.back(),
+            KeyCode::Char('q') => {
                 self.visible = false;
                 self.pending = None;
                 self.queued = Some(InstructionInspectionRequest::Close);
             }
             KeyCode::Char('?') => {
                 self.help = true;
-                self.scroll = 0;
+                self.help_scroll = 0;
             }
+            KeyCode::Char(' ' | ':') => self.open_actions(false),
+            KeyCode::Char('t') => self.open_actions(true),
             KeyCode::F(1) => self.pane = Pane::Repositories,
             KeyCode::F(2) => self.pane = Pane::Resources,
             KeyCode::F(3) => self.pane = Pane::Detail,
             KeyCode::Char('/') => {
                 self.search_editing = true;
+                self.search_cursor = self.filter.search.len();
                 self.pane = Pane::Resources;
             }
             KeyCode::Char('r' | 'R') => self.refresh(&self.session.clone()),
@@ -551,61 +696,16 @@ impl InstructionManager {
             KeyCode::End => self.navigate(true, usize::MAX),
             KeyCode::Char('n') => self.page(true),
             KeyCode::Char('p') => self.page(false),
-            KeyCode::Char('f') => {
-                let kinds = [
-                    "system",
-                    "agent",
-                    "agent-addendum",
-                    "module",
-                    "notification",
-                    "tool-guidance",
-                    "skill",
-                    "model-roster",
-                    "AGENTS.md",
-                    "legacy-prompt",
-                    "store-settings",
-                    "invalid-resource",
-                    "configuration",
-                ];
-                self.filter.kind = match self.filter.kind.as_deref() {
-                    None => Some(kinds[0].into()),
-                    Some(kind) => kinds
-                        .iter()
-                        .position(|candidate| *candidate == kind)
-                        .and_then(|index| kinds.get(index + 1))
-                        .map(|kind| (*kind).into()),
-                };
-                self.filter_changed();
-            }
-            KeyCode::Char('s') => {
-                self.filter.scope = match self.filter.scope.as_deref() {
-                    None => Some("global".into()),
-                    Some("global") => Some("project".into()),
-                    _ => None,
-                };
-                self.filter_changed();
-            }
+            KeyCode::Char('f') => self.open_filters(FilterField::All),
+            KeyCode::Char('s') => self.open_filters(FilterField::Scope),
             KeyCode::Char('g') => {
-                self.filter.redefinitions = cycle_bool(self.filter.redefinitions);
+                self.filter.redefinitions =
+                    (self.filter.redefinitions != Some(true)).then_some(true);
                 self.filter_changed();
             }
-            KeyCode::Char('v') => {
-                self.filter.valid = cycle_bool(self.filter.valid);
-                self.filter_changed();
-            }
-            KeyCode::Char('e') => {
-                self.filter.effective = cycle_bool(self.filter.effective);
-                self.filter_changed();
-            }
-            KeyCode::Char('o') => {
-                self.filter.origin = match self.filter.origin {
-                    None => Some(InstructionOrigin::Managed),
-                    Some(InstructionOrigin::Managed) => Some(InstructionOrigin::Legacy),
-                    Some(InstructionOrigin::Legacy) => Some(InstructionOrigin::External),
-                    Some(InstructionOrigin::External) => None,
-                };
-                self.filter_changed();
-            }
+            KeyCode::Char('v') => self.open_filters(FilterField::Validity),
+            KeyCode::Char('e') => self.open_filters(FilterField::Effectiveness),
+            KeyCode::Char('o') => self.open_filters(FilterField::Origin),
             KeyCode::Char('c') => {
                 self.filter = InstructionFilter::default();
                 self.filter_changed();
@@ -619,6 +719,17 @@ impl InstructionManager {
             KeyCode::Char('6') => self.detail(InstructionInspectionView::History, None),
             KeyCode::Char('7') => self.detail(InstructionInspectionView::WorkingDiff, None),
             KeyCode::Char('8') => self.detail(InstructionInspectionView::ScopeComparison, None),
+            KeyCode::Char('i') if self.history_visible && self.pane == Pane::Detail => {
+                if let Some(entry) = self.history.get(self.history_selected) {
+                    self.detail(
+                        InstructionInspectionView::Metadata,
+                        Some(InstructionRevisionSelection {
+                            from: entry.commit.clone(),
+                            to: None,
+                        }),
+                    );
+                }
+            }
             KeyCode::Char('a') if self.history_visible => {
                 self.history_base = self
                     .history
@@ -640,13 +751,6 @@ impl InstructionManager {
                     );
                 }
             }
-            KeyCode::Enter if self.pane == Pane::Repositories && self.repository_selected > 0 => {
-                if let Some(InstructionInspectionTarget::Repository(key)) = self.selected_target() {
-                    self.filter.repository = Some(key);
-                    self.pane = Pane::Resources;
-                    self.filter_changed();
-                }
-            }
             KeyCode::Enter if self.history_visible && self.pane == Pane::Detail => {
                 if let Some(entry) = self.history.get(self.history_selected) {
                     self.detail(
@@ -658,8 +762,19 @@ impl InstructionManager {
                     );
                 }
             }
-            KeyCode::Enter | KeyCode::Char(' ') => {
-                self.detail(InstructionInspectionView::Metadata, None)
+            KeyCode::Enter | KeyCode::Right => {
+                if self.pane == Pane::Detail {
+                    self.open_actions(true);
+                } else {
+                    self.detail(
+                        if self.pane == Pane::Repositories {
+                            InstructionInspectionView::Metadata
+                        } else {
+                            InstructionInspectionView::Source
+                        },
+                        None,
+                    );
+                }
             }
             _ => {}
         }
@@ -667,74 +782,145 @@ impl InstructionManager {
     }
 
     pub fn mouse(&mut self, event: MouseEvent) {
-        if !self.visible || self.help {
+        if !self.visible {
             return;
         }
-        let point = (event.column, event.row);
-        if let MouseEventKind::Down(MouseButton::Left) = event.kind
-            && let Some((_, key)) = self
-                .controls
-                .iter()
-                .find(|(area, _)| area.contains(point.into()))
-        {
-            self.key(*key, KeyModifiers::NONE);
-            return;
-        }
-        if let MouseEventKind::Down(MouseButton::Left) = event.kind
-            && let Some((_, view)) = self
-                .tabs
-                .iter()
-                .find(|(area, _)| area.contains(point.into()))
-        {
-            self.detail(*view, None);
-            return;
-        }
-        for (index, area) in self.areas.iter().enumerate() {
-            if !area.contains(point.into()) {
-                continue;
-            }
-            self.pane = [Pane::Repositories, Pane::Resources, Pane::Detail][index];
+        if self.menu.is_some() {
             match event.kind {
-                MouseEventKind::ScrollDown => self.navigate(true, 3),
-                MouseEventKind::ScrollUp => self.navigate(false, 3),
+                MouseEventKind::ScrollDown => self.menu_key(KeyCode::Down, KeyModifiers::NONE),
+                MouseEventKind::ScrollUp => self.menu_key(KeyCode::Up, KeyModifiers::NONE),
                 MouseEventKind::Down(MouseButton::Left) => {
-                    let row = usize::from(event.row.saturating_sub(area.y + 1));
-                    let height = usize::from(area.height.saturating_sub(2)).max(1);
-                    match self.pane {
-                        Pane::Resources => {
-                            self.selected = (self.selected / height * height + row)
-                                .min(self.rows.len().saturating_sub(1))
+                    if let Some((_, index)) = self
+                        .menu_hits
+                        .iter()
+                        .find(|(area, _)| area.contains((event.column, event.row).into()))
+                    {
+                        if let Some(menu) = self.menu.as_mut() {
+                            menu.selected = *index;
                         }
-                        Pane::Repositories => {
-                            self.repository_selected =
-                                (self.repository_selected / height * height + row).min(
-                                    self.snapshot
-                                        .as_ref()
-                                        .map_or(0, |snapshot| snapshot.repositories.len()),
-                                )
-                        }
-                        Pane::Detail if self.history_visible => {
-                            self.history_selected = (self.history_selected / height * height + row)
-                                .min(self.history.len().saturating_sub(1))
-                        }
-                        _ => {}
+                        self.choose_menu();
+                    } else if let Some((_, key)) = self
+                        .controls
+                        .iter()
+                        .find(|(area, _)| area.contains((event.column, event.row).into()))
+                    {
+                        self.menu_key(*key, KeyModifiers::NONE);
                     }
                 }
                 _ => {}
             }
-            break;
+            return;
+        }
+        if self.help {
+            match event.kind {
+                MouseEventKind::ScrollDown => self.help_scroll = self.help_scroll.saturating_add(3),
+                MouseEventKind::ScrollUp => self.help_scroll = self.help_scroll.saturating_sub(3),
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if self
+                        .controls
+                        .iter()
+                        .any(|(area, _)| area.contains((event.column, event.row).into()))
+                    {
+                        self.help = false;
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+        let point = (event.column, event.row).into();
+        if let MouseEventKind::Down(MouseButton::Left) = event.kind {
+            if let Some((_, key)) = self.controls.iter().find(|(area, _)| area.contains(point)) {
+                let key = *key;
+                self.key(key, KeyModifiers::NONE);
+                return;
+            }
+            if let Some((_, view)) = self.tabs.iter().find(|(area, _)| area.contains(point)) {
+                let view = *view;
+                self.detail(view, None);
+                return;
+            }
+            if let Some((_, pane, index)) = self
+                .list_hits
+                .iter()
+                .find(|(area, _, _)| area.contains(point))
+            {
+                self.pane = *pane;
+                match pane {
+                    Pane::Repositories => self.repository_selected = *index,
+                    Pane::Resources => self.selected = *index,
+                    Pane::Detail => self.history_selected = *index,
+                };
+                return;
+            }
+        }
+        if let Some(index) = self.areas.iter().position(|area| area.contains(point)) {
+            self.pane = [Pane::Repositories, Pane::Resources, Pane::Detail][index];
+            match event.kind {
+                MouseEventKind::ScrollDown => self.navigate(true, 3),
+                MouseEventKind::ScrollUp => self.navigate(false, 3),
+                _ => {}
+            }
+        }
+    }
+
+    fn back(&mut self) {
+        if self.revision_open && self.pane == Pane::Detail {
+            let loading = self.pending.is_some() || self.queued.is_some();
+            self.pending = None;
+            self.queued = loading.then_some(InstructionInspectionRequest::Cancel);
+            self.revision_open = false;
+            self.revision_selection = None;
+            self.history_visible = true;
+            self.view = InstructionInspectionView::History;
+            self.text = None;
+            self.status = "Returned to Git history. Comparison base and selection retained.".into();
+        } else if self.pane == Pane::Detail {
+            let loading = self.pending.is_some() || self.queued.is_some();
+            self.pending = None;
+            self.queued = loading.then_some(InstructionInspectionRequest::Cancel);
+            self.pane = self.return_pane;
+            self.status = "Back to browsing. Selection retained.".into();
+        } else if self.pane == Pane::Resources && self.filter.repository.is_some() {
+            self.filter.repository = None;
+            self.filter_changed();
+        } else if self.pane == Pane::Resources {
+            self.pane = Pane::Repositories;
+        } else {
+            self.visible = false;
+            self.pending = None;
+            self.queued = Some(InstructionInspectionRequest::Close);
+        }
+    }
+
+    fn can_page(&self, forward: bool) -> bool {
+        match self.pane {
+            Pane::Repositories => false,
+            Pane::Resources => {
+                if forward {
+                    self.row_next.is_some()
+                } else {
+                    self.row_offset > 0
+                }
+            }
+            Pane::Detail if self.history_visible => {
+                if forward {
+                    self.history_next.is_some()
+                } else {
+                    self.history_offset > 0
+                }
+            }
+            Pane::Detail => self.text.as_ref().is_some_and(|page| {
+                if forward {
+                    page.next.is_some()
+                } else {
+                    page.offset > 0
+                }
+            }),
         }
     }
 
     pub fn debug(&self) -> serde_json::Value {
-        serde_json::json!({ "visible": self.visible, "section": format!("{:?}", self.view), "pane": format!("{:?}", self.pane), "resource_id": self.rows.get(self.selected).map(|row| &row.id), "scope": self.filter.scope, "rows_loaded": self.rows.len(), "resource_offset": self.row_offset, "detail_pages_visited": self.text_offsets.len(), "detail_bytes_loaded": self.text.as_ref().map_or(0, |page| page.text.len()), "valid": self.rows.get(self.selected).map(|row| row.valid), "repositories": self.snapshot.as_ref().map(|snapshot| snapshot.repositories.iter().map(|store| serde_json::json!({"id":store.key,"kind":store.kind,"dirty":store.dirty,"detached":store.detached,"conflicts":store.conflicts,"active_lease":store.active_lease})).collect::<Vec<_>>()), "pending_id": self.pending.as_ref().map(|pending| pending.id), "layout": if self.areas.iter().filter(|area| area.width > 0).count() > 1 { "wide" } else { "tabs" } })
-    }
-}
-
-fn cycle_bool(value: Option<bool>) -> Option<bool> {
-    match value {
-        None => Some(true),
-        Some(true) => Some(false),
-        Some(false) => None,
+        serde_json::json!({ "visible": self.visible, "section": format!("{:?}", self.view), "pane": format!("{:?}", self.pane), "resource_id": self.rows.get(self.selected).map(|row| &row.id), "scope": self.filter.scope, "rows_loaded": self.rows.len(), "resource_offset": self.row_offset, "detail_pages_visited": self.text_offsets.len(), "detail_bytes_loaded": self.text.as_ref().map_or(0, |page| page.text.len()), "valid": self.rows.get(self.selected).map(|row| row.valid), "repositories": self.snapshot.as_ref().map(|snapshot| snapshot.repositories.iter().map(|store| serde_json::json!({"id":store.key,"kind":store.kind,"dirty":store.dirty,"detached":store.detached,"conflicts":store.conflicts,"active_lease":store.active_lease})).collect::<Vec<_>>()), "pending_id": self.pending.as_ref().map(|pending| pending.id), "menu": self.menu.as_ref().map(|menu| &menu.title), "scroll":self.scroll,"detail_view":self.view_label(), "layout": if self.areas.iter().filter(|area| area.width > 0).count() > 1 { "wide" } else { "tabs" } })
     }
 }

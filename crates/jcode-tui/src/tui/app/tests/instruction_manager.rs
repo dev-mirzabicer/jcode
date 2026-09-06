@@ -14,6 +14,8 @@ fn instruction_manager_local_commands_and_modal_keys_do_not_touch_session_instru
         assert_eq!(app.instruction_ui.manager.as_ref().unwrap().borrow().filter.search, "界");
         app.handle_key(KeyCode::Esc, KeyModifiers::NONE).unwrap();
         app.handle_key(KeyCode::Esc, KeyModifiers::NONE).unwrap();
+        assert!(app.instruction_manager_visible(), "Escape now backs out before closing");
+        app.handle_key(KeyCode::Char('q'), KeyModifiers::NONE).unwrap();
         assert!(!app.instruction_manager_visible());
     }
     assert_eq!(app.messages.len(), messages);

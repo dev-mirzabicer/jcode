@@ -1,24 +1,45 @@
+use super::menu::{VIEWS, format_key};
 use super::*;
+use jcode_tui_style::palette::{Role, role_color};
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
-    text::{Line, Span},
+    text::Line,
     widgets::{Block, Borders, Clear, Paragraph},
 };
-use unicode_width::UnicodeWidthChar;
+use unicode_width::UnicodeWidthStr;
 
-const VIEWS: [(InstructionInspectionView, &str); 8] = [
-    (InstructionInspectionView::Source, "Source"),
-    (InstructionInspectionView::Metadata, "Metadata"),
-    (InstructionInspectionView::Rendered, "Render"),
-    (InstructionInspectionView::System, "System"),
-    (InstructionInspectionView::Dependencies, "Relations"),
-    (InstructionInspectionView::History, "History"),
-    (InstructionInspectionView::WorkingDiff, "Diff"),
-    (InstructionInspectionView::ScopeComparison, "Scopes"),
-];
-const HELP: &str = "INSTRUCTION INSPECTION · READ ONLY\n\nTab / Shift-Tab: change pane. F1/F2/F3: repository, resources, detail.\nUp/Down or J/K: navigate. PageUp/PageDown: scroll. Home/End: page start/end.\nEnter: open resource metadata; repository filters its resources. Space: inspect repository/session.\n1 Source · 2 Metadata · 3 Rendered preview · 4 Full system / exact stored system\n5 Dependencies and consumers · 6 Git history · 7 Working diff · 8 Global/project comparison\n/ Search by ID/name/kind/scope. Enter or Escape leaves search.\nF: kind filter · S: scope · V: validity · E: effective/shadowed · O: managed/legacy/external\nG: group project redefinitions ([HIGH] marks high-impact system/profile/control overrides).\nC: clear all filters. Z: expand/collapse the focused pane.\nN/P: next/previous resource, history, or exact text page.\nHistory: Enter reads selected revision. A selects the base. B compares base to selected.\nR: fresh authoritative snapshot. X: cancel pending loading. Q/Escape: close.\nMouse: click panes, rows and view tabs; wheel scrolls the pointed pane.\n\nNo editor, save, commit, restore, copy, setup, branch or network Git action exists here.\nPreviews do not activate a profile, change the model, or make an inference request.\nPlain and typed templates use existing owners. Missing occurrence values produce a clear failure, never fabricated input.\nDetail is an exact captured document. The visible byte range is one transport page, not a clipped complete file. N/P and scrolling traverse every byte.\nRefresh/reconnect discards captured detail and retains safe navigation. Existing session instructions stay frozen.\nExternal skill Copy and all mutations belong to WP-10.\n\n? or Escape closes this help. Arrow keys scroll.";
+struct Theme {
+    accent: Style,
+    muted: Style,
+    warning: Style,
+    error: Style,
+    selected: Style,
+}
+impl Theme {
+    fn new() -> Self {
+        let plain = std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty());
+        let color = |role| {
+            if plain {
+                Color::Reset
+            } else {
+                role_color(role)
+            }
+        };
+        Self {
+            accent: Style::default()
+                .fg(color(Role::Accent))
+                .add_modifier(Modifier::BOLD),
+            muted: Style::default().fg(color(Role::Dim)),
+            warning: Style::default().fg(color(Role::Warning)),
+            error: Style::default()
+                .fg(color(Role::Error))
+                .add_modifier(Modifier::BOLD),
+            selected: Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD),
+        }
+    }
+}
 
 impl InstructionManager {
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
@@ -26,265 +47,397 @@ impl InstructionManager {
         self.areas = [Rect::default(); 3];
         self.tabs.clear();
         self.controls.clear();
-        if area.width == 0 || area.height == 0 {
+        self.list_hits.clear();
+        self.menu_hits.clear();
+        let theme = Theme::new();
+        self.small = area.width < 24 || area.height < 8;
+        if self.small {
+            frame.render_widget(
+                Paragraph::new(
+                    "Instructions\nNeed 24 columns x 8 rows\nResize to continue. Q closes.",
+                )
+                .style(theme.warning),
+                area,
+            );
+            self.capture(frame, area);
             return;
         }
-        let header_height = if area.height >= 16 { 2 } else { 1 };
-        let regions = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(header_height),
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Min(1),
-                Constraint::Length(1),
-                Constraint::Length(1),
-            ])
-            .split(area);
-        let accent = Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD);
-        if header_height == 2 {
-            let active = self
-                .snapshot
-                .as_ref()
-                .and_then(|snapshot| snapshot.active_agent.as_deref())
-                .unwrap_or("none");
-            frame.render_widget(
-                Paragraph::new(safe(&format!(
-                    " INSTRUCTIONS / READ ONLY     Active: {active}"
-                )))
-                .style(accent),
-                Rect::new(area.x, area.y, area.width, 1),
-            );
-        }
-        let pane_row = Rect::new(
-            regions[0].x,
-            regions[0].bottom().saturating_sub(1),
-            regions[0].width,
-            1,
-        );
-        self.buttons(
-            frame,
-            pane_row,
-            &[
-                (KeyCode::F(1), "Repos"),
-                (KeyCode::F(2), "List"),
-                (KeyCode::F(3), "Detail"),
-            ],
-        );
-        if self.search_editing {
-            frame.render_widget(
-                Paragraph::new(safe(&format!("/ > {}", self.filter.search)))
-                    .style(Style::default().fg(Color::Yellow)),
-                regions[1],
-            );
-        } else {
-            self.buttons(
-                frame,
-                regions[1],
-                &[
-                    (KeyCode::Char('/'), "/"),
-                    (KeyCode::Char('f'), "F"),
-                    (KeyCode::Char('s'), "S"),
-                    (KeyCode::Char('v'), "V"),
-                    (KeyCode::Char('e'), "E"),
-                    (KeyCode::Char('o'), "O"),
-                    (KeyCode::Char('c'), "C"),
-                    (KeyCode::Char('g'), "G"),
-                ],
-            );
-            if regions[1].width > 28 {
-                let filters = format!(
-                    "{} · {} · {}",
-                    self.filter.search,
-                    self.filter.kind.as_deref().unwrap_or("all kinds"),
-                    self.filter.scope.as_deref().unwrap_or("all scopes")
-                );
-                frame.render_widget(
-                    Paragraph::new(safe(&filters)).style(Style::default().fg(Color::Gray)),
-                    Rect::new(regions[1].x + 22, regions[1].y, regions[1].width - 22, 1),
-                );
-            }
-        }
-        let compact = area.width < 90;
-        let mut x = regions[2].x;
-        for (index, (view, name)) in VIEWS.iter().enumerate() {
-            let label = if compact {
-                format!("{} ", index + 1)
-            } else {
-                format!("{} {}  ", index + 1, name)
-            };
-            let width = (label.len() as u16).min(regions[2].right().saturating_sub(x));
-            let tab = Rect::new(x, regions[2].y, width, regions[2].height);
-            frame.render_widget(
-                Paragraph::new(label).style(if *view == self.view {
-                    accent
-                } else {
-                    Style::default().fg(Color::DarkGray)
-                }),
-                tab,
-            );
-            self.tabs.push((tab, *view));
-            x = x.saturating_add(width);
+        if self.menu.is_some() {
+            self.render_menu(frame, area, &theme);
+            self.capture(frame, area);
+            return;
         }
         if self.help {
-            let help = format!("{HELP}\n\nCurrent filters:\n{:#?}", self.filter);
-            let lines = wrap(&help, regions[3].width.saturating_sub(2).max(1));
-            self.scroll = self.scroll.min(lines.len().saturating_sub(1));
-            let text = lines
-                .iter()
-                .skip(self.scroll)
-                .take(regions[3].height as usize)
-                .map(|line| Line::raw(line.clone()))
-                .collect::<Vec<_>>();
-            frame.render_widget(Paragraph::new(text), regions[3]);
-        } else {
-            let wide = area.width >= 120 && !self.expanded;
-            if wide {
-                let columns = Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints([
-                        Constraint::Length(26),
-                        Constraint::Length(35),
-                        Constraint::Min(1),
-                    ])
-                    .split(regions[3]);
-                self.areas = [columns[0], columns[1], columns[2]];
-            } else {
-                self.areas[match self.pane {
-                    Pane::Repositories => 0,
-                    Pane::Resources => 1,
-                    Pane::Detail => 2,
-                }] = regions[3];
-            }
-            self.render_repositories(frame, self.areas[0]);
-            self.render_resources(frame, self.areas[1]);
-            self.render_detail(frame, self.areas[2]);
+            self.render_help(frame, area, &theme);
+            self.capture(frame, area);
+            return;
         }
-        frame.render_widget(
-            Paragraph::new(safe(&self.status)).style(Style::default().fg(
-                if self.pending.is_some() {
-                    Color::Yellow
-                } else {
-                    Color::DarkGray
-                },
-            )),
-            regions[4],
+        let compact = area.height < 12;
+        let filtered = self.filter != InstructionFilter::default();
+        let top = if compact {
+            2
+        } else if filtered {
+            4
+        } else {
+            3
+        };
+        let bottom = if compact { 1 } else { 2 };
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(top),
+                Constraint::Min(1),
+                Constraint::Length(bottom),
+            ])
+            .split(area);
+        let title = if area.width >= 65 {
+            format!(
+                "Instructions   READ ONLY   |   Active agent: {}",
+                self.snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.active_agent.as_deref())
+                    .unwrap_or("not available")
+            )
+        } else {
+            "Instructions [read only]".into()
+        };
+        line(
+            frame,
+            Rect::new(area.x, area.y, area.width, 1),
+            &title,
+            theme.accent,
         );
+        let nav = [
+            (
+                KeyCode::F(1),
+                if area.width >= 60 {
+                    "F1 Repositories"
+                } else {
+                    "Repos"
+                },
+            ),
+            (
+                KeyCode::F(2),
+                if area.width >= 60 {
+                    "F2 Resources"
+                } else {
+                    "List"
+                },
+            ),
+            (
+                KeyCode::F(3),
+                if area.width >= 60 {
+                    "F3 Reading"
+                } else {
+                    "Read"
+                },
+            ),
+        ];
         self.buttons(
             frame,
-            regions[5],
-            &[
-                (KeyCode::Enter, "↵"),
-                (KeyCode::Char('n'), "N"),
-                (KeyCode::Char('p'), "P"),
-                (KeyCode::Char('a'), "A"),
-                (KeyCode::Char('b'), "B"),
-                (KeyCode::Char('z'), "Z"),
-                (KeyCode::Char('r'), "R"),
-                (KeyCode::Char('x'), "X"),
-                (KeyCode::Char('?'), "?"),
-                (KeyCode::Char('q'), "Q"),
-            ],
+            Rect::new(area.x, area.y + 1, area.width, 1),
+            &nav,
+            &theme,
         );
-        // The ordinary chat renderer returns early for this full-screen view.
-        // Capture its actual visible cells through the existing opt-in debugger,
-        // not source bodies or another transcript. Summary diagnostics stay separate.
-        if crate::tui::visual_debug::is_enabled() {
-            use crate::tui::visual_debug::{
-                FrameCaptureBuilder, MessageCapture, RectCapture, WidgetPlacementCapture,
-            };
-            let mut capture = FrameCaptureBuilder::new(area.width, area.height);
-            capture.state.status = "instruction manager (read-only)".into();
-            capture.state.scroll_offset = self.scroll;
-            capture.render_order.push("instruction_manager".into());
-            let cells = frame.buffer_mut();
-            let mut viewport = String::new();
-            for y in area.y..area.bottom() {
-                for x in area.x..area.right() {
-                    viewport.push_str(cells[(x, y)].symbol());
-                }
-                viewport.push('\n');
+        if !compact {
+            if self.search_editing {
+                let before = safe(&self.filter.search[..self.search_cursor]);
+                let after = safe(&self.filter.search[self.search_cursor..]);
+                let before = tail_cells(&before, usize::from(area.width.saturating_sub(15)));
+                line(
+                    frame,
+                    Rect::new(area.x, area.y + 2, area.width, 1),
+                    &format!("Search: {before}|{after}"),
+                    theme.accent,
+                );
+            } else {
+                self.buttons(
+                    frame,
+                    Rect::new(area.x, area.y + 2, area.width, 1),
+                    &[
+                        (KeyCode::Char('/'), "/ Search"),
+                        (KeyCode::Char('f'), "F Filters"),
+                        (KeyCode::Char('t'), "T Views"),
+                        (KeyCode::Char(' '), "Space Actions"),
+                        (KeyCode::Char('r'), "R Refresh"),
+                    ],
+                    &theme,
+                );
             }
-            capture.rendered_text.recent_messages.push(MessageCapture {
-                role: "instruction-manager-viewport".into(),
-                content_len: viewport.len(),
-                content_preview: viewport,
-            });
-            for (index, rect) in self
-                .areas
-                .iter()
-                .enumerate()
-                .filter(|(_, rect)| rect.width > 0)
-            {
-                capture
-                    .layout
-                    .widget_placements
-                    .push(WidgetPlacementCapture {
-                        kind: format!("instruction-pane-{index}"),
-                        side: "overlay".into(),
-                        rect: RectCapture {
-                            x: rect.x,
-                            y: rect.y,
-                            width: rect.width,
-                            height: rect.height,
-                        },
-                    });
+            if filtered {
+                line(
+                    frame,
+                    Rect::new(area.x, area.y + 3, area.width, 1),
+                    &self.filter_summary(),
+                    theme.muted,
+                );
             }
-            crate::tui::visual_debug::record_frame(capture.build());
+        } else if self.search_editing {
+            line(
+                frame,
+                Rect::new(area.x, area.y + 1, area.width, 1),
+                &format!(
+                    "Search: {}|",
+                    tail_cells(
+                        &safe(&self.filter.search),
+                        usize::from(area.width.saturating_sub(9))
+                    )
+                ),
+                theme.accent,
+            );
+            self.controls.clear();
         }
+        let body = chunks[1];
+        if area.width >= 140 && !self.expanded {
+            let panes = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Length(25),
+                    Constraint::Length(39),
+                    Constraint::Min(1),
+                ])
+                .split(body);
+            self.areas = [panes[0], panes[1], panes[2]];
+        } else if area.width >= 90 && !self.expanded {
+            let panes = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Length(33), Constraint::Min(1)])
+                .split(body);
+            self.areas[if self.pane == Pane::Repositories {
+                0
+            } else {
+                1
+            }] = panes[0];
+            self.areas[2] = panes[1];
+        } else {
+            self.areas[match self.pane {
+                Pane::Repositories => 0,
+                Pane::Resources => 1,
+                Pane::Detail => 2,
+            }] = body;
+        }
+        self.render_repositories(frame, self.areas[0], &theme);
+        self.render_resources(frame, self.areas[1], &theme);
+        self.render_detail(frame, self.areas[2], &theme);
+        if !compact {
+            line(
+                frame,
+                Rect::new(area.x, chunks[2].y, area.width, 1),
+                &self.status,
+                if self.last_error {
+                    theme.error
+                } else if self.pending.is_some() {
+                    theme.warning
+                } else {
+                    theme.muted
+                },
+            );
+        }
+        let footer = Rect::new(area.x, area.bottom() - 1, area.width, 1);
+        if self.search_editing {
+            self.buttons(
+                frame,
+                footer,
+                &[(KeyCode::Enter, "Enter Done"), (KeyCode::Esc, "Esc Done")],
+                &theme,
+            );
+        } else if compact || area.width < 44 {
+            self.buttons(
+                frame,
+                footer,
+                &[
+                    (KeyCode::Char(' '), "Space Actions"),
+                    (KeyCode::Esc, "Esc Back"),
+                ],
+                &theme,
+            );
+        } else {
+            let mut actions = vec![
+                (
+                    KeyCode::Enter,
+                    if self.history_visible && self.pane == Pane::Detail {
+                        "Enter Read revision"
+                    } else if self.pane == Pane::Detail {
+                        "Enter Views"
+                    } else {
+                        "Enter Open"
+                    },
+                ),
+                (KeyCode::Esc, "Esc Back"),
+                (KeyCode::Char(' '), "Space Actions"),
+            ];
+            if self.history_visible && self.pane == Pane::Detail {
+                actions.push((KeyCode::Char('a'), "A Mark base"));
+                if self.history_base.is_some() {
+                    actions.push((KeyCode::Char('b'), "B Compare"));
+                }
+            }
+            if self.can_page(true) {
+                actions.push((KeyCode::Char('n'), "N Next page"));
+            }
+            if self.can_page(false) {
+                actions.push((KeyCode::Char('p'), "P Previous"));
+            }
+            actions.extend([
+                (KeyCode::Char('?'), "? Help"),
+                (KeyCode::Char('q'), "Q Close"),
+            ]);
+            self.buttons(frame, footer, &actions, &theme);
+        }
+        self.capture(frame, area);
     }
 
-    fn buttons(&mut self, frame: &mut Frame, area: Rect, buttons: &[(KeyCode, &str)]) {
+    fn buttons(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        buttons: &[(KeyCode, &str)],
+        theme: &Theme,
+    ) {
         let mut x = area.x;
         for (key, label) in buttons {
-            let width = (label.chars().count() as u16 + 1).min(area.right().saturating_sub(x));
-            if width == 0 {
+            let width = u16::try_from(label.width() + 1).unwrap_or(u16::MAX);
+            if width > area.right().saturating_sub(x) {
                 break;
             }
             let rect = Rect::new(x, area.y, width, area.height.min(1));
-            frame.render_widget(
-                Paragraph::new(format!("{label} ")).style(Style::default().fg(Color::Cyan)),
+            let focused = matches!(
+                (self.pane, key),
+                (Pane::Repositories, KeyCode::F(1))
+                    | (Pane::Resources, KeyCode::F(2))
+                    | (Pane::Detail, KeyCode::F(3))
+            );
+            line(
+                frame,
                 rect,
+                &format!("{label} "),
+                if focused {
+                    theme.selected
+                } else {
+                    theme.accent
+                },
             );
             self.controls.push((rect, *key));
             x = x.saturating_add(width);
         }
     }
 
-    fn render_repositories(&self, frame: &mut Frame, area: Rect) {
+    fn pane(&self, frame: &mut Frame, area: Rect, title: &str, pane: Pane, theme: &Theme) -> Rect {
+        let title = format!("{}{}", if self.pane == pane { "> " } else { "" }, title);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(clip(&title, usize::from(area.width.saturating_sub(2))))
+            .border_style(if self.pane == pane {
+                theme.accent
+            } else {
+                theme.muted
+            });
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        inner
+    }
+
+    fn draw_rows(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        labels: &[String],
+        selected: usize,
+        pane: Pane,
+        theme: &Theme,
+    ) {
+        let height = usize::from(area.height).max(1);
+        let start = selected
+            .saturating_sub(height / 2)
+            .min(labels.len().saturating_sub(height));
+        for (index, label) in labels.iter().enumerate().skip(start).take(height) {
+            let rect = Rect::new(
+                area.x,
+                area.y + u16::try_from(index - start).unwrap_or(0),
+                area.width.saturating_sub(1),
+                1,
+            );
+            let selected = index == selected;
+            line(
+                frame,
+                rect,
+                &format!("{} {}", if selected { ">" } else { " " }, label),
+                if selected && self.pane == pane {
+                    theme.selected
+                } else {
+                    Style::default()
+                },
+            );
+            self.list_hits.push((rect, pane, index));
+        }
+        scrollbar(frame, area, start, labels.len(), theme);
+    }
+
+    fn render_repositories(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
         if area.width == 0 {
             return;
         }
-        let mut labels = vec!["Session / defaults".to_string()];
+        let inner = self.pane(frame, area, "Repositories", Pane::Repositories, theme);
+        let mut rows = vec!["Session & active instructions".into()];
         if let Some(snapshot) = &self.snapshot {
-            labels.extend(snapshot.repositories.iter().map(|store| {
+            rows.extend(snapshot.repositories.iter().map(|store| {
                 format!(
-                    "{} {} {}{}",
+                    "{}{}{}",
                     store.kind,
-                    store.branch.as_deref().unwrap_or(if store.detached {
-                        "DETACHED"
+                    if store.detached {
+                        " [detached]"
+                    } else if store.conflicts > 0 {
+                        " [conflict]"
+                    } else if store.dirty {
+                        " [changed]"
                     } else {
-                        "no branch"
-                    }),
-                    if store.dirty { "*" } else { "" },
-                    if store.active_lease { " LOCKED" } else { "" }
+                        ""
+                    },
+                    if store.active_lease { " [busy]" } else { "" }
                 )
             }));
         }
-        draw_list(
+        self.draw_rows(
             frame,
-            area,
-            "F1 Repositories",
-            &labels,
+            inner,
+            &rows,
             self.repository_selected,
-            self.pane == Pane::Repositories,
+            Pane::Repositories,
+            theme,
         );
     }
 
-    fn render_resources(&self, frame: &mut Frame, area: Rect) {
+    fn render_resources(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
         if area.width == 0 {
+            return;
+        }
+        let label = if self.filter.redefinitions == Some(true) {
+            "Redefinitions"
+        } else {
+            "Resources"
+        };
+        let inner = self.pane(
+            frame,
+            area,
+            &format!("{label} · {} results", self.row_total),
+            Pane::Resources,
+            theme,
+        );
+        if self.rows_loading() {
+            line(frame, inner, "Loading resources…", theme.warning);
+            return;
+        }
+        if self.rows.is_empty() {
+            text(
+                frame,
+                inner,
+                if self.last_error {
+                    "Source discovery failed.\nEnter Views or Space Actions to inspect the error or refresh."
+                } else {
+                    "No matching resources.\nF: adjust filters\nC: clear all filters\nR: refresh sources"
+                },
+                theme.muted,
+            );
             return;
         }
         let labels = self
@@ -292,163 +445,636 @@ impl InstructionManager {
             .iter()
             .map(|row| {
                 format!(
-                    "{}{}{} {}:{} / {}",
-                    if row.valid { " " } else { "!" },
-                    if row.effective { "●" } else { "○" },
+                    "{}{}{}{}",
                     if row.high_impact {
-                        "[HIGH]"
+                        "[HIGH] "
                     } else if row.redefines_global {
-                        "[R]"
+                        "[override] "
                     } else {
                         ""
                     },
-                    row.scope,
+                    if !row.valid {
+                        "[invalid] "
+                    } else if !row.effective {
+                        "[shadowed] "
+                    } else {
+                        ""
+                    },
                     row.id,
-                    row.kind
+                    if row.scope == "project" {
+                        " · project"
+                    } else {
+                        ""
+                    }
                 )
             })
             .collect::<Vec<_>>();
-        let title = format!(
-            "F2 {} {}-{}/{}",
-            if self.filter.redefinitions == Some(true) {
-                "Redefinitions"
-            } else {
-                "Resources"
-            },
-            if self.rows.is_empty() {
-                0
-            } else {
-                self.row_offset + 1
-            },
-            self.row_offset + self.rows.len(),
-            self.row_total
+        let body = Rect::new(
+            inner.x,
+            inner.y,
+            inner.width,
+            inner.height.saturating_sub(1),
         );
-        draw_list(
+        self.draw_rows(frame, body, &labels, self.selected, Pane::Resources, theme);
+        let row = self.rows.get(self.selected).expect("nonempty selection");
+        line(
             frame,
-            area,
-            &title,
-            &labels,
-            self.selected,
-            self.pane == Pane::Resources,
+            Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
+            &format!(
+                "{} | {} | {}-{} / {}",
+                row.scope,
+                row.kind,
+                self.row_offset + 1,
+                self.row_offset + self.rows.len(),
+                self.row_total
+            ),
+            theme.muted,
         );
     }
 
-    fn render_detail(&mut self, frame: &mut Frame, area: Rect) {
+    fn breadcrumb(&self) -> String {
+        if let Some(row) = &self.detail_row {
+            return format!("{}:{}", row.scope, row.id);
+        }
+        match &self.target {
+            Some(InstructionInspectionTarget::Session) => {
+                "Session · exact active instructions".into()
+            }
+            Some(InstructionInspectionTarget::Repository(key)) => self
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.repositories.iter().find(|store| &store.key == key))
+                .map_or_else(
+                    || "Repository".into(),
+                    |store| {
+                        format!(
+                            "{} · {}",
+                            store.kind,
+                            store.branch.as_deref().unwrap_or("detached / no branch")
+                        )
+                    },
+                ),
+            _ => "Choose a resource".into(),
+        }
+    }
+
+    fn render_detail(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
         if area.width == 0 {
             return;
         }
+        let title = if let Some(revision) = &self.revision_selection {
+            format!(
+                "{} {}{}",
+                self.view_label(),
+                short(&revision.from),
+                revision
+                    .to
+                    .as_ref()
+                    .map_or_else(String::new, |to| format!(" -> {}", short(to)))
+            )
+        } else {
+            self.view_label().into()
+        };
+        let inner = self.pane(frame, area, &title, Pane::Detail, theme);
+        if inner.height == 0 {
+            return;
+        }
+        line(
+            frame,
+            Rect::new(inner.x, inner.y, inner.width, 1),
+            &self.breadcrumb(),
+            theme.accent,
+        );
+        let body = Rect::new(
+            inner.x,
+            inner.y + 1,
+            inner.width,
+            inner.height.saturating_sub(2),
+        );
+        let progress = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
+        if self.pending.is_some() && self.text.is_none() && !self.history_visible {
+            text(
+                frame,
+                body,
+                "Loading selected view…\nX cancels loading. Esc returns to browsing.",
+                theme.warning,
+            );
+            return;
+        }
         if self.history_visible {
+            let selected = self.history.get(self.history_selected);
+            let info = if let Some(base) = &self.history_base {
+                format!(
+                    "Base {} -> {} | B Compare",
+                    short(base),
+                    selected.map_or("select a revision", |entry| short(&entry.commit))
+                )
+            } else {
+                "Enter: read · A: mark base for comparison".into()
+            };
+            line(frame, progress, &info, theme.muted);
+            if self.history.is_empty() {
+                text(
+                    frame,
+                    body,
+                    if self.pending.is_some() {
+                        "Loading Git history…"
+                    } else {
+                        "No commits for this source at the inspected HEAD.\nEsc returns without changing anything."
+                    },
+                    theme.muted,
+                );
+                return;
+            }
+            let info_height = if body.height >= 8 { 3 } else { 0 };
+            let list = Rect::new(
+                body.x,
+                body.y,
+                body.width,
+                body.height.saturating_sub(info_height),
+            );
             let labels = self
                 .history
                 .iter()
                 .map(|entry| {
                     format!(
-                        "{} {} {}",
+                        "{}{} {}",
                         if self.history_base.as_deref() == Some(&entry.commit) {
-                            "A"
+                            "[base] "
                         } else {
-                            " "
+                            ""
                         },
-                        entry.commit.get(..10).unwrap_or(&entry.commit),
+                        short(&entry.commit),
                         entry.subject
                     )
                 })
                 .collect::<Vec<_>>();
-            draw_list(
+            self.draw_rows(
                 frame,
-                area,
-                "F3 History · Enter read · A/B compare",
+                list,
                 &labels,
                 self.history_selected,
-                self.pane == Pane::Detail,
+                Pane::Detail,
+                theme,
             );
+            if info_height > 0
+                && let Some(selected) = self.history.get(self.history_selected)
+            {
+                text(
+                    frame,
+                    Rect::new(body.x, list.bottom(), body.width, info_height),
+                    &format!(
+                        "{}\n{} · {}\n{} changed paths · Enter to inspect",
+                        selected.subject,
+                        selected.date,
+                        selected.author,
+                        selected.paths.len()
+                    ),
+                    theme.muted,
+                );
+            }
             return;
         }
-        let block = pane_block("F3 Detail", self.pane == Pane::Detail, area);
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
         let Some(page) = &self.text else {
-            frame.render_widget(Paragraph::new("Select a resource and press 1-8.\nSpace inspects a repository.\nSession + 4 reads exact stored system text."), inner);
+            if let Some(row) = self.rows.get(self.selected) {
+                text(
+                    frame,
+                    body,
+                    &format!(
+                        "{}\n\n{} · {}\n{}\n\nEnter opens the complete source.\nSpace shows every available action.\n\nSource is on disk. A preview is not an activation. Session offers the exact stored prompt.",
+                        row.name,
+                        row.scope,
+                        row.kind,
+                        if !row.valid {
+                            "Validation failed: open Overview for details."
+                        } else if row.high_impact {
+                            "High-impact project redefinition. Inspect before editing."
+                        } else if !row.effective {
+                            "Shadowed definition; still available for explicit inspection."
+                        } else {
+                            "Effective definition for unqualified lookup."
+                        }
+                    ),
+                    Style::default(),
+                );
+            } else {
+                text(
+                    frame,
+                    body,
+                    "Choose a repository or resource.\nEnter opens it.\nSpace lists actions.\n\nThis manager is read only.",
+                    theme.muted,
+                );
+            }
             return;
         };
-        let key = (page.document.clone(), page.offset, inner.width);
+        let width = body.width.saturating_sub(1).max(1);
+        let key = (page.document.clone(), page.offset, width);
         if self.wrap_key.as_ref() != Some(&key) {
-            let heading = format!(
-                "{}\nBytes {}-{} / {} · {}\n\n",
-                page.title,
-                page.offset,
-                page.offset + page.text.len(),
-                page.total_bytes,
-                if page.offset == 0 && page.next.is_none() {
-                    "complete document"
-                } else {
-                    "page; N/P for all content"
-                }
-            );
-            self.wrapped = wrap(&(heading + &page.text), inner.width.max(1));
+            self.wrapped = wrap(&page.text, width);
             self.wrap_key = Some(key);
         }
-        self.scroll = self.scroll.min(self.wrapped.len().saturating_sub(1));
+        self.detail_height = usize::from(body.height).max(1);
+        self.scroll = self
+            .scroll
+            .min(self.wrapped.len().saturating_sub(self.detail_height));
         let lines = self
             .wrapped
             .iter()
             .skip(self.scroll)
-            .take(inner.height as usize)
-            .map(|line| Line::raw(line.clone()))
+            .take(self.detail_height)
+            .map(|value| Line::raw(value.clone()))
             .collect::<Vec<_>>();
-        frame.render_widget(Paragraph::new(lines), inner);
-    }
-}
-
-fn pane_block(title: &str, active: bool, area: Rect) -> Block<'_> {
-    Block::default()
-        .title(title)
-        .borders(if area.height > 2 && area.width > 2 {
-            Borders::ALL
+        frame.render_widget(
+            Paragraph::new(lines).style(if self.last_error {
+                theme.error
+            } else {
+                Style::default()
+            }),
+            Rect::new(body.x, body.y, width, body.height),
+        );
+        scrollbar(frame, body, self.scroll, self.wrapped.len(), theme);
+        let position = if page.next.is_none() && page.offset == 0 {
+            format!(
+                "Complete · lines {}-{}/{}",
+                self.scroll + 1,
+                (self.scroll + self.detail_height).min(self.wrapped.len()),
+                self.wrapped.len()
+            )
         } else {
-            Borders::NONE
-        })
-        .border_style(Style::default().fg(if active { Color::Cyan } else { Color::DarkGray }))
-}
+            format!(
+                "Bytes {}-{}/{} · N/P pages",
+                page.offset,
+                page.offset + page.text.len(),
+                page.total_bytes
+            )
+        };
+        line(frame, progress, &position, theme.muted);
+    }
 
-fn draw_list(
-    frame: &mut Frame,
-    area: Rect,
-    title: &str,
-    labels: &[String],
-    selected: usize,
-    active: bool,
-) {
-    let block = pane_block(title, active, area);
-    let inner = block.inner(area);
-    let height = usize::from(inner.height).max(1);
-    let start = selected / height * height;
-    let lines = labels
-        .iter()
-        .enumerate()
-        .skip(start)
-        .take(height)
-        .map(|(index, label)| {
-            Line::from(Span::styled(
-                format!(
-                    "{} {}",
-                    if index == selected { "›" } else { " " },
-                    safe(label)
+    fn render_menu(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        let popup = if area.width >= 70 && area.height >= 20 {
+            Rect::new(
+                area.x + (area.width - 68) / 2,
+                area.y + 2,
+                68,
+                area.height - 4,
+            )
+        } else {
+            area
+        };
+        let menu = self.menu.as_mut().expect("menu open");
+        let block = Block::default()
+            .title(format!(" {} ", menu.title))
+            .borders(Borders::ALL)
+            .border_style(theme.accent);
+        let inner = block.inner(popup);
+        frame.render_widget(Clear, popup);
+        frame.render_widget(block, popup);
+        if menu.explanation {
+            let indices = menu.matches();
+            let explanation = indices
+                .get(menu.selected)
+                .map(|index| {
+                    let item = &menu.items[*index];
+                    format!(
+                        "{} [{}]\n\n{}\n\n{}",
+                        item.label,
+                        item.key,
+                        item.disabled
+                            .as_deref()
+                            .unwrap_or("Available for this selection"),
+                        item.hint
+                    )
+                })
+                .unwrap_or_else(|| "No selected action. Escape returns to the menu.".into());
+            let lines = wrap(&explanation, inner.width.saturating_sub(1).max(1));
+            let body = Rect::new(
+                inner.x,
+                inner.y,
+                inner.width,
+                inner.height.saturating_sub(1),
+            );
+            menu.explanation_scroll = menu
+                .explanation_scroll
+                .min(lines.len().saturating_sub(usize::from(body.height)));
+            frame.render_widget(
+                Paragraph::new(
+                    lines
+                        .iter()
+                        .skip(menu.explanation_scroll)
+                        .take(usize::from(body.height))
+                        .map(|line| Line::raw(line.clone()))
+                        .collect::<Vec<_>>(),
                 ),
-                if index == selected {
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD)
+                body,
+            );
+            scrollbar(frame, body, menu.explanation_scroll, lines.len(), theme);
+            self.buttons(
+                frame,
+                Rect::new(inner.x, inner.bottom() - 1, inner.width, 1),
+                &[(KeyCode::Esc, "Esc Back to menu")],
+                theme,
+            );
+            return;
+        }
+        line(
+            frame,
+            Rect::new(inner.x, inner.y, inner.width, 1),
+            &format!(
+                "Find: {}|",
+                tail_cells(&menu.query, usize::from(inner.width.saturating_sub(7)))
+            ),
+            theme.accent,
+        );
+        let note_height = if inner.height >= 12 { 4 } else { 2 };
+        let list = Rect::new(
+            inner.x,
+            inner.y + 1,
+            inner.width,
+            inner.height.saturating_sub(note_height + 2),
+        );
+        let matches = menu.matches();
+        menu.selected = menu.selected.min(matches.len().saturating_sub(1));
+        let start = menu
+            .selected
+            .saturating_sub(usize::from(list.height) / 2)
+            .min(matches.len().saturating_sub(usize::from(list.height)));
+        for (position, index) in matches
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(usize::from(list.height))
+        {
+            let item = &menu.items[*index];
+            let label = format!(
+                "{}{}",
+                item.label,
+                if item.disabled.is_some() {
+                    " [unavailable]"
+                } else {
+                    ""
+                }
+            );
+            let rect = Rect::new(
+                list.x,
+                list.y + u16::try_from(position - start).unwrap_or(0),
+                list.width.saturating_sub(1),
+                1,
+            );
+            line(
+                frame,
+                rect,
+                &format!(
+                    "{} {}",
+                    if position == menu.selected { ">" } else { " " },
+                    label
+                ),
+                if position == menu.selected {
+                    theme.selected
+                } else if item.disabled.is_some() {
+                    theme.muted
                 } else {
                     Style::default()
                 },
-            ))
-        })
-        .collect::<Vec<_>>();
-    frame.render_widget(block, area);
-    frame.render_widget(Paragraph::new(lines), inner);
-}
+            );
+            self.menu_hits.push((rect, position));
+        }
+        if matches.is_empty() {
+            line(frame, list, "No matching actions.", theme.muted);
+        }
+        scrollbar(frame, list, start, matches.len(), theme);
+        if let Some(index) = matches.get(menu.selected) {
+            let item = &menu.items[*index];
+            let info = format!(
+                "{}{}\n{}",
+                item.label,
+                if item.key.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{}]", item.key)
+                },
+                item.disabled.as_deref().unwrap_or(&item.hint)
+            );
+            text(
+                frame,
+                Rect::new(inner.x, list.bottom(), inner.width, note_height),
+                &info,
+                if item.disabled.is_some() {
+                    theme.warning
+                } else {
+                    theme.muted
+                },
+            );
+        }
+        self.buttons(
+            frame,
+            Rect::new(inner.x, inner.bottom() - 1, inner.width, 1),
+            &[
+                (KeyCode::Enter, "Enter Choose"),
+                (KeyCode::Esc, "Esc Back"),
+                (KeyCode::Char('?'), "? Details"),
+            ],
+            theme,
+        );
+        // At the 24-column floor both controls remain keyboard reachable; the
+        // explicit Back button receives the remaining cells rather than vanishing.
+        if !self.controls.iter().any(|(_, key)| *key == KeyCode::Esc) {
+            let rect = Rect::new(inner.right().saturating_sub(8), inner.bottom() - 1, 8, 1);
+            line(frame, rect, "Esc Back", theme.accent);
+            self.controls.push((rect, KeyCode::Esc));
+        }
+    }
 
+    fn render_help(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        let view_help = VIEWS
+            .iter()
+            .map(|(_, key, label, hint)| format!("{key}  {label}\n   {hint}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let help = format!(
+            "READ-ONLY INSTRUCTION MANAGER\n\nBrowse with arrows or J/K. Enter opens a resource or repository.\nSpace / : / Ctrl-P: searchable Actions. T: choose a view.\nF: filters with explicit values. /: search resources.\nSearch supports arrows, Home/End, Delete, Backspace, Ctrl-U and paste.\n\nEsc / Left / Backspace returns from revision to history, from detail to browsing, then repositories. Q closes directly.\nTab / Shift-Tab moves focus. F1 repositories, F2 resources, F3 reading.\nZ expands/collapses the focused pane. PageUp/Down scroll.\nN/P changes transport page. At content page boundaries, scrolling continues to the adjacent page. Home/End stays within the page.\n\nVIEWS\n{view_help}\n\nHISTORY\nEnter reads a revision. I shows complete commit details. A marks a base. B compares base to selected.\nEsc restores the same history selection and base. Changes are never applied.\n\nFILTER SHORTCUTS\nS scope, V validation, E effectiveness, O origin, G toggles redefinitions.\nC clears all filters.\nCurrent: {}\n\nR refreshes sources. X cancels loading. No file, session prompt, model, branch or remote is changed.\nSource is the original file. Preview uses current source and captured inspection inputs. Session / Stored system prompt is exact active text, not a new preview.\nComplete content is paged, never shortened. Scope/identity and position stay visible while scrolling.\nTerminal control characters are shown as escapes. Mouse accelerates keyboard actions; Shift normally bypasses mouse capture for terminal text selection.\n\nAt 80 and 60 columns this is one navigable pane. At wide widths repositories/list/reader share space. At least24x8 is required.\n\nEsc closes help and restores your reading position.",
+            self.filter_summary()
+        );
+        let body = Rect::new(area.x, area.y, area.width, area.height - 1);
+        let lines = wrap(&help, body.width.saturating_sub(1).max(1));
+        self.help_scroll = self
+            .help_scroll
+            .min(lines.len().saturating_sub(usize::from(body.height)));
+        frame.render_widget(
+            Paragraph::new(
+                lines
+                    .iter()
+                    .skip(self.help_scroll)
+                    .take(usize::from(body.height))
+                    .map(|line| Line::raw(line.clone()))
+                    .collect::<Vec<_>>(),
+            ),
+            body,
+        );
+        scrollbar(frame, body, self.help_scroll, lines.len(), theme);
+        self.buttons(
+            frame,
+            Rect::new(area.x, area.bottom() - 1, area.width, 1),
+            &[
+                (KeyCode::Esc, "Esc Back"),
+                (KeyCode::Char('?'), "? Close help"),
+            ],
+            theme,
+        );
+    }
+
+    fn capture(&self, frame: &mut Frame, area: Rect) {
+        if !crate::tui::visual_debug::is_enabled() {
+            return;
+        }
+        use crate::tui::visual_debug::{
+            FrameCaptureBuilder, MessageCapture, RectCapture, WidgetPlacementCapture,
+        };
+        let mut capture = FrameCaptureBuilder::new(area.width, area.height);
+        capture.state.status = "instruction manager (read-only)".into();
+        capture.state.scroll_offset = self.scroll;
+        capture.render_order.push("instruction_manager".into());
+        let cells = frame.buffer_mut();
+        let mut viewport = String::new();
+        for y in area.y..area.bottom() {
+            for x in area.x..area.right() {
+                viewport.push_str(cells[(x, y)].symbol());
+            }
+            viewport.push('\n');
+        }
+        capture.rendered_text.recent_messages.push(MessageCapture {
+            role: "instruction-manager-viewport".into(),
+            content_len: viewport.len(),
+            content_preview: viewport,
+        });
+        for (index, rect) in self
+            .areas
+            .iter()
+            .enumerate()
+            .filter(|(_, rect)| rect.width > 0)
+        {
+            capture
+                .layout
+                .widget_placements
+                .push(WidgetPlacementCapture {
+                    kind: format!("instruction-pane-{index}"),
+                    side: "overlay".into(),
+                    rect: RectCapture {
+                        x: rect.x,
+                        y: rect.y,
+                        width: rect.width,
+                        height: rect.height,
+                    },
+                });
+        }
+        for (rect, key) in &self.controls {
+            capture
+                .layout
+                .widget_placements
+                .push(WidgetPlacementCapture {
+                    kind: format!("instruction-action-{}", format_key(*key)),
+                    side: "overlay".into(),
+                    rect: RectCapture {
+                        x: rect.x,
+                        y: rect.y,
+                        width: rect.width,
+                        height: rect.height,
+                    },
+                });
+        }
+        crate::tui::visual_debug::record_frame(capture.build());
+    }
+}
+fn short(value: &str) -> &str {
+    value.get(..10).unwrap_or(value)
+}
+fn line(frame: &mut Frame, area: Rect, value: &str, style: Style) {
+    frame.render_widget(
+        Paragraph::new(clip(
+            &safe(value).replace(['\n', '\t'], " "),
+            usize::from(area.width),
+        ))
+        .style(style),
+        area,
+    );
+}
+fn text(frame: &mut Frame, area: Rect, value: &str, style: Style) {
+    let lines = wrap(value, area.width.max(1));
+    frame.render_widget(
+        Paragraph::new(
+            lines
+                .into_iter()
+                .take(usize::from(area.height))
+                .map(Line::raw)
+                .collect::<Vec<_>>(),
+        )
+        .style(style),
+        area,
+    );
+}
+fn scrollbar(frame: &mut Frame, area: Rect, start: usize, total: usize, theme: &Theme) {
+    let height = usize::from(area.height);
+    if height == 0 || total <= height || area.width < 2 {
+        return;
+    }
+    let position =
+        start.saturating_mul(height.saturating_sub(1)) / total.saturating_sub(height).max(1);
+    for y in 0..height {
+        frame.render_widget(
+            Paragraph::new(if y == position.min(height - 1) {
+                "#"
+            } else {
+                "|"
+            })
+            .style(theme.muted),
+            Rect::new(
+                area.right() - 1,
+                area.y + u16::try_from(y).unwrap_or(0),
+                1,
+                1,
+            ),
+        );
+    }
+}
+fn clip(text: &str, width: usize) -> String {
+    if text.width() <= width {
+        return text.into();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let line = Line::raw(text);
+    let mut result = String::new();
+    let mut used = 0;
+    for grapheme in line.styled_graphemes(Style::default()) {
+        let size = grapheme.symbol.width();
+        if used + size > width - 1 {
+            break;
+        }
+        result.push_str(grapheme.symbol);
+        used += size;
+    }
+    result.push('…');
+    result
+}
+fn tail_cells(text: &str, width: usize) -> String {
+    let line = Line::raw(text);
+    let graphemes = line.styled_graphemes(Style::default()).collect::<Vec<_>>();
+    let mut start = graphemes.len();
+    let mut used = 0;
+    for grapheme in graphemes.iter().rev() {
+        let size = grapheme.symbol.width();
+        if used + size > width {
+            break;
+        }
+        start -= 1;
+        used += size;
+    }
+    graphemes[start..]
+        .iter()
+        .map(|grapheme| grapheme.symbol)
+        .collect()
+}
 fn safe(text: &str) -> String {
     let mut out = String::new();
     for ch in text.chars() {
@@ -461,30 +1087,22 @@ fn safe(text: &str) -> String {
     }
     out
 }
-
-/// Wrap only the current bounded transport page. No u16 scroll offset can make
-/// a later line unreachable and unchanged frames do not rewrap large documents.
 fn wrap(text: &str, width: u16) -> Vec<String> {
     let limit = usize::from(width).max(1);
     let mut lines = Vec::new();
     for source in safe(text).split('\n') {
+        let expanded = source.replace('\t', "    ");
+        let source = Line::raw(expanded);
         let mut line = String::new();
         let mut columns = 0;
-        for ch in source.chars() {
-            let chars = if ch == '\t' {
-                "    ".to_string()
-            } else {
-                ch.to_string()
-            };
-            for ch in chars.chars() {
-                let size = ch.width().unwrap_or(0);
-                if columns + size > limit && !line.is_empty() {
-                    lines.push(std::mem::take(&mut line));
-                    columns = 0;
-                }
-                line.push(ch);
-                columns += size;
+        for grapheme in source.styled_graphemes(Style::default()) {
+            let size = grapheme.symbol.width();
+            if columns + size > limit && !line.is_empty() {
+                lines.push(std::mem::take(&mut line));
+                columns = 0;
             }
+            line.push_str(grapheme.symbol);
+            columns += size;
         }
         lines.push(line);
     }
