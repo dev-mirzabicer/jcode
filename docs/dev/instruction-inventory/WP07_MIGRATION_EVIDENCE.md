@@ -1,6 +1,6 @@
 # WP-07 workflow migration evidence
 
-**Status:** Candidate verification in progress. This is technical evidence, not work-package acceptance.
+**Status:** Candidate verification complete, awaiting Mirza acceptance. This is technical evidence, not work-package acceptance.
 
 **Starting revision:** `99bba69497a04fa48fac675c5e40d05e39a929ca`.
 
@@ -48,7 +48,13 @@ Verification is on macOS arm64. Model requests in tests use recording providers 
 
 ## Activation
 
-Final coordinated build/reload, binary/channel/canary identity and activated public journeys are recorded here after they run. The live instruction store is not treated as upgraded merely because test stores adopted seed 26.
+The corrected activated implementation is `jcode v0.75.174-dev (2adf99cd8, dirty)`, identity `2adf99cd8-dirty-2c9114a60566`. Current/shared channels match and canary passed. The five dirty paths are the protected pre-existing files, not uncommitted WP-07 changes. The live instruction store is clean at schema 1, seed 26, upgrade commit `29a8f67`.
+
+The activated daemon plus real headless TUI journey passed on 2026-09-06 at 14:41 UTC, task `6945644l1s`, artifacts `/Users/mirzabicer/.jcode/scratch/wp07/live-9icgcx_m/`. It verified four localhost-only provider requests, routing snapshot reuse across ordinary turns, split and daemon restart, source failure before split publication, unchanged static prompt, actual TUI Enter-key command dispatch, and command restoration after invalid source with no extra model call. `WP07_RUNTIME_EVIDENCE.json` summarizes the result.
+
+JSON frame capture returned `screen-json: no frames captured`; no JSON-frame or broad graphical-layout coverage is claimed. Actual terminal output, TUI input/history, and recording-provider payloads establish the exercised path. All owned sandbox daemons/testers were stopped. Mirza's live debug configuration was not changed.
+
+The first build succeeded but its reload returned transient OS error 35. Retrying only reload activated the verified binary. The corrected candidate subsequently built/reloaded successfully. A first restart probe used the wrong subscription field and accidentally created a fresh sandbox session; it was corrected to `target_session_id` with an explicit resumed-identity assertion. Later probes exposed the real dispatcher defect described below rather than weakening acceptance expectations.
 
 ## Future owners
 
@@ -60,4 +66,4 @@ Coordinated task `482976kh39` completed the combined matrix, including successfu
 
 ### Activated integration correction
 
-The first activated TUI command journey exposed a real wake-up gap: typed command preparation was queued without requesting the idle event-loop dispatcher. Command creation, render replies and reconnect now request the existing dispatch wake-up. The main event loop and regression test share its flag-clearing boundary, and waiting for a reply does not spin. Task `838766nuc5` passed actual Enter/reply dispatch, command recovery, adjacent follow-up tests and strict TUI lint. The same activated journey must pass after rebuilding this correction.
+The first activated TUI command journey exposed a real wake-up gap: typed command preparation was queued without requesting the idle event-loop dispatcher. Command creation, render replies and reconnect now request the existing dispatch wake-up. The main event loop and regression test share its flag-clearing boundary, and waiting for a reply does not spin. Task `838766nuc5` passed actual Enter/reply dispatch, command recovery, adjacent follow-up tests and strict TUI lint. The same activated journey passed after rebuilding this correction at `2adf99cd8`. Task `380015once` also passed the finalized three command dispatcher/recovery tests before that activation.

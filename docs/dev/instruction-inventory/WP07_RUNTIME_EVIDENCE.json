@@ -1,0 +1,14 @@
+{
+  "binary": "jcode v0.75.174-dev (2adf99cd8, dirty)",
+  "provider_requests": 4,
+  "routing_snapshot_across_turns_split_and_daemon_restart": true,
+  "split_source_failure_prevents_orphan": true,
+  "actual_tui_plan_command_dispatch": true,
+  "invalid_tui_source_preserves_input_without_provider_call": true,
+  "static_prompt_unchanged": true,
+  "artifact": "/Users/mirzabicer/.jcode/scratch/wp07/live-9icgcx_m",
+  "runtime_identity": "2adf99cd8-dirty-2c9114a60566",
+  "current_shared_equal": true,
+  "canary": "passed",
+  "json_frame_capture": "Unavailable: screen-json returned no frames captured. Actual TUI keyboard/input, history, terminal output and provider payloads were exercised."
+}
