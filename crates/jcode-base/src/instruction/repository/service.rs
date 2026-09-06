@@ -628,6 +628,7 @@ impl InstructionRepositoryService {
             crate::instruction::InstructionRuntime::discover(self.validation_sources(repository)?);
         let resources = runtime.resources();
         let mut diagnostics = runtime.diagnostics().to_vec();
+        diagnostics.extend(self.roster_diagnostics(repository, &repository.root));
         collect_managed_path_diagnostics(
             repository,
             &repository.root,
@@ -1866,6 +1867,13 @@ impl InstructionRepositoryService {
         repository_root: &Path,
         mut issues: BTreeSet<String>,
     ) -> InstructionRepositoryResult<BTreeSet<String>> {
+        for diagnostic in self.roster_diagnostics(repository, repository_root) {
+            issues.insert(format!(
+                "roster:{}:{}",
+                crate::model_roster::ROSTER_PATH,
+                diagnostic.detail
+            ));
+        }
         let manifest_path = repository_root.join(STORE_MANIFEST);
         match std::fs::read_to_string(&manifest_path) {
             Ok(content) => {
@@ -1962,6 +1970,49 @@ impl InstructionRepositoryService {
             }
         }
         Ok(issues)
+    }
+
+    fn roster_diagnostics(
+        &self,
+        repository: &InstructionRepositoryRef,
+        root: &Path,
+    ) -> Vec<crate::instruction::InstructionDiagnostic> {
+        let mut target = repository.clone();
+        target.root = root.to_path_buf();
+        let path = Path::new(crate::model_roster::ROSTER_PATH);
+        let details = match read_working_utf8(&target, path) {
+            Ok(None) => Vec::new(),
+            Err(error) => vec![error.to_string()],
+            Ok(Some(_)) if repository.kind != InstructionRepositoryKind::Global => {
+                vec!["model roster is global-only; project roster files are not supported".into()]
+            }
+            Ok(Some(content)) => match crate::model_roster::ModelRoster::parse(&content) {
+                Err(error) => vec![error.to_string()],
+                Ok(roster) => roster
+                    .validate()
+                    .iter()
+                    .map(|error| {
+                        format!(
+                            "alias {}: {}",
+                            error.alias.as_deref().unwrap_or("<roster>"),
+                            error.detail
+                        )
+                    })
+                    .collect(),
+            },
+        };
+        details
+            .into_iter()
+            .map(|detail| crate::instruction::InstructionDiagnostic {
+                scope: if repository.kind == InstructionRepositoryKind::Global {
+                    InstructionScope::Global
+                } else {
+                    InstructionScope::Project
+                },
+                path: root.join(path),
+                detail,
+            })
+            .collect()
     }
 
     fn validation_sources_for_root(

@@ -208,28 +208,8 @@ pub(crate) fn occurrence_runtime(
     repositories: &InstructionRepositoryService,
     working_dir: Option<&Path>,
 ) -> Result<InstructionRuntime, SystemPromptActivationError> {
-    let global = repositories.global_repository()?;
-    let state = repositories.inspect(&global)?;
-    match state.health {
-        InstructionRepositoryHealth::Uninitialized => {
-            SystemPromptComposer::from_repository_service(repositories.clone())
-                .ensure_global_store()?;
-        }
-        InstructionRepositoryHealth::Ready => {
-            let manifest = repositories.load_manifest(&global)?;
-            if manifest.seed_version != INSTRUCTION_STORE_SEED_VERSION {
-                SystemPromptComposer::from_repository_service(repositories.clone())
-                    .ensure_global_store()?;
-            }
-        }
-        InstructionRepositoryHealth::Damaged(damage) => {
-            return Err(SystemPromptActivationError::Compatibility(format!(
-                "cannot render notification from {}: {}",
-                global.root.display(),
-                damage.detail
-            )));
-        }
-    }
+    SystemPromptComposer::from_repository_service(repositories.clone())
+        .prepare_global_store_for_read()?;
     let project = working_dir
         .map(|dir| repositories.resolve_project_repository(dir))
         .transpose()?

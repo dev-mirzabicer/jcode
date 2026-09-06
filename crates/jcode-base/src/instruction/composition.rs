@@ -234,6 +234,33 @@ impl SystemPromptComposer {
         Ok(initialized)
     }
 
+    /// Ordinary readers validate their selected resources, not unrelated
+    /// editable content. Bootstrap and seed upgrades still use full validation.
+    pub(crate) fn prepare_global_store_for_read(
+        &self,
+    ) -> Result<(super::InstructionRepositoryRef, bool), SystemPromptActivationError> {
+        let global = self.repositories.global_repository()?;
+        let state = self.repositories.inspect(&global)?;
+        match state.health {
+            super::InstructionRepositoryHealth::Uninitialized => {}
+            super::InstructionRepositoryHealth::Ready => {
+                let manifest = self.repositories.load_manifest(&global)?;
+                if manifest.seed_version == super::INSTRUCTION_STORE_SEED_VERSION {
+                    return Ok((global, false));
+                }
+            }
+            super::InstructionRepositoryHealth::Damaged(damage) => {
+                return Err(SystemPromptActivationError::Compatibility(format!(
+                    "cannot read managed sources from {}: {}",
+                    global.root.display(),
+                    damage.detail
+                )));
+            }
+        }
+        let initialized = self.ensure_global_store()?;
+        Ok((initialized.repository, initialized.created))
+    }
+
     /// Compatibility callers retain their original project-before-global slot
     /// order. Primary activation uses the approved global-before-project order.
     pub fn legacy_preferred_tools(
@@ -378,7 +405,7 @@ impl SystemPromptComposer {
         &self,
         working_dir: Option<&Path>,
     ) -> Result<CompositionEnvironment, SystemPromptActivationError> {
-        let initialized = self.ensure_global_store()?;
+        let (global_repository, initialized_global_store) = self.prepare_global_store_for_read()?;
         let project_root = working_dir
             .map(|working_dir| self.repositories.resolve_project_root(working_dir))
             .transpose()?;
@@ -395,7 +422,7 @@ impl SystemPromptComposer {
             sources = sources.with_project_agents_md(root.join("AGENTS.md"));
         }
         let runtime = super::InstructionRuntime::discover(sources);
-        let global_manifest = self.repositories.load_manifest(&initialized.repository)?;
+        let global_manifest = self.repositories.load_manifest(&global_repository)?;
         let project_manifest = project_repository
             .as_ref()
             .map(|repository| self.repositories.load_manifest(repository))
@@ -405,7 +432,7 @@ impl SystemPromptComposer {
             global_manifest,
             project_manifest,
             project_root,
-            initialized_global_store: initialized.created,
+            initialized_global_store,
         })
     }
 }
@@ -890,7 +917,13 @@ pub fn shipped_instruction_seed() -> Result<InstructionStoreSeed, InstructionErr
                     content: document.to_markdown()?.into_bytes(),
                 })
             })
-            .collect::<Result<Vec<_>, InstructionError>>()?,
+            .collect::<Result<Vec<_>, InstructionError>>()?
+            .into_iter()
+            .chain(std::iter::once(InstructionSeedFile {
+                relative_path: PathBuf::from(crate::model_roster::ROSTER_PATH),
+                content: crate::model_roster::SHIPPED_ROSTER.as_bytes().to_vec(),
+            }))
+            .collect(),
     })
 }
 
@@ -1133,6 +1166,38 @@ mod tests {
         assert!(!second.initialized_global_store);
         assert!(second.state.text.contains("SYNTHETIC_AGENT_V2"));
         assert!(!first.state.text.contains("SYNTHETIC_AGENT_V2"));
+    }
+
+    #[test]
+    fn ordinary_activation_isolates_invalid_roster_but_selected_sources_and_publication_still_fail()
+    {
+        let fixture = Fixture::new();
+        let composer = fixture.composer();
+        let first = composer
+            .activate(fixture.request(AgentSelection::Default))
+            .unwrap();
+        let path = fixture.jcode_home.join("instructions/model-roster.toml");
+        std::fs::write(
+            path,
+            "[aliases.unused]\ndescription='synthetic'\nmodels=[]\n",
+        )
+        .unwrap();
+        let second = composer
+            .activate(fixture.request(AgentSelection::Default))
+            .unwrap();
+        assert_eq!(first.state.text, second.state.text);
+        assert!(!second.initialized_global_store);
+        assert!(
+            composer.ensure_global_store().is_err(),
+            "explicit initialization reuse retains full validation"
+        );
+        std::fs::remove_file(fixture.jcode_home.join("instructions/system/kernel.md")).unwrap();
+        assert!(
+            composer
+                .activate(fixture.request(AgentSelection::Default))
+                .is_err(),
+            "selected required resource damage must still fail"
+        );
     }
 
     #[test]

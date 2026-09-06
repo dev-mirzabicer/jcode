@@ -1,0 +1,23 @@
+[aliases.expensive-expert]
+description = "Hard architecture, debugging dead ends, and final review where quality outweighs cost."
+models = ["claude-oauth:claude-fable-5", "openai-oauth:gpt-6-astra"]
+default_effort = "max"
+
+[aliases.architect]
+description = "Architecture, design, investigation, debugging, review, and verification."
+models = ["claude-oauth:claude-fable-5", "openai-oauth:gpt-6-astra"]
+default_effort = "xhigh"
+
+[aliases.coder]
+description = "Substantial implementation work in an existing codebase."
+models = ["openai-oauth:gpt-6-astra", "claude-oauth:claude-opus-5"]
+default_effort = "xhigh"
+
+[aliases.researcher]
+description = "Isolated research, source gathering, bulk reading, and synthesis."
+models = ["openai-oauth:gpt-6-astra", "claude-oauth:claude-opus-5"]
+default_effort = "low"
+
+[aliases.fast-worker]
+description = "Fast lower-cost isolated work that does not need frontier reasoning."
+models = ["openai-oauth:gpt-5.6-terra"]

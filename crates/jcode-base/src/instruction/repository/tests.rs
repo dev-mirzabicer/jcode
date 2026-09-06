@@ -131,6 +131,71 @@ fn draft_commit(
 }
 
 #[test]
+fn roster_validation_participates_in_initialization_commits_retry_and_project_scope() {
+    use crate::model_roster::ROSTER_PATH;
+    let fixture = Fixture::new();
+    let mut seed = seed();
+    let valid = "[aliases.fixture]\ndescription='synthetic'\nmodels=['openai-oauth:fixture']\n";
+    seed.files.push(InstructionSeedFile {
+        relative_path: ROSTER_PATH.into(),
+        content: valid.as_bytes().to_vec(),
+    });
+    let initialized = fixture.service.initialize_global(&seed, &[]).unwrap();
+    let repo = &initialized.repository;
+    let draft = fixture.service.open_draft(repo, ROSTER_PATH).unwrap();
+    let request = InstructionCommitRequest {
+        operation_id: "invalid-roster".into(),
+        message: "fixture invalid roster".into(),
+        expected_head: draft.base_head,
+        expected_files: vec![draft.base],
+        mutations: vec![InstructionFileMutation::Write {
+            relative_path: ROSTER_PATH.into(),
+            content: b"[aliases.fixture]\ndescription='synthetic'\nmodels=[]\n".to_vec(),
+        }],
+    };
+    assert!(fixture.service.commit(repo, &request).is_err());
+    assert!(
+        fixture.service.commit(repo, &request).is_err(),
+        "retry cannot bless a failed working edit"
+    );
+    assert_eq!(git(&repo.root, &["rev-parse", "HEAD"]), initialized.commit);
+    assert!(
+        !fixture
+            .service
+            .validate_repository(repo)
+            .unwrap()
+            .diagnostics
+            .is_empty()
+    );
+    draft_commit(
+        &fixture.service,
+        repo,
+        "modules/other.md",
+        &managed("other", "module", "independent edit"),
+        "independent-roster-error",
+    );
+    let mut project = repo.clone();
+    project.kind = InstructionRepositoryKind::ProjectExternal;
+    assert!(
+        !fixture
+            .service
+            .validate_repository(&project)
+            .unwrap()
+            .diagnostics
+            .is_empty()
+    );
+    let invalid_fixture = Fixture::new();
+    seed.files.last_mut().unwrap().content =
+        b"[aliases.bad]\ndescription='synthetic'\nmodels=[]\n".to_vec();
+    assert!(
+        invalid_fixture
+            .service
+            .initialize_global(&seed, &[])
+            .is_err()
+    );
+}
+
+#[test]
 fn global_initialization_is_private_idempotent_and_damage_is_explicit() {
     let fixture = Fixture::new();
     let repository = fixture.service.global_repository().unwrap();

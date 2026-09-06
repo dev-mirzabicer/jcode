@@ -776,6 +776,8 @@ codegen-units = 256
 
 [dev-dependencies]
 async-stream = "0.3"
+# Production model-roster/provider-construction integration tests.
+jcode-base = { path = "crates/jcode-base", features = ["test-support"] }
 # Used by tests/context_window_matrix.rs to assert the shared context-window
 # resolution invariants directly, without going through a live provider.
 jcode-provider-core = { path = "crates/jcode-provider-core" }

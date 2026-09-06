@@ -222,6 +222,10 @@ pub fn register_external_provider_runtimes() {
     );
 }
 
+#[cfg(test)]
+#[path = "roster_tests.rs"]
+mod roster_tests;
+
 fn parse_and_prepare_args() -> Result<Args> {
     let args = Args::parse();
     startup_profile::mark("args_parse");
