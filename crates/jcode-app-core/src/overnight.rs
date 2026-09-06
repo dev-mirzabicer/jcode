@@ -18,15 +18,15 @@ pub use jcode_overnight_core::{
     OvernightManifest, OvernightPreflight, OvernightProgressCard, OvernightRunStatus,
     OvernightTaskCard, OvernightTaskCardAfter, OvernightTaskCardBefore, OvernightTaskCardSummary,
     OvernightTaskCardValidation, OvernightTaskStatusCounts, ResourceSnapshot, UsageLimitSnapshot,
-    UsageProjection, UsageProviderSnapshot, build_continuation_prompt, build_coordinator_prompt,
-    build_final_wrapup_prompt, build_handoff_ready_prompt, build_morning_report_prompt,
-    build_post_wake_continuation_prompt, build_progress_card_from_parts, build_review_html,
-    build_visible_current_session_prompt, event_class, format_log_markdown_from_events,
-    format_minutes, format_status_markdown_from_summary, git_summary, html_escape, overnight_usage,
-    parse_duration, parse_overnight_command, preflight_summary, prompt_event_summary,
-    render_task_cards_html, resource_summary, summarize_task_cards_slice, task_card_title,
-    task_card_validated, task_status_bucket,
+    UsageProjection, UsageProviderSnapshot, build_progress_card_from_parts, build_review_html,
+    event_class, format_log_markdown_from_events, format_minutes,
+    format_status_markdown_from_summary, git_summary, html_escape, overnight_usage, parse_duration,
+    parse_overnight_command, preflight_summary, render_task_cards_html, resource_summary,
+    summarize_task_cards_slice, task_card_title, task_card_validated, task_status_bucket,
 };
+
+mod prompts;
+pub use prompts::*;
 
 const RESOURCE_SAMPLE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const LONG_TURN_NOTICE_INTERVAL: Duration = Duration::from_secs(30 * 60);
@@ -68,9 +68,6 @@ pub fn start_overnight_run(options: OvernightStartOptions) -> Result<OvernightLa
     let task_cards_dir = run_dir.join("task-cards");
     let issue_drafts_dir = run_dir.join("issue-drafts");
     let validation_dir = run_dir.join("validation");
-    std::fs::create_dir_all(&task_cards_dir)?;
-    std::fs::create_dir_all(&issue_drafts_dir)?;
-    std::fs::create_dir_all(&validation_dir)?;
 
     let mut child = if options.use_current_session {
         options.parent_session.clone()
@@ -87,14 +84,6 @@ pub fn start_overnight_run(options: OvernightStartOptions) -> Result<OvernightLa
     if !options.use_current_session {
         child.status = SessionStatus::Closed;
     }
-    child.save()?;
-
-    if !options.use_current_session
-        && let Ok(todos) = crate::todo::load_todos(&options.parent_session.id)
-    {
-        let _ = crate::todo::save_todos(&coordinator_session_id, &todos);
-    }
-
     let manifest = OvernightManifest {
         version: OVERNIGHT_VERSION,
         run_id: run_id.clone(),
@@ -127,6 +116,22 @@ pub fn start_overnight_run(options: OvernightStartOptions) -> Result<OvernightLa
         last_activity_at: started_at,
     };
 
+    let initial_prompt = if options.use_current_session {
+        Some(build_visible_current_session_prompt(&manifest)?)
+    } else {
+        None
+    };
+    std::fs::create_dir_all(&manifest.task_cards_dir)?;
+    std::fs::create_dir_all(&manifest.issue_drafts_dir)?;
+    std::fs::create_dir_all(&manifest.validation_dir)?;
+    child.save()?;
+
+    if !options.use_current_session
+        && let Ok(todos) = crate::todo::load_todos(&options.parent_session.id)
+    {
+        let _ = crate::todo::save_todos(&coordinator_session_id, &todos);
+    }
+
     save_manifest(&manifest)?;
     write_initial_review_notes(&manifest)?;
     write_task_card_schema(&manifest)?;
@@ -148,9 +153,7 @@ pub fn start_overnight_run(options: OvernightStartOptions) -> Result<OvernightLa
     )?;
     render_review_html(&manifest)?;
 
-    let initial_prompt = if options.use_current_session {
-        Some(build_visible_current_session_prompt(&manifest))
-    } else {
+    if !options.use_current_session {
         spawn_supervisor(
             manifest.clone(),
             child,
@@ -158,8 +161,7 @@ pub fn start_overnight_run(options: OvernightStartOptions) -> Result<OvernightLa
             options.registry,
             child_is_canary,
         );
-        None
-    };
+    }
 
     Ok(OvernightLaunch {
         manifest,
@@ -258,9 +260,9 @@ async fn run_supervisor(
         registry.register_selfdev_tools().await;
     }
 
+    let mut next_prompt = build_coordinator_prompt(&manifest, &preflight)?;
     let mut agent =
         Agent::new_with_session_and_disabled_startup_context(provider, registry, child, None);
-    let mut next_prompt = build_coordinator_prompt(&manifest, &preflight);
     let mut handoff_notice_sent = false;
     let mut morning_report_prompt_sent = false;
     let mut final_wrapup_prompt_sent = false;
@@ -292,20 +294,20 @@ async fn run_supervisor(
                 json!({ "target_wake_at": current.target_wake_at }),
                 true,
             )?;
-            next_prompt = build_handoff_ready_prompt(&current);
+            next_prompt = build_handoff_ready_prompt(&current)?;
             handoff_notice_sent = true;
         }
 
         record_event(
             &current,
             "coordinator_turn_started",
-            prompt_event_summary(&next_prompt),
-            json!({ "prompt_preview": crate::util::truncate_str(&next_prompt, 600) }),
+            prompt_event_summary(next_prompt.kind),
+            json!({ "prompt_preview": crate::util::truncate_str(&next_prompt.text, 600) }),
             true,
         )?;
         render_review_html(&current)?;
 
-        let output = run_turn_monitored(&mut agent, &current, &next_prompt).await?;
+        let output = run_turn_monitored(&mut agent, &current, &next_prompt.text).await?;
         let after_turn = load_manifest(&manifest.run_id)?;
         record_event(
             &after_turn,
@@ -331,6 +333,7 @@ async fn run_supervisor(
             if !morning_report_prompt_sent && after_turn.morning_report_posted_at.is_none() {
                 let mut updated = after_turn.clone();
                 updated.morning_report_posted_at = Some(now);
+                let morning_prompt = build_morning_report_prompt(&updated)?;
                 save_manifest(&updated)?;
                 record_event(
                     &updated,
@@ -339,7 +342,7 @@ async fn run_supervisor(
                     json!({ "target_wake_at": updated.target_wake_at }),
                     true,
                 )?;
-                next_prompt = build_morning_report_prompt(&updated);
+                next_prompt = morning_prompt;
                 morning_report_prompt_sent = true;
                 continue;
             }
@@ -352,7 +355,7 @@ async fn run_supervisor(
                     json!({ "post_wake_grace_until": after_turn.post_wake_grace_until }),
                     true,
                 )?;
-                next_prompt = build_post_wake_continuation_prompt(&after_turn);
+                next_prompt = build_post_wake_continuation_prompt(&after_turn)?;
                 continue;
             }
 
@@ -364,7 +367,7 @@ async fn run_supervisor(
                     json!({ "post_wake_grace_until": after_turn.post_wake_grace_until }),
                     true,
                 )?;
-                next_prompt = build_final_wrapup_prompt(&after_turn);
+                next_prompt = build_final_wrapup_prompt(&after_turn)?;
                 final_wrapup_prompt_sent = true;
                 continue;
             }
@@ -377,7 +380,7 @@ async fn run_supervisor(
             break;
         }
 
-        next_prompt = build_continuation_prompt(&after_turn);
+        next_prompt = build_continuation_prompt(&after_turn)?;
     }
 
     Ok(())
@@ -1086,6 +1089,157 @@ mod tests {
             validation_dir: run_dir.join("validation"),
             last_activity_at: now,
         }
+    }
+
+    fn write_test_workflow(home: &Path, path: &str, id: &str, kind: &str, body: &str) {
+        std::fs::write(
+            home.join("instructions").join(path),
+            format!("---\nid: {id}\nkind: {kind}\ntemplate: handlebars\n---\n{body}"),
+        )
+        .unwrap();
+    }
+
+    fn synthetic_preflight() -> OvernightPreflight {
+        let at = "2026-09-05T12:00:00Z";
+        serde_json::from_value(json!({"captured_at":at,"usage":{"captured_at":at,"risk":"fixture","confidence":"fixture","providers":[],"notes":[]},"resources":{"captured_at":at},"git":{"captured_at":at,"branch":"fixture<&>"}})).unwrap()
+    }
+
+    #[test]
+    fn managed_overnight_sources_are_current_typed_and_keep_phase_identity() {
+        let home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        crate::instruction::SystemPromptComposer::new()
+            .ensure_global_store()
+            .unwrap();
+        let mut manifest = test_manifest(home.root(), "fixture");
+        manifest.working_dir = None;
+        write_test_workflow(
+            home.root(),
+            "notifications/overnight-handoff-ready.md",
+            "overnight-handoff-ready",
+            "notification",
+            "FIRST {{review_notes}}",
+        );
+        let first = build_handoff_ready_prompt(&manifest).unwrap();
+        assert_eq!(
+            first.text,
+            format!("FIRST {}", manifest.review_notes_path.display())
+        );
+        assert_eq!(first.kind, OvernightPromptKind::Handoff);
+        write_test_workflow(
+            home.root(),
+            "notifications/overnight-handoff-ready.md",
+            "overnight-handoff-ready",
+            "notification",
+            "SECOND",
+        );
+        let second = build_handoff_ready_prompt(&manifest).unwrap();
+        assert_eq!(second.text, "SECOND");
+        assert_eq!(
+            prompt_event_summary(first.kind),
+            prompt_event_summary(second.kind)
+        );
+        write_test_workflow(
+            home.root(),
+            "notifications/overnight-handoff-ready.md",
+            "overnight-handoff-ready",
+            "notification",
+            "",
+        );
+        assert!(
+            build_handoff_ready_prompt(&manifest)
+                .unwrap()
+                .text
+                .is_empty()
+        );
+        write_test_workflow(
+            home.root(),
+            "notifications/overnight-handoff-ready.md",
+            "overnight-handoff-ready",
+            "notification",
+            "{{missing}}",
+        );
+        assert!(build_handoff_ready_prompt(&manifest).is_err());
+        write_test_workflow(
+            home.root(),
+            "modules/overnight-coordinator.md",
+            "overnight-coordinator",
+            "module",
+            "{{mission}}|{{run_id}}|{{preflight_summary}}",
+        );
+        write_test_workflow(
+            home.root(),
+            "modules/overnight-default-mission.md",
+            "overnight-default-mission",
+            "module",
+            "{{missing}}",
+        );
+        manifest.mission = Some("MISSION <&{{literal}}>".into());
+        let preflight = synthetic_preflight();
+        assert_eq!(
+            build_coordinator_prompt(&manifest, &preflight)
+                .unwrap()
+                .text,
+            format!(
+                "MISSION <&{{{{literal}}}}>|fixture|{}",
+                preflight_summary(&preflight)
+            )
+        );
+        manifest.mission = None;
+        assert!(build_coordinator_prompt(&manifest, &preflight).is_err());
+    }
+
+    #[derive(Clone)]
+    struct NoOvernightProviderCalls;
+    #[async_trait::async_trait]
+    impl Provider for NoOvernightProviderCalls {
+        async fn complete(
+            &self,
+            _messages: &[crate::message::Message],
+            _tools: &[crate::message::ToolDefinition],
+            _system: &str,
+            _resume: Option<&str>,
+        ) -> Result<crate::provider::EventStream> {
+            panic!("invalid instructions must not dispatch");
+        }
+        fn name(&self) -> &str {
+            "overnight-fixture"
+        }
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(self.clone())
+        }
+    }
+
+    #[test]
+    fn invalid_visible_overnight_source_does_not_publish_run_or_mutate_parent() {
+        let home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        crate::instruction::SystemPromptComposer::new()
+            .ensure_global_store()
+            .unwrap();
+        write_test_workflow(
+            home.root(),
+            "modules/overnight-visible-coordinator.md",
+            "overnight-visible-coordinator",
+            "module",
+            "{{missing}}",
+        );
+        let mut parent = Session::create_with_id("overnight-render-parent".into(), None, None);
+        parent.save().unwrap();
+        let before = serde_json::to_value(Session::load(&parent.id).unwrap()).unwrap();
+        let result = start_overnight_run(OvernightStartOptions {
+            duration: OvernightDuration { minutes: 60 },
+            mission: Some("FIXTURE".into()),
+            parent_session: parent.clone(),
+            provider: Arc::new(NoOvernightProviderCalls),
+            registry: Registry::empty(),
+            working_dir: None,
+            use_current_session: true,
+        });
+        assert!(result.is_err());
+        assert!(!runs_dir().unwrap().exists());
+        assert_eq!(
+            serde_json::to_value(Session::load(&parent.id).unwrap()).unwrap(),
+            before
+        );
     }
 
     #[test]

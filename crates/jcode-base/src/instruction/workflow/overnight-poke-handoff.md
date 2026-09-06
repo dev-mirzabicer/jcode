@@ -1,0 +1,1 @@
+Enter handoff-ready mode. Update review notes, task cards, validation evidence, dirty repo state, risks, skipped work, and next steps. Avoid starting large or risky new work.

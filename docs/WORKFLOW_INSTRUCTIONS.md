@@ -34,6 +34,14 @@ The SDKs retain schema validation, error normalization, previous-response limits
 
 The additive `workflow_prompt_rendering` capability is mandatory for these calls. Older servers fail before a model turn, with no embedded-prose fallback. Rendering does not append history or call a model. Invalid sources propagate as request errors, preserving the current session and preventing the affected attempt.
 
+### Overnight workflows
+
+The existing headless supervisor and launching TUI own overnight execution. The migration does not move supervision to a different process, change queues or timing, or adopt profiles/model aliases. In particular, the existing remote-attached TUI overnight mode remains locally supervised and uses that owner's instruction store and working directory.
+
+Coordinator and visible-start prose live in `modules/overnight-coordinator.md` and `overnight-visible-coordinator.md`, with a conditional `overnight-default-mission.md` module. Follow-up resources live under `notifications/overnight-*`. Paths, times, preflight facts and stall counts remain typed caller data. The fixed auto-poke run marker remains code-owned. Supervisor log labels derive from a typed phase, not editable prose.
+
+A failed visible-start render leaves the parent and run publication untouched. Headless preparation propagates rendering errors before constructing the coordinator Agent or calling the model, using the existing supervisor failure record. Follow-up rendering occurs before setting request flags or consuming the poke count. The TUI retains continuation state after a render failure, queues no turn, and reports the error. Repair can be followed by an explicit continuation. Phase 9 retains ownership of future unattended policy.
+
 ## Source and failure semantics
 
 Working files are authoritative, including intentionally empty bodies where the owner retains meaningful structure. A present invalid project redefinition fails rather than exposing global prose. Missing previously adopted singleton resources are damage, not permission to recreate defaults. New shipped paths use the existing versioned, scoped Git seed-adoption transaction. It preserves current files and does not push a repository.

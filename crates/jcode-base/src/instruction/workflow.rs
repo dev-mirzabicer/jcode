@@ -39,6 +39,21 @@ macro_rules! workflows {
 }
 
 workflows! {
+    OvernightPokeIntro { manifest_path: &'a str, review_notes: &'a str, task_cards: &'a str, validation: &'a str } => ("overnight-poke-intro", Notification, "notifications", "overnight visible follow-up", Handlebars, ProjectThenGlobal),
+    OvernightPokeDiagnostic { stalled_turns: u8 } => ("overnight-poke-diagnostic", Notification, "notifications", "overnight visible follow-up", Handlebars, ProjectThenGlobal),
+    OvernightPokeHandoff => ("overnight-poke-handoff", Notification, "notifications", "overnight visible follow-up", Plain, ProjectThenGlobal),
+    OvernightPokeMorningReport => ("overnight-poke-morning", Notification, "notifications", "overnight visible follow-up", Plain, ProjectThenGlobal),
+    OvernightPokePostWake => ("overnight-poke-post-wake", Notification, "notifications", "overnight visible follow-up", Plain, ProjectThenGlobal),
+    OvernightPokeFinalWrap => ("overnight-poke-final", Notification, "notifications", "overnight visible follow-up", Plain, ProjectThenGlobal),
+    OvernightPokeContinue => ("overnight-poke-continue", Notification, "notifications", "overnight visible follow-up", Plain, ProjectThenGlobal),
+    OvernightCoordinator { run_id: &'a str, target_wake_at: &'a str, post_wake_grace_until: &'a str, mission: &'a str, issue_drafts: &'a str, review_notes: &'a str, task_cards: &'a str, task_card_schema: &'a str, validation: &'a str, review_html: &'a str, preflight_summary: &'a str } => ("overnight-coordinator", Module, "modules", "overnight runner", Handlebars, ProjectThenGlobal),
+    OvernightVisible { run_id: &'a str, target_wake_at: &'a str, post_wake_grace_until: &'a str, mission: &'a str, review_notes: &'a str, task_cards: &'a str, task_card_schema: &'a str, validation: &'a str, review_html: &'a str, manifest_path: &'a str } => ("overnight-visible-coordinator", Module, "modules", "overnight runner", Handlebars, ProjectThenGlobal),
+    OvernightContinuation { remaining: &'a str, review_notes: &'a str } => ("overnight-continuation", Notification, "notifications", "overnight runner", Handlebars, ProjectThenGlobal),
+    OvernightHandoff { review_notes: &'a str } => ("overnight-handoff-ready", Notification, "notifications", "overnight runner", Handlebars, ProjectThenGlobal),
+    OvernightMorning { review_notes: &'a str, review_html: &'a str } => ("overnight-morning-report", Notification, "notifications", "overnight runner", Handlebars, ProjectThenGlobal),
+    OvernightPostWake { review_notes: &'a str, post_wake_grace_until: &'a str } => ("overnight-post-wake", Notification, "notifications", "overnight runner", Handlebars, ProjectThenGlobal),
+    OvernightFinal { review_notes: &'a str, review_html: &'a str } => ("overnight-final-wrap", Notification, "notifications", "overnight runner", Handlebars, ProjectThenGlobal),
+    OvernightDefaultMission => ("overnight-default-mission", Module, "modules", "overnight runner", Plain, ProjectThenGlobal),
     StructuredOutput { schema: &'a str } => ("structured-output", Module, "modules", "structured SDK initial prompt", Plain, ProjectThenGlobal),
     StructuredCorrection { schema: &'a str, error_lines: &'a str, previous_response: &'a str } => ("structured-output-correction", Notification, "notifications", "structured SDK correction", Plain, ProjectThenGlobal),
     SwarmEffort => ("swarm-effort", System, "system", "request dynamic effort directive", Plain, ProjectThenGlobal),

@@ -1,0 +1,1 @@
+Final overnight wrap-up: the post-wake grace window has expired. Stop starting new work. Finish only immediate cleanup, update `{{review_notes}}`, task-card JSON, and `{{review_html}}` with final before/after evidence, validation status, dirty repo state, remaining risks, and next steps, then stop.

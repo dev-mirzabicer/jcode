@@ -1,0 +1,1 @@
+Final wrap-up. Stop starting new work. Finish immediate cleanup only, update review notes/task cards/review page with final evidence and risks, then mark the manifest completed.

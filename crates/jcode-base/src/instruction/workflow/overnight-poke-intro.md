@@ -1,0 +1,1 @@
+ First inspect manifest `{{manifest_path}}`, review notes `{{review_notes}}`, task cards `{{task_cards}}`, validation `{{validation}}`, and git/todo state. Keep artifacts current before stopping. 

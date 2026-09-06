@@ -1,0 +1,1 @@
+Continue the overnight run. If the previous task is done, choose the next highest-confidence bounded task. If blocked, record why and switch to another useful task. Prove/reproduce before fixing, validate after, and update task cards/review notes.

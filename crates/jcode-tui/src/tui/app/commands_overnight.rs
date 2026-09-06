@@ -395,6 +395,18 @@ impl App {
             return false;
         }
 
+        let prompt = match build_overnight_poke_message(&manifest, phase, state.stalled_turns) {
+            Ok(prompt) => prompt,
+            Err(error) => {
+                self.overnight_auto_poke = Some(state);
+                self.push_display_message(DisplayMessage::error(format!(
+                    "Could not render overnight follow-up; no turn was queued: {error}"
+                )));
+                self.set_status_notice("Overnight follow-up needs instruction repair");
+                return false;
+            }
+        };
+
         if matches!(phase, OvernightPokePhase::MorningReport) {
             state.morning_report_poked = true;
         }
@@ -406,7 +418,6 @@ impl App {
         }
         state.total_pokes_sent = state.total_pokes_sent.saturating_add(1);
 
-        let prompt = build_overnight_poke_message(&manifest, phase, state.stalled_turns);
         self.push_display_message(DisplayMessage::system(format!(
             "🌙 Overnight auto-poking: {}. /overnight cancel to stop.",
             overnight_phase_label(phase)
@@ -486,27 +497,30 @@ fn build_overnight_poke_message(
     manifest: &crate::overnight::OvernightManifest,
     phase: OvernightPokePhase,
     stalled_turns: u8,
-) -> String {
-    let prefix = format!(
-        "Overnight auto-poke for run `{}`. First inspect manifest `{}`, review notes `{}`, task cards `{}`, validation `{}`, and git/todo state. Keep artifacts current before stopping. ",
-        manifest.run_id,
-        manifest.run_dir.join("manifest.json").display(),
-        manifest.review_notes_path.display(),
-        manifest.task_cards_dir.display(),
-        manifest.validation_dir.display(),
-    );
-    let body = match phase {
-        OvernightPokePhase::Diagnostic => format!(
-            "The auto-poke guard detected {} no-progress turn(s). Do not continue blindly. Diagnose why progress stalled: blocked task, missing credentials, failing tool, context/model issue, or unclear next step. Either recover with one small verifiable task, or mark the run/task blocked and stop.",
-            stalled_turns
-        ),
-        OvernightPokePhase::Handoff => "Enter handoff-ready mode. Update review notes, task cards, validation evidence, dirty repo state, risks, skipped work, and next steps. Avoid starting large or risky new work.".to_string(),
-        OvernightPokePhase::MorningReport => "Target wake time reached. Post the morning report now before starting any new work. Include completed work, current state, validation, files changed, risks, and next steps. Set `morning_report_posted_at` in the manifest when done.".to_string(),
-        OvernightPokePhase::PostWake => "Post-wake continuation. Continue only bounded, safe, verifiable work that is in progress or clearly high-value. Do not start broad/risky new changes. Keep artifacts current.".to_string(),
-        OvernightPokePhase::FinalWrap | OvernightPokePhase::FinalDone => "Final wrap-up. Stop starting new work. Finish immediate cleanup only, update review notes/task cards/review page with final evidence and risks, then mark the manifest completed.".to_string(),
-        OvernightPokePhase::Continue => "Continue the overnight run. If the previous task is done, choose the next highest-confidence bounded task. If blocked, record why and switch to another useful task. Prove/reproduce before fixing, validate after, and update task cards/review notes.".to_string(),
+) -> anyhow::Result<String> {
+    use crate::instruction::workflow::Workflow;
+    let working_dir = manifest.working_dir.as_deref().map(std::path::Path::new);
+    // This factual run marker remains the queue's compatibility identity.
+    let prefix = format!("Overnight auto-poke for run `{}`.", manifest.run_id);
+    let intro = Workflow::OvernightPokeIntro {
+        manifest_path: &manifest.run_dir.join("manifest.json").display().to_string(),
+        review_notes: &manifest.review_notes_path.display().to_string(),
+        task_cards: &manifest.task_cards_dir.display().to_string(),
+        validation: &manifest.validation_dir.display().to_string(),
+    }
+    .render(working_dir)?;
+    let resource = match phase {
+        OvernightPokePhase::Diagnostic => Workflow::OvernightPokeDiagnostic { stalled_turns },
+        OvernightPokePhase::Handoff => Workflow::OvernightPokeHandoff,
+        OvernightPokePhase::MorningReport => Workflow::OvernightPokeMorningReport,
+        OvernightPokePhase::PostWake => Workflow::OvernightPokePostWake,
+        OvernightPokePhase::FinalWrap | OvernightPokePhase::FinalDone => {
+            Workflow::OvernightPokeFinalWrap
+        }
+        OvernightPokePhase::Continue => Workflow::OvernightPokeContinue,
     };
-    format!("{}{}", prefix, body)
+    let body = resource.render(working_dir)?;
+    Ok(format!("{prefix}{intro}{body}"))
 }
 
 fn overnight_fingerprint_for_app(
@@ -634,6 +648,79 @@ mod tests {
             morning_report_poked: false,
             final_wrap_poked: false,
         }
+    }
+
+    fn relocated_manifest() -> crate::overnight::OvernightManifest {
+        let now = Utc::now();
+        let manifest = test_manifest_with_times(
+            now - ChronoDuration::hours(2),
+            now - ChronoDuration::minutes(1),
+            now + ChronoDuration::hours(1),
+        );
+        let root = crate::overnight::run_dir(&manifest.run_id).unwrap();
+        let mut value = serde_json::to_value(manifest).unwrap();
+        for field in value.as_object_mut().unwrap().values_mut() {
+            if let Some(path) = field
+                .as_str()
+                .and_then(|s| s.strip_prefix("/tmp/overnight_test"))
+            {
+                *field = serde_json::Value::String(format!("{}{path}", root.display()));
+            }
+        }
+        serde_json::from_value(value).unwrap()
+    }
+
+    fn write_poke_source(home: &std::path::Path, id: &str, body: &str) {
+        std::fs::write(
+            home.join(format!("instructions/notifications/{id}.md")),
+            format!("---\nid: {id}\nkind: notification\ntemplate: handlebars\n---\n{body}"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn managed_overnight_poke_retains_framing_and_failed_render_does_not_consume_dispatch() {
+        let home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        crate::instruction::SystemPromptComposer::new()
+            .ensure_global_store()
+            .unwrap();
+        let manifest = relocated_manifest();
+        write_poke_source(
+            home.root(),
+            "overnight-poke-intro",
+            " INTRO {{manifest_path}} ",
+        );
+        write_poke_source(
+            home.root(),
+            "overnight-poke-diagnostic",
+            "DIAGNOSTIC {{stalled_turns}}",
+        );
+        let first =
+            build_overnight_poke_message(&manifest, OvernightPokePhase::Diagnostic, 2).unwrap();
+        assert!(is_overnight_auto_poke_message(&first));
+        assert!(first.ends_with("DIAGNOSTIC 2"));
+        write_poke_source(home.root(), "overnight-poke-diagnostic", "");
+        assert!(is_overnight_auto_poke_message(
+            &build_overnight_poke_message(&manifest, OvernightPokePhase::Diagnostic, 2).unwrap()
+        ));
+        let mut app = crate::tui::app::tests::create_test_app();
+        crate::overnight::save_manifest(&manifest).unwrap();
+        app.enable_overnight_auto_poke(&manifest);
+        app.overnight_auto_poke.as_mut().unwrap().diagnostic_sent = true;
+        write_poke_source(home.root(), "overnight-poke-morning", "{{missing}}");
+        assert!(!app.schedule_overnight_poke_followup_if_needed());
+        let state = app.overnight_auto_poke.as_ref().unwrap();
+        assert_eq!(state.total_pokes_sent, 0);
+        assert!(!state.morning_report_poked);
+        assert!(!app.pending_queued_dispatch);
+        assert!(app.queued_messages.is_empty());
+        write_poke_source(home.root(), "overnight-poke-morning", "REPAIRED");
+        assert!(app.schedule_overnight_poke_followup_if_needed());
+        assert_eq!(app.queued_messages.len(), 1);
+        assert_eq!(
+            app.overnight_auto_poke.as_ref().unwrap().total_pokes_sent,
+            1
+        );
     }
 
     #[test]

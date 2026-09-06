@@ -1,0 +1,1 @@
+Post-wake continuation. Continue only bounded, safe, verifiable work that is in progress or clearly high-value. Do not start broad/risky new changes. Keep artifacts current.

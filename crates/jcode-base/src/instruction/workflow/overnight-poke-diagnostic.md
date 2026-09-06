@@ -1,0 +1,1 @@
+The auto-poke guard detected {{stalled_turns}} no-progress turn(s). Do not continue blindly. Diagnose why progress stalled: blocked task, missing credentials, failing tool, context/model issue, or unclear next step. Either recover with one small verifiable task, or mark the run/task blocked and stop.

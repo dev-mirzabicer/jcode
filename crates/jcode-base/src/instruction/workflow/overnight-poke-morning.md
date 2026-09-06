@@ -1,0 +1,1 @@
+Target wake time reached. Post the morning report now before starting any new work. Include completed work, current state, validation, files changed, risks, and next steps. Set `morning_report_posted_at` in the manifest when done.

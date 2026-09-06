@@ -1,0 +1,1 @@
+Continue the current session's highest-value work, prioritizing verified, low-risk progress.
