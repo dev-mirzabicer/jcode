@@ -1,0 +1,80 @@
+{
+  "baseline_source": "3c3576b104540a8b71539c245eaa08a0574d0c17",
+  "verified_source": "99aced20d85b26c4567756ef20586fd298005ec4",
+  "verified_tree": "c45d10cf34ec05359572314a8bacf0ac6ab988c1",
+  "runtime": "99aced20d-dirty-afc30b76ba38",
+  "version": "v0.75.180-dev",
+  "current_and_shared_equal": true,
+  "canary": "passed",
+  "seed": {
+    "authority": "Mirza 2026-09-02 roster with 2026-09-06 Astra substitution",
+    "semantic_equality": true,
+    "aliases": [
+      "expensive-expert",
+      "architect",
+      "coder",
+      "researcher",
+      "fast-worker"
+    ],
+    "seed_sha256": "bb5e4c22063aba2b679c94039e0f04c0efb1e4f17ea6fd9832b21b9a2be65117",
+    "seed_bytes": 953
+  },
+  "live_seed_version": 27,
+  "live_seed_commit": "c0af670a32ff2156693f27a2dab48d4dcb0043d2",
+  "live_store_unrelated_untracked": [
+    ".DS_Store"
+  ],
+  "existing_session_unchanged": {
+    "model": "gpt-6-astra",
+    "provider_key": "openai-oauth",
+    "reasoning_effort": "high",
+    "system_sha256": "37b5619868d9ca2b7597d905d9a7448c13289e541adeb6054fe7246a78adae54"
+  },
+  "public_repl": {
+    "exit": 0,
+    "explicit_exit_command": "quit",
+    "exact_seed": true,
+    "persisted_frozen_activation": true,
+    "provider_dispatch": false
+  },
+  "earlier_runtime_attempts": {
+    "activation_os_error_35": 2,
+    "reload_succeeded_after_user_reduced_memory_pressure": true,
+    "binary_rebuild_needed": false,
+    "repl_eof_probe_timed_out": true,
+    "corrected_repl_probe_passed": true
+  },
+  "tests": {
+    "root_production_registry": {
+      "passed": 2
+    },
+    "provider_core": {
+      "passed": 142
+    },
+    "base_all": {
+      "passed": 1408,
+      "failed": 29,
+      "ignored": 1,
+      "failure_classification": "12 disabled-memory expectations, 3 unchanged cwd-sensitive session tests, 14 subsequent cwd-cascade failures"
+    },
+    "fresh_process_skills": {
+      "passed": 38
+    },
+    "fresh_process_transfer": {
+      "passed": 4
+    },
+    "fresh_process_roster": {
+      "passed": 8
+    },
+    "openrouter_runtime": {
+      "passed": 121,
+      "ignored": 1
+    },
+    "strict_affected_and_root_lint": "passed",
+    "workspace_format": "passed",
+    "diff_check": "passed"
+  },
+  "paid_model_calls": 0,
+  "swarm_delegation_used": false,
+  "human_acceptance_not_claimed_by_this_artifact": true
+}

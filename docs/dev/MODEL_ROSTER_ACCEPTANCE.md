@@ -78,3 +78,28 @@ health check, and post-launch failure policy remains with the execution owner.
 
 No prompt/skill wording test, automated model-quality evaluation, or paid model
 request is part of this verification.
+
+## Activated boundary
+
+The coordinated TUI build was activated as `v0.75.180-dev`, runtime
+`99aced20d-dirty-afc30b76ba38`. Current and shared channels matched and canary
+passed. Two activation attempts returned macOS OS error 35. Reload succeeded
+after Mirza reduced memory pressure, without rebuilding the already executable
+binary. This records the observation, not a proven diagnosis of the OS error.
+
+The live global store adopted seed 27 through its scoped local Git transaction.
+Its roster bytes matched the approved seed exactly. An unrelated `.DS_Store`
+remained untracked and was not included in the commit. The current session's
+model, OAuth route, effort and complete frozen system state remained unchanged.
+
+An activated public REPL in a private sandbox initialized the exact seed,
+persisted a frozen primary activation, exited zero using its documented `quit`
+command and made no provider dispatch. The first probe used EOF and timed out
+because the existing direct REPL treats EOF as empty input. That owned process
+was terminated, the probe was corrected using the source-confirmed exit command,
+and the complete rerun passed. No unrelated REPL behavior was changed.
+
+The compact, non-secret record is [`WP08_EVIDENCE.json`](model-roster/WP08_EVIDENCE.json).
+It contains source/tree/runtime identities, seed equality, unchanged-session
+hashes, test outcomes and the failed-attempt boundaries. Human package acceptance
+remains a separate program decision.
