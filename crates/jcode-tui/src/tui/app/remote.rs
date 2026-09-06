@@ -54,8 +54,8 @@ use workspace::{handle_workspace_command, handle_workspace_navigation_key};
 pub(super) use input_dispatch::{
     apply_remote_transcript_event, apply_transcript_event, begin_remote_send,
     begin_remote_split_launch, finish_remote_split_launch, history_matches_pending_startup_prompt,
-    route_prepared_input_to_new_remote_session, stage_turn_for_remote_tick_loop,
-    submit_prepared_remote_input, submit_remote_slash_input,
+    route_prepared_input_to_new_remote_session, send_pending_split,
+    stage_turn_for_remote_tick_loop, submit_prepared_remote_input, submit_remote_slash_input,
 };
 pub(super) use key_handling::{
     handle_remote_char_input, handle_remote_key, handle_remote_key_event, send_interleave_now,
@@ -1426,9 +1426,9 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
             .clone()
             .unwrap_or_else(|| "Split".to_string());
         begin_remote_split_launch(app, &flow_label);
-        if let Err(error) = remote.split().await {
+        if let Err(error) = send_pending_split(app, remote).await {
             finish_remote_split_launch(app);
-            let had_startup = app.pending_split_startup_message.take().is_some();
+            let had_startup = app.pending_split_workflow.take().is_some();
             app.pending_split_parent_session_id = None;
             let had_prompt = app.pending_split_prompt.take().is_some();
             let label = app.pending_split_label.take();

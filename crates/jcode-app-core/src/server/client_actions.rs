@@ -669,15 +669,29 @@ pub(super) async fn handle_trigger_memory_extraction(
 
 fn clone_split_session(parent_session_id: &str) -> anyhow::Result<(String, String)> {
     let parent = Session::load(parent_session_id)?;
+    clone_split_parent(&parent)
+}
 
+fn clone_split_parent(parent: &Session) -> anyhow::Result<(String, String)> {
+    let parent_session_id = &parent.id;
     let mut child = Session::create(Some(parent_session_id.to_string()), None);
-    child.inherit_continuation_state_from(&parent);
+    child.inherit_continuation_state_from(parent);
     child.status = crate::session::SessionStatus::Closed;
     // The parent agent keeps ownership of any in-flight request; tell the
     // forked agent so it treats the next prompt as fresh work instead of
     // continuing (and duplicating) the parent's current turn.
-    child.append_fork_notice(parent_session_id, parent.display_name())?;
-    child.save()?;
+    if let Err(error) = child
+        .append_fork_notice(parent_session_id, parent.display_name())
+        .map(|_| ())
+        .and_then(|()| child.save())
+    {
+        if let Err(cleanup) = crate::session::remove_unpublished_session(&child.id) {
+            anyhow::bail!(
+                "split child preparation failed ({error}); cleanup also failed: {cleanup}"
+            );
+        }
+        return Err(error);
+    }
 
     let name = child.display_name().to_string();
     Ok((child.id.clone(), name))
@@ -816,6 +830,8 @@ fn remove_failed_transfer_child(session_id: &str) -> anyhow::Result<()> {
 pub(super) async fn handle_split(
     id: u64,
     client_session_id: &str,
+    instruction_repositories: &crate::instruction::InstructionRepositoryService,
+    workflow: Option<&jcode_task_types::WorkflowPromptRequest>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
     let started = Instant::now();
@@ -827,7 +843,20 @@ pub(super) async fn handle_split(
             ("session_id", client_session_id.to_string()),
         ],
     );
-    let (new_session_id, new_session_name) = match clone_split_session(client_session_id) {
+    let prepared = if let Some(workflow) = workflow {
+        Session::load(client_session_id).and_then(|parent| {
+            let text = crate::workflow::render_prompt(
+                instruction_repositories,
+                parent.working_dir.as_deref().map(std::path::Path::new),
+                workflow,
+            )?;
+            let (id, name) = clone_split_parent(&parent)?;
+            Ok((id, name, Some(text)))
+        })
+    } else {
+        clone_split_session(client_session_id).map(|(id, name)| (id, name, None))
+    };
+    let (new_session_id, new_session_name, startup_message) = match prepared {
         Ok(result) => result,
         Err(e) => {
             crate::logging::event_warn(
@@ -840,11 +869,17 @@ pub(super) async fn handle_split(
                     ("elapsed_ms", started.elapsed().as_millis().to_string()),
                 ],
             );
-            let _ = client_event_tx.send(ServerEvent::Error {
-                id,
-                message: format!("Failed to save split session: {e}"),
-                retry_after_secs: None,
-            });
+            let message = format!("Failed to prepare split session: {e}");
+            let event = if workflow.is_some() {
+                ServerEvent::WorkflowSplitFailed { id, message }
+            } else {
+                ServerEvent::Error {
+                    id,
+                    message,
+                    retry_after_secs: None,
+                }
+            };
+            let _ = client_event_tx.send(event);
             return;
         }
     };
@@ -859,11 +894,20 @@ pub(super) async fn handle_split(
         ],
     );
 
-    let _ = client_event_tx.send(ServerEvent::SplitResponse {
-        id,
-        new_session_id,
-        new_session_name,
-    });
+    let event = match startup_message {
+        Some(startup_message) => ServerEvent::WorkflowSplitResponse {
+            id,
+            new_session_id,
+            new_session_name,
+            startup_message,
+        },
+        None => ServerEvent::SplitResponse {
+            id,
+            new_session_id,
+            new_session_name,
+        },
+    };
+    let _ = client_event_tx.send(event);
 }
 
 pub(super) async fn handle_transfer(

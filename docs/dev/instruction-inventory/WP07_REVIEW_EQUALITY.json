@@ -1,0 +1,106 @@
+{
+  "source_revision": "55ec2bde3",
+  "route": "Original TUI production outputs captured, then compared against managed app-core rendering with ordinary and template-like parent IDs. Shared modules compared independently. Disposable probes removed.",
+  "cases": [
+    {
+      "bytes": 2075,
+      "equal": true,
+      "id": "INS-WFL-019",
+      "request": {
+        "kind": "review_startup",
+        "mode": "review",
+        "parent_session_id": "PARENT"
+      },
+      "sha256": "fb7a7a193d44b0724642f1269466778a64f9b0df25dcab1070c8a47d3a6661fc"
+    },
+    {
+      "bytes": 2048,
+      "equal": true,
+      "id": "INS-WFL-019",
+      "request": {
+        "kind": "review_startup",
+        "mode": "autoreview",
+        "parent_session_id": "PARENT"
+      },
+      "sha256": "d24ffdbdf0afd6ced7c223ab5bc9e2f01734d7fde4769a543a6953d47e5bb719"
+    },
+    {
+      "bytes": 2948,
+      "equal": true,
+      "id": "INS-WFL-020",
+      "request": {
+        "kind": "review_startup",
+        "mode": "judge",
+        "parent_session_id": "PARENT"
+      },
+      "sha256": "36844f2cba14f5ca4add977082206ddb51c39e6802371e6fc2872a43f30b8721"
+    },
+    {
+      "bytes": 3818,
+      "equal": true,
+      "id": "INS-WFL-020",
+      "request": {
+        "kind": "review_startup",
+        "mode": "autojudge",
+        "parent_session_id": "PARENT"
+      },
+      "sha256": "4f45184ae28869215da5edf2da0333a84a8c298873583439e9791c8342541908"
+    },
+    {
+      "bytes": 2102,
+      "equal": true,
+      "id": "INS-WFL-019",
+      "request": {
+        "kind": "review_startup",
+        "mode": "review",
+        "parent_session_id": "P<&{{literal}}>"
+      },
+      "sha256": "9d65ee8ba27f02b6e312381beef3f4af43f79c5836f7ef01e49357414821bf03"
+    },
+    {
+      "bytes": 2075,
+      "equal": true,
+      "id": "INS-WFL-019",
+      "request": {
+        "kind": "review_startup",
+        "mode": "autoreview",
+        "parent_session_id": "P<&{{literal}}>"
+      },
+      "sha256": "cb889c7f9584e5d0c613132b71b0fc9ae28ecb9f0af797aaacbd495a718780ef"
+    },
+    {
+      "bytes": 2975,
+      "equal": true,
+      "id": "INS-WFL-020",
+      "request": {
+        "kind": "review_startup",
+        "mode": "judge",
+        "parent_session_id": "P<&{{literal}}>"
+      },
+      "sha256": "024b177b35df12da60a4d344ae3108c2eec2c6cea01f78883e0f2c5a56894925"
+    },
+    {
+      "bytes": 3845,
+      "equal": true,
+      "id": "INS-WFL-020",
+      "request": {
+        "kind": "review_startup",
+        "mode": "autojudge",
+        "parent_session_id": "P<&{{literal}}>"
+      },
+      "sha256": "6fe296e4ba521e1813e59ad25e0e1ae53d56e96b0b446158dfa1abc7b4b3067d"
+    },
+    {
+      "bytes": 412,
+      "equal": true,
+      "id": "INS-WFL-017",
+      "sha256": "26050547a7b3f2c77b4c1df3ab426294b468f458fb4c7d9cf5cb5e7e2b881b6b"
+    },
+    {
+      "bytes": 497,
+      "equal": true,
+      "id": "INS-WFL-018",
+      "sha256": "1774c8be0ac9787a167c8d4811111904b31e82da70f7de120461761ce4a081bf"
+    }
+  ]
+}

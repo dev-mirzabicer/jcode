@@ -628,6 +628,13 @@ pub enum Request {
     #[serde(rename = "split")]
     Split { id: u64 },
 
+    /// Render a startup workflow in the captured parent's scope before cloning.
+    #[serde(rename = "split_with_workflow")]
+    SplitWithWorkflow {
+        id: u64,
+        workflow: jcode_task_types::WorkflowPromptRequest,
+    },
+
     /// Transfer the current session into a compacted handoff session
     #[serde(rename = "transfer")]
     Transfer { id: u64 },
@@ -2017,6 +2024,17 @@ pub enum ServerEvent {
     },
 
     /// Response to split request — new session created with cloned conversation
+    #[serde(rename = "workflow_split_response")]
+    WorkflowSplitResponse {
+        id: u64,
+        new_session_id: String,
+        new_session_name: String,
+        startup_message: String,
+    },
+
+    #[serde(rename = "workflow_split_failed")]
+    WorkflowSplitFailed { id: u64, message: String },
+
     #[serde(rename = "split_response")]
     SplitResponse {
         id: u64,

@@ -1,4 +1,4 @@
-use super::state_ui_storage::infer_spawned_session_startup_hints;
+use super::state_ui_storage::spawned_session_startup_hints;
 use super::*;
 use crate::tui::ui::tools_ui;
 use crate::tui::{TuiState, backend};
@@ -330,13 +330,19 @@ impl App {
         }
     }
 
-    pub(crate) fn save_startup_message_for_session(session_id: &str, message: String) {
+    pub(crate) fn save_startup_message_for_session(
+        session_id: &str,
+        message: String,
+        hints: Option<(crate::workflow::ReviewWorkflowKind, &str)>,
+    ) -> anyhow::Result<()> {
         if message.trim().is_empty() {
-            return;
+            return Ok(());
         }
-        if let Ok(jcode_dir) = crate::storage::jcode_dir() {
+        let jcode_dir = crate::storage::jcode_dir()?;
+        {
             let path = jcode_dir.join(format!("client-input-{}", session_id));
-            let inferred_hints = infer_spawned_session_startup_hints(&message);
+            let startup_hints =
+                hints.map(|(mode, parent)| spawned_session_startup_hints(mode, parent));
             let data = serde_json::json!({
                 "cursor": 0,
                 "input": "",
@@ -344,9 +350,9 @@ impl App {
                 "submit_on_restore": false,
                 "queued_messages": [],
                 "hidden_queued_system_messages": [message],
-                "startup_status_notice": inferred_hints.as_ref().map(|(status, _)| status.clone()),
-                "startup_display_message_title": inferred_hints.as_ref().map(|(_, (title, _))| title.clone()),
-                "startup_display_message": inferred_hints.as_ref().map(|(_, (_, body))| body.clone()),
+                "startup_status_notice": startup_hints.as_ref().map(|(status, _)| status.clone()),
+                "startup_display_message_title": startup_hints.as_ref().map(|(_, (title, _))| title.clone()),
+                "startup_display_message": startup_hints.as_ref().map(|(_, (_, body))| body.clone()),
                 "interleave_message": serde_json::Value::Null,
                 "pending_soft_interrupts": [],
                 "pending_soft_interrupt_resend": [],
@@ -358,8 +364,9 @@ impl App {
                 "split_view_enabled": false,
                 "todos_view_enabled": false,
             });
-            let _ = std::fs::write(&path, data.to_string());
+            crate::storage::write_json_fast(&path, &data)?;
         }
+        Ok(())
     }
 
     pub(crate) fn save_startup_submission_for_session(

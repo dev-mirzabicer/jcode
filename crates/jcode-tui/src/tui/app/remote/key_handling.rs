@@ -1475,7 +1475,7 @@ async fn handle_remote_key_internal(
                         app,
                         "Autoreview",
                         parent_session_id.clone(),
-                        app_mod::commands::build_autoreview_startup_message(&parent_session_id),
+                        crate::workflow::ReviewWorkflowKind::Autoreview,
                         crate::config::config().autoreview.model.clone(),
                         None,
                     );
@@ -1484,9 +1484,9 @@ async fn handle_remote_key_internal(
                     } else {
                         app.pending_split_request = false;
                         begin_remote_split_launch(app, "Autoreview");
-                        if let Err(error) = remote.split().await {
+                        if let Err(error) = send_pending_split(app, remote).await {
                             finish_remote_split_launch(app);
-                            app.pending_split_startup_message = None;
+                            app.pending_split_workflow = None;
                             app.pending_split_parent_session_id = None;
                             app.pending_split_prompt = None;
                             app.pending_split_model_override = None;
@@ -1533,7 +1533,7 @@ async fn handle_remote_key_internal(
                         app,
                         "Autojudge",
                         parent_session_id.clone(),
-                        app_mod::commands::build_autojudge_startup_message(&parent_session_id),
+                        crate::workflow::ReviewWorkflowKind::Autojudge,
                         crate::config::config().autojudge.model.clone(),
                         None,
                     );
@@ -1542,9 +1542,9 @@ async fn handle_remote_key_internal(
                     } else {
                         app.pending_split_request = false;
                         begin_remote_split_launch(app, "Autojudge");
-                        if let Err(error) = remote.split().await {
+                        if let Err(error) = send_pending_split(app, remote).await {
                             finish_remote_split_launch(app);
-                            app.pending_split_startup_message = None;
+                            app.pending_split_workflow = None;
                             app.pending_split_parent_session_id = None;
                             app.pending_split_prompt = None;
                             app.pending_split_model_override = None;
@@ -1573,7 +1573,7 @@ async fn handle_remote_key_internal(
                         app,
                         "Review",
                         parent_session_id.clone(),
-                        app_mod::commands::build_review_startup_message(&parent_session_id),
+                        crate::workflow::ReviewWorkflowKind::Review,
                         model_override,
                         provider_key_override,
                     );
@@ -1582,9 +1582,9 @@ async fn handle_remote_key_internal(
                     } else {
                         app.pending_split_request = false;
                         begin_remote_split_launch(app, "Review");
-                        if let Err(error) = remote.split().await {
+                        if let Err(error) = send_pending_split(app, remote).await {
                             finish_remote_split_launch(app);
-                            app.pending_split_startup_message = None;
+                            app.pending_split_workflow = None;
                             app.pending_split_parent_session_id = None;
                             app.pending_split_prompt = None;
                             app.pending_split_model_override = None;
@@ -1613,7 +1613,7 @@ async fn handle_remote_key_internal(
                         app,
                         "Judge",
                         parent_session_id.clone(),
-                        app_mod::commands::build_judge_startup_message(&parent_session_id),
+                        crate::workflow::ReviewWorkflowKind::Judge,
                         model_override,
                         provider_key_override,
                     );
@@ -1622,9 +1622,9 @@ async fn handle_remote_key_internal(
                     } else {
                         app.pending_split_request = false;
                         begin_remote_split_launch(app, "Judge");
-                        if let Err(error) = remote.split().await {
+                        if let Err(error) = send_pending_split(app, remote).await {
                             finish_remote_split_launch(app);
-                            app.pending_split_startup_message = None;
+                            app.pending_split_workflow = None;
                             app.pending_split_parent_session_id = None;
                             app.pending_split_prompt = None;
                             app.pending_split_model_override = None;

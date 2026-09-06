@@ -1155,3 +1155,108 @@ async fn resume_all_skips_session_with_completed_turn() {
         crate::env::remove_var("JCODE_HOME");
     }
 }
+
+#[test]
+fn workflow_split_renders_before_creation_and_uses_one_parent_snapshot() {
+    let home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let repositories = crate::instruction::InstructionRepositoryService::new();
+    crate::instruction::SystemPromptComposer::new()
+        .ensure_global_store()
+        .unwrap();
+    let mut parent =
+        crate::session::Session::create_with_id("review-split-parent".into(), None, None);
+    parent.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "PARENT HISTORY".into(),
+            cache_control: None,
+        }],
+    );
+    parent.save().unwrap();
+    crate::session::Session::load(&parent.id).unwrap();
+    let session_files = || {
+        std::fs::read_dir(home.root().join("sessions"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<HashSet<_>>()
+    };
+    let before = session_files();
+    let source = home.root().join("instructions/modules/review-startup.md");
+    let write = |body: &str| {
+        std::fs::write(
+            &source,
+            format!("---\nid: review-startup\nkind: module\ntemplate: handlebars\n---\n{body}"),
+        )
+        .unwrap()
+    };
+    let request = crate::workflow::WorkflowPromptRequest::ReviewStartup {
+        mode: crate::workflow::ReviewWorkflowKind::Review,
+        parent_session_id: parent.id.clone(),
+    };
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    write("{{missing}}");
+    runtime.block_on(super::handle_split(
+        90,
+        &parent.id,
+        &repositories,
+        Some(&request),
+        &tx,
+    ));
+    assert!(matches!(
+        rx.try_recv().unwrap(),
+        ServerEvent::WorkflowSplitFailed { id: 90, .. }
+    ));
+    assert_eq!(session_files(), before);
+    write("READY {{parent_session_id}}");
+    let fork = home
+        .root()
+        .join("instructions/notifications/session-fork.md");
+    let original = std::fs::read(&fork).unwrap();
+    std::fs::write(
+        &fork,
+        "---\nid: session-fork\nkind: notification\ntemplate: handlebars\n---\n{{missing}}",
+    )
+    .unwrap();
+    runtime.block_on(super::handle_split(
+        91,
+        &parent.id,
+        &repositories,
+        Some(&request),
+        &tx,
+    ));
+    assert!(matches!(
+        rx.try_recv().unwrap(),
+        ServerEvent::WorkflowSplitFailed { id: 91, .. }
+    ));
+    assert_eq!(session_files(), before);
+    std::fs::write(&fork, original).unwrap();
+    runtime.block_on(super::handle_split(
+        92,
+        &parent.id,
+        &repositories,
+        Some(&request),
+        &tx,
+    ));
+    let ServerEvent::WorkflowSplitResponse {
+        id: 92,
+        new_session_id,
+        startup_message,
+        ..
+    } = rx.try_recv().unwrap()
+    else {
+        panic!("expected prepared workflow child")
+    };
+    assert_eq!(startup_message, format!("READY {}", parent.id));
+    let child = crate::session::Session::load(&new_session_id).unwrap();
+    assert_eq!(child.parent_id.as_deref(), Some(parent.id.as_str()));
+    assert_eq!(child.messages.len(), parent.messages.len() + 1);
+    assert_eq!(
+        serde_json::to_value(&child.messages[..parent.messages.len()]).unwrap(),
+        serde_json::to_value(&parent.messages).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(&crate::session::Session::load(&parent.id).unwrap().messages).unwrap(),
+        serde_json::to_value(&parent.messages).unwrap()
+    );
+}

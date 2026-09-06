@@ -160,6 +160,13 @@ struct PendingComposerInput {
     output_started: bool,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct PendingSplitWorkflow {
+    workflow: crate::workflow::WorkflowPromptRequest,
+    source_session_id: String,
+    request_id: Option<u64>,
+}
+
 #[derive(Debug, Clone)]
 struct PendingSplitPrompt {
     content: String,
@@ -1563,7 +1570,7 @@ pub struct App {
     // Whether the current remote turn should trigger autojudge after completion.
     autojudge_after_current_turn: bool,
     // Startup message to preload into the next spawned split window.
-    pending_split_startup_message: Option<String>,
+    pending_split_workflow: Option<PendingSplitWorkflow>,
     // Parent/original session that feedback flows should report back to after a split launch.
     pending_split_parent_session_id: Option<String>,
     // Startup user prompt to auto-submit in the next spawned split window.

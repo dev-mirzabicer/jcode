@@ -3318,6 +3318,57 @@ fn managed_workflow_rendering_uses_server_project_sources_without_a_turn() {
                 }
             }
         }
+        for (id, body, succeeds) in [(30, "{{missing}}", false), (31, "FORK-SOURCE", true)] {
+            std::fs::write(
+                &source,
+                format!(
+                    "---\nid: structured-output\nkind: module\ntemplate: handlebars\n---\n{body}"
+                ),
+            )
+            .unwrap();
+            let request = Request::SplitWithWorkflow {
+                id,
+                workflow: jcode_task_types::WorkflowPromptRequest::StructuredInitial {
+                    content: "USER".into(),
+                    schema: schema.into(),
+                },
+            };
+            client_writer
+                .write_all((serde_json::to_string(&request).unwrap() + "\n").as_bytes())
+                .await
+                .unwrap();
+            loop {
+                let mut line = String::new();
+                tokio::time::timeout(Duration::from_secs(10), reader.read_line(&mut line))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(!line.is_empty());
+                match decode_request_or_event(&line) {
+                    ServerEvent::WorkflowSplitResponse {
+                        id: reply,
+                        new_session_id,
+                        startup_message,
+                        ..
+                    } if reply == id => {
+                        assert!(succeeds);
+                        assert_eq!(
+                            startup_message,
+                            format!("USER\n\nFORK-SOURCE```json\n{schema}\n```")
+                        );
+                        let child = crate::session::Session::load(&new_session_id).unwrap();
+                        assert_eq!(child.parent_id.as_deref(), Some(session_id.as_str()));
+                        assert_eq!(child.system_prompt, before.system_prompt);
+                        break;
+                    }
+                    ServerEvent::WorkflowSplitFailed { id: reply, .. } if reply == id => {
+                        assert!(!succeeds);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
         let after = crate::session::Session::load(&session_id).unwrap();
         assert_eq!(
             serde_json::to_value(&before.messages).unwrap(),

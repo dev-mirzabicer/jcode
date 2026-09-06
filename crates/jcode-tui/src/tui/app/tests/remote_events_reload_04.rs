@@ -2112,14 +2112,15 @@ fn test_remote_review_shows_processing_until_split_response() {
     assert!(matches!(app.status, ProcessingStatus::Sending));
     assert!(app.current_message_id.is_none());
     assert_eq!(app.status_notice(), Some("Review launching".to_string()));
-    assert!(app.pending_split_startup_message.is_some());
+    assert!(app.pending_split_workflow.is_some());
     assert_eq!(app.pending_split_label.as_deref(), Some("Review"));
     assert!(!app.pending_split_request);
 
     app.handle_server_event(
-        crate::protocol::ServerEvent::SplitResponse {
-            id: 1,
+        crate::protocol::ServerEvent::WorkflowSplitResponse {
+            id: app.pending_split_workflow.as_ref().unwrap().request_id.unwrap(),
             new_session_id: "session_review_child".to_string(),
+            startup_message: "SYNTHETIC_STARTUP".into(),
             new_session_name: "review_child".to_string(),
         },
         &mut remote,
@@ -2131,7 +2132,7 @@ fn test_remote_review_shows_processing_until_split_response() {
     );
     assert!(matches!(app.status, ProcessingStatus::Idle));
     assert!(app.processing_started.is_none());
-    assert!(app.pending_split_startup_message.is_none());
+    assert!(app.pending_split_workflow.is_none());
     assert!(app.pending_split_label.is_none());
 }
 
@@ -2208,14 +2209,15 @@ fn test_remote_judge_shows_processing_until_split_response() {
     assert!(matches!(app.status, ProcessingStatus::Sending));
     assert!(app.current_message_id.is_none());
     assert_eq!(app.status_notice(), Some("Judge launching".to_string()));
-    assert!(app.pending_split_startup_message.is_some());
+    assert!(app.pending_split_workflow.is_some());
     assert_eq!(app.pending_split_label.as_deref(), Some("Judge"));
     assert!(!app.pending_split_request);
 
     app.handle_server_event(
-        crate::protocol::ServerEvent::SplitResponse {
-            id: 1,
+        crate::protocol::ServerEvent::WorkflowSplitResponse {
+            id: app.pending_split_workflow.as_ref().unwrap().request_id.unwrap(),
             new_session_id: "session_judge_child".to_string(),
+            startup_message: "SYNTHETIC_STARTUP".into(),
             new_session_name: "judge_child".to_string(),
         },
         &mut remote,
@@ -2227,7 +2229,7 @@ fn test_remote_judge_shows_processing_until_split_response() {
     );
     assert!(matches!(app.status, ProcessingStatus::Idle));
     assert!(app.processing_started.is_none());
-    assert!(app.pending_split_startup_message.is_none());
+    assert!(app.pending_split_workflow.is_none());
     assert!(app.pending_split_label.is_none());
 }
 

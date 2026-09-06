@@ -39,6 +39,12 @@ macro_rules! workflows {
 }
 
 workflows! {
+    ReviewReadOnly => ("review-read-only-guardrails", Module, "modules", "review startup", Plain, ProjectThenGlobal),
+    JudgeVisibleContext => ("judge-visible-context", Module, "modules", "judge startup", Plain, ProjectThenGlobal),
+    ReviewStartup { parent_session_id: &'a str } => ("review-startup", Module, "modules", "review/judge child startup", Handlebars, ProjectThenGlobal),
+    AutoreviewStartup { parent_session_id: &'a str } => ("autoreview-startup", Module, "modules", "review/judge child startup", Handlebars, ProjectThenGlobal),
+    JudgeStartup { parent_session_id: &'a str } => ("judge-startup", Module, "modules", "review/judge child startup", Handlebars, ProjectThenGlobal),
+    AutojudgeStartup { parent_session_id: &'a str } => ("autojudge-startup", Module, "modules", "review/judge child startup", Handlebars, ProjectThenGlobal),
     OvernightPokeIntro { manifest_path: &'a str, review_notes: &'a str, task_cards: &'a str, validation: &'a str } => ("overnight-poke-intro", Notification, "notifications", "overnight visible follow-up", Handlebars, ProjectThenGlobal),
     OvernightPokeDiagnostic { stalled_turns: u8 } => ("overnight-poke-diagnostic", Notification, "notifications", "overnight visible follow-up", Handlebars, ProjectThenGlobal),
     OvernightPokeHandoff => ("overnight-poke-handoff", Notification, "notifications", "overnight visible follow-up", Plain, ProjectThenGlobal),

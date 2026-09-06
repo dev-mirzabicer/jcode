@@ -376,7 +376,7 @@ pub(in crate::tui::app) async fn route_prepared_input_to_new_remote_session(
     prepared: input::PreparedInput,
 ) -> Result<()> {
     app.route_next_prompt_to_new_session = false;
-    app.pending_split_startup_message = None;
+    app.pending_split_workflow = None;
     app.pending_split_prompt = Some(PendingSplitPrompt {
         content: prepared.expanded,
         cursor_pos: prepared.cursor_pos,
@@ -685,4 +685,23 @@ pub(in crate::tui::app) fn stage_turn_for_remote_tick_loop(app: &mut App, input:
     app.queued_messages.push(input.to_string());
     app.pending_images.clear();
     true
+}
+
+pub(in crate::tui::app) async fn send_pending_split(
+    app: &mut App,
+    remote: &mut RemoteConnection,
+) -> Result<u64> {
+    let source_session = crate::tui::app::commands::active_session_id(app);
+    let Some(pending) = app.pending_split_workflow.as_mut() else {
+        return remote.split().await;
+    };
+    if pending.source_session_id != source_session {
+        anyhow::bail!("Session changed before the workflow split could be sent");
+    }
+    let id = remote.reserve_workflow_request_id();
+    pending.request_id = Some(id);
+    remote
+        .split_with_workflow(id, pending.workflow.clone())
+        .await?;
+    Ok(id)
 }

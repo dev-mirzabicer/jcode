@@ -83,6 +83,7 @@ export interface StartupContextCreateError {
 export type ImageAttachment = [string, string];
 
 export type WorkflowPromptRequest =
+  | { kind: "review_startup"; mode: "review" | "autoreview" | "judge" | "autojudge"; parent_session_id: string }
   | { kind: "structured_initial"; content: string; schema: string }
   | { kind: "structured_correction"; schema: string; error_lines: string; previous_response: string };
 

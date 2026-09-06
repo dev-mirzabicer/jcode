@@ -3,25 +3,8 @@ use super::{App, DisplayMessage};
 use crate::id;
 use crate::message::{ContentBlock, Role, ToolCall};
 use crate::session::{Session, StoredMessage};
+use crate::workflow::{ReviewWorkflowKind, WorkflowPromptRequest};
 use std::time::Instant;
-
-fn review_session_read_only_guardrails() -> &'static str {
-    "Important constraints for this session:\n\
-- This session is analysis-only. Do not do the work yourself.\n\
-- Do not modify files or repo state. Do not call `edit`, `write`, `multiedit`, `patch`, `apply_patch`, or destructive `bash`/`git` commands.\n\
-- Do not continue implementation, fix issues, or take follow-up actions yourself.\n\
-- If additional work is needed, describe it in your DM to the parent session instead.\n\
-\n"
-}
-
-fn judge_session_visible_context_notice() -> &'static str {
-    "Important context for this judge session:\n\
-- This session contains a user-visible mirror of the parent conversation, not the full original implementation context.\n\
-- It includes the user's prompts, the assistant's visible replies, and shallow summaries of visible tool calls.\n\
-- It intentionally omits deep tool-result details and hidden internal context beyond what the user could see.\n\
-- Base your judgment on this mirror, then verify claims by inspecting repo state or tests directly when needed.\n\
-\n"
-}
 
 fn is_judge_session_title(title: Option<&str>) -> bool {
     matches!(title, Some("judge" | "autojudge"))
@@ -249,24 +232,27 @@ fn build_judge_visible_transcript_messages(parent_session: &Session) -> Vec<Stor
     transcript
 }
 
-fn apply_judge_visible_context_if_needed(session: &mut Session, title_override: Option<&str>) {
+fn apply_judge_visible_context_if_needed(
+    session: &mut Session,
+    title_override: Option<&str>,
+) -> anyhow::Result<()> {
     let effective_title = title_override.or(session.title.as_deref());
     if !is_judge_session_title(effective_title) {
-        return;
+        return Ok(());
     }
 
-    let Some(parent_session_id) = session.parent_id.clone() else {
-        return;
-    };
-    let Ok(parent_session) = Session::load(&parent_session_id) else {
-        return;
-    };
+    let parent_session_id = session
+        .parent_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("Judge session has no parent to mirror"))?;
+    let parent_session = Session::load(parent_session_id)?;
 
     let transcript = build_judge_visible_transcript_messages(&parent_session);
     session.replace_messages(transcript);
     session.compaction = None;
     session.context_view = Default::default();
     session.provider_session_id = None;
+    Ok(())
 }
 
 /// Drop every side panel page belonging to the discarded session (#605).
@@ -497,157 +483,6 @@ pub(super) fn autojudge_status_message(app: &App) -> String {
     )
 }
 
-pub(super) fn build_autoreview_startup_message(parent_session_id: &str) -> String {
-    format!(
-        "You are the automatic reviewer for parent session `{}`.\n\
-Your job is to inspect the just-finished work and decide whether a review is needed.\n\
-\n\
-First read only the conversation history you actually need:\n\
-1. Use `conversation_search` with `stats=true` to learn the history size.\n\
-2. Read the most recent turns with `conversation_search turns` (start with roughly the last 6-12 turns, then widen only if needed).\n\
-3. If requirements are unclear, use `conversation_search query` to find the latest relevant user request or acceptance criteria.\n\
-\n\
-{}\
-Then determine whether review is needed. Review is needed if the recent work likely changed code, config, docs, tests, tooling behavior, or made technical claims worth validating. If the recent turn was purely conversational or administrative, no review is needed.\n\
-\n\
-If no review is needed:\n\
-- Send exactly one DM to session `{}` using `communicate` with action `dm`.\n\
-- Briefly explain why no review was needed.\n\
-- Then stop.\n\
-\n\
-If review is needed:\n\
-- Inspect the actual repo changes with targeted commands such as `git diff --stat`, `git diff --name-only`, and focused file reads.\n\
-- Perform a concise code review. Look for correctness bugs, regressions, missing validation, missing tests, edge cases, unsafe behavior, or broken assumptions. Prefer concrete findings over style comments.\n\
-- When finished, send exactly one DM to session `{}` summarizing:\n\
-  - whether review was needed\n\
-  - any findings with severity and file paths\n\
-  - or `No issues found` if the work looks good\n\
-- After sending the DM, stop.\n\
-\n\
-Do not ask the user anything unless absolutely necessary. Keep your own session concise.",
-        parent_session_id,
-        review_session_read_only_guardrails(),
-        parent_session_id,
-        parent_session_id
-    )
-}
-
-pub(super) fn build_autojudge_startup_message(parent_session_id: &str) -> String {
-    format!(
-        "You are the automatic judge for parent session `{}`.\n\
-Your job is to act like a strong completion manager/reviewer for the parent agent.\n\
-Your purpose is not just to critique. Your purpose is to decide whether the parent agent should keep going, and if so, tell it exactly what to do next. Only tell it to stop when the user's best likely intent has been carried through thoughtfully and completely.\n\
-\n\
-First read only the conversation history you actually need:\n\
-1. Use `conversation_search` with `stats=true` to learn the history size.\n\
-2. Read the most recent turns with `conversation_search turns` (start with roughly the last 6-12 turns, then widen only if needed).\n\
-3. If requirements are unclear, use `conversation_search query` to find the latest relevant user request, constraints, preferences, or acceptance criteria.\n\
-\n\
-{}{}\
-Then determine whether a judgment pass is needed. It is needed if the recent work likely changed code, docs, tests, tooling behavior, repo state, or made claims about what was completed. If the recent turn was purely conversational or administrative, no judgment is needed.\n\
-\n\
-If no judgment is needed:\n\
-- Send exactly one DM to session `{}` using `communicate` with action `dm`.\n\
-- Start the DM with `STOP:` and briefly explain why no judgment was needed.\n\
-- Then stop.\n\
-\n\
-If judgment is needed:\n\
-- Inspect the actual repo changes with targeted commands such as `git diff --stat`, `git diff --name-only`, focused file reads, and relevant tests or validation commands when warranted.\n\
-- Evaluate: intent alignment, completeness, initiative, approach quality, correctness, validation quality, and whether obvious next steps were missed.\n\
-- Prefer concrete findings over vague commentary. Call out if the work stopped after one pass when more follow-through was clearly needed.\n\
-- Be strict about incomplete execution. If the parent likely stopped too early, missed obvious follow-through, only implemented a narrow slice of the user's intent, skipped validation, or left a refactor/feature half-finished, you should tell it to continue.\n\
-- Default to `CONTINUE:` unless you are genuinely convinced the work is complete, well-executed, and ready to stop.\n\
-- When finished, send exactly one DM to session `{}` summarizing:\n\
-  - Start with either `CONTINUE:` or `STOP:`\n\
-  - `CONTINUE:` means the parent should immediately keep working. Include the concrete missing follow-through, better interpretation of user intent, and the next steps to execute now. Be specific and action-oriented.\n\
-  - `STOP:` means the work is aligned, thoughtful, complete, and it is fine for the parent to stop. Briefly say why the completion bar is met.\n\
-  - Mention file paths, validation gaps, correctness concerns, or missed next steps when relevant.\n\
-- After sending the DM, stop.\n\
-\n\
-Do not ask the user anything unless absolutely necessary. Keep your own session concise. Address the DM to the parent agent, not to the user.",
-        parent_session_id,
-        judge_session_visible_context_notice(),
-        review_session_read_only_guardrails(),
-        parent_session_id,
-        parent_session_id
-    )
-}
-
-pub(super) fn build_review_startup_message(parent_session_id: &str) -> String {
-    format!(
-        "You are the one-shot reviewer for parent session `{}`.\n\
-Your job is to inspect the recent work, determine whether a review is needed, and perform that review if needed.\n\
-\n\
-First read only the conversation history you actually need:\n\
-1. Use `conversation_search` with `stats=true` to learn the history size.\n\
-2. Read the most recent turns with `conversation_search turns` (start with roughly the last 6-12 turns, then widen only if needed).\n\
-3. If requirements are unclear, use `conversation_search query` to find the latest relevant user request or acceptance criteria.\n\
-\n\
-{}\
-Then determine whether review is needed. Review is needed if the recent work likely changed code, config, docs, tests, tooling behavior, or made technical claims worth validating. If the recent turn was purely conversational or administrative, no review is needed.\n\
-\n\
-If no review is needed:\n\
-- Send exactly one DM to session `{}` using `communicate` with action `dm`.\n\
-- Briefly explain why no review was needed.\n\
-- Then stop.\n\
-\n\
-If review is needed:\n\
-- Inspect the actual repo changes with targeted commands such as `git diff --stat`, `git diff --name-only`, and focused file reads.\n\
-- Perform a concise code review. Look for correctness bugs, regressions, missing validation, missing tests, edge cases, unsafe behavior, or broken assumptions. Prefer concrete findings over style comments.\n\
-- When finished, send exactly one DM to session `{}` summarizing:\n\
-  - whether review was needed\n\
-  - any findings with severity and file paths\n\
-  - or `No issues found` if the work looks good\n\
-- After sending the DM, stop.\n\
-\n\
-Do not ask the user anything unless absolutely necessary. Keep your own session concise.",
-        parent_session_id,
-        review_session_read_only_guardrails(),
-        parent_session_id,
-        parent_session_id
-    )
-}
-
-pub(super) fn build_judge_startup_message(parent_session_id: &str) -> String {
-    format!(
-        "You are the one-shot judge for parent session `{}`.\n\
-Your job is to inspect the recent work, determine whether a judgment pass is needed, and perform that judgment if needed.\n\
-{}\
-\n\
-First read only the conversation history you actually need:\n\
-1. Use `conversation_search` with `stats=true` to learn the history size.\n\
-2. Read the most recent turns with `conversation_search turns` (start with roughly the last 6-12 turns, then widen only if needed).\n\
-3. If requirements are unclear, use `conversation_search query` to find the latest relevant user request, constraints, preferences, or acceptance criteria.\n\
-\n\
-{}\
-Then determine whether a judgment pass is needed. It is needed if the recent work likely changed code, docs, tests, tooling behavior, repo state, or made claims about what was completed. If the recent turn was purely conversational or administrative, no judgment is needed.\n\
-\n\
-If no judgment is needed:\n\
-- Send exactly one DM to session `{}` using `communicate` with action `dm`.\n\
-- Briefly explain why no judgment was needed.\n\
-- Then stop.\n\
-\n\
-If judgment is needed:\n\
-- Inspect the actual repo changes with targeted commands such as `git diff --stat`, `git diff --name-only`, focused file reads, and relevant tests or validation commands when warranted.\n\
-- Evaluate: intent alignment, completeness, initiative, approach quality, correctness, validation quality, and whether obvious next steps were missed.\n\
-- Prefer concrete findings over vague commentary. Call out if the work stopped after one pass when more follow-through was clearly needed.\n\
-- When finished, send exactly one DM to session `{}` summarizing:\n\
-  - whether judgment was needed\n\
-  - whether the work looks complete and well-executed\n\
-  - any findings with severity and file paths when relevant\n\
-  - specific missing follow-through or better next steps if the execution was incomplete or low-agency\n\
-  - or `Looks good` if the work is aligned, thoughtful, and complete\n\
-- After sending the DM, stop.\n\
-\n\
-Do not ask the user anything unless absolutely necessary. Keep your own session concise.",
-        parent_session_id,
-        judge_session_visible_context_notice(),
-        review_session_read_only_guardrails(),
-        parent_session_id,
-        parent_session_id
-    )
-}
-
 pub(super) fn preferred_one_shot_review_override() -> Option<(String, String)> {
     let creds = crate::auth::codex::load_credentials().ok()?;
     let has_oauth = !creds.refresh_token.trim().is_empty() || creds.id_token.is_some();
@@ -708,8 +543,9 @@ pub(super) fn prepare_review_spawned_session(
     provider_key_override: Option<String>,
     title_override: Option<String>,
     parent_session_id_override: Option<String>,
-) {
-    if let Ok(mut session) = crate::session::Session::load(session_id) {
+) -> anyhow::Result<()> {
+    let mut session = crate::session::Session::load(session_id)?;
+    {
         session.autoreview_enabled = Some(false);
         session.autojudge_enabled = Some(false);
         if let Some(parent_session_id) = parent_session_id_override {
@@ -724,10 +560,21 @@ pub(super) fn prepare_review_spawned_session(
         if provider_key_override.is_some() {
             session.provider_key = provider_key_override;
         }
-        apply_judge_visible_context_if_needed(&mut session, title_override.as_deref());
-        let _ = session.save();
+        apply_judge_visible_context_if_needed(&mut session, title_override.as_deref())?;
+        session.save()?;
     }
-    App::save_startup_message_for_session(session_id, startup_message);
+    let mode = match session.title.as_deref() {
+        Some("review") => Some(ReviewWorkflowKind::Review),
+        Some("autoreview") => Some(ReviewWorkflowKind::Autoreview),
+        Some("judge") => Some(ReviewWorkflowKind::Judge),
+        Some("autojudge") => Some(ReviewWorkflowKind::Autojudge),
+        _ => None,
+    };
+    App::save_startup_message_for_session(
+        session_id,
+        startup_message,
+        mode.zip(session.parent_id.as_deref()),
+    )
 }
 
 pub(super) fn launch_prompt_in_new_session_local(
@@ -794,10 +641,18 @@ fn launch_review_window_local(
     app: &mut App,
     session_title: &str,
     label: &str,
-    startup_message: String,
+    mode: ReviewWorkflowKind,
     model_override: Option<String>,
     provider_key_override: Option<String>,
 ) -> anyhow::Result<bool> {
+    let startup_message = crate::workflow::render_prompt(
+        &crate::instruction::InstructionRepositoryService::new(),
+        active_working_dir(app).as_deref(),
+        &WorkflowPromptRequest::ReviewStartup {
+            mode,
+            parent_session_id: current_feedback_target_session_id(app),
+        },
+    )?;
     let initial_model = model_override
         .clone()
         .unwrap_or_else(|| current_autoreview_model_summary(app));
@@ -814,7 +669,7 @@ fn launch_review_window_local(
         provider_key_override,
         Some(session_title.to_string()),
         None,
-    );
+    ).map_err(|error| anyhow::anyhow!("Created review session {session_id}, but preparation failed before window launch: {error}"))?;
     let exe = super::launch_client_executable();
     let cwd = active_working_dir(app)
         .filter(|path| path.is_dir())
@@ -839,12 +694,11 @@ fn launch_review_window_local(
 }
 
 fn launch_autoreview_window_local(app: &mut App) -> anyhow::Result<bool> {
-    let parent_session_id = current_feedback_target_session_id(app);
     launch_review_window_local(
         app,
         "autoreview",
         "Autoreview",
-        build_autoreview_startup_message(&parent_session_id),
+        ReviewWorkflowKind::Autoreview,
         current_autoreview_model_override(),
         None,
     )
@@ -852,24 +706,22 @@ fn launch_autoreview_window_local(app: &mut App) -> anyhow::Result<bool> {
 
 fn launch_review_once_local(app: &mut App) -> anyhow::Result<bool> {
     let (model_override, provider_key_override) = current_review_model_override();
-    let parent_session_id = current_feedback_target_session_id(app);
     launch_review_window_local(
         app,
         "review",
         "Review",
-        build_review_startup_message(&parent_session_id),
+        ReviewWorkflowKind::Review,
         model_override,
         provider_key_override,
     )
 }
 
 fn launch_autojudge_window_local(app: &mut App) -> anyhow::Result<bool> {
-    let parent_session_id = current_feedback_target_session_id(app);
     launch_review_window_local(
         app,
         "autojudge",
         "Autojudge",
-        build_autojudge_startup_message(&parent_session_id),
+        ReviewWorkflowKind::Autojudge,
         current_autojudge_model_override(),
         None,
     )
@@ -877,12 +729,11 @@ fn launch_autojudge_window_local(app: &mut App) -> anyhow::Result<bool> {
 
 fn launch_judge_once_local(app: &mut App) -> anyhow::Result<bool> {
     let (model_override, provider_key_override) = current_judge_model_override();
-    let parent_session_id = current_feedback_target_session_id(app);
     launch_review_window_local(
         app,
         "judge",
         "Judge",
-        build_judge_startup_message(&parent_session_id),
+        ReviewWorkflowKind::Judge,
         model_override,
         provider_key_override,
     )
@@ -892,12 +743,19 @@ pub(super) fn queue_review_spawn_remote(
     app: &mut App,
     label: &str,
     parent_session_id: String,
-    startup_message: String,
+    mode: ReviewWorkflowKind,
     model_override: Option<String>,
     provider_key_override: Option<String>,
 ) {
-    app.pending_split_parent_session_id = Some(parent_session_id);
-    app.pending_split_startup_message = Some(startup_message);
+    app.pending_split_parent_session_id = Some(parent_session_id.clone());
+    app.pending_split_workflow = Some(super::PendingSplitWorkflow {
+        workflow: WorkflowPromptRequest::ReviewStartup {
+            mode,
+            parent_session_id,
+        },
+        source_session_id: active_session_id(app),
+        request_id: None,
+    });
     app.pending_split_model_override = model_override;
     app.pending_split_provider_key_override = provider_key_override;
     app.pending_split_label = Some(label.to_string());
@@ -908,10 +766,7 @@ pub(super) fn queue_review_spawn_remote(
 
 #[cfg(test)]
 pub(super) fn queue_autojudge_remote(app: &mut App) {
-    if !app.autojudge_enabled
-        || app.pending_split_request
-        || app.pending_split_startup_message.is_some()
-    {
+    if !app.autojudge_enabled || app.pending_split_request || app.pending_split_workflow.is_some() {
         return;
     }
     let parent_session_id = current_feedback_target_session_id(app);
@@ -919,7 +774,7 @@ pub(super) fn queue_autojudge_remote(app: &mut App) {
         app,
         "Autojudge",
         parent_session_id.clone(),
-        build_autojudge_startup_message(&parent_session_id),
+        ReviewWorkflowKind::Autojudge,
         current_autojudge_model_override(),
         None,
     );

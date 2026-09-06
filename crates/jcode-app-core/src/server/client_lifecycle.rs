@@ -3183,7 +3183,24 @@ pub(super) async fn handle_client_with_instruction_repositories(
             }
 
             Request::Split { id } => {
-                handle_split(id, &client_session_id, &client_event_tx).await;
+                handle_split(
+                    id,
+                    &client_session_id,
+                    &instruction_repositories,
+                    None,
+                    &client_event_tx,
+                )
+                .await;
+            }
+            Request::SplitWithWorkflow { id, workflow } => {
+                handle_split(
+                    id,
+                    &client_session_id,
+                    &instruction_repositories,
+                    Some(&workflow),
+                    &client_event_tx,
+                )
+                .await;
             }
 
             Request::Transfer { id } => {

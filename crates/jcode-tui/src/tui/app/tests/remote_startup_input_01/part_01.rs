@@ -123,7 +123,8 @@ fn test_startup_message_restore_uses_hidden_system_queue() {
         super::App::save_startup_message_for_session(
             session_id,
             "internal startup prompt".to_string(),
-        );
+            None,
+        ).unwrap();
 
         let restored = super::App::restore_input_for_reload(session_id)
             .expect("startup message should restore");
@@ -133,49 +134,6 @@ fn test_startup_message_restore_uses_hidden_system_queue() {
             vec!["internal startup prompt".to_string()]
         );
     });
-}
-
-#[test]
-fn test_review_and_judge_startup_prompts_are_analysis_only() {
-    let prompts = [
-        super::commands::build_autoreview_startup_message("session_parent"),
-        super::commands::build_review_startup_message("session_parent"),
-        super::commands::build_autojudge_startup_message("session_parent"),
-        super::commands::build_judge_startup_message("session_parent"),
-    ];
-
-    for prompt in prompts {
-        assert!(prompt.contains("analysis-only"));
-        assert!(prompt.contains("Do not do the work yourself"));
-        assert!(prompt.contains("Do not modify files or repo state"));
-        assert!(prompt.contains("send exactly one DM"));
-        assert!(prompt.contains("Do not continue implementation"));
-    }
-}
-
-#[test]
-fn test_autojudge_prompt_is_continue_or_stop_manager() {
-    let prompt = super::commands::build_autojudge_startup_message("session_parent");
-
-    assert!(prompt.contains("act like a strong completion manager/reviewer"));
-    assert!(prompt.contains("tell it exactly what to do next"));
-    assert!(prompt.contains("Default to `CONTINUE:` unless you are genuinely convinced"));
-    assert!(prompt.contains("Start with either `CONTINUE:` or `STOP:`"));
-    assert!(prompt.contains("Address the DM to the parent agent, not to the user"));
-}
-
-#[test]
-fn test_judge_startup_prompts_describe_visible_mirror_context() {
-    let prompts = [
-        super::commands::build_autojudge_startup_message("session_parent"),
-        super::commands::build_judge_startup_message("session_parent"),
-    ];
-
-    for prompt in prompts {
-        assert!(prompt.contains("user-visible mirror of the parent conversation"));
-        assert!(prompt.contains("shallow summaries of visible tool calls"));
-        assert!(prompt.contains("omits deep tool-result details"));
-    }
 }
 
 #[test]
@@ -252,12 +210,12 @@ fn test_prepare_review_spawned_session_uses_visible_transcript_for_judge_session
 
             super::commands::prepare_review_spawned_session(
                 &child_id,
-                super::commands::build_judge_startup_message(&parent_id),
+                "SYNTHETIC_REVIEW_STARTUP".into(),
                 None,
                 None,
                 Some(title.to_string()),
                 Some(parent_id.clone()),
-            );
+            ).unwrap();
 
             let prepared = crate::session::Session::load(&child_id).expect("reload child session");
             let transcript = prepared
@@ -311,13 +269,9 @@ fn test_queue_autojudge_remote_targets_original_non_judge_session() {
             app.pending_split_parent_session_id.as_deref(),
             Some(root.id.as_str())
         );
-        let startup = app
-            .pending_split_startup_message
-            .as_deref()
-            .expect("autojudge startup message");
-        assert!(startup.contains(root.id.as_str()));
-        assert!(!startup.contains(review.id.as_str()));
-        assert!(!startup.contains(judge.id.as_str()));
+        let pending = app.pending_split_workflow.as_ref().expect("autojudge workflow intent");
+        assert!(matches!(&pending.workflow, crate::workflow::WorkflowPromptRequest::ReviewStartup { mode: crate::workflow::ReviewWorkflowKind::Autojudge, parent_session_id } if parent_session_id == &root.id));
+        assert_eq!(pending.source_session_id, judge.id);
     });
 }
 
@@ -334,8 +288,9 @@ fn test_new_for_remote_restores_spawn_startup_hints_and_dispatch_state() {
 
         super::App::save_startup_message_for_session(
             session_id,
-            super::commands::build_autojudge_startup_message("session_parent_123"),
-        );
+            "SYNTHETIC_STARTUP".into(),
+            Some((crate::workflow::ReviewWorkflowKind::Autojudge,"session_parent_123")),
+        ).unwrap();
 
         let mut app = App::new_for_remote(Some(session_id.to_string()));
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -406,8 +361,9 @@ fn test_remote_startup_done_event_does_not_cancel_pending_judge_launch() {
 
         super::App::save_startup_message_for_session(
             session_id,
-            super::commands::build_judge_startup_message("session_parent_guard"),
-        );
+            "SYNTHETIC_STARTUP".into(),
+            Some((crate::workflow::ReviewWorkflowKind::Judge,"session_parent_guard")),
+        ).unwrap();
 
         let mut app = App::new_for_remote(Some(session_id.to_string()));
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -459,8 +415,9 @@ fn test_remote_startup_judge_hidden_prompt_dispatches_once_history_is_loaded() {
 
         super::App::save_startup_message_for_session(
             session_id,
-            super::commands::build_judge_startup_message("session_parent_dispatch"),
-        );
+            "SYNTHETIC_STARTUP".into(),
+            Some((crate::workflow::ReviewWorkflowKind::Judge,"session_parent_dispatch")),
+        ).unwrap();
 
         let mut app = App::new_for_remote(Some(session_id.to_string()));
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -521,8 +478,9 @@ fn test_new_for_remote_fresh_spawn_restores_local_transcript() {
 
         super::App::save_startup_message_for_session(
             session_id,
-            super::commands::build_autojudge_startup_message("session_parent_123"),
-        );
+            "SYNTHETIC_STARTUP".into(),
+            Some((crate::workflow::ReviewWorkflowKind::Autojudge,"session_parent_123")),
+        ).unwrap();
 
         let mut app = App::new_for_remote_with_options(Some(session_id.to_string()), true);
 
@@ -613,8 +571,9 @@ fn test_restore_session_restores_local_judge_processing_state() {
 
         super::App::save_startup_message_for_session(
             session_id,
-            super::commands::build_judge_startup_message("session_parent_local"),
-        );
+            "SYNTHETIC_STARTUP".into(),
+            Some((crate::workflow::ReviewWorkflowKind::Judge,"session_parent_local")),
+        ).unwrap();
 
         let mut app = create_test_app();
         app.restore_session(session_id);

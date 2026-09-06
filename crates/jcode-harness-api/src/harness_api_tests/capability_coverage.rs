@@ -87,6 +87,7 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("SetSubagentModel", ClientInternal),
     ("SetTransport", ClientInternal),
     ("SoftInterrupt", Covered),
+    ("SplitWithWorkflow", ClientInternal),
     ("Split", ClientInternal),
     ("StdinResponse", ClientInternal),
     ("Subscribe", Covered),

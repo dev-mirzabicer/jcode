@@ -655,7 +655,7 @@ impl Request {
             Request::SetFeature { id, .. } => *id,
             Request::LegacyContextCommand { id, .. } => *id,
             Request::RenameSession { id, .. } => *id,
-            Request::Split { id } => *id,
+            Request::Split { id } | Request::SplitWithWorkflow { id, .. } => *id,
             Request::Transfer { id } => *id,
             Request::TriggerMemoryExtraction { id } => *id,
             Request::NotifyAuthChanged { id, .. } => *id,

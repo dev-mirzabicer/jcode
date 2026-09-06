@@ -1071,6 +1071,22 @@ impl RemoteConnection {
             .await
     }
 
+    /// Reserve workflow response correlation before sending the request.
+    pub fn reserve_workflow_request_id(&mut self) -> u64 {
+        let id = self.next_request_id;
+        self.next_request_id = self.next_request_id.wrapping_add(1).max(1);
+        id
+    }
+
+    pub async fn split_with_workflow(
+        &self,
+        id: u64,
+        workflow: crate::workflow::WorkflowPromptRequest,
+    ) -> Result<()> {
+        self.send_request(Request::SplitWithWorkflow { id, workflow })
+            .await
+    }
+
     /// Split the current session - ask server to clone conversation into a new session
     pub async fn split(&mut self) -> Result<u64> {
         let id = self.next_request_id;

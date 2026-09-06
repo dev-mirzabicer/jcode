@@ -554,6 +554,48 @@ pub(in crate::tui::app) fn handle_server_event(
     event: ServerEvent,
     remote: &mut impl RemoteEventState,
 ) -> bool {
+    // Workflow split replies are action-scoped, not model turn events. Match
+    // both the reserved request and original session before touching UI state.
+    let mut rendered_split_startup = None;
+    let event = match event {
+        ServerEvent::WorkflowSplitResponse {
+            id,
+            new_session_id,
+            new_session_name,
+            startup_message,
+        } => {
+            let current = app_mod::commands::active_session_id(app);
+            if !app.pending_split_workflow.as_ref().is_some_and(|pending| {
+                pending.request_id == Some(id) && pending.source_session_id == current
+            }) {
+                return false;
+            }
+            rendered_split_startup = Some(startup_message);
+            ServerEvent::SplitResponse {
+                id,
+                new_session_id,
+                new_session_name,
+            }
+        }
+        ServerEvent::WorkflowSplitFailed { id, message } => {
+            let current = app_mod::commands::active_session_id(app);
+            if app.pending_split_workflow.as_ref().is_some_and(|pending| {
+                pending.request_id == Some(id) && pending.source_session_id == current
+            }) {
+                finish_remote_split_launch(app);
+                app.pending_split_request = false;
+                app.pending_split_workflow = None;
+                app.pending_split_parent_session_id = None;
+                app.pending_split_model_override = None;
+                app.pending_split_provider_key_override = None;
+                app.pending_split_label = None;
+                app.push_display_message(DisplayMessage::error(message));
+                app.set_status_notice("Workflow session preparation failed");
+            }
+            return false;
+        }
+        event => event,
+    };
     let context_action_required = matches!(&event, ServerEvent::ContextActionRequired { .. });
     let event = match app.reduce_context_server_event(event) {
         Ok(accepted) => {
@@ -2971,10 +3013,12 @@ pub(in crate::tui::app) fn handle_server_event(
             new_session_name,
             ..
         } => {
-            if app.workspace_client.handle_split_response(&new_session_id) {
+            if rendered_split_startup.is_none()
+                && app.workspace_client.handle_split_response(&new_session_id)
+            {
                 finish_remote_split_launch(app);
                 app.pending_split_request = false;
-                app.pending_split_startup_message = None;
+                app.pending_split_workflow = None;
                 app.pending_split_parent_session_id = None;
                 app.pending_split_prompt = None;
                 app.pending_split_model_override = None;
@@ -2987,23 +3031,31 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.set_status_notice(format!("Workspace + {}", new_session_name));
                 return false;
             }
+            if rendered_split_startup.is_none() && app.pending_split_workflow.is_some() {
+                return false;
+            }
             finish_remote_split_launch(app);
             app.pending_split_request = false;
-            let startup_message = app.pending_split_startup_message.take();
+            app.pending_split_workflow = None;
+            let startup_message = rendered_split_startup;
             let parent_session_id_override = app.pending_split_parent_session_id.take();
             let startup_prompt = app.pending_split_prompt.take();
             let model_override = app.pending_split_model_override.take();
             let provider_key_override = app.pending_split_provider_key_override.take();
             let split_label = app.pending_split_label.take();
             if let Some(startup_message) = startup_message {
-                app_mod::commands::prepare_review_spawned_session(
+                if let Err(error) = app_mod::commands::prepare_review_spawned_session(
                     &new_session_id,
                     startup_message,
                     model_override,
                     provider_key_override,
                     split_label.clone().map(|label| label.to_ascii_lowercase()),
                     parent_session_id_override,
-                );
+                ) {
+                    app.push_display_message(DisplayMessage::error(format!("Created workflow session {new_session_id}, but preparation failed before window launch: {error}")));
+                    app.set_status_notice("Workflow startup preparation failed");
+                    return false;
+                }
             } else if let Some(startup_prompt) = startup_prompt {
                 App::save_startup_submission_for_session(
                     &new_session_id,

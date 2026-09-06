@@ -296,9 +296,14 @@ impl App {
                 .map(|value| value.capacity())
                 .unwrap_or(0)
             + self
-                .pending_split_startup_message
+                .pending_split_workflow
                 .as_ref()
-                .map(|value| value.capacity())
+                .map(|value| {
+                    value
+                        .workflow
+                        .allocated_bytes()
+                        .saturating_add(value.source_session_id.capacity())
+                })
                 .unwrap_or(0)
             + self
                 .pending_split_parent_session_id

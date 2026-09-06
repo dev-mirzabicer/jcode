@@ -42,6 +42,14 @@ Coordinator and visible-start prose live in `modules/overnight-coordinator.md` a
 
 A failed visible-start render leaves the parent and run publication untouched. Headless preparation propagates rendering errors before constructing the coordinator Agent or calling the model, using the existing supervisor failure record. Follow-up rendering occurs before setting request flags or consuming the poke count. The TUI retains continuation state after a render failure, queues no turn, and reports the error. Repair can be followed by an explicit continuation. Phase 9 retains ownership of future unattended policy.
 
+### Review and judge startup
+
+`modules/review-startup.md`, `autoreview-startup.md`, `judge-startup.md`, and `autojudge-startup.md` compose the existing startup instructions with the shared `review-read-only-guardrails` and `judge-visible-context` modules. These are workflow modules, not the Phase 5 primary-agent set. Model overrides, parent targeting, judge transcript mirroring and command triggers stay with their existing owners.
+
+Local launches render before cloning. Remote launches use the distinct `SplitWithWorkflow` operation: the server captures the parent once, renders in that parent's scope, then clones that same snapshot. Rendering failure creates no child. A failed fork-notice/save preparation cleans the unpublished child. Dedicated workflow success/failure events and request/session correlation prevent stale replies from launching a window or failing an unrelated model turn. Ordinary split and transfer wire shapes remain unchanged.
+
+Startup banners derive from typed review mode and parent metadata, not prompt prefixes. Their existing persisted hint fields keep old queued starts compatible. Startup payload writes are atomic and failures stop window launch. If an already-created session cannot be prepared, the error identifies it and states that no window was launched. Source text remains separately editable without changing banner identity or silently bypassing the judge mirror.
+
 ## Source and failure semantics
 
 Working files are authoritative, including intentionally empty bodies where the owner retains meaningful structure. A present invalid project redefinition fails rather than exposing global prose. Missing previously adopted singleton resources are damage, not permission to recreate defaults. New shipped paths use the existing versioned, scoped Git seed-adoption transaction. It preserves current files and does not push a repository.

@@ -1892,3 +1892,109 @@ fn local_managed_effort_error_blocks_provider_preparation_without_changing_stati
     assert_eq!(app.session.system_prompt, state);
     assert!(app.pending_composer_input.is_some());
 }
+
+#[test]
+fn workflow_split_replies_are_correlated_and_do_not_cancel_an_unrelated_turn() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.is_remote = true;
+        super::commands::queue_review_spawn_remote(
+            &mut app,
+            "Review",
+            "target-parent".into(),
+            crate::workflow::ReviewWorkflowKind::Review,
+            None,
+            None,
+        );
+        let pending = app.pending_split_workflow.as_mut().unwrap();
+        pending.request_id = Some(41);
+        let source = pending.source_session_id.clone();
+        app.current_message_id = Some(99);
+        app.is_processing = true;
+        app.status = ProcessingStatus::Sending;
+        app.input = "CURRENT USER INPUT".into();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        app.handle_server_event(
+            crate::protocol::ServerEvent::WorkflowSplitResponse {
+                id: 40,
+                new_session_id: "stale-child".into(),
+                new_session_name: "stale".into(),
+                startup_message: "STALE".into(),
+            },
+            &mut remote,
+        );
+        assert_eq!(
+            app.pending_split_workflow.as_ref().unwrap().request_id,
+            Some(41)
+        );
+        app.remote_session_id = Some("other-session".into());
+        app.handle_server_event(
+            crate::protocol::ServerEvent::WorkflowSplitFailed {
+                id: 41,
+                message: "wrong session".into(),
+            },
+            &mut remote,
+        );
+        assert!(app.pending_split_workflow.is_some());
+        app.remote_session_id = Some(source);
+        app.handle_server_event(
+            crate::protocol::ServerEvent::WorkflowSplitFailed {
+                id: 41,
+                message: "SYNTHETIC_RENDER_FAILURE".into(),
+            },
+            &mut remote,
+        );
+        assert!(app.pending_split_workflow.is_none());
+        assert_eq!(app.current_message_id, Some(99));
+        assert!(app.is_processing);
+        assert_eq!(app.input, "CURRENT USER INPUT");
+    });
+}
+
+#[test]
+fn reviewer_startup_hints_are_typed_and_independent_of_instruction_prose() {
+    with_temp_jcode_home(|| {
+        use crate::workflow::ReviewWorkflowKind;
+        let root = crate::storage::jcode_dir().unwrap();
+        for (id, text) in [("hint-one", "SYNTHETIC ONE"), ("hint-two", "SYNTHETIC TWO")] {
+            App::save_startup_message_for_session(
+                id,
+                text.into(),
+                Some((ReviewWorkflowKind::Autojudge, "parent-id")),
+            )
+            .unwrap();
+        }
+        let read = |id: &str| {
+            serde_json::from_str::<serde_json::Value>(
+                &std::fs::read_to_string(root.join(format!("client-input-{id}"))).unwrap(),
+            )
+            .unwrap()
+        };
+        let one = read("hint-one");
+        let two = read("hint-two");
+        for key in [
+            "startup_status_notice",
+            "startup_display_message_title",
+            "startup_display_message",
+        ] {
+            assert_eq!(one[key], two[key]);
+        }
+        assert_eq!(one["hidden_queued_system_messages"][0], "SYNTHETIC ONE");
+        assert_eq!(two["hidden_queued_system_messages"][0], "SYNTHETIC TWO");
+        App::save_startup_message_for_session("hint-none", "SYNTHETIC THREE".into(), None).unwrap();
+        assert!(read("hint-none")["startup_display_message_title"].is_null());
+        let blocked = root.join("client-input-hint-blocked");
+        std::fs::create_dir(&blocked).unwrap();
+        assert!(
+            App::save_startup_message_for_session(
+                "hint-blocked",
+                "DATA".into(),
+                Some((ReviewWorkflowKind::Review, "parent-id"))
+            )
+            .is_err()
+        );
+        assert!(blocked.is_dir());
+    });
+}
