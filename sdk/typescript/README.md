@@ -237,6 +237,9 @@ discovery pass only.
 
 Agent profile controls require the advertised `agent_profile_controls` capability. The SDK rejects before sending when an older bridge lacks it. Ordinary `setAgent` after first dispatch appends complete instructions without making a model call; `replace: true` requests the explicit true-system replacement path.
 
+Structured-output calls require `workflow_prompt_rendering`. Both SDKs render current instructions on the connected server in the attached session's project scope. `renderWorkflowPrompt(id, request)` (`render_workflow_prompt` in Rust) exposes this read-only operation without starting a turn. Schema validation and retry policy remain SDK-owned. A missing capability or invalid managed source fails before the affected model attempt. No client-side embedded-prose fallback is used. See [workflow instructions](../../docs/WORKFLOW_INSTRUCTIONS.md) for source paths and recovery.
+
+
 ## Models
 
 A client that cannot enumerate models cannot offer a picker, so the catalog is
@@ -379,7 +382,7 @@ try {
 | --- | --- | --- |
 | `disconnected` | The socket closed or a write failed while work was in flight. | Reconnect. Retry only idempotent reads, or first verify whether a mutating request took effect. |
 | `timeout` | No correlated reply arrived within `requestTimeoutMs` (30 seconds by default). | Check daemon health and raise the timeout for legitimately slow requests. Treat outcome as unknown before repeating mutations. |
-| `unexpected_reply` | A reply was valid protocol data but not the event kind required by that SDK method. | Upgrade both sides and report the server/client versions with the error. |
+| `unexpected_reply` | A reply did not have the event kind or required payload expected by that SDK method. | Upgrade both sides and report the server/client versions with the error. |
 | `unknown_request` | The bridge does not implement that request tag. | Upgrade jcode, or stop using that newer SDK method with this bridge. |
 | `unknown_session` | The session no longer exists, is not available to this instance, or the connection is not attached where attachment is required. | Refresh `listSessions()`, use the right private/shared instance, and attach when the method requires it. |
 | `invalid_request` | Arguments or current state violate the operation's contract (for example an invalid model, retry count, path, or route selection). | Correct the caller input. The message contains the rejected constraint; do not blindly retry. |

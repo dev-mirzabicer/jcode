@@ -1514,3 +1514,36 @@ fn rooted_file_operations_reject_traversal_and_symlink_escapes_and_bound_results
         } if kind == "missing"
     ));
 }
+
+#[test]
+fn workflow_rendering_translates_typed_requests_and_correlated_complete_replies() {
+    let mut state = state_with_session();
+    let workflow = json!({"kind":"structured_initial","content":"USER","schema":"SCHEMA <&界>"});
+    let outbound = state.api_request_to_legacy(
+        &json!({"id":70,"req":"render_workflow_prompt","workflow":workflow}),
+    );
+    let [Outbound::Legacy(request)] = &outbound[..] else {
+        panic!("expected daemon request");
+    };
+    assert_eq!(request["workflow"], workflow);
+    assert_eq!(request["type"], "render_workflow_prompt");
+    let frames = state.legacy_event_to_api(
+        &json!({"type":"workflow_prompt_rendered","id":request["id"],"content":"COMPLETE <&界>"}),
+    );
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].reply_to, Some(70));
+    assert!(
+        matches!(&frames[0].event, ApiEvent::WorkflowPromptRendered { content, .. } if content == "COMPLETE <&界>")
+    );
+    assert!(
+        state
+            .legacy_event_to_api(
+                &json!({"type":"workflow_prompt_rendered","id":request["id"],"content":"duplicate"})
+            )
+            .is_empty()
+    );
+    let malformed = state.api_request_to_legacy(&json!({"id":71,"req":"render_workflow_prompt","workflow":{"kind":"structured_initial","schema":"SCHEMA"}}));
+    assert!(
+        matches!(&malformed[..], [Outbound::Reply(frame)] if matches!(frame.event, ApiEvent::Error { code: ErrorCode::InvalidRequest, .. }))
+    );
+}

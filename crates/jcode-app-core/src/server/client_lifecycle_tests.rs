@@ -3173,3 +3173,160 @@ async fn busy_startup_apply_drains_after_active_turn_before_next_user_prompt() {
 fn decode_request_or_event(line: &str) -> ServerEvent {
     serde_json::from_str(line.trim()).expect("decode server event")
 }
+
+#[test]
+fn managed_workflow_rendering_uses_server_project_sources_without_a_turn() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    let project = tempfile::tempdir().unwrap();
+    let repositories = crate::instruction::InstructionRepositoryService::new();
+    let seed = crate::instruction::InstructionStoreSeed {
+        manifest: crate::instruction::InstructionStoreManifest::current(),
+        files: vec![crate::instruction::InstructionSeedFile {
+            relative_path: "modules/structured-output.md".into(),
+            content: b"---\nid: structured-output\nkind: module\ntemplate: handlebars\n---\nPROJECT {{schema}}\n".to_vec(),
+        }],
+    };
+    let initialized = repositories
+        .configure_non_git_project(project.path(), "workflow-socket-fixture", None, &seed, &[])
+        .unwrap();
+    let source = initialized
+        .repository
+        .root
+        .join("modules/structured-output.md");
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let (server_stream, client_stream) = crate::transport::stream_pair().expect("stream pair");
+        let sessions = Arc::new(RwLock::new(HashMap::new()));
+        let client_connections = Arc::new(RwLock::new(HashMap::new()));
+        let (debug_response_tx, _) = broadcast::channel(8);
+        let (swarm_event_tx, _) = broadcast::channel(8);
+        let (global_event_tx, _) = broadcast::channel(8);
+        let startup_context = crate::server::startup_context::test_coordinator();
+        let server_task = tokio::spawn(handle_client(
+            server_stream,
+            Arc::clone(&sessions),
+            global_event_tx,
+            Arc::new(CompleteImmediatelyProvider),
+            Arc::new(crate::context::ContextTransactionService::new()),
+            startup_context,
+            Arc::new(RwLock::new(false)),
+            Arc::new(RwLock::new(String::new())),
+            Arc::new(RwLock::new(1usize)),
+            Arc::clone(&client_connections),
+            Arc::new(RwLock::new(HashMap::new())),
+            Arc::new(RwLock::new(HashMap::new())),
+            Arc::new(RwLock::new(HashMap::new())),
+            Arc::new(RwLock::new(HashMap::new())),
+            Arc::new(RwLock::new(HashMap::new())),
+            FileTouchService::new(),
+            Arc::new(RwLock::new(HashMap::new())),
+            Arc::new(RwLock::new(HashMap::new())),
+            Arc::new(RwLock::new(ClientDebugState::default())),
+            debug_response_tx,
+            Arc::new(RwLock::new(std::collections::VecDeque::new())),
+            Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            swarm_event_tx,
+            "jcode-test".to_string(),
+            "🧪".to_string(),
+            Arc::new(crate::mcp::SharedMcpPool::from_default_config()),
+            Arc::new(RwLock::new(HashMap::new())),
+            Arc::new(RwLock::new(HashMap::new())),
+            AwaitMembersRuntime::default(),
+            SwarmMutationRuntime::default(),
+        ));
+        let (client_reader, mut client_writer) = client_stream.into_split();
+        let mut reader = BufReader::new(client_reader);
+        let mut request = subscribe_request(Some(project.path().to_string_lossy().as_ref()));
+        if let Request::Subscribe {
+            target_session_id: target,
+            agent,
+            ..
+        } = &mut request
+        {
+            *target = None;
+            *agent = None;
+        }
+        client_writer
+            .write_all(
+                (serde_json::to_string(&request).expect("serialize subscribe") + "\n").as_bytes(),
+            )
+            .await
+            .expect("write subscribe");
+        let mut session_id = None;
+        while session_id.is_none() {
+            let mut line = String::new();
+            tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line))
+                .await
+                .expect("subscribe timeout")
+                .expect("read subscribe event");
+            assert!(!line.is_empty(), "server closed before SessionId");
+            if let ServerEvent::SessionId { session_id: id } = decode_request_or_event(&line) {
+                session_id = Some(id);
+            }
+        }
+
+        let session_id = session_id.unwrap();
+        let before = crate::session::Session::load(&session_id).unwrap();
+        let schema = "<&{{literal}}>";
+        for (id, body, expected) in [
+            (20, "PROJECT {{schema}}\n", Some("PROJECT <&{{literal}}>\n")),
+            (21, "SECOND\n", Some("SECOND\n")),
+            (22, "", Some("")),
+            (23, "{{missing}}", None),
+        ] {
+            std::fs::write(
+                &source,
+                format!(
+                    "---\nid: structured-output\nkind: module\ntemplate: handlebars\n---\n{body}"
+                ),
+            )
+            .unwrap();
+            let request = Request::RenderWorkflowPrompt {
+                id,
+                workflow: jcode_task_types::WorkflowPromptRequest::StructuredInitial {
+                    content: "USER".into(),
+                    schema: schema.into(),
+                },
+            };
+            client_writer
+                .write_all((serde_json::to_string(&request).unwrap() + "\n").as_bytes())
+                .await
+                .unwrap();
+            loop {
+                let mut line = String::new();
+                tokio::time::timeout(Duration::from_secs(10), reader.read_line(&mut line))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(!line.is_empty());
+                match decode_request_or_event(&line) {
+                    ServerEvent::WorkflowPromptRendered { id: reply, content } if reply == id => {
+                        assert_eq!(
+                            content,
+                            format!(
+                                "USER\n\n{}```json\n{schema}\n```",
+                                expected.expect("invalid project source must fail")
+                            )
+                        );
+                        break;
+                    }
+                    ServerEvent::Error { id: reply, .. } if reply == id => {
+                        assert!(expected.is_none());
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let after = crate::session::Session::load(&session_id).unwrap();
+        assert_eq!(
+            serde_json::to_value(&before.messages).unwrap(),
+            serde_json::to_value(&after.messages).unwrap()
+        );
+        assert_eq!(before.system_prompt, after.system_prompt);
+        assert!(after.first_provider_dispatch_at().is_none());
+        drop(client_writer);
+        server_task.await.unwrap().unwrap();
+        assert!(client_connections.read().await.is_empty());
+    });
+}

@@ -8,7 +8,7 @@
  */
 
 export const API_VERSION_MAJOR = 1;
-export const API_VERSION_MINOR = 0;
+export const API_VERSION_MINOR = 1;
 
 export type PermissionDecision = "allow" | "allow_always" | "deny";
 
@@ -82,6 +82,10 @@ export interface StartupContextCreateError {
 /** Base64 image attachment: [mediaType, base64Data]. */
 export type ImageAttachment = [string, string];
 
+export type WorkflowPromptRequest =
+  | { kind: "structured_initial"; content: string; schema: string }
+  | { kind: "structured_correction"; schema: string; error_lines: string; previous_response: string };
+
 export type ApiRequest =
   | { req: "hello"; min_version: number; max_version: number; client: string }
   | { req: "list_sessions"; include_archived?: boolean }
@@ -108,6 +112,7 @@ export type ApiRequest =
   | { req: "get_history"; session_id: string }
   | { req: "list_agents"; session_id: string }
   | { req: "set_agent"; session_id: string; agent: string; replace?: boolean }
+  | { req: "render_workflow_prompt"; session_id: string; workflow: WorkflowPromptRequest }
   | { req: "inspect_agent"; session_id: string; include_instructions?: boolean }
   | { req: "peek_session"; session_id: string; limit?: number }
   | { req: "clear"; session_id: string }
@@ -134,6 +139,7 @@ export type ApiRequest =
   | { req: "ping" };
 
 export type ApiEvent =
+  | { ev: "workflow_prompt_rendered"; session_id: string; content: string }
   | { ev: "hello_ok"; version: number; server: string; capabilities?: string[] }
   | { ev: "ok" }
   | { ev: "error"; code: ErrorCode; message: string }
@@ -281,6 +287,7 @@ export const KNOWN_EVENT_KINDS = [
   "agents",
   "agent_changed",
   "agent_status",
+  "workflow_prompt_rendered",
   "pong",
   "text_delta",
   "reasoning_delta",
@@ -323,6 +330,7 @@ export const KNOWN_REQUEST_KINDS = [
   "list_agents",
   "set_agent",
   "inspect_agent",
+  "render_workflow_prompt",
   "peek_session",
   "clear",
   "rewind",

@@ -32,6 +32,7 @@ const REQUIRES_ATTACH: &[&str] = &[
     "list_agents",
     "set_agent",
     "inspect_agent",
+    "render_workflow_prompt",
     "list_models",
     "set_model",
     "set_reasoning_effort",
@@ -148,6 +149,7 @@ enum SimpleKind {
     AgentChange,
     Agents,
     AgentStatus,
+    WorkflowPrompt,
     Credential {
         provider: String,
         configured: bool,
@@ -448,6 +450,27 @@ impl BridgeState {
                     "agent": agent,
                     "replace": request["replace"].as_bool().unwrap_or(false),
                 }))]
+            }
+            "render_workflow_prompt" => {
+                let workflow = match serde_json::from_value::<
+                    jcode_harness_api::WorkflowPromptRequest,
+                >(request["workflow"].clone())
+                {
+                    Ok(workflow) => workflow,
+                    Err(error) => {
+                        return Self::error_reply(
+                            api_id,
+                            ErrorCode::InvalidRequest,
+                            &format!("Invalid workflow request: {error}"),
+                        );
+                    }
+                };
+                let id = self.legacy_id();
+                self.pending_simple
+                    .push((id, api_id, SimpleKind::WorkflowPrompt));
+                vec![Outbound::Legacy(
+                    json!({"type": "render_workflow_prompt", "id": id, "workflow": workflow}),
+                )]
             }
             "inspect_agent" => {
                 let id = self.legacy_id();
@@ -1116,6 +1139,28 @@ impl BridgeState {
                     ApiEvent::Agents {
                         session_id: session(self),
                         agents,
+                    },
+                )]
+            }
+            "workflow_prompt_rendered" => {
+                let id = event["id"].as_u64().unwrap_or(0);
+                let Some(api_id) = self.take_simple(id, SimpleKind::WorkflowPrompt) else {
+                    return vec![];
+                };
+                let Some(content) = event["content"].as_str() else {
+                    return vec![ServerFrame::reply(
+                        api_id,
+                        ApiEvent::Error {
+                            code: ErrorCode::Internal,
+                            message: "Workflow reply omitted rendered content".into(),
+                        },
+                    )];
+                };
+                vec![ServerFrame::reply(
+                    api_id,
+                    ApiEvent::WorkflowPromptRendered {
+                        session_id: session(self),
+                        content: content.into(),
                     },
                 )]
             }

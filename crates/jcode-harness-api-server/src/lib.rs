@@ -52,6 +52,7 @@ const BRIDGE_CAPABILITIES: &[&str] = &[
     "startup_context_creation_errors",
     "initial_agent_selection",
     "agent_profile_controls",
+    "workflow_prompt_rendering",
 ];
 
 /// Read one newline-delimited frame, refusing to buffer more than

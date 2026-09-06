@@ -5,16 +5,17 @@ use serde::Serialize;
 use std::path::Path;
 
 macro_rules! workflows {
-    ($( $variant:ident => ($id:literal, $kind:ident, $directory:literal, $owner:literal, $mode:ident, $scope:ident) ),* $(,)?) => {
+    ($( $variant:ident $( { $( $field:ident : $ty:ty ),* $(,)? } )? => ($id:literal, $kind:ident, $directory:literal, $owner:literal, $mode:ident, $scope:ident) ),* $(,)?) => {
         #[derive(Debug, Serialize)]
-        pub enum Workflow {
-            $( $variant ),*
+        #[serde(untagged)]
+        pub enum Workflow<'a> {
+            $( $variant $( { $( $field: $ty ),* } )? ),*
         }
 
-        impl Workflow {
+        impl Workflow<'_> {
             pub fn registration(&self) -> Result<ConsumerRegistration, InstructionError> {
                 match self {
-                    $( Self::$variant => registration($id, InstructionKind::$kind, $directory, $owner, ConsumerScopePolicy::$scope) ),*
+                    $( Self::$variant $( { $( $field: _ ),* } )? => registration($id, InstructionKind::$kind, $directory, $owner, ConsumerScopePolicy::$scope) ),*
                 }
             }
         }
@@ -38,6 +39,8 @@ macro_rules! workflows {
 }
 
 workflows! {
+    StructuredOutput { schema: &'a str } => ("structured-output", Module, "modules", "structured SDK initial prompt", Plain, ProjectThenGlobal),
+    StructuredCorrection { schema: &'a str, error_lines: &'a str, previous_response: &'a str } => ("structured-output-correction", Notification, "notifications", "structured SDK correction", Plain, ProjectThenGlobal),
     SwarmEffort => ("swarm-effort", System, "system", "request dynamic effort directive", Plain, ProjectThenGlobal),
     SwarmDeepEffort => ("swarm-deep-effort", System, "system", "request dynamic effort directive", Plain, ProjectThenGlobal),
     AmbientIdentity => ("ambient-identity", Module, "modules", "ambient cycle", Plain, GlobalOnly),
@@ -68,7 +71,7 @@ fn registration(
     Ok(registration)
 }
 
-impl Workflow {
+impl Workflow<'_> {
     pub fn render(
         &self,
         working_dir: Option<&Path>,
@@ -101,7 +104,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let global = temp.path().join("global");
         let project = temp.path().join("project");
-        let write = |root: &Path, resource: Workflow, body: &str| {
+        let write = |root: &Path, resource: Workflow<'_>, body: &str| {
             let registration = resource.registration().unwrap();
             let path = root.join(registration.default_relative_path);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();

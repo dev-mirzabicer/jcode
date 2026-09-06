@@ -594,7 +594,9 @@ impl Request {
             Request::Clear { id } => *id,
             Request::ActivateSkill { id, .. } => *id,
             Request::SetAgent { id, .. } => *id,
-            Request::GetAgentCatalog { id } | Request::GetAgentStatus { id, .. } => *id,
+            Request::GetAgentCatalog { id }
+            | Request::GetAgentStatus { id, .. }
+            | Request::RenderWorkflowPrompt { id, .. } => *id,
             Request::Rewind { id, .. } => *id,
             Request::RewindUndo { id } => *id,
             Request::Ping { id } => *id,

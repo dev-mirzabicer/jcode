@@ -1,7 +1,7 @@
 //! Schema-validated structured model turns.
 //!
-//! This is an SDK-level contract rather than a harness protocol feature. The
-//! client asks for JSON, validates the response locally, and gives the model a
+//! Managed instructions render on the connected server. The client retains
+//! schema validation and gives the model a
 //! bounded number of correction opportunities when parsing or validation
 //! fails.
 
@@ -247,7 +247,10 @@ impl JcodeClient {
             })
         })?;
         let mut attempts = Vec::new();
-        let mut prompt = build_structured_prompt(content, &options.schema);
+        let mut prompt = self.render_workflow_prompt(
+            session_id,
+            build_structured_prompt(content, &options.schema),
+        )?;
 
         for attempt_number in 1..=options.max_retries.saturating_add(1) {
             let turn = self.run(session_id, &prompt, options.run_options())?;
@@ -266,7 +269,10 @@ impl JcodeClient {
             match validation {
                 Ok(data) => return Ok(StructuredTurnResult::from_turn(data, attempts, turn)),
                 Err(_) if attempt_number <= options.max_retries => {
-                    prompt = build_structured_correction_prompt(&options.schema, &attempt);
+                    prompt = self.render_workflow_prompt(
+                        session_id,
+                        build_structured_correction_prompt(&options.schema, &attempt),
+                    )?;
                 }
                 Err(_) => break,
             }
@@ -454,33 +460,31 @@ fn first_json_container(text: &str) -> Option<&str> {
     None
 }
 
-fn build_structured_prompt(content: &str, schema: &Value) -> String {
-    format!("{content}\n\n{}", structured_instructions(schema))
+fn build_structured_prompt(
+    content: &str,
+    schema: &Value,
+) -> jcode_harness_api::WorkflowPromptRequest {
+    jcode_harness_api::WorkflowPromptRequest::StructuredInitial {
+        content: content.into(),
+        schema: stable_stringify(schema),
+    }
 }
 
-fn build_structured_correction_prompt(schema: &Value, attempt: &StructuredOutputAttempt) -> String {
+fn build_structured_correction_prompt(
+    schema: &Value,
+    attempt: &StructuredOutputAttempt,
+) -> jcode_harness_api::WorkflowPromptRequest {
     let errors = attempt
         .errors
         .iter()
         .map(|issue| format!("- {}", format_issue(issue)))
         .collect::<Vec<_>>()
         .join("\n");
-    format!(
-        "Your previous response did not satisfy the required structured-output contract.\n\
-         Return a corrected response as JSON only, with no markdown, prose, code fences, or comments.\n\
-         It must validate against this JSON Schema:\n```json\n{}\n```\n\
-         Validation errors:\n{errors}\nPrevious response:\n```\n{}\n```",
-        stable_stringify(schema),
-        truncate(&attempt.text, 4_000)
-    )
-}
-
-fn structured_instructions(schema: &Value) -> String {
-    format!(
-        "Return the answer as JSON only, with no markdown, prose, code fences, or comments.\n\
-         The JSON value must validate against this JSON Schema:\n```json\n{}\n```",
-        stable_stringify(schema)
-    )
+    jcode_harness_api::WorkflowPromptRequest::StructuredCorrection {
+        schema: stable_stringify(schema),
+        error_lines: format!("{errors}\n"),
+        previous_response: truncate(&attempt.text, 4_000),
+    }
 }
 
 fn stable_stringify(value: &Value) -> String {

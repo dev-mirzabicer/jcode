@@ -124,6 +124,13 @@ pub enum Request {
         replace: bool,
     },
 
+    /// Render managed workflow prose without changing session or provider state.
+    #[serde(rename = "render_workflow_prompt")]
+    RenderWorkflowPrompt {
+        id: u64,
+        workflow: jcode_task_types::WorkflowPromptRequest,
+    },
+
     /// List currently valid primary agents for the active project.
     #[serde(rename = "get_agent_catalog")]
     GetAgentCatalog { id: u64 },
@@ -1351,6 +1358,9 @@ pub enum ServerEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         active_skill_id: Option<String>,
     },
+
+    #[serde(rename = "workflow_prompt_rendered")]
+    WorkflowPromptRendered { id: u64, content: String },
 
     #[serde(rename = "agent_catalog")]
     AgentCatalog {

@@ -20,17 +20,31 @@ pub enum ApiEvent {
     Ok,
 
     /// Request failed.
-    Error { code: ErrorCode, message: String },
+    Error {
+        code: ErrorCode,
+        message: String,
+    },
 
     /// Reply to `ListSessions`.
-    Sessions { sessions: Vec<SessionInfo> },
+    Sessions {
+        sessions: Vec<SessionInfo>,
+    },
 
     /// Reply to `CreateSession` / `AttachSession`.
-    Attached { session: SessionInfo },
+    Attached {
+        session: SessionInfo,
+    },
 
     /// `CreateSession` could not establish its mandatory Startup Context.
     /// Additive and skippable under the protocol-v1 event compatibility model.
-    StartupContextCreationFailed { error: StartupContextCreateError },
+    StartupContextCreationFailed {
+        error: StartupContextCreateError,
+    },
+
+    WorkflowPromptRendered {
+        session_id: String,
+        content: String,
+    },
 
     /// Reply to `GetHistory`.
     History {
@@ -72,10 +86,16 @@ pub enum ApiEvent {
 
     // --- Streaming events (carry session_id, not tied to a request id) ---
     /// Assistant text delta.
-    TextDelta { session_id: String, text: String },
+    TextDelta {
+        session_id: String,
+        text: String,
+    },
 
     /// Model reasoning delta (render dim/italic; safe to ignore).
-    ReasoningDelta { session_id: String, text: String },
+    ReasoningDelta {
+        session_id: String,
+        text: String,
+    },
 
     /// Reasoning finished for the current step.
     ReasoningDone {
@@ -119,7 +139,9 @@ pub enum ApiEvent {
     },
 
     /// The turn finished; the agent is idle.
-    TurnDone { session_id: String },
+    TurnDone {
+        session_id: String,
+    },
 
     /// A background task the agent is waiting on reported progress, or
     /// finished.
@@ -153,7 +175,9 @@ pub enum ApiEvent {
     /// that shows "sent" versus "acknowledged" needs the second fact, and
     /// without it the only proof a message landed is the reply, which can be
     /// minutes away.
-    MessageAccepted { session_id: String },
+    MessageAccepted {
+        session_id: String,
+    },
 
     /// The harness needs a permission decision from the user.
     PermissionRequest {
@@ -164,7 +188,10 @@ pub enum ApiEvent {
     },
 
     /// Session-level status change (idle, generating, tool_running, ...).
-    SessionStatus { session_id: String, status: String },
+    SessionStatus {
+        session_id: String,
+        status: String,
+    },
 
     /// The provider and model serving the attached session.
     ///
@@ -201,7 +228,10 @@ pub enum ApiEvent {
     },
 
     /// An API-key credential was persisted or removed.
-    CredentialUpdated { provider: String, configured: bool },
+    CredentialUpdated {
+        provider: String,
+        configured: bool,
+    },
 
     /// Reply to `ReadFile`.
     FileContent {

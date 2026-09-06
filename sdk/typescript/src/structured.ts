@@ -1,3 +1,4 @@
+import type { WorkflowPromptRequest } from "./protocol.js";
 import {
   Ajv,
   type AnySchema,
@@ -89,28 +90,12 @@ export function validateStructuredText<T>(
   return { ok: false, errors: normalizeAjvErrors(validate.errors ?? []) };
 }
 
-export function buildStructuredPrompt<T>(content: string, schema: StructuredOutputSchema<T>): string {
-  return `${content}\n\n${structuredInstructions(schema)}`;
+export function buildStructuredPrompt<T>(content: string, schema: StructuredOutputSchema<T>): WorkflowPromptRequest {
+  return { kind: "structured_initial", content, schema: stableStringify(schema) };
 }
 
-export function buildStructuredCorrectionPrompt<T>(
-  schema: StructuredOutputSchema<T>,
-  attempt: StructuredOutputAttempt,
-): string {
-  return [
-    "Your previous response did not satisfy the required structured-output contract.",
-    "Return a corrected response as JSON only, with no markdown, prose, code fences, or comments.",
-    "It must validate against this JSON Schema:",
-    "```json",
-    stableStringify(schema),
-    "```",
-    "Validation errors:",
-    ...attempt.errors.map((issue) => `- ${formatIssue(issue)}`),
-    "Previous response:",
-    "```",
-    truncate(attempt.text, 4_000),
-    "```",
-  ].join("\n");
+export function buildStructuredCorrectionPrompt<T>(schema: StructuredOutputSchema<T>, attempt: StructuredOutputAttempt): WorkflowPromptRequest {
+  return { kind: "structured_correction", schema: stableStringify(schema), error_lines: attempt.errors.map((issue) => `- ${formatIssue(issue)}\n`).join(""), previous_response: truncate(attempt.text, 4_000) };
 }
 
 export function assertRetryCount(maxRetries: number): void {
@@ -122,16 +107,6 @@ export function assertRetryCount(maxRetries: number): void {
 export function formatIssue(issue: StructuredValidationIssue): string {
   const path = issue.path || "/";
   return `${path} ${issue.message}`;
-}
-
-function structuredInstructions<T>(schema: StructuredOutputSchema<T>): string {
-  return [
-    "Return the answer as JSON only, with no markdown, prose, code fences, or comments.",
-    "The JSON value must validate against this JSON Schema:",
-    "```json",
-    stableStringify(schema),
-    "```",
-  ].join("\n");
 }
 
 function normalizeAjvErrors(errors: ErrorObject[]): StructuredValidationIssue[] {
@@ -227,5 +202,10 @@ function sortJson(value: unknown): unknown {
 
 function truncate(value: string, maxChars: number): string {
   if (value.length <= maxChars) return value;
-  return `${value.slice(0, maxChars)}\n… truncated ${value.length - maxChars} chars`;
+  // The limit is in UTF-16 code units. Never send a lone high surrogate:
+  // JSON.stringify escapes it, but the Rust transport correctly rejects it.
+  let end = maxChars;
+  const last = value.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end--;
+  return `${value.slice(0, end)}\n… truncated ${value.length - end} chars`;
 }

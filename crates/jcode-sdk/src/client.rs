@@ -747,6 +747,25 @@ impl JcodeClient {
         }
     }
 
+    /// Render current managed prose on the connected server without sending a turn.
+    pub fn render_workflow_prompt(
+        &self,
+        session_id: &str,
+        workflow: jcode_harness_api::WorkflowPromptRequest,
+    ) -> Result<String> {
+        self.require_capability("workflow_prompt_rendering")?;
+        match self
+            .request_ok(ApiRequest::RenderWorkflowPrompt {
+                session_id: session_id.into(),
+                workflow,
+            })?
+            .event
+        {
+            ApiEvent::WorkflowPromptRendered { content, .. } => Ok(content),
+            other => Err(unexpected("workflow_prompt_rendered", &other)),
+        }
+    }
+
     pub fn list_agents(&self, session_id: &str) -> Result<Vec<AgentInfo>> {
         self.require_capability("agent_profile_controls")?;
         match self

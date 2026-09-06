@@ -42,6 +42,7 @@ const CAPABILITIES: &[Capability] = &[
     cap("list_agents", "listAgents"),
     cap("set_agent", "setAgent"),
     cap("inspect_agent", "inspectAgent"),
+    cap("render_workflow_prompt", "renderWorkflowPrompt"),
     cap("peek_session", "peekSession"),
     cap("clear", "clear"),
     cap("rewind", "rewind"),

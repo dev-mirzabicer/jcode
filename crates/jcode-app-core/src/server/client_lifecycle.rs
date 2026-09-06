@@ -3029,6 +3029,37 @@ pub(super) async fn handle_client_with_instruction_repositories(
              * check-then-lock helper: that would reintroduce a race with turn
              * acquisition.
              */
+            Request::RenderWorkflowPrompt { id, workflow } => {
+                let working_dir = match agent.try_lock() {
+                    Ok(current) => Ok(current.working_dir().map(str::to_string)),
+                    Err(_) => Session::load(&client_session_id)
+                        .map(|session| session.working_dir)
+                        .map_err(|error| error.to_string()),
+                };
+                let result = working_dir.and_then(|working_dir| {
+                    crate::workflow::render_prompt(
+                        instruction_repositories.as_ref(),
+                        working_dir.as_deref().map(Path::new),
+                        &workflow,
+                    )
+                    .map_err(|error| error.to_string())
+                });
+                match result {
+                    Ok(content) => {
+                        let _ = client_event_tx
+                            .send(ServerEvent::WorkflowPromptRendered { id, content });
+                        let _ = client_event_tx.send(ServerEvent::Done { id });
+                    }
+                    Err(error) => {
+                        let _ = client_event_tx.send(ServerEvent::Error {
+                            id,
+                            message: format!("Workflow instruction rendering failed: {error}"),
+                            retry_after_secs: None,
+                        });
+                    }
+                }
+            }
+
             Request::GetAgentCatalog { id } => {
                 let catalog = match agent.try_lock() {
                     Ok(agent_guard) => agent_guard

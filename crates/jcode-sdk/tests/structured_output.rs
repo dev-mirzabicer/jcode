@@ -20,7 +20,21 @@ impl Transport for PairTransport {
     }
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum RenderMode {
+    Synthetic,
+    Reject,
+    Unsupported,
+}
+
 fn fake_harness(handle: impl Fn(&ClientFrame, &mut dyn Write) + Send + 'static) -> JcodeClient {
+    fake_harness_with_mode(RenderMode::Synthetic, handle)
+}
+
+fn fake_harness_with_mode(
+    mode: RenderMode,
+    handle: impl Fn(&ClientFrame, &mut dyn Write) + Send + 'static,
+) -> JcodeClient {
     let (ours, theirs) = UnixStream::pair().expect("socket pair");
     std::thread::spawn(move || {
         let mut reader = BufReader::new(theirs.try_clone().expect("clone"));
@@ -32,10 +46,46 @@ fn fake_harness(handle: impl Fn(&ClientFrame, &mut dyn Write) + Send + 'static) 
                     ApiEvent::HelloOk {
                         version: API_VERSION_MAJOR,
                         server: "structured-test/1.0".to_string(),
-                        capabilities: vec!["sessions".to_string()],
+                        capabilities: if mode == RenderMode::Unsupported {
+                            vec!["sessions".into()]
+                        } else {
+                            vec!["sessions".into(), "workflow_prompt_rendering".into()]
+                        },
                     },
                     &mut writer,
                 );
+                continue;
+            }
+            if let ApiRequest::RenderWorkflowPrompt {
+                session_id,
+                workflow,
+            } = &frame.request
+            {
+                let event = if mode == RenderMode::Reject {
+                    ApiEvent::Error {
+                        code: jcode_harness_api::ErrorCode::Internal,
+                        message: "SYNTHETIC_RENDER_FAILURE".into(),
+                    }
+                } else {
+                    let content = match workflow {
+                        jcode_harness_api::WorkflowPromptRequest::StructuredInitial {
+                            content,
+                            schema,
+                        } => format!("SERVER_INITIAL\n{content}\n{schema}"),
+                        jcode_harness_api::WorkflowPromptRequest::StructuredCorrection {
+                            schema,
+                            error_lines,
+                            previous_response,
+                        } => {
+                            format!("SERVER_CORRECTION\n{schema}\n{error_lines}{previous_response}")
+                        }
+                    };
+                    ApiEvent::WorkflowPromptRendered {
+                        session_id: session_id.clone(),
+                        content,
+                    }
+                };
+                reply(&frame, event, &mut writer);
                 continue;
             }
             handle(&frame, &mut writer);
@@ -158,7 +208,7 @@ fn validates_fenced_json_and_returns_parsed_data() {
     assert_eq!(result.attempts.len(), 1);
     assert!(result.attempts[0].errors.is_empty());
     let prompts = prompts.lock().unwrap();
-    assert!(prompts[0].contains("Return the answer as JSON only"));
+    assert!(prompts[0].starts_with("SERVER_INITIAL\nSummarize the work\n"));
     assert!(prompts[0].contains("\"additionalProperties\": false"));
 }
 
@@ -202,7 +252,7 @@ fn retries_with_validation_details_then_returns_the_correction() {
     assert!(result.attempts[1].errors.is_empty());
     let prompts = prompts.lock().unwrap();
     assert_eq!(prompts.len(), 2);
-    assert!(prompts[1].contains("Validation errors:"));
+    assert!(prompts[1].starts_with("SERVER_CORRECTION\n"));
     assert!(prompts[1].contains("/summary must be string"));
     assert!(prompts[1].contains("\"summary\":42"));
 }
@@ -257,4 +307,22 @@ fn invalid_schema_fails_before_any_model_turn() {
     assert_eq!(error.code(), "structured_schema_invalid");
     assert!(matches!(error, RunStructuredError::InvalidSchema(_)));
     assert_eq!(*requests.lock().unwrap(), 0);
+}
+
+#[test]
+fn missing_render_capability_and_render_failure_never_send_a_model_turn() {
+    for mode in [RenderMode::Unsupported, RenderMode::Reject] {
+        let sent = Arc::new(Mutex::new(0));
+        let seen = sent.clone();
+        let client = fake_harness_with_mode(mode, move |_, _| *seen.lock().unwrap() += 1);
+        let error = client
+            .run_structured::<serde_json::Value>("s1", "INPUT", RunStructuredOptions::new(schema()))
+            .unwrap_err();
+        if mode == RenderMode::Unsupported {
+            assert_eq!(error.code(), "unsupported_capability");
+        } else {
+            assert!(error.to_string().contains("SYNTHETIC_RENDER_FAILURE"));
+        }
+        assert_eq!(*sent.lock().unwrap(), 0);
+    }
 }

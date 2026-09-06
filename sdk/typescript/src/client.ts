@@ -24,6 +24,7 @@ import {
   type AgentInfo,
   type ApiEvent,
   type ApiRequest,
+  type WorkflowPromptRequest,
   type HistoryMessage,
   type ImageAttachment,
   type ModelRouteInfo,
@@ -594,6 +595,14 @@ export class JcodeClient extends EventEmitter {
     return frame.messages ?? [];
   }
 
+  /** Render current managed prose on the server, without starting a turn. */
+  async renderWorkflowPrompt(sessionId: string, workflow: WorkflowPromptRequest): Promise<string> {
+    this.requireCapability("workflow_prompt_rendering");
+    const frame = await this.expectReply({ req: "render_workflow_prompt", session_id: sessionId, workflow }, "workflow_prompt_rendered");
+    if (typeof frame.content !== "string") throw new HarnessError("unexpected_reply", "Workflow reply omitted rendered content");
+    return frame.content;
+  }
+
   async listAgents(sessionId: string): Promise<AgentInfo[]> {
     this.requireCapability("agent_profile_controls");
     const frame = await this.expectReply(
@@ -1143,8 +1152,8 @@ export class JcodeClient extends EventEmitter {
   /**
    * Send a message and parse the assistant's answer as JSON validated by schema.
    *
-   * This is an SDK-level contract: it does not require a special bridge or model
-   * feature. The initial prompt asks for JSON only; if the response is not JSON
+   * Managed instructions render on the connected server. Validation and retry
+   * policy remain local to this SDK. If the response is not JSON
    * or fails Ajv validation, the client sends a bounded number of corrective
    * prompts that include the normalized validation errors and the prior text.
    */
@@ -1157,7 +1166,7 @@ export class JcodeClient extends EventEmitter {
     assertRetryCount(maxRetries);
     const validate = compileStructuredSchema(schema);
     const attempts: StructuredOutputAttempt[] = [];
-    let prompt = buildStructuredPrompt(content, schema);
+    let prompt = await this.renderWorkflowPrompt(sessionId, buildStructuredPrompt(content, schema));
 
     for (let attemptNumber = 1; attemptNumber <= maxRetries + 1; attemptNumber += 1) {
       const turn = await this.run(sessionId, prompt, runOptions);
@@ -1169,7 +1178,7 @@ export class JcodeClient extends EventEmitter {
       };
       attempts.push(attempt);
       if (validation.ok) return { ...turn, data: validation.data, attempts };
-      prompt = buildStructuredCorrectionPrompt(schema, attempt);
+      if (attemptNumber <= maxRetries) prompt = await this.renderWorkflowPrompt(sessionId, buildStructuredCorrectionPrompt(schema, attempt));
     }
 
     throw new StructuredOutputError(attempts);

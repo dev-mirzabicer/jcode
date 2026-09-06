@@ -26,6 +26,14 @@ Ambient mode remains disabled when `[ambient].enabled = false`. The migration do
 
 Invalid selected prose fails before provider dispatch in app-core and local TUI paths. The TUI uses one rendered instruction snapshot for both request accounting and dispatch. Empty guidance contributes no prose. These resources do not start a worker or enable Swarm.
 
+### SDK structured output
+
+Both SDKs use `RenderWorkflowPrompt` on the connected server before each actual attempt. `modules/structured-output.md` and `notifications/structured-output-correction.md` own the prose. The server supplies structural schema/error/previous-response framing in the attached session's project scope. Typed substitutions expose schema and correction data without arbitrary resource selection or file access.
+
+The SDKs retain schema validation, error normalization, previous-response limits, image/event handling and retry counts. TypeScript's existing UTF-16 excerpt limit now avoids splitting surrogate pairs and reports the actual omitted count. Previously that boundary could produce JSON the Rust server could not decode.
+
+The additive `workflow_prompt_rendering` capability is mandatory for these calls. Older servers fail before a model turn, with no embedded-prose fallback. Rendering does not append history or call a model. Invalid sources propagate as request errors, preserving the current session and preventing the affected attempt.
+
 ## Source and failure semantics
 
 Working files are authoritative, including intentionally empty bodies where the owner retains meaningful structure. A present invalid project redefinition fails rather than exposing global prose. Missing previously adopted singleton resources are damage, not permission to recreate defaults. New shipped paths use the existing versioned, scoped Git seed-adoption transaction. It preserves current files and does not push a repository.

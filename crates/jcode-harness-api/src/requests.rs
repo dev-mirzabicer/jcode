@@ -71,6 +71,13 @@ pub enum ApiRequest {
         urgent: bool,
     },
 
+    /// Render current managed workflow instructions in the attached session scope.
+    /// This does not append history or start a model turn.
+    RenderWorkflowPrompt {
+        session_id: String,
+        workflow: crate::WorkflowPromptRequest,
+    },
+
     /// Fetch conversation history.
     GetHistory { session_id: String },
 
