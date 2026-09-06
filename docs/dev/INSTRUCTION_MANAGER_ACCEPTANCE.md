@@ -2,8 +2,8 @@
 
 This records Phase 3 WP-09 implementation evidence. Mirza approved the original
 candidate on 2026-09-06 at 21:52 UTC, then authorized a bounded same-package UX
-refinement at 22:02 UTC. The refined activated candidate below is ready for renewed
-UX review. Durable accepted closeout follows that review.
+refinement at 22:02 UTC. Mirza accepted the refined activated candidate on 2026-09-06 at 23:18 UTC.
+The evidence below describes that accepted boundary.
 
 ## Scope and ownership
 
@@ -207,6 +207,9 @@ acceptance. Neither receives an unrelated redesign assignment.
 
 ## Acceptance boundary
 
-The original candidate is accepted. This refined candidate awaits its agreed
-activated UX review before final integration/publication and durable work-package
-closeout. The next evidence-only commit changes no runtime implementation.
+Mirza accepted the original candidate at 21:52 UTC and the refined candidate at
+23:18 UTC on 2026-09-06, responding: “absolutely incredible work. approved for sure.”
+The accepted candidate source was `20e42df63`, with verified implementation
+`17aab5629`. Integration/publication and durable program closeout are authorized.
+This acceptance-record commit changes no runtime implementation and does not
+broaden the reported verification limits or claim Phase 3 completion.

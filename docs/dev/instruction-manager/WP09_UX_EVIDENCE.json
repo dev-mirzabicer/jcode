@@ -1,5 +1,5 @@
 {
-  "status": "Refined candidate verified; revised user approval pending",
+  "status": "Accepted by Mirza",
   "original_candidate_approved_at": "2026-09-06T21:52:48Z",
   "refinement_authorized_at": "2026-09-06T22:02:25Z",
   "source_commit": "17aab562929c43289ef502a4c53b9be0156fc998",
@@ -211,5 +211,7 @@
       "frame_id": 45,
       "sha256": "0f3016988af3bdc513e7176ffb53d5429a0987b804ef2dcce765d9053b0a2f81"
     }
-  ]
+  ],
+  "accepted_at": "2026-09-06T23:18:07Z",
+  "accepted_candidate_head": "20e42df6364c16e2f43e7c3e4fbd380df2feebe9"
 }
