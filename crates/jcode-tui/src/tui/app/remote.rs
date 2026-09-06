@@ -139,7 +139,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     needs_redraw |= app.onboarding_tick();
     needs_redraw |= app.refresh_keybindings_if_config_reloaded();
 
-    let _ = check_debug_command(app, remote).await;
+    needs_redraw |= check_debug_command(app, remote).await.is_some();
 
     if !app.is_processing {
         if let Some(request) = app.take_pending_catchup_resume() {

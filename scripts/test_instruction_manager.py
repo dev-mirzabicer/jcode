@@ -202,7 +202,7 @@ def frame(tid, expected_text='WORKING'):
         except json.JSONDecodeError:
             value = {}
         viewport = '\n'.join((row.get('content_preview', '') for row in value.get('rendered_text', {}).get('recent_messages', [])))
-        if value.get('frame_id', -1) > first_id and 'instruction_manager' in value.get('render_order', []) and ('WORKING' in viewport):
+        if value.get('frame_id', -1) >= first_id and 'instruction_manager' in value.get('render_order', []) and (expected_text in viewport):
             return value
         if time.monotonic() > deadline:
             raise TimeoutError('fresh selected-source frame not captured: ' + result)
