@@ -1,0 +1,73 @@
+{
+  "status": "candidate verification, not user acceptance",
+  "date": "2026-09-06",
+  "source_commit": "3b9dc06bc0996e2a9f42007b02aecc1c1e7a93cb",
+  "runtime": "3b9dc06bc-dirty-6ed7adf08941",
+  "current_shared_equal": true,
+  "canary": "passed",
+  "active_session_instruction_model_identity_preserved": true,
+  "production_probe": {
+    "binary": "jcode v0.75.189-dev (3b9dc06bc, dirty)",
+    "catalog_rows": 226,
+    "complete_content_pages": 55,
+    "source_and_index_unchanged": true,
+    "session_instructions_and_messages_unchanged": true,
+    "provider_requests": 0,
+    "actual_remote_keys_mouse_frames": [
+      [
+        150,
+        40
+      ],
+      [
+        72,
+        24
+      ],
+      [
+        24,
+        10
+      ]
+    ],
+    "server_restart_reconnect_and_stale_rejection": true,
+    "artifact": "/Users/mirzabicer/.jcode/scratch/wp09/activated-final/live-ijta3tml"
+  },
+  "frames": {
+    "150x40": {
+      "group_frame_id": 0,
+      "source_frame_id": 15,
+      "source_scroll": 8
+    },
+    "72x24": {
+      "group_frame_id": 0,
+      "source_frame_id": 15,
+      "source_scroll": 8
+    },
+    "24x10": {
+      "group_frame_id": 0,
+      "source_frame_id": 15,
+      "source_scroll": 14
+    }
+  },
+  "focused_tests": {
+    "inspection_domain": 12,
+    "manager": 10,
+    "protocol": 92,
+    "skills": 38,
+    "roster": 8,
+    "startup_ui": 47,
+    "context_ui": 97,
+    "client_lifecycle_after_classification_repair": 30
+  },
+  "known_baseline_failures": [
+    "remote enabled-memory activity expectation",
+    "two enabled-memory goals command expectations"
+  ],
+  "validation": [
+    "strict all-target affected-crate Clippy",
+    "root all-target check",
+    "workspace formatting",
+    "git diff --check",
+    "protected checkout fingerprints",
+    "live source/index/HEAD/status fingerprints",
+    "zero model inference requests"
+  ]
+}

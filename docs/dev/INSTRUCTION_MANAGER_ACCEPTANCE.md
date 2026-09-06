@@ -118,9 +118,40 @@ an account, and assertions were retained. The conflict also improved the
 manager's diagnostic projection. None of those failed attempts is counted as a
 successful valid-preview or physical-input journey.
 
-## Runtime and acceptance boundary
+## Final activated verification
 
-The final coordinated build/reload identity, final fresh-frame probe and source
-HEAD are added after activation. User approval, downstream publication, the
-external accepted progress report, and WP-10 authorization remain separate
-lifecycle steps. No accepted completion is claimed by this document.
+The final production probe passed on **2026-09-06** against
+`jcode v0.75.189-dev (3b9dc06bc, dirty)`, runtime
+`3b9dc06bc-dirty-6ed7adf08941`. Current and shared channels matched and canary
+passed. The active primary session retained its exact system-prompt state,
+active-skill state, frozen routing text, model, authentication route and effort
+across both reloads.
+
+Final artifacts: `~/.jcode/scratch/wp09/activated-final/live-ijta3tml/`.
+The versioned probe passed 226 catalog rows, exact reconstruction of 55 content
+pages, high-impact grouping, repeated search between different resources,
+actual remote keyboard and mouse paths, and content-matched frames at 150x40,
+72x24 and 24x10. All six group/source viewports were inspected. The extreme-narrow
+source frame shows the actual `WORKING` synthetic body at scroll 14, not an
+older header-only frame. Source files, Git HEAD/index/status and session
+instructions/messages/model remained unchanged. The provider recorded zero
+inference requests. Daemon restart and stale-snapshot rejection passed, and all
+owned test processes were stopped.
+
+The final frame loop first found an assertion bug in the test helper's sentinel
+parameter, then correctly exposed a pre-existing remote tester repaint defect:
+`handle_tick` discarded the `check_debug_command` completion signal. The narrow
+repair in `3b9dc06bc` requests repaint after an explicit debug-file command. Normal
+physical keyboard routing was already passing. The probe also respects the
+visual debugger's intentional deduplication of identical frames while requiring
+the expected visible content. Earlier failed frame attempts are not counted as
+successful narrow-body evidence.
+
+Machine-readable summary: [WP09_EVIDENCE.json](instruction-manager/WP09_EVIDENCE.json).
+
+## Acceptance boundary
+
+This source/runtime result is a candidate, not accepted completion. User
+approval, downstream publication, the external accepted progress report, and
+WP-10 authorization remain separate lifecycle steps. The final evidence-only
+commit does not change the activated runtime implementation.
