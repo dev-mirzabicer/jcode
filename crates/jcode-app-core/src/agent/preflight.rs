@@ -47,15 +47,24 @@ impl Agent {
         &mut self,
         dispatch_error: anyhow::Error,
     ) -> anyhow::Error {
-        let kind =
-            match dispatch_error.downcast_ref::<crate::session::StartupContextDispatchError>() {
-                Some(crate::session::StartupContextDispatchError::Blocked) => {
-                    crate::protocol::StartupContextActionKind::RequirementsUnresolved
+        let startup_error = dispatch_error
+            .downcast_ref::<crate::session::StartupContextDispatchError>()
+            .or_else(|| {
+                match dispatch_error.downcast_ref::<crate::session::SystemPromptDispatchError>() {
+                    Some(crate::session::SystemPromptDispatchError::StartupContext(error)) => {
+                        Some(error)
+                    }
+                    _ => None,
                 }
-                Some(crate::session::StartupContextDispatchError::Persistence(_)) | None => {
-                    crate::protocol::StartupContextActionKind::DispatchPersistence
-                }
-            };
+            });
+        let kind = match startup_error {
+            Some(crate::session::StartupContextDispatchError::Blocked) => {
+                crate::protocol::StartupContextActionKind::RequirementsUnresolved
+            }
+            Some(crate::session::StartupContextDispatchError::Persistence(_)) | None => {
+                crate::protocol::StartupContextActionKind::DispatchPersistence
+            }
+        };
         let dispatch_detail =
             crate::util::truncate_str(&dispatch_error.to_string(), 1_024).to_string();
         let (prompt_disposition, pending_input, detail) = match self

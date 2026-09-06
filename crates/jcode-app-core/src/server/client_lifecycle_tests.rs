@@ -1405,7 +1405,8 @@ async fn blocked_shared_startup_emits_prompt_safe_action_and_rolls_back_unanswer
                 ));
                 assert_eq!(
                     action.kind,
-                    crate::protocol::StartupContextActionKind::RequirementsUnresolved
+                    crate::protocol::StartupContextActionKind::RequirementsUnresolved,
+                    "unexpected blocked action: {action:?}"
                 );
                 assert_eq!(
                     action.prompt_disposition,
