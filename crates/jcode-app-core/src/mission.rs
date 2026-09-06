@@ -1,9 +1,9 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use crate::prompt::MISSION_CONTINUATION_TEMPLATE;
+use crate::instruction::workflow::Workflow;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -63,7 +63,7 @@ pub fn load(session_id: &str) -> Result<Option<Mission>> {
     crate::storage::read_json(&path)
 }
 
-pub fn set(session_id: &str, objective: &str) -> Result<Mission> {
+pub fn set(session_id: &str, objective: &str, working_dir: Option<&Path>) -> Result<Mission> {
     let objective = objective.trim();
     if objective.is_empty() {
         anyhow::bail!("mission objective cannot be empty");
@@ -82,7 +82,8 @@ pub fn set(session_id: &str, objective: &str) -> Result<Mission> {
         updated_at: now,
     });
     mission.objective = objective.to_string();
-    mission.long_horizon_intent = default_long_horizon_intent(objective);
+    mission.long_horizon_intent =
+        Workflow::MissionDefaultIntent { objective }.render(working_dir)?;
     mission.status = MissionStatus::Active;
     mission.updated_at = now;
     save(&mission)?;
@@ -140,23 +141,43 @@ pub fn render_status(mission: &Mission) -> String {
     out
 }
 
-pub fn active_system_reminder(session_id: &str) -> Result<Option<String>> {
+pub fn active_system_reminder(
+    session_id: &str,
+    working_dir: Option<&Path>,
+) -> Result<Option<String>> {
     let Some(mission) = load(session_id)? else {
         return Ok(None);
     };
     if !matches!(mission.status, MissionStatus::Active) {
         return Ok(None);
     }
-    Ok(Some(render_mission_continuation_prompt(&mission)))
+    Ok(Some(render_mission_continuation_prompt(
+        &mission,
+        working_dir,
+    )?))
 }
 
-pub fn render_mission_continuation_prompt(mission: &Mission) -> String {
-    MISSION_CONTINUATION_TEMPLATE
-        .replace("{{ objective }}", &escape_xml_text(&mission.objective))
-        .replace(
-            "{{ long_horizon_intent }}",
-            &escape_xml_text(&mission.long_horizon_intent),
-        )
+pub fn render_mission_continuation_prompt(
+    mission: &Mission,
+    working_dir: Option<&Path>,
+) -> Result<String> {
+    let objective = escape_xml_text(&mission.objective);
+    let long_horizon_intent = escape_xml_text(&mission.long_horizon_intent);
+    let intro = Workflow::MissionIntroduction {
+        objective: &objective,
+        long_horizon_intent: &long_horizon_intent,
+    }
+    .render(working_dir)?;
+    let body = Workflow::MissionContinuation {
+        objective: &objective,
+        long_horizon_intent: &long_horizon_intent,
+    }
+    .render(working_dir)?;
+    // User data stays literal and XML-escaped. It is never reparsed as template
+    // syntax, and editable prose cannot remove the mission's structural data.
+    Ok(format!(
+        "{intro}<objective>\n{objective}\n</objective>\n\n<long_horizon_intent>\n{long_horizon_intent}\n</long_horizon_intent>\n\n{body}"
+    ))
 }
 
 fn escape_xml_text(input: &str) -> String {
@@ -189,9 +210,60 @@ fn sanitize_session_id(session_id: &str) -> String {
         .collect()
 }
 
-fn default_long_horizon_intent(objective: &str) -> String {
-    format!(
-        "Interpret `{}` broadly: pursue the literal objective, continuously refresh the todo frontier, include semantically adjacent work that improves the outcome, and preserve long-term quality.",
-        objective
-    )
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn write(home: &Path, id: &str, body: &str) {
+        std::fs::write(
+            home.join(format!("instructions/modules/{id}.md")),
+            format!("---\nid: {id}\nkind: module\ntemplate: handlebars\n---\n{body}"),
+        )
+        .unwrap();
+    }
+    #[test]
+    fn mission_rendering_preserves_literal_xml_data_and_failed_set_preserves_state() {
+        let home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        crate::instruction::SystemPromptComposer::new()
+            .ensure_global_store()
+            .unwrap();
+        write(home.root(), "mission-default-intent", "LONG {{objective}}");
+        write(home.root(), "mission-introduction", "INTRO\n");
+        write(home.root(), "mission-continuation", "BODY");
+        let mut mission = set("mission-fixture", "OBJ <&>", None).unwrap();
+        assert_eq!(mission.long_horizon_intent, "LONG OBJ <&>");
+        let first = render_mission_continuation_prompt(&mission, None).unwrap();
+        assert_eq!(
+            first,
+            "INTRO\n<objective>\nOBJ &lt;&amp;&gt;\n</objective>\n\n<long_horizon_intent>\nLONG OBJ &lt;&amp;&gt;\n</long_horizon_intent>\n\nBODY"
+        );
+        write(home.root(), "mission-continuation", "NEXT");
+        assert!(
+            render_mission_continuation_prompt(&mission, None)
+                .unwrap()
+                .ends_with("NEXT")
+        );
+        assert!(first.ends_with("BODY"));
+        write(home.root(), "mission-introduction", "");
+        write(home.root(), "mission-continuation", "");
+        mission.objective = "DATA {{ long_horizon_intent }}".into();
+        mission.long_horizon_intent = "OTHER".into();
+        assert!(
+            render_mission_continuation_prompt(&mission, None)
+                .unwrap()
+                .contains("<objective>\nDATA {{ long_horizon_intent }}\n</objective>")
+        );
+        let stored = load("mission-fixture").unwrap().unwrap();
+        write(home.root(), "mission-default-intent", "{{missing}}");
+        assert!(set("mission-fixture", "NEW", None).is_err());
+        assert_eq!(load("mission-fixture").unwrap().unwrap(), stored);
+        write(home.root(), "mission-continuation", "{{missing}}");
+        assert!(active_system_reminder("mission-fixture", None).is_err());
+        update_status("mission-fixture", MissionStatus::Paused).unwrap();
+        assert!(
+            active_system_reminder("mission-fixture", None)
+                .unwrap()
+                .is_none()
+        );
+        assert!(active_system_reminder("absent", None).unwrap().is_none());
+    }
 }

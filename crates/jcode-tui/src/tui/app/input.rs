@@ -65,11 +65,11 @@ pub(super) fn strip_reasoning_lines(content: &str) -> String {
     result.trim_end().to_string()
 }
 
-fn mission_turn_reminder(session_id: &str) -> Option<String> {
-    crate::mission::active_system_reminder(session_id)
-        .map_err(|err| crate::logging::warn(&format!("failed to load active mission: {err}")))
-        .ok()
-        .flatten()
+fn mission_turn_reminder(app: &App) -> Result<Option<String>> {
+    crate::mission::active_system_reminder(
+        &app.session.id,
+        app.session.working_dir.as_deref().map(std::path::Path::new),
+    )
 }
 
 fn merge_turn_reminders(a: Option<String>, b: Option<String>) -> Option<String> {
@@ -3800,6 +3800,23 @@ impl App {
             }
         }
 
+        let mission_reminder = if self.is_remote {
+            None
+        } else {
+            match mission_turn_reminder(self) {
+                Ok(reminder) => reminder,
+                Err(error) => {
+                    self.input = raw_input;
+                    self.cursor_pos = submitted_cursor_pos;
+                    self.pasted_contents = submitted_pasted_contents;
+                    self.push_display_message(DisplayMessage::error(format!(
+                        "Mission instruction rendering failed; input was preserved: {error}"
+                    )));
+                    return;
+                }
+            }
+        };
+
         // Leaving the preview should happen as soon as the user acts on it.
         self.onboarding_preview_mode = false;
 
@@ -3858,14 +3875,14 @@ impl App {
             ));
         }
         if images.is_empty() {
-            self.current_turn_system_reminder = mission_turn_reminder(&self.session.id);
+            self.current_turn_system_reminder = mission_reminder;
             self.add_provider_message(Message::user(&input));
             self.session.add_human_message(vec![ContentBlock::Text {
                 text: input.clone(),
                 cache_control: None,
             }]);
         } else {
-            self.current_turn_system_reminder = mission_turn_reminder(&self.session.id);
+            self.current_turn_system_reminder = mission_reminder;
             self.add_provider_message(Message::user_with_images(&input, images.clone()));
             let mut blocks: Vec<ContentBlock> = images
                 .into_iter()
@@ -3933,13 +3950,18 @@ impl App {
             let hidden_reminders = std::mem::take(&mut self.hidden_queued_system_messages);
             let (messages, reminder, display_system_messages) =
                 super::helpers::partition_queued_messages(queued_messages, hidden_reminders);
-            let (combined, origin) = match crate::todo::render_queued_messages(
-                &messages,
-                self.session
-                    .working_dir
-                    .as_deref()
-                    .map(std::path::Path::new),
-            ) {
+            let prepared = (|| -> Result<_> {
+                let (combined, origin) = crate::todo::render_queued_messages(
+                    &messages,
+                    self.session
+                        .working_dir
+                        .as_deref()
+                        .map(std::path::Path::new),
+                )?;
+                let mission = mission_turn_reminder(self)?;
+                Ok((combined, origin, mission))
+            })();
+            let (combined, origin, mission_reminder) = match prepared {
                 Ok(rendered) => rendered,
                 Err(error) => {
                     self.queued_instruction_error = Some(error.to_string());
@@ -3986,8 +4008,7 @@ impl App {
                 }
             }
 
-            self.current_turn_system_reminder =
-                merge_turn_reminders(reminder, mission_turn_reminder(&self.session.id));
+            self.current_turn_system_reminder = merge_turn_reminders(reminder, mission_reminder);
 
             if has_combined {
                 if !preserve_visible_turn {

@@ -1,0 +1,1 @@
+Interpret `{{objective}}` broadly: pursue the literal objective, continuously refresh the todo frontier, include semantically adjacent work that improves the outcome, and preserve long-term quality.

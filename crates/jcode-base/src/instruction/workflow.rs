@@ -39,6 +39,9 @@ macro_rules! workflows {
 }
 
 workflows! {
+    MissionIntroduction { objective: &'a str, long_horizon_intent: &'a str } => ("mission-introduction", Module, "modules", "mission turn", Plain, ProjectThenGlobal),
+    MissionContinuation { objective: &'a str, long_horizon_intent: &'a str } => ("mission-continuation", Module, "modules", "mission turn", Plain, ProjectThenGlobal),
+    MissionDefaultIntent { objective: &'a str } => ("mission-default-intent", Module, "modules", "mission creation", Handlebars, ProjectThenGlobal),
     ReviewReadOnly => ("review-read-only-guardrails", Module, "modules", "review startup", Plain, ProjectThenGlobal),
     JudgeVisibleContext => ("judge-visible-context", Module, "modules", "judge startup", Plain, ProjectThenGlobal),
     ReviewStartup { parent_session_id: &'a str } => ("review-startup", Module, "modules", "review/judge child startup", Handlebars, ProjectThenGlobal),

@@ -1998,3 +1998,37 @@ fn reviewer_startup_hints_are_typed_and_independent_of_instruction_prose() {
         assert!(blocked.is_dir());
     });
 }
+
+#[test]
+fn invalid_mission_prose_preserves_composer_pastes_images_and_prior_turn_state() {
+    let home = SkillTestHome::new();
+    let mut app = create_test_app();
+    crate::mission::set(&app.session.id, "MISSION", None).unwrap();
+    std::fs::write(
+        home.path()
+            .join("instructions/modules/mission-continuation.md"),
+        "---\nid: mission-continuation\nkind: module\ntemplate: handlebars\n---\n{{missing}}",
+    )
+    .unwrap();
+    app.input = "KEEP INPUT".into();
+    app.cursor_pos = 3;
+    app.pasted_contents = vec!["FULL PASTED CONTENT".into()];
+    app.pending_images = vec![("image/png".into(), "ZmFrZQ==".into())];
+    app.current_turn_system_reminder = Some("PRIOR".into());
+    let messages = serde_json::to_value(&app.session.messages).unwrap();
+    app.submit_input();
+    assert_eq!(app.input, "KEEP INPUT");
+    assert_eq!(app.cursor_pos, 3);
+    assert_eq!(app.pasted_contents, vec!["FULL PASTED CONTENT"]);
+    assert_eq!(
+        app.pending_images,
+        vec![("image/png".to_string(), "ZmFrZQ==".to_string())]
+    );
+    assert_eq!(app.current_turn_system_reminder.as_deref(), Some("PRIOR"));
+    assert_eq!(
+        serde_json::to_value(&app.session.messages).unwrap(),
+        messages
+    );
+    assert!(!app.is_processing);
+    assert!(app.pending_composer_input.is_none());
+}

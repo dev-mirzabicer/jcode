@@ -50,6 +50,12 @@ Local launches render before cloning. Remote launches use the distinct `SplitWit
 
 Startup banners derive from typed review mode and parent metadata, not prompt prefixes. Their existing persisted hint fields keep old queued starts compatible. Startup payload writes are atomic and failures stop window launch. If an already-created session cannot be prepared, the error identifies it and states that no window was launched. Source text remains separately editable without changing banner identity or silently bypassing the judge mirror.
 
+### Mission continuation
+
+Mission introduction, continuation and generated default intent use managed `modules/mission-*` resources. The mission owner retains XML tags and escaping. User objective and intent data remain literal, including template-looking text. This corrects the former chained-replacement behavior that could replace a placeholder inside the user's objective.
+
+Mission creation and rendering accept an explicit working directory for scope. No mission or an inactive mission performs no instruction-source read. Failed creation preserves the previous stored mission. A local turn with invalid mission instructions preserves its raw composer input, cursor, paste backing and images without appending a user turn. Queued preparation uses the existing instruction-error recovery boundary. The migration adds no new mission UI, remote activation policy, profile selection or automatic context operation.
+
 ## Source and failure semantics
 
 Working files are authoritative, including intentionally empty bodies where the owner retains meaningful structure. A present invalid project redefinition fails rather than exposing global prose. Missing previously adopted singleton resources are damage, not permission to recreate defaults. New shipped paths use the existing versioned, scoped Git seed-adoption transaction. It preserves current files and does not push a repository.

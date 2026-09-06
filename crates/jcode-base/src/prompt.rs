@@ -185,10 +185,6 @@ pub fn append_swarm_effort_directive(
     split.dynamic_part.push_str(&directive);
     Ok(())
 }
-/// Mission-continuation template (embedded at compile time). Consumed by the
-/// `mission` module in the upper `jcode-app-core` layer; the asset lives here
-/// alongside the other prompt templates.
-pub const MISSION_CONTINUATION_TEMPLATE: &str = include_str!("prompt/mission_continuation.md");
 const SELFDEV_MODE_PROMPT: &str = include_str!("prompt/selfdev_mode.txt");
 const SELFDEV_FOCUS_TUI_PROMPT: &str = include_str!("prompt/selfdev_focus_tui.txt");
 const SELFDEV_FOCUS_DESKTOP2_PROMPT: &str = include_str!("prompt/selfdev_focus_desktop2.txt");

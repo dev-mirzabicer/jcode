@@ -1,0 +1,92 @@
+{
+  "source_revision": "f49f34aa5",
+  "route": "Original embedded template and replacement logic captured before migration; compared with managed production rendering and default-intent rendering. Disposable probe removed.",
+  "data_correction": "The original chained replacement reinterpreted a long_horizon_intent placeholder inside user objective data. The corrected renderer keeps user data literal and XML-escaped. Managed prose is unchanged.",
+  "cases": [
+    {
+      "bytes": 4209,
+      "equal": true,
+      "id": "INS-WFL-001",
+      "intent": "LONG",
+      "literal_data_correction": false,
+      "objective": "OBJ",
+      "sha256": "a3c66a70e9a76e8f63ad1a70af3719ec0edbba25212f79844e62ee137a2343a0"
+    },
+    {
+      "bytes": 188,
+      "equal": true,
+      "id": "INS-WFL-001",
+      "objective": "OBJ",
+      "part": "default_intent",
+      "sha256": "f52f14ca09128cc91c78c3bcdd3ec964bbce8795f2a832867ad1ce54b9648c87"
+    },
+    {
+      "bytes": 4234,
+      "equal": true,
+      "id": "INS-WFL-001",
+      "intent": "LONG & >",
+      "literal_data_correction": false,
+      "objective": "<&\"\u754c>",
+      "sha256": "abac73d2aa6db0948491fd1602f0f73abc65a07a50577dc5155c2ea2a12f1627"
+    },
+    {
+      "bytes": 192,
+      "equal": true,
+      "id": "INS-WFL-001",
+      "objective": "<&\"\u754c>",
+      "part": "default_intent",
+      "sha256": "81f4e4b1706f939483b07dd45574d763a18b131109d14670df29be111d8812cd"
+    },
+    {
+      "bytes": 4202,
+      "equal": true,
+      "id": "INS-WFL-001",
+      "intent": "",
+      "literal_data_correction": false,
+      "objective": "",
+      "sha256": "75e07d609a3b4c4232867956d716017808a09c6eb033a690638ebe5518100f21"
+    },
+    {
+      "bytes": 185,
+      "equal": true,
+      "id": "INS-WFL-001",
+      "objective": "",
+      "part": "default_intent",
+      "sha256": "064ba957d016cb1a3ce4aa5de6ce01b8d2065ff68a651440d49febc19c0e9dc6"
+    },
+    {
+      "bytes": 4240,
+      "equal": true,
+      "id": "INS-WFL-001",
+      "intent": "literal {{ objective }}",
+      "literal_data_correction": false,
+      "objective": "{{ objective }}",
+      "sha256": "c07cbf663c19cdce31deb1d32356717ba2a5395d33f3aeeaccf18d3ebefdf69e"
+    },
+    {
+      "bytes": 200,
+      "equal": true,
+      "id": "INS-WFL-001",
+      "objective": "{{ objective }}",
+      "part": "default_intent",
+      "sha256": "964931ed7094892f4192e2fe1cef73df53cc7223ddaf399232c8e60f5cbfe919"
+    },
+    {
+      "bytes": 4237,
+      "equal": false,
+      "id": "INS-WFL-001",
+      "intent": "OTHER",
+      "literal_data_correction": true,
+      "objective": "DATA {{ long_horizon_intent }}",
+      "sha256": "ef8dde86abc264df781e5f71aa621e28c0fa693639e212c9a2914d13610c5ffa"
+    },
+    {
+      "bytes": 215,
+      "equal": true,
+      "id": "INS-WFL-001",
+      "objective": "DATA {{ long_horizon_intent }}",
+      "part": "default_intent",
+      "sha256": "e2b563f0c926d0f9dc66e9f62b4e672a063814e78e614dba934f93d23b70b902"
+    }
+  ]
+}
