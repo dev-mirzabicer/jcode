@@ -1,5 +1,7 @@
 # Agent profiles and frozen system prompts
 
+For complete source, current-source preview, exact stored-system inspection, and Git history, open the [read-only instruction manager](INSTRUCTION_MANAGER.md) with `/instructions` or `/agent instructions`. Inspection does not activate instructions.
+
 Jcode primary sessions use one named agent, one exact stored true system prompt, and an explicit profile-transition lifecycle.
 
 ## Initial selection

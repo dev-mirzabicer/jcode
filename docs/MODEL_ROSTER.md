@@ -11,7 +11,7 @@ The authoritative working file is `~/.jcode/instructions/model-roster.toml` in
 the private global instruction Git repository. There is no project roster or
 project alias shadowing. Shipped seed 27 adds the file without overwriting an
 existing working copy or resurrecting a committed deletion. The instruction
-manager's inspection and editing UI are separate, later Phase 3 work.
+manager's [read-only inspection UI](INSTRUCTION_MANAGER.md) is available through `/model-roster`. Editing remains separate WP-10 work.
 
 Initial policy:
 

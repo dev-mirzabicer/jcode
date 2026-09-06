@@ -1,6 +1,6 @@
 # Instruction stores
 
-**Status:** Phase 3 Git repository infrastructure, primary activation, and versioned shipped-seed adoption. The central instruction manager arrives in later Phase 3 packages.
+**Status:** Phase 3 Git repository infrastructure, primary activation, versioned seed adoption, and the [read-only instruction manager](INSTRUCTION_MANAGER.md). Mutation UI remains WP-10 work.
 
 Jcode has a typed service for Git-versioned managed instructions. App-core `Server` owns the service. Server construction performs no repository I/O; the first primary instruction activation initializes or validates the global store and then uses the same service for activation, clear, and transfer.
 
@@ -106,7 +106,7 @@ The global store is not initialized by ordinary server construction, read-only r
 
 ## Current boundary
 
-The repository service and primary activation path are live. Read-only and editing manager protocol/TUI surfaces arrive in WP-09 and WP-10. Network Git operations remain explicit and no parent-project gitlink is committed automatically.
+The repository service, primary activation, and read-only manager protocol/TUI are live. `/instructions` and `/model-roster` inspect current sources without initialization, seed upgrades, activation, or repository mutation. Editing workflows remain WP-10 work. Network Git operations remain explicit and no parent-project gitlink is committed automatically.
 
 ## Notification occurrence and todo history
 

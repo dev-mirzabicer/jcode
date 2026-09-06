@@ -52,9 +52,9 @@ Supported external sources remain discoverable and invocable:
 - `<project>/.agents/skills/<name>/SKILL.md`
 - `<project>/.claude/skills/<name>/SKILL.md`
 
-External packages are read-only through the future central instruction manager. Jcode does not edit or commit them in place.
+External packages are read-only through the [central instruction manager](INSTRUCTION_MANAGER.md). Jcode does not edit or commit them in place.
 
-`/skills` identifies effective and shadowed local candidates. `skill_manage list` identifies each effective source class. External entries are labeled read-only and point to Copy rather than Edit. Ordinary remote History currently carries effective skill names for compact display. The complete central manager protocol and UI arrive in Phase 3 WP-09 and WP-10.
+`/skills` identifies effective and shadowed local candidates. `skill_manage list` identifies each effective source class. External entries are labeled read-only and point to Copy rather than Edit. Ordinary remote History currently carries effective skill names for compact display. The read-only central manager is available through `/skills instructions`, including complete source, previews, history, and invalid/shadowed rows. Mutation UI remains WP-10 work.
 
 ## Copy skill backend
 

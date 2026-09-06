@@ -228,7 +228,7 @@ Primary composition, notifications and roster loading share `prepare_global_stor
 - WP-04 supplies append transitions, explicit system replacement, context protection, rewind pinning, inspection, exports, and public control interfaces.
 - WP-05 supplies managed and external skill discovery, deterministic source precedence, restricted rendering, complete Copy transactions, and exact active rendered-text snapshots.
 - WP-06 and WP-07 migrate inventory rows through registered typed consumers.
-- WP-09 and WP-10 use catalog summaries, diagnostics, complete content, graphs, and deterministic document serialization for the manager.
+- WP-09 provides the read-only manager over catalog summaries, diagnostics, exact paged content, graphs, Git state, and composer/roster previews. WP-10 adds editing over the existing repository service.
 - WP-11 reconciles every inventory row and verifies exact migration equality or an approved exception.
 
 ## Git-backed instruction repository service
@@ -328,3 +328,24 @@ See [managed notification delivery](../NOTIFICATIONS.md) for current-source occu
 ## Workflow consumers
 
 [Workflow instructions](../WORKFLOW_INSTRUCTIONS.md) describes managed specialist, command, task-control and tool-guidance consumers. Swarm routing uses one optional `Session.swarm_routing_prompt` scalar containing its complete validated tool description. It is captured only after successful preflight and persisted before dispatch. It is not a generic tool-schema store or source-version tracker.
+
+## Read-only central inspection
+
+The [instruction manager](../INSTRUCTION_MANAGER.md) uses the separate
+`instruction::inspection` projection. `SystemPromptComposer::preview` and
+`preview_agent_component` reuse composition without bootstrap/import/seed adoption
+or session persistence. `SkillRegistry::inspect_global_sources` bypasses the
+legacy first-run copy boundary. Model policy reads use the repository owner and
+`ModelRoster` on the exact captured file, never a mutation of the primary provider.
+
+Catalog discovery releases parsed bodies after deriving its rows. Explicit detail
+creates one immutable complete document; UTF-8 pages carry snapshot/document
+identity and byte offsets. Refresh replaces only this inspection projection.
+Resource/consumer validity shares `validate_registered_graph`, including required
+empty-body semantics. Composer registrations distinguish paired additive common
+and preferred-tool sources and provide available skill-catalog values for previews.
+
+Managed discovery rejects symlink/special-file resources and retains invalid
+scoped candidates. An unavailable scoped resource directory is not absence and
+cannot silently reveal a lower-precedence definition. External compatibility
+skill diagnostics are projected separately without changing invocation precedence.
