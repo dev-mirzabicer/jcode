@@ -52,7 +52,7 @@ impl App {
                 self.session.is_canary,
                 None,
                 None,
-            )
+            )?
         };
         if let Some(memory_prompt) = memory_prompt {
             split.dynamic_part.push_str(memory_prompt);

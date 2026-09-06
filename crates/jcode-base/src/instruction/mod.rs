@@ -353,6 +353,7 @@ pub struct RenderedInstruction {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConsumerScopePolicy {
     GlobalOnly,
+    ProjectOnly,
     ProjectThenGlobal,
 }
 

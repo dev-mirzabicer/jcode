@@ -48,7 +48,7 @@ The current stable slots are:
 6. Project common guidance or compatible project overlay
 7. Global then project `AGENTS.md`
 8. Applicable project agent addenda
-9. Global then project preferred-tool compatibility guidance
+9. Global then project managed preferred-tool guidance (or unimported project compatibility input)
 10. Managed available-skills catalog snapshot
 
 Memory is absent while globally disabled. Startup Context file snapshots remain authoritative user messages and are not system-prompt layers.
@@ -63,7 +63,7 @@ On first global-store initialization:
 
 A project legacy system prompt or overlay remains a compatibility input only while the corresponding managed project resource is genuinely absent and no import receipt has completed cutover. A present invalid or ambiguous managed resource fails; it cannot disappear behind legacy fallback. Explicit `global:` selection remains global even when project legacy input exists. A configured project store can define or redefine agents and common guidance. Present valid legacy and managed definitions with no matching import receipt fail rather than contributing twice.
 
-`AGENTS.md` remains a dedicated ecosystem input and is not imported automatically. Preferred-tool files remain live compatibility sources until their later managed migration.
+`AGENTS.md` remains a dedicated ecosystem input and is not imported automatically. Global `preferred-tools.md` is imported exactly during the managed-guidance cutover. Its original stays on disk but becomes inactive. Managed `tools/preferred-tools.md` is authoritative in each scope. An unimported project retains its legacy file only while no managed project definition exists. Imported missing resources block rather than reactivating the old file. See `WORKFLOW_INSTRUCTIONS.md` for paired-scope and recovery details.
 
 ## Session freezing
 

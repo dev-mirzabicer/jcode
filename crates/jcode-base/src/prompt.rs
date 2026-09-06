@@ -354,7 +354,10 @@ impl ContextInfo {
 }
 
 /// Build the full system prompt with static context.
-pub fn build_system_prompt(skill_prompt: Option<&str>, available_skills: &[SkillInfo]) -> String {
+pub fn build_system_prompt(
+    skill_prompt: Option<&str>,
+    available_skills: &[SkillInfo],
+) -> Result<String, crate::instruction::SystemPromptActivationError> {
     build_system_prompt_with_selfdev(skill_prompt, available_skills, false)
 }
 
@@ -363,9 +366,9 @@ pub fn build_system_prompt_with_selfdev(
     skill_prompt: Option<&str>,
     available_skills: &[SkillInfo],
     is_selfdev: bool,
-) -> String {
-    let (prompt, _) = build_system_prompt_with_context(skill_prompt, available_skills, is_selfdev);
-    prompt
+) -> Result<String, crate::instruction::SystemPromptActivationError> {
+    let (prompt, _) = build_system_prompt_with_context(skill_prompt, available_skills, is_selfdev)?;
+    Ok(prompt)
 }
 
 /// Build the full system prompt and return context info about what was loaded
@@ -373,7 +376,7 @@ pub fn build_system_prompt_with_context(
     skill_prompt: Option<&str>,
     available_skills: &[SkillInfo],
     is_selfdev: bool,
-) -> (String, ContextInfo) {
+) -> Result<(String, ContextInfo), crate::instruction::SystemPromptActivationError> {
     build_system_prompt_with_context_and_memory(skill_prompt, available_skills, is_selfdev, None)
 }
 
@@ -383,7 +386,7 @@ pub fn build_system_prompt_with_context_and_memory(
     available_skills: &[SkillInfo],
     is_selfdev: bool,
     memory_prompt: Option<&str>,
-) -> (String, ContextInfo) {
+) -> Result<(String, ContextInfo), crate::instruction::SystemPromptActivationError> {
     build_system_prompt_full(
         skill_prompt,
         available_skills,
@@ -400,7 +403,7 @@ pub fn build_system_prompt_full(
     is_selfdev: bool,
     memory_prompt: Option<&str>,
     working_dir: Option<&Path>,
-) -> (String, ContextInfo) {
+) -> Result<(String, ContextInfo), crate::instruction::SystemPromptActivationError> {
     build_system_prompt_full_with_capabilities(
         skill_prompt,
         available_skills,
@@ -418,7 +421,7 @@ pub fn build_system_prompt_full_with_capabilities(
     memory_prompt: Option<&str>,
     working_dir: Option<&Path>,
     capabilities: PromptCapabilities,
-) -> (String, ContextInfo) {
+) -> Result<(String, ContextInfo), crate::instruction::SystemPromptActivationError> {
     let mut parts = base_system_prompt_parts(capabilities, working_dir);
     let mut info = ContextInfo {
         system_prompt_chars: parts.join("\n\n").len(),
@@ -453,7 +456,7 @@ pub fn build_system_prompt_full_with_capabilities(
 
     // Add optional preferred-tool guidance from ~/.jcode/ and ./.jcode/
     let (preferred_tools_content, preferred_tools_chars) =
-        load_preferred_tools_files_from_dir(working_dir);
+        crate::instruction::SystemPromptComposer::new().legacy_preferred_tools(working_dir)?;
     if let Some(content) = preferred_tools_content {
         info.preferred_tools_chars = preferred_tools_chars;
         parts.push(content);
@@ -478,7 +481,7 @@ pub fn build_system_prompt_full_with_capabilities(
     let prompt = parts.join("\n\n");
     info.total_chars = prompt.len();
 
-    (prompt, info)
+    Ok((prompt, info))
 }
 
 /// Build system prompt split into static (cacheable) and dynamic parts
@@ -489,7 +492,7 @@ pub fn build_system_prompt_split(
     is_selfdev: bool,
     memory_prompt: Option<&str>,
     working_dir: Option<&Path>,
-) -> (SplitSystemPrompt, ContextInfo) {
+) -> Result<(SplitSystemPrompt, ContextInfo), crate::instruction::SystemPromptActivationError> {
     build_system_prompt_split_with_capabilities(
         skill_prompt,
         available_skills,
@@ -507,7 +510,7 @@ pub fn build_system_prompt_split_with_capabilities(
     memory_prompt: Option<&str>,
     working_dir: Option<&Path>,
     capabilities: PromptCapabilities,
-) -> (SplitSystemPrompt, ContextInfo) {
+) -> Result<(SplitSystemPrompt, ContextInfo), crate::instruction::SystemPromptActivationError> {
     let mut static_parts = base_system_prompt_parts(capabilities, working_dir);
     let mut dynamic_parts = Vec::new();
     let mut info = ContextInfo {
@@ -544,7 +547,7 @@ pub fn build_system_prompt_split_with_capabilities(
 
     // Add optional preferred-tool guidance (static per project/user)
     let (preferred_tools_content, preferred_tools_chars) =
-        load_preferred_tools_files_from_dir(working_dir);
+        crate::instruction::SystemPromptComposer::new().legacy_preferred_tools(working_dir)?;
     if let Some(content) = preferred_tools_content {
         info.preferred_tools_chars = preferred_tools_chars;
         static_parts.push(content);
@@ -573,13 +576,13 @@ pub fn build_system_prompt_split_with_capabilities(
     let dynamic_part = dynamic_parts.join("\n\n");
     info.total_chars = static_part.len() + dynamic_part.len();
 
-    (
+    Ok((
         SplitSystemPrompt {
             static_part,
             dynamic_part,
         },
         info,
-    )
+    ))
 }
 
 /// Build self-dev tools prompt section (static version without dynamic socket path)
@@ -914,50 +917,6 @@ fn load_prompt_overlay_files_from_dir(working_dir: Option<&Path>) -> (Option<Str
         && let Some((content, size)) = load_file(
             &global_overlay,
             "Global Prompt Overlay (~/.jcode/prompt-overlay.md)",
-        )
-    {
-        total_chars += size;
-        contents.push(content);
-    }
-
-    if contents.is_empty() {
-        (None, 0)
-    } else {
-        (Some(contents.join("\n\n")), total_chars)
-    }
-}
-
-/// Load optional preferred-tool guidance from ~/.jcode/ and ./.jcode/
-fn load_preferred_tools_files_from_dir(working_dir: Option<&Path>) -> (Option<String>, usize) {
-    let mut contents = vec![];
-    let mut total_chars = 0usize;
-
-    let load_file = |path: &Path, label: &str| -> Option<(String, usize)> {
-        if path.exists() {
-            std::fs::read_to_string(path).ok().map(|content| {
-                let raw_size = content.len();
-                let formatted = format!("# {}\n\n{}", label, content.trim());
-                (formatted, raw_size)
-            })
-        } else {
-            None
-        }
-    };
-
-    let project_dir = working_dir.unwrap_or(Path::new("."));
-    if let Some((content, size)) = load_file(
-        &project_dir.join(".jcode").join("preferred-tools.md"),
-        "Project Preferred Tools (.jcode/preferred-tools.md)",
-    ) {
-        total_chars += size;
-        contents.push(content);
-    }
-
-    if let Ok(global_preferred_tools) =
-        crate::storage::jcode_dir().map(|dir| dir.join("preferred-tools.md"))
-        && let Some((content, size)) = load_file(
-            &global_preferred_tools,
-            "Global Preferred Tools (~/.jcode/preferred-tools.md)",
         )
     {
         total_chars += size;

@@ -30,7 +30,7 @@ The app-core server owns an `InstructionRepositoryService`. Construction remains
 - `render(&InstructionSelector, &typed_values)` resolves dependencies and returns complete rendered text plus the dependency/reverse-consumer graph.
 - `render_agent(...)` additionally enforces primary/isolated availability metadata.
 - `render_registered(&ConsumerRegistration, &typed_values)` renders a code-owned singleton and distinguishes required missing files from deleted user resources.
-- `InstructionConsumer<T>` binds one consumer registration to a serializable value type without taking over delivery behavior.
+- `InstructionConsumer<T>` binds one consumer registration to a serializable value type without taking over delivery behavior. Consumer policy supports explicit global-only, explicit project-only, and project-then-global resolution.
 
 Callers do not coordinate public load, parse, validate, resolve, graph, partial, and render stages.
 

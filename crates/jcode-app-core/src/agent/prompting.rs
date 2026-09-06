@@ -128,7 +128,7 @@ impl Agent {
                 self.session.is_canary,
                 None,
                 working_dir.as_deref(),
-            )
+            )?
             .0
         };
         if let Some(memory_prompt) = memory_prompt {

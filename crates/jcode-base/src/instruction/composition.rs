@@ -1,3 +1,5 @@
+const PREFERRED_TOOLS_CUTOVER_SEED: u32 = 25;
+use super::ConsumerScopePolicy;
 use super::{
     AgentAvailability, AgentMetadata, ConsumerRegistration, InstructionConsumer,
     InstructionDocument, InstructionError, InstructionId, InstructionKind,
@@ -112,7 +114,6 @@ struct CompositionEnvironment {
     global_manifest: InstructionStoreManifest,
     project_manifest: Option<InstructionStoreManifest>,
     project_root: Option<PathBuf>,
-    jcode_home: PathBuf,
     initialized_global_store: bool,
 }
 
@@ -207,11 +208,60 @@ impl SystemPromptComposer {
         &self,
     ) -> Result<super::InstructionStoreInitialization, SystemPromptActivationError> {
         let seed = shipped_instruction_seed()?;
-        let legacy = global_legacy_imports(&self.repositories)?;
+        let repository = self.repositories.global_repository()?;
+        // This hint only plans cutover. initialize_global remains the authority
+        // for validating damage and resuming an interrupted first installation.
+        let prior = self.repositories.load_manifest(&repository).ok();
+        let legacy = global_legacy_imports(&self.repositories, prior.as_ref())?;
         let initialized = self.repositories.initialize_global(&seed, &legacy)?;
+        if !initialized.created {
+            for spec in legacy
+                .iter()
+                .filter(|spec| spec.source_kind == LegacyInstructionSourceKind::PreferredTools)
+            {
+                self.repositories.import_legacy(
+                    &initialized.repository,
+                    spec,
+                    "wp07-global-preferred-tools",
+                )?;
+            }
+        }
         self.repositories
             .ensure_shipped_seed(&initialized.repository, &seed)?;
         Ok(initialized)
+    }
+
+    /// Compatibility callers retain their original project-before-global slot
+    /// order. Primary activation uses the approved global-before-project order.
+    pub fn legacy_preferred_tools(
+        &self,
+        working_dir: Option<&Path>,
+    ) -> Result<(Option<String>, usize), SystemPromptActivationError> {
+        let working_dir = working_dir.unwrap_or(Path::new("."));
+        let runtime =
+            super::notification::occurrence_runtime(&self.repositories, Some(working_dir))?;
+        let project_repository = self.repositories.resolve_project_repository(working_dir)?;
+        let environment = CompositionEnvironment {
+            runtime,
+            global_manifest: self
+                .repositories
+                .load_manifest(&self.repositories.global_repository()?)?,
+            project_manifest: project_repository
+                .as_ref()
+                .map(|repo| self.repositories.load_manifest(repo))
+                .transpose()?,
+            project_root: Some(self.repositories.resolve_project_root(working_dir)?),
+            initialized_global_store: false,
+        };
+        let mut parts = Vec::new();
+        let mut chars = 0usize;
+        for scope in [InstructionScope::Project, InstructionScope::Global] {
+            if let Some((text, size)) = preferred_tools_section(&environment, scope)? {
+                parts.push(text);
+                chars = chars.saturating_add(size);
+            }
+        }
+        Ok(((!parts.is_empty()).then(|| parts.join("\n\n")), chars))
     }
 
     pub fn activate(
@@ -337,16 +387,6 @@ impl SystemPromptComposer {
         let mut sources = self
             .repositories
             .instruction_sources(project_repository.as_ref())?;
-        let global_repository = self.repositories.global_repository()?;
-        let jcode_home = global_repository
-            .root
-            .parent()
-            .ok_or_else(|| {
-                SystemPromptActivationError::Compatibility(
-                    "global instruction repository has no Jcode home parent".to_string(),
-                )
-            })?
-            .to_path_buf();
         sources = sources.with_global_agents_md(self.repositories.global_agents_path()?);
         if let Some(root) = project_root.as_ref() {
             sources = sources.with_project_agents_md(root.join("AGENTS.md"));
@@ -362,7 +402,6 @@ impl SystemPromptComposer {
             global_manifest,
             project_manifest,
             project_root,
-            jcode_home,
             initialized_global_store: initialized.created,
         })
     }
@@ -452,11 +491,11 @@ fn compose_activation(
     }
 
     push_project_addenda(&environment.runtime, &profile.resource, &mut parts)?;
-    push_legacy_preferred_tools(
-        &environment.jcode_home,
-        environment.project_root.as_deref(),
-        &mut parts,
-    )?;
+    for scope in [InstructionScope::Global, InstructionScope::Project] {
+        if let Some((section, _)) = preferred_tools_section(environment, scope)? {
+            parts.push(section);
+        }
+    }
     if !request.available_skills.is_empty() {
         parts.push(render_available_skills(
             &environment.runtime,
@@ -695,26 +734,71 @@ fn push_project_addenda(
     Ok(())
 }
 
-fn push_legacy_preferred_tools(
-    jcode_home: &Path,
-    project_root: Option<&Path>,
-    parts: &mut Vec<String>,
-) -> Result<(), SystemPromptActivationError> {
-    if let Some(content) = read_present(jcode_home.join("preferred-tools.md"))? {
-        parts.push(format!(
-            "# Global Preferred Tools (~/.jcode/preferred-tools.md)\n\n{}",
-            content.trim()
-        ));
-    }
-    if let Some(project_root) = project_root
-        && let Some(content) = read_present(project_root.join(".jcode/preferred-tools.md"))?
-    {
-        parts.push(format!(
-            "# Project Preferred Tools (.jcode/preferred-tools.md)\n\n{}",
-            content.trim()
-        ));
-    }
-    Ok(())
+pub fn preferred_tools_registration(
+    scope: InstructionScope,
+) -> Result<ConsumerRegistration, InstructionError> {
+    let mut registration = ConsumerRegistration::new(
+        format!("preferred-tools-{scope}"),
+        "preferred-tools",
+        InstructionKind::ToolGuidance,
+        "tools/preferred-tools.md",
+        "preferred tool system section",
+        "Paired additive preferred-tool guidance. Each explicit scope contributes independently; project-only lookup must not fall back to global.",
+    )?;
+    registration.scope_policy = match scope {
+        InstructionScope::Global => ConsumerScopePolicy::GlobalOnly,
+        InstructionScope::Project => ConsumerScopePolicy::ProjectOnly,
+    };
+    registration.required = false;
+    Ok(registration)
+}
+
+fn preferred_tools_section(
+    environment: &CompositionEnvironment,
+    scope: InstructionScope,
+) -> Result<Option<(String, usize)>, SystemPromptActivationError> {
+    let manifest = match scope {
+        InstructionScope::Global => Some(&environment.global_manifest),
+        InstructionScope::Project => environment.project_manifest.as_ref(),
+    };
+    let imported = manifest.is_some_and(|manifest| {
+        manifest
+            .legacy_imports
+            .values()
+            .any(|receipt| receipt.source_kind == LegacyInstructionSourceKind::PreferredTools)
+    });
+    let mut registration = preferred_tools_registration(scope)?;
+    registration.required = imported;
+    let (content, legacy) = match environment.runtime.render_registered(&registration, &()) {
+        Ok(rendered) => (rendered.text, imported),
+        Err(InstructionError::ResourceNotFound { .. })
+            if scope == InstructionScope::Project && !imported =>
+        {
+            let Some(root) = environment.project_root.as_ref() else {
+                return Ok(None);
+            };
+            let Some(content) = read_present(root.join(".jcode/preferred-tools.md"))? else {
+                return Ok(None);
+            };
+            (content, true)
+        }
+        Err(InstructionError::ResourceNotFound { .. }) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let size = content.len();
+    let label = match (scope, legacy) {
+        (InstructionScope::Global, true) => "Global Preferred Tools (~/.jcode/preferred-tools.md)",
+        (InstructionScope::Project, true) => "Project Preferred Tools (.jcode/preferred-tools.md)",
+        (InstructionScope::Global, false) => "Global Preferred Tools",
+        (InstructionScope::Project, false) => "Project Preferred Tools",
+    };
+    Ok(Some((
+        format!(
+            "# {label}\n\n{}",
+            if legacy { content.trim() } else { &content }
+        ),
+        size,
+    )))
 }
 
 fn read_present(path: PathBuf) -> Result<Option<String>, SystemPromptActivationError> {
@@ -828,6 +912,7 @@ fn compatibility_agent_document() -> Result<InstructionDocument, InstructionErro
 
 fn global_legacy_imports(
     repositories: &InstructionRepositoryService,
+    prior: Option<&InstructionStoreManifest>,
 ) -> Result<Vec<InstructionLegacyImportSpec>, SystemPromptActivationError> {
     let root = repositories.global_repository()?.root;
     let Some(jcode_home) = root.parent() else {
@@ -863,6 +948,29 @@ fn global_legacy_imports(
             source_path: overlay,
             target: legacy_target(&document),
         });
+    }
+    if prior.is_none_or(|manifest| {
+        manifest.seed_version < PREFERRED_TOOLS_CUTOVER_SEED
+            && !manifest
+                .legacy_imports
+                .contains_key("global-preferred-tools")
+    }) {
+        let source_path = jcode_home.join("preferred-tools.md");
+        if read_present(source_path.clone())?.is_some() {
+            imports.push(InstructionLegacyImportSpec {
+                import_id: "global-preferred-tools".into(),
+                source_kind: LegacyInstructionSourceKind::PreferredTools,
+                source_path,
+                target: InstructionLegacyImportTarget {
+                    relative_path: "tools/preferred-tools.md".into(),
+                    id: InstructionId::parse("preferred-tools")?,
+                    kind: InstructionKind::ToolGuidance,
+                    scope: InstructionScope::Global,
+                    template_mode: TemplateMode::Plain,
+                    metadata: InstructionMetadata::default(),
+                },
+            });
+        }
     }
     Ok(imports)
 }
@@ -1638,3 +1746,7 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "composition_preferred_tests.rs"]
+mod preferred_tests;

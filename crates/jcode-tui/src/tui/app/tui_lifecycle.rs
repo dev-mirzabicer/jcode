@@ -850,20 +850,14 @@ impl App {
             });
         }
 
-        // Pre-compute context info so it shows on startup
-        let available_skills: Vec<crate::prompt::SkillInfo> = skills
-            .list()
-            .iter()
-            .map(|s| crate::prompt::SkillInfo {
-                name: s.name.clone(),
-                description: s.description.clone(),
-            })
-            .collect();
-        let (_, context_info) = crate::prompt::build_system_prompt_with_context(
-            None,
-            &available_skills,
-            session.is_canary,
-        );
+        // Metadata follows the installed activation. Constructing a client must
+        // not load or initialize another instruction store for an estimate.
+        let chars = session.system_prompt_text().map_or(0, str::len);
+        let context_info = crate::prompt::ContextInfo {
+            system_prompt_chars: chars,
+            total_chars: chars,
+            ..Default::default()
+        };
         let t_prompt = t0.elapsed();
         crate::logging::info(&format!(
             "App::new timings: skills={:.1}ms session={:.1}ms prompt={:.1}ms total={:.1}ms",

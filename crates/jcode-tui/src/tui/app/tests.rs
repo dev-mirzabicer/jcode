@@ -2103,3 +2103,14 @@ fn invalid_command_source_preserves_mode_and_does_not_interrupt_or_append() {
     assert_eq!(serde_json::to_value(&app.session.messages).unwrap(), before);
     assert_eq!(app.input, "/improve plan target");
 }
+
+#[test]
+fn client_initial_accounting_does_not_initialize_a_managed_instruction_store() {
+    let home = SkillTestHome::new();
+    let app = create_test_app();
+    assert!(!home.path().join("instructions").exists());
+    assert_eq!(
+        app.context_info.system_prompt_chars,
+        app.session.system_prompt_text().map_or(0, str::len)
+    );
+}

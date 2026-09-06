@@ -18,6 +18,7 @@ fn test_default_system_prompt_no_claude_code_identity() {
 
 #[test]
 fn mermaid_prompt_module_follows_capability() {
+    let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
     let (enabled, _) = build_system_prompt_split_with_capabilities(
         None,
         &[],
@@ -25,7 +26,8 @@ fn mermaid_prompt_module_follows_capability() {
         None,
         None,
         PromptCapabilities { mermaid: true },
-    );
+    )
+    .unwrap();
     assert!(enabled.static_part.contains(MERMAID_PROMPT));
 
     let (disabled, _) = build_system_prompt_split_with_capabilities(
@@ -35,7 +37,8 @@ fn mermaid_prompt_module_follows_capability() {
         None,
         None,
         PromptCapabilities { mermaid: false },
-    );
+    )
+    .unwrap();
     assert!(!disabled.static_part.contains("Mermaid diagrams"));
     assert!(!disabled.static_part.contains("fenced `mermaid` code block"));
 }
@@ -43,9 +46,10 @@ fn mermaid_prompt_module_follows_capability() {
 /// Verify skill prompts don't accidentally introduce "Claude Code" identity
 #[test]
 fn test_skill_prompt_integration() {
+    let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
     // Test that a skill prompt is properly appended and doesn't break anything
     let skill_prompt = "You are helping with a debugging task.";
-    let prompt = build_system_prompt(Some(skill_prompt), &[]);
+    let prompt = build_system_prompt(Some(skill_prompt), &[]).unwrap();
 
     // The prompt should contain our default system prompt
     assert!(prompt.contains("Your name is Jcode."));
@@ -108,7 +112,8 @@ fn test_session_context_includes_time_timezone_and_system_info() {
 
 #[test]
 fn test_split_prompt_does_not_inject_session_context_per_turn() {
-    let (split, _info) = build_system_prompt_split(None, &[], false, None, None);
+    let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let (split, _info) = build_system_prompt_split(None, &[], false, None, None).unwrap();
     assert!(!split.dynamic_part.contains("# Session Context"));
     assert!(!split.dynamic_part.contains("Time: "));
     assert!(!split.dynamic_part.contains("Timezone: UTC"));
@@ -116,7 +121,8 @@ fn test_split_prompt_does_not_inject_session_context_per_turn() {
 
 #[test]
 fn sponsored_discovery_is_not_injected_into_the_system_prompt() {
-    let (split, _) = build_system_prompt_split(None, &[], false, None, None);
+    let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let (split, _) = build_system_prompt_split(None, &[], false, None, None).unwrap();
     assert!(!split.static_part.contains("Discoverable Tools"));
     assert!(!split.static_part.contains("integration_tools"));
 }
@@ -155,7 +161,8 @@ fn test_prompt_overlay_files_are_loaded_from_project_and_global_jcode_dirs() {
         "expected global prompt overlay content"
     );
 
-    let (prompt, info) = build_system_prompt_full(None, &[], false, None, Some(project_dir.path()));
+    let (prompt, info) =
+        build_system_prompt_full(None, &[], false, None, Some(project_dir.path())).unwrap();
     assert!(prompt.contains("project prompt overlay instructions"));
     assert!(prompt.contains("global prompt overlay instructions"));
     assert!(info.prompt_overlay_chars > 0);
@@ -188,7 +195,9 @@ fn test_preferred_tools_files_are_loaded_from_project_and_global_jcode_dirs() {
     )
     .unwrap();
 
-    let direct = load_preferred_tools_files_from_dir(Some(project_dir.path()));
+    let direct = crate::instruction::SystemPromptComposer::new()
+        .legacy_preferred_tools(Some(project_dir.path()))
+        .unwrap();
 
     assert!(direct.0.is_some(), "expected preferred tools content");
     let direct_content = direct.0.unwrap();
@@ -209,13 +218,14 @@ fn test_preferred_tools_files_are_loaded_from_project_and_global_jcode_dirs() {
         "expected global preferred tools content"
     );
 
-    let (prompt, info) = build_system_prompt_full(None, &[], false, None, Some(project_dir.path()));
+    let (prompt, info) =
+        build_system_prompt_full(None, &[], false, None, Some(project_dir.path())).unwrap();
     assert!(prompt.contains("project preferred tools instructions"));
     assert!(prompt.contains("global preferred tools instructions"));
     assert!(info.preferred_tools_chars > 0);
 
     let (split, split_info) =
-        build_system_prompt_split(None, &[], false, None, Some(project_dir.path()));
+        build_system_prompt_split(None, &[], false, None, Some(project_dir.path())).unwrap();
     assert!(
         split
             .static_part
@@ -287,7 +297,8 @@ fn test_default_swarm_prompt_mentions_model_and_list_models() {
 
 #[test]
 fn test_non_selfdev_prompt_leaves_selfdev_guidance_to_the_tool_schema() {
-    let prompt = build_system_prompt(None, &[]);
+    let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let prompt = build_system_prompt(None, &[]).unwrap();
     assert!(!prompt.contains("Self-Development Access"));
     assert!(!prompt.contains("You have access to the `selfdev` tool in all sessions"));
     assert!(!prompt.contains("You are working on the jcode codebase itself."));
@@ -295,7 +306,8 @@ fn test_non_selfdev_prompt_leaves_selfdev_guidance_to_the_tool_schema() {
 
 #[test]
 fn test_selfdev_prompt_uses_full_selfdev_instructions() {
-    let prompt = build_system_prompt_with_selfdev(None, &[], true);
+    let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let prompt = build_system_prompt_with_selfdev(None, &[], true).unwrap();
     assert!(prompt.contains("You are working on the jcode codebase itself."));
     assert!(prompt.contains("launched from the TUI/root jcode context"));
     assert!(prompt.contains("selfdev build target=tui"));
@@ -304,8 +316,12 @@ fn test_selfdev_prompt_uses_full_selfdev_instructions() {
 
 #[test]
 fn test_selfdev_prompt_uses_desktop_focus_for_desktop_working_dir() {
-    let desktop_dir = std::path::Path::new("/tmp/jcode/crates/jcode-desktop2/src");
-    let (prompt, _info) = build_system_prompt_full(None, &[], true, None, Some(desktop_dir));
+    let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let directory = _home.root().join("jcode/crates/jcode-desktop2/src");
+    std::fs::create_dir_all(&directory).unwrap();
+    let desktop_dir = directory.as_path();
+    let (prompt, _info) =
+        build_system_prompt_full(None, &[], true, None, Some(desktop_dir)).unwrap();
     assert!(prompt.contains("launched from the jcode-desktop2"));
     assert!(prompt.contains("selfdev build target=desktop2"));
     assert!(!prompt.contains("launched from the TUI/root jcode context"));
@@ -313,8 +329,11 @@ fn test_selfdev_prompt_uses_desktop_focus_for_desktop_working_dir() {
 
 #[test]
 fn test_split_selfdev_prompt_defaults_to_tui_focus_for_repo_root() {
-    let repo_dir = std::path::Path::new("/tmp/jcode");
-    let (split, _info) = build_system_prompt_split(None, &[], true, None, Some(repo_dir));
+    let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let directory = _home.root().join("jcode");
+    std::fs::create_dir_all(&directory).unwrap();
+    let repo_dir = directory.as_path();
+    let (split, _info) = build_system_prompt_split(None, &[], true, None, Some(repo_dir)).unwrap();
     assert!(
         split
             .static_part
@@ -325,7 +344,8 @@ fn test_split_selfdev_prompt_defaults_to_tui_focus_for_repo_root() {
 
 #[test]
 fn test_selfdev_prompt_prefers_publish_flow_for_active_builds() {
-    let prompt = build_system_prompt_with_selfdev(None, &[], true);
+    let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let prompt = build_system_prompt_with_selfdev(None, &[], true).unwrap();
     assert!(prompt.contains("selfdev build"));
     assert!(prompt.contains("cancel-build"));
     assert!(prompt.contains("selfdev reload"));
@@ -348,7 +368,8 @@ fn test_selfdev_prompt_template_placeholders_are_resolved() {
 
 #[test]
 fn split_prompt_estimated_tokens_is_positive_when_populated() {
-    let (split, _info) = build_system_prompt_split(None, &[], false, None, None);
+    let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let (split, _info) = build_system_prompt_split(None, &[], false, None, None).unwrap();
     assert!(split.chars() > 0);
     assert!(split.estimated_tokens() > 0);
 }
@@ -422,8 +443,12 @@ fn classify_effort_distinguishes_reasoning_from_swarm_modes() {
 
 #[test]
 fn test_selfdev_prompt_uses_desktop2_focus_for_desktop2_working_dir() {
-    let desktop2_dir = std::path::Path::new("/tmp/jcode/crates/jcode-desktop2/src");
-    let (prompt, _info) = build_system_prompt_full(None, &[], true, None, Some(desktop2_dir));
+    let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let directory = _home.root().join("jcode/crates/jcode-desktop2/src");
+    std::fs::create_dir_all(&directory).unwrap();
+    let desktop2_dir = directory.as_path();
+    let (prompt, _info) =
+        build_system_prompt_full(None, &[], true, None, Some(desktop2_dir)).unwrap();
     assert!(prompt.contains("launched from the jcode-desktop2"));
     assert!(prompt.contains("selfdev build target=desktop2"));
     assert!(!prompt.contains("launched from the TUI/root jcode context"));
@@ -431,6 +456,7 @@ fn test_selfdev_prompt_uses_desktop2_focus_for_desktop2_working_dir() {
 
 #[test]
 fn project_system_prompt_file_replaces_default_base_prompt() {
+    let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
     use crate::prompt::load_base_system_prompt;
 
     let dir = std::env::temp_dir().join(format!("jcode-sysprompt-{}", std::process::id()));
@@ -447,7 +473,7 @@ fn project_system_prompt_file_replaces_default_base_prompt() {
         "You are a custom agent."
     );
 
-    let (prompt, _info) = build_system_prompt_full(None, &[], false, None, Some(&dir));
+    let (prompt, _info) = build_system_prompt_full(None, &[], false, None, Some(&dir)).unwrap();
     assert!(prompt.contains("You are a custom agent."));
     assert!(!prompt.contains("Jcode is open source"));
 

@@ -1,0 +1,474 @@
+{
+  "source_revision": "9b43d3496",
+  "route": "Original primary and compatibility preferred-tool builders captured before migration, compared against managed production composition across new/existing stores, absent/empty/Unicode files, and both historical caller orderings. Probes removed.",
+  "cases": [
+    {
+      "bytes": 0,
+      "caller": "compatibility",
+      "equal": true,
+      "existing": false,
+      "global": null,
+      "ids": [
+        "INS-LEG-005",
+        "INS-LEG-006"
+      ],
+      "project": null,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 0,
+      "caller": "primary",
+      "equal": true,
+      "existing": false,
+      "global": null,
+      "ids": [
+        "INS-LEG-005",
+        "INS-LEG-006"
+      ],
+      "project": null,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 55,
+      "caller": "compatibility",
+      "equal": true,
+      "existing": false,
+      "global": null,
+      "ids": [
+        "INS-LEG-005",
+        "INS-LEG-006"
+      ],
+      "project": "",
+      "sha256": "d0e274265cdc377087332d02de3ed0f283886651f42cf97fb82831b5d90837d8"
+    },
+    {
+      "bytes": 55,
+      "caller": "primary",
+      "equal": true,
+      "existing": false,
+      "global": null,
+      "ids": [
+        "INS-LEG-005",
+        "INS-LEG-006"
+      ],
+      "project": "",
+      "sha256": "d0e274265cdc377087332d02de3ed0f283886651f42cf97fb82831b5d90837d8"
+    },
+    {
+      "bytes": 65,
+      "caller": "compatibility",
+      "equal": true,
+      "existing": false,
+      "global": null,
+      "ids": [
+        "INS-LEG-005",
+        "INS-LEG-006"
+      ],
+      "project": " PROJECT<&> \n",
+      "sha256": "bbfa84bfe8c14294adc6383d24e22577b7c6616c7d9657b2324cdc3da8b87ff2"
+    },
+    {
+      "bytes": 65,
+      "caller": "primary",
+      "equal": true,
+      "existing": false,
+      "global": null,
+      "ids": [
+        "INS-LEG-005",
+        "INS-LEG-006"
+      ],
+      "project": " PROJECT<&> \n",
+      "sha256": "bbfa84bfe8c14294adc6383d24e22577b7c6616c7d9657b2324cdc3da8b87ff2"
+    },
+    {
+      "bytes": 56,
+      "caller": "compatibility",
+      "equal": true,
+      "existing": false,
+      "global": "",
+      "ids": [
+        "INS-LEG-005",
+        "INS-LEG-006"
+      ],
+      "project": null,
+      "sha256": "27366b97c04e7f919844ccc07d1e345c644d326bc966e50c4bc10b7ff66c1b3c"
+    },
+    {
+      "bytes": 56,
+      "caller": "primary",
+      "equal": true,
+      "existing": false,
+      "global": "",
+      "ids": [
+        "INS-LEG-005",
+        "INS-LEG-006"
+      ],
+      "project": null,
+      "sha256": "27366b97c04e7f919844ccc07d1e345c644d326bc966e50c4bc10b7ff66c1b3c"
+    },
+    {
+      "bytes": 113,
+      "caller": "compatibility",
+      "equal": true,
+      "existing": false,
+      "global": "",
+      "ids": [
+        "INS-LEG-005",
+        "INS-LEG-006"
+      ],
+      "project": "",
+      "sha256": "72a358c1a8ca348fad288af436eb30dde8f68b92f6e4c247929db30237d7d1a1"
+    },
+    {
+      "bytes": 113,
+      "caller": "primary",
+      "equal": true,
+      "existing": false,
+      "global": "",
+      "ids": [
+        "INS-LEG-005",
+        "INS-LEG-006"
+      ],
+      "project": "",
+      "sha256": "51d835831a6ad2eaa00ef932e0bbb08f5ac7a1ca676de0b20def795e8293154a"
+    },
+    {
+      "bytes": 123,
+      "caller": "compatibility",
+      "equal": true,
+      "existing": false,
+      "global": "",
+      "ids": [
+        "INS-LEG-005",
+        "INS-LEG-006"
+      ],
+      "project": " PROJECT<&> \n",
+      "sha256": "d532017d4f97accf71e104dc03d00f10b206f195b74199abbcf39afc65de3a5d"
+    },
+    {
+      "bytes": 123,
+      "caller": "primary",
+      "equal": true,
+      "existing": false,
+      "global": "",
+      "ids": [
+        "INS-LEG-005",
+        "INS-LEG-006"
+      ],
+      "project": " PROJECT<&> \n",
+      "sha256": "f901bde03a780cbfd40f0d5f625d2bcd2b36ce9f7757bf58b4dc4792c9e57b83"
+    },
+    {
+      "bytes": 65,
+      "caller": "compatibility",
+      "equal": true,
+      "existing": false,
+      "global": " GLOBAL<&> \n",
+      "ids": [
+        "INS-LEG-005",
+        "INS-LEG-006"
+      ],
+      "project": null,
+      "sha256": "76d355bde5301dea18797e7e47c7a4145bc2935faf94b8a52a0f842ac5bbaa5c"
+    },
+    {
+      "bytes": 65,
+      "caller": "primary",
+      "equal": true,
+      "existing": false,
+      "global": " GLOBAL<&> \n",
+      "ids": [
+        "INS-LEG-005",
+        "INS-LEG-006"
+      ],
+      "project": null,
+      "sha256": "76d355bde5301dea18797e7e47c7a4145bc2935faf94b8a52a0f842ac5bbaa5c"
+    },
+    {
+      "bytes": 122,
+      "caller": "compatibility",
+      "equal": true,
+      "existing": false,
+      "global": " GLOBAL<&> \n",
+      "ids": [
+        "INS-LEG-005",
+        "INS-LEG-006"
+      ],
+      "project": "",
+      "sha256": "251c871ebf475b1ca8c948f77231eb3b08b763cf9d75c753128893678f768dab"
+    },
+    {
+      "bytes": 122,
+      "caller": "primary",
+      "equal": true,
+      "existing": false,
+      "global": " GLOBAL<&> \n",
+      "ids": [
+        "INS-LEG-005",
+        "INS-LEG-006"
+      ],
+      "project": "",
+      "sha256": "fcc66623818d0050e65aab66b8864f6ef71360d3204c8648c1281263473a3102"
+    },
+    {
+      "bytes": 132,
+      "caller": "compatibility",
+      "equal": true,
+      "existing": false,
+      "global": " GLOBAL<&> \n",
+      "ids": [
+        "INS-LEG-005",
+        "INS-LEG-006"
+      ],
+      "project": " PROJECT<&> \n",
+      "sha256": "0dcd4f1259573135513ddb53e71f775a8a675e44bf521231dfe9f94d13df0807"
+    },
+    {
+      "bytes": 132,
+      "caller": "primary",
+      "equal": true,
+      "existing": false,
+      "global": " GLOBAL<&> \n",
+      "ids": [
+        "INS-LEG-005",
+        "INS-LEG-006"
+      ],
+      "project": " PROJECT<&> \n",
+      "sha256": "41563a05462b490bcd763a405eec8a8b6fd282495e8919d1211daf6f5553b756"
+    },
+    {
+      "bytes": 0,
+      "caller": "compatibility",
+      "equal": true,
+      "existing": true,
+      "global": null,
+      "ids": [
+        "INS-LEG-005",
+        "INS-LEG-006"
+      ],
+      "project": null,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 0,
+      "caller": "primary",
+      "equal": true,
+      "existing": true,
+      "global": null,
+      "ids": [
+        "INS-LEG-005",
+        "INS-LEG-006"
+      ],
+      "project": null,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 55,
+      "caller": "compatibility",
+      "equal": true,
+      "existing": true,
+      "global": null,
+      "ids": [
+        "INS-LEG-005",
+        "INS-LEG-006"
+      ],
+      "project": "",
+      "sha256": "d0e274265cdc377087332d02de3ed0f283886651f42cf97fb82831b5d90837d8"
+    },
+    {
+      "bytes": 55,
+      "caller": "primary",
+      "equal": true,
+      "existing": true,
+      "global": null,
+      "ids": [
+        "INS-LEG-005",
+        "INS-LEG-006"
+      ],
+      "project": "",
+      "sha256": "d0e274265cdc377087332d02de3ed0f283886651f42cf97fb82831b5d90837d8"
+    },
+    {
+      "bytes": 65,
+      "caller": "compatibility",
+      "equal": true,
+      "existing": true,
+      "global": null,
+      "ids": [
+        "INS-LEG-005",
+        "INS-LEG-006"
+      ],
+      "project": " PROJECT<&> \n",
+      "sha256": "bbfa84bfe8c14294adc6383d24e22577b7c6616c7d9657b2324cdc3da8b87ff2"
+    },
+    {
+      "bytes": 65,
+      "caller": "primary",
+      "equal": true,
+      "existing": true,
+      "global": null,
+      "ids": [
+        "INS-LEG-005",
+        "INS-LEG-006"
+      ],
+      "project": " PROJECT<&> \n",
+      "sha256": "bbfa84bfe8c14294adc6383d24e22577b7c6616c7d9657b2324cdc3da8b87ff2"
+    },
+    {
+      "bytes": 56,
+      "caller": "compatibility",
+      "equal": true,
+      "existing": true,
+      "global": "",
+      "ids": [
+        "INS-LEG-005",
+        "INS-LEG-006"
+      ],
+      "project": null,
+      "sha256": "27366b97c04e7f919844ccc07d1e345c644d326bc966e50c4bc10b7ff66c1b3c"
+    },
+    {
+      "bytes": 56,
+      "caller": "primary",
+      "equal": true,
+      "existing": true,
+      "global": "",
+      "ids": [
+        "INS-LEG-005",
+        "INS-LEG-006"
+      ],
+      "project": null,
+      "sha256": "27366b97c04e7f919844ccc07d1e345c644d326bc966e50c4bc10b7ff66c1b3c"
+    },
+    {
+      "bytes": 113,
+      "caller": "compatibility",
+      "equal": true,
+      "existing": true,
+      "global": "",
+      "ids": [
+        "INS-LEG-005",
+        "INS-LEG-006"
+      ],
+      "project": "",
+      "sha256": "72a358c1a8ca348fad288af436eb30dde8f68b92f6e4c247929db30237d7d1a1"
+    },
+    {
+      "bytes": 113,
+      "caller": "primary",
+      "equal": true,
+      "existing": true,
+      "global": "",
+      "ids": [
+        "INS-LEG-005",
+        "INS-LEG-006"
+      ],
+      "project": "",
+      "sha256": "51d835831a6ad2eaa00ef932e0bbb08f5ac7a1ca676de0b20def795e8293154a"
+    },
+    {
+      "bytes": 123,
+      "caller": "compatibility",
+      "equal": true,
+      "existing": true,
+      "global": "",
+      "ids": [
+        "INS-LEG-005",
+        "INS-LEG-006"
+      ],
+      "project": " PROJECT<&> \n",
+      "sha256": "d532017d4f97accf71e104dc03d00f10b206f195b74199abbcf39afc65de3a5d"
+    },
+    {
+      "bytes": 123,
+      "caller": "primary",
+      "equal": true,
+      "existing": true,
+      "global": "",
+      "ids": [
+        "INS-LEG-005",
+        "INS-LEG-006"
+      ],
+      "project": " PROJECT<&> \n",
+      "sha256": "f901bde03a780cbfd40f0d5f625d2bcd2b36ce9f7757bf58b4dc4792c9e57b83"
+    },
+    {
+      "bytes": 65,
+      "caller": "compatibility",
+      "equal": true,
+      "existing": true,
+      "global": " GLOBAL<&> \n",
+      "ids": [
+        "INS-LEG-005",
+        "INS-LEG-006"
+      ],
+      "project": null,
+      "sha256": "76d355bde5301dea18797e7e47c7a4145bc2935faf94b8a52a0f842ac5bbaa5c"
+    },
+    {
+      "bytes": 65,
+      "caller": "primary",
+      "equal": true,
+      "existing": true,
+      "global": " GLOBAL<&> \n",
+      "ids": [
+        "INS-LEG-005",
+        "INS-LEG-006"
+      ],
+      "project": null,
+      "sha256": "76d355bde5301dea18797e7e47c7a4145bc2935faf94b8a52a0f842ac5bbaa5c"
+    },
+    {
+      "bytes": 122,
+      "caller": "compatibility",
+      "equal": true,
+      "existing": true,
+      "global": " GLOBAL<&> \n",
+      "ids": [
+        "INS-LEG-005",
+        "INS-LEG-006"
+      ],
+      "project": "",
+      "sha256": "251c871ebf475b1ca8c948f77231eb3b08b763cf9d75c753128893678f768dab"
+    },
+    {
+      "bytes": 122,
+      "caller": "primary",
+      "equal": true,
+      "existing": true,
+      "global": " GLOBAL<&> \n",
+      "ids": [
+        "INS-LEG-005",
+        "INS-LEG-006"
+      ],
+      "project": "",
+      "sha256": "fcc66623818d0050e65aab66b8864f6ef71360d3204c8648c1281263473a3102"
+    },
+    {
+      "bytes": 132,
+      "caller": "compatibility",
+      "equal": true,
+      "existing": true,
+      "global": " GLOBAL<&> \n",
+      "ids": [
+        "INS-LEG-005",
+        "INS-LEG-006"
+      ],
+      "project": " PROJECT<&> \n",
+      "sha256": "0dcd4f1259573135513ddb53e71f775a8a675e44bf521231dfe9f94d13df0807"
+    },
+    {
+      "bytes": 132,
+      "caller": "primary",
+      "equal": true,
+      "existing": true,
+      "global": " GLOBAL<&> \n",
+      "ids": [
+        "INS-LEG-005",
+        "INS-LEG-006"
+      ],
+      "project": " PROJECT<&> \n",
+      "sha256": "41563a05462b490bcd763a405eec8a8b6fd282495e8919d1211daf6f5553b756"
+    }
+  ]
+}

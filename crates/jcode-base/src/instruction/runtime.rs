@@ -352,6 +352,7 @@ impl InstructionRuntime {
         let selector = InstructionSelector {
             scope: match registration.scope_policy {
                 ConsumerScopePolicy::GlobalOnly => InstructionScopeSelector::Global,
+                ConsumerScopePolicy::ProjectOnly => InstructionScopeSelector::Project,
                 ConsumerScopePolicy::ProjectThenGlobal => InstructionScopeSelector::Unqualified,
             },
             kind: registration.kind,
@@ -360,8 +361,13 @@ impl InstructionRuntime {
         let document = match self.resolve(&selector) {
             Ok(document) => document,
             Err(InstructionError::ResourceNotFound { .. }) if registration.required => {
-                let root = match registration.scope_policy {
+                let root: &std::path::Path = match registration.scope_policy {
                     ConsumerScopePolicy::GlobalOnly => &self.sources.global_root,
+                    ConsumerScopePolicy::ProjectOnly => self
+                        .sources
+                        .project_root
+                        .as_deref()
+                        .unwrap_or(std::path::Path::new(".jcode/instructions")),
                     ConsumerScopePolicy::ProjectThenGlobal => self
                         .sources
                         .project_root

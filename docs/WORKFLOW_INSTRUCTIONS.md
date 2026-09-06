@@ -72,6 +72,14 @@ Swarm core retains the structural report/deep markers, wrapper spacing, idempote
 
 If integration instructions fail after workers completed, the error preserves their outputs rather than implying those tasks were rolled back. No new delegation system or roster adoption was introduced. Phase 4 still owns future isolated delegation and Phase 9 owns future async policy.
 
+### Preferred-tool guidance
+
+Optional `tools/preferred-tools.md` resources contribute global and project guidance independently. Primary activation preserves its approved global-before-project order. Existing non-primary compatibility builders retain their historical project-before-global order without adopting named profiles. Both use the same registered scope-aware renderer, not separate legacy loaders. Project-only consumers never fall back to global and duplicate it.
+
+Global legacy content imports exactly through a committed receipt when the store first adopts this cutover. Originals remain unchanged and inactive afterward. Project legacy content remains a compatibility input until explicitly imported or replaced by a managed project definition. Invalid managed content fails instead of revealing legacy/global text. A missing imported target blocks for repair; clear its body to suppress prose deliberately. Existing imported whitespace normalization and legacy provenance headings remain byte-identical. New managed bodies render completely.
+
+Compatibility prompt APIs now propagate instruction failures before provider use. TUI construction derives initial accounting from installed prompt state instead of reading or initializing a client-local instruction store merely for an estimate.
+
 ## Source and failure semantics
 
 Working files are authoritative, including intentionally empty bodies where the owner retains meaningful structure. A present invalid project redefinition fails rather than exposing global prose. Missing previously adopted singleton resources are damage, not permission to recreate defaults. New shipped paths use the existing versioned, scoped Git seed-adoption transaction. It preserves current files and does not push a repository.
