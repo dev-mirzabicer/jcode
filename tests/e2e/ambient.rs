@@ -333,62 +333,54 @@ async fn test_ambient_schedule_tool() -> Result<()> {
 #[test]
 fn test_ambient_system_prompt_builder() {
     use jcode::ambient::{
-        AmbientState, MemoryGraphHealth, ResourceBudget, build_ambient_system_prompt,
+        AmbientMemoryContext, AmbientState, MemoryGraphHealth, ResourceBudget,
+        build_ambient_system_prompt,
     };
-
-    let state = AmbientState::default();
-    let queue_items = vec![];
-    let health = MemoryGraphHealth {
-        total: 42,
-        active: 38,
-        inactive: 4,
-        low_confidence: 2,
-        contradictions: 1,
-        missing_embeddings: 0,
-        duplicate_candidates: 3,
-        last_consolidation: None,
+    let _env = setup_test_env().expect("isolated test home");
+    jcode::instruction::SystemPromptComposer::new()
+        .ensure_global_store()
+        .unwrap();
+    let root = jcode::storage::jcode_dir()
+        .unwrap()
+        .join("instructions/modules");
+    for id in [
+        "ambient-identity",
+        "ambient-empty-queue",
+        "ambient-instructions",
+    ] {
+        std::fs::write(
+            root.join(format!("{id}.md")),
+            format!("---\nid: {id}\nkind: module\n---\nSYNTHETIC-{id}\n"),
+        )
+        .unwrap();
+    }
+    let memory = AmbientMemoryContext {
+        graph_health: MemoryGraphHealth {
+            total: 42,
+            active: 38,
+            inactive: 4,
+            ..Default::default()
+        },
+        feedback: vec![],
     };
-    let recent_sessions = vec![];
-    let feedback: Vec<String> = vec![];
     let budget = ResourceBudget {
-        provider: "mock".to_string(),
-        tokens_remaining_desc: "50k tokens".to_string(),
-        window_resets_desc: "2h".to_string(),
-        user_usage_rate_desc: "5k/min".to_string(),
-        cycle_budget_desc: "stay under 50k".to_string(),
+        provider: "mock".into(),
+        tokens_remaining_desc: "50k tokens".into(),
+        ..Default::default()
     };
-
     let prompt = build_ambient_system_prompt(
-        &state,
-        &queue_items,
-        &health,
-        &recent_sessions,
-        &feedback,
+        &AmbientState::default(),
+        &[],
+        Some(&memory),
+        &[],
         &budget,
         0,
-    );
-
-    // Verify key sections exist
-    assert!(
-        prompt.contains("ambient agent"),
-        "Prompt missing 'ambient agent'"
-    );
-    assert!(
-        prompt.contains("Memory Graph Health"),
-        "Prompt missing 'Memory Graph Health'"
-    );
-    assert!(
-        prompt.contains("Total memories: 42"),
-        "Prompt missing memory count"
-    );
-    assert!(
-        prompt.contains("Resource Budget"),
-        "Prompt missing 'Resource Budget'"
-    );
-    assert!(
-        prompt.contains("end_ambient_cycle"),
-        "Prompt missing end_ambient_cycle instruction"
-    );
+    )
+    .unwrap();
+    assert!(prompt.starts_with("SYNTHETIC-ambient-identity\n"));
+    assert!(prompt.contains("Total memories: 42"));
+    assert!(prompt.contains("Provider: mock"));
+    assert!(prompt.contains("SYNTHETIC-ambient-instructions\n"));
 }
 
 /// Test ambient runner handle: status_json

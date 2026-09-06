@@ -2887,7 +2887,7 @@ pub(super) fn handle_swarm_prompt_command(app: &mut App, trimmed: &str) -> bool 
     match run_interactive_editor(&mut command) {
         Ok(status) if status.success() => {
             app.push_display_message(DisplayMessage::system(format!(
-                "Edited the active swarm routing prompt in {}:\n{}\n\nChanges apply to newly exposed Swarm tools in new contexts. Existing session snapshots remain unchanged. This editor operates on local sources; a remote server uses its own instruction store.",
+                "Edited the local swarm routing source in {}:\n{}\n\nChanges apply to newly exposed Swarm tools in new contexts. Existing session snapshots remain unchanged. This editor operates on local sources; a remote server uses its own instruction store.",
                 editor,
                 path.display()
             )));

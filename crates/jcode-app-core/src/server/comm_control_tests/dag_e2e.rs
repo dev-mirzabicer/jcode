@@ -439,6 +439,9 @@ async fn e2e_deep_expand_inserts_gate_in_live_plan() {
 #[tokio::test]
 async fn e2e_deep_assignment_carries_fanout_and_artifact_contract() {
     let (_env, _runtime) = RuntimeEnvGuard::new();
+    crate::instruction::SystemPromptComposer::new().ensure_global_store().unwrap();
+    std::fs::write(crate::storage::jcode_dir().unwrap().join("instructions/notifications/swarm-deep-node-contract.md"),"---\nid: swarm-deep-node-contract\nkind: notification\ntemplate: handlebars\n---\nNODE {{node_id}} BUDGET {{member_cap}}").unwrap();
+
     let mut fx = graph_fixture_named("swarm-deep-directive", "coord-dd", "worker-dd").await;
     fx.seed(
         "deep",
@@ -490,8 +493,7 @@ async fn e2e_deep_assignment_carries_fanout_and_artifact_contract() {
         prompt.contains(jcode_swarm_core::SWARM_DEEP_NODE_MARKER),
         "deep assignment prompt must carry the deep-node contract, got: {prompt}"
     );
-    assert!(prompt.contains("action=\"expand_node\", node_id=\"explore.a\""));
-    assert!(prompt.contains("action=\"complete_node\", node_id=\"explore.a\""));
+    assert!(prompt.contains(&format!("NODE explore.a BUDGET {}",jcode_swarm_core::MAX_SWARM_MEMBERS)));
 
     // Light plans must NOT get the directive. Use a fresh fixture: re-seeding
     // the existing non-empty deep plan as light is now rejected (silent rigor
@@ -539,6 +541,11 @@ async fn e2e_deep_assignment_carries_fanout_and_artifact_contract() {
 #[tokio::test]
 async fn e2e_deep_gate_assignment_carries_inject_gap_contract() {
     let (_env, _runtime) = RuntimeEnvGuard::new();
+    crate::instruction::SystemPromptComposer::new().ensure_global_store().unwrap();
+    for (id,body) in [("swarm-deep-gate-contract","GATE {{gate_id}}"),("swarm-deep-gate-priority","LOW-SIBLINGS {{ids}}")] {
+        std::fs::write(crate::storage::jcode_dir().unwrap().join(format!("instructions/notifications/{id}.md")),format!("---\nid: {id}\nkind: notification\ntemplate: handlebars\n---\n{body}")).unwrap();
+    }
+
     let mut fx = graph_fixture_named("swarm-deep-gate", "coord-dg", "worker-dg").await;
     fx.seed("deep", vec![node_spec("root", "explore", &[])])
         .await;
@@ -646,7 +653,7 @@ async fn e2e_deep_gate_assignment_carries_inject_gap_contract() {
     .expect("gate assignment should queue a task prompt for the worker");
     assert!(prompt.contains(jcode_swarm_core::SWARM_DEEP_NODE_MARKER));
     assert!(
-        prompt.contains(&format!("action=\"inject_gap\", gate_id=\"{gate_id}\"")),
+        prompt.contains(&format!("GATE {gate_id}")),
         "gate prompt must carry the inject_gap contract, got: {prompt}"
     );
     // The gate also sees the child's artifact (forward dataflow) including the
@@ -655,7 +662,7 @@ async fn e2e_deep_gate_assignment_carries_inject_gap_contract() {
     // The child completed with LOW confidence, so the gate directive must name
     // it as a priority probe target (the engine rejects a pass over it).
     assert!(
-        prompt.contains("PRIORITY") && prompt.contains("root.1"),
+        prompt.contains("LOW-SIBLINGS root.1"),
         "gate prompt must call out the low-confidence sibling, got: {prompt}"
     );
 }

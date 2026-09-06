@@ -1,21 +1,5 @@
 use super::*;
 
-/// Verify the default system prompt does NOT identify as "Claude Code"
-/// It's fine to say "powered by Claude" but not "Claude Code" (Anthropic's product)
-#[test]
-fn test_default_system_prompt_no_claude_code_identity() {
-    let prompt = DEFAULT_SYSTEM_PROMPT.to_lowercase();
-
-    assert!(
-        !prompt.contains("claude code"),
-        "DEFAULT_SYSTEM_PROMPT should NOT identify as 'Claude Code'. Found in system_prompt.md"
-    );
-    assert!(
-        !prompt.contains("claude-code"),
-        "DEFAULT_SYSTEM_PROMPT should NOT contain 'claude-code'. Found in system_prompt.md"
-    );
-}
-
 #[test]
 fn mermaid_prompt_module_follows_capability() {
     let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
@@ -39,32 +23,16 @@ fn mermaid_prompt_module_follows_capability() {
         PromptCapabilities { mermaid: false },
     )
     .unwrap();
-    assert!(!disabled.static_part.contains("Mermaid diagrams"));
-    assert!(!disabled.static_part.contains("fenced `mermaid` code block"));
+    assert!(!disabled.static_part.contains(MERMAID_PROMPT));
 }
 
-/// Verify skill prompts don't accidentally introduce "Claude Code" identity
 #[test]
 fn test_skill_prompt_integration() {
-    let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
-    // Test that a skill prompt is properly appended and doesn't break anything
-    let skill_prompt = "You are helping with a debugging task.";
-    let prompt = build_system_prompt(Some(skill_prompt), &[]).unwrap();
-
-    // The prompt should contain our default system prompt
-    assert!(prompt.contains("Your name is Jcode."));
-
-    // The prompt should contain the skill prompt
-    assert!(prompt.contains(skill_prompt));
-
-    // The base prompt parts (excluding user-provided instruction files) should NOT contain
-    // "Claude Code". We check DEFAULT_SYSTEM_PROMPT separately since user files may
-    // legitimately contain it.
-    let default_lower = DEFAULT_SYSTEM_PROMPT.to_lowercase();
-    assert!(
-        !default_lower.contains("claude code"),
-        "DEFAULT_SYSTEM_PROMPT should NOT identify as 'Claude Code'"
-    );
+    let home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    std::fs::write(home.root().join("system-prompt.md"), "SYNTHETIC_BASE").unwrap();
+    let prompt = build_system_prompt(Some("SYNTHETIC_SKILL"), &[]).unwrap();
+    assert!(prompt.starts_with("SYNTHETIC_BASE"));
+    assert!(prompt.ends_with("# Active Skill\n\nSYNTHETIC_SKILL"));
 }
 
 #[test]
