@@ -2563,6 +2563,72 @@ fn jcode_subscription_runtime_has_explicit_display_and_route_identity() {
 }
 
 #[test]
+fn execution_constructors_preserve_intentional_legacy_namespace_and_route_state() {
+    let _lock = ENV_LOCK.lock();
+    let home = TempDir::new().unwrap();
+    let _home = EnvVarGuard::set("JCODE_HOME", home.path());
+    let _env = isolate_openrouter_autodetect_env();
+    let _namespace = EnvVarGuard::set("JCODE_OPENROUTER_CACHE_NAMESPACE", "primary-namespace");
+    let _runtime = EnvVarGuard::set("JCODE_RUNTIME_PROVIDER", "primary-route");
+    let _active = EnvVarGuard::set("JCODE_ACTIVE_PROVIDER", "primary-provider");
+    let _key = EnvVarGuard::set("JCODE_API_KEY", "synthetic-subscription-key");
+    let _base = EnvVarGuard::remove("JCODE_API_BASE");
+    let profile = jcode_base::config::NamedProviderConfig {
+        base_url: "http://127.0.0.1:9/v1".into(),
+        auth: jcode_base::config::NamedProviderAuth::None,
+        default_model: Some("synthetic-model".into()),
+        ..Default::default()
+    };
+    let isolated = OpenRouterProvider::new_named_execution("isolated-fixture", &profile).unwrap();
+    assert_eq!(
+        isolated.foreground_cache_namespace().as_deref(),
+        Some("isolated-fixture")
+    );
+    assert_eq!(
+        isolated.direct_openai_compatible_route_parts().unwrap().1,
+        "openai-compatible:isolated-fixture"
+    );
+    assert_eq!(
+        std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE").unwrap(),
+        "primary-namespace"
+    );
+    let subscription = OpenRouterProvider::new_subscription_execution().unwrap();
+    assert_eq!(
+        subscription
+            .direct_openai_compatible_route_parts()
+            .unwrap()
+            .1,
+        "jcode-subscription"
+    );
+    assert_eq!(
+        std::env::var("JCODE_RUNTIME_PROVIDER").unwrap(),
+        "primary-route"
+    );
+    assert_eq!(
+        std::env::var("JCODE_ACTIVE_PROVIDER").unwrap(),
+        "primary-provider"
+    );
+    assert_eq!(
+        std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE").unwrap(),
+        "primary-namespace"
+    );
+    let legacy =
+        OpenRouterProvider::new_named_openai_compatible("legacy-fixture", &profile).unwrap();
+    assert_eq!(
+        std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE").unwrap(),
+        "legacy-fixture"
+    );
+    assert_eq!(
+        legacy.foreground_cache_namespace().as_deref(),
+        Some("legacy-fixture")
+    );
+    assert_eq!(
+        isolated.foreground_cache_namespace().as_deref(),
+        Some("isolated-fixture")
+    );
+}
+
+#[test]
 fn non_subscription_runtimes_keep_existing_display_and_route_identity() {
     let _lock = ENV_LOCK.lock();
     let temp = TempDir::new().expect("create temp home");

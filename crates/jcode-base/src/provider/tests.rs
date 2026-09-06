@@ -1019,6 +1019,12 @@ fn register_test_external_runtimes() {
         use external::OpenRouterRuntimeSpec;
         use jcode_provider_openrouter_runtime::OpenRouterProvider;
         let provider: Arc<dyn Provider> = match spec {
+            OpenRouterRuntimeSpec::JcodeSubscription => {
+                Arc::new(OpenRouterProvider::new_subscription_execution()?)
+            }
+            OpenRouterRuntimeSpec::NamedProfileForExecution { name, config } => {
+                Arc::new(OpenRouterProvider::new_named_execution(&name, &config)?)
+            }
             OpenRouterRuntimeSpec::Default => Arc::new(OpenRouterProvider::new()?),
             OpenRouterRuntimeSpec::OpenRouterApiKey => {
                 Arc::new(OpenRouterProvider::new_openrouter_api_key_runtime()?)

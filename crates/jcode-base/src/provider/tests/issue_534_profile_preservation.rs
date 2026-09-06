@@ -33,6 +33,8 @@ input = ["text"]
                         &["openrouter/owl-alpha"],
                     ))
                 }
+                OpenRouterRuntimeSpec::JcodeSubscription => Arc::new(OpenRouterProvider::new_subscription_execution()?),
+                OpenRouterRuntimeSpec::NamedProfileForExecution { name, config } => Arc::new(OpenRouterProvider::new_named_execution(&name, &config)?),
                 OpenRouterRuntimeSpec::Default => Arc::new(OpenRouterProvider::new()?),
                 OpenRouterRuntimeSpec::CompatibleProfile(profile) => Arc::new(
                     OpenRouterProvider::new_openai_compatible_profile_runtime(profile)?,

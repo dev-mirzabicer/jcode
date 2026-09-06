@@ -24,6 +24,7 @@ pub mod openrouter;
 pub mod pricing;
 mod registry;
 mod route_builders;
+pub mod route_execution;
 mod routing;
 mod selection;
 mod startup;

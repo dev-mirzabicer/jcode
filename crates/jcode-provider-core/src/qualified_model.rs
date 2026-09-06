@@ -34,7 +34,11 @@ impl QualifiedModel {
             let (profile, model) = model
                 .split_once(':')
                 .ok_or_else(|| "openai-compatible requires a profile and model".to_string())?;
-            if profile.is_empty() || model.trim().is_empty() || profile.trim() != profile {
+            if profile.is_empty()
+                || model.trim().is_empty()
+                || profile.trim() != profile
+                || model.trim() != model
+            {
                 return Err("openai-compatible requires a nonempty profile and model".into());
             }
         }
@@ -134,6 +138,7 @@ mod tests {
             "openai-oauth:",
             "openai-compatible:model",
             "openai-compatible::model",
+            "openai-compatible:profile: model",
             "openai-oauth: model",
         ] {
             assert!(QualifiedModel::parse(text).is_err(), "{text}");

@@ -536,13 +536,7 @@ impl Provider for OpenRouterProvider {
             );
         }
         let requested = effort.trim().to_ascii_lowercase();
-        let mut accepted = self.available_efforts().contains(&requested.as_str());
-        if !self.supports_deepseek_reasoning_effort()
-            && !self.supports_openai_reasoning_effort()
-            && requested == "max"
-        {
-            accepted = true;
-        }
+        let accepted = self.accepts_reasoning_effort(&requested);
         if !requested.is_empty() && !accepted {
             anyhow::bail!(
                 "Reasoning effort '{}' is not supported by the current model/profile (available: {})",
@@ -571,6 +565,14 @@ impl Provider for OpenRouterProvider {
         } else {
             vec![]
         }
+    }
+
+    fn accepts_reasoning_effort(&self, effort: &str) -> bool {
+        self.supports_any_reasoning_effort()
+            && (self.available_efforts().contains(&effort)
+                || (!self.supports_deepseek_reasoning_effort()
+                    && !self.supports_openai_reasoning_effort()
+                    && effort == "max"))
     }
 
     fn available_models(&self) -> Vec<&'static str> {

@@ -1264,6 +1264,15 @@ impl OpenRouterProvider {
         // before any model-cache reads/writes happen. Without this, a custom
         // endpoint can accidentally display the default OpenRouter catalog.
         jcode_base::env::set_var("JCODE_OPENROUTER_CACHE_NAMESPACE", profile_name);
+        Self::new_named_execution(profile_name, profile)
+    }
+
+    /// Construct an independent runtime without changing another session's
+    /// process-wide catalog namespace. Runtime caches already carry profile_id.
+    pub fn new_named_execution(
+        profile_name: &str,
+        profile: &jcode_base::config::NamedProviderConfig,
+    ) -> Result<Self> {
         let api_base = normalize_api_base(&profile.base_url).ok_or_else(|| {
             anyhow::anyhow!("Provider profile '{}' has invalid base_url", profile_name)
         })?;
@@ -1281,8 +1290,12 @@ impl OpenRouterProvider {
                 label: "local endpoint (no auth)".to_string(),
             },
             jcode_base::config::NamedProviderAuth::Bearer => ProviderAuth::AuthorizationBearer {
-                token: key
-                    .ok_or_else(|| anyhow::anyhow!("{} not found in environment", key_label))?,
+                token: key.ok_or_else(|| {
+                    jcode_base::provider::route_execution::MissingRouteCredentials(format!(
+                        "{} not found in environment",
+                        key_label
+                    ))
+                })?,
                 label: key_label,
             },
             jcode_base::config::NamedProviderAuth::Header => ProviderAuth::HeaderValue {
@@ -1293,8 +1306,12 @@ impl OpenRouterProvider {
                         .unwrap_or("api-key")
                         .as_bytes(),
                 )?,
-                value: key
-                    .ok_or_else(|| anyhow::anyhow!("{} not found in environment", key_label))?,
+                value: key.ok_or_else(|| {
+                    jcode_base::provider::route_execution::MissingRouteCredentials(format!(
+                        "{} not found in environment",
+                        key_label
+                    ))
+                })?,
                 label: key_label,
             },
         };
@@ -1615,6 +1632,30 @@ impl OpenRouterProvider {
         })
     }
 
+    pub fn new_subscription_execution() -> Result<Self> {
+        use jcode_base::subscription_catalog as subscription;
+        let profile = jcode_base::config::NamedProviderConfig {
+            base_url: subscription::configured_api_base()
+                .unwrap_or_else(|| subscription::DEFAULT_JCODE_API_BASE.into()),
+            api_key: Some(subscription::configured_api_key().ok_or_else(|| {
+                jcode_base::provider::route_execution::MissingRouteCredentials(
+                    "Jcode subscription credentials unavailable".into(),
+                )
+            })?),
+            api_key_env: Some(subscription::JCODE_API_KEY_ENV.into()),
+            default_model: Some(subscription::default_model().id.into()),
+            ..Default::default()
+        };
+        let mut runtime = Self::new_named_execution(subscription::JCODE_CACHE_NAMESPACE, &profile)?;
+        runtime.static_models = subscription::curated_models()
+            .iter()
+            .filter(|model| subscription::is_model_allowed_for_current_tier(model.id))
+            .map(|model| model.id.to_string())
+            .collect();
+        runtime.supports_model_catalog = false;
+        Ok(runtime)
+    }
+
     pub fn new_openai_compatible_profile_runtime(
         profile: jcode_base::provider_catalog::OpenAiCompatibleProfile,
     ) -> Result<Self> {
@@ -1639,13 +1680,13 @@ impl OpenRouterProvider {
                 let path = jcode_base::storage::app_config_dir()
                     .map(|dir| dir.join(&resolved.env_file).display().to_string())
                     .unwrap_or_else(|_| resolved.env_file.clone());
-                anyhow::bail!(
+                return Err(jcode_base::provider::route_execution::MissingRouteCredentials(format!(
                     "{} credentials not available. {} not found in environment or {}. Run `jcode login --provider {}` first.",
                     resolved.display_name,
                     resolved.api_key_env,
                     path,
                     resolved.id,
-                );
+                )).into());
             }
         };
 

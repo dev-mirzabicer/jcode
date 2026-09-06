@@ -47,6 +47,13 @@ pub const OPENAI_RUNTIME: &str = "openai";
 /// zero-arg factory per identity.
 #[derive(Debug, Clone)]
 pub enum OpenRouterRuntimeSpec {
+    /// Managed subscription endpoint without changing process-wide routing.
+    JcodeSubscription,
+    /// A named endpoint for an isolated execution, without global cache setup.
+    NamedProfileForExecution {
+        name: String,
+        config: crate::config::NamedProviderConfig,
+    },
     /// Environment-derived default runtime (`OpenRouterProvider::new()`).
     Default,
     /// Real OpenRouter aggregator pinned to the OPENROUTER_API_KEY route.

@@ -397,6 +397,13 @@ pub trait Provider: Send + Sync {
         vec![]
     }
 
+    /// Whether an explicit effort is accepted, including provider-owned aliases
+    /// not displayed as distinct ladder rungs. Callers persist reasoning_effort()
+    /// after setting it, rather than assuming the requested spelling is effective.
+    fn accepts_reasoning_effort(&self, effort: &str) -> bool {
+        self.available_efforts().contains(&effort)
+    }
+
     /// Get the active service tier override (if applicable).
     fn service_tier(&self) -> Option<String> {
         None

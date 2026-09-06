@@ -160,6 +160,12 @@ pub fn register_external_provider_runtimes() {
         use crate::provider::external::OpenRouterRuntimeSpec;
         use jcode_provider_openrouter_runtime::OpenRouterProvider;
         let provider: std::sync::Arc<dyn crate::provider::Provider> = match spec {
+            OpenRouterRuntimeSpec::JcodeSubscription => {
+                std::sync::Arc::new(OpenRouterProvider::new_subscription_execution()?)
+            }
+            OpenRouterRuntimeSpec::NamedProfileForExecution { name, config } => {
+                std::sync::Arc::new(OpenRouterProvider::new_named_execution(&name, &config)?)
+            }
             OpenRouterRuntimeSpec::Default => std::sync::Arc::new(OpenRouterProvider::new()?),
             OpenRouterRuntimeSpec::OpenRouterApiKey => {
                 std::sync::Arc::new(OpenRouterProvider::new_openrouter_api_key_runtime()?)
