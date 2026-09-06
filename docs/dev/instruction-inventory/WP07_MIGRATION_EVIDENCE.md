@@ -1,6 +1,6 @@
 # WP-07 workflow migration evidence
 
-**Status:** Candidate verification complete, awaiting Mirza acceptance. This is technical evidence, not work-package acceptance.
+**Status:** Accepted by Mirza on 2026-09-06 at 14:50 UTC, with the documented verification limits retained.
 
 **Starting revision:** `99bba69497a04fa48fac675c5e40d05e39a929ca`.
 
@@ -67,3 +67,7 @@ Coordinated task `482976kh39` completed the combined matrix, including successfu
 ### Activated integration correction
 
 The first activated TUI command journey exposed a real wake-up gap: typed command preparation was queued without requesting the idle event-loop dispatcher. Command creation, render replies and reconnect now request the existing dispatch wake-up. The main event loop and regression test share its flag-clearing boundary, and waiting for a reply does not spin. Task `838766nuc5` passed actual Enter/reply dispatch, command recovery, adjacent follow-up tests and strict TUI lint. The same activated journey passed after rebuilding this correction at `2adf99cd8`. Task `380015once` also passed the finalized three command dispatcher/recovery tests before that activation.
+
+## Acceptance
+
+Mirza accepted WP-07 after the corrected activated journey and authorized its requested integration/publication. The accepted runtime implementation remains `2adf99cd8`; subsequent source commits update evidence only. The authoritative program handoff is `jcode_program/phases/phase-03-agent-profiles-prompts/progress/PROGRESS-WP-07.md`. Acceptance does not imply zero undiscovered defects or broaden the recorded platform/provider/frame coverage.
