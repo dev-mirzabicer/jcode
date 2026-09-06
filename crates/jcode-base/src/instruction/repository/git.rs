@@ -140,6 +140,23 @@ impl GitRepository {
         Ok(self.show_file(&head, relative_path)?.is_some())
     }
 
+    pub(super) fn file_existed_in_history(
+        &self,
+        relative_path: &Path,
+    ) -> InstructionRepositoryResult<bool> {
+        let history = self.checked_utf8(
+            "inspect resource history",
+            [
+                OsStr::new("rev-list"),
+                OsStr::new("-1"),
+                OsStr::new("HEAD"),
+                OsStr::new("--"),
+                relative_path.as_os_str(),
+            ],
+        )?;
+        Ok(!history.trim().is_empty())
+    }
+
     pub(super) fn history(
         &self,
         relative_path: Option<&Path>,

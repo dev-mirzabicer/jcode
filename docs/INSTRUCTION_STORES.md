@@ -111,3 +111,7 @@ The repository service and primary activation path are live. Read-only and editi
 ## Notification occurrence and todo history
 
 See [notification occurrence and todo history](NOTIFICATIONS.md) for current-source occurrence rendering, structural ownership, typed todo queues, failures and recovery.
+
+### Committed deletion across seed upgrades
+
+Seed adoption checks the current branch history before creating a missing shipped path. A path deliberately deleted in an earlier commit is not a new resource and is not recreated by a later seed version. A file still present at HEAD but missing from the working tree remains damage requiring explicit repair. This closes the cross-version deletion case without changing normal scoped commits or working-file authority.

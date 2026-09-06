@@ -308,6 +308,12 @@ impl InstructionRepositoryService {
                         .repository(repository)
                         .path(&file.relative_path));
                     }
+                    // A later seed is not permission to undo a committed user
+                    // deletion. HEAD absence alone also describes genuinely new
+                    // resources, so distinguish them through repository history.
+                    if git.file_existed_in_history(&file.relative_path)? {
+                        continue;
+                    }
                     expected_files.push(state);
                     mutations.push(InstructionFileMutation::Write {
                         relative_path: file.relative_path.clone(),

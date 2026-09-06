@@ -312,6 +312,18 @@ fn shipped_seed_upgrade_adds_only_new_resources_and_never_recreates_user_deletio
             .exists(),
         "a later user deletion must remain authoritative"
     );
+    upgraded_seed.manifest.seed_version = 3;
+    fixture
+        .service
+        .ensure_shipped_seed(&repository, &upgraded_seed)
+        .expect("adopt next seed after committed deletion");
+    assert!(
+        !repository
+            .root
+            .join("notifications/agent-transition.md")
+            .exists(),
+        "a later seed version must not resurrect a committed user deletion"
+    );
 }
 
 #[test]
