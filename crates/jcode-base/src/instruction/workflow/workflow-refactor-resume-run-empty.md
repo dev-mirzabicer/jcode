@@ -1,0 +1,1 @@
+Resume refactor mode for this repository. Start by inspecting the current repo state and relevant quality docs, write or refresh a ranked refactor todo list with `todo`, implement the highest-leverage safe refactors yourself, validate them, run an independent read-only review subagent after each meaningful batch, and continue only while more work is clearly worth the churn.

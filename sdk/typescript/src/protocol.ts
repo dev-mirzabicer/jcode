@@ -82,7 +82,18 @@ export interface StartupContextCreateError {
 /** Base64 image attachment: [mediaType, base64Data]. */
 export type ImageAttachment = [string, string];
 
+export type WorkflowLoopMode = "improve_run" | "improve_plan" | "refactor_run" | "refactor_plan";
+export interface WorkflowTodo { content: string; status: string; priority: string }
+export type CommandWorkflow =
+  | { kind: "commit" | "commit_push" | "release_fast" | "release_macos" | "release_remote" | "improve_stop" | "refactor_stop" }
+  | { kind: "triage"; focus: string }
+  | { kind: "test"; claim: string }
+  | { kind: "plan"; goal: string | null }
+  | { kind: "improve" | "refactor"; plan_only: boolean; focus: string | null }
+  | { kind: "improve_resume" | "refactor_resume"; mode: WorkflowLoopMode; todos: WorkflowTodo[] };
+
 export type WorkflowPromptRequest =
+  | { kind: "command"; command: CommandWorkflow }
   | { kind: "review_startup"; mode: "review" | "autoreview" | "judge" | "autojudge"; parent_session_id: string }
   | { kind: "structured_initial"; content: string; schema: string }
   | { kind: "structured_correction"; schema: string; error_lines: string; previous_response: string };

@@ -1078,6 +1078,15 @@ impl RemoteConnection {
         id
     }
 
+    pub async fn render_workflow_prompt(
+        &self,
+        id: u64,
+        workflow: crate::workflow::WorkflowPromptRequest,
+    ) -> Result<()> {
+        self.send_request(Request::RenderWorkflowPrompt { id, workflow })
+            .await
+    }
+
     pub async fn split_with_workflow(
         &self,
         id: u64,

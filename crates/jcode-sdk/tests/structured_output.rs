@@ -68,7 +68,8 @@ fn fake_harness_with_mode(
                     }
                 } else {
                     let content = match workflow {
-                        jcode_harness_api::WorkflowPromptRequest::ReviewStartup { .. } => {
+                        jcode_harness_api::WorkflowPromptRequest::ReviewStartup { .. }
+                        | jcode_harness_api::WorkflowPromptRequest::Command { .. } => {
                             panic!("structured SDK must not request review prose")
                         }
                         jcode_harness_api::WorkflowPromptRequest::StructuredInitial {

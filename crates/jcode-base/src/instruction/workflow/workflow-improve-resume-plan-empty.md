@@ -1,0 +1,1 @@
+Resume improvement planning mode for this repository. Reinspect the current repo state, refresh the ranked improve todo list with `todo`, and stop after presenting the updated plan without editing files.

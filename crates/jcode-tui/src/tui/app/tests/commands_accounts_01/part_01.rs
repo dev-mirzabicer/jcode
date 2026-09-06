@@ -562,7 +562,9 @@ fn test_help_topic_shows_commit_command_details() {
 
 #[test]
 fn test_commit_command_starts_synthetic_user_turn() {
+    let _home=SkillTestHome::new();
     let mut app = create_test_app();
+        seed_synthetic_command_sources();
     app.input = "/commit".to_string();
     app.submit_input();
 
@@ -578,7 +580,9 @@ fn test_commit_command_starts_synthetic_user_turn() {
 
 #[test]
 fn test_commit_push_command_starts_synthetic_user_turn() {
+    let _home=SkillTestHome::new();
     let mut app = create_test_app();
+        seed_synthetic_command_sources();
     app.input = "/commit-push".to_string();
     app.submit_input();
 
@@ -609,7 +613,9 @@ fn test_help_topic_shows_commit_push_command_details() {
 
 #[test]
 fn test_fast_release_command_starts_synthetic_user_turn() {
+    let _home=SkillTestHome::new();
     let mut app = create_test_app();
+        seed_synthetic_command_sources();
     app.input = "/fast-release".to_string();
     app.submit_input();
 
@@ -627,7 +633,9 @@ fn test_fast_release_command_starts_synthetic_user_turn() {
 
 #[test]
 fn test_triage_command_starts_synthetic_user_turn() {
+    let _home=SkillTestHome::new();
     let mut app = create_test_app();
+        seed_synthetic_command_sources();
     app.input = "/triage".to_string();
     app.submit_input();
 
@@ -642,15 +650,18 @@ fn test_triage_command_starts_synthetic_user_turn() {
 }
 
 #[test]
-fn test_triage_command_includes_focus_in_prompt() {
-    let prompt = crate::tui::app::commands::build_triage_prompt(" only crash reports");
-    assert!(prompt.contains("Triage the open GitHub issues"));
-    assert!(prompt.contains("Additional focus from the user: only crash reports"));
+fn test_triage_command_includes_typed_focus() {
+    let _home=SkillTestHome::new();let mut app=create_test_app();seed_synthetic_command_sources();
+    app.input="/triage only crash reports".into();app.submit_input();
+    let ContentBlock::Text{text,..}=&app.session.messages.last().unwrap().content[0] else {panic!("expected text")};
+    assert!(text.contains("FOCUS only crash reports"));
 }
 
 #[test]
 fn test_cut_release_alias_starts_fast_release_turn() {
+    let _home=SkillTestHome::new();
     let mut app = create_test_app();
+        seed_synthetic_command_sources();
     app.input = "/cut-release".to_string();
     app.submit_input();
 
@@ -663,21 +674,12 @@ fn test_cut_release_alias_starts_fast_release_turn() {
     assert!(notice.content.contains("fast local release"));
 }
 
-#[test]
-fn test_fast_release_prompt_uses_selfdev_cache() {
-    let fast_prompt = super::commands::build_fast_release_prompt();
-    assert!(fast_prompt.contains("quick-release.sh --prepare-fast"));
-    assert!(fast_prompt.contains("quick-release.sh --fast-local"));
-    assert!(fast_prompt.contains("warm target/selfdev cache"));
-    assert!(fast_prompt.contains("Do not run the separate local macOS cross-build"));
-    let prepare = fast_prompt.find("--prepare-fast").unwrap();
-    let bump = fast_prompt.find("Bump the version").unwrap();
-    assert!(prepare < bump);
-}
 
 #[test]
 fn test_fast_macos_release_command_uses_prepared_cross_build() {
+    let _home=SkillTestHome::new();
     let mut app = create_test_app();
+        seed_synthetic_command_sources();
     app.input = "/fast-macos-release".to_string();
     app.submit_input();
 
@@ -689,13 +691,7 @@ fn test_fast_macos_release_command_uses_prepared_cross_build() {
         .expect("missing launch notice");
     assert!(notice.content.contains("fast macOS release"));
 
-    let prompt = super::commands::build_fast_macos_release_prompt();
-    assert!(prompt.contains("quick-release.sh --prepare-fast-macos"));
-    assert!(prompt.contains("quick-release.sh --fast-macos-local"));
-    assert!(prompt.contains("macOS arm64"));
-    let prepare = prompt.find("--prepare-fast-macos").unwrap();
-    let bump = prompt.find("Bump the version").unwrap();
-    assert!(prepare < bump);
+    assert!(matches!(&app.session.messages.last().unwrap().content[0],ContentBlock::Text{text,..} if text.starts_with("workflow-release-")));
 }
 
 #[test]
@@ -717,7 +713,9 @@ fn test_help_topic_shows_fast_macos_release_details() {
 
 #[test]
 fn test_remote_release_command_uses_tag_only_ci_path() {
+    let _home=SkillTestHome::new();
     let mut app = create_test_app();
+        seed_synthetic_command_sources();
     app.input = "/remote-release".to_string();
     app.submit_input();
 
@@ -732,15 +730,14 @@ fn test_remote_release_command_uses_tag_only_ci_path() {
         .content
         .contains("Starting logical commits + push + remote release"));
 
-    let prompt = super::commands::build_remote_release_prompt();
-    assert!(prompt.contains("quick-release.sh --remote"));
-    assert!(prompt.contains("without any local build"));
-    assert!(prompt.contains("publication gated"));
+    assert!(matches!(&app.session.messages.last().unwrap().content[0],ContentBlock::Text{text,..} if text.starts_with("workflow-release-")));
 }
 
 #[test]
 fn test_commit_push_release_alias_starts_synthetic_user_turn() {
+    let _home=SkillTestHome::new();
     let mut app = create_test_app();
+        seed_synthetic_command_sources();
     app.input = "/commit-push-release".to_string();
     app.submit_input();
 
@@ -1144,19 +1141,15 @@ fn test_goals_legacy_alias_is_not_captured_by_goal_mission_alias() {
 
 #[test]
 fn test_test_command_queues_layered_verification_prompt() {
+    let _home=SkillTestHome::new();
     let mut app = create_test_app();
+        seed_synthetic_command_sources();
     app.input = "/test browser control is reliable".to_string();
     app.submit_input();
 
     assert!(app.pending_queued_dispatch);
     let queued = app.queued_messages.last().expect("missing /test prompt");
-    assert!(queued.human_text().unwrap().contains("browser control is reliable"));
-    assert!(queued.human_text().unwrap().contains("Reproduction-first"));
-    assert!(queued.human_text().unwrap().contains("End-to-end/user-flow smoke tests"));
-    assert!(queued.human_text().unwrap().contains("Property-based tests"));
-    assert!(queued.human_text().unwrap().contains("Static analysis"));
-    assert!(queued.human_text().unwrap().contains("fault injection/chaos"));
-    assert!(queued.human_text().unwrap().contains("Final proof packet"));
+    assert_eq!(queued.human_text(),Some("TEST browser control is reliable"));
 }
 
 #[test]

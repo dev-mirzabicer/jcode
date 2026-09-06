@@ -2032,3 +2032,74 @@ fn invalid_mission_prose_preserves_composer_pastes_images_and_prior_turn_state()
     assert!(!app.is_processing);
     assert!(app.pending_composer_input.is_none());
 }
+
+fn seed_synthetic_command_sources() {
+    crate::instruction::SystemPromptComposer::new()
+        .ensure_global_store()
+        .unwrap();
+    let root = crate::storage::jcode_dir().unwrap().join("instructions");
+    for registration in crate::instruction::workflow::registrations()
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.delivery_owner == "command workflow")
+    {
+        let id = registration.id.as_str();
+        let body = if id.ends_with("-focus") {
+            "FOCUS {{focus}}".to_string()
+        } else if id == "workflow-plan" {
+            "PLAN {{goal_line}}".into()
+        } else if id == "workflow-plan-default-goal" {
+            "CURRENT".into()
+        } else if id == "workflow-test-verification" {
+            "TEST {{target}}".into()
+        } else if matches!(
+            id,
+            "workflow-improve"
+                | "workflow-improve-plan"
+                | "workflow-refactor"
+                | "workflow-refactor-plan"
+        ) {
+            format!("{id} {{{{focus_line}}}}")
+        } else if id.contains("-resume-") && !id.ends_with("-empty") {
+            format!("{id} {{{{todo_rows}}}}")
+        } else {
+            id.to_string()
+        };
+        std::fs::write(
+            root.join(registration.default_relative_path),
+            format!(
+                "---\nid: {id}\nkind: {}\ntemplate: handlebars\n---\n{body}",
+                registration.kind
+            ),
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn invalid_command_source_preserves_mode_and_does_not_interrupt_or_append() {
+    let home = SkillTestHome::new();
+    let mut app = create_test_app();
+    seed_synthetic_command_sources();
+    std::fs::write(
+        home.path()
+            .join("instructions/modules/workflow-improve-plan.md"),
+        "---\nid: workflow-improve-plan\nkind: module\ntemplate: handlebars\n---\n{{missing}}",
+    )
+    .unwrap();
+    app.improve_mode = Some(ImproveMode::RefactorRun);
+    app.session.improve_mode = Some(crate::session::SessionImproveMode::RefactorRun);
+    app.is_processing = true;
+    let before = serde_json::to_value(&app.session.messages).unwrap();
+    app.input = "/improve plan target".into();
+    app.submit_input();
+    assert_eq!(app.improve_mode, Some(ImproveMode::RefactorRun));
+    assert_eq!(
+        app.session.improve_mode,
+        Some(crate::session::SessionImproveMode::RefactorRun)
+    );
+    assert!(!app.cancel_requested);
+    assert!(app.queued_messages.is_empty());
+    assert_eq!(serde_json::to_value(&app.session.messages).unwrap(), before);
+    assert_eq!(app.input, "/improve plan target");
+}

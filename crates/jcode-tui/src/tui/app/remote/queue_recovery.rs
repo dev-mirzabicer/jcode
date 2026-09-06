@@ -1,7 +1,11 @@
 use super::*;
 
 impl App {
-    pub(super) fn track_pending_soft_interrupt(&mut self, request_id: u64, content: String) {
+    pub(in crate::tui::app) fn track_pending_soft_interrupt(
+        &mut self,
+        request_id: u64,
+        content: String,
+    ) {
         let content_bytes = content.len();
         let content_chars = content.chars().count();
         self.pending_soft_interrupt_requests

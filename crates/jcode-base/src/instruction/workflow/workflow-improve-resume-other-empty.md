@@ -1,0 +1,1 @@
+Resume improvement mode for this repository by first writing an improve-oriented todo list with `todo`, then continue only with high-leverage safe improvements.

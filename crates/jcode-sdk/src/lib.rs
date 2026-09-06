@@ -54,4 +54,6 @@ pub use jcode_harness_api::{
     SessionInfo, TextMatch, api_socket_path,
 };
 
-pub use jcode_harness_api::{ReviewWorkflowKind, WorkflowPromptRequest};
+pub use jcode_harness_api::{
+    CommandWorkflow, ReviewWorkflowKind, WorkflowLoopMode, WorkflowPromptRequest, WorkflowTodo,
+};

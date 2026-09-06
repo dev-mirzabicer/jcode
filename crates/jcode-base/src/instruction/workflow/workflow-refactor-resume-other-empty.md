@@ -1,0 +1,1 @@
+Resume refactor mode for this repository by first producing a ranked refactor todo list with `todo`, then continue only with high-leverage safe refactors.

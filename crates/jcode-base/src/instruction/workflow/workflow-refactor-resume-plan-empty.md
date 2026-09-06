@@ -1,0 +1,1 @@
+Resume refactor planning mode for this repository. Reinspect the current repo state and quality docs, refresh the ranked refactor todo list with `todo`, and stop after presenting the updated plan without editing files.

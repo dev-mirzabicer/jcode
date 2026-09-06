@@ -39,6 +39,46 @@ macro_rules! workflows {
 }
 
 workflows! {
+    CommandCommit => ("workflow-commit", Module, "modules", "command workflow", Plain, ProjectThenGlobal),
+    CommandCommitPush => ("workflow-commit-push", Module, "modules", "command workflow", Handlebars, ProjectThenGlobal),
+    CommandReleaseSelect => ("workflow-release-select", Module, "modules", "command workflow", Plain, ProjectThenGlobal),
+    CommandReleaseMetadata => ("workflow-release-metadata", Module, "modules", "command workflow", Plain, ProjectThenGlobal),
+    CommandReleaseFinish => ("workflow-release-finish", Module, "modules", "command workflow", Plain, ProjectThenGlobal),
+    CommandReleaseLayout { preparation: &'a str, publication: &'a str } => ("workflow-release-layout", Module, "modules", "command workflow", Handlebars, ProjectThenGlobal),
+    CommandReleaseFast { preparation: &'a str, publication: &'a str } => ("workflow-release-fast", Module, "modules", "command workflow", Handlebars, ProjectThenGlobal),
+    CommandReleaseFastPrepare => ("workflow-release-fast-prepare", Module, "modules", "command workflow", Plain, ProjectThenGlobal),
+    CommandReleaseFastPublish => ("workflow-release-fast-publish", Module, "modules", "command workflow", Plain, ProjectThenGlobal),
+    CommandReleaseMacos { preparation: &'a str, publication: &'a str } => ("workflow-release-fast-macos", Module, "modules", "command workflow", Handlebars, ProjectThenGlobal),
+    CommandReleaseMacosPrepare => ("workflow-release-fast-macos-prepare", Module, "modules", "command workflow", Plain, ProjectThenGlobal),
+    CommandReleaseMacosPublish => ("workflow-release-fast-macos-publish", Module, "modules", "command workflow", Plain, ProjectThenGlobal),
+    CommandReleaseRemote { preparation: &'a str, publication: &'a str } => ("workflow-release-remote", Module, "modules", "command workflow", Handlebars, ProjectThenGlobal),
+    CommandReleaseRemotePublish => ("workflow-release-remote-publish", Module, "modules", "command workflow", Plain, ProjectThenGlobal),
+    CommandTriage => ("workflow-github-triage", Module, "modules", "command workflow", Plain, ProjectThenGlobal),
+    CommandTriageFocus { focus: &'a str } => ("workflow-triage-focus", Module, "modules", "command workflow", Handlebars, ProjectThenGlobal),
+    CommandTest { target: &'a str } => ("workflow-test-verification", Module, "modules", "command workflow", Handlebars, ProjectThenGlobal),
+    CommandTestDefault => ("workflow-test-default-target", Module, "modules", "command workflow", Plain, ProjectThenGlobal),
+    CommandPlan { goal_line: &'a str } => ("workflow-plan", Module, "modules", "command workflow", Handlebars, ProjectThenGlobal),
+    CommandPlanDefault => ("workflow-plan-default-goal", Module, "modules", "command workflow", Plain, ProjectThenGlobal),
+    CommandImproveFocus { focus: &'a str } => ("workflow-improve-focus", Module, "modules", "command workflow", Handlebars, ProjectThenGlobal),
+    CommandImprove { focus_line: &'a str } => ("workflow-improve", Module, "modules", "command workflow", Handlebars, ProjectThenGlobal),
+    CommandImprovePlan { focus_line: &'a str } => ("workflow-improve-plan", Module, "modules", "command workflow", Handlebars, ProjectThenGlobal),
+    CommandImproveStop => ("workflow-improve-stop", Notification, "notifications", "command workflow", Plain, ProjectThenGlobal),
+    CommandImproveResumeRun { todo_rows: &'a str, count: usize, plural: &'a str } => ("workflow-improve-resume-run", Module, "modules", "command workflow", Handlebars, ProjectThenGlobal),
+    CommandImproveResumeRunEmpty => ("workflow-improve-resume-run-empty", Module, "modules", "command workflow", Plain, ProjectThenGlobal),
+    CommandImproveResumePlan { todo_rows: &'a str, count: usize, plural: &'a str } => ("workflow-improve-resume-plan", Module, "modules", "command workflow", Handlebars, ProjectThenGlobal),
+    CommandImproveResumePlanEmpty => ("workflow-improve-resume-plan-empty", Module, "modules", "command workflow", Plain, ProjectThenGlobal),
+    CommandImproveResumeOther { todo_rows: &'a str, count: usize, plural: &'a str } => ("workflow-improve-resume-other", Module, "modules", "command workflow", Handlebars, ProjectThenGlobal),
+    CommandImproveResumeOtherEmpty => ("workflow-improve-resume-other-empty", Module, "modules", "command workflow", Plain, ProjectThenGlobal),
+    CommandRefactorFocus { focus: &'a str } => ("workflow-refactor-focus", Module, "modules", "command workflow", Handlebars, ProjectThenGlobal),
+    CommandRefactor { focus_line: &'a str } => ("workflow-refactor", Module, "modules", "command workflow", Handlebars, ProjectThenGlobal),
+    CommandRefactorPlan { focus_line: &'a str } => ("workflow-refactor-plan", Module, "modules", "command workflow", Handlebars, ProjectThenGlobal),
+    CommandRefactorStop => ("workflow-refactor-stop", Notification, "notifications", "command workflow", Plain, ProjectThenGlobal),
+    CommandRefactorResumeRun { todo_rows: &'a str, count: usize, plural: &'a str } => ("workflow-refactor-resume-run", Module, "modules", "command workflow", Handlebars, ProjectThenGlobal),
+    CommandRefactorResumeRunEmpty => ("workflow-refactor-resume-run-empty", Module, "modules", "command workflow", Plain, ProjectThenGlobal),
+    CommandRefactorResumePlan { todo_rows: &'a str, count: usize, plural: &'a str } => ("workflow-refactor-resume-plan", Module, "modules", "command workflow", Handlebars, ProjectThenGlobal),
+    CommandRefactorResumePlanEmpty => ("workflow-refactor-resume-plan-empty", Module, "modules", "command workflow", Plain, ProjectThenGlobal),
+    CommandRefactorResumeOther { todo_rows: &'a str, count: usize, plural: &'a str } => ("workflow-refactor-resume-other", Module, "modules", "command workflow", Handlebars, ProjectThenGlobal),
+    CommandRefactorResumeOtherEmpty => ("workflow-refactor-resume-other-empty", Module, "modules", "command workflow", Plain, ProjectThenGlobal),
     MissionIntroduction { objective: &'a str, long_horizon_intent: &'a str } => ("mission-introduction", Module, "modules", "mission turn", Plain, ProjectThenGlobal),
     MissionContinuation { objective: &'a str, long_horizon_intent: &'a str } => ("mission-continuation", Module, "modules", "mission turn", Plain, ProjectThenGlobal),
     MissionDefaultIntent { objective: &'a str } => ("mission-default-intent", Module, "modules", "mission creation", Handlebars, ProjectThenGlobal),
@@ -182,3 +222,6 @@ mod tests {
         ));
     }
 }
+
+mod commands;
+pub use commands::render_command;

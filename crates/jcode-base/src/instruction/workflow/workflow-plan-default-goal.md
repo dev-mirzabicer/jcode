@@ -1,0 +1,1 @@
+produce a plan for the task or request currently in focus in this session. If the goal is ambiguous, infer the most useful interpretation from the recent conversation and repo state, and state your assumption.

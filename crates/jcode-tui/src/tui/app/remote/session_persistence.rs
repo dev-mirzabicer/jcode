@@ -43,7 +43,10 @@ pub(super) fn persist_swarm_plan_snapshot(
     let _ = app.session.save();
 }
 
-pub(super) fn persist_remote_session_metadata<F>(app: &mut App, update: F) -> Result<()>
+pub(in crate::tui::app) fn persist_remote_session_metadata<F>(
+    app: &mut App,
+    update: F,
+) -> Result<()>
 where
     F: FnOnce(&mut crate::session::Session),
 {

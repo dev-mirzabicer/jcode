@@ -43,8 +43,7 @@ pub(super) use reconnect::{
 };
 use reconnect::{format_disconnect_reason, reconnect_status_message};
 use session_persistence::{
-    persist_remote_session_metadata, persist_replay_display_message, persist_swarm_plan_snapshot,
-    persist_swarm_status_snapshot,
+    persist_replay_display_message, persist_swarm_plan_snapshot, persist_swarm_status_snapshot,
 };
 use workspace::{handle_workspace_command, handle_workspace_navigation_key};
 
@@ -931,6 +930,8 @@ pub(super) fn handle_disconnect(
     state: &mut RemoteRunState,
     reason: Option<RemoteDisconnectReason>,
 ) {
+    super::commands_workflow::reset_connection(app);
+
     let detail = if state.server_reload_in_progress {
         "server reload in progress".to_string()
     } else if let Some(reason) = reason.as_ref() {
@@ -1416,6 +1417,10 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
 
     if app.pending_background_client_reload.is_some() && !app.is_processing {
         app.maybe_finish_background_client_reload();
+        return;
+    }
+
+    if super::commands_workflow::poll(app, remote).await {
         return;
     }
 
@@ -2182,3 +2187,5 @@ mod stall_guard_tests {
         assert!(app.queued_followup_starved_since.is_none());
     }
 }
+
+pub(super) use session_persistence::persist_remote_session_metadata;

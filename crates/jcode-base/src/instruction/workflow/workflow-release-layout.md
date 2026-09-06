@@ -1,0 +1,1 @@
+{{> workflow-commit-push}} {{> workflow-release-select}} {{preparation}}{{> workflow-release-metadata}} {{publication}}{{> workflow-release-finish}}

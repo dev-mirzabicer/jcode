@@ -619,7 +619,9 @@ fn test_commands_alias_shows_help() {
 
 #[test]
 fn test_improve_command_starts_improvement_loop() {
+    let _home=SkillTestHome::new();
     let mut app = create_test_app();
+        seed_synthetic_command_sources();
     app.input = "/improve".to_string();
     app.submit_input();
 
@@ -634,8 +636,7 @@ fn test_improve_command_starts_improvement_loop() {
     assert!(matches!(
         &msg.content[0],
         ContentBlock::Text { text, .. }
-            if text.contains("You are entering improvement mode for this repository")
-                && text.contains("write a concise ranked todo list using `todo`")
+            if text.starts_with("workflow-improve ")
     ));
 
     let display = app
@@ -647,7 +648,9 @@ fn test_improve_command_starts_improvement_loop() {
 
 #[test]
 fn test_improve_plan_command_is_plan_only_and_accepts_focus() {
+    let _home=SkillTestHome::new();
     let mut app = create_test_app();
+        seed_synthetic_command_sources();
     app.input = "/improve plan startup performance".to_string();
     app.submit_input();
 
@@ -666,9 +669,7 @@ fn test_improve_plan_command_is_plan_only_and_accepts_focus() {
     assert!(matches!(
         &msg.content[0],
         ContentBlock::Text { text, .. }
-            if text.contains("improvement planning mode")
-                && text.contains("This is plan-only mode")
-                && text.contains("Focus area: startup performance")
+            if text.starts_with("workflow-improve-plan ") && text.contains("FOCUS startup performance")
     ));
 }
 
@@ -676,6 +677,7 @@ fn test_improve_plan_command_is_plan_only_and_accepts_focus() {
 fn test_improve_status_summarizes_current_todos() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
+        seed_synthetic_command_sources();
         crate::todo::save_todos(
             &app.session.id,
             &[
@@ -727,7 +729,9 @@ fn test_improve_status_summarizes_current_todos() {
 
 #[test]
 fn test_improve_stop_without_active_run_reports_idle() {
+    let _home=SkillTestHome::new();
     let mut app = create_test_app();
+        seed_synthetic_command_sources();
     app.session.improve_mode = None;
     app.input = "/improve stop".to_string();
     app.submit_input();
@@ -741,7 +745,9 @@ fn test_improve_stop_without_active_run_reports_idle() {
 
 #[test]
 fn test_improve_stop_queues_stop_prompt_and_clears_mode() {
+    let _home=SkillTestHome::new();
     let mut app = create_test_app();
+        seed_synthetic_command_sources();
     app.improve_mode = Some(ImproveMode::ImproveRun);
     app.session.improve_mode = Some(crate::session::SessionImproveMode::ImproveRun);
     app.input = "/improve stop".to_string();
@@ -759,13 +765,15 @@ fn test_improve_stop_queues_stop_prompt_and_clears_mode() {
     assert!(matches!(
         &msg.content[0],
         ContentBlock::Text { text, .. }
-            if text.contains("Stop improvement mode after the current safe point")
+            if text == "workflow-improve-stop"
     ));
 }
 
 #[test]
 fn test_improve_resume_requires_saved_mode() {
+    let _home=SkillTestHome::new();
     let mut app = create_test_app();
+        seed_synthetic_command_sources();
     app.input = "/improve resume".to_string();
     app.submit_input();
 
@@ -780,6 +788,7 @@ fn test_improve_resume_requires_saved_mode() {
 fn test_improve_resume_uses_saved_mode_and_current_todos() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
+        seed_synthetic_command_sources();
         app.session.improve_mode = Some(crate::session::SessionImproveMode::ImproveRun);
         app.session.save().expect("save session");
         crate::todo::save_todos(
@@ -817,8 +826,7 @@ fn test_improve_resume_uses_saved_mode_and_current_todos() {
         assert!(matches!(
             &msg.content[0],
             ContentBlock::Text { text, .. }
-                if text.contains("Resume improvement mode")
-                    && text.contains("Refactor command parsing")
-        ));
+                if text.starts_with("workflow-improve-resume-run ") && text.contains("Refactor command parsing")
+    ));
     });
 }

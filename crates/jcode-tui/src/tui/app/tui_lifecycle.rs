@@ -4,6 +4,21 @@ use crate::tui::{backend, keybind};
 
 impl App {
     pub(super) fn apply_restored_reload_input(&mut self, restored: RestoredReloadInput) {
+        self.pending_workflow_commands = restored.pending_workflow_commands;
+        // A prior process may have handed the prepared command to the normal
+        // turn path before its last snapshot. Never replay such work blindly.
+        for pending in &mut self.pending_workflow_commands {
+            pending.suspended = true;
+        }
+        let recovered_commands = self
+            .pending_workflow_commands
+            .iter()
+            .filter(|p| !p.cancelled)
+            .map(|p| p.original.clone())
+            .collect::<Vec<_>>();
+        if !recovered_commands.is_empty() {
+            self.push_display_message(DisplayMessage::system(format!("Workflow preparation was interrupted. Verify whether these commands were dispatched before explicitly re-running them:\n{}",recovered_commands.join("\n"))));
+        }
         self.input = restored.input;
         self.cursor_pos = restored.cursor;
         self.pending_images = restored.pending_images;
@@ -711,6 +726,7 @@ impl App {
             autoreview_after_current_turn: false,
             autojudge_after_current_turn: false,
             pending_split_workflow: None,
+            pending_workflow_commands: Vec::new(),
             pending_split_parent_session_id: None,
             pending_split_prompt: None,
             pending_split_model_override: None,
@@ -1174,6 +1190,7 @@ impl App {
             autoreview_after_current_turn: false,
             autojudge_after_current_turn: false,
             pending_split_workflow: None,
+            pending_workflow_commands: Vec::new(),
             pending_split_parent_session_id: None,
             pending_split_prompt: None,
             pending_split_model_override: None,

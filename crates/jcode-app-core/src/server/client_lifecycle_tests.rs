@@ -3369,6 +3369,15 @@ fn managed_workflow_rendering_uses_server_project_sources_without_a_turn() {
                 }
             }
         }
+        std::fs::write(source.parent().unwrap().join("workflow-plan.md"),"---\nid: workflow-plan\nkind: module\ntemplate: handlebars\n---\nREMOTE-PLAN {{goal_line}}").unwrap();
+        let request = Request::RenderWorkflowPrompt { id: 40, workflow: jcode_task_types::WorkflowPromptRequest::Command { command: jcode_task_types::CommandWorkflow::Plan { goal: Some("EXPLICIT".into()) } } };
+        client_writer.write_all((serde_json::to_string(&request).unwrap()+"\n").as_bytes()).await.unwrap();
+        loop {
+            let mut line=String::new();
+            tokio::time::timeout(Duration::from_secs(10),reader.read_line(&mut line)).await.unwrap().unwrap();
+            assert!(!line.is_empty());
+            if let ServerEvent::WorkflowPromptRendered {id:40,content}=decode_request_or_event(&line) {assert_eq!(content,"REMOTE-PLAN Goal: EXPLICIT\n\n");break;}
+        }
         let after = crate::session::Session::load(&session_id).unwrap();
         assert_eq!(
             serde_json::to_value(&before.messages).unwrap(),

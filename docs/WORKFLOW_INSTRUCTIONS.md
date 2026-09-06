@@ -56,6 +56,14 @@ Mission introduction, continuation and generated default intent use managed `mod
 
 Mission creation and rendering accept an explicit working directory for scope. No mission or an inactive mission performs no instruction-source read. Failed creation preserves the previous stored mission. A local turn with invalid mission instructions preserves its raw composer input, cursor, paste backing and images without appending a user turn. Queued preparation uses the existing instruction-error recovery boundary. The migration adds no new mission UI, remote activation policy, profile selection or automatic context operation.
 
+### Interactive command workflows
+
+Commit/push/release, triage, `/test`, `/plan`, improve/refactor run/plan/stop/resume use `workflow-*` modules and notifications. Shared release and commit sections remain reusable modules. Dynamic focus, goal and todo rows are captured as typed data. One catalog snapshot renders each complete command.
+
+Local commands render before changing loop mode, appending a turn or requesting interruption. Remote commands prepare asynchronously through the server's existing `RenderWorkflowPrompt` operation. The TUI remains responsive and does not load its own instruction store for remote commands. Only after successful rendering does it apply the existing dispatch policy: busy commit/triage/release uses soft interruption, busy plan/improve/refactor cancels and queues, and `/test` queues. Idle send authority, retry settings and Startup Context observation remain unchanged.
+
+Pending preparation is request/session/working-directory correlated and cancellable. Source failures preserve the current mode/turn and retain the command for explicit repair and retry. Reconnect reissues only unresolved read-only rendering. Process reload restores interrupted preparation as unconfirmed, suspended intent, not automatic execution. The UI tells the user to verify whether a command was dispatched before explicitly re-running it. This avoids blindly repeating a commit, push or release after an uncertain interruption.
+
 ## Source and failure semantics
 
 Working files are authoritative, including intentionally empty bodies where the owner retains meaningful structure. A present invalid project redefinition fails rather than exposing global prose. Missing previously adopted singleton resources are damage, not permission to recreate defaults. New shipped paths use the existing versioned, scoped Git seed-adoption transaction. It preserves current files and does not push a repository.

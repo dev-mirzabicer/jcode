@@ -554,6 +554,10 @@ pub(in crate::tui::app) fn handle_server_event(
     event: ServerEvent,
     remote: &mut impl RemoteEventState,
 ) -> bool {
+    let event = match app_mod::commands_workflow::accept_event(app, event) {
+        Ok(()) => return false,
+        Err(event) => *event,
+    };
     // Workflow split replies are action-scoped, not model turn events. Match
     // both the reserved request and original session before touching UI state.
     let mut rendered_split_startup = None;

@@ -1,0 +1,916 @@
+{
+  "source_revision": "bed57aae6",
+  "route": "Original TUI builders captured before migration. The complete managed command composer reproduced all 57 outputs, including default/empty/focused and all resume-mode branches. Disposable probes removed.",
+  "cases": [
+    {
+      "bytes": 572,
+      "equal": true,
+      "fixture": 0,
+      "request": {
+        "kind": "commit"
+      },
+      "sha256": "5cd8cb0bdd7089514b6449470b2938593ee50d0062aca7cdbb907ce838684bef",
+      "ids": [
+        "INS-WFL-002"
+      ]
+    },
+    {
+      "bytes": 900,
+      "equal": true,
+      "fixture": 1,
+      "request": {
+        "kind": "commit_push"
+      },
+      "sha256": "b8a7fd780ffc2b02290d35858370f46ae6984376e8689be68b2ba3f97f9809f5",
+      "ids": [
+        "INS-WFL-003"
+      ]
+    },
+    {
+      "bytes": 2544,
+      "equal": true,
+      "fixture": 2,
+      "request": {
+        "kind": "release_fast"
+      },
+      "sha256": "d1e02ae900447d1cc8fdaace859a811ba2968980eacb4da3e1bd9fbaa8143125",
+      "ids": [
+        "INS-WFL-004"
+      ]
+    },
+    {
+      "bytes": 2420,
+      "equal": true,
+      "fixture": 3,
+      "request": {
+        "kind": "release_macos"
+      },
+      "sha256": "a59f468b85a7eacf1f7af663e61ad181f2a84ae8923090813c79cf2f334f1cba",
+      "ids": [
+        "INS-WFL-005"
+      ]
+    },
+    {
+      "bytes": 1969,
+      "equal": true,
+      "fixture": 4,
+      "request": {
+        "kind": "release_remote"
+      },
+      "sha256": "9054b9d0b3021dbdd075342de114ccbd4ce4c243fd990c79497f5e0675f3d5c1",
+      "ids": [
+        "INS-WFL-006"
+      ]
+    },
+    {
+      "bytes": 234,
+      "equal": true,
+      "fixture": 5,
+      "request": {
+        "kind": "improve_stop"
+      },
+      "sha256": "c1da56e5446713a26021af6eaa8de660af1f4392a04c6833f8052174d4a1a10c",
+      "ids": [
+        "INS-WFL-014"
+      ]
+    },
+    {
+      "bytes": 386,
+      "equal": true,
+      "fixture": 6,
+      "request": {
+        "kind": "refactor_stop"
+      },
+      "sha256": "c71cba6a4ff6fe2fdadf545d100dffcb210df18f221255b4b3c7bf83d24bd0a5",
+      "ids": [
+        "INS-WFL-014"
+      ]
+    },
+    {
+      "bytes": 1236,
+      "equal": true,
+      "fixture": 7,
+      "request": {
+        "goal": null,
+        "kind": "plan"
+      },
+      "sha256": "208fd146c033dcccaca5c753f1e6029b339d88e1c555cebfc0b05861128b938a",
+      "ids": [
+        "INS-WFL-009"
+      ]
+    },
+    {
+      "bytes": 1225,
+      "equal": true,
+      "fixture": 8,
+      "request": {
+        "focus": null,
+        "kind": "improve",
+        "plan_only": false
+      },
+      "sha256": "5cdd61b848277f6025a6a1f36701ac469407dec97d0f4c2f7c0d7d489f849cd8",
+      "ids": [
+        "INS-WFL-011"
+      ]
+    },
+    {
+      "bytes": 1737,
+      "equal": true,
+      "fixture": 9,
+      "request": {
+        "focus": null,
+        "kind": "refactor",
+        "plan_only": false
+      },
+      "sha256": "c69d5db82de3c32f21a8b464e0f5337d480035d01468b20a684cfcef11a5a1c4",
+      "ids": [
+        "INS-WFL-013"
+      ]
+    },
+    {
+      "bytes": 946,
+      "equal": true,
+      "fixture": 10,
+      "request": {
+        "focus": null,
+        "kind": "improve",
+        "plan_only": true
+      },
+      "sha256": "de3c39fe5fa762fa6bea8cde0eb4d1f565f185810c7d098baffc91cdd312bbdf",
+      "ids": [
+        "INS-WFL-010"
+      ]
+    },
+    {
+      "bytes": 1023,
+      "equal": true,
+      "fixture": 11,
+      "request": {
+        "focus": null,
+        "kind": "refactor",
+        "plan_only": true
+      },
+      "sha256": "a2e5effc59f23dfac20d2ea7a3374ad14051a1429e7ff35199066a64c4dc650f",
+      "ids": [
+        "INS-WFL-012"
+      ]
+    },
+    {
+      "bytes": 1236,
+      "equal": true,
+      "fixture": 12,
+      "request": {
+        "goal": "",
+        "kind": "plan"
+      },
+      "sha256": "208fd146c033dcccaca5c753f1e6029b339d88e1c555cebfc0b05861128b938a",
+      "ids": [
+        "INS-WFL-009"
+      ]
+    },
+    {
+      "bytes": 1355,
+      "equal": true,
+      "fixture": 13,
+      "request": {
+        "focus": "",
+        "kind": "improve",
+        "plan_only": false
+      },
+      "sha256": "0ebd41e1ab9862e475e05d15921d495d3f4e4894d0495ca5567db04087cddd0f",
+      "ids": [
+        "INS-WFL-011"
+      ]
+    },
+    {
+      "bytes": 1859,
+      "equal": true,
+      "fixture": 14,
+      "request": {
+        "focus": "",
+        "kind": "refactor",
+        "plan_only": false
+      },
+      "sha256": "d4d717762db6bb7b3d13f83945035735edc89de8dd30991d0bb1ce6ca29c8ff4",
+      "ids": [
+        "INS-WFL-013"
+      ]
+    },
+    {
+      "bytes": 1076,
+      "equal": true,
+      "fixture": 15,
+      "request": {
+        "focus": "",
+        "kind": "improve",
+        "plan_only": true
+      },
+      "sha256": "786db4a312d7feb48a399ac67aee435a82e087cd30821ff31fb08af5653a35be",
+      "ids": [
+        "INS-WFL-010"
+      ]
+    },
+    {
+      "bytes": 1145,
+      "equal": true,
+      "fixture": 16,
+      "request": {
+        "focus": "",
+        "kind": "refactor",
+        "plan_only": true
+      },
+      "sha256": "5e092f45023a868f179801913a294683f0dbe93cd4cf5d0df3e1f3902d739290",
+      "ids": [
+        "INS-WFL-012"
+      ]
+    },
+    {
+      "bytes": 1037,
+      "equal": true,
+      "fixture": 17,
+      "request": {
+        "goal": "WP07_FOCUS",
+        "kind": "plan"
+      },
+      "sha256": "898b5e52c09fb604db95c84836d9b1e1ccbfc42baf30cbea6a571f6bcb34c394",
+      "ids": [
+        "INS-WFL-009"
+      ]
+    },
+    {
+      "bytes": 1365,
+      "equal": true,
+      "fixture": 18,
+      "request": {
+        "focus": "WP07_FOCUS",
+        "kind": "improve",
+        "plan_only": false
+      },
+      "sha256": "563426a1ce6fa98adb444fe342c3e223f57063d874e4ef3d19f1a0eda4dbe7db",
+      "ids": [
+        "INS-WFL-011"
+      ]
+    },
+    {
+      "bytes": 1869,
+      "equal": true,
+      "fixture": 19,
+      "request": {
+        "focus": "WP07_FOCUS",
+        "kind": "refactor",
+        "plan_only": false
+      },
+      "sha256": "0a6cd258c1570ff25713f9e5434784384d270e67f5474fd0fba084a469c9da22",
+      "ids": [
+        "INS-WFL-013"
+      ]
+    },
+    {
+      "bytes": 1086,
+      "equal": true,
+      "fixture": 20,
+      "request": {
+        "focus": "WP07_FOCUS",
+        "kind": "improve",
+        "plan_only": true
+      },
+      "sha256": "7a272052521ae53ac8214cc8ab384dc65c24bdf5fb7554f5fa19a74a95b68978",
+      "ids": [
+        "INS-WFL-010"
+      ]
+    },
+    {
+      "bytes": 1155,
+      "equal": true,
+      "fixture": 21,
+      "request": {
+        "focus": "WP07_FOCUS",
+        "kind": "refactor",
+        "plan_only": true
+      },
+      "sha256": "be9ff155affe86af379b27f9d89ba6e9dd90086984e17965f5712e1c083fcb9f",
+      "ids": [
+        "INS-WFL-012"
+      ]
+    },
+    {
+      "bytes": 1041,
+      "equal": true,
+      "fixture": 22,
+      "request": {
+        "goal": "  <&{{literal}}>  ",
+        "kind": "plan"
+      },
+      "sha256": "60b23341e2df0572d840e6b94a37d854b0bb20ca401b5bb68363239eef5abe64",
+      "ids": [
+        "INS-WFL-009"
+      ]
+    },
+    {
+      "bytes": 1369,
+      "equal": true,
+      "fixture": 23,
+      "request": {
+        "focus": "  <&{{literal}}>  ",
+        "kind": "improve",
+        "plan_only": false
+      },
+      "sha256": "23882d38f2a676767b40f3af0ab9f7d6778660843e9d5f8f5d5d5bef93a762e9",
+      "ids": [
+        "INS-WFL-011"
+      ]
+    },
+    {
+      "bytes": 1873,
+      "equal": true,
+      "fixture": 24,
+      "request": {
+        "focus": "  <&{{literal}}>  ",
+        "kind": "refactor",
+        "plan_only": false
+      },
+      "sha256": "cecfbf96a14e5bca6e08b6814b6b0149162a066bf3f34745488aa4c6a9c75e0c",
+      "ids": [
+        "INS-WFL-013"
+      ]
+    },
+    {
+      "bytes": 1090,
+      "equal": true,
+      "fixture": 25,
+      "request": {
+        "focus": "  <&{{literal}}>  ",
+        "kind": "improve",
+        "plan_only": true
+      },
+      "sha256": "269456255ea0dd13365b9bad2e9ca7b62d4e1197a6fcdd17ce0c2d9b13d0cf8a",
+      "ids": [
+        "INS-WFL-010"
+      ]
+    },
+    {
+      "bytes": 1159,
+      "equal": true,
+      "fixture": 26,
+      "request": {
+        "focus": "  <&{{literal}}>  ",
+        "kind": "refactor",
+        "plan_only": true
+      },
+      "sha256": "bffddd106420ca32a03800297d2d4a60f9ec87e181c10786a24caf95e6a55a99",
+      "ids": [
+        "INS-WFL-012"
+      ]
+    },
+    {
+      "bytes": 2154,
+      "equal": true,
+      "fixture": 27,
+      "request": {
+        "focus": "",
+        "kind": "triage"
+      },
+      "sha256": "da8f285b36ef4fa0da54bf117b974f951166fa634910a318653f254ee5375060",
+      "ids": [
+        "INS-WFL-007"
+      ]
+    },
+    {
+      "bytes": 1822,
+      "equal": true,
+      "fixture": 28,
+      "request": {
+        "claim": "",
+        "kind": "test"
+      },
+      "sha256": "a4fa64d70566e50d44fa77f2787600ebb566ed98f8fb9507a6c2d3e60f5ef3cf",
+      "ids": [
+        "INS-WFL-008"
+      ]
+    },
+    {
+      "bytes": 2197,
+      "equal": true,
+      "fixture": 29,
+      "request": {
+        "focus": "WP07_FOCUS",
+        "kind": "triage"
+      },
+      "sha256": "8295e7a394aa0af3f615d4906322a243bb3a6b1227136bc02ca52dfcace3a7a9",
+      "ids": [
+        "INS-WFL-007"
+      ]
+    },
+    {
+      "bytes": 1765,
+      "equal": true,
+      "fixture": 30,
+      "request": {
+        "claim": "WP07_FOCUS",
+        "kind": "test"
+      },
+      "sha256": "f686cc5179c4a0ec7fffa2abfda332d1d618721abdb806c7742f2e2502e21e42",
+      "ids": [
+        "INS-WFL-008"
+      ]
+    },
+    {
+      "bytes": 2201,
+      "equal": true,
+      "fixture": 31,
+      "request": {
+        "focus": "  <&{{literal}}>  ",
+        "kind": "triage"
+      },
+      "sha256": "ae58a43ba771f98b0f0a617c40607a4b918bde21fc718ad6ad3ddb46729c2ea6",
+      "ids": [
+        "INS-WFL-007"
+      ]
+    },
+    {
+      "bytes": 1769,
+      "equal": true,
+      "fixture": 32,
+      "request": {
+        "claim": "  <&{{literal}}>  ",
+        "kind": "test"
+      },
+      "sha256": "e0fe79d626f5bbea44402d9886d4c5192ae4668c52c67722748ae92400801091",
+      "ids": [
+        "INS-WFL-008"
+      ]
+    },
+    {
+      "bytes": 255,
+      "equal": true,
+      "fixture": 33,
+      "request": {
+        "kind": "improve_resume",
+        "mode": "improve_run",
+        "todos": []
+      },
+      "sha256": "e2a967056a6665e1b272e2c871081cba9190a7ed317b55a17913d6dd7b990391",
+      "ids": [
+        "INS-WFL-015"
+      ]
+    },
+    {
+      "bytes": 154,
+      "equal": true,
+      "fixture": 34,
+      "request": {
+        "kind": "refactor_resume",
+        "mode": "improve_run",
+        "todos": []
+      },
+      "sha256": "da6f38f00878d906abd43eb011a6decf9bda53def7094a7e46d5c902b6d804a8",
+      "ids": [
+        "INS-WFL-016"
+      ]
+    },
+    {
+      "bytes": 299,
+      "equal": true,
+      "fixture": 35,
+      "request": {
+        "kind": "improve_resume",
+        "mode": "improve_run",
+        "todos": [
+          {
+            "content": "WP07_TODO_A",
+            "priority": "high",
+            "status": "in_progress"
+          }
+        ]
+      },
+      "sha256": "e14a3527b4bf326777109358f6d465222ce1c7709ed646ee3601cc91eacca8f2",
+      "ids": [
+        "INS-WFL-015"
+      ]
+    },
+    {
+      "bytes": 182,
+      "equal": true,
+      "fixture": 36,
+      "request": {
+        "kind": "refactor_resume",
+        "mode": "improve_run",
+        "todos": [
+          {
+            "content": "WP07_TODO_A",
+            "priority": "high",
+            "status": "in_progress"
+          }
+        ]
+      },
+      "sha256": "0d5cfe88eed1a97ed31a2ab60f62abe592d92f2bed3c49b93d8a89f68d85d05d",
+      "ids": [
+        "INS-WFL-016"
+      ]
+    },
+    {
+      "bytes": 324,
+      "equal": true,
+      "fixture": 37,
+      "request": {
+        "kind": "improve_resume",
+        "mode": "improve_run",
+        "todos": [
+          {
+            "content": "WP07_TODO_A",
+            "priority": "high",
+            "status": "in_progress"
+          },
+          {
+            "content": "WP07_TODO_B",
+            "priority": "low",
+            "status": "pending"
+          }
+        ]
+      },
+      "sha256": "58d76d165c6f45726c31b962e7c4fec05d4ef6f8aa8924cf21e2b9007528513f",
+      "ids": [
+        "INS-WFL-015"
+      ]
+    },
+    {
+      "bytes": 206,
+      "equal": true,
+      "fixture": 38,
+      "request": {
+        "kind": "refactor_resume",
+        "mode": "improve_run",
+        "todos": [
+          {
+            "content": "WP07_TODO_A",
+            "priority": "high",
+            "status": "in_progress"
+          },
+          {
+            "content": "WP07_TODO_B",
+            "priority": "low",
+            "status": "pending"
+          }
+        ]
+      },
+      "sha256": "40374844320b010592630b2417b9877fb7c5915b4bf42322fc32240756b14223",
+      "ids": [
+        "INS-WFL-016"
+      ]
+    },
+    {
+      "bytes": 203,
+      "equal": true,
+      "fixture": 39,
+      "request": {
+        "kind": "improve_resume",
+        "mode": "improve_plan",
+        "todos": []
+      },
+      "sha256": "69ce7e0d88c16225689aca206308eaeb0cf017321d35eb4007ae831671746225",
+      "ids": [
+        "INS-WFL-015"
+      ]
+    },
+    {
+      "bytes": 154,
+      "equal": true,
+      "fixture": 40,
+      "request": {
+        "kind": "refactor_resume",
+        "mode": "improve_plan",
+        "todos": []
+      },
+      "sha256": "da6f38f00878d906abd43eb011a6decf9bda53def7094a7e46d5c902b6d804a8",
+      "ids": [
+        "INS-WFL-016"
+      ]
+    },
+    {
+      "bytes": 219,
+      "equal": true,
+      "fixture": 41,
+      "request": {
+        "kind": "improve_resume",
+        "mode": "improve_plan",
+        "todos": [
+          {
+            "content": "WP07_TODO_A",
+            "priority": "high",
+            "status": "in_progress"
+          }
+        ]
+      },
+      "sha256": "1f443aa8c0903e561c9dde5ad8005cbd3f85438d10a09a96aeec6e2e555187d4",
+      "ids": [
+        "INS-WFL-015"
+      ]
+    },
+    {
+      "bytes": 182,
+      "equal": true,
+      "fixture": 42,
+      "request": {
+        "kind": "refactor_resume",
+        "mode": "improve_plan",
+        "todos": [
+          {
+            "content": "WP07_TODO_A",
+            "priority": "high",
+            "status": "in_progress"
+          }
+        ]
+      },
+      "sha256": "0d5cfe88eed1a97ed31a2ab60f62abe592d92f2bed3c49b93d8a89f68d85d05d",
+      "ids": [
+        "INS-WFL-016"
+      ]
+    },
+    {
+      "bytes": 244,
+      "equal": true,
+      "fixture": 43,
+      "request": {
+        "kind": "improve_resume",
+        "mode": "improve_plan",
+        "todos": [
+          {
+            "content": "WP07_TODO_A",
+            "priority": "high",
+            "status": "in_progress"
+          },
+          {
+            "content": "WP07_TODO_B",
+            "priority": "low",
+            "status": "pending"
+          }
+        ]
+      },
+      "sha256": "6cc3d1b5a51ab2b56ffc78d4fc31e227d950be99296a38cb6187a82a09102a60",
+      "ids": [
+        "INS-WFL-015"
+      ]
+    },
+    {
+      "bytes": 206,
+      "equal": true,
+      "fixture": 44,
+      "request": {
+        "kind": "refactor_resume",
+        "mode": "improve_plan",
+        "todos": [
+          {
+            "content": "WP07_TODO_A",
+            "priority": "high",
+            "status": "in_progress"
+          },
+          {
+            "content": "WP07_TODO_B",
+            "priority": "low",
+            "status": "pending"
+          }
+        ]
+      },
+      "sha256": "40374844320b010592630b2417b9877fb7c5915b4bf42322fc32240756b14223",
+      "ids": [
+        "INS-WFL-016"
+      ]
+    },
+    {
+      "bytes": 160,
+      "equal": true,
+      "fixture": 45,
+      "request": {
+        "kind": "improve_resume",
+        "mode": "refactor_run",
+        "todos": []
+      },
+      "sha256": "cfec849cd1397797605ae6fdf55c26db568c9fd49a54271e0ed66c4f5796bafa",
+      "ids": [
+        "INS-WFL-015"
+      ]
+    },
+    {
+      "bytes": 376,
+      "equal": true,
+      "fixture": 46,
+      "request": {
+        "kind": "refactor_resume",
+        "mode": "refactor_run",
+        "todos": []
+      },
+      "sha256": "fc1da65c66c8e3f2156d9e984520f8c94600f5dcdf4f8b86f436947ef6f5195c",
+      "ids": [
+        "INS-WFL-016"
+      ]
+    },
+    {
+      "bytes": 178,
+      "equal": true,
+      "fixture": 47,
+      "request": {
+        "kind": "improve_resume",
+        "mode": "refactor_run",
+        "todos": [
+          {
+            "content": "WP07_TODO_A",
+            "priority": "high",
+            "status": "in_progress"
+          }
+        ]
+      },
+      "sha256": "be82a4d875fc1f2f2e53072d2f299a67208650d9ca179a17f8b90c1e0020fb43",
+      "ids": [
+        "INS-WFL-015"
+      ]
+    },
+    {
+      "bytes": 388,
+      "equal": true,
+      "fixture": 48,
+      "request": {
+        "kind": "refactor_resume",
+        "mode": "refactor_run",
+        "todos": [
+          {
+            "content": "WP07_TODO_A",
+            "priority": "high",
+            "status": "in_progress"
+          }
+        ]
+      },
+      "sha256": "e0e88d393232e84a7c8d8bc1a4bfd65b43ccf6c20d631c075d5b7cc47ed265a9",
+      "ids": [
+        "INS-WFL-016"
+      ]
+    },
+    {
+      "bytes": 202,
+      "equal": true,
+      "fixture": 49,
+      "request": {
+        "kind": "improve_resume",
+        "mode": "refactor_run",
+        "todos": [
+          {
+            "content": "WP07_TODO_A",
+            "priority": "high",
+            "status": "in_progress"
+          },
+          {
+            "content": "WP07_TODO_B",
+            "priority": "low",
+            "status": "pending"
+          }
+        ]
+      },
+      "sha256": "c8966a8bab07c4ab73c41586aaeb6e23c1e58cf6745f1a175dec0b431ee5f5b6",
+      "ids": [
+        "INS-WFL-015"
+      ]
+    },
+    {
+      "bytes": 413,
+      "equal": true,
+      "fixture": 50,
+      "request": {
+        "kind": "refactor_resume",
+        "mode": "refactor_run",
+        "todos": [
+          {
+            "content": "WP07_TODO_A",
+            "priority": "high",
+            "status": "in_progress"
+          },
+          {
+            "content": "WP07_TODO_B",
+            "priority": "low",
+            "status": "pending"
+          }
+        ]
+      },
+      "sha256": "7b35cd612b8044f82abfab395de248846f105af1a88e9a418bd6a867f3b82efa",
+      "ids": [
+        "INS-WFL-016"
+      ]
+    },
+    {
+      "bytes": 160,
+      "equal": true,
+      "fixture": 51,
+      "request": {
+        "kind": "improve_resume",
+        "mode": "refactor_plan",
+        "todos": []
+      },
+      "sha256": "cfec849cd1397797605ae6fdf55c26db568c9fd49a54271e0ed66c4f5796bafa",
+      "ids": [
+        "INS-WFL-015"
+      ]
+    },
+    {
+      "bytes": 218,
+      "equal": true,
+      "fixture": 52,
+      "request": {
+        "kind": "refactor_resume",
+        "mode": "refactor_plan",
+        "todos": []
+      },
+      "sha256": "08806673c2f2dff7fdd4d046a09575f8cd9d158517b0ab2e73f34506b7022516",
+      "ids": [
+        "INS-WFL-016"
+      ]
+    },
+    {
+      "bytes": 178,
+      "equal": true,
+      "fixture": 53,
+      "request": {
+        "kind": "improve_resume",
+        "mode": "refactor_plan",
+        "todos": [
+          {
+            "content": "WP07_TODO_A",
+            "priority": "high",
+            "status": "in_progress"
+          }
+        ]
+      },
+      "sha256": "be82a4d875fc1f2f2e53072d2f299a67208650d9ca179a17f8b90c1e0020fb43",
+      "ids": [
+        "INS-WFL-015"
+      ]
+    },
+    {
+      "bytes": 217,
+      "equal": true,
+      "fixture": 54,
+      "request": {
+        "kind": "refactor_resume",
+        "mode": "refactor_plan",
+        "todos": [
+          {
+            "content": "WP07_TODO_A",
+            "priority": "high",
+            "status": "in_progress"
+          }
+        ]
+      },
+      "sha256": "581204578389b22d333cfe5cea5ae0a79c1ea4266f59837264476a7793905be3",
+      "ids": [
+        "INS-WFL-016"
+      ]
+    },
+    {
+      "bytes": 202,
+      "equal": true,
+      "fixture": 55,
+      "request": {
+        "kind": "improve_resume",
+        "mode": "refactor_plan",
+        "todos": [
+          {
+            "content": "WP07_TODO_A",
+            "priority": "high",
+            "status": "in_progress"
+          },
+          {
+            "content": "WP07_TODO_B",
+            "priority": "low",
+            "status": "pending"
+          }
+        ]
+      },
+      "sha256": "c8966a8bab07c4ab73c41586aaeb6e23c1e58cf6745f1a175dec0b431ee5f5b6",
+      "ids": [
+        "INS-WFL-015"
+      ]
+    },
+    {
+      "bytes": 242,
+      "equal": true,
+      "fixture": 56,
+      "request": {
+        "kind": "refactor_resume",
+        "mode": "refactor_plan",
+        "todos": [
+          {
+            "content": "WP07_TODO_A",
+            "priority": "high",
+            "status": "in_progress"
+          },
+          {
+            "content": "WP07_TODO_B",
+            "priority": "low",
+            "status": "pending"
+          }
+        ]
+      },
+      "sha256": "4b5cccc60307c7b50549ff271183ef09f8d91e190cec7418692b8cde7272728c",
+      "ids": [
+        "INS-WFL-016"
+      ]
+    }
+  ]
+}

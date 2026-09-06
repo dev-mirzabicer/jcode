@@ -2,7 +2,9 @@
 use crate::instruction::{
     InstructionRepositoryService, SystemPromptActivationError, workflow::Workflow,
 };
-pub use jcode_task_types::{ReviewWorkflowKind, WorkflowPromptRequest};
+pub use jcode_task_types::{
+    CommandWorkflow, ReviewWorkflowKind, WorkflowLoopMode, WorkflowPromptRequest, WorkflowTodo,
+};
 use std::path::Path;
 
 pub fn render_prompt(
@@ -11,6 +13,9 @@ pub fn render_prompt(
     request: &WorkflowPromptRequest,
 ) -> Result<String, SystemPromptActivationError> {
     match request {
+        WorkflowPromptRequest::Command { command } => {
+            crate::instruction::workflow::render_command(repositories, working_dir, command)
+        }
         WorkflowPromptRequest::ReviewStartup {
             mode,
             parent_session_id,

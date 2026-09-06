@@ -283,144 +283,151 @@ impl App {
             .iter()
             .map(|event| event.kind.capacity() + event.detail.capacity())
             .sum();
-        let string_state_bytes = self.observe_page_markdown.capacity()
-            + self.split_view_markdown.capacity()
-            + self
-                .status_notice
-                .as_ref()
-                .map(|(value, _)| value.capacity())
-                .unwrap_or(0)
-            + self
-                .interleave_message
-                .as_ref()
-                .map(|value| value.capacity())
-                .unwrap_or(0)
-            + self
-                .pending_split_workflow
-                .as_ref()
-                .map(|value| {
-                    value
-                        .workflow
-                        .allocated_bytes()
-                        .saturating_add(value.source_session_id.capacity())
-                })
-                .unwrap_or(0)
-            + self
-                .pending_split_parent_session_id
-                .as_ref()
-                .map(|value| value.capacity())
-                .unwrap_or(0)
-            + self
-                .pending_split_model_override
-                .as_ref()
-                .map(|value| value.capacity())
-                .unwrap_or(0)
-            + self
-                .pending_split_provider_key_override
-                .as_ref()
-                .map(|value| value.capacity())
-                .unwrap_or(0)
-            + self
-                .pending_split_label
-                .as_ref()
-                .map(|value| value.capacity())
-                .unwrap_or(0)
-            + self
-                .rate_limit_pending_message
-                .as_ref()
-                .and_then(|message| message.system_reminder.as_ref())
-                .map(|value| value.capacity())
-                .unwrap_or(0)
-            + self
-                .ambient_system_prompt
-                .as_ref()
-                .map(|value| value.capacity())
-                .unwrap_or(0)
-            + self
-                .last_stream_error
-                .as_ref()
-                .map(|value| value.capacity())
-                .unwrap_or(0)
-            + self
-                .active_skill
-                .as_ref()
-                .map(|value| value.capacity())
-                .unwrap_or(0)
-            + self
-                .provider_session_id
-                .as_ref()
-                .map(|value| value.capacity())
-                .unwrap_or(0)
-            + self
-                .upstream_provider
-                .as_ref()
-                .map(|value| value.capacity())
-                .unwrap_or(0)
-            + self
-                .connection_type
-                .as_ref()
-                .map(|value| value.capacity())
-                .unwrap_or(0)
-            + self
-                .status_detail
-                .as_ref()
-                .map(|value| value.capacity())
-                .unwrap_or(0)
-            + self
-                .remote_provider_name
-                .as_ref()
-                .map(|value| value.capacity())
-                .unwrap_or(0)
-            + self
-                .remote_provider_model
-                .as_ref()
-                .map(|value| value.capacity())
-                .unwrap_or(0)
-            + self
-                .remote_reasoning_effort
-                .as_ref()
-                .map(|value| value.capacity())
-                .unwrap_or(0)
-            + self
-                .remote_service_tier
-                .as_ref()
-                .map(|value| value.capacity())
-                .unwrap_or(0)
-            + self
-                .remote_transport
-                .as_ref()
-                .map(|value| value.capacity())
-                .unwrap_or(0)
-            + self
-                .remote_server_version
-                .as_ref()
-                .map(|value| value.capacity())
-                .unwrap_or(0)
-            + self
-                .remote_server_short_name
-                .as_ref()
-                .map(|value| value.capacity())
-                .unwrap_or(0)
-            + self
-                .remote_server_icon
-                .as_ref()
-                .map(|value| value.capacity())
-                .unwrap_or(0)
-            + self
-                .remote_session_id
-                .as_ref()
-                .map(|value| value.capacity())
-                .unwrap_or(0)
-            + self
-                .pending_migration
-                .as_ref()
-                .map(|value| value.capacity())
-                .unwrap_or(0)
-            + self
-                .resume_session_id
-                .as_ref()
-                .map(|value| value.capacity())
-                .unwrap_or(0);
+        let string_state_bytes =
+            self.observe_page_markdown.capacity()
+                + self.split_view_markdown.capacity()
+                + self
+                    .status_notice
+                    .as_ref()
+                    .map(|(value, _)| value.capacity())
+                    .unwrap_or(0)
+                + self
+                    .interleave_message
+                    .as_ref()
+                    .map(|value| value.capacity())
+                    .unwrap_or(0)
+                + self
+                    .pending_split_workflow
+                    .as_ref()
+                    .map(|value| {
+                        value
+                            .workflow
+                            .allocated_bytes()
+                            .saturating_add(value.source_session_id.capacity())
+                    })
+                    .unwrap_or(0)
+                    .saturating_add(self.pending_workflow_commands.iter().fold(
+                        self.pending_workflow_commands.capacity().saturating_mul(
+                            std::mem::size_of::<super::commands_workflow::PendingCommand>(),
+                        ),
+                        |sum, pending| sum.saturating_add(pending.allocated_bytes()),
+                    ))
+                + self
+                    .pending_split_parent_session_id
+                    .as_ref()
+                    .map(|value| value.capacity())
+                    .unwrap_or(0)
+                + self
+                    .pending_split_model_override
+                    .as_ref()
+                    .map(|value| value.capacity())
+                    .unwrap_or(0)
+                + self
+                    .pending_split_provider_key_override
+                    .as_ref()
+                    .map(|value| value.capacity())
+                    .unwrap_or(0)
+                + self
+                    .pending_split_label
+                    .as_ref()
+                    .map(|value| value.capacity())
+                    .unwrap_or(0)
+                + self
+                    .rate_limit_pending_message
+                    .as_ref()
+                    .and_then(|message| message.system_reminder.as_ref())
+                    .map(|value| value.capacity())
+                    .unwrap_or(0)
+                + self
+                    .ambient_system_prompt
+                    .as_ref()
+                    .map(|value| value.capacity())
+                    .unwrap_or(0)
+                + self
+                    .last_stream_error
+                    .as_ref()
+                    .map(|value| value.capacity())
+                    .unwrap_or(0)
+                + self
+                    .active_skill
+                    .as_ref()
+                    .map(|value| value.capacity())
+                    .unwrap_or(0)
+                + self
+                    .provider_session_id
+                    .as_ref()
+                    .map(|value| value.capacity())
+                    .unwrap_or(0)
+                + self
+                    .upstream_provider
+                    .as_ref()
+                    .map(|value| value.capacity())
+                    .unwrap_or(0)
+                + self
+                    .connection_type
+                    .as_ref()
+                    .map(|value| value.capacity())
+                    .unwrap_or(0)
+                + self
+                    .status_detail
+                    .as_ref()
+                    .map(|value| value.capacity())
+                    .unwrap_or(0)
+                + self
+                    .remote_provider_name
+                    .as_ref()
+                    .map(|value| value.capacity())
+                    .unwrap_or(0)
+                + self
+                    .remote_provider_model
+                    .as_ref()
+                    .map(|value| value.capacity())
+                    .unwrap_or(0)
+                + self
+                    .remote_reasoning_effort
+                    .as_ref()
+                    .map(|value| value.capacity())
+                    .unwrap_or(0)
+                + self
+                    .remote_service_tier
+                    .as_ref()
+                    .map(|value| value.capacity())
+                    .unwrap_or(0)
+                + self
+                    .remote_transport
+                    .as_ref()
+                    .map(|value| value.capacity())
+                    .unwrap_or(0)
+                + self
+                    .remote_server_version
+                    .as_ref()
+                    .map(|value| value.capacity())
+                    .unwrap_or(0)
+                + self
+                    .remote_server_short_name
+                    .as_ref()
+                    .map(|value| value.capacity())
+                    .unwrap_or(0)
+                + self
+                    .remote_server_icon
+                    .as_ref()
+                    .map(|value| value.capacity())
+                    .unwrap_or(0)
+                + self
+                    .remote_session_id
+                    .as_ref()
+                    .map(|value| value.capacity())
+                    .unwrap_or(0)
+                + self
+                    .pending_migration
+                    .as_ref()
+                    .map(|value| value.capacity())
+                    .unwrap_or(0)
+                + self
+                    .resume_session_id
+                    .as_ref()
+                    .map(|value| value.capacity())
+                    .unwrap_or(0);
 
         let totals = serde_json::json!({
             "pending_remote_message_bytes": pending_remote_message_bytes,

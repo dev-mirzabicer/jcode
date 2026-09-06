@@ -1,0 +1,1 @@
+Resume improvement mode for this repository. Start by inspecting the current repo state, writing or refreshing a ranked todo list with `todo`, then continue implementing the highest-leverage safe improvements until the next ideas have diminishing returns.

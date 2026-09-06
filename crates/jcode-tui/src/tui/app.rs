@@ -59,6 +59,7 @@ mod commands_overnight;
 mod commands_plan;
 mod commands_remote;
 mod commands_review;
+mod commands_workflow;
 mod context_editor_runtime;
 mod context_pressure;
 pub(crate) mod context_protocol;
@@ -1571,6 +1572,7 @@ pub struct App {
     autojudge_after_current_turn: bool,
     // Startup message to preload into the next spawned split window.
     pending_split_workflow: Option<PendingSplitWorkflow>,
+    pending_workflow_commands: Vec<commands_workflow::PendingCommand>,
     // Parent/original session that feedback flows should report back to after a split launch.
     pending_split_parent_session_id: Option<String>,
     // Startup user prompt to auto-submit in the next spawned split window.

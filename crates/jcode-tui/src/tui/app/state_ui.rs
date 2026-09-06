@@ -9,6 +9,7 @@ pub(super) struct RestoredReloadInput {
     pub pending_images: Vec<(String, String)>,
     pub submit_on_restore: bool,
     pub queued_messages: crate::todo::QueuedMessages,
+    pub pending_workflow_commands: Vec<super::commands_workflow::PendingCommand>,
     pub hidden_queued_system_messages: Vec<String>,
     pub startup_status_notice: Option<String>,
     pub startup_display_message: Option<(String, String)>,
@@ -220,6 +221,7 @@ impl App {
         if self.input.is_empty()
             && self.pending_images.is_empty()
             && self.queued_messages.is_empty()
+            && self.pending_workflow_commands.is_empty()
             && self.hidden_queued_system_messages.is_empty()
             && self.interleave_message.is_none()
             && self.pending_soft_interrupts.is_empty()
@@ -313,6 +315,7 @@ impl App {
                 })).collect::<Vec<_>>(),
                 "submit_on_restore": resume_prompt.is_some(),
                 "queued_messages": queued_messages,
+                "pending_workflow_commands": self.pending_workflow_commands,
                 "hidden_queued_system_messages": hidden_queued_system_messages,
                 "interleave_message": self.interleave_message,
                 "pending_soft_interrupts": self.pending_soft_interrupts,
@@ -576,6 +579,19 @@ impl App {
                 .get("todo_confidence_spike_challenged")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            let pending_workflow_commands = match value.get("pending_workflow_commands") {
+                Some(value) => match serde_json::from_value(value.clone()) {
+                    Ok(commands) => commands,
+                    Err(error) => {
+                        crate::logging::error(&format!(
+                            "Could not restore workflow commands; retained {}: {error}",
+                            path.display()
+                        ));
+                        return None;
+                    }
+                },
+                None => Vec::new(),
+            };
             let cursor = cursor.min(input.len());
             let _ = std::fs::remove_file(&path);
             return Some(RestoredReloadInput {
@@ -584,6 +600,7 @@ impl App {
                 pending_images,
                 submit_on_restore,
                 queued_messages,
+                pending_workflow_commands,
                 hidden_queued_system_messages,
                 startup_status_notice,
                 startup_display_message,
@@ -611,6 +628,7 @@ impl App {
             pending_images: Vec::new(),
             submit_on_restore: false,
             queued_messages: Default::default(),
+            pending_workflow_commands: Vec::new(),
             hidden_queued_system_messages: Vec::new(),
             startup_status_notice: None,
             startup_display_message: None,

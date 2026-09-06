@@ -1,14 +1,9 @@
 pub(super) use super::commands_improve::{
-    build_improve_prompt, build_improve_resume_prompt, build_refactor_prompt,
-    build_refactor_resume_prompt, format_improve_status, format_refactor_status,
-    handle_improve_command_local, handle_refactor_command_local, improve_launch_notice,
-    improve_mode_for, improve_stop_notice, improve_stop_prompt, parse_improve_command,
-    parse_refactor_command, refactor_launch_notice, refactor_mode_for, refactor_stop_notice,
-    refactor_stop_prompt, restore_improve_mode, session_improve_mode_for,
+    format_improve_status, format_refactor_status, improve_launch_notice, improve_mode_for,
+    improve_stop_notice, parse_improve_command, parse_refactor_command, refactor_launch_notice,
+    refactor_mode_for, refactor_stop_notice, restore_improve_mode, session_improve_mode_for,
 };
-pub(super) use super::commands_plan::{
-    build_plan_prompt, handle_plan_command_local, parse_plan_command, plan_launch_notice,
-};
+pub(super) use super::commands_plan::{parse_plan_command, plan_launch_notice};
 #[cfg(test)]
 pub(super) use super::commands_review::queue_autojudge_remote;
 pub(super) use super::commands_review::{
@@ -868,6 +863,9 @@ pub(super) fn handle_cancel_command(app: &mut App, trimmed: &str) -> bool {
         return false;
     }
 
+    if super::commands_workflow::cancel_pending(app) && !app.is_processing {
+        return true;
+    }
     let pending_retry = app.rate_limit_reset.is_some() && app.rate_limit_pending_message.is_some();
     if app.is_processing {
         app.cancel_requested = true;
@@ -1681,6 +1679,10 @@ pub(super) fn handle_git_status_completed(app: &mut App, completed: GitStatusCom
 }
 
 pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
+    if super::commands_workflow::handle(app, trimmed) {
+        return true;
+    }
+
     if handle_subagent_model_command(app, trimmed)
         || app.handle_hotkeys_command(trimmed)
         || app.handle_terminal_setup_command(trimmed)
@@ -1704,42 +1706,8 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
         return true;
     }
 
-    if trimmed == "/commit" {
-        handle_commit_command_local(app);
-        return true;
-    }
-
-    if trimmed == "/commit-push" || trimmed == "/commit-and-push" {
-        handle_commit_push_command_local(app);
-        return true;
-    }
-
-    if matches!(
-        trimmed,
-        "/fast-release" | "/cut-release" | "/commit-push-release"
-    ) {
-        handle_fast_release_command_local(app);
-        return true;
-    }
-
-    if trimmed == "/fast-macos-release" {
-        handle_fast_macos_release_command_local(app);
-        return true;
-    }
-
-    if trimmed == "/remote-release" {
-        handle_remote_release_command_local(app);
-        return true;
-    }
-
     // After `/remote-release`: the parser claims only `/remote` + whitespace/end.
     if super::commands_remote::handle_remote_command(app, trimmed) {
-        return true;
-    }
-
-    if trimmed == "/triage" || trimmed.starts_with("/triage ") {
-        let rest = trimmed.strip_prefix("/triage").unwrap_or_default();
-        handle_triage_command_local(app, rest);
         return true;
     }
 
@@ -1751,27 +1719,6 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
 
     if trimmed == "/active" {
         app.open_active_sessions_picker();
-        return true;
-    }
-
-    if let Some(command) = parse_plan_command(trimmed) {
-        handle_plan_command_local(app, command);
-        return true;
-    }
-
-    if let Some(command) = parse_improve_command(trimmed) {
-        match command {
-            Ok(command) => handle_improve_command_local(app, command),
-            Err(error) => app.push_display_message(DisplayMessage::error(error)),
-        }
-        return true;
-    }
-
-    if let Some(command) = parse_refactor_command(trimmed) {
-        match command {
-            Ok(command) => handle_refactor_command_local(app, command),
-            Err(error) => app.push_display_message(DisplayMessage::error(error)),
-        }
         return true;
     }
 
@@ -2274,92 +2221,11 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
     false
 }
 
-pub(super) fn build_commit_prompt() -> String {
-    "Make interactive, logical commits for the current uncommitted work. Inspect the git state first, including unstaged and staged changes. Group related changes into small coherent commits, staging only the files or hunks that belong together. Preserve unrelated user or agent work, do not discard changes, and do not amend existing commits unless clearly necessary. For each commit, use a concise conventional-style message when possible. Validate as appropriate for the changed files before committing, and report the commits created plus any remaining uncommitted changes.".to_string()
-}
-
-pub(super) fn build_commit_push_prompt() -> String {
-    let mut prompt = build_commit_prompt();
-    prompt.push(' ');
-    prompt.push_str(
-        "After creating the commits, push them to the remote tracking branch with git push (set the upstream with git push -u if the branch has no upstream yet). If the push fails, report the error instead of force-pushing, and never force-push or rewrite already-pushed history. Finally, report the commits created and the push result.",
-    );
-    prompt
-}
-
-fn build_release_prompt(before_bump_instruction: &str, release_instruction: &str) -> String {
-    let mut prompt = build_commit_push_prompt();
-    prompt.push(' ');
-    prompt.push_str("Then cut a release. Find the last release tag (git describe --tags --abbrev=0 or gh release list) and review everything that changed since it to pick the semver bump: patch for fixes and small internal changes, minor for new features, major only for breaking changes. ");
-    if !before_bump_instruction.is_empty() {
-        prompt.push_str(before_bump_instruction);
-        prompt.push(' ');
-    }
-    prompt.push_str("Bump the version in the root Cargo.toml, refresh Cargo.lock (for example with cargo check), and, if the repo has a changelog/ directory, write a user-facing changelog entry changelog/v<version>.json following changelog/README.md (translate commits into user-visible effects, skip internal-only changes, update changelog/index.json). Commit the version bump together with the changelog entry as one release-metadata commit, and push. ");
-    prompt.push_str(release_instruction);
-    prompt.push_str(" Do not force-push or move existing tags. Finally, report the new version, the commits created, the tag push, and the release status.");
-    prompt
-}
-
-pub(super) fn build_fast_release_prompt() -> String {
-    build_release_prompt(
-        "Before editing Cargo.toml or the changelog for the version bump, run scripts/quick-release.sh --prepare-fast v<version>. It must refresh the warm target/selfdev cache for the Linux x86_64 binary while the existing Cargo version is unchanged and record the prepared commit.",
-        "Then run scripts/quick-release.sh --fast-local v<version>. It must wrap the prepared selfdev binary with the release identity, publish that Linux asset and the GitHub release immediately, and let CI replace it with the portable Linux artifact while adding macOS, Windows, FreeBSD, signatures, and final checksums. Do not run the separate local macOS cross-build or wait for release optimization. If preparation is stale or the release-metadata commit contains code changes, stop instead of publishing a binary that differs from the tag.",
-    )
-}
-
-pub(super) fn build_fast_macos_release_prompt() -> String {
-    build_release_prompt(
-        "Before editing Cargo.toml or the changelog for the version bump, run scripts/quick-release.sh --prepare-fast-macos v<version>. It must cross-build and record the macOS arm64 binary with the future release identity while the release metadata is still unchanged.",
-        "Then run scripts/quick-release.sh --fast-macos-local v<version>. It must validate and publish the prepared macOS arm64 asset and GitHub release immediately, while CI replaces it with the signoff artifact and adds macOS Intel, Linux, Windows, FreeBSD, signatures, and final checksums. If preparation is stale or the release-metadata commit contains code changes, stop instead of publishing a binary that differs from the tag.",
-    )
-}
-
-pub(super) fn build_remote_release_prompt() -> String {
-    build_release_prompt(
-        "",
-        "Then run scripts/quick-release.sh --remote v<version> to push the tag immediately without any local build. Let the release workflow build, sign, checksum, and publish every platform, and leave publication gated on those remote checks.",
-    )
-}
-
-pub(super) fn build_triage_prompt(focus: &str) -> String {
-    let mut prompt = String::from(
-        "Triage the open GitHub issues for the repository in the current working directory, then autonomously fix the ones that are safe to fix. \
-        Hard rules: every public comment, issue reply, or PR description you post MUST end with a clear agent attribution line like '--- *— Jcode agent (automated triage), on behalf of @<repo-owner>*' so it can never be mistaken for the human. \
-        Never close an issue as wontfix/invalid without user confirmation (closing as completed is fine only after a verified fix). Be brief, friendly, and factual toward reporters. Prefer a branch + PR unless the repo's established norm is committing directly to the default branch. \
-        Workflow: (1) Collect: verify gh auth status, identify the repo with gh repo view, list open issues newest-first (gh issue list --state open --limit 50 --json number,title,labels,createdAt,author,comments,body), focus on untriaged ones (no labels or no maintainer/agent comment), and read each candidate fully with gh issue view <n> --comments. \
-        (2) Classify each into exactly one bucket and track them in a todo list: auto-fix (clear, reproducible, low-risk, verifiable), needs-info (comment asking for the specific missing details), needs-human (design decisions, breaking changes, security-sensitive, large refactors), duplicate (link the original, do not close without confirmation unless unambiguous), or question/support (answer directly if verifiable against the code or docs). Apply existing labels only (check gh label list first, never invent labels). \
-        (3) Fix the auto-fix bucket: locate the root cause first (demote to needs-human if you cannot pin it confidently), implement the smallest correct fix with a test when practical, verify with builds/tests before claiming anything, commit referencing the issue (fix: <summary> (fixes #<n>)), and comment on the issue describing what was done, signed. If there are more than about 3 auto-fix issues, consider spawning swarm workers, one per issue, and synthesize their reports. \
-        (4) Report back with a compact table of issue number, title, bucket, and action taken, plus links to commits/PRs and one-line recommendations for the needs-human issues.",
-    );
-    let focus = focus.trim();
-    if !focus.is_empty() {
-        prompt.push_str(" Additional focus from the user: ");
-        prompt.push_str(focus);
-    }
-    prompt
-}
-
 pub(super) fn triage_launch_notice(interrupted: bool) -> String {
     if interrupted {
         "👉 Interrupting and starting GitHub issue triage...".to_string()
     } else {
         "🚀 Starting GitHub issue triage...".to_string()
-    }
-}
-
-fn handle_triage_command_local(app: &mut App, rest: &str) {
-    let prompt = build_triage_prompt(rest);
-    if app.is_processing {
-        super::commands_improve::interrupt_and_queue_synthetic_message(
-            app,
-            prompt,
-            "Interrupting for /triage...",
-            triage_launch_notice(true),
-        );
-    } else {
-        app.push_display_message(DisplayMessage::system(triage_launch_notice(false)));
-        super::commands_improve::start_synthetic_user_turn(app, prompt);
     }
 }
 
@@ -2400,83 +2266,6 @@ pub(super) fn remote_release_launch_notice(interrupted: bool) -> String {
         "👉 Interrupting and starting logical commits + push + remote release...".to_string()
     } else {
         "🚀 Starting logical commits + push + remote release...".to_string()
-    }
-}
-
-fn handle_commit_command_local(app: &mut App) {
-    let prompt = build_commit_prompt();
-    if app.is_processing {
-        super::commands_improve::interrupt_and_queue_synthetic_message(
-            app,
-            prompt,
-            "Interrupting for /commit...",
-            commit_launch_notice(true),
-        );
-    } else {
-        app.push_display_message(DisplayMessage::system(commit_launch_notice(false)));
-        super::commands_improve::start_synthetic_user_turn(app, prompt);
-    }
-}
-
-fn handle_commit_push_command_local(app: &mut App) {
-    let prompt = build_commit_push_prompt();
-    if app.is_processing {
-        super::commands_improve::interrupt_and_queue_synthetic_message(
-            app,
-            prompt,
-            "Interrupting for /commit-push...",
-            commit_push_launch_notice(true),
-        );
-    } else {
-        app.push_display_message(DisplayMessage::system(commit_push_launch_notice(false)));
-        super::commands_improve::start_synthetic_user_turn(app, prompt);
-    }
-}
-
-fn handle_fast_release_command_local(app: &mut App) {
-    let prompt = build_fast_release_prompt();
-    if app.is_processing {
-        super::commands_improve::interrupt_and_queue_synthetic_message(
-            app,
-            prompt,
-            "Interrupting for /fast-release...",
-            fast_release_launch_notice(true),
-        );
-    } else {
-        app.push_display_message(DisplayMessage::system(fast_release_launch_notice(false)));
-        super::commands_improve::start_synthetic_user_turn(app, prompt);
-    }
-}
-
-fn handle_fast_macos_release_command_local(app: &mut App) {
-    let prompt = build_fast_macos_release_prompt();
-    if app.is_processing {
-        super::commands_improve::interrupt_and_queue_synthetic_message(
-            app,
-            prompt,
-            "Interrupting for /fast-macos-release...",
-            fast_macos_release_launch_notice(true),
-        );
-    } else {
-        app.push_display_message(DisplayMessage::system(fast_macos_release_launch_notice(
-            false,
-        )));
-        super::commands_improve::start_synthetic_user_turn(app, prompt);
-    }
-}
-
-fn handle_remote_release_command_local(app: &mut App) {
-    let prompt = build_remote_release_prompt();
-    if app.is_processing {
-        super::commands_improve::interrupt_and_queue_synthetic_message(
-            app,
-            prompt,
-            "Interrupting for /remote-release...",
-            remote_release_launch_notice(true),
-        );
-    } else {
-        app.push_display_message(DisplayMessage::system(remote_release_launch_notice(false)));
-        super::commands_improve::start_synthetic_user_turn(app, prompt);
     }
 }
 
@@ -2694,30 +2483,11 @@ pub(super) fn handle_disabled_mission_command(app: &mut App, trimmed: &str) -> b
 }
 
 pub(super) fn handle_test_command(app: &mut App, trimmed: &str) -> bool {
-    let Some(rest) = slash_command_rest(trimmed, "/test") else {
-        return false;
-    };
-    let claim = rest.trim();
-    if matches!(claim, "help" | "--help" | "-h") {
-        app.push_display_message(DisplayMessage::system(test_usage()));
-        return true;
-    }
-
-    let prompt = build_test_verification_prompt(claim);
-    app.queued_messages.push(prompt);
-    if app.is_processing {
-        app.push_display_message(DisplayMessage::system(
-            "Queued /test; verification will run after the current turn.".to_string(),
-        ));
-        app.set_status_notice("Queued /test");
+    if trimmed == "/test" || trimmed.starts_with("/test ") {
+        super::commands_workflow::handle(app, trimmed)
     } else {
-        app.pending_queued_dispatch = true;
-        app.push_display_message(DisplayMessage::system(
-            "Running /test verification orchestrator.".to_string(),
-        ));
-        app.set_status_notice("Running /test");
+        false
     }
-    true
 }
 
 fn slash_command_rest<'a>(trimmed: &'a str, command: &str) -> Option<&'a str> {
@@ -2726,40 +2496,6 @@ fn slash_command_rest<'a>(trimmed: &'a str, command: &str) -> Option<&'a str> {
     } else {
         trimmed.strip_prefix(&format!("{} ", command))
     }
-}
-
-fn test_usage() -> String {
-    "Usage: /test [claim|feature|current changes]\n\nRuns a layered verification pass and returns evidence, confidence, and gaps."
-        .to_string()
-}
-
-fn build_test_verification_prompt(claim: &str) -> String {
-    let target = if claim.trim().is_empty() {
-        "the current changes and the likely user-facing behavior they affect"
-    } else {
-        claim.trim()
-    };
-    format!(
-        "Run Jcode's /test verification orchestrator for: {target}\n\n\
-Goal: become as sure as reasonably possible before the user checks manually. Do not stop at compile success. Build and execute a verification plan, update todos as needed, and finish with an evidence-backed proof packet.\n\n\
-Required verification layers to consider and run when applicable:\n\
-1. Reproduction-first: if this is a bug, create or identify the exact failing repro and prove it now passes.\n\
-2. Focused unit tests plus integration tests for real module boundaries.\n\
-3. End-to-end/user-flow smoke tests that mirror what the user would manually try.\n\
-4. Property-based tests, state-machine/model-based tests, fuzzing, and exhaustive enumeration for small state spaces.\n\
-5. Static analysis: formatting, type/check build, clippy/lints, dead code, schema/contract compatibility, secret/security scans, dependency/audit checks when available.\n\
-6. Regression strategy: adjacent feature sweep, old-vs-new differential checks, oracle/golden/snapshot comparisons, and metamorphic tests.\n\
-7. Robustness: fault injection/chaos for timeouts, network errors, corrupt storage, permission errors, restarts/resume, cancellation, and invalid inputs.\n\
-8. Concurrency/race/interrupt/multi-session stress plus soak/flakiness loops where risk exists.\n\
-9. Nonfunctional checks: performance/resource regressions, observability logs/events/telemetry, UX/accessibility, and security/safety boundaries.\n\n\
-Final proof packet required:\n\
-- Claim verified or not verified.\n\
-- Commands/tests/checks actually run and their results.\n\
-- E2E/manual-equivalent flows covered.\n\
-- Adjacent regressions considered.\n\
-- Remaining gaps or untested environments.\n\
-- Confidence level and why the user should or should not expect to hit another obvious error."
-    )
 }
 
 pub(super) fn active_session_id(app: &App) -> String {

@@ -16,7 +16,9 @@ fn test_improve_mode_persists_in_session_file() {
 
 #[test]
 fn test_refactor_command_starts_refactor_loop() {
+    let _home=SkillTestHome::new();
     let mut app = create_test_app();
+        seed_synthetic_command_sources();
     app.input = "/refactor".to_string();
     app.submit_input();
 
@@ -35,8 +37,7 @@ fn test_refactor_command_starts_refactor_loop() {
     assert!(matches!(
         &msg.content[0],
         ContentBlock::Text { text, .. }
-            if text.contains("You are entering refactor mode for this repository")
-                && text.contains("use the `swarm` tool with `action=spawn` exactly once")
+            if text.starts_with("workflow-refactor ")
     ));
 
     let display = app
@@ -48,7 +49,9 @@ fn test_refactor_command_starts_refactor_loop() {
 
 #[test]
 fn test_plan_command_is_plan_only_and_presents_plan_card() {
+    let _home=SkillTestHome::new();
     let mut app = create_test_app();
+        seed_synthetic_command_sources();
     app.input = "/plan add a compact message mode".to_string();
     app.submit_input();
 
@@ -60,11 +63,7 @@ fn test_plan_command_is_plan_only_and_presents_plan_card() {
     assert!(matches!(
         &msg.content[0],
         ContentBlock::Text { text, .. }
-            if text.contains("You are entering planning mode")
-                && text.contains("Do NOT implement anything yet")
-                && text.contains("```plan")
-                && text.contains("`todo`")
-                && text.contains("Goal: add a compact message mode")
+            if text.starts_with("PLAN ") && text.contains("Goal: add a compact message mode")
     ));
 
     let display = app
@@ -80,7 +79,9 @@ fn test_plan_command_is_plan_only_and_presents_plan_card() {
 
 #[test]
 fn test_plan_command_without_goal_plans_current_focus() {
+    let _home=SkillTestHome::new();
     let mut app = create_test_app();
+        seed_synthetic_command_sources();
     app.input = "/plan".to_string();
     app.submit_input();
 
@@ -91,14 +92,17 @@ fn test_plan_command_without_goal_plans_current_focus() {
     assert!(matches!(
         &msg.content[0],
         ContentBlock::Text { text, .. }
-            if text.contains("You are entering planning mode")
-                && text.contains("currently in focus in this session")
+            if text == "PLAN Goal: CURRENT
+
+"
     ));
 }
 
 #[test]
 fn test_refactor_plan_command_is_plan_only_and_accepts_focus() {
+    let _home=SkillTestHome::new();
     let mut app = create_test_app();
+        seed_synthetic_command_sources();
     app.input = "/refactor plan command parsing".to_string();
     app.submit_input();
 
@@ -117,9 +121,7 @@ fn test_refactor_plan_command_is_plan_only_and_accepts_focus() {
     assert!(matches!(
         &msg.content[0],
         ContentBlock::Text { text, .. }
-            if text.contains("refactor planning mode")
-                && text.contains("This is plan-only mode")
-                && text.contains("Focus area: command parsing")
+            if text.starts_with("workflow-refactor-plan ") && text.contains("FOCUS command parsing")
     ));
 }
 
@@ -127,6 +129,7 @@ fn test_refactor_plan_command_is_plan_only_and_accepts_focus() {
 fn test_refactor_status_summarizes_current_todos() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
+        seed_synthetic_command_sources();
         crate::todo::save_todos(
             &app.session.id,
             &[
@@ -180,6 +183,7 @@ fn test_refactor_status_summarizes_current_todos() {
 fn test_refactor_resume_uses_saved_mode_and_current_todos() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
+        seed_synthetic_command_sources();
         app.session.improve_mode = Some(crate::session::SessionImproveMode::RefactorRun);
         app.session.save().expect("save session");
         crate::todo::save_todos(
@@ -217,9 +221,8 @@ fn test_refactor_resume_uses_saved_mode_and_current_todos() {
         assert!(matches!(
             &msg.content[0],
             ContentBlock::Text { text, .. }
-                if text.contains("Resume refactor mode")
-                    && text.contains("Extract review prompt builder")
-        ));
+                if text.starts_with("workflow-refactor-resume-run ") && text.contains("Extract review prompt builder")
+    ));
     });
 }
 
