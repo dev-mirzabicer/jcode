@@ -273,6 +273,8 @@ async fn execute_tester_subcommand(
         "frame" => "screen-json".to_string(),
         "frame-normalized" => "screen-json-normalized".to_string(),
         "state" => "state".to_string(),
+        "instruction-manager" => "instruction-manager".to_string(),
+        "mouse" => format!("mouse:{}", arg.unwrap_or("")),
         "history" => "history".to_string(),
         "wait" => "wait".to_string(),
         "input" => "input".to_string(),

@@ -522,8 +522,7 @@ fn unsafe_managed_symlinks_do_not_render_or_expose_global_fallback() {
             .any(|resource| resource.row.id == "linked" && !resource.row.valid)
     );
     assert!(
-        inspector
-            .runtime
+        InstructionRuntime::discover(inspector.sources.clone())
             .render(
                 &InstructionSelector::global(InstructionKind::Module, "linked").unwrap(),
                 &()

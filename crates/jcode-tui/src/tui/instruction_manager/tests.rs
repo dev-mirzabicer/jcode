@@ -258,3 +258,31 @@ fn instruction_manager_filters_history_cancel_and_render_only_fixture_are_struct
     assert!(manager.reserve(12).is_none());
     assert!(manager.pending.is_none());
 }
+
+#[test]
+fn instruction_manager_explicit_visual_frames_capture_only_the_visible_viewport() {
+    let _lock = crate::storage::lock_test_env();
+    let previously_enabled = crate::tui::visual_debug::is_enabled();
+    crate::tui::visual_debug::enable();
+    let mut manager = populated();
+    manager.pane = Pane::Detail;
+    manager.text = Some(InstructionTextPage {
+        document: "visual".into(),
+        title: "Visible fixture".into(),
+        offset: 0,
+        total_bytes: 4,
+        next: None,
+        text: "BODY".into(),
+    });
+    let cells = render(&mut manager, 80, 24);
+    let capture = crate::tui::visual_debug::latest_frame().unwrap();
+    assert_eq!(capture.render_order, vec!["instruction_manager"]);
+    assert_eq!(
+        capture.rendered_text.recent_messages[0].content_preview,
+        cells
+    );
+    assert!(!manager.debug().to_string().contains("BODY"));
+    if !previously_enabled {
+        crate::tui::visual_debug::disable();
+    }
+}

@@ -61,3 +61,33 @@ fn instruction_manager_remote_physical_enter_keys_and_replies_use_server_authori
     assert_eq!(app.session.system_prompt,original_system);
     assert_eq!(app.messages.len(),original_messages);
 }
+
+#[test]
+fn instruction_manager_history_updates_preserve_detail_but_reconnect_refreshes() {
+    let _home = SkillTestHome::new();
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.remote_session_id = Some("inspection-history".into());
+    assert!(app.handle_instruction_command("/instructions"));
+    {
+        let mut manager = app.instruction_ui.manager.as_ref().unwrap().borrow_mut();
+        manager.queued = None;
+        manager.filter.search = "retained filter".into();
+        manager.text = Some(crate::protocol::InstructionTextPage { document:"detail".into(),title:"Fixture".into(),offset:0,total_bytes:4,next:None,text:"BODY".into() });
+    }
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let _entered = runtime.enter();
+    let history = || serde_json::from_value::<crate::protocol::ServerEvent>(serde_json::json!({"type":"history","id":1,"session_id":"inspection-history","messages":[],"server_has_update":false})).unwrap();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.set_session_id("inspection-history".into()); remote.mark_history_loaded();
+    app.handle_server_event(history(), &mut remote);
+    assert!(app.instruction_ui.manager.as_ref().unwrap().borrow().text.is_some());
+    assert!(app.instruction_ui.manager.as_ref().unwrap().borrow().queued.is_none());
+    let mut reconnected = crate::tui::backend::RemoteConnection::dummy();
+    reconnected.set_session_id("inspection-history".into());
+    app.handle_server_event(history(), &mut reconnected);
+    let manager = app.instruction_ui.manager.as_ref().unwrap().borrow();
+    assert!(manager.text.is_none());
+    assert!(matches!(manager.queued, Some(crate::protocol::InstructionInspectionRequest::Open { .. })));
+    assert_eq!(manager.filter.search, "retained filter");
+}

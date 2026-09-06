@@ -187,6 +187,51 @@ impl InstructionManager {
                 (KeyCode::Char('q'), "Q"),
             ],
         );
+        // The ordinary chat renderer returns early for this full-screen view.
+        // Capture its actual visible cells through the existing opt-in debugger,
+        // not source bodies or another transcript. Summary diagnostics stay separate.
+        if crate::tui::visual_debug::is_enabled() {
+            use crate::tui::visual_debug::{
+                FrameCaptureBuilder, MessageCapture, RectCapture, WidgetPlacementCapture,
+            };
+            let mut capture = FrameCaptureBuilder::new(area.width, area.height);
+            capture.state.status = "instruction manager (read-only)".into();
+            capture.render_order.push("instruction_manager".into());
+            let cells = frame.buffer_mut();
+            let mut viewport = String::new();
+            for y in area.y..area.bottom() {
+                for x in area.x..area.right() {
+                    viewport.push_str(cells[(x, y)].symbol());
+                }
+                viewport.push('\n');
+            }
+            capture.rendered_text.recent_messages.push(MessageCapture {
+                role: "instruction-manager-viewport".into(),
+                content_len: viewport.len(),
+                content_preview: viewport,
+            });
+            for (index, rect) in self
+                .areas
+                .iter()
+                .enumerate()
+                .filter(|(_, rect)| rect.width > 0)
+            {
+                capture
+                    .layout
+                    .widget_placements
+                    .push(WidgetPlacementCapture {
+                        kind: format!("instruction-pane-{index}"),
+                        side: "overlay".into(),
+                        rect: RectCapture {
+                            x: rect.x,
+                            y: rect.y,
+                            width: rect.width,
+                            height: rect.height,
+                        },
+                    });
+            }
+            crate::tui::visual_debug::record_frame(capture.build());
+        }
     }
 
     fn buttons(&mut self, frame: &mut Frame, area: Rect, buttons: &[(KeyCode, &str)]) {

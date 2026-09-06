@@ -46,7 +46,6 @@ impl InstructionInspector {
             stores: BTreeMap::new(),
             resources: BTreeMap::new(),
             sources,
-            runtime,
             skills: Vec::new(),
             consumers,
             document: None,
@@ -75,13 +74,12 @@ impl InstructionInspector {
                 Some(error),
             );
         }
-        let summaries = inspector.runtime.resources();
+        let summaries = runtime.resources();
         for summary in &summaries {
             canceled(cancel)?;
             let resource = &summary.resource;
             let selector = selector(resource);
-            let mut graph_error = inspector
-                .runtime
+            let mut graph_error = runtime
                 .validate_graph(&selector)
                 .err()
                 .map(|error| error.to_string());
@@ -96,7 +94,7 @@ impl InstructionInspector {
                 } else {
                     ConsumerScopePolicy::ProjectOnly
                 };
-                if let Err(error) = inspector.runtime.validate_registered_graph(&scoped) {
+                if let Err(error) = runtime.validate_registered_graph(&scoped) {
                     graph_error = Some(error.to_string());
                 }
             }
@@ -107,7 +105,7 @@ impl InstructionInspector {
                     Some("Ambiguous identity: multiple files define this scoped resource".into())
                 }
             };
-            let doc = inspector.runtime.resolve(&selector).ok();
+            let doc = runtime.resolve(&selector).ok();
             let name = doc
                 .and_then(|doc| doc.metadata.display_name.clone())
                 .unwrap_or_else(|| resource.id.to_string());
@@ -173,7 +171,7 @@ impl InstructionInspector {
             }
         }
         // Preserve unidentified failures too, not just resolvable identities.
-        for diagnostic in inspector.runtime.diagnostics().to_vec() {
+        for diagnostic in runtime.diagnostics().to_vec() {
             if !inspector
                 .resources
                 .values()
@@ -207,7 +205,7 @@ impl InstructionInspector {
             }
         }
         inspector.collect_skills(cancel)?;
-        inspector.collect_legacy(project_root.as_deref(), cancel)?;
+        inspector.collect_legacy(&runtime, project_root.as_deref(), cancel)?;
         inspector.collect_roster(&global);
         // Repository metadata is inspectable, including damaged/absent manifests.
         let manifests = inspector
@@ -542,7 +540,12 @@ impl InstructionInspector {
         Ok(())
     }
 
-    fn collect_legacy(&mut self, project_root: Option<&Path>, cancel: &AtomicBool) -> Result<()> {
+    fn collect_legacy(
+        &mut self,
+        runtime: &InstructionRuntime,
+        project_root: Option<&Path>,
+        cancel: &AtomicBool,
+    ) -> Result<()> {
         let global = self
             .repositories
             .global_repository()
@@ -594,7 +597,7 @@ impl InstructionInspector {
                 let regular = std::fs::metadata(&path).is_ok_and(|metadata| metadata.is_file());
                 let blank = regular
                     && std::fs::read_to_string(&path).is_ok_and(|text| text.trim().is_empty());
-                let eligibility = legacy_source_eligibility(&self.runtime, scope, kind, imported);
+                let eligibility = legacy_source_eligibility(runtime, scope, kind, imported);
                 let (eligible, activity) = eligibility.as_ref().copied().unwrap_or((false, "Managed target is invalid. It does not silently expose this compatibility file."));
                 self.add_external(
                     path.clone(),

@@ -2017,7 +2017,6 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.persist_remote_model_catalog_cache();
             }
             app.remote_skills = skills;
-            app.reconnect_instruction_manager(&session_id);
             app.accept_remote_startup_context_history(
                 &session_id,
                 startup_context.map(|status| *status),
@@ -2091,6 +2090,7 @@ pub(in crate::tui::app) fn handle_server_event(
 
             let should_apply_history_payload = session_changed || !remote.has_loaded_history();
             if should_apply_history_payload {
+                app.reconnect_instruction_manager(&session_id);
                 if session_changed {
                     app.clear_context_turn_state_for_session_change();
                 }

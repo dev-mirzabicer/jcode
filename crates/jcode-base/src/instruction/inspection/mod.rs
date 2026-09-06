@@ -81,7 +81,6 @@ pub struct InstructionInspector {
     stores: BTreeMap<String, Repository>,
     resources: BTreeMap<String, Resource>,
     sources: InstructionSources,
-    runtime: InstructionRuntime,
     skills: Vec<SkillInfo>,
     consumers: Vec<ConsumerRegistration>,
     document: Option<Document>,
