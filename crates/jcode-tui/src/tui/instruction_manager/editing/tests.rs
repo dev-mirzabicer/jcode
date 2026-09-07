@@ -395,3 +395,49 @@ fn complete_metadata_value_uses_external_editor_without_dispatching_a_source_cha
     assert_eq!(editor.metadata_field, Some(1));
     assert!(manager.editing.queued.is_none());
 }
+
+#[test]
+fn direct_close_during_update_preserves_reply_then_releases_the_server_draft() {
+    let mut manager = manager();
+    manager.editing.queued = Some(InstructionManagementRequest::Update {
+        draft: "draft-synthetic".into(),
+        generation: 4,
+        change: InstructionDraftChange::Body {
+            file: "modules/example.md".into(),
+            body: "NEW".into(),
+        },
+    });
+    manager.editing.reserve(91, "synthetic-session").unwrap();
+    manager.key(KeyCode::Char('q'), KeyModifiers::NONE);
+    assert!(!manager.visible);
+    let mut updated = synthetic_draft();
+    updated.generation = 5;
+    assert!(manager.accept_management(
+        91,
+        InstructionManagementReply {
+            session_id: "synthetic-session".into(),
+            result: InstructionManagementResult::Draft(updated)
+        }
+    ));
+    assert!(matches!(
+        manager.editing.queued,
+        Some(InstructionManagementRequest::Close)
+    ));
+    assert_eq!(manager.editing.draft.as_ref().unwrap().generation, 5);
+}
+
+#[test]
+fn question_mark_opens_contextual_draft_actions_without_leaking_input() {
+    let mut manager = manager();
+    manager.key(KeyCode::Char('?'), KeyModifiers::NONE);
+    assert!(
+        manager
+            .menu
+            .as_ref()
+            .is_some_and(|menu| menu.items.iter().any(|item| matches!(
+                item.action,
+                super::super::menu::MenuAction::Edit(EditAction::Save)
+            )))
+    );
+    assert!(manager.editing.queued.is_none());
+}

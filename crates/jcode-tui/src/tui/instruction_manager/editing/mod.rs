@@ -899,7 +899,7 @@ impl InstructionManager {
                 self.visible = false;
                 self.queued = Some(InstructionInspectionRequest::Close);
             }
-            KeyCode::Char(' ') | KeyCode::Char(':') => self.open_actions(false),
+            KeyCode::Char(' ' | ':' | '?') => self.open_actions(false),
             KeyCode::Char('b') => self.edit_action(EditAction::Body),
             KeyCode::Char('m') => self.edit_action(EditAction::Metadata),
             KeyCode::Char('r') => self.edit_action(EditAction::Review),
@@ -1265,6 +1265,10 @@ pub(super) enum RecoveryChoice {
 }
 impl InstructionManager {
     pub(crate) fn accept_management(&mut self, id: u64, reply: InstructionManagementReply) -> bool {
+        let closing_reply = matches!(
+            &reply.result,
+            InstructionManagementResult::Closed | InstructionManagementResult::Discarded
+        );
         let acknowledged_update = matches!(&reply.result, InstructionManagementResult::Draft(_))
             && self
                 .editing
@@ -1283,6 +1287,12 @@ impl InstructionManager {
         let is_recovery = matches!(reply.result, InstructionManagementResult::Recoveries(_));
         if !self.editing.accept(id, reply) {
             return false;
+        }
+        if !self.visible && !closing_reply {
+            // Q may hide the manager while its accepted operation is still
+            // completing. Preserve that result, then detach the server draft
+            // rather than keeping its lease behind a closed view.
+            self.editing.queued = Some(InstructionManagementRequest::Close);
         }
         if acknowledged_update {
             self.editing.local_loaded = None;

@@ -55,7 +55,7 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
         "/instructions",
         "Inspect all instructions, sources, previews and Git history",
     ),
-    RegisteredCommand::public("/prompts", "Alias for the read-only instruction manager"),
+    RegisteredCommand::public("/prompts", "Alias for the instruction manager"),
     RegisteredCommand::public(
         "/model-roster",
         "Inspect global model policy and resolution previews",
