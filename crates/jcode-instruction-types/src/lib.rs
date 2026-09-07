@@ -5,6 +5,8 @@ mod editing;
 pub use editing::*;
 mod repository_actions;
 pub use repository_actions::*;
+mod recovery;
+pub use recovery::*;
 
 pub const ROW_PAGE_SIZE: usize = 64;
 pub const TEXT_PAGE_BYTES: usize = 16 * 1024;

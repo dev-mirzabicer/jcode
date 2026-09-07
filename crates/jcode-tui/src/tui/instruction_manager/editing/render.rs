@@ -293,6 +293,7 @@ impl InstructionManager {
         }
     }
     pub(crate) fn edit_mouse(&mut self, event: MouseEvent) -> bool {
+        self.editing.recovery_dirty |= self.editing.visible;
         if !self.editing.visible {
             return false;
         }
@@ -341,6 +342,7 @@ impl InstructionManager {
 }
 fn button_label(button: FormButton) -> &'static str {
     match button {
+        FormButton::ReviewTarget => "Review current target and retained values",
         FormButton::Submit => "Use these draft values",
         FormButton::AddReference => "Add module reference",
         FormButton::AddCandidate => "Add model candidate",

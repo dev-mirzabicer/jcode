@@ -1,4 +1,4 @@
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum RepositoryMode {
     Initialize,
     Recreate,
@@ -84,6 +84,7 @@ impl EditForm {
             RepositoryMode::Standalone
         };
         let mut form = Self {
+            anchor: None,
             title: format!("{:?} repository controls", choices.scope),
             fields: Vec::new(),
             selected: 0,

@@ -14,6 +14,7 @@ pub(super) enum FilterField {
 }
 #[derive(Clone)]
 pub(super) enum MenuAction {
+    Recovery(super::editing::RecoveryChoice),
     Edit(super::editing::EditAction),
     Key(KeyCode),
     Filter(InstructionFilter),
@@ -831,6 +832,7 @@ impl InstructionManager {
         }
         self.menu = None;
         match item.action {
+            MenuAction::Recovery(choice) => self.choose_recovery(choice),
             MenuAction::Edit(action) => self.edit_action(action),
             MenuAction::Key(key) => {
                 self.key(key, KeyModifiers::NONE);

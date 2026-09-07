@@ -241,6 +241,94 @@ impl InstructionRepositoryService {
         Ok(plan)
     }
 
+    pub fn retained_repository_operations(
+        &self,
+        session: &str,
+        project: Option<&Path>,
+    ) -> InstructionRepositoryResult<(Vec<InstructionRetainedOperation>, Vec<String>)> {
+        #[derive(Deserialize)]
+        struct Header {
+            schema: u32,
+            session: String,
+            project: Option<PathBuf>,
+            plan: PlanHeader,
+            started: bool,
+            receipt: Option<InstructionRepositoryReceipt>,
+        }
+        #[derive(Deserialize)]
+        struct PlanHeader {
+            id: String,
+            title: String,
+        }
+        let directory = self
+            .operation_path(session, &uuid::Uuid::nil().to_string())?
+            .parent()
+            .ok_or_else(|| operation_error("No operation directory"))?
+            .to_path_buf();
+        let entries = match std::fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok((Vec::new(), Vec::new()));
+            }
+            Err(error) => return Err(operation_error(&error.to_string())),
+        };
+        let project = project
+            .map(|path| self.resolve_project_root(path))
+            .transpose()?;
+        let mut operations = Vec::new();
+        let mut errors = Vec::new();
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    errors.push(error.to_string());
+                    continue;
+                }
+            };
+            if entry
+                .path()
+                .extension()
+                .is_none_or(|extension| extension != "json")
+            {
+                continue;
+            }
+            let read = || -> InstructionRepositoryResult<Header> {
+                let metadata = std::fs::symlink_metadata(entry.path())
+                    .map_err(|error| operation_error(&error.to_string()))?;
+                if !metadata.is_file() || metadata.file_type().is_symlink() {
+                    return Err(operation_error(
+                        "Operation recovery record is not a regular file",
+                    ));
+                }
+                let file = std::fs::File::open(entry.path())
+                    .map_err(|error| operation_error(&error.to_string()))?;
+                serde_json::from_reader(std::io::BufReader::new(file)).map_err(serialization_error)
+            };
+            match read() {
+                Ok(header)
+                    if header.schema == 1
+                        && header.session == session
+                        && header.project == project
+                        && uuid::Uuid::parse_str(&header.plan.id).is_ok() =>
+                {
+                    operations.push(InstructionRetainedOperation {
+                        id: header.plan.id,
+                        title: header.plan.title,
+                        started: header.started,
+                        completed: header.receipt.is_some_and(|receipt| receipt.completed),
+                    })
+                }
+                Ok(_) => errors.push(format!(
+                    "{} has unsupported or inconsistent operation metadata; it was retained",
+                    entry.path().display()
+                )),
+                Err(error) => errors.push(format!("{}: {error}", entry.path().display())),
+            }
+        }
+        operations.sort_by(|left, right| left.title.cmp(&right.title).then(left.id.cmp(&right.id)));
+        Ok((operations, errors))
+    }
+
     pub fn repository_operation_receipt(
         &self,
         session: &str,

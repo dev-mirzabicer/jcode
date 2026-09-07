@@ -30,6 +30,7 @@ fn synthetic_draft() -> InstructionEditDraft {
         warnings: vec!["Synthetic consequence".into()],
         reviewed: false,
         save_started: false,
+        committed: None,
         choices: InstructionEditChoices::default(),
     }
 }
@@ -328,4 +329,35 @@ fn closed_metadata_choices_never_silently_become_another_value() {
     assert_eq!(form.fields[2].value, "plain");
     assert!(form.picker.is_some());
     assert!(manager.editing.queued.is_none());
+}
+
+#[test]
+fn stale_form_requires_comparison_before_rebinding_to_a_new_draft_generation() {
+    let mut manager = manager();
+    manager.edit_action(EditAction::Metadata);
+    manager.paste("retained local name");
+    manager.editing.draft.as_mut().unwrap().generation += 1;
+    let form = manager.editing.form.as_mut().unwrap();
+    form.selected = form.fields.len();
+    manager.key(KeyCode::Enter, KeyModifiers::NONE);
+    assert!(manager.editing.queued.is_none());
+    assert!(
+        manager
+            .editing
+            .form
+            .as_ref()
+            .unwrap()
+            .error
+            .contains("changed")
+    );
+    manager.review_local_values();
+    assert!(manager.editing.document.contains("CURRENT SERVER DRAFT"));
+    manager.key(KeyCode::Char('y'), KeyModifiers::NONE);
+    let form = manager.editing.form.as_mut().unwrap();
+    form.selected = form.fields.len();
+    manager.key(KeyCode::Enter, KeyModifiers::NONE);
+    assert!(matches!(
+        manager.editing.queued,
+        Some(InstructionManagementRequest::Update { generation: 5, .. })
+    ));
 }

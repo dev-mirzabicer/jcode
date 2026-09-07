@@ -2480,3 +2480,5 @@ fn mutation_lease_child_process_helper() {
 }
 
 mod operation_tests;
+
+mod recovery_tests;

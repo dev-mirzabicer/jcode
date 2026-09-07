@@ -1,6 +1,7 @@
 use super::*;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) enum FieldKey {
     Id,
     Name,
@@ -23,7 +24,7 @@ pub(super) enum FieldKey {
     Start,
     LocalBranch,
 }
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub(super) struct Field {
     pub key: FieldKey,
     pub label: String,
@@ -61,7 +62,7 @@ impl Field {
         field
     }
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) enum FormButton {
     Submit,
     AddReference,
@@ -71,8 +72,9 @@ pub(super) enum FormButton {
     Later,
     AddAlias,
     DeleteAlias,
+    ReviewTarget,
 }
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 enum Purpose {
     Action(EditAction),
     Resource(InstructionResourceFields),
@@ -80,6 +82,7 @@ enum Purpose {
     Roster(Vec<InstructionRosterFields>, usize),
     Repository(Box<InstructionRepositoryChoices>, RepositoryMode),
 }
+#[derive(Clone, Serialize, Deserialize)]
 pub(super) struct Picker {
     pub values: Vec<String>,
     pub query: String,
@@ -94,7 +97,16 @@ impl Picker {
             .collect()
     }
 }
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct FormAnchor {
+    pub snapshot: Option<String>,
+    pub target: Option<InstructionInspectionTarget>,
+    pub draft: Option<(String, u64, String)>,
+}
+#[derive(Clone, Serialize, Deserialize)]
 pub(super) struct EditForm {
+    #[serde(default)]
+    pub anchor: Option<FormAnchor>,
     pub title: String,
     pub fields: Vec<Field>,
     pub selected: usize,
@@ -107,6 +119,19 @@ pub(super) struct EditForm {
     last_field: usize,
 }
 impl EditForm {
+    pub fn repair_cursors(&mut self) {
+        self.selected = self
+            .selected
+            .min((self.fields.len() + self.buttons.len()).saturating_sub(1));
+        self.last_field = self.last_field.min(self.fields.len().saturating_sub(1));
+        for field in &mut self.fields {
+            field.cursor = field.cursor.min(field.value.len());
+            while !field.value.is_char_boundary(field.cursor) {
+                field.cursor = field.cursor.saturating_sub(1);
+            }
+        }
+    }
+
     pub fn is_repository(&self) -> bool {
         matches!(self.purpose, Purpose::Repository(_, _))
     }
@@ -119,6 +144,7 @@ impl EditForm {
     pub fn start(action: EditAction, draft: Option<&InstructionEditDraft>) -> Self {
         let choices = draft.map(|draft| draft.choices.clone()).unwrap_or_default();
         let mut form = Self {
+            anchor: None,
             title: match action {
                 EditAction::Rename => "Rename resource",
                 EditAction::Addendum => "Create project addendum",
@@ -134,7 +160,7 @@ impl EditForm {
             selected: 0,
             picker: None,
             error: String::new(),
-            buttons: vec![FormButton::Submit],
+            buttons: vec![FormButton::Submit, FormButton::ReviewTarget],
             offset: 0,
             purpose: Purpose::Action(action),
             choices,
@@ -188,12 +214,13 @@ impl EditForm {
     }
     pub fn metadata(file: &InstructionEditFile, choices: &InstructionEditChoices) -> Self {
         let mut form = Self {
+            anchor: None,
             title: format!("Metadata: {}", file.path),
             fields: Vec::new(),
             selected: 0,
             picker: None,
             error: String::new(),
-            buttons: vec![FormButton::Submit],
+            buttons: vec![FormButton::Submit, FormButton::ReviewTarget],
             offset: 0,
             purpose: Purpose::Settings,
             choices: choices.clone(),
@@ -483,6 +510,7 @@ impl EditForm {
     }
     fn button(&mut self, button: FormButton) -> Option<Result<FormResult, String>> {
         match button {
+            FormButton::ReviewTarget => return Some(Ok(FormResult::ReviewTarget)),
             FormButton::Submit => return Some(self.submit()),
             FormButton::AddReference => {
                 self.fields.push(Field::choice(
@@ -729,6 +757,7 @@ fn availability(value: InstructionEditAvailability) -> &'static str {
     }
 }
 enum FormResult {
+    ReviewTarget,
     Repository(InstructionEditScope, InstructionRepositoryAction),
     Begin(InstructionEditAction),
     Metadata(InstructionEditMetadata),
@@ -756,8 +785,26 @@ impl InstructionManager {
                 }
             }
             Some(FormEvent::Submit(Ok(result))) => {
+                if matches!(result, FormResult::ReviewTarget) {
+                    self.review_local_values();
+                    return;
+                }
+                let stale = self.editing.form.as_ref().is_some_and(|form| {
+                    !form.is_repository()
+                        && form
+                            .anchor
+                            .as_ref()
+                            .is_some_and(|anchor| anchor != &self.form_anchor())
+                });
+                if stale || self.editing.resume_needed {
+                    if let Some(form) = &mut self.editing.form {
+                        form.error = "Target or draft changed. Use Review current target and retained values before applying this form.".into();
+                    }
+                    return;
+                }
                 self.editing.submitted_form = self.editing.form.take();
                 match result {
+                    FormResult::ReviewTarget => {}
                     FormResult::Repository(scope, action) => {
                         self.editing.queued =
                             Some(InstructionManagementRequest::PlanRepository { scope, action });

@@ -111,6 +111,74 @@ impl ManagerState {
             ));
         }
         match request {
+            InstructionManagementRequest::Recoveries => {
+                let mut list = InstructionRecoveryList {
+                    drafts: Vec::new(),
+                    operations: Vec::new(),
+                    errors: Vec::new(),
+                };
+                let global = service.global_repository().map(Some);
+                let project = context
+                    .working_dir
+                    .as_deref()
+                    .map(|path| service.resolve_project_repository(path))
+                    .transpose()
+                    .map(Option::flatten);
+                for repository in [global, project] {
+                    match repository {
+                        Ok(Some(repository)) => {
+                            match service.retained_drafts(&repository, &context.session_id) {
+                                Ok((drafts, errors)) => {
+                                    list.drafts.extend(drafts);
+                                    list.errors.extend(errors);
+                                }
+                                Err(error) => list.errors.push(error.to_string()),
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(error) => list.errors.push(error.to_string()),
+                    }
+                }
+                match service.retained_repository_operations(
+                    &context.session_id,
+                    context.working_dir.as_deref(),
+                ) {
+                    Ok((operations, errors)) => {
+                        list.operations = operations;
+                        list.errors.extend(errors);
+                    }
+                    Err(error) => list.errors.push(error.to_string()),
+                }
+                Ok(InstructionManagementResult::Recoveries(list))
+            }
+            InstructionManagementRequest::CompareDraft { draft, generation } => {
+                self.check_repository(service, &context)?;
+                Ok(InstructionManagementResult::DraftConflict(
+                    self.workspace
+                        .compare_current(service, &draft, generation)
+                        .map_err(repo_error)?,
+                ))
+            }
+            InstructionManagementRequest::ReconcileDraft {
+                draft,
+                generation,
+                comparison,
+                use_working_content,
+            } => {
+                self.check_repository(service, &context)?;
+                self.workspace
+                    .reconcile_current(
+                        service,
+                        &draft,
+                        generation,
+                        &comparison,
+                        use_working_content,
+                    )
+                    .map_err(repo_error)?;
+                self.warnings.push(format!("A new private draft uses the compared current source as its base and the explicitly selected content. Original draft {draft} is still preserved. No automatic text merge or source write occurred."));
+                Ok(InstructionManagementResult::Draft(self.snapshot()?))
+            }
+
             InstructionManagementRequest::RepositoryChoices { scope } => {
                 Ok(InstructionManagementResult::RepositoryChoices(
                     service
@@ -458,6 +526,10 @@ impl ManagerState {
             warnings: self.warnings.clone(),
             reviewed: record.validated,
             save_started: record.save_started,
+            committed: record
+                .outcome
+                .as_ref()
+                .map(|outcome| outcome.commit.clone()),
             choices: self.choices.clone(),
         })
     }

@@ -171,6 +171,45 @@ blindly repeated. Failed requests retain form values for correction and a new
 review. Seed recreation keeps old source and Git history in its named backup.
 Existing sessions continue to use their stored instructions throughout.
 
+## Retained drafts and unsent client values
+
+**Recover drafts and operations** lists retained server drafts and repository
+receipts for this session. Listing reads metadata without loading every draft
+body. Invalid records remain reported rather than hiding valid ones. Resume
+loads the exact private draft, not a new system prompt. A completed Save is
+recognized and shown as completed without creating another commit.
+
+For stale source, **Compare draft with current source** exposes complete opened,
+current-working and proposed versions. **Edit current source instead** creates a
+new private draft from the compared working version. **Keep proposed text on
+compared base** creates a new private draft retaining the proposal against that
+base. Neither choice automatically merges text or writes source. The original
+draft remains available, later source changes reject the comparison, and another
+validated Review/Save is required.
+
+Unsubmitted client forms and unacknowledged typed updates have separate private
+recovery capsules under the client's durable state. They are partitioned by
+session and client, so another client cannot overwrite them. A coalesced
+background writer preserves current intent before mutation transport, and
+orderly reload flushes the final values. **Recover local unsent changes** loads a
+retained capsule explicitly. Source actions, Save and network operations are
+never automatically replayed from it. A live owner prevents another client from
+adopting its unsent values.
+
+Reconnect preserves values and recovers the server draft. Retained forms bind to
+their exact original target/generation. If that changed, **Review current target
+and retained values** displays the current and retained values before an explicit
+rebind. Pending updates can likewise be reviewed and applied only to a private
+draft before another Save. Closing with unacknowledged values archives them before
+clearing the active client state, so the next edit cannot overwrite them.
+
+If local recovery storage fails, mutation dispatch blocks and reports the failure.
+Repair storage and choose **Retry local recovery storage** explicitly. Existing
+source, server drafts and any completed commits are not rolled back. Abrupt
+termination can recover the last successfully persisted client state; it cannot
+guarantee keystrokes that had not reached durable storage during a storage failure.
+No prompt-source watcher or runtime prompt-version state is involved.
+
 ## Detail views
 
 Select a resource, then press:

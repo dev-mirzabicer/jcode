@@ -1,9 +1,17 @@
 use super::App;
 use crate::instruction::inspection::{InspectionContext, InspectionWorker};
 use crate::protocol::{InstructionInspectionReply, InstructionInspectionRequest};
+use crate::tui::instruction_manager::editing::local_recovery::{
+    LocalRecoveryRequest, LocalRecoveryRow, LocalSnapshot, RecoveryStore,
+};
 use crate::tui::{backend::RemoteConnection, instruction_manager::InstructionManager};
 use crossterm::event::{KeyCode, KeyModifiers};
 use std::cell::RefCell;
+enum LocalRecoveryOutput {
+    Archived(String),
+    Listed(Vec<LocalRecoveryRow>),
+    Loaded(Box<LocalSnapshot>),
+}
 
 #[derive(Default)]
 pub(super) struct InstructionUi {
@@ -18,6 +26,14 @@ pub(super) struct InstructionUi {
     management_receiver: Option<(
         u64,
         tokio::sync::oneshot::Receiver<crate::protocol::InstructionManagementReply>,
+    )>,
+    recovery: Option<RecoveryStore>,
+    recovery_generation: u64,
+    had_local_intent: bool,
+    recovery_redraw: bool,
+    local_recovery_receiver: Option<(
+        String,
+        tokio::sync::oneshot::Receiver<Result<LocalRecoveryOutput, String>>,
     )>,
 }
 
@@ -80,10 +96,22 @@ impl App {
     }
 
     pub(super) fn reconnect_instruction_manager(&mut self, session: &str) {
-        if let Some(manager) = &self.instruction_ui.manager
-            && manager.borrow().visible
-        {
-            manager.borrow_mut().refresh(session);
+        if let Some(manager) = &self.instruction_ui.manager {
+            let mut manager = manager.borrow_mut();
+            if manager.session == session {
+                manager.suspend_editing_connection(&self.remote_client_instance_id);
+            } else {
+                if let Some(store) = &self.instruction_ui.recovery {
+                    store.schedule(
+                        &manager.session,
+                        LocalSnapshot::capture(&manager, &self.remote_client_instance_id),
+                    );
+                }
+                manager.editing = Default::default();
+            }
+            if manager.visible {
+                manager.refresh(session);
+            }
         }
     }
 
@@ -99,7 +127,9 @@ impl App {
     }
 
     pub(super) fn dispatch_local_instruction_request(&mut self) -> bool {
-        let mut changed = self.dispatch_local_instruction_management();
+        self.prepare_instruction_recovery();
+        let mut changed =
+            self.take_instruction_recovery_redraw() | self.dispatch_local_instruction_management();
         if let Some((id, receiver)) = self.instruction_ui.receiver.as_mut() {
             match receiver.try_recv() {
                 Ok(reply) => {
@@ -144,6 +174,7 @@ impl App {
         &mut self,
         remote: &mut RemoteConnection,
     ) {
+        self.prepare_instruction_recovery();
         self.dispatch_remote_instruction_management(remote).await;
         let Some(manager) = &self.instruction_ui.manager else {
             return;
@@ -193,7 +224,7 @@ impl App {
             return false;
         };
         let mut manager = manager.borrow_mut();
-        let accepted = manager.editing.accept(id, reply);
+        let accepted = manager.accept_management(id, reply);
         if accepted && closed && manager.visible {
             let session = manager.session.clone();
             manager.refresh(&session);
@@ -221,6 +252,9 @@ impl App {
                 }
                 Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
             }
+        }
+        if !self.prepare_instruction_recovery() {
+            return changed;
         }
         let Some(manager) = &self.instruction_ui.manager else {
             return changed;
@@ -250,6 +284,9 @@ impl App {
     }
 
     async fn dispatch_remote_instruction_management(&mut self, remote: &mut RemoteConnection) {
+        if !self.prepare_instruction_recovery() {
+            return;
+        }
         let Some(manager) = &self.instruction_ui.manager else {
             return;
         };
@@ -292,6 +329,7 @@ impl App {
         );
         let mut manager = manager.borrow_mut();
         manager.editing.wrapped.clear();
+        manager.editing.recovery_dirty = true;
         match result {
             Ok((path, Ok(body))) => {
                 manager.editing.status = format!(
@@ -329,5 +367,130 @@ impl App {
             }
         }
         true
+    }
+    fn prepare_instruction_recovery(&mut self) -> bool {
+        if let Some((expected_session, receiver)) = &mut self.instruction_ui.local_recovery_receiver
+        {
+            match receiver.try_recv() {
+                Ok(result) => {
+                    let expected_session = expected_session.clone();
+                    self.instruction_ui.local_recovery_receiver = None;
+                    self.instruction_ui.recovery_redraw = true;
+                    if let Some(manager) = &self.instruction_ui.manager {
+                        let mut manager = manager.borrow_mut();
+                        if manager.session != expected_session {
+                            return true;
+                        }
+                        match result {
+                            Ok(LocalRecoveryOutput::Archived(key)) => {
+                                manager.archived_local_intent(key)
+                            }
+                            Ok(LocalRecoveryOutput::Listed(rows)) => {
+                                manager.open_local_recovery_menu(rows)
+                            }
+                            Ok(LocalRecoveryOutput::Loaded(snapshot)) => {
+                                manager.restore_local_intent(*snapshot)
+                            }
+                            Err(error) => {
+                                manager.editing.status = error;
+                                manager.editing.failed = true;
+                                manager.editing.archiving = false;
+                            }
+                        }
+                    }
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    self.instruction_ui.local_recovery_receiver = None
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
+            }
+        }
+        let Some(manager) = &self.instruction_ui.manager else {
+            return true;
+        };
+        let mut manager = manager.borrow_mut();
+        let session = manager.session.clone();
+        if manager.editing.storage_blocked {
+            return false;
+        }
+        if manager.editing.queued.is_some() && !manager.editing.request_preserved {
+            manager.editing.recovery_dirty = true;
+            manager.editing.request_preserved = true;
+        }
+        let store = self.instruction_ui.recovery.get_or_insert_with(|| {
+            RecoveryStore::new(
+                crate::storage::durable_state_dir(),
+                self.remote_client_instance_id.clone(),
+            )
+        });
+        if let Some(key) = manager.editing.local_request.take() {
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            let store = store.clone();
+            let task_session = session.clone();
+            let archive = LocalSnapshot::capture(&manager, &self.remote_client_instance_id);
+            tokio::task::spawn_blocking(move || {
+                let result = match key {
+                    LocalRecoveryRequest::Load(key) => store
+                        .load(&task_session, &key)
+                        .map(Box::new)
+                        .map(LocalRecoveryOutput::Loaded),
+                    LocalRecoveryRequest::List => {
+                        store.list(&task_session).map(LocalRecoveryOutput::Listed)
+                    }
+                    LocalRecoveryRequest::Archive => archive
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("No local intent to preserve"))
+                        .and_then(|snapshot| store.archive(snapshot))
+                        .map(LocalRecoveryOutput::Archived),
+                };
+                let _ = sender
+                    .send(result.map_err(|error| format!("Local recovery failed: {error:#}")));
+            });
+            self.instruction_ui.local_recovery_receiver = Some((session.clone(), receiver));
+        }
+        if manager.editing.recovery_dirty {
+            let snapshot = LocalSnapshot::capture(&manager, &self.remote_client_instance_id);
+            let needed = snapshot.is_some();
+            if needed || self.instruction_ui.had_local_intent {
+                self.instruction_ui.recovery_generation = store.schedule(&session, snapshot);
+                self.instruction_ui.had_local_intent = needed;
+            }
+            manager.editing.recovery_dirty = false;
+        }
+        match store.ready(&session, self.instruction_ui.recovery_generation) {
+            Ok(ready) => ready,
+            Err(error) => {
+                manager.editing.status = error.to_string();
+                manager.editing.failed = true;
+                manager.editing.storage_blocked = true;
+                false
+            }
+        }
+    }
+
+    pub(super) fn take_instruction_recovery_redraw(&mut self) -> bool {
+        std::mem::take(&mut self.instruction_ui.recovery_redraw)
+    }
+
+    pub(super) fn flush_instruction_recovery(&self) {
+        let Some(manager) = &self.instruction_ui.manager else {
+            return;
+        };
+        let manager = manager.borrow();
+        let snapshot = LocalSnapshot::capture(&manager, &self.remote_client_instance_id);
+        let result = match &self.instruction_ui.recovery {
+            Some(store) => store.flush(&manager.session, snapshot),
+            None if snapshot.is_some() => RecoveryStore::new(
+                crate::storage::durable_state_dir(),
+                self.remote_client_instance_id.clone(),
+            )
+            .flush(&manager.session, snapshot),
+            None => return,
+        };
+        if let Err(error) = result {
+            crate::logging::error(&format!(
+                "Instruction client recovery flush failed: {error:#}"
+            ));
+        }
     }
 }

@@ -8,6 +8,7 @@ use super::*;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+mod recovery;
 const DRAFT_SCHEMA: u32 = 1;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -32,6 +33,7 @@ pub struct InstructionEditingDraft {
 pub struct InstructionDraftWorkspace {
     guard: Option<RepositoryMutationGuard>,
     attached: Option<InstructionEditingDraft>,
+    comparison: Option<recovery::ComparedDraft>,
 }
 
 impl InstructionDraftWorkspace {
@@ -119,10 +121,21 @@ impl InstructionDraftWorkspace {
         }
         let roots = service.roots()?;
         let _mutation = acquire_mutation_lease(&roots.durable_state, repository, id)?;
-        let record = service.read_editing_draft(repository, session_id, id)?;
+        let mut record = service.read_editing_draft(repository, session_id, id)?;
         let guard = acquire_draft_lease(&roots.durable_state, repository, id)?;
+        if record.outcome.is_none()
+            && let Some(commit) =
+                service.completed_operation_commit(repository, &record.request.operation_id)?
+        {
+            record.outcome = Some(InstructionCommitOutcome {
+                disposition: InstructionCommitDisposition::AlreadyCommitted,
+                commit,
+                changed_paths: super::mutation::affected_paths(&record.request.mutations),
+            });
+            service.write_editing_draft(&record)?;
+        }
         // Stale drafts must still open for comparison and recovery, not vanish.
-        self.guard = Some(guard);
+        self.guard = record.outcome.is_none().then_some(guard);
         self.attached = Some(record);
         self.attached
             .as_ref()
@@ -237,6 +250,7 @@ impl InstructionDraftWorkspace {
     pub fn close(&mut self) {
         self.attached = None;
         self.guard = None;
+        self.comparison = None;
     }
 
     pub fn discard(
@@ -353,14 +367,35 @@ impl InstructionRepositoryService {
     }
 }
 
-fn read_record_bytes(path: &Path) -> InstructionRepositoryResult<Vec<u8>> {
-    let metadata =
-        std::fs::symlink_metadata(path).map_err(|error| draft_error(&error.to_string()))?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() {
+fn read_record_file(path: &Path) -> InstructionRepositoryResult<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options
+        .open(path)
+        .map_err(|error| draft_error(&error.to_string()))?;
+    if !file
+        .metadata()
+        .map_err(|error| draft_error(&error.to_string()))?
+        .is_file()
+    {
         return Err(draft_error("Draft record must be a regular file"));
     }
-    std::fs::read(path).map_err(|error| draft_error(&error.to_string()))
+    Ok(file)
 }
+fn read_record_bytes(path: &Path) -> InstructionRepositoryResult<Vec<u8>> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    read_record_file(path)?
+        .read_to_end(&mut bytes)
+        .map_err(|error| draft_error(&error.to_string()))?;
+    Ok(bytes)
+}
+
 fn draft_error(detail: &str) -> InstructionRepositoryError {
     InstructionRepositoryError::new(
         InstructionRepositoryErrorKind::Configuration,

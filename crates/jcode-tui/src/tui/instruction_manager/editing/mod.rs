@@ -1,14 +1,23 @@
 //! Unsaved local intent and correlated manager mutation replies.
 pub(crate) mod external;
 mod forms;
+pub(crate) mod local_recovery;
 mod render;
 #[cfg(test)]
 mod tests;
 use super::*;
 use forms::EditForm;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum EditAction {
+    Recoveries,
+    RetryLocalStorage,
+    LocalRecoveries,
+    ReviewLocalValues,
+    CompareCurrent,
+    ReconcileProposed,
+    EditCurrent,
+    RetrySave,
     GlobalRepository,
     ProjectRepository,
     ApplyRepository,
@@ -49,6 +58,15 @@ pub(crate) struct EditorRequest {
 #[derive(Default)]
 pub(crate) struct EditingUi {
     pub visible: bool,
+    pub recovery_dirty: bool,
+    pub storage_blocked: bool,
+    pub request_preserved: bool,
+    pub suspended_request: Option<InstructionManagementRequest>,
+    pub resume_needed: bool,
+    pub local_request: Option<local_recovery::LocalRecoveryRequest>,
+    pub archiving: bool,
+    pub local_loaded: Option<local_recovery::LocalSnapshot>,
+    local_review_anchor: Option<forms::FormAnchor>,
     pub draft: Option<InstructionEditDraft>,
     pub queued: Option<InstructionManagementRequest>,
     pub pending: Option<(u64, String, InstructionManagementRequest)>,
@@ -69,13 +87,16 @@ pub(crate) struct EditingUi {
     pub recovery_id: Option<String>,
     pub repository_plan: Option<InstructionRepositoryPlan>,
     pub repository_receipt: Option<InstructionRepositoryReceipt>,
+    pub recoveries: Option<InstructionRecoveryList>,
+    pub conflict: Option<InstructionDraftConflict>,
 }
 impl EditingUi {
     fn busy(&self) -> bool {
-        self.queued.is_some() || self.pending.is_some() || self.editor.is_some()
+        self.archiving || self.queued.is_some() || self.pending.is_some() || self.editor.is_some()
     }
     pub fn reserve(&mut self, id: u64, session: &str) -> Option<InstructionManagementRequest> {
         let request = self.queued.take()?;
+        self.request_preserved = false;
         self.pending = Some((id, session.into(), request.clone()));
         self.failed = false;
         self.status = match &request {
@@ -94,6 +115,7 @@ impl EditingUi {
         }
         let matches_draft = |draft: &InstructionEditDraft| match request {
             InstructionManagementRequest::Begin { .. } => true,
+            InstructionManagementRequest::ReconcileDraft { draft: old, .. } => draft.id != *old,
             InstructionManagementRequest::Update {
                 draft: expected,
                 generation,
@@ -105,6 +127,16 @@ impl EditingUi {
             _ => false,
         };
         match &reply.result {
+            InstructionManagementResult::Recoveries(_)
+                if !matches!(request, InstructionManagementRequest::Recoveries) =>
+            {
+                return false;
+            }
+            InstructionManagementResult::DraftConflict(conflict) if !matches!(request, InstructionManagementRequest::CompareDraft { draft, generation } if draft == &conflict.draft && generation == &conflict.generation) =>
+            {
+                return false;
+            }
+
             InstructionManagementResult::RepositoryChoices(choices) if !matches!(request, InstructionManagementRequest::RepositoryChoices { scope } if scope == &choices.scope) =>
             {
                 return false;
@@ -140,8 +172,28 @@ impl EditingUi {
             _ => {}
         }
         self.pending = None;
+        self.recovery_dirty = true;
         self.wrapped.clear();
         match reply.result {
+            InstructionManagementResult::Recoveries(list) => {
+                self.status = "Choose retained unsaved work or inspect an operation receipt. No source action runs automatically.".into();
+                self.recoveries = Some(list);
+            }
+            InstructionManagementResult::DraftConflict(conflict) => {
+                self.document = format!(
+                    "STALE DRAFT COMPARISON\nCurrent HEAD: {}\nBranch: {}\n\nNothing was overwritten. Choose Edit current source to start from the external version, or Keep proposed text to retain your proposed text against this compared base. Both create a new private draft, preserve the original, and require another reviewed Save. No automatic text merge occurs.\n",
+                    conflict.head,
+                    conflict.branch.as_deref().unwrap_or("detached")
+                );
+                for file in &conflict.files {
+                    self.document.push_str(&format!("\nFILE {}\nOPENED BASE\n{}\nCURRENT WORKING SOURCE\n{}\nYOUR PROPOSED VERSION\n{}\n", file.path, file.base.as_deref().unwrap_or("(absent)"), file.working.as_deref().unwrap_or("(absent)"), file.proposed.as_deref().unwrap_or("(delete)")));
+                }
+                self.conflict = Some(conflict);
+                self.scroll = 0;
+                self.visible = true;
+                self.status = "Complete original, current and proposed versions. Actions offers explicit recovery choices.".into();
+            }
+
             InstructionManagementResult::RepositoryChoices(choices) => {
                 self.visible = true;
                 self.form = Some(EditForm::repository(choices));
@@ -193,14 +245,21 @@ impl EditingUi {
 
             InstructionManagementResult::Draft(draft) => {
                 self.submitted_form = None;
+                self.conflict = None;
                 self.visible = true;
                 self.review = None;
                 self.document.clear();
                 self.scroll = 0;
                 self.file_index = self.file_index.min(draft.files.len().saturating_sub(1));
                 self.recovery_id = Some(draft.id.clone());
+                let committed = draft.committed.clone();
                 self.draft = Some(draft);
                 self.status = "Unsaved draft. Edit body or metadata, then Review changes. Current instructions are unchanged.".into();
+                if let Some(commit) = committed {
+                    self.status = format!(
+                        "This draft already completed at {commit}. Source was not replayed. Close it and open a new edit for further changes."
+                    );
+                }
             }
             InstructionManagementResult::Reviewed(review) => {
                 self.status = if review.errors.is_empty() {
@@ -233,14 +292,21 @@ impl EditingUi {
                     commit,
                     paths.len()
                 );
+                self.suspended_request = None;
+                self.local_loaded = None;
                 self.document = self.status.clone();
                 self.review = None;
                 if let Some(draft) = &mut self.draft {
                     draft.save_started = true;
+                    draft.committed = Some(commit.clone());
                     draft.reviewed = false;
                 }
             }
             InstructionManagementResult::Closed | InstructionManagementResult::Discarded => {
+                self.suspended_request = None;
+                self.local_loaded = None;
+                self.resume_needed = false;
+                self.conflict = None;
                 self.draft = None;
                 self.review = None;
                 self.visible = false;
@@ -345,8 +411,34 @@ impl EditingUi {
 
 impl InstructionManager {
     pub(super) fn edit_action(&mut self, action: EditAction) {
+        if action == EditAction::RetryLocalStorage {
+            self.editing.storage_blocked = false;
+            self.editing.recovery_dirty = true;
+            self.editing.status =
+                "Retrying local recovery persistence before any pending source action.".into();
+            return;
+        }
+        if self.editing.storage_blocked {
+            self.editing.status = "Local recovery storage failed. Repair it and choose Retry local recovery storage. No pending source action was dispatched.".into();
+            return;
+        }
+        self.editing.recovery_dirty = true;
         if self.render_only {
             self.status = "Render-only fixture: no source operation is sent.".into();
+            return;
+        }
+        if self.editing.resume_needed
+            && matches!(
+                action,
+                EditAction::Body
+                    | EditAction::Metadata
+                    | EditAction::Save
+                    | EditAction::Review
+                    | EditAction::RetrySave
+            )
+        {
+            self.editing.status =
+                "Recover the server draft first; local values are preserved.".into();
             return;
         }
         if self.editing.busy() {
@@ -356,6 +448,37 @@ impl InstructionManager {
         }
         self.editing.wrapped.clear();
         match action {
+            EditAction::RetryLocalStorage => {}
+            EditAction::LocalRecoveries => {
+                self.editing.local_request = Some(local_recovery::LocalRecoveryRequest::List);
+            }
+            EditAction::ReviewLocalValues => self.review_local_values(),
+            EditAction::Recoveries => {
+                self.editing.queued = Some(InstructionManagementRequest::Recoveries);
+            }
+            EditAction::CompareCurrent => {
+                if let Some(draft) = &self.editing.draft {
+                    self.editing.queued = Some(InstructionManagementRequest::CompareDraft {
+                        draft: draft.id.clone(),
+                        generation: draft.generation,
+                    });
+                }
+            }
+            EditAction::ReconcileProposed | EditAction::EditCurrent => {
+                if self.editing.conflict.is_some() {
+                    self.editing.confirm = Some(action);
+                    self.editing.status = "Create a new private draft using the compared state? Y confirms. Original draft and source remain unchanged.".into();
+                }
+            }
+            EditAction::RetrySave => {
+                if let Some(draft) = &self.editing.draft {
+                    self.editing.queued = Some(InstructionManagementRequest::Save {
+                        draft: draft.id.clone(),
+                        generation: draft.generation,
+                    });
+                }
+            }
+
             EditAction::GlobalRepository | EditAction::ProjectRepository => {
                 self.editing.visible = true;
                 self.editing.queued = Some(InstructionManagementRequest::RepositoryChoices {
@@ -387,7 +510,9 @@ impl InstructionManager {
             | EditAction::Rename
             | EditAction::Addendum => {
                 self.editing.visible = true;
-                self.editing.form = Some(EditForm::start(action, self.editing.draft.as_ref()));
+                let mut form = EditForm::start(action, self.editing.draft.as_ref());
+                form.anchor = Some(self.form_anchor());
+                self.editing.form = Some(form);
             }
             EditAction::Open
             | EditAction::Redefine
@@ -418,7 +543,9 @@ impl InstructionManager {
                     && let Some(file) = draft.files.get(self.editing.file_index)
                     && !file.deleted
                 {
-                    self.editing.form = Some(EditForm::metadata(file, &draft.choices));
+                    let mut form = EditForm::metadata(file, &draft.choices);
+                    form.anchor = Some(self.form_anchor());
+                    self.editing.form = Some(form);
                 }
             }
             EditAction::Body => {
@@ -468,6 +595,13 @@ impl InstructionManager {
                 }
             }
             EditAction::Close => {
+                if self.editing.suspended_request.is_some() || self.editing.local_loaded.is_some() {
+                    self.editing.archiving = true;
+                    self.editing.local_request =
+                        Some(local_recovery::LocalRecoveryRequest::Archive);
+                    self.editing.status = "Preserving unsent local intent before closing…".into();
+                    return;
+                }
                 if self.editing.failed
                     && self.editing.submitted_form.is_some()
                     && self.editing.draft.is_none()
@@ -523,6 +657,7 @@ impl InstructionManager {
         });
     }
     pub(super) fn edit_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
+        self.editing.recovery_dirty |= self.editing.visible;
         if !self.editing.visible {
             return false;
         }
@@ -561,6 +696,19 @@ impl InstructionManager {
                     self.editing.confirm = None;
                     self.editing.document.clear();
                     match action {
+                        EditAction::ReviewLocalValues => self.apply_local_values(),
+                        EditAction::ReconcileProposed | EditAction::EditCurrent => {
+                            if let Some(conflict) = &self.editing.conflict {
+                                self.editing.queued =
+                                    Some(InstructionManagementRequest::ReconcileDraft {
+                                        draft: conflict.draft.clone(),
+                                        generation: conflict.generation,
+                                        comparison: conflict.comparison.clone(),
+                                        use_working_content: action == EditAction::EditCurrent,
+                                    });
+                            }
+                        }
+
                         EditAction::ApplyRepository => {
                             self.edit_action(EditAction::ApplyRepository)
                         }
@@ -596,7 +744,10 @@ impl InstructionManager {
                     }
                 }
                 KeyCode::Esc | KeyCode::Enter | KeyCode::Char('n' | 'N') => {
-                    if action == EditAction::ApplyRepository {
+                    if matches!(
+                        action,
+                        EditAction::ApplyRepository | EditAction::ReviewLocalValues
+                    ) {
                         self.editing.form = self.editing.submitted_form.take();
                         self.editing.confirm = None;
                         self.editing.document.clear();
@@ -654,6 +805,7 @@ impl InstructionManager {
         true
     }
     pub(super) fn edit_paste(&mut self, text: &str) -> bool {
+        self.editing.recovery_dirty |= self.editing.visible;
         if !self.editing.visible {
             return false;
         }
@@ -866,18 +1018,50 @@ impl InstructionManager {
                 ),
             ];
         }
+        if draft.is_some() {
+            entries.extend([
+                (EditAction::CompareCurrent, "Compare draft with current source", "Read complete opened, current and proposed versions without changing files", "choose"),
+                (EditAction::ReconcileProposed, "Keep proposed text on compared base", "Create a new private draft; external changes are not automatically merged", "choose"),
+                (EditAction::EditCurrent, "Edit current source instead", "Start a new private draft from the compared working version, preserving the original draft", "choose"),
+                (EditAction::RetrySave, "Recover previous Save", "Retry the same durable Save identity, never a guessed new commit", "choose"),
+            ]);
+        } else if !entries
+            .iter()
+            .any(|(action, _, _, _)| *action == EditAction::Recoveries)
+        {
+            entries.push((
+                EditAction::Recoveries,
+                "Recover drafts and operations",
+                "Find this session's retained drafts and receipts",
+                "choose",
+            ));
+        }
+        entries.push((
+            EditAction::LocalRecoveries,
+            "Recover local unsent changes",
+            "Recover this client's retained form/editor intent without replaying source actions",
+            "choose",
+        ));
+        if self.editing.local_loaded.is_some() || self.editing.suspended_request.is_some() {
+            entries.push((EditAction::ReviewLocalValues, "Review retained local values", "Compare local intent with the current draft or inspected target before applying it", "choose"));
+        }
+        if self.editing.storage_blocked {
+            entries.insert(0, (EditAction::RetryLocalStorage, "Retry local recovery storage", "After repairing storage, explicitly resume persistence before the pending action", "choose"));
+        }
         entries.into_iter().map(|(action, label, hint, key)| {
-            let disabled = if self.editing.busy() { Some("Wait for the current operation; its receipt is preserved.".into()) }
+            let disabled = if action == EditAction::RetryLocalStorage { None } else if self.editing.busy() { Some("Wait for the current operation; its receipt is preserved.".into()) }
+            else if matches!(action, EditAction::ReconcileProposed | EditAction::EditCurrent) && self.editing.conflict.is_none() { Some("Compare the draft with current source first.".into()) }
+            else if action == EditAction::RetrySave && draft.is_none_or(|draft| !draft.save_started) { Some("No previous Save needs recovery.".into()) }
             else if action == EditAction::RepositoryReceipt && self.editing.repository_plan.is_none() { Some("No repository operation has been prepared in this manager.".into()) }
             else if self.editing.visible {
-                if matches!(action, EditAction::Close | EditAction::GlobalRepository | EditAction::ProjectRepository | EditAction::RepositoryReceipt) { None }
+                if matches!(action, EditAction::LocalRecoveries | EditAction::ReviewLocalValues | EditAction::Recoveries | EditAction::Close | EditAction::GlobalRepository | EditAction::ProjectRepository | EditAction::RepositoryReceipt) { None }
                 else if draft.is_none() { Some("No attached draft. Close this view or recover its retained draft.".into()) }
                 else if action == EditAction::Save && draft.is_some_and(|draft| !draft.reviewed || draft.branch.is_none()) { Some("Review this exact draft successfully on an attached branch before Save.".into()) }
                 else if matches!(action, EditAction::Diff | EditAction::Preview) && self.editing.review.is_none() { Some("Review changes first.".into()) }
                 else if draft.is_some_and(|draft| draft.save_started) && matches!(action, EditAction::Body | EditAction::Metadata) { Some("This Save has started or completed. Resolve its receipt, then open a new edit.".into()) }
                 else { None }
             } else if self.snapshot.is_none() || self.rows_loading() { Some("Refresh source inspection before choosing an edit target.".into()) }
-            else if matches!(action, EditAction::GlobalRepository | EditAction::ProjectRepository | EditAction::RepositoryReceipt | EditAction::CreateGlobal | EditAction::CreateProject | EditAction::GlobalSettings | EditAction::ProjectSettings) { None }
+            else if matches!(action, EditAction::LocalRecoveries | EditAction::ReviewLocalValues | EditAction::Recoveries | EditAction::GlobalRepository | EditAction::ProjectRepository | EditAction::RepositoryReceipt | EditAction::CreateGlobal | EditAction::CreateProject | EditAction::GlobalSettings | EditAction::ProjectSettings) { None }
             else if row.is_none_or(|row| row.origin != InstructionOrigin::Managed) { Some("Select a managed resource. External skills use Copy; ecosystem files retain separate ownership.".into()) }
             else if action == EditAction::Redefine && row.is_some_and(|row| row.scope != "global" || matches!(row.kind.as_str(), "model-roster" | "store-settings")) { Some("Select a global instruction, not global-only model policy or store settings.".into()) }
             else if action == EditAction::Addendum && row.is_some_and(|row| row.kind != "agent") { Some("Select the agent that should receive the addendum.".into()) }
@@ -898,6 +1082,95 @@ impl InstructionManager {
             parent: None,
             explanation: false,
             explanation_scroll: 0,
+        });
+    }
+}
+
+#[derive(Clone)]
+pub(super) enum RecoveryChoice {
+    Local(String),
+    Draft(InstructionEditScope, String),
+    Operation(String),
+}
+impl InstructionManager {
+    pub(crate) fn accept_management(&mut self, id: u64, reply: InstructionManagementReply) -> bool {
+        let resumed = self
+            .editing
+            .pending
+            .as_ref()
+            .is_some_and(|(_, _, request)| {
+                matches!(request, InstructionManagementRequest::Resume { .. })
+            });
+        let is_recovery = matches!(reply.result, InstructionManagementResult::Recoveries(_));
+        if !self.editing.accept(id, reply) {
+            return false;
+        }
+        if is_recovery {
+            self.open_recovery_menu();
+        }
+        if resumed && !self.editing.failed {
+            self.complete_local_resume();
+        }
+        true
+    }
+    fn open_recovery_menu(&mut self) {
+        use super::menu::{Menu, MenuAction, MenuItem};
+        let Some(list) = &self.editing.recoveries else {
+            return;
+        };
+        let mut items = Vec::new();
+        for draft in &list.drafts {
+            items.push(MenuItem { label: format!("{:?}: {} [{}]", draft.scope, draft.subject, draft.id.chars().take(8).collect::<String>()), hint: format!("Draft {} · generation {} · Save started: {} · Commit: {}. Resume does not Save or activate instructions.", draft.id, draft.generation, draft.save_started, draft.committed.as_deref().unwrap_or("none")), key: "Enter".into(), action: MenuAction::Recovery(RecoveryChoice::Draft(draft.scope, draft.id.clone())), disabled: self.editing.draft.as_ref().map(|_| "Close the current draft before resuming another.".into()) });
+        }
+        for operation in &list.operations {
+            items.push(MenuItem { label: format!("Receipt: {} [{}]", operation.title, operation.id.chars().take(8).collect::<String>()), hint: format!("Started: {} · Completed: {}. Read the durable receipt without executing the operation.", operation.started, operation.completed), key: "Enter".into(), action: MenuAction::Recovery(RecoveryChoice::Operation(operation.id.clone())), disabled: None });
+        }
+        for error in &list.errors {
+            items.push(MenuItem {
+                label: "Recovery record needs inspection".into(),
+                hint: error.clone(),
+                key: "?".into(),
+                action: MenuAction::Key(KeyCode::Esc),
+                disabled: Some(error.clone()),
+            });
+        }
+        if items.is_empty() {
+            items.push(MenuItem {
+                label: "No retained drafts or operations for this session".into(),
+                hint: "Escape returns without changing source.".into(),
+                key: "Esc".into(),
+                action: MenuAction::Key(KeyCode::Esc),
+                disabled: None,
+            });
+        }
+        self.menu = Some(Menu {
+            title: "Retained drafts and operations".into(),
+            items,
+            query: String::new(),
+            selected: 0,
+            context: self.selected_target(),
+            snapshot: self.snapshot_id(),
+            revision: None,
+            parent: None,
+            explanation: false,
+            explanation_scroll: 0,
+        });
+    }
+    pub(super) fn choose_recovery(&mut self, choice: RecoveryChoice) {
+        self.editing.recovery_dirty = true;
+        self.editing.visible = true;
+        if let RecoveryChoice::Local(key) = choice {
+            self.editing.local_request = Some(local_recovery::LocalRecoveryRequest::Load(key));
+            return;
+        }
+        self.editing.queued = Some(match choice {
+            RecoveryChoice::Local(_) => return,
+            RecoveryChoice::Draft(scope, draft) => {
+                InstructionManagementRequest::Resume { scope, draft }
+            }
+            RecoveryChoice::Operation(operation_id) => {
+                InstructionManagementRequest::RepositoryReceipt { operation_id }
+            }
         });
     }
 }

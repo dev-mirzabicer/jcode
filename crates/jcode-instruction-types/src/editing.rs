@@ -97,6 +97,7 @@ pub struct InstructionEditDraft {
     pub warnings: Vec<String>,
     pub reviewed: bool,
     pub save_started: bool,
+    pub committed: Option<String>,
     pub choices: InstructionEditChoices,
 }
 
@@ -156,6 +157,17 @@ pub enum InstructionDraftChange {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case")]
 pub enum InstructionManagementRequest {
+    Recoveries,
+    CompareDraft {
+        draft: String,
+        generation: u64,
+    },
+    ReconcileDraft {
+        draft: String,
+        generation: u64,
+        comparison: String,
+        use_working_content: bool,
+    },
     RepositoryChoices {
         scope: InstructionEditScope,
     },
@@ -233,6 +245,8 @@ pub struct InstructionManagementFailure {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "result", content = "data", rename_all = "snake_case")]
 pub enum InstructionManagementResult {
+    Recoveries(super::InstructionRecoveryList),
+    DraftConflict(super::InstructionDraftConflict),
     RepositoryChoices(super::InstructionRepositoryChoices),
     RepositoryPlan(super::InstructionRepositoryPlan),
     RepositoryReceipt(super::InstructionRepositoryReceipt),
