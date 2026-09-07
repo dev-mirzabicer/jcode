@@ -29,5 +29,18 @@
   "complete_journal_aware_replay_unchanged": true,
   "manager_inference_requests": 0,
   "localhost_bootstrap_requests": 1,
-  "artifact": "/Users/mirzabicer/.jcode/scratch/wp10/activated-live/live-p0idk3ap"
+  "artifact": "/Users/mirzabicer/.jcode/scratch/wp10/activated-live/live-p0idk3ap",
+  "final_runtime": {
+    "version": "jcode v0.75.211-dev (8f56ad57a, dirty)",
+    "identity": "8f56ad57a-dirty-efbe29180b11",
+    "current_shared_equal": true,
+    "canary_passed": true,
+    "tail_verification": {
+      "help_and_contextual_actions": true,
+      "direct_close_detaches_inflight_review": true,
+      "source_index_head_unchanged": true,
+      "manager_inference_requests": 0,
+      "artifact": "/Users/mirzabicer/.jcode/scratch/wp10/final-tail/live-suj57kjr"
+    }
+  }
 }

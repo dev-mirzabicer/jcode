@@ -2,7 +2,7 @@
 
 **Status:** Candidate verification. WP-10 has not been accepted by Mirza.
 
-**Implementation boundary:** `712d37527`, activated as `712d37527-dirty-5dc65a98bd61`, `jcode v0.75.209-dev`. Later changes to the acceptance probe and supplemental tests do not change runtime behavior.
+**Final activated boundary:** `8f56ad57a`, runtime `8f56ad57a-dirty-efbe29180b11`, `jcode v0.75.211-dev`. Full combined acceptance ran at `712d37527`; the subsequent help/close-race changes have focused tests and an activated production TUI smoke. These boundaries are recorded separately, not conflated.
 
 This record covers editing, Git operations, repository setup and recovery. The earlier read-only inspection record remains [INSTRUCTION_MANAGER_ACCEPTANCE.md](INSTRUCTION_MANAGER_ACCEPTANCE.md). Current user behavior is documented in [INSTRUCTION_MANAGER.md](../INSTRUCTION_MANAGER.md).
 
@@ -110,3 +110,5 @@ Human acceptance of the activated manager and permission to integrate/publish re
 ## Final review tail
 
 The final UI review corrected stale read-only help and made `?` open contextual draft actions. A direct Q-close racing an accepted update now retains the reply and then detaches the server draft, rather than retaining its lease behind a closed view. The new race/help tests and the full 42-test manager family pass. Strict base/TUI all-target lint also passes, including the supplemental resource-action journey. These are runtime-tail changes, not a claim that the earlier full live run used this later source.
+
+Final activation and tail smoke passed at `8f56ad57a-dirty-efbe29180b11`: current/shared equality, canary, complete editing help, contextual Draft actions, and direct close detaching an in-flight review. Source/index/HEAD stayed unchanged and no inference request occurred. Artifacts: `$HOME/.jcode/scratch/wp10/final-tail/live-suj57kjr`. Initial smoke attempts encountered first-run overlays and an incorrect menu-title expectation; the actual UI was inspected, the probe assumptions corrected, and the complete tail passed. Only this evidence documentation differs from activated source after the final record commit.
