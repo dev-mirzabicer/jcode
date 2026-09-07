@@ -1,4 +1,5 @@
 //! One read-only state machine for wide and narrow local/remote inspection.
+pub(crate) mod editing;
 mod menu;
 mod render;
 use menu::{FilterField, Menu};
@@ -25,6 +26,7 @@ pub(crate) struct Pending {
 }
 
 pub(crate) struct InstructionManager {
+    pub editing: editing::EditingUi,
     pub visible: bool,
     pub session: String,
     pub snapshot: Option<InstructionInspectionSnapshot>,
@@ -80,6 +82,7 @@ impl InstructionManager {
             ..Default::default()
         };
         Self {
+            editing: editing::EditingUi::default(),
             visible: true,
             session,
             snapshot: None,
@@ -529,6 +532,9 @@ impl InstructionManager {
             menu.selected = 0;
             return true;
         }
+        if self.edit_paste(text) {
+            return true;
+        }
         if self.search_editing {
             self.filter.search.insert_str(self.search_cursor, text);
             self.search_cursor += text.len();
@@ -553,6 +559,13 @@ impl InstructionManager {
         }
         if self.menu.is_some() {
             self.menu_key(code, modifiers);
+            return true;
+        }
+        if self.edit_key(code, modifiers) {
+            return true;
+        }
+        if code == KeyCode::Char('e') && modifiers.contains(KeyModifiers::CONTROL) {
+            self.edit_action(editing::EditAction::Open);
             return true;
         }
         if code == KeyCode::Char('p')
@@ -809,6 +822,9 @@ impl InstructionManager {
                 }
                 _ => {}
             }
+            return;
+        }
+        if self.edit_mouse(event) {
             return;
         }
         if self.help {

@@ -1,0 +1,742 @@
+//! Unsaved local intent and correlated manager mutation replies.
+pub(crate) mod external;
+mod forms;
+mod render;
+#[cfg(test)]
+mod tests;
+use super::*;
+use forms::EditForm;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EditAction {
+    Open,
+    CreateGlobal,
+    CreateProject,
+    Redefine,
+    Addendum,
+    Rename,
+    Clear,
+    Delete,
+    Restore,
+    CommitExternal,
+    GlobalSettings,
+    ProjectSettings,
+    Body,
+    Metadata,
+    Review,
+    Save,
+    Close,
+    Discard,
+    NextFile,
+    PreviousFile,
+    Diff,
+    Preview,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct EditorRequest {
+    pub draft: String,
+    pub generation: u64,
+    pub file: String,
+    pub body: String,
+    pub repair: bool,
+}
+
+#[derive(Default)]
+pub(crate) struct EditingUi {
+    pub visible: bool,
+    pub draft: Option<InstructionEditDraft>,
+    pub queued: Option<InstructionManagementRequest>,
+    pub pending: Option<(u64, String, InstructionManagementRequest)>,
+    pub review: Option<InstructionEditReview>,
+    pub editor: Option<EditorRequest>,
+    pub status: String,
+    pub file_index: usize,
+    pub scroll: usize,
+    pub document: String,
+    pub wrapped: Vec<String>,
+    pub wrap_width: u16,
+    form: Option<EditForm>,
+    submitted_form: Option<EditForm>,
+    pub hits: Vec<(Rect, EditAction)>,
+    pub field_hits: Vec<(Rect, usize)>,
+    pub confirm: Option<EditAction>,
+    pub failed: bool,
+    pub recovery_id: Option<String>,
+}
+impl EditingUi {
+    fn busy(&self) -> bool {
+        self.queued.is_some() || self.pending.is_some() || self.editor.is_some()
+    }
+    pub fn reserve(&mut self, id: u64, session: &str) -> Option<InstructionManagementRequest> {
+        let request = self.queued.take()?;
+        self.pending = Some((id, session.into(), request.clone()));
+        self.failed = false;
+        self.status = match &request {
+            InstructionManagementRequest::Save { .. } => "Saving reviewed instructions. Closing or losing the connection does not undo a published commit.".into(),
+            InstructionManagementRequest::Review { .. } => "Validating complete draft and affected consumers…".into(),
+            _ => "Preparing instruction edit…".into(),
+        };
+        Some(request)
+    }
+    pub fn accept(&mut self, id: u64, reply: InstructionManagementReply) -> bool {
+        let Some((expected_id, session, request)) = &self.pending else {
+            return false;
+        };
+        if id != *expected_id || &reply.session_id != session {
+            return false;
+        }
+        let matches_draft = |draft: &InstructionEditDraft| match request {
+            InstructionManagementRequest::Begin { .. } => true,
+            InstructionManagementRequest::Update {
+                draft: expected,
+                generation,
+                ..
+            } => &draft.id == expected && draft.generation == generation.saturating_add(1),
+            InstructionManagementRequest::Resume {
+                draft: expected, ..
+            } => &draft.id == expected,
+            _ => false,
+        };
+        match &reply.result {
+            InstructionManagementResult::Draft(draft) if !matches_draft(draft) => return false,
+            InstructionManagementResult::Reviewed(review) if !matches!(request, InstructionManagementRequest::Review { draft, generation } if draft == &review.draft.id && generation == &review.draft.generation) =>
+            {
+                return false;
+            }
+            InstructionManagementResult::Saved { draft: actual, .. } if !matches!(request, InstructionManagementRequest::Save { draft, .. } if draft == actual) =>
+            {
+                return false;
+            }
+            InstructionManagementResult::Closed
+                if !matches!(request, InstructionManagementRequest::Close) =>
+            {
+                return false;
+            }
+            InstructionManagementResult::Discarded
+                if !matches!(request, InstructionManagementRequest::Discard { .. }) =>
+            {
+                return false;
+            }
+            _ => {}
+        }
+        self.pending = None;
+        self.wrapped.clear();
+        match reply.result {
+            InstructionManagementResult::Draft(draft) => {
+                self.submitted_form = None;
+                self.visible = true;
+                self.review = None;
+                self.document.clear();
+                self.scroll = 0;
+                self.file_index = self.file_index.min(draft.files.len().saturating_sub(1));
+                self.recovery_id = Some(draft.id.clone());
+                self.draft = Some(draft);
+                self.status = "Unsaved draft. Edit body or metadata, then Review changes. Current instructions are unchanged.".into();
+            }
+            InstructionManagementResult::Reviewed(review) => {
+                self.status = if review.errors.is_empty() {
+                    "Validated draft. Review the complete diff, then Save once to commit locally."
+                        .into()
+                } else {
+                    "Validation failed. Source is unchanged and the draft is preserved. Repair the listed files, then Review again.".into()
+                };
+                self.failed = !review.errors.is_empty();
+                self.draft = Some(review.draft.clone());
+                self.review = Some(review);
+                self.show_diff();
+            }
+            InstructionManagementResult::Saved {
+                commit,
+                no_change,
+                recovered,
+                paths,
+                ..
+            } => {
+                self.status = format!(
+                    "{} at {}. {} owned path(s). Nothing pushed or committed in the parent project. Current session instructions are unchanged.",
+                    if no_change {
+                        "No change"
+                    } else if recovered {
+                        "Recovered completed Save"
+                    } else {
+                        "Committed"
+                    },
+                    commit,
+                    paths.len()
+                );
+                self.document = self.status.clone();
+                self.review = None;
+                if let Some(draft) = &mut self.draft {
+                    draft.save_started = true;
+                    draft.reviewed = false;
+                }
+            }
+            InstructionManagementResult::Closed | InstructionManagementResult::Discarded => {
+                self.draft = None;
+                self.review = None;
+                self.visible = false;
+                self.form = None;
+                self.document.clear();
+                self.status = "Draft closed. No automatic Save.".into();
+            }
+            InstructionManagementResult::Failed(error) => {
+                self.failed = true;
+                if let Some(mut form) = self.submitted_form.take() {
+                    form.error = error.detail.clone();
+                    self.form = Some(form);
+                }
+                self.recovery_id = error
+                    .draft
+                    .or_else(|| self.draft.as_ref().map(|draft| draft.id.clone()));
+                self.status = format!(
+                    "{}: {}\n{}{}",
+                    error.operation,
+                    error.detail,
+                    if error.source_unchanged {
+                        "Authoritative source was not changed."
+                    } else {
+                        "The operation may have completed some writes. Inspect source and its receipt before retrying."
+                    },
+                    self.recovery_id
+                        .as_ref()
+                        .map(|id| format!(" Draft retained: {id}"))
+                        .unwrap_or_default()
+                );
+                self.document = self.status.clone();
+                self.scroll = 0;
+            }
+        }
+        true
+    }
+    fn show_diff(&mut self) {
+        self.document.clear();
+        self.scroll = 0;
+        let Some(review) = &self.review else { return };
+        self.document.push_str(&format!(
+            "REVIEWED LOCAL COMMIT\n{}\nRepository: {}\nBranch: {}\n\n",
+            review.draft.subject,
+            review.draft.repository,
+            review
+                .draft
+                .branch
+                .as_deref()
+                .unwrap_or("DETACHED: Save unavailable")
+        ));
+        for warning in &review.draft.warnings {
+            self.document.push_str(&format!("{warning}\n"));
+        }
+        for error in &review.errors {
+            self.document.push_str(&format!("ERROR: {error}\n"));
+        }
+        for file in &review.files {
+            self.document.push_str(&format!("\nFILE {}\n", file.path));
+            let before = file.committed.as_deref().unwrap_or_default();
+            let after = file.proposed.as_deref().unwrap_or_default();
+            let diff = similar::TextDiff::from_lines(before, after);
+            self.document.push_str(
+                &diff
+                    .unified_diff()
+                    .header(
+                        &format!("HEAD/{}", file.path),
+                        &format!("draft/{}", file.path),
+                    )
+                    .to_string(),
+            );
+            if file.working != file.committed {
+                self.document
+                    .push_str("\nEXTERNAL WORKING CHANGES: draft versus current working file\n");
+                self.document.push_str(
+                    &similar::TextDiff::from_lines(
+                        file.working.as_deref().unwrap_or_default(),
+                        after,
+                    )
+                    .unified_diff()
+                    .header("working", "draft")
+                    .to_string(),
+                );
+            }
+        }
+    }
+    fn show_previews(&mut self) {
+        self.document = self
+            .review
+            .as_ref()
+            .map(|review| {
+                review
+                    .previews
+                    .iter()
+                    .map(|preview| format!("{}\n\n{}", preview.title, preview.content))
+                    .collect::<Vec<_>>()
+                    .join("\n\n")
+            })
+            .unwrap_or_else(|| "Review the draft to render affected previews.".into());
+        self.scroll = 0;
+    }
+}
+
+impl InstructionManager {
+    pub(super) fn edit_action(&mut self, action: EditAction) {
+        if self.render_only {
+            self.status = "Render-only fixture: no source operation is sent.".into();
+            return;
+        }
+        if self.editing.busy() {
+            self.editing.status =
+                "Wait for the current edit operation. Its draft and receipt are preserved.".into();
+            return;
+        }
+        self.editing.wrapped.clear();
+        match action {
+            EditAction::CreateGlobal
+            | EditAction::CreateProject
+            | EditAction::Rename
+            | EditAction::Addendum => {
+                self.editing.visible = true;
+                self.editing.form = Some(EditForm::start(action, self.editing.draft.as_ref()));
+            }
+            EditAction::Open
+            | EditAction::Redefine
+            | EditAction::CommitExternal
+            | EditAction::GlobalSettings
+            | EditAction::ProjectSettings => {
+                let operation = match action {
+                    EditAction::Redefine => InstructionEditAction::RedefineInProject,
+                    EditAction::CommitExternal => InstructionEditAction::CommitExternal,
+                    EditAction::GlobalSettings => InstructionEditAction::Settings {
+                        scope: InstructionEditScope::Global,
+                    },
+                    EditAction::ProjectSettings => InstructionEditAction::Settings {
+                        scope: InstructionEditScope::Project,
+                    },
+                    _ => InstructionEditAction::Edit,
+                };
+                self.begin_edit(operation);
+            }
+            EditAction::Clear | EditAction::Delete | EditAction::Restore | EditAction::Discard => {
+                self.editing.visible = true;
+                self.editing.confirm = Some(action);
+                self.editing.document = match action { EditAction::Clear => "Clear the selected body? Identity remains, and empty project instructions suppress global prose. You will review the diff before committing.", EditAction::Delete => "Delete this user resource? Project deletion reveals global guidance. Referencing files must be repaired in the same reviewed commit. Nothing is written until Save.", EditAction::Restore => "Restore this selected Git revision through a new reviewed commit? Other files and parent history remain untouched.", _ => "Discard the unsaved draft? This removes its recovery record. It does not undo a completed Save or external working changes." }.into();
+                self.editing.scroll = 0;
+            }
+            EditAction::Metadata => {
+                if let Some(draft) = &self.editing.draft
+                    && let Some(file) = draft.files.get(self.editing.file_index)
+                    && !file.deleted
+                {
+                    self.editing.form = Some(EditForm::metadata(file, &draft.choices));
+                }
+            }
+            EditAction::Body => {
+                if let Some(draft) = &self.editing.draft
+                    && let Some(file) = draft.files.get(self.editing.file_index)
+                    && !file.deleted
+                {
+                    match &file.metadata {
+                        InstructionEditMetadata::Resource(_)
+                        | InstructionEditMetadata::Damaged { .. }
+                        | InstructionEditMetadata::Ecosystem => {
+                            self.editing.editor = Some(EditorRequest {
+                                draft: draft.id.clone(),
+                                generation: draft.generation,
+                                file: file.key.clone(),
+                                body: file.body.clone(),
+                                repair: matches!(
+                                    file.metadata,
+                                    InstructionEditMetadata::Damaged { .. }
+                                ),
+                            })
+                        }
+                        _ => self.editing.status =
+                            "Use typed metadata fields for repository settings and model aliases."
+                                .into(),
+                    }
+                }
+            }
+            EditAction::Review | EditAction::Save => {
+                if let Some(draft) = &self.editing.draft {
+                    if action == EditAction::Save && (!draft.reviewed || draft.branch.is_none()) {
+                        self.editing.status =
+                            "Save needs a validated reviewed draft on an attached branch.".into();
+                        return;
+                    }
+                    self.editing.queued = Some(if action == EditAction::Review {
+                        InstructionManagementRequest::Review {
+                            draft: draft.id.clone(),
+                            generation: draft.generation,
+                        }
+                    } else {
+                        InstructionManagementRequest::Save {
+                            draft: draft.id.clone(),
+                            generation: draft.generation,
+                        }
+                    });
+                }
+            }
+            EditAction::Close => {
+                self.editing.queued = self
+                    .editing
+                    .draft
+                    .as_ref()
+                    .map(|_| InstructionManagementRequest::Close);
+                if self.editing.draft.is_none() {
+                    self.editing.visible = false;
+                    self.editing.form = None;
+                }
+            }
+            EditAction::NextFile | EditAction::PreviousFile => {
+                let count = self
+                    .editing
+                    .draft
+                    .as_ref()
+                    .map_or(0, |draft| draft.files.len());
+                if count > 0 {
+                    self.editing.file_index = if action == EditAction::NextFile {
+                        (self.editing.file_index + 1) % count
+                    } else {
+                        (self.editing.file_index + count - 1) % count
+                    };
+                    self.editing.document.clear();
+                    self.editing.scroll = 0;
+                }
+            }
+            EditAction::Diff => self.editing.show_diff(),
+            EditAction::Preview => self.editing.show_previews(),
+        }
+    }
+    fn begin_edit(&mut self, action: InstructionEditAction) {
+        let Some(snapshot) = &self.snapshot else {
+            self.status = "Refresh inspection before editing.".into();
+            return;
+        };
+        let target = self
+            .selected_target()
+            .unwrap_or(InstructionInspectionTarget::Session);
+        self.editing.visible = true;
+        self.editing.queued = Some(InstructionManagementRequest::Begin {
+            snapshot: snapshot.snapshot.clone(),
+            target,
+            action,
+        });
+    }
+    pub(super) fn edit_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
+        if !self.editing.visible {
+            return false;
+        }
+        if self.editing.form.is_some() {
+            self.edit_form_key(code, modifiers);
+            return true;
+        }
+        if let Some(action) = self.editing.confirm {
+            match code {
+                KeyCode::Down | KeyCode::PageDown => {
+                    self.editing.scroll =
+                        self.editing
+                            .scroll
+                            .saturating_add(if code == KeyCode::PageDown {
+                                self.detail_height.max(1)
+                            } else {
+                                1
+                            });
+                    return true;
+                }
+                KeyCode::Up | KeyCode::PageUp => {
+                    self.editing.scroll =
+                        self.editing
+                            .scroll
+                            .saturating_sub(if code == KeyCode::PageUp {
+                                self.detail_height.max(1)
+                            } else {
+                                1
+                            });
+                    return true;
+                }
+                _ => {}
+            }
+            match code {
+                KeyCode::Char('y' | 'Y') => {
+                    self.editing.confirm = None;
+                    self.editing.document.clear();
+                    match action {
+                        EditAction::Clear => self.begin_edit(InstructionEditAction::Clear),
+                        EditAction::Delete => self.begin_edit(InstructionEditAction::Delete),
+                        EditAction::Restore => {
+                            if let Some(revision) = self
+                                .revision_selection
+                                .as_ref()
+                                .map(|selection| selection.from.clone())
+                                .or_else(|| {
+                                    self.history
+                                        .get(self.history_selected)
+                                        .map(|entry| entry.commit.clone())
+                                })
+                            {
+                                self.begin_edit(InstructionEditAction::Restore { revision });
+                            } else {
+                                self.editing.status =
+                                    "Select a revision in Git history first.".into();
+                                self.editing.visible = false;
+                            }
+                        }
+                        EditAction::Discard => {
+                            if let Some(draft) = &self.editing.draft {
+                                self.editing.queued = Some(InstructionManagementRequest::Discard {
+                                    draft: draft.id.clone(),
+                                    generation: draft.generation,
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('n' | 'N') => {
+                    self.editing.confirm = None;
+                    self.editing.document.clear();
+                    if self.editing.draft.is_none() {
+                        self.editing.visible = false;
+                    }
+                }
+                _ => {}
+            }
+            return true;
+        }
+        match code {
+            KeyCode::Esc => self.edit_action(EditAction::Close),
+            KeyCode::Char('q' | 'Q') => {
+                self.edit_action(EditAction::Close);
+                self.visible = false;
+                self.queued = Some(InstructionInspectionRequest::Close);
+            }
+            KeyCode::Char(' ') | KeyCode::Char(':') => self.open_actions(false),
+            KeyCode::Char('b') => self.edit_action(EditAction::Body),
+            KeyCode::Char('m') => self.edit_action(EditAction::Metadata),
+            KeyCode::Char('r') => self.edit_action(EditAction::Review),
+            KeyCode::Char('s') => self.edit_action(EditAction::Save),
+            KeyCode::Char('d') => self.edit_action(EditAction::Diff),
+            KeyCode::Char('v') => self.edit_action(EditAction::Preview),
+            KeyCode::Tab => self.edit_action(EditAction::NextFile),
+            KeyCode::BackTab => self.edit_action(EditAction::PreviousFile),
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.editing.scroll = self.editing.scroll.saturating_add(1)
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.editing.scroll = self.editing.scroll.saturating_sub(1)
+            }
+            KeyCode::PageDown => {
+                self.editing.scroll = self
+                    .editing
+                    .scroll
+                    .saturating_add(self.detail_height.max(1))
+            }
+            KeyCode::PageUp => {
+                self.editing.scroll = self
+                    .editing
+                    .scroll
+                    .saturating_sub(self.detail_height.max(1))
+            }
+            KeyCode::Home => self.editing.scroll = 0,
+            KeyCode::End => self.editing.scroll = usize::MAX,
+            _ => {}
+        }
+        true
+    }
+    pub(super) fn edit_paste(&mut self, text: &str) -> bool {
+        if !self.editing.visible {
+            return false;
+        }
+        if let Some(form) = &mut self.editing.form {
+            form.paste(text);
+        } else {
+            self.editing.status =
+                "Use Edit body to paste prose into the external editor, or open a metadata field."
+                    .into();
+        }
+        true
+    }
+}
+
+impl InstructionManager {
+    pub(super) fn edit_menu_items(&self) -> Vec<super::menu::MenuItem> {
+        use super::menu::{MenuAction, MenuItem};
+        let draft = self.editing.draft.as_ref();
+        let row = self.selected_target().and_then(|target| match target {
+            InstructionInspectionTarget::Resource(key) => self
+                .rows
+                .iter()
+                .find(|row| row.key == key)
+                .or(self.detail_row.as_ref().filter(|row| row.key == key)),
+            _ => None,
+        });
+        let entries: Vec<(EditAction, &str, &str, &str)> = if self.editing.visible {
+            vec![
+                (
+                    EditAction::Body,
+                    "Edit body",
+                    "Open a complete private local draft in VISUAL, EDITOR or nano",
+                    "B",
+                ),
+                (
+                    EditAction::Metadata,
+                    "Edit metadata",
+                    "Typed resource fields, model aliases or default-agent settings",
+                    "M",
+                ),
+                (
+                    EditAction::Review,
+                    "Review changes",
+                    "Validate the complete graph, inspect exact diffs and affected previews",
+                    "R",
+                ),
+                (
+                    EditAction::Save,
+                    "Save reviewed changes",
+                    "One scoped local instruction commit, no parent commit or push",
+                    "S",
+                ),
+                (
+                    EditAction::Diff,
+                    "Read complete diff",
+                    "Committed and working source compared with the proposed version",
+                    "D",
+                ),
+                (
+                    EditAction::Preview,
+                    "Read affected previews",
+                    "Synthetic typed previews, not current session instructions",
+                    "V",
+                ),
+                (
+                    EditAction::NextFile,
+                    "Next affected file",
+                    "Select another file in this atomic reference-repair draft",
+                    "Tab",
+                ),
+                (
+                    EditAction::PreviousFile,
+                    "Previous affected file",
+                    "Return to the previous draft file",
+                    "Shift-Tab",
+                ),
+                (
+                    EditAction::Close,
+                    "Close and keep draft",
+                    "Release editing ownership and preserve unsaved recovery data",
+                    "Esc",
+                ),
+                (
+                    EditAction::Discard,
+                    "Discard unsaved draft",
+                    "Explicit confirmation removes the draft recovery record, not Git history",
+                    "choose",
+                ),
+            ]
+        } else {
+            vec![
+                (
+                    EditAction::Open,
+                    "Edit instruction",
+                    "Draft working source without changing it until reviewed Save",
+                    "Ctrl-E",
+                ),
+                (
+                    EditAction::CreateGlobal,
+                    "Create global resource",
+                    "Choose typed identity and metadata, then edit its body",
+                    "choose",
+                ),
+                (
+                    EditAction::CreateProject,
+                    "Create project resource",
+                    "Create in the configured project instruction repository",
+                    "choose",
+                ),
+                (
+                    EditAction::Redefine,
+                    "Redefine in project",
+                    "Copy this global definition into project scope, with a consequence warning",
+                    "choose",
+                ),
+                (
+                    EditAction::Addendum,
+                    "Create agent addendum",
+                    "Create explicit project guidance targeting the selected agent",
+                    "choose",
+                ),
+                (
+                    EditAction::Rename,
+                    "Rename with reference repair",
+                    "Repair this repository atomically; cross-repository changes stay explicit",
+                    "choose",
+                ),
+                (
+                    EditAction::Clear,
+                    "Clear body",
+                    "Keep identity and intentionally empty the body after diff review",
+                    "choose",
+                ),
+                (
+                    EditAction::Delete,
+                    "Delete with reference repair",
+                    "Remove a user resource only after repairing its references",
+                    "choose",
+                ),
+                (
+                    EditAction::Restore,
+                    "Restore revision",
+                    "Restore the selected historical content as a new commit",
+                    "choose",
+                ),
+                (
+                    EditAction::CommitExternal,
+                    "Review external changes",
+                    "Validate and commit the current working version, or edit on top",
+                    "choose",
+                ),
+                (
+                    EditAction::GlobalSettings,
+                    "Global default agent",
+                    "Change the global store's typed default-agent setting",
+                    "choose",
+                ),
+                (
+                    EditAction::ProjectSettings,
+                    "Project default agent",
+                    "Change the configured project's typed default-agent setting",
+                    "choose",
+                ),
+            ]
+        };
+        entries.into_iter().map(|(action, label, hint, key)| {
+            let disabled = if self.editing.busy() { Some("Wait for the current operation; its receipt is preserved.".into()) }
+            else if self.editing.visible {
+                if action == EditAction::Close { None }
+                else if draft.is_none() { Some("No attached draft. Close this view or recover its retained draft.".into()) }
+                else if action == EditAction::Save && draft.is_some_and(|draft| !draft.reviewed || draft.branch.is_none()) { Some("Review this exact draft successfully on an attached branch before Save.".into()) }
+                else if matches!(action, EditAction::Diff | EditAction::Preview) && self.editing.review.is_none() { Some("Review changes first.".into()) }
+                else if draft.is_some_and(|draft| draft.save_started) && matches!(action, EditAction::Body | EditAction::Metadata) { Some("This Save has started or completed. Resolve its receipt, then open a new edit.".into()) }
+                else { None }
+            } else if self.snapshot.is_none() || self.rows_loading() { Some("Refresh source inspection before choosing an edit target.".into()) }
+            else if matches!(action, EditAction::CreateGlobal | EditAction::CreateProject | EditAction::GlobalSettings | EditAction::ProjectSettings) { None }
+            else if row.is_none_or(|row| row.origin != InstructionOrigin::Managed) { Some("Select a managed resource. External skills use Copy; ecosystem files retain separate ownership.".into()) }
+            else if action == EditAction::Redefine && row.is_some_and(|row| row.scope != "global" || matches!(row.kind.as_str(), "model-roster" | "store-settings")) { Some("Select a global instruction, not global-only model policy or store settings.".into()) }
+            else if action == EditAction::Addendum && row.is_some_and(|row| row.kind != "agent") { Some("Select the agent that should receive the addendum.".into()) }
+            else if action == EditAction::Restore && self.revision_selection.is_none() && !self.history_visible { Some("Select a revision in Git history first.".into()) }
+            else { None };
+            MenuItem { label: label.into(), hint: hint.into(), key: key.into(), action: MenuAction::Edit(action), disabled }
+        }).collect()
+    }
+    pub(super) fn open_edit_menu(&mut self) {
+        self.menu = Some(super::menu::Menu {
+            title: "Draft actions".into(),
+            items: self.edit_menu_items(),
+            query: String::new(),
+            selected: 0,
+            context: self.selected_target(),
+            snapshot: self.snapshot_id(),
+            revision: None,
+            parent: None,
+            explanation: false,
+            explanation_scroll: 0,
+        });
+    }
+}

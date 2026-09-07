@@ -139,6 +139,13 @@ pub enum Request {
         request: InstructionInspectionRequest,
     },
 
+    /// Explicit reviewed edits. Repository paths and session context are server-owned.
+    #[serde(rename = "manage_instructions")]
+    ManageInstructions {
+        id: u64,
+        request: Box<InstructionManagementRequest>,
+    },
+
     /// List currently valid primary agents for the active project.
     #[serde(rename = "get_agent_catalog")]
     GetAgentCatalog { id: u64 },
@@ -1381,6 +1388,12 @@ pub enum ServerEvent {
     InstructionInspection {
         id: u64,
         reply: Box<InstructionInspectionReply>,
+    },
+
+    #[serde(rename = "instruction_management")]
+    InstructionManagement {
+        id: u64,
+        reply: Box<InstructionManagementReply>,
     },
 
     #[serde(rename = "agent_catalog")]

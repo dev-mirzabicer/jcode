@@ -963,6 +963,8 @@ pub(super) async fn handle_client_with_instruction_repositories(
     let mut client_subscribed = false;
     let mut pending_request = Some(initial_request);
     let mut instruction_inspection = crate::instruction::inspection::InspectionWorker::default();
+    let instruction_management =
+        crate::instruction::management::InstructionManagementWorker::default();
 
     loop {
         let request = if let Some(request) = pending_request.take() {
@@ -3113,6 +3115,66 @@ pub(super) async fn handle_client_with_instruction_repositories(
                             id,
                             reply: Box::new(reply),
                         });
+                    }
+                });
+            }
+
+            Request::ManageInstructions { id, request } => {
+                use crate::instruction::inspection::InspectionContext;
+                let provider = agent
+                    .try_lock()
+                    .map(|current| current.provider_handle())
+                    .unwrap_or_else(|_| Arc::clone(&provider_template));
+                let captured = agent.try_lock().ok().map(|current| {
+                    InspectionContext::from_session(
+                        current.startup_context_session(),
+                        provider.as_ref(),
+                        current.is_canary(),
+                    )
+                });
+                let worker = instruction_management.clone();
+                let resolver = instruction_inspection.target_resolver();
+                let repositories = instruction_repositories.as_ref().clone();
+                let session_id = client_session_id.clone();
+                let events = client_event_tx.clone();
+                tokio::spawn(async move {
+                    let context = tokio::task::spawn_blocking(move || match captured {
+                        Some(context) => Ok(context),
+                        None => Session::load(&session_id).map(|session| {
+                            InspectionContext::from_session(
+                                &session,
+                                provider.as_ref(),
+                                session.is_canary,
+                            )
+                        }),
+                    })
+                    .await;
+                    match context {
+                        Ok(Ok(context)) => {
+                            if let Ok(reply) = worker
+                                .submit(repositories, context, resolver, *request)
+                                .await
+                            {
+                                let _ = events.send(ServerEvent::InstructionManagement {
+                                    id,
+                                    reply: Box::new(reply),
+                                });
+                            }
+                        }
+                        error => {
+                            let _ = events.send(ServerEvent::Error {
+                                id,
+                                message: format!(
+                                    "Could not capture instruction management context: {}",
+                                    match error {
+                                        Ok(Err(error)) => error.to_string(),
+                                        Err(error) => error.to_string(),
+                                        _ => String::new(),
+                                    }
+                                ),
+                                retry_after_secs: None,
+                            });
+                        }
                     }
                 });
             }

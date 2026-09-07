@@ -14,6 +14,7 @@ pub(super) enum FilterField {
 }
 #[derive(Clone)]
 pub(super) enum MenuAction {
+    Edit(super::editing::EditAction),
     Key(KeyCode),
     Filter(InstructionFilter),
     FilterMenu(FilterField),
@@ -218,6 +219,10 @@ impl InstructionManager {
     }
 
     pub(super) fn open_actions(&mut self, views_only: bool) {
+        if self.editing.visible {
+            self.open_edit_menu();
+            return;
+        }
         let mut items = Vec::new();
         for (view, key, label, hint) in VIEWS {
             items.push(MenuItem {
@@ -405,6 +410,9 @@ impl InstructionManager {
                 "Return to chat; no source changes",
                 None,
             );
+        }
+        if !views_only {
+            items.extend(self.edit_menu_items());
         }
         self.menu = Some(Menu {
             title: if views_only {
@@ -793,8 +801,10 @@ impl InstructionManager {
             }
             return;
         }
-        if let MenuAction::Key(KeyCode::Char('1'..='8' | 'a' | 'b' | 'i')) = item.action
-            && (menu.context != self.selected_target() || menu.snapshot != self.snapshot_id())
+        if matches!(
+            item.action,
+            MenuAction::Key(KeyCode::Char('1'..='8' | 'a' | 'b' | 'i')) | MenuAction::Edit(_)
+        ) && (menu.context != self.selected_target() || menu.snapshot != self.snapshot_id())
         {
             self.menu = None;
             self.status =
@@ -821,6 +831,7 @@ impl InstructionManager {
         }
         self.menu = None;
         match item.action {
+            MenuAction::Edit(action) => self.edit_action(action),
             MenuAction::Key(key) => {
                 self.key(key, KeyModifiers::NONE);
             }

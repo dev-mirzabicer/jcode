@@ -1,6 +1,6 @@
 # Instruction manager
 
-`/instructions` opens the full-screen **read-only** instruction manager in local
+`/instructions` opens the full-screen instruction manager in local
 and server-connected TUI sessions. `/prompts` is an alias. `/model-roster` opens
 its global model-policy section directly.
 
@@ -14,7 +14,7 @@ Inspection does not initialize or upgrade a store, import or copy a skill,
 activate an agent, replace a system prompt, dispatch a model request, commit a
 file, change branches, or synchronize remotes. An absent store stays absent.
 Damaged sources remain available for diagnosis rather than being recreated.
-Editing and repository mutation actions are not exposed by this interface.
+Editing is explicit through Actions or Ctrl-E. Merely opening, searching, or reading the manager performs no source mutation.
 
 The connected server owns remote discovery and previews. Client-local files
 cannot substitute for the connected session's project or global instructions.
@@ -88,6 +88,46 @@ Back from a completed reading view keeps its captured content and position; help
 has a separate scroll position. Canceling an in-flight request rejects its stale
 reply. Refresh/reconnect recaptures source state rather than claiming the old view
 is fresh. None of these operations activates instructions.
+
+## Reviewed editing
+
+Use **Actions → Edit instruction** (or **Ctrl-E**) on a managed resource. A draft
+captures complete working source, branch, HEAD and file identity without changing
+the authoritative file. In the draft, **B** opens the body in a private local
+file using `$VISUAL`, then `$EDITOR`, then `nano`. Quoted executable paths and
+arguments are parsed without a shell. Editors that launch a GUI must use their
+own wait argument. A remote client edits its local draft and sends typed content
+to the source-owning server, never a remote shell command.
+
+**M** opens structured metadata. Resource kind and existing identity are fixed;
+Rename is a separate reference-aware operation. Agent availability, template mode,
+addendum targets, module references, default agents and model-roster entries use
+typed fields and searchable choices. Roster candidates can be added, removed and
+reordered. Human-only notes remain outside model-facing discovery. Form errors
+retain entered values instead of replacing them with a raw configuration editor.
+
+**R** validates the complete proposed commit and affected consumers using typed
+synthetic preview data. **D** shows exact committed/working-versus-draft diffs,
+and **V** shows affected component previews. These are not the current session's
+stored instructions. **S** saves a successfully reviewed draft on an attached
+branch. It creates one scoped local commit, or no commit when unchanged. It never
+pushes or commits the parent project's gitlink. Ordinary reviewed Save has no
+redundant second confirmation.
+
+Named Actions also prepare global/project resources, project redefinitions,
+agent addenda, clear-body changes, user-resource renames/deletions, external
+working versions, and historical restores. Clear retains identity and intentional
+empty semantics. Delete exposes any lower-precedence definition. Same-repository
+reference repairs share the reviewed commit. Known cross-repository dependents
+require an explicit create-new-ID, repair-references, remove-old-ID sequence.
+Unopened projects are not claimed to have been scanned.
+
+Tab/Shift-Tab chooses an affected draft file. Close preserves its recovery record
+and releases editing ownership without saving. Discard is explicit and does not
+rewrite Git history or undo completed source changes. Validation, editor and Git
+failures preserve drafts and distinguish unchanged source from possibly completed
+writes. A lost Save receipt is reconciled through its structural operation ID,
+not by replaying a guessed new edit.
 
 ## Detail views
 
@@ -165,7 +205,7 @@ Requests are correlated before transport by request, session, snapshot, and
 exact detail/page identity. Superseded responses cannot replace a newer
 selection. Reconnect refreshes the open manager and preserves filters and safe
 selection. A source change, absent snapshot, or unavailable transport is visible
-without overwriting session prompts. No unsaved edits exist in this manager.
+without overwriting session prompts. Unsaved edits are held separately from inspection snapshots. Refreshing inspection never commits them.
 
 Git inspection disables optional index refreshes, filesystem-monitor hooks,
 external diffs and text conversion. It does not run repository scripts or fetch

@@ -72,6 +72,11 @@ impl InstructionManager {
             self.capture(frame, area);
             return;
         }
+        if self.editing.visible {
+            self.render_editing(frame, area);
+            self.capture(frame, area);
+            return;
+        }
         let compact = area.height < 12;
         let filtered = self.filter != InstructionFilter::default();
         let top = if compact {
@@ -1066,7 +1071,7 @@ fn clip(text: &str, width: usize) -> String {
     result.push('…');
     result
 }
-fn tail_cells(text: &str, width: usize) -> String {
+pub(super) fn tail_cells(text: &str, width: usize) -> String {
     let line = Line::raw(text);
     let graphemes = line.styled_graphemes(Style::default()).collect::<Vec<_>>();
     let mut start = graphemes.len();
@@ -1084,7 +1089,7 @@ fn tail_cells(text: &str, width: usize) -> String {
         .map(|grapheme| grapheme.symbol)
         .collect()
 }
-fn safe(text: &str) -> String {
+pub(super) fn safe(text: &str) -> String {
     let mut out = String::new();
     for ch in text.chars() {
         if ch.is_control() && !matches!(ch, '\n' | '\t') {
@@ -1096,7 +1101,7 @@ fn safe(text: &str) -> String {
     }
     out
 }
-fn wrap(text: &str, width: u16) -> Vec<String> {
+pub(super) fn wrap(text: &str, width: u16) -> Vec<String> {
     let limit = usize::from(width).max(1);
     let mut lines = Vec::new();
     for source in safe(text).split('\n') {

@@ -702,6 +702,9 @@ pub(in crate::tui::app) fn handle_server_event(
     let call_output_tokens_seen = remote.call_output_tokens_seen();
 
     match event {
+        ServerEvent::InstructionManagement { id, reply } => {
+            app.accept_instruction_management_reply(id, *reply)
+        }
         ServerEvent::InstructionInspection { id, reply } => {
             app.accept_instruction_reply(id, *reply)
         }

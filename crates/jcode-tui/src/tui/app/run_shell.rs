@@ -622,7 +622,7 @@ impl App {
     /// Returns Some(session_id) if hot-reload was requested
     pub async fn run(mut self, mut terminal: DefaultTerminal) -> Result<RunResult> {
         super::terminal_liveness::capture_initial_tty();
-        let mut event_stream = EventStream::new();
+        let mut event_stream = Some(EventStream::new());
         let mut redraw_period = crate::tui::redraw_interval(&self);
         let mut redraw_interval = redraw_timer(redraw_period);
         let mut status_spinner_interval = status_spinner_interval();
@@ -639,6 +639,9 @@ impl App {
 
         loop {
             self.sync_sleep_guard();
+            if self.run_pending_instruction_editor(&mut terminal, &mut event_stream) {
+                needs_redraw = true;
+            }
             let desired_redraw = crate::tui::redraw_interval(&self);
             if desired_redraw != redraw_period {
                 redraw_period = desired_redraw;
@@ -676,13 +679,24 @@ impl App {
             if self.pending_turn {
                 self.pending_turn = false;
                 // Process turn while still handling input
-                self.process_turn_with_input(&mut terminal, &mut event_stream, &mut bus_receiver)
-                    .await;
+                self.process_turn_with_input(
+                    &mut terminal,
+                    event_stream
+                        .as_mut()
+                        .expect("terminal input reader is active"),
+                    &mut bus_receiver,
+                )
+                .await;
                 needs_redraw = true;
             } else if self.pending_queued_dispatch {
                 self.pending_queued_dispatch = false;
-                self.process_queued_messages(&mut terminal, &mut event_stream)
-                    .await;
+                self.process_queued_messages(
+                    &mut terminal,
+                    event_stream
+                        .as_mut()
+                        .expect("terminal input reader is active"),
+                )
+                .await;
                 local::finish_turn(&mut self);
                 needs_redraw = true;
             } else {
@@ -691,7 +705,7 @@ impl App {
                     // Declaration-order polling: user input outranks timers and
                     // bus chatter (see the remote loop for the rationale).
                     biased;
-                    event = event_stream.next() => {
+                    event = event_stream.as_mut().expect("terminal input reader is active").next() => {
                         if event.is_some() {
                             needs_redraw |= local::handle_terminal_event(&mut self, &mut terminal, event)?;
                         } else if super::terminal_liveness::terminal_abandoned() {
@@ -757,7 +771,7 @@ impl App {
         remote_working_dir: Option<String>,
     ) -> Result<RunResult> {
         super::terminal_liveness::capture_initial_tty();
-        let mut event_stream = EventStream::new();
+        let mut event_stream = Some(EventStream::new());
         let mut redraw_period = crate::tui::redraw_interval(&self);
         let mut redraw_interval = redraw_timer(redraw_period);
         let mut status_spinner_interval = status_spinner_interval();
@@ -810,7 +824,9 @@ impl App {
             let mut remote_conn = match remote::connect_with_retry(
                 &mut self,
                 &mut terminal,
-                &mut event_stream,
+                event_stream
+                    .as_mut()
+                    .expect("terminal input reader is active"),
                 &mut remote_state,
                 session_to_resume.as_deref(),
                 remote_working_dir.as_deref(),
@@ -847,6 +863,9 @@ impl App {
             // Main event loop
             loop {
                 self.sync_sleep_guard();
+                if self.run_pending_instruction_editor(&mut terminal, &mut event_stream) {
+                    needs_redraw = true;
+                }
                 let desired_redraw = crate::tui::redraw_interval(&self);
                 if desired_redraw != redraw_period {
                     redraw_period = desired_redraw;
@@ -908,7 +927,7 @@ impl App {
                     // keystrokes, which shows up as a laggy, stuttering input
                     // line while a turn is running.
                     biased;
-                    event = event_stream.next() => {
+                    event = event_stream.as_mut().expect("terminal input reader is active").next() => {
                         if event.is_some() {
                             needs_redraw |= remote::handle_terminal_event(&mut self, &mut terminal, &mut remote_conn, event).await?;
                         } else if super::terminal_liveness::terminal_abandoned() {
