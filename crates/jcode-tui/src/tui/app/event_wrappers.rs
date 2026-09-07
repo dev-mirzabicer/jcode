@@ -30,7 +30,7 @@ impl App {
     pub(super) async fn process_turn_with_input(
         &mut self,
         terminal: &mut DefaultTerminal,
-        event_stream: &mut EventStream,
+        event_stream: &mut Option<EventStream>,
         bus_receiver: &mut tokio::sync::broadcast::Receiver<crate::bus::BusEvent>,
     ) {
         local::process_turn_with_input(self, terminal, event_stream, bus_receiver).await;

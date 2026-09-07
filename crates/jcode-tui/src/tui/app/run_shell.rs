@@ -679,24 +679,13 @@ impl App {
             if self.pending_turn {
                 self.pending_turn = false;
                 // Process turn while still handling input
-                self.process_turn_with_input(
-                    &mut terminal,
-                    event_stream
-                        .as_mut()
-                        .expect("terminal input reader is active"),
-                    &mut bus_receiver,
-                )
-                .await;
+                self.process_turn_with_input(&mut terminal, &mut event_stream, &mut bus_receiver)
+                    .await;
                 needs_redraw = true;
             } else if self.pending_queued_dispatch {
                 self.pending_queued_dispatch = false;
-                self.process_queued_messages(
-                    &mut terminal,
-                    event_stream
-                        .as_mut()
-                        .expect("terminal input reader is active"),
-                )
-                .await;
+                self.process_queued_messages(&mut terminal, &mut event_stream)
+                    .await;
                 local::finish_turn(&mut self);
                 needs_redraw = true;
             } else {

@@ -193,7 +193,7 @@ impl App {
     pub(super) async fn run_turn_interactive(
         &mut self,
         terminal: &mut DefaultTerminal,
-        event_stream: &mut EventStream,
+        event_stream: &mut Option<EventStream>,
         mut bus_receiver: Option<&mut tokio::sync::broadcast::Receiver<crate::bus::BusEvent>>,
     ) -> Result<()> {
         let eager_stream_redraw = !crate::perf::tui_policy().enable_decorative_animations;
@@ -296,10 +296,15 @@ impl App {
             let mut api_future = std::pin::pin!(invocation.invoke());
 
             let mut stream = loop {
+                if self.dispatch_local_instruction_request()
+                    | self.run_pending_instruction_editor(terminal, event_stream)
+                {
+                    status_spinner_renderer.draw_full(self, terminal)?;
+                }
                 tokio::select! {
                     biased;
                     // Handle keyboard input while waiting for API
-                    event = event_stream.next() => {
+                    event = event_stream.as_mut().expect("terminal input reader is active").next() => {
                         match event {
                             Some(Ok(Event::Key(key))) => {
                                 self.update_copy_badge_key_event(key);
@@ -427,6 +432,11 @@ impl App {
 
             // Stream with input handling
             loop {
+                if self.dispatch_local_instruction_request()
+                    | self.run_pending_instruction_editor(terminal, event_stream)
+                {
+                    status_spinner_renderer.draw_full(self, terminal)?;
+                }
                 let desired_redraw = crate::tui::redraw_interval(self);
                 if desired_redraw != redraw_period {
                     redraw_period = desired_redraw;
@@ -463,7 +473,7 @@ impl App {
                         }
                     }
                     // Handle keyboard input
-                    event = event_stream.next() => {
+                    event = event_stream.as_mut().expect("terminal input reader is active").next() => {
                         match event {
                             Some(Ok(Event::Key(key))) => {
                                 self.update_copy_badge_key_event(key);
@@ -1500,10 +1510,15 @@ impl App {
                 self.batch_progress = None; // Clear previous batch progress
 
                 let result = loop {
+                    if self.dispatch_local_instruction_request()
+                        | self.run_pending_instruction_editor(terminal, event_stream)
+                    {
+                        status_spinner_renderer.draw_full(self, terminal)?;
+                    }
                     tokio::select! {
                         biased;
                         // Handle keyboard input while tool executes
-                        event = event_stream.next() => {
+                        event = event_stream.as_mut().expect("terminal input reader is active").next() => {
                             match event {
                                 Some(Ok(Event::Key(key))) => {
                                     self.update_copy_badge_key_event(key);

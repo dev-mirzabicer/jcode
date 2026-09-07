@@ -3944,7 +3944,7 @@ impl App {
     pub(super) async fn process_queued_messages(
         &mut self,
         terminal: &mut DefaultTerminal,
-        event_stream: &mut EventStream,
+        event_stream: &mut Option<EventStream>,
     ) {
         if self.queued_instruction_error.is_some() {
             return;

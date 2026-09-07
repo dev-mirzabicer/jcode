@@ -21,7 +21,7 @@ const BACKGROUND_PROGRESS_IDENTICAL_NOTICE_TTL: Duration = Duration::from_secs(2
 pub(super) async fn process_turn_with_input(
     app: &mut App,
     terminal: &mut DefaultTerminal,
-    event_stream: &mut EventStream,
+    event_stream: &mut Option<EventStream>,
     bus_receiver: &mut Receiver<BusEvent>,
 ) {
     match app
