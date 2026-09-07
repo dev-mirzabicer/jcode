@@ -1,6 +1,6 @@
 # Configuring primary agent instructions
 
-For complete source, current-source preview, exact stored-system inspection, and Git history, open the [read-only instruction manager](INSTRUCTION_MANAGER.md) with `/instructions` or `/agent instructions`. Inspection does not activate instructions.
+For complete source, current-source preview, exact stored-system inspection, and Git history, open the [instruction manager](INSTRUCTION_MANAGER.md) with `/instructions` or `/agent instructions`. Inspection does not activate instructions.
 
 Jcode composes one complete static system prompt when a primary session activates and stores the exact rendered text in that session. See [`AGENT_PROFILES.md`](AGENT_PROFILES.md) for selection, lifecycle, persistence, and recovery.
 

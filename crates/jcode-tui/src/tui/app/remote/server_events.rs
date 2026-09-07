@@ -705,6 +705,9 @@ pub(in crate::tui::app) fn handle_server_event(
         ServerEvent::InstructionManagement { id, reply } => {
             app.accept_instruction_management_reply(id, *reply)
         }
+        ServerEvent::InstructionManagementChunk { id, chunk } => {
+            app.accept_instruction_management_chunk(id, chunk)
+        }
         ServerEvent::InstructionInspection { id, reply } => {
             app.accept_instruction_reply(id, *reply)
         }

@@ -54,11 +54,11 @@ Supported external sources remain discoverable and invocable:
 
 External packages are read-only through the [central instruction manager](INSTRUCTION_MANAGER.md). Jcode does not edit or commit them in place.
 
-`/skills` identifies effective and shadowed local candidates. `skill_manage list` identifies each effective source class. External entries are labeled read-only and point to Copy rather than Edit. Ordinary remote History currently carries effective skill names for compact display. The read-only central manager is available through `/skills instructions`, including complete source, previews, history, and invalid/shadowed rows. Mutation UI remains WP-10 work.
+`/skills` identifies effective and shadowed local candidates. `skill_manage list` identifies each effective source class. External entries are labeled read-only and point to Copy rather than Edit. Ordinary remote History currently carries effective skill names for compact display. The central manager is available through `/skills instructions`, including complete source, previews, history, and invalid/shadowed rows. Reviewed Copy, complete-package rename/delete/redefinition, history restore and export are available in the same manager.
 
 ## Copy skill backend
 
-The backend Copy operation is available to the later central instruction manager. The mutation UI itself arrives in WP-10.
+The central instruction manager exposes reviewed Copy over the existing package-capture and scoped Git service. Preparation captures complete bytes without publishing source; Save commits the reviewed package.
 
 Copy:
 

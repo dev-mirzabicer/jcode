@@ -228,7 +228,7 @@ Primary composition, notifications and roster loading share `prepare_global_stor
 - WP-04 supplies append transitions, explicit system replacement, context protection, rewind pinning, inspection, exports, and public control interfaces.
 - WP-05 supplies managed and external skill discovery, deterministic source precedence, restricted rendering, complete Copy transactions, and exact active rendered-text snapshots.
 - WP-06 and WP-07 migrate inventory rows through registered typed consumers.
-- WP-09 provides the read-only manager over catalog summaries, diagnostics, exact paged content, graphs, Git state, and composer/roster previews. WP-10 adds editing over the existing repository service.
+- WP-09 provides the read-only manager over catalog summaries, diagnostics, exact paged content, graphs, Git state, and composer/roster previews. WP-10 supplies reviewed editing, complete package management, ecosystem working-file drafts and explicit repository controls over the existing owners.
 - WP-11 reconciles every inventory row and verifies exact migration equality or an approved exception.
 
 ## Git-backed instruction repository service

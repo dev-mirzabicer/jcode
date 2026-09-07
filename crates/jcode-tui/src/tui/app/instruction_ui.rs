@@ -16,6 +16,7 @@ enum LocalRecoveryOutput {
 
 #[derive(Default)]
 pub(super) struct InstructionUi {
+    transfer: crate::protocol::InstructionManagementTransfer,
     pub manager: Option<RefCell<InstructionManager>>,
     worker: InspectionWorker,
     receiver: Option<(
@@ -97,6 +98,7 @@ impl App {
     }
 
     pub(super) fn reconnect_instruction_manager(&mut self, session: &str) {
+        self.instruction_ui.transfer.clear();
         if let Some(manager) = &self.instruction_ui.manager {
             let mut manager = manager.borrow_mut();
             if manager.session == session {
@@ -226,6 +228,9 @@ impl App {
         };
         let mut manager = manager.borrow_mut();
         let accepted = manager.accept_management(id, reply);
+        if accepted {
+            self.instruction_ui.transfer.clear();
+        }
         if accepted && closed && manager.visible {
             let session = manager.session.clone();
             manager.refresh(&session);
@@ -499,6 +504,35 @@ impl App {
 
     pub(super) fn take_instruction_recovery_redraw(&mut self) -> bool {
         std::mem::take(&mut self.instruction_ui.recovery_redraw)
+    }
+
+    pub(super) fn accept_instruction_management_chunk(
+        &mut self,
+        id: u64,
+        chunk: crate::protocol::InstructionManagementChunk,
+    ) -> bool {
+        let Some(manager) = &self.instruction_ui.manager else {
+            return false;
+        };
+        let session = {
+            let manager = manager.borrow();
+            if !manager
+                .editing
+                .pending
+                .as_ref()
+                .is_some_and(|(expected, session, _)| {
+                    *expected == id && session == &chunk.session_id
+                })
+            {
+                return false;
+            }
+            manager.session.clone()
+        };
+        match self.instruction_ui.transfer.push(id,&session,chunk) {
+            Ok(Some(reply))=>self.accept_instruction_management_reply(id,reply),
+            Ok(None)=>false,
+            Err(error)=>self.accept_instruction_management_reply(id,crate::protocol::InstructionManagementReply{session_id:session,result:crate::protocol::InstructionManagementResult::Failed(crate::protocol::InstructionManagementFailure{operation:"receive complete manager reply".into(),detail:format!("{error}. The operation may have completed. Recover its retained draft or receipt; no automatic replay occurred."),draft:None,source_unchanged:false})}),
+        }
     }
 
     pub(super) fn flush_instruction_recovery(&self) {

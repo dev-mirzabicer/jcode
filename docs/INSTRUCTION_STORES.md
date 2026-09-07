@@ -1,6 +1,6 @@
 # Instruction stores
 
-**Status:** Phase 3 Git repository infrastructure, primary activation, versioned seed adoption, and the [read-only instruction manager](INSTRUCTION_MANAGER.md). Mutation UI remains WP-10 work.
+**Status:** Phase 3 Git repository infrastructure, primary activation, versioned seed adoption, and the [instruction manager](INSTRUCTION_MANAGER.md) with reviewed editing and explicit repository controls.
 
 Jcode has a typed service for Git-versioned managed instructions. App-core `Server` owns the service. Server construction performs no repository I/O; the first primary instruction activation initializes or validates the global store and then uses the same service for activation, clear, and transfer.
 
@@ -107,8 +107,7 @@ shows it rather than silently resetting it during a retry.
 ### Draft service
 
 The Rust repository service provides `InstructionDraftWorkspace` for client-owned
-unsaved intent. The full-screen manager is still read-only until the editing
-adapter is integrated. Draft records live in private durable state, outside the
+unsaved intent. The full-screen manager uses this service for reviewed editing. Draft records live in private durable state, outside the
 instruction repository, and bind session, configured repository, branch, HEAD,
 generation and exact captured files. Closing or dropping a workspace releases
 its kernel lease without saving or deleting the draft. Explicit discard removes
@@ -154,7 +153,7 @@ The repository service can inspect and plan exact import for current global and 
 
 Import leaves the original untouched, records its SHA-256 and empty/blank semantics, validates the complete prospective repository graph, and commits the resource plus receipt together. The primary composer deactivates a global system-prompt or overlay compatibility source only after the durable receipt exists. Project compatibility fallback applies only when the corresponding managed project resource is genuinely absent. Invalid or ambiguous managed project resources remain authoritative failures, and explicit global selection is never replaced by project legacy input. An already-completed retry materializes missing committed files but never overwrites a newer working-tree edit; the typed outcome lists preserved divergent paths.
 
-`AGENTS.md` remains a dedicated live ecosystem input. External skills remain read-only and are never imported automatically. The typed Copy backend can preserve a complete external package and commit a managed global or project copy; the central manager action arrives in WP-10. See [`SKILLS.md`](SKILLS.md).
+`AGENTS.md` remains a dedicated live ecosystem input. External skills remain read-only and are never imported automatically. The typed Copy backend can preserve a complete external package and commit a managed global or project copy; the central manager exposes reviewed Copy actions. See [`SKILLS.md`](SKILLS.md).
 
 ## Primary activation
 
@@ -164,7 +163,7 @@ The global store is not initialized by ordinary server construction, read-only r
 
 ## Current boundary
 
-The repository service, primary activation, and read-only manager protocol/TUI are live. `/instructions` and `/model-roster` inspect current sources without initialization, seed upgrades, activation, or repository mutation. Editing workflows remain WP-10 work. Network Git operations remain explicit and no parent-project gitlink is committed automatically.
+The repository service, primary activation, and manager inspection/editing protocol and TUI are live. `/instructions` and `/model-roster` inspect current sources without initialization, seed upgrades, activation, or repository mutation. Mutation actions are explicit, reviewed, and preserve current session instructions. Network Git operations remain explicit and no parent-project gitlink is committed automatically.
 
 ## Notification occurrence and todo history
 

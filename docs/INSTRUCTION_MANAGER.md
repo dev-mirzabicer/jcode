@@ -324,7 +324,7 @@ warning in Metadata. They are identified, not prohibited.
 compatibility eligibility separately from managed source. A newly added global
 legacy file is not described as active after an initialized store has already
 cut over to managed sources. External skills are read-only, including shadowed
-sources and visible parse failures. Copy is a later mutation workflow.
+sources and visible parse failures. Explicit Copy captures them into a reviewed managed package.
 
 The roster is global-only. Invalid aliases remain visible alongside valid ones.
 A project roster file is shown as invalid/inactive rather than hidden policy.
@@ -363,9 +363,16 @@ layout, open menu, scroll, validation flags, page counts, repository flags and
 pending IDs. It does
 not include source or rendered instruction bodies.
 
+Complete draft/review/export replies use correlated bounded wire chunks when
+needed. The existing general frame-size guard remains intact, while complete
+management content has no instruction-specific size cap. Missing, reordered or
+cross-session chunks fail visibly, preserve pending intent and never report a
+partial document as complete. Recovery distinguishes an incomplete reply from an
+operation that may already have committed.
+
 ## Implementation and verification
 
-- `jcode-instruction-types` owns the pure read-only request/result/page vocabulary.
+- `jcode-instruction-types` owns the pure inspection, editing, repository-action and recovery vocabulary.
 - `jcode-base::instruction::inspection` projects the existing runtime, composer,
   repository, skill and roster domains and owns cancelable connection-local work.
 - App-core supplies server-owned session context and asynchronous replies.
@@ -380,9 +387,9 @@ verification and activated-runtime evidence.
 
 ## Interaction ownership for later manager work
 
-WP-10 extends this same navigation/action model for drafts, metadata forms, diff
-review, Save, restore, Copy, setup and explicit sync. Its own mutation safety and
-recovery work remains the primary task. Each added action must state its target,
+The manager uses one navigation/action model for drafts, metadata forms, diff
+review, Save, restore, Copy, setup and explicit sync. Mutation safety and
+recovery remain with the repository or dedicated ecosystem owner. Each added action must state its target,
 consequence and availability; do not introduce a competing hotkey-only workflow.
 WP-11 evaluates complete combined journeys and repairs inconsistencies during
 its existing integration acceptance, without starting another UI redesign.

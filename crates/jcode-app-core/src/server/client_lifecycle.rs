@@ -3152,14 +3152,28 @@ pub(super) async fn handle_client_with_instruction_repositories(
                     .await;
                     match context {
                         Ok(Ok(context)) => {
-                            if let Ok(reply) = worker
+                            let failure = match worker
                                 .submit(repositories, context, resolver, *request)
                                 .await
                             {
-                                let _ = events.send(ServerEvent::InstructionManagement {
+                                Ok(reply) => crate::protocol::emit_instruction_management_reply(
                                     id,
-                                    reply: Box::new(reply),
-                                });
+                                    reply,
+                                    |event| {
+                                        let _ = events.send(event);
+                                    },
+                                )
+                                .err()
+                                .map(|error| error.to_string()),
+                                Err(error) => Some(format!(
+                                    "Manager worker stopped before returning an outcome: {error}"
+                                )),
+                            };
+                            if let Some(error) = failure {
+                                let _ = events.send(ServerEvent::InstructionManagement { id, reply: Box::new(crate::protocol::InstructionManagementReply {
+                                        session_id: failure_session.clone(),
+                                        result: crate::protocol::InstructionManagementResult::Failed(crate::protocol::InstructionManagementFailure { operation: "deliver manager outcome".into(), detail: format!("{error}. Recover its retained draft or receipt before retrying; no rollback is implied."), draft: None, source_unchanged: false }),
+                                    }) });
                             }
                         }
                         error => {

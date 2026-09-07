@@ -1395,6 +1395,11 @@ pub enum ServerEvent {
         id: u64,
         reply: Box<InstructionManagementReply>,
     },
+    #[serde(rename = "instruction_management_chunk")]
+    InstructionManagementChunk {
+        id: u64,
+        chunk: crate::InstructionManagementChunk,
+    },
 
     #[serde(rename = "agent_catalog")]
     AgentCatalog {

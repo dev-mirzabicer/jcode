@@ -1265,6 +1265,14 @@ pub(super) enum RecoveryChoice {
 }
 impl InstructionManager {
     pub(crate) fn accept_management(&mut self, id: u64, reply: InstructionManagementReply) -> bool {
+        let acknowledged_update = matches!(&reply.result, InstructionManagementResult::Draft(_))
+            && self
+                .editing
+                .pending
+                .as_ref()
+                .is_some_and(|(_, _, request)| {
+                    matches!(request, InstructionManagementRequest::Update { .. })
+                });
         let resumed = self
             .editing
             .pending
@@ -1275,6 +1283,10 @@ impl InstructionManager {
         let is_recovery = matches!(reply.result, InstructionManagementResult::Recoveries(_));
         if !self.editing.accept(id, reply) {
             return false;
+        }
+        if acknowledged_update {
+            self.editing.local_loaded = None;
+            self.editing.suspended_request = None;
         }
         if is_recovery {
             self.open_recovery_menu();
