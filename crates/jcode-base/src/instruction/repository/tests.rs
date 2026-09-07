@@ -2478,3 +2478,5 @@ fn mutation_lease_child_process_helper() {
     }
     assert!(release.exists(), "parent did not release helper in time");
 }
+
+mod operation_tests;

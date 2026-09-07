@@ -15,6 +15,13 @@ pub(super) enum FieldKey {
     Candidate,
     Effort,
     Notes,
+    RepositoryMode,
+    RepositoryPath,
+    RepositoryUrl,
+    Branch,
+    Remote,
+    Start,
+    LocalBranch,
 }
 #[derive(Clone)]
 pub(super) struct Field {
@@ -25,6 +32,16 @@ pub(super) struct Field {
     pub options: Vec<String>,
 }
 impl Field {
+    fn closed(&self) -> bool {
+        matches!(
+            self.key,
+            FieldKey::Kind
+                | FieldKey::Template
+                | FieldKey::Availability
+                | FieldKey::Effort
+                | FieldKey::RepositoryMode
+        )
+    }
     fn text(key: FieldKey, label: &str, value: String) -> Self {
         let cursor = value.len();
         Self {
@@ -61,6 +78,7 @@ enum Purpose {
     Resource(InstructionResourceFields),
     Settings,
     Roster(Vec<InstructionRosterFields>, usize),
+    Repository(Box<InstructionRepositoryChoices>, RepositoryMode),
 }
 pub(super) struct Picker {
     pub values: Vec<String>,
@@ -89,6 +107,9 @@ pub(super) struct EditForm {
     last_field: usize,
 }
 impl EditForm {
+    pub fn is_repository(&self) -> bool {
+        matches!(self.purpose, Purpose::Repository(_, _))
+    }
     pub fn focus(&mut self, index: usize) {
         self.selected = index;
         if index < self.fields.len() {
@@ -338,6 +359,14 @@ impl EditForm {
             return;
         }
         if let Some(field) = self.fields.get_mut(self.selected) {
+            if field.closed() {
+                self.picker = Some(Picker {
+                    values: field.options.clone(),
+                    query: text.into(),
+                    selected: 0,
+                });
+                return;
+            }
             field.value.insert_str(field.cursor, text);
             field.cursor += text.len();
             self.error.clear();
@@ -396,6 +425,11 @@ impl EditForm {
         }
     }
     fn submit(&mut self) -> Result<FormResult, String> {
+        for field in &self.fields {
+            if field.closed() && !field.options.contains(&field.value) {
+                return Err(format!("Choose a supported value for {}.", field.label));
+            }
+        }
         self.stash_alias();
         match &self.purpose {
             Purpose::Action(EditAction::CreateGlobal | EditAction::CreateProject) => {
@@ -436,6 +470,10 @@ impl EditForm {
                 InstructionEditMetadata::StoreSettings {
                     default_agent: optional(self.value(FieldKey::DefaultAgent)),
                 },
+            )),
+            Purpose::Repository(choices, mode) => Ok(FormResult::Repository(
+                choices.scope,
+                self.repository_action(*mode),
             )),
             Purpose::Roster(entries, _) => Ok(FormResult::Metadata(
                 InstructionEditMetadata::Roster(entries.clone()),
@@ -549,6 +587,19 @@ impl EditForm {
                         if self
                             .fields
                             .get(self.selected)
+                            .is_some_and(|field| field.key == FieldKey::RepositoryMode)
+                        {
+                            if let Some(mode) = RepositoryMode::all()
+                                .into_iter()
+                                .find(|mode| mode.label() == value)
+                            {
+                                self.load_repository_mode(mode);
+                            }
+                            return FormEvent::Continue;
+                        }
+                        if self
+                            .fields
+                            .get(self.selected)
                             .is_some_and(|field| field.key == FieldKey::Alias)
                         {
                             self.stash_alias();
@@ -602,6 +653,16 @@ impl EditForm {
             }
             _ => {
                 if let Some(field) = self.fields.get_mut(self.selected) {
+                    if field.closed() {
+                        if let KeyCode::Char(character) = code {
+                            self.picker = Some(Picker {
+                                values: field.options.clone(),
+                                query: character.to_string(),
+                                selected: 0,
+                            });
+                        }
+                        return FormEvent::Continue;
+                    }
                     match code {
                         KeyCode::Left => {
                             field.cursor = field.value[..field.cursor]
@@ -668,6 +729,7 @@ fn availability(value: InstructionEditAvailability) -> &'static str {
     }
 }
 enum FormResult {
+    Repository(InstructionEditScope, InstructionRepositoryAction),
     Begin(InstructionEditAction),
     Metadata(InstructionEditMetadata),
 }
@@ -696,6 +758,10 @@ impl InstructionManager {
             Some(FormEvent::Submit(Ok(result))) => {
                 self.editing.submitted_form = self.editing.form.take();
                 match result {
+                    FormResult::Repository(scope, action) => {
+                        self.editing.queued =
+                            Some(InstructionManagementRequest::PlanRepository { scope, action });
+                    }
                     FormResult::Begin(action) => self.begin_edit(action),
                     FormResult::Metadata(metadata) => {
                         if let Some(draft) = &self.editing.draft
@@ -722,3 +788,5 @@ impl InstructionManager {
         }
     }
 }
+
+include!("repository_forms.rs");

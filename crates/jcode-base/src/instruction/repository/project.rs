@@ -95,6 +95,64 @@ impl InstructionRepositoryService {
         }
         load_project_config(&path).map(Some)
     }
+    pub(super) fn repair_instruction_checkout(
+        &self,
+        repository: &InstructionRepositoryRef,
+        operation_id: &str,
+        expected: Option<&str>,
+    ) -> InstructionRepositoryResult<InstructionRepositoryRef> {
+        if repository.root.exists() || repository.root.is_symlink() {
+            return Err(config_error(
+                &repository.root,
+                "Checkout is present; repair individual sources instead of overwriting it",
+            ));
+        }
+        let project = repository.project_root.as_deref().ok_or_else(|| {
+            config_error(&repository.root, "Missing checkout has no project identity")
+        })?;
+        let configuration = self
+            .load_project_configuration(project)?
+            .ok_or_else(|| config_error(project, "Project configuration is missing"))?;
+        match configuration.repository {
+            InstructionProjectRepositoryMode::ExternalRemote { url, branch } => self
+                .configure_external_remote_checked(project, operation_id, &url, &branch, expected),
+            InstructionProjectRepositoryMode::Submodule { path, .. } => {
+                let roots = self.roots()?;
+                let _setup = acquire_setup_lease(&roots.durable_state, repository, operation_id)?;
+                self.check_project_operation_configuration(project, expected)?;
+                let common = GitRepository::submodule_metadata(project, &path)?;
+                let _existing = if let Some(common) = &common {
+                    let lease = super::lease::acquire_recovery_lease(
+                        &roots.durable_state,
+                        repository,
+                        operation_id,
+                        common,
+                    )?;
+                    super::lease::require_no_drafts_in_git_directory(common)?;
+                    Some(lease)
+                } else {
+                    None
+                };
+                GitRepository::restore_submodule(project, &path)?;
+                let _new = if common.is_none() {
+                    Some(acquire_mutation_lease(
+                        &roots.durable_state,
+                        repository,
+                        operation_id,
+                    )?)
+                } else {
+                    None
+                };
+                self.validate_complete_store(repository)
+                    .map_err(InstructionRepositoryError::may_have_working_changes)?;
+                Ok(repository.clone())
+            }
+            _ => Err(config_error(
+                &repository.root,
+                "This missing local/standalone checkout has no configured remote. Restore it from a backup, or explicitly attach a replacement repository. No seed was substituted.",
+            )),
+        }
+    }
 
     pub fn configure_submodule(
         &self,
@@ -103,6 +161,17 @@ impl InstructionRepositoryService {
         url: &str,
         branch: &str,
         path: Option<PathBuf>,
+    ) -> InstructionRepositoryResult<InstructionRepositoryRef> {
+        self.configure_submodule_checked(launch_dir, operation_id, url, branch, path, None)
+    }
+    pub(super) fn configure_submodule_checked(
+        &self,
+        launch_dir: impl AsRef<Path>,
+        operation_id: &str,
+        url: &str,
+        branch: &str,
+        path: Option<PathBuf>,
+        expected_configuration: Option<&str>,
     ) -> InstructionRepositoryResult<InstructionRepositoryRef> {
         let roots = self.roots()?;
         let project = StartupContext::from_durable_state_dir(&roots.durable_state)
@@ -136,6 +205,7 @@ impl InstructionRepositoryService {
         };
         validate_operation_id(operation_id)?;
         let _setup = acquire_setup_lease(&roots.durable_state, &repository, operation_id)?;
+        self.check_project_operation_configuration(project.active_root(), expected_configuration)?;
         let fresh_checkout = !GitRepository::new(&repository.root).is_repository();
         let _lease = acquire_mutation_lease(&roots.durable_state, &repository, operation_id)?;
         let mut published_lease = None;
@@ -199,6 +269,16 @@ impl InstructionRepositoryService {
         url: &str,
         branch: &str,
     ) -> InstructionRepositoryResult<InstructionRepositoryRef> {
+        self.configure_external_remote_checked(launch_dir, operation_id, url, branch, None)
+    }
+    pub(super) fn configure_external_remote_checked(
+        &self,
+        launch_dir: impl AsRef<Path>,
+        operation_id: &str,
+        url: &str,
+        branch: &str,
+        expected_configuration: Option<&str>,
+    ) -> InstructionRepositoryResult<InstructionRepositoryRef> {
         let roots = self.roots()?;
         let project = StartupContext::from_durable_state_dir(&roots.durable_state)
             .resolve_project(launch_dir)
@@ -223,6 +303,7 @@ impl InstructionRepositoryService {
         };
         validate_operation_id(operation_id)?;
         let _setup = acquire_setup_lease(&roots.durable_state, &repository, operation_id)?;
+        self.check_project_operation_configuration(project.active_root(), expected_configuration)?;
         let fresh_checkout = !GitRepository::new(&repository.root).is_repository();
         let _lease = acquire_mutation_lease(&roots.durable_state, &repository, operation_id)?;
         if !checkout.exists() {
@@ -269,6 +350,16 @@ impl InstructionRepositoryService {
         checkout: impl AsRef<Path>,
         branch: Option<String>,
     ) -> InstructionRepositoryResult<InstructionRepositoryRef> {
+        self.configure_external_local_checked(launch_dir, operation_id, checkout, branch, None)
+    }
+    pub(super) fn configure_external_local_checked(
+        &self,
+        launch_dir: impl AsRef<Path>,
+        operation_id: &str,
+        checkout: impl AsRef<Path>,
+        branch: Option<String>,
+        expected_configuration: Option<&str>,
+    ) -> InstructionRepositoryResult<InstructionRepositoryRef> {
         let roots = self.roots()?;
         let project = StartupContext::from_durable_state_dir(&roots.durable_state)
             .resolve_project(launch_dir)
@@ -301,6 +392,7 @@ impl InstructionRepositoryService {
         };
         validate_operation_id(operation_id)?;
         let _setup = acquire_setup_lease(&roots.durable_state, &repository, operation_id)?;
+        self.check_project_operation_configuration(project.active_root(), expected_configuration)?;
         let _lease = acquire_mutation_lease(&roots.durable_state, &repository, operation_id)?;
         let git = GitRepository::new(&canonical);
         if !git.is_repository() {
@@ -351,6 +443,17 @@ impl InstructionRepositoryService {
         seed: &InstructionStoreSeed,
         legacy: &[InstructionLegacyImportSpec],
     ) -> InstructionRepositoryResult<InstructionStoreInitialization> {
+        self.configure_non_git_project_checked(launch_dir, operation_id, path, seed, legacy, None)
+    }
+    pub(super) fn configure_non_git_project_checked(
+        &self,
+        launch_dir: impl AsRef<Path>,
+        operation_id: &str,
+        path: Option<PathBuf>,
+        seed: &InstructionStoreSeed,
+        legacy: &[InstructionLegacyImportSpec],
+        expected_configuration: Option<&str>,
+    ) -> InstructionRepositoryResult<InstructionStoreInitialization> {
         let roots = self.roots()?;
         let project = StartupContext::from_durable_state_dir(&roots.durable_state)
             .resolve_project(launch_dir)
@@ -383,6 +486,7 @@ impl InstructionRepositoryService {
         };
         validate_operation_id(operation_id)?;
         let _setup = acquire_setup_lease(&roots.durable_state, &repository, operation_id)?;
+        self.check_project_operation_configuration(project.active_root(), expected_configuration)?;
         let fresh_checkout = !GitRepository::new(&repository.root).is_repository();
         let _lease = acquire_mutation_lease(&roots.durable_state, &repository, operation_id)?;
         let initialization =
@@ -682,10 +786,7 @@ fn validate_checkout_identity(
         return Err(InstructionRepositoryError::new(
             InstructionRepositoryErrorKind::Configuration,
             "reuse instruction repository checkout",
-            format!(
-                "existing checkout origin is {}, not the requested URL '{url}'",
-                actual_url.as_deref().unwrap_or("not configured")
-            ),
+            "Existing checkout origin does not match the requested repository URL. Inspect or configure that remote explicitly."
         )
         .repository(repository));
     }

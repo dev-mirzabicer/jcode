@@ -556,14 +556,39 @@ impl InstructionRepositoryService {
         legacy: &[InstructionLegacyImportSpec],
         branch: &str,
     ) -> InstructionRepositoryResult<InstructionStoreRecreation> {
+        self.recreate_from_seed_checked(repository, seed, legacy, branch, None)
+    }
+
+    pub(super) fn recreate_from_seed_checked(
+        &self,
+        repository: &InstructionRepositoryRef,
+        seed: &InstructionStoreSeed,
+        legacy: &[InstructionLegacyImportSpec],
+        branch: &str,
+        expected: Option<(&str, &str)>,
+    ) -> InstructionRepositoryResult<InstructionStoreRecreation> {
         validate_branch(branch)?;
         let roots = self.roots()?;
-        let operation_id = format!("recreate-{}-{}", repository.id, crate::id::new_id("store"));
+        let operation_id = expected.map(|(id, _)| id.to_string()).unwrap_or_else(|| {
+            format!("recreate-{}-{}", repository.id, crate::id::new_id("store"))
+        });
+        validate_operation_id(&operation_id)?;
         let _setup = acquire_setup_lease(&roots.durable_state, repository, &operation_id)?;
         let _lease = acquire_mutation_lease(&roots.durable_state, repository, &operation_id)?;
+        if let Some((_, signature)) = expected
+            && self.repository_operation_digest(repository)? != signature
+        {
+            return Err(InstructionRepositoryError::new(
+                InstructionRepositoryErrorKind::StaleDraft,
+                "recreate instruction store",
+                "Repository changed since review; nothing was moved",
+            )
+            .repository(repository));
+        }
+        self.require_no_attached_drafts(repository)?;
         let prepared = self.prepare_repository_seed(repository, seed, legacy)?;
         self.validate_prepared_store(repository, &prepared)?;
-        let backup = if repository.root.exists() {
+        let backup = if repository.root.exists() || repository.root.is_symlink() {
             let parent = repository.root.parent().ok_or_else(|| {
                 InstructionRepositoryError::new(
                     InstructionRepositoryErrorKind::Configuration,
@@ -576,12 +601,15 @@ impl InstructionRepositoryService {
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or("instructions");
-            let backup = parent.join(format!(
-                "{name}.damaged-{}-{}-{}",
-                chrono::Utc::now().format("%Y%m%dT%H%M%SZ"),
-                std::process::id(),
-                rand::random::<u64>()
-            ));
+            let backup = parent.join(format!("{name}.damaged-{operation_id}"));
+            if backup.exists() || backup.is_symlink() {
+                return Err(InstructionRepositoryError::new(
+                    InstructionRepositoryErrorKind::Conflict,
+                    "preserve damaged store",
+                    "This operation already has a backup; inspect its receipt before proceeding",
+                )
+                .path(&backup));
+            }
             std::fs::rename(&repository.root, &backup).map_err(|error| {
                 repository_io_error(
                     repository,
@@ -2769,7 +2797,7 @@ fn kind_for_path(path: &Path) -> InstructionRepositoryResult<crate::instruction:
     }
 }
 
-fn require_clean(
+pub(super) fn require_clean(
     repository: &InstructionRepositoryRef,
     git: &GitRepository,
     operation: &str,

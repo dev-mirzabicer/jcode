@@ -156,6 +156,19 @@ pub enum InstructionDraftChange {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case")]
 pub enum InstructionManagementRequest {
+    RepositoryChoices {
+        scope: InstructionEditScope,
+    },
+    PlanRepository {
+        scope: InstructionEditScope,
+        action: super::InstructionRepositoryAction,
+    },
+    ApplyRepository {
+        operation_id: String,
+    },
+    RepositoryReceipt {
+        operation_id: String,
+    },
     Begin {
         snapshot: String,
         target: InstructionInspectionTarget,
@@ -220,6 +233,9 @@ pub struct InstructionManagementFailure {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "result", content = "data", rename_all = "snake_case")]
 pub enum InstructionManagementResult {
+    RepositoryChoices(super::InstructionRepositoryChoices),
+    RepositoryPlan(super::InstructionRepositoryPlan),
+    RepositoryReceipt(super::InstructionRepositoryReceipt),
     Draft(InstructionEditDraft),
     Reviewed(InstructionEditReview),
     Saved {

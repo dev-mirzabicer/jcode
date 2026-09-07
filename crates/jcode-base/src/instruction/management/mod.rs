@@ -111,6 +111,59 @@ impl ManagerState {
             ));
         }
         match request {
+            InstructionManagementRequest::RepositoryChoices { scope } => {
+                Ok(InstructionManagementResult::RepositoryChoices(
+                    service
+                        .repository_operation_choices(context.working_dir.as_deref(), scope)
+                        .map_err(repo_error)?,
+                ))
+            }
+            InstructionManagementRequest::PlanRepository { scope, action } => {
+                if self.workspace.draft().is_some() {
+                    return Err(fail(
+                        "repository operation",
+                        "Close and preserve the current draft before changing repository configuration.",
+                    ));
+                }
+                Ok(InstructionManagementResult::RepositoryPlan(
+                    service
+                        .plan_repository_operation(
+                            &context.session_id,
+                            context.working_dir.as_deref(),
+                            scope,
+                            action,
+                        )
+                        .map_err(repo_error)?,
+                ))
+            }
+            InstructionManagementRequest::ApplyRepository { operation_id } => {
+                if self.workspace.draft().is_some() {
+                    return Err(fail(
+                        "repository operation",
+                        "Close and preserve the current draft before applying a repository operation.",
+                    ));
+                }
+                Ok(InstructionManagementResult::RepositoryReceipt(
+                    service
+                        .apply_repository_operation(
+                            &context.session_id,
+                            context.working_dir.as_deref(),
+                            &operation_id,
+                        )
+                        .map_err(repo_error)?,
+                ))
+            }
+            InstructionManagementRequest::RepositoryReceipt { operation_id } => {
+                Ok(InstructionManagementResult::RepositoryReceipt(
+                    service
+                        .repository_operation_receipt(
+                            &context.session_id,
+                            context.working_dir.as_deref(),
+                            &operation_id,
+                        )
+                        .map_err(repo_error)?,
+                ))
+            }
             InstructionManagementRequest::Begin {
                 snapshot,
                 target,

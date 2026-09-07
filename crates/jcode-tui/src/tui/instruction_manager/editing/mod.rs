@@ -9,6 +9,10 @@ use forms::EditForm;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EditAction {
+    GlobalRepository,
+    ProjectRepository,
+    ApplyRepository,
+    RepositoryReceipt,
     Open,
     CreateGlobal,
     CreateProject,
@@ -63,6 +67,8 @@ pub(crate) struct EditingUi {
     pub confirm: Option<EditAction>,
     pub failed: bool,
     pub recovery_id: Option<String>,
+    pub repository_plan: Option<InstructionRepositoryPlan>,
+    pub repository_receipt: Option<InstructionRepositoryReceipt>,
 }
 impl EditingUi {
     fn busy(&self) -> bool {
@@ -99,6 +105,19 @@ impl EditingUi {
             _ => false,
         };
         match &reply.result {
+            InstructionManagementResult::RepositoryChoices(choices) if !matches!(request, InstructionManagementRequest::RepositoryChoices { scope } if scope == &choices.scope) =>
+            {
+                return false;
+            }
+            InstructionManagementResult::RepositoryPlan(plan) if !matches!(request, InstructionManagementRequest::PlanRepository { scope, action } if scope == &plan.scope && std::mem::discriminant(action) == std::mem::discriminant(&plan.action)) =>
+            {
+                return false;
+            }
+            InstructionManagementResult::RepositoryReceipt(receipt) if !matches!(request, InstructionManagementRequest::ApplyRepository { operation_id } | InstructionManagementRequest::RepositoryReceipt { operation_id } if operation_id == &receipt.id) =>
+            {
+                return false;
+            }
+
             InstructionManagementResult::Draft(draft) if !matches_draft(draft) => return false,
             InstructionManagementResult::Reviewed(review) if !matches!(request, InstructionManagementRequest::Review { draft, generation } if draft == &review.draft.id && generation == &review.draft.generation) =>
             {
@@ -123,6 +142,55 @@ impl EditingUi {
         self.pending = None;
         self.wrapped.clear();
         match reply.result {
+            InstructionManagementResult::RepositoryChoices(choices) => {
+                self.visible = true;
+                self.form = Some(EditForm::repository(choices));
+                self.status =
+                    "Choose an explicit repository operation, then review its exact consequences."
+                        .into();
+            }
+            InstructionManagementResult::RepositoryPlan(plan) => {
+                self.visible = true;
+                self.document = format!(
+                    "{}\n\nNetwork action: {}\nOperation: {}\n\nOUTGOING COMMITS\n{}",
+                    plan.detail,
+                    plan.network,
+                    plan.id,
+                    plan.outgoing_commits.join("\n")
+                );
+                self.repository_plan = Some(plan);
+                self.repository_receipt = None;
+                self.confirm = Some(EditAction::ApplyRepository);
+                self.scroll = 0;
+                self.status = "Reviewed repository action. Y applies once; N returns to the form without changing source.".into();
+            }
+            InstructionManagementResult::RepositoryReceipt(receipt) => {
+                self.visible = true;
+                self.confirm = None;
+                self.document = format!(
+                    "{}\n\n{}\n\nOperation: {}\nCompleted: {}\nOutcome uncertain: {}",
+                    receipt.title,
+                    receipt.detail,
+                    receipt.id,
+                    receipt.completed,
+                    receipt.outcome_uncertain
+                );
+                self.failed = !receipt.completed && !receipt.running;
+                self.status = if receipt.completed {
+                    "Repository action completed. No automatic follow-up or current-session activation.".into()
+                } else if receipt.running {
+                    "Repository operation is still running. Read its receipt again when ready."
+                        .into()
+                } else {
+                    "Repository action needs attention. Inspect the retained outcome before any further explicit action.".into()
+                };
+                if receipt.completed {
+                    self.submitted_form = None;
+                }
+                self.repository_receipt = Some(receipt);
+                self.scroll = 0;
+            }
+
             InstructionManagementResult::Draft(draft) => {
                 self.submitted_form = None;
                 self.visible = true;
@@ -288,6 +356,32 @@ impl InstructionManager {
         }
         self.editing.wrapped.clear();
         match action {
+            EditAction::GlobalRepository | EditAction::ProjectRepository => {
+                self.editing.visible = true;
+                self.editing.queued = Some(InstructionManagementRequest::RepositoryChoices {
+                    scope: if action == EditAction::GlobalRepository {
+                        InstructionEditScope::Global
+                    } else {
+                        InstructionEditScope::Project
+                    },
+                });
+            }
+            EditAction::RepositoryReceipt => {
+                if let Some(plan) = &self.editing.repository_plan {
+                    self.editing.queued = Some(InstructionManagementRequest::RepositoryReceipt {
+                        operation_id: plan.id.clone(),
+                    });
+                    self.editing.visible = true;
+                }
+            }
+            EditAction::ApplyRepository => {
+                if let Some(plan) = &self.editing.repository_plan {
+                    self.editing.queued = Some(InstructionManagementRequest::ApplyRepository {
+                        operation_id: plan.id.clone(),
+                    });
+                }
+            }
+
             EditAction::CreateGlobal
             | EditAction::CreateProject
             | EditAction::Rename
@@ -374,6 +468,15 @@ impl InstructionManager {
                 }
             }
             EditAction::Close => {
+                if self.editing.failed
+                    && self.editing.submitted_form.is_some()
+                    && self.editing.draft.is_none()
+                {
+                    self.editing.form = self.editing.submitted_form.take();
+                    self.editing.document.clear();
+                    self.editing.wrapped.clear();
+                    return;
+                }
                 self.editing.queued = self
                     .editing
                     .draft
@@ -458,6 +561,9 @@ impl InstructionManager {
                     self.editing.confirm = None;
                     self.editing.document.clear();
                     match action {
+                        EditAction::ApplyRepository => {
+                            self.edit_action(EditAction::ApplyRepository)
+                        }
                         EditAction::Clear => self.begin_edit(InstructionEditAction::Clear),
                         EditAction::Delete => self.begin_edit(InstructionEditAction::Delete),
                         EditAction::Restore => {
@@ -490,6 +596,13 @@ impl InstructionManager {
                     }
                 }
                 KeyCode::Esc | KeyCode::Enter | KeyCode::Char('n' | 'N') => {
+                    if action == EditAction::ApplyRepository {
+                        self.editing.form = self.editing.submitted_form.take();
+                        self.editing.confirm = None;
+                        self.editing.document.clear();
+                        self.editing.wrapped.clear();
+                        return true;
+                    }
                     self.editing.confirm = None;
                     self.editing.document.clear();
                     if self.editing.draft.is_none() {
@@ -633,6 +746,24 @@ impl InstructionManager {
         } else {
             vec![
                 (
+                    EditAction::GlobalRepository,
+                    "Global repository controls",
+                    "Review initialization, recovery, branch and explicit synchronization actions",
+                    "choose",
+                ),
+                (
+                    EditAction::ProjectRepository,
+                    "Project repository controls",
+                    "Set up, repair, attach or synchronize this project's instruction repository",
+                    "choose",
+                ),
+                (
+                    EditAction::RepositoryReceipt,
+                    "Recover last repository outcome",
+                    "Read a durable receipt without replaying an uncertain operation",
+                    "choose",
+                ),
+                (
                     EditAction::Open,
                     "Edit instruction",
                     "Draft working source without changing it until reviewed Save",
@@ -706,17 +837,47 @@ impl InstructionManager {
                 ),
             ]
         };
+        let mut entries = entries;
+        if self.editing.visible && draft.is_none() {
+            entries = vec![
+                (
+                    EditAction::GlobalRepository,
+                    "Global repository controls",
+                    "Choose another explicit repository action",
+                    "choose",
+                ),
+                (
+                    EditAction::ProjectRepository,
+                    "Project repository controls",
+                    "Configure or synchronize this project's instructions",
+                    "choose",
+                ),
+                (
+                    EditAction::RepositoryReceipt,
+                    "Read last repository receipt",
+                    "Recover an outcome without repeating the operation",
+                    "choose",
+                ),
+                (
+                    EditAction::Close,
+                    "Back to instructions",
+                    "Return to source inspection",
+                    "Esc",
+                ),
+            ];
+        }
         entries.into_iter().map(|(action, label, hint, key)| {
             let disabled = if self.editing.busy() { Some("Wait for the current operation; its receipt is preserved.".into()) }
+            else if action == EditAction::RepositoryReceipt && self.editing.repository_plan.is_none() { Some("No repository operation has been prepared in this manager.".into()) }
             else if self.editing.visible {
-                if action == EditAction::Close { None }
+                if matches!(action, EditAction::Close | EditAction::GlobalRepository | EditAction::ProjectRepository | EditAction::RepositoryReceipt) { None }
                 else if draft.is_none() { Some("No attached draft. Close this view or recover its retained draft.".into()) }
                 else if action == EditAction::Save && draft.is_some_and(|draft| !draft.reviewed || draft.branch.is_none()) { Some("Review this exact draft successfully on an attached branch before Save.".into()) }
                 else if matches!(action, EditAction::Diff | EditAction::Preview) && self.editing.review.is_none() { Some("Review changes first.".into()) }
                 else if draft.is_some_and(|draft| draft.save_started) && matches!(action, EditAction::Body | EditAction::Metadata) { Some("This Save has started or completed. Resolve its receipt, then open a new edit.".into()) }
                 else { None }
             } else if self.snapshot.is_none() || self.rows_loading() { Some("Refresh source inspection before choosing an edit target.".into()) }
-            else if matches!(action, EditAction::CreateGlobal | EditAction::CreateProject | EditAction::GlobalSettings | EditAction::ProjectSettings) { None }
+            else if matches!(action, EditAction::GlobalRepository | EditAction::ProjectRepository | EditAction::RepositoryReceipt | EditAction::CreateGlobal | EditAction::CreateProject | EditAction::GlobalSettings | EditAction::ProjectSettings) { None }
             else if row.is_none_or(|row| row.origin != InstructionOrigin::Managed) { Some("Select a managed resource. External skills use Copy; ecosystem files retain separate ownership.".into()) }
             else if action == EditAction::Redefine && row.is_some_and(|row| row.scope != "global" || matches!(row.kind.as_str(), "model-roster" | "store-settings")) { Some("Select a global instruction, not global-only model policy or store settings.".into()) }
             else if action == EditAction::Addendum && row.is_some_and(|row| row.kind != "agent") { Some("Select the agent that should receive the addendum.".into()) }

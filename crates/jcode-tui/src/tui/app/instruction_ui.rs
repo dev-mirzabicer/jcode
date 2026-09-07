@@ -35,7 +35,15 @@ impl App {
             .remote_session_id
             .clone()
             .unwrap_or_else(|| self.session.id.clone());
+        let retained_editing = self.instruction_ui.manager.as_ref().and_then(|existing| {
+            let mut existing = existing.borrow_mut();
+            (existing.session == session && !existing.visible)
+                .then(|| std::mem::take(&mut existing.editing))
+        });
         let mut manager = InstructionManager::new(session, kind == Some("model-roster"));
+        if let Some(editing) = retained_editing {
+            manager.editing = editing;
+        }
         manager.filter.kind = kind.map(str::to_string);
         manager.queued = Some(InstructionInspectionRequest::Open {
             filter: manager.filter.clone(),

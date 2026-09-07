@@ -23,7 +23,20 @@ impl InstructionManager {
         let selected_style = Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD);
         let block = Block::default()
             .borders(Borders::ALL)
-            .title(" Instruction draft ")
+            .title(
+                if self.editing.draft.is_none()
+                    && (self.editing.repository_plan.is_some()
+                        || self
+                            .editing
+                            .form
+                            .as_ref()
+                            .is_some_and(|form| form.is_repository()))
+                {
+                    " Repository operation "
+                } else {
+                    " Instruction draft "
+                },
+            )
             .border_style(accent);
         let inner = block.inner(area);
         frame.render_widget(block, area);

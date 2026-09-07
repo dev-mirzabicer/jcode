@@ -226,3 +226,106 @@ fn edit_form_focus_is_not_color_only() {
             .any(|cell| cell.modifier.contains(ratatui::style::Modifier::REVERSED))
     );
 }
+
+fn repository_choices() -> InstructionRepositoryChoices {
+    InstructionRepositoryChoices {
+        scope: InstructionEditScope::Global,
+        project_is_git: false,
+        git_available: true,
+        can_initialize: false,
+        can_recreate: true,
+        root: Some("/synthetic/instructions".into()),
+        branches: vec!["main".into()],
+        remote_branches: Vec::new(),
+        remotes: Vec::new(),
+        configured_branch: Some("main".into()),
+        current_branch: Some("main".into()),
+        health: "Ready".into(),
+        warnings: Vec::new(),
+    }
+}
+
+#[test]
+fn repository_forms_require_review_and_explicit_confirmation_at_every_width() {
+    for (width, height) in [(150, 40), (80, 24), (60, 24), (24, 8)] {
+        let mut manager = InstructionManager::new("synthetic-session".into(), false);
+        manager.queued = None;
+        manager.edit_action(EditAction::GlobalRepository);
+        manager.editing.reserve(1, "synthetic-session").unwrap();
+        assert!(manager.editing.accept(
+            1,
+            InstructionManagementReply {
+                session_id: "synthetic-session".into(),
+                result: InstructionManagementResult::RepositoryChoices(repository_choices())
+            }
+        ));
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| manager.render(frame, frame.area()))
+            .unwrap();
+        let form = manager.editing.form.as_mut().unwrap();
+        form.selected = 2;
+        manager.paste("/synthetic/bare.git");
+        let form = manager.editing.form.as_mut().unwrap();
+        form.selected = form.fields.len();
+        manager.key(KeyCode::Enter, KeyModifiers::NONE);
+        let request = manager.editing.reserve(2, "synthetic-session").unwrap();
+        let InstructionManagementRequest::PlanRepository { scope, action } = request else {
+            panic!("expected reviewed plan")
+        };
+        assert_eq!(scope, InstructionEditScope::Global);
+        assert!(
+            matches!(&action, InstructionRepositoryAction::ConfigureRemote { name, url } if name == "origin" && url == "/synthetic/bare.git")
+        );
+        let plan = InstructionRepositoryPlan {
+            id: "operation".into(),
+            scope,
+            action,
+            title: "Configure remote".into(),
+            detail: "Complete synthetic consequences".repeat(20),
+            network: false,
+            outgoing_commits: Vec::new(),
+        };
+        manager.editing.accept(
+            2,
+            InstructionManagementReply {
+                session_id: "synthetic-session".into(),
+                result: InstructionManagementResult::RepositoryPlan(plan.clone()),
+            },
+        );
+        terminal
+            .draw(|frame| manager.render(frame, frame.area()))
+            .unwrap();
+        assert_eq!(manager.editing.confirm, Some(EditAction::ApplyRepository));
+        manager.key(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(manager.editing.queued.is_none());
+        assert!(manager.editing.form.is_some());
+        let form = manager.editing.form.as_mut().unwrap();
+        form.selected = form.fields.len();
+        manager.key(KeyCode::Enter, KeyModifiers::NONE);
+        manager.editing.reserve(3, "synthetic-session").unwrap();
+        manager.editing.accept(
+            3,
+            InstructionManagementReply {
+                session_id: "synthetic-session".into(),
+                result: InstructionManagementResult::RepositoryPlan(plan),
+            },
+        );
+        manager.key(KeyCode::Char('y'), KeyModifiers::NONE);
+        assert!(
+            matches!(manager.editing.queued, Some(InstructionManagementRequest::ApplyRepository { ref operation_id }) if operation_id == "operation")
+        );
+    }
+}
+
+#[test]
+fn closed_metadata_choices_never_silently_become_another_value() {
+    let mut manager = manager();
+    manager.edit_action(EditAction::Metadata);
+    manager.editing.form.as_mut().unwrap().selected = 2;
+    manager.paste("not-a-template-mode");
+    let form = manager.editing.form.as_ref().unwrap();
+    assert_eq!(form.fields[2].value, "plain");
+    assert!(form.picker.is_some());
+    assert!(manager.editing.queued.is_none());
+}

@@ -3137,6 +3137,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
                 let repositories = instruction_repositories.as_ref().clone();
                 let session_id = client_session_id.clone();
                 let events = client_event_tx.clone();
+                let failure_session = client_session_id.clone();
                 tokio::spawn(async move {
                     let context = tokio::task::spawn_blocking(move || match captured {
                         Some(context) => Ok(context),
@@ -3162,17 +3163,24 @@ pub(super) async fn handle_client_with_instruction_repositories(
                             }
                         }
                         error => {
-                            let _ = events.send(ServerEvent::Error {
+                            let detail = match error {
+                                Ok(Err(error)) => error.to_string(),
+                                Err(error) => error.to_string(),
+                                _ => String::new(),
+                            };
+                            let _ = events.send(ServerEvent::InstructionManagement {
                                 id,
-                                message: format!(
-                                    "Could not capture instruction management context: {}",
-                                    match error {
-                                        Ok(Err(error)) => error.to_string(),
-                                        Err(error) => error.to_string(),
-                                        _ => String::new(),
-                                    }
-                                ),
-                                retry_after_secs: None,
+                                reply: Box::new(crate::protocol::InstructionManagementReply {
+                                    session_id: failure_session,
+                                    result: crate::protocol::InstructionManagementResult::Failed(
+                                        crate::protocol::InstructionManagementFailure {
+                                            operation: "capture manager session".into(),
+                                            detail,
+                                            draft: None,
+                                            source_unchanged: true,
+                                        },
+                                    ),
+                                }),
                             });
                         }
                     }

@@ -20,6 +20,8 @@ enum LeaseKind<'a> {
     Mutation,
     Setup,
     Draft(&'a str),
+    Operation(&'a str),
+    GitDirectory(&'a Path),
 }
 
 pub(super) fn acquire_mutation_lease(
@@ -42,6 +44,21 @@ pub(super) fn acquire_draft_lease(
     id: &str,
 ) -> InstructionRepositoryResult<RepositoryMutationGuard> {
     acquire_lease(state_root, repository, id, LeaseKind::Draft(id))
+}
+pub(super) fn acquire_operation_lease(
+    state_root: &Path,
+    repository: &InstructionRepositoryRef,
+    id: &str,
+) -> InstructionRepositoryResult<RepositoryMutationGuard> {
+    acquire_lease(state_root, repository, id, LeaseKind::Operation(id))
+}
+pub(super) fn acquire_recovery_lease(
+    state_root: &Path,
+    repository: &InstructionRepositoryRef,
+    id: &str,
+    common: &Path,
+) -> InstructionRepositoryResult<RepositoryMutationGuard> {
+    acquire_lease(state_root, repository, id, LeaseKind::GitDirectory(common))
 }
 fn acquire_lease(
     state_root: &Path,
@@ -179,6 +196,14 @@ fn acquire_lease(
     }
 }
 
+pub(super) fn active_operation_lease(
+    state_root: &Path,
+    repository: &InstructionRepositoryRef,
+    id: &str,
+) -> Option<InstructionMutationLeaseInfo> {
+    active_lease(state_root, repository, LeaseKind::Operation(id))
+}
+
 pub(super) fn active_mutation_lease(
     state_root: &Path,
     repository: &InstructionRepositoryRef,
@@ -191,7 +216,10 @@ fn active_lease(
     kind: LeaseKind<'_>,
 ) -> Option<InstructionMutationLeaseInfo> {
     let paths = lease_paths(state_root, repository, kind).ok()?;
+    active_lease_paths(paths)
+}
 
+fn active_lease_paths(paths: LeasePaths) -> Option<InstructionMutationLeaseInfo> {
     #[cfg(unix)]
     {
         use std::os::fd::AsRawFd;
@@ -257,6 +285,22 @@ fn lease_paths(
 ) -> InstructionRepositoryResult<LeasePaths> {
     let git = GitRepository::new(&repository.root);
     let (directory, name) = match (kind, git.common_directory()) {
+        (LeaseKind::GitDirectory(common), _) => {
+            (common.join("jcode-instruction-leases"), "mutation".into())
+        }
+        (LeaseKind::Operation(id), _) => {
+            uuid::Uuid::parse_str(id).map_err(|error| {
+                InstructionRepositoryError::new(
+                    InstructionRepositoryErrorKind::Configuration,
+                    "operation identity",
+                    error.to_string(),
+                )
+            })?;
+            (
+                canonical_prefix(state_root).join("instruction-repositories/operation-leases"),
+                id.to_string(),
+            )
+        }
         (LeaseKind::Mutation, Some(common)) => (
             common.join("jcode-instruction-leases"),
             "mutation".to_string(),
@@ -363,6 +407,52 @@ pub(super) fn active_drafts(
         }
     }
     Ok(owners)
+}
+
+pub(super) fn require_no_drafts_in_git_directory(common: &Path) -> InstructionRepositoryResult<()> {
+    let directory = common.join("jcode-instruction-leases");
+    let entries = match std::fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(InstructionRepositoryError::new(
+                InstructionRepositoryErrorKind::Io,
+                "inspect recovery leases",
+                error.to_string(),
+            ));
+        }
+    };
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            InstructionRepositoryError::new(
+                InstructionRepositoryErrorKind::Io,
+                "inspect recovery lease",
+                error.to_string(),
+            )
+        })?;
+        let name = entry.file_name();
+        let Some(id) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix("draft-"))
+            .and_then(|name| name.strip_suffix(".owner.json"))
+        else {
+            continue;
+        };
+        if uuid::Uuid::parse_str(id).is_ok()
+            && active_lease_paths(LeasePaths {
+                lock: directory.join(format!("draft-{id}.lock")),
+                owner: entry.path(),
+            })
+            .is_some()
+        {
+            return Err(InstructionRepositoryError::new(
+                InstructionRepositoryErrorKind::MutationBusy,
+                "repair checkout",
+                "Close the existing draft before restoring its missing checkout",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn canonical_prefix(path: &Path) -> PathBuf {

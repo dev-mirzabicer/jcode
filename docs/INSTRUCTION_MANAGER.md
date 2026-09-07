@@ -129,6 +129,48 @@ failures preserve drafts and distinguish unchanged source from possibly complete
 writes. A lost Save receipt is reconciled through its structural operation ID,
 not by replaying a guessed new edit.
 
+## Repository controls
+
+Actions exposes **Global repository controls** and **Project repository controls**.
+Choose an operation through typed fields, then read the complete plan. **Y**
+applies that plan once. Enter or N returns to the retained form without applying
+anything. Setup shows the actual session project, destination, branch, URL and
+parent-project consequences. An external checkout path refers to the server,
+not the remote client's filesystem.
+
+Available operations cover genuinely new global initialization, explicit seed
+recreation with an operation-specific preserved backup, project submodule setup,
+private external cloning, existing checkout attachment, non-Git standalone setup,
+missing-checkout repair, remote configuration and branch selection. No real
+project is configured merely by opening these controls.
+
+Fetch is explicit and leaves the working branch unchanged. Pull is explicitly
+**fast-forward-only** and rejects divergence rather than creating a surprise
+merge or rebasing history. Existing conflicts remain visible for deliberate Git
+resolution. Push lists outgoing commits against locally known tracking state and
+sends the exact reviewed local commit, without force, tag following or recursive
+submodule pushes. Fetch-and-select can retrieve a named remote branch even when
+the initial clone fetched only one branch. Branch names are literal, not reflog
+shortcuts. Creating a branch at the current detached commit preserves unrelated
+working files; other checkout/pull actions require clean working state. Attached
+drafts block branch changes.
+
+Project configuration is rechecked under its setup lease. Repository files,
+branch, index and references are checked again before a reviewed Git operation.
+A changed review is rejected rather than applied to another state. Configured
+missing remote checkouts can be restored explicitly. Submodule recovery retains
+parent history and uses surviving Git metadata where available. A missing local
+checkout with no configured remote needs a backup or an explicitly selected
+replacement, never silent seed substitution.
+
+Repository plans and receipts are private durable records. **Recover last
+repository outcome** reads the receipt without replaying the action. It
+separates a live running operation from an interrupted uncertain outcome. A
+terminal receipt survives response loss; an uncertain network operation is not
+blindly repeated. Failed requests retain form values for correction and a new
+review. Seed recreation keeps old source and Git history in its named backup.
+Existing sessions continue to use their stored instructions throughout.
+
 ## Detail views
 
 Select a resource, then press:

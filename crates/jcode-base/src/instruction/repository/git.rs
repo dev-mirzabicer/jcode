@@ -104,6 +104,117 @@ impl GitRepository {
         }))
     }
 
+    pub(super) fn references(&self) -> InstructionRepositoryResult<String> {
+        self.checked_utf8(
+            "inspect reference identities",
+            [
+                "for-each-ref",
+                "--format=%(refname) %(objectname)",
+                "refs/heads",
+                "refs/remotes",
+            ],
+        )
+    }
+
+    pub(super) fn branch_names(&self, remote: bool) -> InstructionRepositoryResult<Vec<String>> {
+        let values = self.checked_utf8(
+            "list branches",
+            [
+                "for-each-ref",
+                "--format=%(refname:short)",
+                if remote { "refs/remotes" } else { "refs/heads" },
+            ],
+        )?;
+        Ok(values
+            .lines()
+            .filter(|line| !line.ends_with("/HEAD"))
+            .map(str::to_string)
+            .collect())
+    }
+
+    pub(super) fn remotes(&self) -> InstructionRepositoryResult<Vec<(String, String)>> {
+        self.checked_utf8("list remotes", ["remote"])?
+            .lines()
+            .map(|name| Ok((name.to_string(), self.remote_url(name)?.unwrap_or_default())))
+            .collect()
+    }
+
+    pub(super) fn resolve_reference(&self, reference: &str) -> InstructionRepositoryResult<String> {
+        if reference.starts_with('-') || reference.chars().any(char::is_control) {
+            return Err(InstructionRepositoryError::new(
+                InstructionRepositoryErrorKind::Configuration,
+                "resolve Git reference",
+                "Invalid reference",
+            ));
+        }
+        let value = self.checked_utf8(
+            "resolve Git reference",
+            ["rev-parse", "--verify", &format!("{reference}^{{commit}}")],
+        )?;
+        let value = value.trim().to_string();
+        validate_commit_id(&value)?;
+        Ok(value)
+    }
+
+    pub(super) fn outgoing(
+        &self,
+        remote: &str,
+        branch: &str,
+    ) -> InstructionRepositoryResult<Vec<String>> {
+        validate_remote(remote)?;
+        validate_branch(branch)?;
+        let local = self.resolve_reference(&format!("refs/heads/{branch}"))?;
+        let range = match self.resolve_reference(&format!("refs/remotes/{remote}/{branch}")) {
+            Ok(remote) => format!("{remote}..{local}"),
+            Err(_) => local,
+        };
+        Ok(self
+            .checked_utf8(
+                "inspect outgoing commits",
+                ["log", "--format=%H %s", &range],
+            )?
+            .lines()
+            .map(str::to_string)
+            .collect())
+    }
+
+    pub(super) fn push_snapshot(
+        &self,
+        remote: &str,
+        branch: &str,
+        commit: &str,
+    ) -> InstructionRepositoryResult<()> {
+        validate_remote(remote)?;
+        validate_branch(branch)?;
+        validate_commit_id(commit)?;
+        self.checked(
+            "push reviewed snapshot",
+            [
+                "-c",
+                "push.followTags=false",
+                "push",
+                "--recurse-submodules=no",
+                "--",
+                remote,
+                &format!("{commit}:refs/heads/{branch}"),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub(super) fn index_digest(&self) -> InstructionRepositoryResult<Option<String>> {
+        let binding = self.binding.as_ref().map_err(Clone::clone)?;
+        match std::fs::read(binding.git_dir.join("index")) {
+            Ok(bytes) => Ok(Some(super::mutation::sha256(&bytes))),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(InstructionRepositoryError::new(
+                InstructionRepositoryErrorKind::Io,
+                "inspect Git index",
+                error.to_string(),
+            )),
+        }
+    }
+
     pub(super) fn remote_url(&self, remote: &str) -> InstructionRepositoryResult<Option<String>> {
         validate_remote(remote)?;
         let output = self.run(["remote", "get-url", "--", remote])?;
@@ -857,6 +968,25 @@ impl GitRepository {
         Ok(())
     }
 
+    pub(super) fn fetch_branch(
+        &self,
+        remote: &str,
+        branch: &str,
+    ) -> InstructionRepositoryResult<()> {
+        validate_remote(remote)?;
+        validate_branch(branch)?;
+        self.checked(
+            "fetch selected remote branch",
+            [
+                "fetch",
+                "--",
+                remote,
+                &format!("+refs/heads/{branch}:refs/remotes/{remote}/{branch}"),
+            ],
+        )?;
+        Ok(())
+    }
+
     pub(super) fn pull(
         &self,
         remote: &str,
@@ -953,6 +1083,70 @@ impl GitRepository {
             return Err(git_failure("add instruction submodule", parent, output));
         }
         Ok(Self::new(parent.join(relative_path)))
+    }
+
+    pub(super) fn submodule_metadata(
+        parent: &Path,
+        path: &Path,
+    ) -> InstructionRepositoryResult<Option<PathBuf>> {
+        let git = Self::new(parent);
+        let mapping = git.run([
+            "config",
+            "--null",
+            "--file",
+            ".gitmodules",
+            "--get-regexp",
+            r"^submodule\..*\.path$",
+        ])?;
+        if !mapping.status.success() {
+            return Ok(None);
+        }
+        for record in utf8_stdout("read submodule metadata", mapping)?.split('\0') {
+            if let Some((key, value)) = record.split_once('\n')
+                && value == git_path(path)?
+            {
+                let Some(name) = key
+                    .strip_prefix("submodule.")
+                    .and_then(|key| key.strip_suffix(".path"))
+                else {
+                    continue;
+                };
+                super::mutation::validate_relative_path(Path::new(name))?;
+                let location = git.checked_utf8(
+                    "resolve submodule Git directory",
+                    [
+                        "rev-parse",
+                        "--path-format=absolute",
+                        "--git-path",
+                        &format!("modules/{name}"),
+                    ],
+                )?;
+                let location = PathBuf::from(location.trim_end());
+                return Ok(location.is_dir().then_some(location));
+            }
+        }
+        Ok(None)
+    }
+
+    pub(super) fn restore_submodule(parent: &Path, path: &Path) -> InstructionRepositoryResult<()> {
+        let git = Self::new(parent);
+        let mut args = match Self::submodule_metadata(parent, path)? {
+            Some(metadata) => script_disabling_config_at(parent, Some(&metadata))?,
+            None => Vec::new(),
+        };
+        args.extend([
+            OsString::from("-c"),
+            OsString::from("protocol.file.allow=always"),
+            OsString::from("submodule"),
+            OsString::from("update"),
+            OsString::from("--init"),
+            OsString::from("--checkout"),
+            OsString::from("--"),
+            path.as_os_str().to_os_string(),
+        ]);
+        git.checked_os("restore missing submodule checkout", &args)
+            .map_err(InstructionRepositoryError::may_have_working_changes)?;
+        Ok(())
     }
 
     pub(super) fn configured_submodule_url(
@@ -1280,15 +1474,35 @@ fn bind_git(root: &Path) -> InstructionRepositoryResult<GitBinding> {
 }
 
 fn script_disabling_config(root: &Path) -> InstructionRepositoryResult<Vec<OsString>> {
-    let output = execute_git(
-        Some(root),
+    script_disabling_config_at(root, None)
+}
+fn script_disabling_config_at(
+    root: &Path,
+    git_dir: Option<&Path>,
+) -> InstructionRepositoryResult<Vec<OsString>> {
+    let mut arguments = Vec::new();
+    if let Some(git_dir) = git_dir {
+        arguments.extend([
+            OsString::from("--git-dir"),
+            git_dir.as_os_str().to_os_string(),
+            OsString::from("--work-tree"),
+            root.as_os_str().to_os_string(),
+        ]);
+    }
+    arguments.extend(
         [
             "config",
             "--null",
             "--name-only",
             "--get-regexp",
             r"^(filter\..*\.(clean|smudge|process|required)|merge\..*\.driver)$",
-        ],
+        ]
+        .into_iter()
+        .map(OsString::from),
+    );
+    let output = execute_git(
+        Some(root),
+        arguments,
         std::iter::empty::<(&OsStr, &OsStr)>(),
         None,
         &[],
@@ -1434,8 +1648,30 @@ where
     })
 }
 
+fn redact_git_urls(value: &str) -> String {
+    static URLS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let pattern = URLS.get_or_init(|| {
+        regex::Regex::new(r#"(?:https?|ssh)://[^\s'"<>]+"#).expect("static URL pattern")
+    });
+    pattern
+        .replace_all(value, |captures: &regex::Captures<'_>| {
+            let original = &captures[0];
+            let Ok(mut url) = url::Url::parse(original) else {
+                return "[invalid URL hidden]".to_string();
+            };
+            let _ = url.set_password(None);
+            if matches!(url.scheme(), "http" | "https") {
+                let _ = url.set_username("");
+            }
+            url.set_query(None);
+            url.set_fragment(None);
+            url.to_string()
+        })
+        .into_owned()
+}
+
 fn git_failure(operation: &str, root: &Path, output: Output) -> InstructionRepositoryError {
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stderr = redact_git_urls(String::from_utf8_lossy(&output.stderr).trim());
     let detail = if stderr.is_empty() {
         format!("Git exited with status {}", output.status)
     } else {
@@ -1609,7 +1845,11 @@ pub(super) fn validate_operation_id(operation_id: &str) -> InstructionRepository
 }
 
 pub(super) fn validate_branch(branch: &str) -> InstructionRepositoryResult<()> {
-    if branch.is_empty() || branch.contains(['\n', '\r', '\0']) || branch.starts_with('-') {
+    if branch.is_empty()
+        || branch == "HEAD"
+        || branch.contains(['\n', '\r', '\0'])
+        || branch.starts_with('-')
+    {
         return Err(InstructionRepositoryError::new(
             InstructionRepositoryErrorKind::Configuration,
             "validate branch",
@@ -1618,7 +1858,7 @@ pub(super) fn validate_branch(branch: &str) -> InstructionRepositoryResult<()> {
     }
     let output = run_git(
         None,
-        ["check-ref-format", "--branch", branch],
+        ["check-ref-format", &format!("refs/heads/{branch}")],
         std::iter::empty::<(&OsStr, &OsStr)>(),
         None,
     )?;
