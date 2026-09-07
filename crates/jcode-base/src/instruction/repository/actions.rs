@@ -947,7 +947,7 @@ fn action_title(action: &InstructionRepositoryAction) -> &'static str {
         InstructionRepositoryAction::Pull { .. } => "Pull fast-forward only",
         InstructionRepositoryAction::Push { .. } => "Push reviewed instruction commits",
         InstructionRepositoryAction::FetchCheckout { .. } => {
-            "Fetch and create a remote-tracking working branch"
+            "Fetch and create a working branch from the remote"
         }
     }
 }

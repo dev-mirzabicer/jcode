@@ -44,6 +44,28 @@ impl GitRepository {
             .map(|binding| binding.common_dir.as_path())
     }
 
+    pub(super) fn require_no_pending_transaction(&self) -> InstructionRepositoryResult<()> {
+        let binding = self.binding.as_ref().map_err(Clone::clone)?;
+        for name in [
+            "MERGE_HEAD",
+            "CHERRY_PICK_HEAD",
+            "REVERT_HEAD",
+            "rebase-merge",
+            "rebase-apply",
+            "sequencer",
+        ] {
+            match std::fs::symlink_metadata(binding.git_dir.join(name)) {
+                Ok(_) => return Err(InstructionRepositoryError::new(InstructionRepositoryErrorKind::Conflict, "check Git transaction", "A merge, rebase or sequencer operation is still pending. Finish or abort it explicitly with Git before an instruction Save. No files were overwritten.").path(&self.root)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+                Err(error) => return Err(InstructionRepositoryError::new(InstructionRepositoryErrorKind::Io, "inspect Git transaction", error.to_string()).path(&self.root)),
+            }
+        }
+        if self.changes()?.iter().any(|change| change.conflicted) {
+            return Err(InstructionRepositoryError::new(InstructionRepositoryErrorKind::Conflict, "check Git index", "The instruction repository has unresolved index entries. Resolve them explicitly with Git before Save.").path(&self.root));
+        }
+        Ok(())
+    }
+
     pub(super) fn head(&self) -> InstructionRepositoryResult<Option<String>> {
         let output = self.run(["rev-parse", "--verify", "HEAD"])?;
         if !output.status.success() {
@@ -730,6 +752,7 @@ impl GitRepository {
         operation_id: &str,
         expected_head: &str,
     ) -> InstructionRepositoryResult<Option<String>> {
+        self.require_no_pending_transaction()?;
         validate_operation_id(operation_id)?;
         validate_commit_id(expected_head)?;
         let branch = self.branch()?.ok_or_else(|| {

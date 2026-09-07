@@ -2482,3 +2482,86 @@ fn mutation_lease_child_process_helper() {
 mod operation_tests;
 
 mod recovery_tests;
+
+#[test]
+fn scoped_save_preserves_pending_merge_even_after_conflicts_are_staged() {
+    let fixture = Fixture::new();
+    let repository = fixture.initialize().repository;
+    git(&repository.root, &["switch", "-c", "other"]);
+    draft_commit(
+        &fixture.service,
+        &repository,
+        "modules/common.md",
+        &managed("common", "module", "OTHER"),
+        "other-edit",
+    );
+    git(&repository.root, &["switch", "main"]);
+    draft_commit(
+        &fixture.service,
+        &repository,
+        "modules/common.md",
+        &managed("common", "module", "MAIN"),
+        "main-edit",
+    );
+    let output = Command::new("git")
+        .args([
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "merge",
+            "--no-edit",
+            "other",
+        ])
+        .current_dir(&repository.root)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(repository.root.join(".git/MERGE_HEAD").exists());
+    for staged in [false, true] {
+        if staged {
+            std::fs::write(
+                repository.root.join("modules/common.md"),
+                managed("common", "module", "USER RESOLUTION"),
+            )
+            .unwrap();
+            git(&repository.root, &["add", "modules/common.md"]);
+        }
+        let source = std::fs::read(repository.root.join("modules/common.md")).unwrap();
+        let index = std::fs::read(repository.root.join(".git/index")).unwrap();
+        let draft = fixture
+            .service
+            .open_draft(&repository, "modules/common.md")
+            .unwrap();
+        let error = fixture
+            .service
+            .commit(
+                &repository,
+                &InstructionCommitRequest {
+                    operation_id: format!("save-during-merge-{staged}"),
+                    message: "instruction: must not bypass merge".into(),
+                    expected_head: draft.base_head.clone(),
+                    expected_files: vec![draft.base],
+                    mutations: vec![InstructionFileMutation::Write {
+                        relative_path: "modules/common.md".into(),
+                        content: managed("common", "module", "MANAGER PROPOSAL").into_bytes(),
+                    }],
+                },
+            )
+            .unwrap_err();
+        assert_eq!(error.kind, InstructionRepositoryErrorKind::Conflict);
+        assert!(error.existing_state_unchanged);
+        assert_eq!(
+            std::fs::read(repository.root.join("modules/common.md")).unwrap(),
+            source
+        );
+        assert_eq!(
+            std::fs::read(repository.root.join(".git/index")).unwrap(),
+            index
+        );
+        assert_eq!(
+            git(&repository.root, &["rev-parse", "HEAD"]),
+            draft.base_head
+        );
+    }
+}

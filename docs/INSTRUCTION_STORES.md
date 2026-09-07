@@ -71,6 +71,12 @@ Submodule, external-checkout, and standalone setup also carry operation identiti
 
 Ordinary operations do not offer reset, rebase, force push, commit deletion, or history rewrite.
 
+A scoped Save cannot bypass a pending merge, rebase, cherry-pick or revert.
+This remains true after conflict resolutions have been staged. Finish or abort
+that Git transaction explicitly before saving instructions. Rejection preserves
+the working source, index and HEAD. Recognizing an already completed Save still
+returns its existing receipt without replaying it.
+
 Git commands bind to the verified instruction worktree and its exact Git
 directory. An instruction directory nested inside a different repository is not
 adopted as that repository, including when a submodule checkout is damaged.

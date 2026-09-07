@@ -194,6 +194,7 @@ where
             changed_paths,
         });
     }
+    git.require_no_pending_transaction()?;
     let branch = git.branch()?;
     if branch.is_none() {
         return Err(InstructionRepositoryError::new(
