@@ -7,6 +7,7 @@
 
 mod composition;
 pub mod inspection;
+pub mod management;
 pub mod notification;
 mod repository;
 pub mod routing;

@@ -1,6 +1,8 @@
 //! Read-only instruction inspection values shared by the domain and transport.
 //! Identities belong to an ephemeral inspection, never to session prompt state.
 use serde::{Deserialize, Serialize};
+mod editing;
+pub use editing::*;
 
 pub const ROW_PAGE_SIZE: usize = 64;
 pub const TEXT_PAGE_BYTES: usize = 16 * 1024;

@@ -1214,6 +1214,23 @@ pub(crate) fn paired_composition_resource(kind: InstructionKind, id: &Instructio
         || (kind == InstructionKind::ToolGuidance && id.as_str() == "preferred-tools")
 }
 
+pub(crate) fn composition_preview_values(
+    id: &str,
+) -> Result<Option<serde_json::Value>, serde_json::Error> {
+    match id {
+        AGENT_REPLACEMENT_ID => serde_json::to_value(AgentReplacementValues {
+            previous_agent: "",
+            new_agent: "",
+        })
+        .map(Some),
+        AVAILABLE_SKILLS_ID => serde_json::to_value(AvailableSkillsValues {
+            skills: String::new(),
+        })
+        .map(Some),
+        _ => Ok(None),
+    }
+}
+
 pub(crate) fn render_inspection_resource(
     runtime: &super::InstructionRuntime,
     selector: &InstructionSelector,

@@ -24,6 +24,15 @@ macro_rules! workflows {
             vec![$( registration($id, InstructionKind::$kind, $directory, $owner, ConsumerScopePolicy::$scope) ),*].into_iter().collect()
         }
 
+        /// Typed synthetic values for human draft validation, never execution.
+        pub(crate) fn preview_values(id: &str) -> Result<Option<serde_json::Value>, serde_json::Error> {
+            let value = match id {
+                $( $id => Workflow::$variant $( { $( $field: Default::default() ),* } )? ),*,
+                _ => return Ok(None),
+            };
+            serde_json::to_value(value).map(Some)
+        }
+
         pub(super) fn seed_documents() -> Result<Vec<InstructionDocument>, InstructionError> {
             Ok(vec![$( InstructionDocument {
                 id: InstructionId::parse($id)?,

@@ -641,7 +641,7 @@ impl InstructionRuntime {
                     TemplateSegment::Expression(expression) => {
                         Ok(PlannedSegment::Expression(expression))
                     }
-                    TemplateSegment::Partial(selector) => {
+                    TemplateSegment::Partial(selector, _) => {
                         let dependency = self.document_ref(self.resolve(&selector)?);
                         render_dependencies.push(dependency.clone());
                         Ok(PlannedSegment::Partial(dependency))

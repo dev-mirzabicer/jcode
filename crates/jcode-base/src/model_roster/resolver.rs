@@ -152,6 +152,27 @@ pub struct RosterCatalog {
 }
 
 impl RosterCatalog {
+    /// Human editing choices use exact provider/auth/pin identity, including
+    /// currently unavailable routes. This performs no construction or inference.
+    pub fn qualified_models(&self) -> Vec<String> {
+        self.routes
+            .iter()
+            .filter_map(|route| {
+                let selection = RouteSelection::from_model_route(route);
+                QualifiedModel::parse(format!(
+                    "{}:{}",
+                    selection.runtime_key.stable_id(),
+                    selection.routed_model_spec()
+                ))
+                .ok()
+                .filter(|model| model.matches_route(route) && model.matches_model(route))
+                .map(String::from)
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
     pub fn from_provider(provider: &dyn Provider) -> Result<Self, ModelRosterError> {
         let routes = provider.model_routes();
         if routes.is_empty() {

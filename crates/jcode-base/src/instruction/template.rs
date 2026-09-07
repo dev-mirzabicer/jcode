@@ -4,7 +4,7 @@ use super::{InstructionError, InstructionKind, InstructionResourceRef, Instructi
 pub(crate) enum TemplateSegment {
     Text(String),
     Expression(String),
-    Partial(InstructionSelector),
+    Partial(InstructionSelector, std::ops::Range<usize>),
 }
 
 pub(crate) fn parse_restricted_template(
@@ -54,10 +54,13 @@ pub(crate) fn parse_restricted_template(
                     ),
                 });
             }
-            segments.push(TemplateSegment::Partial(InstructionSelector::parse(
-                InstructionKind::Module,
-                reference,
-            )?));
+            let reference_start = content_start + raw.len() - raw.trim_start().len() + 1;
+            let reference_start = reference_start + source[reference_start..end].len()
+                - source[reference_start..end].trim_start().len();
+            segments.push(TemplateSegment::Partial(
+                InstructionSelector::parse(InstructionKind::Module, reference)?,
+                reference_start..reference_start + reference.len(),
+            ));
             cursor = end + close.len();
             continue;
         } else {

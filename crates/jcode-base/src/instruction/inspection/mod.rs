@@ -5,6 +5,8 @@ mod detail;
 mod overview;
 mod worker;
 pub use worker::InspectionWorker;
+pub use worker::InstructionTargetResolver;
+pub(crate) use worker::ResolvedManagementTarget;
 
 use super::*;
 use crate::model_roster::RosterCatalog;

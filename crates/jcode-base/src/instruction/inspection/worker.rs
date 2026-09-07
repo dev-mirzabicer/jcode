@@ -10,7 +10,83 @@ pub struct InspectionWorker {
     cancellation: Arc<AtomicBool>,
 }
 
+/// Carries inspection authority into the mutation worker without accepting a
+/// client-supplied filesystem path or retaining the inspector's content there.
+#[derive(Clone)]
+pub struct InstructionTargetResolver {
+    state: Arc<Mutex<Option<InstructionInspector>>>,
+}
+
+pub(crate) struct ResolvedManagementTarget {
+    pub context: InspectionContext,
+    pub repository: Option<InstructionRepositoryRef>,
+    pub path: Option<PathBuf>,
+    pub row: Option<InstructionRow>,
+    pub resource: Option<InstructionResourceRef>,
+}
+
+impl InstructionTargetResolver {
+    pub(crate) fn resolve(
+        &self,
+        session: &str,
+        snapshot: &str,
+        target: &InstructionInspectionTarget,
+    ) -> Result<ResolvedManagementTarget> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| fail("resolve edit target", "Inspector failed; reopen it"))?;
+        let inspector = state
+            .as_ref()
+            .filter(|value| value.context.session_id == session)
+            .ok_or_else(|| {
+                fail(
+                    "resolve edit target",
+                    "Open instruction inspection for this session first",
+                )
+            })?;
+        inspector.check_snapshot(snapshot)?;
+        let (repository, path, row, resource) = match target {
+            InstructionInspectionTarget::Resource(key) => {
+                let resource = inspector
+                    .resources
+                    .get(key)
+                    .ok_or_else(|| fail("resolve edit target", "Resource selection expired"))?;
+                (
+                    inspector
+                        .stores
+                        .get(&resource.row.repository)
+                        .and_then(|store| store.reference.clone()),
+                    Some(resource.path.clone()),
+                    Some(resource.row.clone()),
+                    resource.managed.clone(),
+                )
+            }
+            InstructionInspectionTarget::Repository(key) => {
+                let store = inspector
+                    .stores
+                    .get(key)
+                    .ok_or_else(|| fail("resolve edit target", "Repository selection expired"))?;
+                (store.reference.clone(), None, None, None)
+            }
+            InstructionInspectionTarget::Session => (None, None, None, None),
+        };
+        Ok(ResolvedManagementTarget {
+            context: inspector.context.clone(),
+            repository,
+            path,
+            row,
+            resource,
+        })
+    }
+}
+
 impl InspectionWorker {
+    pub fn target_resolver(&self) -> InstructionTargetResolver {
+        InstructionTargetResolver {
+            state: Arc::clone(&self.state),
+        }
+    }
     pub fn submit(
         &mut self,
         repositories: InstructionRepositoryService,
