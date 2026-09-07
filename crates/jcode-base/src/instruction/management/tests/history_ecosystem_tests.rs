@@ -272,3 +272,146 @@ fn ecosystem_stale_save_and_duplicate_owner_preserve_external_work() {
     );
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "EXTERNAL");
 }
+
+#[test]
+fn manager_create_global_project_redefine_addendum_clear_and_external_commit_are_complete() {
+    let _environment = crate::storage::lock_test_env();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let mut fixture = Fixture::new();
+            let project = fixture.context.working_dir.clone().unwrap();
+            let project_repository = fixture
+                .service
+                .configure_non_git_project(
+                    &project,
+                    "create-journey",
+                    None,
+                    &InstructionStoreSeed::empty(),
+                    &[],
+                )
+                .unwrap()
+                .repository;
+            for (scope, id, kind) in [
+                (
+                    InstructionEditScope::Global,
+                    "created-module",
+                    InstructionEditKind::Module,
+                ),
+                (
+                    InstructionEditScope::Project,
+                    "project-module",
+                    InstructionEditKind::Module,
+                ),
+                (
+                    InstructionEditScope::Global,
+                    "created-agent",
+                    InstructionEditKind::Agent,
+                ),
+            ] {
+                let snapshot = fixture.open("").await;
+                let fields = InstructionResourceFields {
+                    id: id.into(),
+                    kind,
+                    name: (kind == InstructionEditKind::Agent).then(|| "Synthetic agent".into()),
+                    description: (kind == InstructionEditKind::Agent)
+                        .then(|| "Synthetic selection description".into()),
+                    template: InstructionEditTemplate::Plain,
+                    availability: (kind == InstructionEditKind::Agent)
+                        .then_some(InstructionEditAvailability::Both),
+                    target: None,
+                    includes: Vec::new(),
+                    allowed_tools: None,
+                };
+                let draft = super::draft(
+                    fixture
+                        .request(InstructionManagementRequest::Begin {
+                            snapshot: snapshot.snapshot,
+                            target: InstructionInspectionTarget::Session,
+                            action: InstructionEditAction::Create { scope, fields },
+                        })
+                        .await,
+                );
+                super::package_tests::save(&fixture, &draft).await;
+            }
+            assert!(
+                fixture
+                    .repository
+                    .root
+                    .join("modules/created-module.md")
+                    .is_file()
+            );
+            assert!(
+                project_repository
+                    .root
+                    .join("modules/project-module.md")
+                    .is_file()
+            );
+            let redefinition = fixture
+                .begin("created-module", InstructionEditAction::RedefineInProject)
+                .await;
+            assert!(
+                redefinition
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.contains("Project redefinition"))
+            );
+            super::package_tests::save(&fixture, &redefinition).await;
+            assert!(
+                project_repository
+                    .root
+                    .join("modules/created-module.md")
+                    .is_file()
+            );
+            let addendum = fixture
+                .begin(
+                    "created-agent",
+                    InstructionEditAction::Addendum {
+                        id: "created-addendum".into(),
+                    },
+                )
+                .await;
+            super::package_tests::save(&fixture, &addendum).await;
+            assert!(
+                project_repository
+                    .root
+                    .join("addenda/created-addendum.md")
+                    .is_file()
+            );
+            let source = fixture.repository.root.join("modules/literal.md");
+            let cleared = fixture.begin("literal", InstructionEditAction::Clear).await;
+            super::package_tests::save(&fixture, &cleared).await;
+            assert!(
+                metadata::parse(
+                    &fixture.repository,
+                    Path::new("modules/literal.md"),
+                    &std::fs::read_to_string(&source).unwrap()
+                )
+                .unwrap()
+                .body
+                .is_empty()
+            );
+            let external = "---\nid: literal\nkind: module\n---\nEXTERNAL SOURCE";
+            std::fs::write(&source, external).unwrap();
+            let draft = fixture
+                .begin("literal", InstructionEditAction::CommitExternal)
+                .await;
+            super::package_tests::save(&fixture, &draft).await;
+            let head = fixture
+                .service
+                .inspect(&fixture.repository)
+                .unwrap()
+                .head
+                .unwrap();
+            assert_eq!(
+                fixture
+                    .service
+                    .content_at_revision(&fixture.repository, &head, "modules/literal.md")
+                    .unwrap()
+                    .content,
+                external
+            );
+        });
+}

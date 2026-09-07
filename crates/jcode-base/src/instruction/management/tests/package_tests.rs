@@ -21,7 +21,7 @@ async fn begin_copy(fixture: &mut Fixture) -> InstructionEditDraft {
             .await,
     )
 }
-async fn save(fixture: &Fixture, draft: &InstructionEditDraft) {
+pub(super) async fn save(fixture: &Fixture, draft: &InstructionEditDraft) {
     let reviewed = fixture
         .request(InstructionManagementRequest::Review {
             draft: draft.id.clone(),

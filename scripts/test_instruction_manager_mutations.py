@@ -65,7 +65,15 @@ def operation(scope,action):
     assert manage({'operation':'repository_receipt','operation_id':plan['id']},'repository_receipt')==receipt
     return receipt
 
-def keys(tid,value): f.debug(f'tester:{tid}:keys:{value}')
+def keys(tid,value):
+    master=next(master for child,master,home,ident in clients if ident==tid)
+    mapping={'esc':b'\x1b','enter':b'\r','tab':b'\t','space':b' ','home':b'\x1b[H','end':b'\x1b[F','up':b'\x1b[A','down':b'\x1b[B','left':b'\x1b[D','right':b'\x1b[C','backspace':b'\x7f','ctrl+e':b'\x05','ctrl+u':b'\x15'}
+    for key in value.split(','):
+        data=mapping.get(key,key.encode())
+        os.write(master,data)
+        if key=='esc':time.sleep(.05)
+    time.sleep(.04)
+
 def ui(tid,predicate): return f.tester_state(tid,lambda state:predicate(state.get('editing',{})))
 
 def spawn_client(session,cols,rows,reuse=None):
@@ -139,16 +147,19 @@ try:
             button=next(item['rect'] for item in view['layout']['widget_placements'] if item['kind']=='instruction-action-S')
             f.debug(f"tester:{tid}:mouse:click:{button['x']},{button['y']}")
         else:keys(tid,'s')
-        ui(tid,lambda state:state.get('pending') is None and not state.get('failed'))
+        ui(tid,lambda state:state.get('pending') is None and not state.get('failed') and not state.get('reviewed'))
         deadline=time.monotonic()+20
         while not (store/'modules/ui-module.md').read_text().endswith(f'UI EDIT {cols} 合成'):
             if time.monotonic()>deadline:raise TimeoutError('Reviewed Save did not commit')
             time.sleep(.1)
         keys(tid,'esc');ui(tid,lambda state:not state.get('visible'))
         if cols==150:
+            f.tester_state(tid,lambda state:state.get('pending_id') is None and state.get('rows_loaded',0)>0)
             keys(tid,'space');keys(tid,','.join('space' if char==' ' else char for char in 'global repository'));keys(tid,'enter')
+            f.tester_state(tid,lambda state:state.get('menu') is None and state.get('editing',{}).get('visible') and state.get('editing',{}).get('pending') is None)
             f.frame(tid,'Global repository controls',motion='home')
             keys(tid,'enter');keys(tid,','.join('space' if char==' ' else char for char in 'create working branch'));keys(tid,'enter')
+            f.frame(tid,'New local branch',motion='home')
             keys(tid,'tab');keys(tid,','.join('reviewed-ui-branch'));keys(tid,'tab,tab,enter')
             plan_frame=f.frame(tid,'Create and select branch reviewed-ui-branch',motion='home')
             (f.ROOT/'repository-plan.json').write_text(json.dumps(plan_frame,indent=2))
@@ -159,6 +170,7 @@ try:
             while f.git(store,'branch','--show-current')!='reviewed-ui-branch':
                 if time.monotonic()>deadline:raise TimeoutError('Confirmed repository action did not select its branch')
                 time.sleep(.1)
+            f.frame(tid,'Repository action completed.',motion='home')
             ui(tid,lambda state:state.get('pending') is None and not state.get('failed'))
             keys(tid,'esc');ui(tid,lambda state:not state.get('visible'))
         child,master,_,_=clients[-1];child.terminate();child.wait(timeout=10);os.close(master);clients[-1][1]=None

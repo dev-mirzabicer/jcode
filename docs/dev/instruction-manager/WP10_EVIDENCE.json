@@ -1,0 +1,33 @@
+{
+  "binary": "jcode v0.75.209-dev (712d37527, dirty)",
+  "production_apis": true,
+  "separate_client_home": true,
+  "editor_failure_and_retry": true,
+  "physical_mouse_save": true,
+  "physical_repository_review_cancel_apply": true,
+  "physical_sizes": [
+    [
+      150,
+      40
+    ],
+    [
+      80,
+      24
+    ],
+    [
+      60,
+      24
+    ],
+    [
+      24,
+      10
+    ]
+  ],
+  "server_restart_draft_recovery": true,
+  "physical_unsent_form_recovery": true,
+  "session_instructions_unchanged": true,
+  "complete_journal_aware_replay_unchanged": true,
+  "manager_inference_requests": 0,
+  "localhost_bootstrap_requests": 1,
+  "artifact": "/Users/mirzabicer/.jcode/scratch/wp10/activated-live/live-p0idk3ap"
+}
