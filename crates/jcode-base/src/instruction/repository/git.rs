@@ -1,6 +1,6 @@
 use super::types::*;
 use std::ffi::{OsStr, OsString};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -9,6 +9,15 @@ const OPERATION_TRAILER: &str = "Jcode-Instruction-Operation";
 #[derive(Clone, Debug)]
 pub(super) struct GitRepository {
     root: PathBuf,
+    binding: InstructionRepositoryResult<GitBinding>,
+}
+
+#[derive(Clone, Debug)]
+struct GitBinding {
+    work_tree: PathBuf,
+    git_dir: PathBuf,
+    common_dir: PathBuf,
+    script_policy: Vec<OsString>,
 }
 
 #[derive(Clone, Debug)]
@@ -19,12 +28,20 @@ pub(super) struct GitTreeEntry {
 
 impl GitRepository {
     pub(super) fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        let root = root.into();
+        let binding = bind_git(&root);
+        Self { root, binding }
     }
 
     pub(super) fn is_repository(&self) -> bool {
-        self.run(["rev-parse", "--is-inside-work-tree"])
-            .is_ok_and(|output| output.status.success() && trim_ascii(&output.stdout) == b"true")
+        self.binding.is_ok()
+    }
+
+    pub(super) fn common_directory(&self) -> Option<&Path> {
+        self.binding
+            .as_ref()
+            .ok()
+            .map(|binding| binding.common_dir.as_path())
     }
 
     pub(super) fn head(&self) -> InstructionRepositoryResult<Option<String>> {
@@ -328,7 +345,12 @@ impl GitRepository {
         if !directory.exists() {
             return Ok(None);
         }
-        let output = Self::new(directory).run(["rev-parse", "--show-toplevel"])?;
+        let output = run_git(
+            Some(directory),
+            ["rev-parse", "--show-toplevel"],
+            std::iter::empty::<(&OsStr, &OsStr)>(),
+            None,
+        )?;
         if !output.status.success() {
             return Ok(None);
         }
@@ -395,18 +417,7 @@ impl GitRepository {
             None,
         )?;
 
-        let mut add_args = vec![
-            OsString::from("add"),
-            OsString::from("-A"),
-            OsString::from("--"),
-        ];
-        add_args.extend(paths.iter().map(|path| path.as_os_str().to_os_string()));
-        self.checked_os_with_env(
-            "stage owned instruction paths",
-            &add_args,
-            [(OsStr::new("GIT_INDEX_FILE"), index_value)],
-            None,
-        )?;
+        self.stage_raw_paths(index_path, paths)?;
 
         let diff = self.run_with_env(
             ["diff", "--cached", "--quiet", "--exit-code"],
@@ -470,9 +481,101 @@ impl GitRepository {
         Ok(Some(commit))
     }
 
+    fn stage_raw_paths(
+        &self,
+        index_path: &Path,
+        paths: &[PathBuf],
+    ) -> InstructionRepositoryResult<()> {
+        let index = [(OsStr::new("GIT_INDEX_FILE"), index_path.as_os_str())];
+        for path in paths {
+            super::mutation::validate_relative_path(path)?;
+            let target = self.root.join(path);
+            let mut options = std::fs::OpenOptions::new();
+            options.read(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+            }
+            let mut file = match options.open(&target) {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    self.checked_with_env(
+                        "stage instruction deletion",
+                        [
+                            OsStr::new("update-index"),
+                            OsStr::new("--force-remove"),
+                            OsStr::new("--"),
+                            path.as_os_str(),
+                        ],
+                        index,
+                        None,
+                    )?;
+                    continue;
+                }
+                Err(error) => {
+                    return Err(InstructionRepositoryError::new(
+                        InstructionRepositoryErrorKind::Io,
+                        "stage instruction bytes",
+                        error.to_string(),
+                    )
+                    .path(&target));
+                }
+            };
+            let metadata = file.metadata().map_err(|error| {
+                InstructionRepositoryError::new(
+                    InstructionRepositoryErrorKind::Io,
+                    "inspect staged file",
+                    error.to_string(),
+                )
+                .path(&target)
+            })?;
+            if !metadata.is_file() {
+                return Err(InstructionRepositoryError::new(
+                    InstructionRepositoryErrorKind::InvalidPath,
+                    "stage instruction bytes",
+                    "Only regular files can be committed",
+                )
+                .path(&target));
+            }
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes).map_err(|error| {
+                InstructionRepositoryError::new(
+                    InstructionRepositoryErrorKind::Io,
+                    "read staged bytes",
+                    error.to_string(),
+                )
+                .path(&target)
+            })?;
+            let blob = self.checked_utf8_with_env(
+                "write exact instruction blob",
+                ["hash-object", "-w", "--stdin"],
+                index,
+                Some(&bytes),
+            )?;
+            #[cfg(unix)]
+            let executable = {
+                use std::os::unix::fs::PermissionsExt;
+                metadata.permissions().mode() & 0o111 != 0
+            };
+            #[cfg(not(unix))]
+            let executable = false;
+            let mode = if executable { "100755" } else { "100644" };
+            let cache_info = format!("{mode},{},{}", blob.trim(), git_path(path)?);
+            self.checked_with_env(
+                "stage exact instruction blob",
+                ["update-index", "--add", "--cacheinfo", &cache_info],
+                index,
+                None,
+            )?;
+        }
+        Ok(())
+    }
+
     pub(super) fn initial_commit(
         &self,
         index_path: &Path,
+        paths: &[PathBuf],
         subject: &str,
         operation_id: &str,
     ) -> InstructionRepositoryResult<String> {
@@ -485,12 +588,7 @@ impl GitRepository {
             [(OsStr::new("GIT_INDEX_FILE"), index_value)],
             None,
         )?;
-        self.checked_with_env(
-            "stage initial instruction store",
-            ["add", "-A", "--", "."],
-            [(OsStr::new("GIT_INDEX_FILE"), index_value)],
-            None,
-        )?;
+        self.stage_raw_paths(index_path, paths)?;
         let tree = self.checked_utf8_with_env(
             "write initial instruction tree",
             ["write-tree"],
@@ -502,14 +600,13 @@ impl GitRepository {
             normalized_subject(subject)
         );
         let commit = self.create_commit(tree.trim(), None, message.as_bytes())?;
-        self.checked(
+        self.checked_with_env(
             "publish initial instruction commit",
-            ["update-ref", &format!("refs/heads/{branch}"), &commit],
+            ["update-ref", "--stdin"],
+            std::iter::empty::<(&OsStr, &OsStr)>(),
+            Some(format!("create refs/heads/{branch} {commit}\n").as_bytes()),
         )?;
-        self.checked(
-            "initialize working index",
-            ["reset", "--mixed", "--quiet", "HEAD"],
-        )?;
+        self.refresh_index_paths(paths)?;
         Ok(commit)
     }
 
@@ -644,6 +741,18 @@ impl GitRepository {
             )
             .path(parent)
         })?;
+        let staging = tempfile::Builder::new()
+            .prefix(".jcode-clone-")
+            .tempdir_in(parent)
+            .map_err(|error| {
+                InstructionRepositoryError::new(
+                    InstructionRepositoryErrorKind::Io,
+                    "prepare private clone",
+                    error.to_string(),
+                )
+                .path(parent)
+            })?;
+        let checkout = staging.path().join("checkout");
         let output = run_git(
             Some(parent),
             [
@@ -653,18 +762,64 @@ impl GitRepository {
                 OsStr::new("--single-branch"),
                 OsStr::new("--"),
                 OsStr::new(url),
-                destination.as_os_str(),
+                checkout.as_os_str(),
             ],
             std::iter::empty::<(&OsStr, &OsStr)>(),
             None,
         )?;
         if !output.status.success() {
-            return Err(git_failure(
-                "clone external repository",
-                destination,
-                output,
-            ));
+            let mut error = git_failure("clone external repository", destination, output);
+            let path = staging.path().to_path_buf();
+            if let Err(cleanup) = staging.close() {
+                error.detail.push_str(&format!(
+                    "; staging cleanup failed at {}: {cleanup}",
+                    path.display()
+                ));
+            }
+            return Err(error);
         }
+        let candidate = Self::new(&checkout);
+        if !candidate.is_repository()
+            || candidate.head()?.is_none()
+            || candidate.branch()?.as_deref() != Some(branch)
+        {
+            return Err(InstructionRepositoryError::new(
+                InstructionRepositoryErrorKind::RepositoryDamaged,
+                "validate cloned checkout",
+                "Clone did not produce the requested attached branch and complete Git worktree",
+            )
+            .path(destination));
+        }
+        if destination.exists() || destination.is_symlink() {
+            return Err(InstructionRepositoryError::new(
+                InstructionRepositoryErrorKind::Conflict,
+                "publish cloned checkout",
+                "Destination appeared during clone; it was not overwritten",
+            )
+            .path(destination));
+        }
+        std::fs::rename(&checkout, destination).map_err(|error| {
+            InstructionRepositoryError::new(
+                InstructionRepositoryErrorKind::Io,
+                "publish cloned checkout",
+                error.to_string(),
+            )
+            .path(destination)
+        })?;
+        let staging_path = staging.path().to_path_buf();
+        staging.close().map_err(|error| {
+            InstructionRepositoryError::new(
+                InstructionRepositoryErrorKind::Io,
+                "clean completed clone staging",
+                format!(
+                    "Checkout is published at {}. Cleanup remains at {}: {error}",
+                    destination.display(),
+                    staging_path.display()
+                ),
+            )
+            .path(destination)
+            .may_have_working_changes()
+        })?;
         Ok(Self::new(destination))
     }
 
@@ -798,6 +953,41 @@ impl GitRepository {
             return Err(git_failure("add instruction submodule", parent, output));
         }
         Ok(Self::new(parent.join(relative_path)))
+    }
+
+    pub(super) fn configured_submodule_url(
+        parent: &Path,
+        path: &Path,
+    ) -> InstructionRepositoryResult<Option<String>> {
+        let git = Self::new(parent);
+        let mapping = git.run([
+            "config",
+            "--null",
+            "--file",
+            ".gitmodules",
+            "--get-regexp",
+            r"^submodule\..*\.path$",
+        ])?;
+        if !mapping.status.success() {
+            return Ok(None);
+        }
+        let mapping = utf8_stdout("read submodule paths", mapping)?;
+        for record in mapping.split('\0') {
+            if let Some((key, value)) = record.split_once('\n')
+                && value == git_path(path)?
+            {
+                let key = format!("{}.url", key.strip_suffix(".path").unwrap_or(key));
+                let output = git.run(["config", "--get", &key])?;
+                if output.status.success() {
+                    return Ok(Some(
+                        utf8_stdout("read resolved submodule URL", output)?
+                            .trim_end()
+                            .to_string(),
+                    ));
+                }
+            }
+        }
+        Ok(None)
     }
 
     pub(super) fn submodule_recorded_commit(
@@ -975,21 +1165,6 @@ impl GitRepository {
         )
     }
 
-    fn checked_os_with_env<E, K, V>(
-        &self,
-        operation: &str,
-        args: &[OsString],
-        env: E,
-        stdin: Option<&[u8]>,
-    ) -> InstructionRepositoryResult<Output>
-    where
-        E: IntoIterator<Item = (K, V)>,
-        K: AsRef<OsStr>,
-        V: AsRef<OsStr>,
-    {
-        self.checked_with_env(operation, args, env, stdin)
-    }
-
     fn checked_utf8_os_env_owned(
         &self,
         operation: &str,
@@ -1014,12 +1189,7 @@ impl GitRepository {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        run_git(
-            Some(&self.root),
-            args,
-            std::iter::empty::<(&OsStr, &OsStr)>(),
-            None,
-        )
+        self.run_with_env(args, std::iter::empty::<(&OsStr, &OsStr)>(), None)
     }
 
     fn run_with_env<I, S, E, K, V>(
@@ -1035,8 +1205,112 @@ impl GitRepository {
         K: AsRef<OsStr>,
         V: AsRef<OsStr>,
     {
-        run_git(Some(&self.root), args, env, stdin)
+        let binding = self.binding.as_ref().map_err(Clone::clone)?;
+        let mut environment = vec![
+            (
+                OsString::from("GIT_DIR"),
+                binding.git_dir.as_os_str().to_os_string(),
+            ),
+            (
+                OsString::from("GIT_WORK_TREE"),
+                binding.work_tree.as_os_str().to_os_string(),
+            ),
+        ];
+        environment.extend(
+            env.into_iter()
+                .map(|(key, value)| (key.as_ref().to_os_string(), value.as_ref().to_os_string())),
+        );
+        execute_git(
+            Some(&binding.work_tree),
+            args,
+            environment,
+            stdin,
+            &binding.script_policy,
+        )
     }
+}
+
+fn bind_git(root: &Path) -> InstructionRepositoryResult<GitBinding> {
+    let fail = |detail: String| {
+        InstructionRepositoryError::new(
+            InstructionRepositoryErrorKind::RepositoryDamaged,
+            "bind instruction Git worktree",
+            detail,
+        )
+        .path(root)
+    };
+    if !root.is_dir() || root.is_symlink() {
+        return Err(fail(
+            "Instruction checkout root must not be a symlink".into(),
+        ));
+    }
+    let script_policy = script_disabling_config(root)?;
+    let output = execute_git(
+        Some(root),
+        [
+            "rev-parse",
+            "--show-toplevel",
+            "--absolute-git-dir",
+            "--path-format=absolute",
+            "--git-common-dir",
+        ],
+        std::iter::empty::<(&OsStr, &OsStr)>(),
+        None,
+        &script_policy,
+    )?;
+    if !output.status.success() {
+        return Err(git_failure("bind instruction Git worktree", root, output));
+    }
+    let output = utf8_stdout("bind instruction Git worktree", output)?;
+    let paths = output.lines().collect::<Vec<_>>();
+    if paths.len() != 3 {
+        return Err(fail("Git returned an ambiguous worktree identity".into()));
+    }
+    let canonical = |path: &Path| path.canonicalize().map_err(|error| fail(error.to_string()));
+    let work_tree = canonical(Path::new(paths[0]))?;
+    if work_tree != canonical(root)? {
+        return Err(fail("Configured instruction directory is not the Git worktree root. Refusing to adopt or mutate its parent repository.".into()));
+    }
+    Ok(GitBinding {
+        work_tree,
+        git_dir: canonical(Path::new(paths[1]))?,
+        common_dir: canonical(Path::new(paths[2]))?,
+        script_policy,
+    })
+}
+
+fn script_disabling_config(root: &Path) -> InstructionRepositoryResult<Vec<OsString>> {
+    let output = execute_git(
+        Some(root),
+        [
+            "config",
+            "--null",
+            "--name-only",
+            "--get-regexp",
+            r"^(filter\..*\.(clean|smudge|process|required)|merge\..*\.driver)$",
+        ],
+        std::iter::empty::<(&OsStr, &OsStr)>(),
+        None,
+        &[],
+    )?;
+    if output.status.code() == Some(1) {
+        return Ok(Vec::new());
+    }
+    if !output.status.success() {
+        return Err(git_failure("inspect Git execution policy", root, output));
+    }
+    let keys = utf8_stdout("inspect Git execution policy", output)?;
+    let mut policy = Vec::new();
+    for key in keys.split('\0').filter(|key| !key.is_empty()) {
+        policy.push(OsString::from("-c"));
+        let value = if key.ends_with(".required") || key.starts_with("merge.") {
+            "false"
+        } else {
+            ""
+        };
+        policy.push(format!("{key}={value}").into());
+    }
+    Ok(policy)
 }
 
 fn run_git<I, S, E, K, V>(
@@ -1052,9 +1326,48 @@ where
     K: AsRef<OsStr>,
     V: AsRef<OsStr>,
 {
+    let policy = match current_dir {
+        Some(root) => script_disabling_config(root)?,
+        None => Vec::new(),
+    };
+    execute_git(current_dir, args, env, stdin, &policy)
+}
+
+fn execute_git<I, S, E, K, V>(
+    current_dir: Option<&Path>,
+    args: I,
+    env: E,
+    stdin: Option<&[u8]>,
+    script_policy: &[OsString],
+) -> InstructionRepositoryResult<Output>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+    E: IntoIterator<Item = (K, V)>,
+    K: AsRef<OsStr>,
+    V: AsRef<OsStr>,
+{
     let mut command = Command::new("git");
     command
-        .args(["-c", "core.fsmonitor=false"])
+        .args([
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            if cfg!(windows) {
+                "core.hooksPath=NUL"
+            } else {
+                "core.hooksPath=/dev/null"
+            },
+            "-c",
+            "submodule.recurse=false",
+            "-c",
+            "fetch.recurseSubmodules=false",
+            "-c",
+            "protocol.ext.allow=never",
+            "-c",
+            "core.autocrlf=false",
+        ])
+        .args(script_policy)
         .args(args)
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -1062,6 +1375,16 @@ where
         .env("LC_ALL", "C")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    for key in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_COMMON_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    ] {
+        command.env_remove(key);
+    }
     if let Some(current_dir) = current_dir {
         command.current_dir(current_dir);
     }
@@ -1373,18 +1696,6 @@ fn stderr_contains_missing_object(stderr: &[u8]) -> bool {
     stderr.contains("does not exist")
         || stderr.contains("Not a valid object name")
         || stderr.contains("path '") && stderr.contains("exists on disk, but not in")
-}
-
-fn trim_ascii(bytes: &[u8]) -> &[u8] {
-    let start = bytes
-        .iter()
-        .position(|byte| !byte.is_ascii_whitespace())
-        .unwrap_or(bytes.len());
-    let end = bytes
-        .iter()
-        .rposition(|byte| !byte.is_ascii_whitespace())
-        .map_or(start, |index| index + 1);
-    &bytes[start..end]
 }
 
 trait SplitOnceByte {

@@ -71,6 +71,33 @@ Submodule, external-checkout, and standalone setup also carry operation identiti
 
 Ordinary operations do not offer reset, rebase, force push, commit deletion, or history rewrite.
 
+Git commands bind to the verified instruction worktree and its exact Git
+directory. An instruction directory nested inside a different repository is not
+adopted as that repository, including when a submodule checkout is damaged.
+Ambient `GIT_DIR`, `GIT_WORK_TREE`, index and object-directory variables cannot
+redirect the operation. Explicit isolated-index arguments remain supported.
+
+Repository hooks and filesystem-monitor commands are disabled. Configured
+clean/smudge/process filters are neutralized, and custom merge drivers fail closed
+instead of running repository-provided commands. Owned files are staged as exact
+Git blobs, preserving complete bytes rather than applying attribute conversion.
+This is literal-file versioning, not support for Git extensions that depend on
+executing filters. Git credential tooling remains responsible for authentication
+during an explicitly requested network operation.
+
+Mutation and attached-draft kernel locks live in the actual Git common directory,
+so configuration aliases and separate Jcode state directories cannot admit two
+writers to the same checkout. Stable setup coordination protects initialization
+and project configuration before that Git directory exists. Draft recovery
+records remain in private application state. A live draft blocks branch changes
+even when the other client uses a different project alias or state directory.
+
+Private remote clones are completed in an owned staging directory before the
+checkout path is published. Submodule setup retains Git-native relative-URL
+resolution against the parent remote and leaves parent changes uncommitted.
+Existing local attachments require their own Git worktree and committed baseline.
+An unmanaged unborn Git directory is not overwritten by seed initialization.
+
 Completed-operation recovery matches the exact operation trailer, not an ID
 prefix or incidental commit-subject text. Recognizing a published Save does not
 refresh the ordinary index again: the user may have staged newer target content

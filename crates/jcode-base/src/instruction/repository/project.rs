@@ -1,5 +1,5 @@
 use super::git::{GitRepository, validate_operation_id};
-use super::lease::acquire_mutation_lease;
+use super::lease::{acquire_mutation_lease, acquire_setup_lease};
 use super::mutation::{atomic_write_path, validate_relative_path};
 use super::service::InstructionRepositoryService;
 use super::types::*;
@@ -135,10 +135,40 @@ impl InstructionRepositoryService {
             owner_only: false,
         };
         validate_operation_id(operation_id)?;
+        let _setup = acquire_setup_lease(&roots.durable_state, &repository, operation_id)?;
+        let fresh_checkout = !GitRepository::new(&repository.root).is_repository();
         let _lease = acquire_mutation_lease(&roots.durable_state, &repository, operation_id)?;
+        let mut published_lease = None;
         if GitRepository::submodule_recorded_commit(project.active_root(), &relative)?.is_none() {
-            GitRepository::add_submodule(project.active_root(), url, branch, &relative)
-                .map_err(InstructionRepositoryError::may_have_working_changes)?;
+            if url.starts_with("./") || url.starts_with("../") {
+                // Git resolves relative submodule URLs against the parent remote,
+                // not against the private checkout directory.
+                GitRepository::add_submodule(project.active_root(), url, branch, &relative)
+                    .map_err(InstructionRepositoryError::may_have_working_changes)?;
+                if fresh_checkout {
+                    published_lease = Some(acquire_mutation_lease(
+                        &roots.durable_state,
+                        &repository,
+                        operation_id,
+                    )?);
+                }
+            } else {
+                if !repository.root.exists() {
+                    GitRepository::clone_remote(url, branch, &repository.root)
+                        .map_err(InstructionRepositoryError::may_have_working_changes)?;
+                }
+                if fresh_checkout {
+                    published_lease = Some(acquire_mutation_lease(
+                        &roots.durable_state,
+                        &repository,
+                        operation_id,
+                    )?);
+                }
+                validate_checkout_identity(&repository, url, branch)?;
+                self.validate_complete_store(&repository)?;
+                GitRepository::add_submodule(project.active_root(), url, branch, &relative)
+                    .map_err(InstructionRepositoryError::may_have_working_changes)?;
+            }
         } else if !GitRepository::new(&repository.root).is_repository() {
             return Err(InstructionRepositoryError::new(
                 InstructionRepositoryErrorKind::RepositoryDamaged,
@@ -149,6 +179,7 @@ impl InstructionRepositoryService {
         } else {
             validate_checkout_identity(&repository, url, branch)?;
         }
+        let _published_lease = published_lease;
         self.validate_complete_store(&repository)
             .map_err(InstructionRepositoryError::may_have_working_changes)?;
         let config = InstructionProjectConfig::new(InstructionProjectRepositoryMode::Submodule {
@@ -191,6 +222,8 @@ impl InstructionRepositoryService {
             owner_only: true,
         };
         validate_operation_id(operation_id)?;
+        let _setup = acquire_setup_lease(&roots.durable_state, &repository, operation_id)?;
+        let fresh_checkout = !GitRepository::new(&repository.root).is_repository();
         let _lease = acquire_mutation_lease(&roots.durable_state, &repository, operation_id)?;
         if !checkout.exists() {
             GitRepository::clone_remote(url, branch, &checkout)
@@ -206,6 +239,16 @@ impl InstructionRepositoryService {
         } else {
             validate_checkout_identity(&repository, url, branch)?;
         }
+        let _published_lease = if fresh_checkout {
+            Some(acquire_mutation_lease(
+                &roots.durable_state,
+                &repository,
+                operation_id,
+            )?)
+        } else {
+            None
+        };
+        validate_checkout_identity(&repository, url, branch)?;
         self.validate_complete_store(&repository)
             .map_err(InstructionRepositoryError::may_have_working_changes)?;
         harden_private_checkout(&checkout)?;
@@ -257,6 +300,7 @@ impl InstructionRepositoryService {
             owner_only: false,
         };
         validate_operation_id(operation_id)?;
+        let _setup = acquire_setup_lease(&roots.durable_state, &repository, operation_id)?;
         let _lease = acquire_mutation_lease(&roots.durable_state, &repository, operation_id)?;
         let git = GitRepository::new(&canonical);
         if !git.is_repository() {
@@ -264,6 +308,14 @@ impl InstructionRepositoryService {
                 InstructionRepositoryErrorKind::RepositoryDamaged,
                 "attach external instruction repository",
                 "selected checkout is not a Git worktree",
+            )
+            .path(&canonical));
+        }
+        if git.head()?.is_none() {
+            return Err(InstructionRepositoryError::new(
+                InstructionRepositoryErrorKind::RepositoryDamaged,
+                "attach external instruction repository",
+                "An instruction checkout needs a committed baseline before attachment",
             )
             .path(&canonical));
         }
@@ -330,9 +382,24 @@ impl InstructionRepositoryService {
             owner_only: false,
         };
         validate_operation_id(operation_id)?;
+        let _setup = acquire_setup_lease(&roots.durable_state, &repository, operation_id)?;
+        let fresh_checkout = !GitRepository::new(&repository.root).is_repository();
         let _lease = acquire_mutation_lease(&roots.durable_state, &repository, operation_id)?;
         let initialization =
             self.initialize_repository_locked(&repository, seed, legacy, "main", operation_id)?;
+        let _published_lease = if fresh_checkout {
+            Some(acquire_mutation_lease(
+                &roots.durable_state,
+                &repository,
+                operation_id,
+            )?)
+        } else {
+            None
+        };
+        self.validate_complete_store(&repository)?;
+        if GitRepository::new(&repository.root).branch()?.as_deref() != Some("main") {
+            return Err(InstructionRepositoryError::new(InstructionRepositoryErrorKind::StaleDraft, "publish project configuration", "Checkout branch changed during setup; inspect the preserved repository before retrying").repository(&repository).may_have_working_changes());
+        }
         let config = InstructionProjectConfig::new(InstructionProjectRepositoryMode::Standalone {
             path: relative,
         });
@@ -594,6 +661,22 @@ fn validate_checkout_identity(
     branch: &str,
 ) -> InstructionRepositoryResult<()> {
     let git = GitRepository::new(&repository.root);
+    let resolved_url = if repository.kind == InstructionRepositoryKind::ProjectSubmodule
+        && (url.starts_with("./") || url.starts_with("../"))
+    {
+        let parent = repository
+            .project_root
+            .as_deref()
+            .ok_or_else(|| config_error(&repository.root, "submodule has no parent"))?;
+        let path = repository
+            .root
+            .strip_prefix(parent)
+            .map_err(|_| config_error(&repository.root, "submodule is outside its parent"))?;
+        GitRepository::configured_submodule_url(parent, path)?
+    } else {
+        None
+    };
+    let url = resolved_url.as_deref().unwrap_or(url);
     let actual_url = git.remote_url("origin")?;
     if actual_url.as_deref() != Some(url) {
         return Err(InstructionRepositoryError::new(

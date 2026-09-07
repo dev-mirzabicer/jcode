@@ -1,7 +1,9 @@
 //! Durable unsaved intent. Kernel-owned draft leases block branch changes while
 //! an editor is attached; dropping a connection releases the lease, not the draft.
 use super::git::validate_operation_id;
-use super::lease::{RepositoryMutationGuard, acquire_mutation_lease, active_mutation_lease};
+use super::lease::{
+    RepositoryMutationGuard, acquire_draft_lease, acquire_mutation_lease, active_drafts,
+};
 use super::*;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -96,8 +98,7 @@ impl InstructionDraftWorkspace {
             outcome: None,
         };
         super::mutation::validate_request_paths(&record.request)?;
-        let guard =
-            acquire_mutation_lease(&roots.durable_state, &draft_lock(repository, &id), &id)?;
+        let guard = acquire_draft_lease(&roots.durable_state, repository, &id)?;
         service.write_editing_draft(&record)?;
         self.guard = Some(guard);
         self.attached = Some(record);
@@ -119,7 +120,7 @@ impl InstructionDraftWorkspace {
         let roots = service.roots()?;
         let _mutation = acquire_mutation_lease(&roots.durable_state, repository, id)?;
         let record = service.read_editing_draft(repository, session_id, id)?;
-        let guard = acquire_mutation_lease(&roots.durable_state, &draft_lock(repository, id), id)?;
+        let guard = acquire_draft_lease(&roots.durable_state, repository, id)?;
         // Stale drafts must still open for comparison and recovery, not vanish.
         self.guard = Some(guard);
         self.attached = Some(record);
@@ -345,44 +346,13 @@ impl InstructionRepositoryService {
         &self,
         repository: &InstructionRepositoryRef,
     ) -> InstructionRepositoryResult<()> {
-        let roots = self.roots()?;
-        let directory = roots
-            .durable_state
-            .join("instruction-repositories")
-            .join("drafts")
-            .join(&repository.id);
-        let entries = match std::fs::read_dir(directory) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => {
-                return Err(draft_error(&format!(
-                    "Cannot inspect attached drafts: {error}"
-                )));
-            }
-        };
-        for entry in entries {
-            let entry = entry.map_err(|error| draft_error(&error.to_string()))?;
-            let path = entry.path();
-            let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
-                continue;
-            };
-            if uuid::Uuid::parse_str(id).is_err() {
-                continue;
-            }
-            if active_mutation_lease(&roots.durable_state, &draft_lock(repository, id)).is_some() {
-                return Err(InstructionRepositoryError::new(InstructionRepositoryErrorKind::MutationBusy,
-                    "change instruction branch", "An attached draft is open. Close it to preserve it for later, or discard it before changing branches.").repository(repository));
-            }
+        if !active_drafts(&self.roots()?.durable_state, repository)?.is_empty() {
+            return Err(InstructionRepositoryError::new(InstructionRepositoryErrorKind::MutationBusy, "change instruction branch", "An attached draft is open in this Git repository. Close or discard it before changing branches.").repository(repository));
         }
         Ok(())
     }
 }
 
-fn draft_lock(repository: &InstructionRepositoryRef, id: &str) -> InstructionRepositoryRef {
-    let mut lock = repository.clone();
-    lock.id = format!("draft-{id}");
-    lock
-}
 fn read_record_bytes(path: &Path) -> InstructionRepositoryResult<Vec<u8>> {
     let metadata =
         std::fs::symlink_metadata(path).map_err(|error| draft_error(&error.to_string()))?;

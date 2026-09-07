@@ -1,5 +1,7 @@
+use super::git::GitRepository;
 use super::types::*;
 use chrono::{Duration, Utc};
+use sha2::{Digest, Sha256};
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 
@@ -13,12 +15,42 @@ pub(super) struct RepositoryMutationGuard {
     operation_id: String,
 }
 
+#[derive(Clone, Copy)]
+enum LeaseKind<'a> {
+    Mutation,
+    Setup,
+    Draft(&'a str),
+}
+
 pub(super) fn acquire_mutation_lease(
     state_root: &Path,
     repository: &InstructionRepositoryRef,
     operation_id: &str,
 ) -> InstructionRepositoryResult<RepositoryMutationGuard> {
-    let paths = lease_paths(state_root, repository);
+    acquire_lease(state_root, repository, operation_id, LeaseKind::Mutation)
+}
+pub(super) fn acquire_setup_lease(
+    state_root: &Path,
+    repository: &InstructionRepositoryRef,
+    operation_id: &str,
+) -> InstructionRepositoryResult<RepositoryMutationGuard> {
+    acquire_lease(state_root, repository, operation_id, LeaseKind::Setup)
+}
+pub(super) fn acquire_draft_lease(
+    state_root: &Path,
+    repository: &InstructionRepositoryRef,
+    id: &str,
+) -> InstructionRepositoryResult<RepositoryMutationGuard> {
+    acquire_lease(state_root, repository, id, LeaseKind::Draft(id))
+}
+fn acquire_lease(
+    state_root: &Path,
+    repository: &InstructionRepositoryRef,
+    operation_id: &str,
+    kind: LeaseKind<'_>,
+) -> InstructionRepositoryResult<RepositoryMutationGuard> {
+    let paths = lease_paths(state_root, repository, kind)?;
+    reject_symlink_components(&paths.owner)?;
     crate::storage::ensure_dir(paths.owner.parent().unwrap_or(state_root)).map_err(|error| {
         InstructionRepositoryError::new(
             InstructionRepositoryErrorKind::Io,
@@ -151,7 +183,14 @@ pub(super) fn active_mutation_lease(
     state_root: &Path,
     repository: &InstructionRepositoryRef,
 ) -> Option<InstructionMutationLeaseInfo> {
-    let paths = lease_paths(state_root, repository);
+    active_lease(state_root, repository, LeaseKind::Mutation)
+}
+fn active_lease(
+    state_root: &Path,
+    repository: &InstructionRepositoryRef,
+    kind: LeaseKind<'_>,
+) -> Option<InstructionMutationLeaseInfo> {
+    let paths = lease_paths(state_root, repository, kind).ok()?;
 
     #[cfg(unix)]
     {
@@ -211,14 +250,167 @@ struct LeasePaths {
     owner: PathBuf,
 }
 
-fn lease_paths(state_root: &Path, repository: &InstructionRepositoryRef) -> LeasePaths {
-    let directory = state_root
-        .join("instruction-repositories")
-        .join("mutation-leases");
-    LeasePaths {
-        lock: directory.join(format!("{}.lock", repository.id)),
-        owner: directory.join(format!("{}.owner.json", repository.id)),
+fn lease_paths(
+    state_root: &Path,
+    repository: &InstructionRepositoryRef,
+    kind: LeaseKind<'_>,
+) -> InstructionRepositoryResult<LeasePaths> {
+    let git = GitRepository::new(&repository.root);
+    let (directory, name) = match (kind, git.common_directory()) {
+        (LeaseKind::Mutation, Some(common)) => (
+            common.join("jcode-instruction-leases"),
+            "mutation".to_string(),
+        ),
+        (LeaseKind::Draft(id), Some(common)) => {
+            uuid::Uuid::parse_str(id).map_err(|error| {
+                InstructionRepositoryError::new(
+                    InstructionRepositoryErrorKind::Configuration,
+                    "draft lease identity",
+                    error.to_string(),
+                )
+            })?;
+            (
+                common.join("jcode-instruction-leases"),
+                format!("draft-{id}"),
+            )
+        }
+        (LeaseKind::Draft(_), None) => {
+            return Err(InstructionRepositoryError::new(
+                InstructionRepositoryErrorKind::RepositoryDamaged,
+                "acquire draft lease",
+                "Drafts require their own initialized Git repository",
+            )
+            .repository(repository));
+        }
+        (kind, _) => {
+            let anchor = if let Some(project) = &repository.project_root {
+                let project_git = GitRepository::new(project);
+                project_git
+                    .common_directory()
+                    .map(|common| common.join("jcode-instruction-setups"))
+                    .unwrap_or_else(|| canonical_prefix(project).join(".jcode/instruction-setups"))
+            } else {
+                canonical_prefix(repository.root.parent().unwrap_or(state_root))
+                    .join("state/instruction-setups")
+            };
+            let identity_root = if matches!(kind, LeaseKind::Setup) {
+                repository
+                    .project_root
+                    .as_deref()
+                    .unwrap_or(&repository.root)
+            } else {
+                &repository.root
+            };
+            let identity = format!(
+                "{:x}",
+                Sha256::digest(canonical_prefix(identity_root).to_string_lossy().as_bytes())
+            );
+            (
+                anchor,
+                format!(
+                    "{}-{identity}",
+                    if matches!(kind, LeaseKind::Setup) {
+                        "setup"
+                    } else {
+                        "bootstrap"
+                    }
+                ),
+            )
+        }
+    };
+    Ok(LeasePaths {
+        lock: directory.join(format!("{name}.lock")),
+        owner: directory.join(format!("{name}.owner.json")),
+    })
+}
+
+pub(super) fn active_drafts(
+    state_root: &Path,
+    repository: &InstructionRepositoryRef,
+) -> InstructionRepositoryResult<Vec<InstructionMutationLeaseInfo>> {
+    let paths = lease_paths(state_root, repository, LeaseKind::Mutation)?;
+    let Some(directory) = paths.lock.parent() else {
+        return Ok(Vec::new());
+    };
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(lease_io_error(
+                repository,
+                "inspect active drafts",
+                directory,
+                error,
+            ));
+        }
+    };
+    let mut owners = Vec::new();
+    for entry in entries {
+        let entry = entry
+            .map_err(|error| lease_io_error(repository, "inspect draft lease", directory, error))?;
+        let name = entry.file_name();
+        let Some(id) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix("draft-"))
+            .and_then(|name| name.strip_suffix(".owner.json"))
+        else {
+            continue;
+        };
+        if uuid::Uuid::parse_str(id).is_ok()
+            && let Some(owner) = active_lease(state_root, repository, LeaseKind::Draft(id))
+        {
+            owners.push(owner);
+        }
     }
+    Ok(owners)
+}
+
+fn canonical_prefix(path: &Path) -> PathBuf {
+    let mut cursor = path;
+    let mut suffix = Vec::new();
+    loop {
+        if let Ok(mut canonical) = cursor.canonicalize() {
+            for name in suffix.into_iter().rev() {
+                canonical.push(name);
+            }
+            return canonical;
+        }
+        let Some(parent) = cursor.parent() else {
+            return path.to_path_buf();
+        };
+        if let Some(name) = cursor.file_name() {
+            suffix.push(name.to_os_string());
+        }
+        cursor = parent;
+    }
+}
+
+fn reject_symlink_components(path: &Path) -> InstructionRepositoryResult<()> {
+    let mut cursor = PathBuf::new();
+    for component in path.components() {
+        cursor.push(component.as_os_str());
+        match std::fs::symlink_metadata(&cursor) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(InstructionRepositoryError::new(
+                    InstructionRepositoryErrorKind::SymlinkEscape,
+                    "open repository lease",
+                    "Lease path crosses a symlink",
+                )
+                .path(&cursor));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(InstructionRepositoryError::new(
+                    InstructionRepositoryErrorKind::Io,
+                    "inspect repository lease",
+                    error.to_string(),
+                )
+                .path(&cursor));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn read_owner(path: &Path) -> Option<InstructionMutationLeaseInfo> {

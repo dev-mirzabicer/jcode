@@ -1175,6 +1175,223 @@ fn instruction_draft_and_working_read_reject_fifo_without_waiting_for_a_writer()
 }
 
 #[test]
+fn git_mutation_lock_is_shared_across_aliases_and_service_state_roots() {
+    let fixture = Fixture::new();
+    let repository = fixture.initialize().repository;
+    let _owner = acquire_mutation_lease(&fixture.state, &repository, "shared-owner").unwrap();
+    let mut alias = repository.clone();
+    alias.id = "different-project-configuration".into();
+    assert!(acquire_mutation_lease(&fixture.state, &alias, "alias-contender").is_err());
+    assert!(
+        acquire_mutation_lease(
+            &fixture._root.path().join("other-state"),
+            &alias,
+            "other-state-contender"
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn attached_drafts_block_branch_changes_from_another_service_state_root() {
+    let fixture = Fixture::new();
+    let repository = fixture.initialize().repository;
+    let mut workspace = InstructionDraftWorkspace::default();
+    workspace
+        .begin(
+            &fixture.service,
+            &repository,
+            "owner-session",
+            &["modules/common.md".into()],
+            "instruction: edit",
+        )
+        .unwrap();
+    let other = InstructionRepositoryService::from_paths(
+        &fixture.home,
+        fixture._root.path().join("other-state"),
+    );
+    let mut alias = repository.clone();
+    alias.id = "alias-project".into();
+    assert_eq!(
+        other
+            .checkout_branch(&alias, "other-branch", "other", true, None)
+            .unwrap_err()
+            .kind,
+        InstructionRepositoryErrorKind::MutationBusy
+    );
+    workspace.close();
+    other
+        .checkout_branch(&alias, "other-branch", "other", true, None)
+        .unwrap();
+}
+
+#[test]
+fn unmanaged_unborn_git_directory_is_not_overwritten_by_seed_initialization() {
+    let fixture = Fixture::new();
+    let repository = fixture.service.global_repository().unwrap();
+    std::fs::create_dir_all(&repository.root).unwrap();
+    git(&repository.root, &["init", "--initial-branch", "main"]);
+    std::fs::write(
+        repository.root.join("user-file.md"),
+        "preserved user content",
+    )
+    .unwrap();
+    assert!(fixture.service.initialize_global(&seed(), &[]).is_err());
+    assert_eq!(
+        std::fs::read_to_string(repository.root.join("user-file.md")).unwrap(),
+        "preserved user content"
+    );
+    assert!(!repository.root.join("instruction-store.toml").exists());
+}
+
+#[test]
+fn relative_submodule_urls_keep_git_resolution_and_idempotent_setup() {
+    let fixture = Fixture::new();
+    let source = fixture.initialize().repository;
+    let remote = fixture._root.path().join("instructions.git");
+    git(
+        fixture._root.path(),
+        &[
+            "clone",
+            "--bare",
+            source.root.to_str().unwrap(),
+            remote.to_str().unwrap(),
+        ],
+    );
+    let parent = fixture._root.path().join("parent");
+    init_plain_git(&parent);
+    git(
+        &parent,
+        &[
+            "remote",
+            "add",
+            "origin",
+            fixture._root.path().join("parent.git").to_str().unwrap(),
+        ],
+    );
+    let head = git(&parent, &["rev-parse", "HEAD"]);
+    let first = fixture
+        .service
+        .configure_submodule(
+            &parent,
+            "relative-setup",
+            "../instructions.git",
+            "main",
+            None,
+        )
+        .unwrap();
+    let repeated = fixture
+        .service
+        .configure_submodule(
+            &parent,
+            "relative-setup",
+            "../instructions.git",
+            "main",
+            None,
+        )
+        .unwrap();
+    assert_eq!(first.root, repeated.root);
+    assert_eq!(git(&parent, &["rev-parse", "HEAD"]), head);
+    assert!(
+        fixture
+            .service
+            .inspect(&first)
+            .unwrap()
+            .parent_gitlink
+            .unwrap()
+            .gitlink_changed
+    );
+}
+
+#[test]
+fn instruction_draft_never_adopts_an_enclosing_parent_git_repository() {
+    let fixture = Fixture::new();
+    init_plain_git(&fixture.home);
+    let repository = fixture.service.global_repository().unwrap();
+    std::fs::create_dir_all(repository.root.join("modules")).unwrap();
+    std::fs::write(
+        repository.root.join("instruction-store.toml"),
+        "schema_version=1\nseed_version=27\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repository.root.join("modules/example.md"),
+        managed("example", "module", "nested source"),
+    )
+    .unwrap();
+    let parent_head = git(&fixture.home, &["rev-parse", "HEAD"]);
+    assert!(
+        fixture
+            .service
+            .open_draft(&repository, "modules/example.md")
+            .is_err()
+    );
+    assert_eq!(git(&fixture.home, &["rev-parse", "HEAD"]), parent_head);
+}
+
+#[cfg(unix)]
+#[test]
+fn instruction_git_branch_actions_do_not_run_repository_hooks() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    let repository = fixture.initialize().repository;
+    let marker = fixture._root.path().join("hook-executed");
+    let hook = repository.root.join(".git/hooks/post-checkout");
+    std::fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    fixture
+        .service
+        .checkout_branch(&repository, "branch-with-hook", "work", true, None)
+        .unwrap();
+    assert!(
+        !marker.exists(),
+        "repository-provided checkout hook executed"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn instruction_commits_are_raw_bytes_and_never_execute_clean_filters() {
+    let fixture = Fixture::new();
+    let repository = fixture.initialize().repository;
+    let marker = fixture._root.path().join("filter-executed");
+    git(
+        &repository.root,
+        &[
+            "config",
+            "filter.fixture.clean",
+            &format!("touch '{}'; printf 'FILTERED'", marker.display()),
+        ],
+    );
+    git(
+        &repository.root,
+        &["config", "filter.fixture.required", "true"],
+    );
+    std::fs::write(
+        repository.root.join(".gitattributes"),
+        "*.md filter=fixture text eol=lf\n",
+    )
+    .unwrap();
+    let content = managed("common", "module", "exact\r\nsynthetic bytes\r\n");
+    let outcome = draft_commit(
+        &fixture.service,
+        &repository,
+        "modules/common.md",
+        &content,
+        "raw-filter-free-save",
+    );
+    assert!(
+        !marker.exists(),
+        "repository-configured clean filter executed"
+    );
+    let committed = fixture
+        .service
+        .content_at_revision(&repository, &outcome.commit, "modules/common.md")
+        .unwrap();
+    assert_eq!(committed.content, content);
+}
+
+#[test]
 fn history_compare_restore_clear_rename_and_multi_delete_create_new_commits() {
     let fixture = Fixture::new();
     let initialized = fixture.initialize();

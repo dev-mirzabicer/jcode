@@ -1,5 +1,5 @@
 use super::git::{GitRepository, validate_branch, validate_operation_id};
-use super::lease::{acquire_mutation_lease, active_mutation_lease};
+use super::lease::{acquire_mutation_lease, acquire_setup_lease, active_mutation_lease};
 use super::mutation::{
     atomic_write, atomic_write_path, commit_request, fingerprint, read_working_utf8, safe_target,
     sha256, validate_relative_path,
@@ -373,6 +373,7 @@ impl InstructionRepositoryService {
         validate_branch(branch)?;
         let roots = self.roots()?;
         let operation_id = format!("initialize-{}", repository.id);
+        let _setup = acquire_setup_lease(&roots.durable_state, repository, &operation_id)?;
         let _lease = acquire_mutation_lease(&roots.durable_state, repository, &operation_id)?;
         self.initialize_repository_locked(repository, seed, legacy, branch, &operation_id)
     }
@@ -431,7 +432,6 @@ impl InstructionRepositoryService {
                 .root
                 .read_dir()
                 .is_ok_and(|mut entries| entries.next().is_some())
-                && !git.is_repository()
                 && !existing_attempt.is_some_and(|attempt| {
                     attempt.repository_id == repository.id
                         && attempt.root == repository.root
@@ -466,6 +466,7 @@ impl InstructionRepositoryService {
             receipts,
         } = prepared;
         let created_root = !repository.root.exists();
+        let needs_git_lease = !GitRepository::new(&repository.root).is_repository();
         self.write_initialization_attempt(repository, branch)?;
         std::fs::create_dir_all(&repository.root).map_err(|error| {
             repository_io_error(
@@ -502,14 +503,26 @@ impl InstructionRepositoryService {
                 Path::new(STORE_MANIFEST),
                 manifest_content.as_bytes(),
             )?;
+            let mut owned_paths = vec![PathBuf::from(STORE_MANIFEST)];
             for file in files {
                 atomic_write(repository, &file.relative_path, &file.content)?;
+                owned_paths.push(file.relative_path);
             }
             self.validate_complete_store(repository)?;
             let git = GitRepository::init(&repository.root, branch)?;
+            let _published_lease = if needs_git_lease {
+                Some(acquire_mutation_lease(
+                    &self.roots()?.durable_state,
+                    repository,
+                    operation_id,
+                )?)
+            } else {
+                None
+            };
             let index_path = self.isolated_index_path(repository, operation_id)?;
             let commit = git.initial_commit(
                 &index_path,
+                &owned_paths,
                 "instruction: initialize managed store",
                 operation_id,
             );
@@ -546,6 +559,7 @@ impl InstructionRepositoryService {
         validate_branch(branch)?;
         let roots = self.roots()?;
         let operation_id = format!("recreate-{}-{}", repository.id, crate::id::new_id("store"));
+        let _setup = acquire_setup_lease(&roots.durable_state, repository, &operation_id)?;
         let _lease = acquire_mutation_lease(&roots.durable_state, repository, &operation_id)?;
         let prepared = self.prepare_repository_seed(repository, seed, legacy)?;
         self.validate_prepared_store(repository, &prepared)?;
