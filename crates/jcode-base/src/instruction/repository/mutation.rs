@@ -76,25 +76,18 @@ pub(super) fn read_working_utf8(
     repository: &InstructionRepositoryRef,
     relative_path: &Path,
 ) -> InstructionRepositoryResult<Option<String>> {
-    let target = safe_target(repository, relative_path, false)?;
-    match std::fs::read(&target) {
-        Ok(bytes) => String::from_utf8(bytes).map(Some).map_err(|error| {
+    super::review::read_bytes(repository, relative_path)?
+        .map(String::from_utf8)
+        .transpose()
+        .map_err(|error| {
             InstructionRepositoryError::new(
                 InstructionRepositoryErrorKind::InvalidUtf8,
                 "read working instruction file",
                 error.to_string(),
             )
             .repository(repository)
-            .path(&target)
-        }),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(io_error(
-            repository,
-            "read working instruction file",
-            &target,
-            error,
-        )),
-    }
+            .path(relative_path)
+        })
 }
 
 pub(super) fn atomic_write(
@@ -160,6 +153,7 @@ pub(super) fn commit_request<F>(
     state_root: &Path,
     repository: &InstructionRepositoryRef,
     request: &InstructionCommitRequest,
+    expected_branch: Option<&str>,
     validate_after_write: F,
 ) -> InstructionRepositoryResult<InstructionCommitOutcome>
 where
@@ -195,6 +189,12 @@ where
             "Save is unavailable while the instruction repository is detached",
         )
         .repository(repository));
+    }
+    if expected_branch.is_some_and(|expected| branch.as_deref() != Some(expected)) {
+        return Err(stale_error(
+            repository,
+            "instruction branch changed after draft review".into(),
+        ));
     }
     let current_head = git.head()?.ok_or_else(|| {
         InstructionRepositoryError::new(
@@ -286,7 +286,9 @@ where
     }
 }
 
-fn validate_request_paths(request: &InstructionCommitRequest) -> InstructionRepositoryResult<()> {
+pub(super) fn validate_request_paths(
+    request: &InstructionCommitRequest,
+) -> InstructionRepositoryResult<()> {
     if request.mutations.is_empty() {
         return Err(InstructionRepositoryError::new(
             InstructionRepositoryErrorKind::Configuration,
@@ -386,7 +388,7 @@ fn apply_mutations(
     Ok(())
 }
 
-fn path_matches_final_state(
+pub(super) fn path_matches_final_state(
     path: &Path,
     actual: &InstructionTargetFingerprint,
     expected_by_path: &BTreeMap<PathBuf, InstructionTargetFingerprint>,

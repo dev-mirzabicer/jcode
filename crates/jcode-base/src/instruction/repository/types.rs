@@ -36,7 +36,7 @@ impl fmt::Display for InstructionRepositoryKind {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct InstructionRepositoryRef {
     pub id: String,
     pub kind: InstructionRepositoryKind,
@@ -247,13 +247,13 @@ pub struct InstructionStoreRecreation {
     pub damaged_backup: Option<PathBuf>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct InstructionFileState {
     pub relative_path: PathBuf,
     pub fingerprint: InstructionTargetFingerprint,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum InstructionTargetFingerprint {
     Missing,
     File { sha256: String, bytes: u64 },
@@ -280,20 +280,22 @@ pub struct InstructionFileContent {
     pub content: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct InstructionDraft {
     pub draft_id: String,
     pub repository: InstructionRepositoryRef,
     pub relative_path: PathBuf,
     pub base: InstructionFileState,
     pub base_head: String,
+    pub base_branch: Option<String>,
     pub content: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum InstructionFileMutation {
     Write {
         relative_path: PathBuf,
+        #[serde(with = "draft_bytes")]
         content: Vec<u8>,
     },
     Delete {
@@ -303,6 +305,22 @@ pub enum InstructionFileMutation {
         from: PathBuf,
         to: PathBuf,
     },
+}
+
+mod draft_bytes {
+    use base64::Engine;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&base64::engine::general_purpose::STANDARD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        base64::engine::general_purpose::STANDARD
+            .decode(value)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 impl InstructionFileMutation {
@@ -316,7 +334,7 @@ impl InstructionFileMutation {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct InstructionCommitRequest {
     pub operation_id: String,
     pub message: String,
@@ -325,18 +343,36 @@ pub struct InstructionCommitRequest {
     pub mutations: Vec<InstructionFileMutation>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum InstructionCommitDisposition {
     Created,
     AlreadyCommitted,
     NoChange,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct InstructionCommitOutcome {
     pub disposition: InstructionCommitDisposition,
     pub commit: String,
     pub changed_paths: Vec<PathBuf>,
+}
+
+/// A complete prospective commit review. Nothing here has been written to the
+/// authoritative worktree or index. Save must revalidate the captured base.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InstructionCommitReview {
+    pub head: String,
+    pub branch: Option<String>,
+    pub files: Vec<InstructionReviewedFile>,
+    pub errors: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InstructionReviewedFile {
+    pub relative_path: PathBuf,
+    pub working: Option<Vec<u8>>,
+    pub committed: Option<Vec<u8>>,
+    pub proposed: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

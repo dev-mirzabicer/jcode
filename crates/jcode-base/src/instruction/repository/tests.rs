@@ -743,6 +743,438 @@ fn completed_save_retry_preserves_newer_staged_target() {
 }
 
 #[test]
+fn commit_review_is_complete_non_mutating_and_validates_published_dependencies() {
+    let fixture = Fixture::new();
+    let repository = fixture.initialize().repository;
+    let path = "modules/common.md";
+    let draft = fixture.service.open_draft(&repository, path).unwrap();
+    // The live renderer can find this source, but the scoped commit will not
+    // contain it unless the user explicitly includes it in the transaction.
+    let extra = managed("uncommitted", "module", "uncommitted dependency");
+    std::fs::write(repository.root.join("modules/uncommitted.md"), &extra).unwrap();
+    std::fs::write(repository.root.join("unrelated.txt"), "staged sentinel").unwrap();
+    git(&repository.root, &["add", "unrelated.txt"]);
+    let index = std::fs::read(repository.root.join(".git/index")).unwrap();
+    let original = std::fs::read(repository.root.join(path)).unwrap();
+    let content = "---\nid: common\nkind: module\ntemplate: handlebars\n---\n{{> uncommitted}}";
+    let mut request = InstructionCommitRequest {
+        operation_id: "review-dependencies".into(),
+        message: "instruction: update synthetic module".into(),
+        expected_head: draft.base_head.clone(),
+        expected_files: vec![draft.base],
+        mutations: vec![InstructionFileMutation::Write {
+            relative_path: path.into(),
+            content: content.as_bytes().to_vec(),
+        }],
+    };
+    let invalid = fixture
+        .service
+        .review_commit(&repository, &request)
+        .unwrap();
+    assert!(!invalid.errors.is_empty());
+    assert_eq!(invalid.files[0].working.as_ref().unwrap(), &original);
+    assert_eq!(
+        invalid.files[0].proposed.as_deref(),
+        Some(content.as_bytes())
+    );
+    assert_eq!(std::fs::read(repository.root.join(path)).unwrap(), original);
+    assert_eq!(
+        std::fs::read(repository.root.join(".git/index")).unwrap(),
+        index
+    );
+    assert_eq!(
+        git(&repository.root, &["rev-parse", "HEAD"]),
+        draft.base_head
+    );
+    let extra_draft = fixture
+        .service
+        .open_draft(&repository, "modules/uncommitted.md")
+        .unwrap();
+    request.expected_files.push(extra_draft.base);
+    request.mutations.push(InstructionFileMutation::Write {
+        relative_path: "modules/uncommitted.md".into(),
+        content: extra.into_bytes(),
+    });
+    let valid = fixture
+        .service
+        .review_commit(&repository, &request)
+        .unwrap();
+    assert!(valid.errors.is_empty(), "{:?}", valid.errors);
+    assert_eq!(valid.files.len(), 2);
+    assert_eq!(
+        std::fs::read(repository.root.join(".git/index")).unwrap(),
+        index
+    );
+    std::fs::write(
+        repository.root.join(path),
+        managed("common", "module", "newer intent"),
+    )
+    .unwrap();
+    let error = fixture
+        .service
+        .review_commit(&repository, &request)
+        .unwrap_err();
+    assert_eq!(error.kind, InstructionRepositoryErrorKind::StaleDraft);
+    assert!(error.existing_state_unchanged);
+}
+
+#[test]
+fn draft_branch_identity_and_large_complete_review_are_preserved() {
+    let fixture = Fixture::new();
+    let repository = fixture.initialize().repository;
+    let draft = fixture
+        .service
+        .open_draft(&repository, "modules/common.md")
+        .unwrap();
+    let content = managed("common", "module", &"合成 🦀\n".repeat(200_000));
+    let review = fixture
+        .service
+        .review_commit(
+            &repository,
+            &InstructionCommitRequest {
+                operation_id: "review-large".into(),
+                message: "instruction: review complete source".into(),
+                expected_head: draft.base_head.clone(),
+                expected_files: vec![draft.base.clone()],
+                mutations: vec![InstructionFileMutation::Write {
+                    relative_path: draft.relative_path.clone(),
+                    content: content.as_bytes().to_vec(),
+                }],
+            },
+        )
+        .unwrap();
+    assert!(review.errors.is_empty());
+    assert_eq!(
+        review.files[0].proposed.as_deref(),
+        Some(content.as_bytes())
+    );
+    git(&repository.root, &["switch", "-c", "other"]);
+    assert_eq!(
+        git(&repository.root, &["rev-parse", "HEAD"]),
+        draft.base_head
+    );
+    assert_eq!(
+        fixture.service.validate_draft(&draft).unwrap_err().kind,
+        InstructionRepositoryErrorKind::StaleDraft
+    );
+}
+
+#[test]
+fn editing_drafts_persist_without_saving_and_block_branch_changes_until_closed() {
+    let fixture = Fixture::new();
+    let repository = fixture.initialize().repository;
+    let mut workspace = InstructionDraftWorkspace::default();
+    let opened = workspace
+        .begin(
+            &fixture.service,
+            &repository,
+            "session-a",
+            &["modules/common.md".into()],
+            "instruction: edit common",
+        )
+        .unwrap()
+        .clone();
+    let original = std::fs::read(repository.root.join("modules/common.md")).unwrap();
+    let revised = workspace
+        .revise(
+            &fixture.service,
+            &opened.id,
+            0,
+            vec![InstructionFileMutation::Write {
+                relative_path: "modules/common.md".into(),
+                content: managed("common", "module", "draft only").into_bytes(),
+            }],
+        )
+        .unwrap()
+        .clone();
+    assert!(workspace.save(&fixture.service, &opened.id, 0).is_err());
+    assert!(workspace.save(&fixture.service, &opened.id, 1).is_err());
+    assert_eq!(
+        fixture
+            .service
+            .checkout_branch(&repository, "branch-during-draft", "other", true, None)
+            .unwrap_err()
+            .kind,
+        InstructionRepositoryErrorKind::MutationBusy
+    );
+    assert_eq!(
+        std::fs::read(repository.root.join("modules/common.md")).unwrap(),
+        original
+    );
+    assert!(
+        fixture
+            .service
+            .read_editing_draft(&repository, "wrong-session", &opened.id)
+            .is_err()
+    );
+    workspace.close();
+    let restored = workspace
+        .resume(&fixture.service, &repository, "session-a", &opened.id)
+        .unwrap();
+    assert_eq!(restored.request, revised.request);
+    assert_eq!(restored.generation, 1);
+    let mut second = InstructionDraftWorkspace::default();
+    assert!(
+        second
+            .resume(&fixture.service, &repository, "session-a", &opened.id)
+            .is_err()
+    );
+    drop(workspace);
+    fixture
+        .service
+        .checkout_branch(&repository, "branch-after-disconnect", "other", true, None)
+        .unwrap();
+    second
+        .resume(&fixture.service, &repository, "session-a", &opened.id)
+        .unwrap();
+    assert!(second.review(&fixture.service, &opened.id, 1).is_err());
+    assert_eq!(
+        std::fs::read(repository.root.join("modules/common.md")).unwrap(),
+        original
+    );
+}
+
+#[test]
+fn editing_drafts_recover_lost_commit_receipt_and_reject_competing_save() {
+    let fixture = Fixture::new();
+    let repository = fixture.initialize().repository;
+    let mut first = InstructionDraftWorkspace::default();
+    let mut second = InstructionDraftWorkspace::default();
+    let first_id = first
+        .begin(
+            &fixture.service,
+            &repository,
+            "session-a",
+            &["modules/common.md".into()],
+            "instruction: first",
+        )
+        .unwrap()
+        .id
+        .clone();
+    let second_id = second
+        .begin(
+            &fixture.service,
+            &repository,
+            "session-b",
+            &["modules/common.md".into()],
+            "instruction: second",
+        )
+        .unwrap()
+        .id
+        .clone();
+    for (workspace, id, body) in [
+        (&mut first, &first_id, "first"),
+        (&mut second, &second_id, "second"),
+    ] {
+        workspace
+            .revise(
+                &fixture.service,
+                id,
+                0,
+                vec![InstructionFileMutation::Write {
+                    relative_path: "modules/common.md".into(),
+                    content: managed("common", "module", body).into_bytes(),
+                }],
+            )
+            .unwrap();
+        assert!(
+            workspace
+                .review(&fixture.service, id, 1)
+                .unwrap()
+                .errors
+                .is_empty()
+        );
+    }
+    let record_path = fixture
+        .state
+        .join("instruction-repositories/drafts/global")
+        .join(format!("{first_id}.json"));
+    let pre_commit_record = std::fs::read(&record_path).unwrap();
+    let committed = first.save(&fixture.service, &first_id, 1).unwrap();
+    assert_eq!(committed.disposition, InstructionCommitDisposition::Created);
+    assert!(second.save(&fixture.service, &second_id, 1).is_err());
+    assert!(second.draft().is_some());
+    // A process died after Git publication but before its draft receipt write.
+    std::fs::write(&record_path, pre_commit_record).unwrap();
+    drop(first);
+    let mut recovered = InstructionDraftWorkspace::default();
+    recovered
+        .resume(&fixture.service, &repository, "session-a", &first_id)
+        .unwrap();
+    let replay = recovered.save(&fixture.service, &first_id, 1).unwrap();
+    assert_eq!(replay.commit, committed.commit);
+    assert_eq!(
+        replay.disposition,
+        InstructionCommitDisposition::AlreadyCommitted
+    );
+    assert_eq!(git(&repository.root, &["rev-list", "--count", "HEAD"]), "2");
+}
+
+#[test]
+fn editing_drafts_resume_persisted_partial_write_without_overwriting_newer_intent() {
+    for diverged in [false, true] {
+        let fixture = Fixture::new();
+        let repository = fixture.initialize().repository;
+        let mut workspace = InstructionDraftWorkspace::default();
+        let id = workspace
+            .begin(
+                &fixture.service,
+                &repository,
+                "session-a",
+                &["modules/common.md".into()],
+                "instruction: recover edit",
+            )
+            .unwrap()
+            .id
+            .clone();
+        let proposed = managed("common", "module", "proposed");
+        workspace
+            .revise(
+                &fixture.service,
+                &id,
+                0,
+                vec![InstructionFileMutation::Write {
+                    relative_path: "modules/common.md".into(),
+                    content: proposed.as_bytes().to_vec(),
+                }],
+            )
+            .unwrap();
+        workspace.review(&fixture.service, &id, 1).unwrap();
+        let record_path = fixture
+            .state
+            .join("instruction-repositories/drafts/global")
+            .join(format!("{id}.json"));
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&record_path).unwrap()).unwrap();
+        record["save_started"] = true.into();
+        std::fs::write(&record_path, serde_json::to_vec(&record).unwrap()).unwrap();
+        let written = if diverged {
+            managed("common", "module", "newer external edit")
+        } else {
+            proposed
+        };
+        std::fs::write(repository.root.join("modules/common.md"), &written).unwrap();
+        drop(workspace);
+        let mut recovered = InstructionDraftWorkspace::default();
+        recovered
+            .resume(&fixture.service, &repository, "session-a", &id)
+            .unwrap();
+        let outcome = recovered.save(&fixture.service, &id, 1);
+        assert_eq!(outcome.is_err(), diverged);
+        assert_eq!(
+            std::fs::read_to_string(repository.root.join("modules/common.md")).unwrap(),
+            written
+        );
+        assert_eq!(
+            git(&repository.root, &["rev-list", "--count", "HEAD"]),
+            if diverged { "1" } else { "2" }
+        );
+    }
+}
+
+#[test]
+fn editing_draft_noop_is_durable_and_repeated_without_a_commit() {
+    let fixture = Fixture::new();
+    let repository = fixture.initialize().repository;
+    let mut workspace = InstructionDraftWorkspace::default();
+    let id = workspace
+        .begin(
+            &fixture.service,
+            &repository,
+            "session-a",
+            &["modules/common.md".into()],
+            "instruction: no change",
+        )
+        .unwrap()
+        .id
+        .clone();
+    workspace.review(&fixture.service, &id, 0).unwrap();
+    assert_eq!(
+        workspace
+            .save(&fixture.service, &id, 0)
+            .unwrap()
+            .disposition,
+        InstructionCommitDisposition::NoChange
+    );
+    drop(workspace);
+    let mut resumed = InstructionDraftWorkspace::default();
+    resumed
+        .resume(&fixture.service, &repository, "session-a", &id)
+        .unwrap();
+    assert_eq!(
+        resumed.save(&fixture.service, &id, 0).unwrap().disposition,
+        InstructionCommitDisposition::NoChange
+    );
+    assert_eq!(git(&repository.root, &["rev-list", "--count", "HEAD"]), "1");
+}
+
+#[test]
+fn draft_review_validates_default_agent_without_mutating_manifest() {
+    let fixture = Fixture::new();
+    let repository = fixture.initialize().repository;
+    let draft = fixture
+        .service
+        .open_draft(&repository, "instruction-store.toml")
+        .unwrap();
+    let original = draft.content.clone().unwrap();
+    for (selector, valid) in [("worker", true), ("global:missing", false)] {
+        let mut manifest = fixture.service.load_manifest(&repository).unwrap();
+        manifest.default_agent = Some(selector.into());
+        let review = fixture
+            .service
+            .review_commit(
+                &repository,
+                &InstructionCommitRequest {
+                    operation_id: "review-default".into(),
+                    message: "instruction: set default agent".into(),
+                    expected_head: draft.base_head.clone(),
+                    expected_files: vec![draft.base.clone()],
+                    mutations: vec![InstructionFileMutation::Write {
+                        relative_path: draft.relative_path.clone(),
+                        content: toml::to_string(&manifest).unwrap().into_bytes(),
+                    }],
+                },
+            )
+            .unwrap();
+        assert_eq!(review.errors.is_empty(), valid);
+        assert_eq!(
+            std::fs::read_to_string(repository.root.join("instruction-store.toml")).unwrap(),
+            original
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn instruction_draft_and_working_read_reject_fifo_without_waiting_for_a_writer() {
+    let fixture = Fixture::new();
+    let repository = fixture.initialize().repository;
+    assert!(
+        Command::new("mkfifo")
+            .arg(repository.root.join("modules/pipe.md"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        fixture
+            .service
+            .open_draft(&repository, "modules/pipe.md")
+            .is_err()
+    );
+    assert!(
+        fixture
+            .service
+            .read_file(
+                &repository,
+                "modules/pipe.md",
+                InstructionReadPolicy::WorkingTreeOnly
+            )
+            .is_err()
+    );
+}
+
+#[test]
 fn history_compare_restore_clear_rename_and_multi_delete_create_new_commits() {
     let fixture = Fixture::new();
     let initialized = fixture.initialize();

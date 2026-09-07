@@ -77,6 +77,31 @@ refresh the ordinary index again: the user may have staged newer target content
 since that Save. If interruption left an index/worktree difference, inspection
 shows it rather than silently resetting it during a retry.
 
+### Draft service
+
+The Rust repository service provides `InstructionDraftWorkspace` for client-owned
+unsaved intent. The full-screen manager is still read-only until the editing
+adapter is integrated. Draft records live in private durable state, outside the
+instruction repository, and bind session, configured repository, branch, HEAD,
+generation and exact captured files. Closing or dropping a workspace releases
+its kernel lease without saving or deleting the draft. Explicit discard removes
+only its draft record. A branch change refuses while a draft is attached.
+
+`review_commit` captures complete working, committed and proposed file versions
+without writing source, HEAD or the index. Validation uses the prospective
+committed tree, so an uncommitted dependency cannot make an invalid scoped commit
+look valid. Default-agent checks at this review boundary do not change existing
+activation error routing. The caller can render previews against that same
+private candidate. Review is not activation and is not a filesystem watcher.
+
+Save requires review of the exact generation, rechecks target/branch state,
+persists attempt identity, and delegates to the existing scoped Git publisher.
+Recovery recognizes a published commit after a lost receipt. Before publication,
+only original or exact intended partial-write states can be resumed. Divergent
+newer working changes remain untouched. A no-op receipt is durable without a new
+commit. Managed source capture rejects nonregular files, including FIFOs without
+waiting for a writer on Unix.
+
 ## Explicit synchronization
 
 Fetch, pull, push, branch checkout, branch creation, remote configuration, and repository setup are explicit operations. Jcode never automatically pulls or pushes.

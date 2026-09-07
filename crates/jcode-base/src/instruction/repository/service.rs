@@ -756,14 +756,35 @@ impl InstructionRepositoryService {
             )
             .repository(repository)
         })?;
-        Ok(InstructionDraft {
+        let base_branch = git.branch()?;
+        let captured = super::review::read_bytes(repository, relative_path)?;
+        let base = InstructionFileState {
+            relative_path: relative_path.to_path_buf(),
+            fingerprint: super::review::captured_fingerprint(captured.as_deref()),
+        };
+        let content = captured
+            .map(String::from_utf8)
+            .transpose()
+            .map_err(|error| {
+                InstructionRepositoryError::new(
+                    InstructionRepositoryErrorKind::InvalidUtf8,
+                    "open instruction draft",
+                    error.to_string(),
+                )
+                .repository(repository)
+                .path(relative_path)
+            })?;
+        let draft = InstructionDraft {
             draft_id: crate::id::new_id("instruction_draft"),
             repository: repository.clone(),
             relative_path: relative_path.to_path_buf(),
-            base: fingerprint(repository, relative_path)?,
+            base,
             base_head,
-            content: read_working_utf8(repository, relative_path)?,
-        })
+            base_branch,
+            content,
+        };
+        self.validate_draft(&draft)?;
+        Ok(draft)
     }
 
     pub fn validate_draft(&self, draft: &InstructionDraft) -> InstructionRepositoryResult<()> {
@@ -776,11 +797,11 @@ impl InstructionRepositoryService {
             )
             .repository(&draft.repository)
         })?;
-        if head != draft.base_head {
+        if head != draft.base_head || git.branch()? != draft.base_branch {
             return Err(InstructionRepositoryError::new(
                 InstructionRepositoryErrorKind::StaleDraft,
                 "validate instruction draft",
-                "repository HEAD changed after the draft was opened",
+                "repository HEAD or branch changed after the draft was opened",
             )
             .repository(&draft.repository));
         }
@@ -802,26 +823,41 @@ impl InstructionRepositoryService {
         repository: &InstructionRepositoryRef,
         request: &InstructionCommitRequest,
     ) -> InstructionRepositoryResult<InstructionCommitOutcome> {
+        self.commit_on_branch(repository, request, None)
+    }
+
+    pub(super) fn commit_on_branch(
+        &self,
+        repository: &InstructionRepositoryRef,
+        request: &InstructionCommitRequest,
+        expected_branch: Option<&str>,
+    ) -> InstructionRepositoryResult<InstructionCommitOutcome> {
         let roots = self.roots()?;
         let before = self.validation_issue_set_at_head(repository, &request.mutations)?;
-        commit_request(&roots.durable_state, repository, request, || {
-            let after = self.validation_issue_set(repository)?;
-            let introduced = after.difference(&before).cloned().collect::<Vec<_>>();
-            if introduced.is_empty() {
-                Ok(())
-            } else {
-                Err(InstructionRepositoryError::new(
-                    InstructionRepositoryErrorKind::RepositoryDamaged,
-                    "validate instruction mutation",
-                    format!(
-                        "mutation introduced {} new resource or dependency error(s): {}",
-                        introduced.len(),
-                        introduced.join(" | ")
-                    ),
-                )
-                .repository(repository))
-            }
-        })
+        commit_request(
+            &roots.durable_state,
+            repository,
+            request,
+            expected_branch,
+            || {
+                let after = self.validation_issue_set(repository)?;
+                let introduced = after.difference(&before).cloned().collect::<Vec<_>>();
+                if introduced.is_empty() {
+                    Ok(())
+                } else {
+                    Err(InstructionRepositoryError::new(
+                        InstructionRepositoryErrorKind::RepositoryDamaged,
+                        "validate instruction mutation",
+                        format!(
+                            "mutation introduced {} new resource or dependency error(s): {}",
+                            introduced.len(),
+                            introduced.join(" | ")
+                        ),
+                    )
+                    .repository(repository))
+                }
+            },
+        )
     }
 
     pub fn commit_external_version(
@@ -1215,6 +1251,7 @@ impl InstructionRepositoryService {
     ) -> InstructionRepositoryResult<InstructionGitOperationOutcome> {
         let roots = self.roots()?;
         let _lease = acquire_mutation_lease(&roots.durable_state, repository, operation_id)?;
+        self.require_no_attached_drafts(repository)?;
         let git = GitRepository::new(&repository.root);
         require_clean(repository, &git, "change branch")?;
         let before = git.head()?;
@@ -1785,7 +1822,7 @@ impl InstructionRepositoryService {
         Ok(allowed)
     }
 
-    fn committed_validation_snapshot(
+    pub(super) fn committed_validation_snapshot(
         &self,
         repository: &InstructionRepositoryRef,
     ) -> InstructionRepositoryResult<(tempfile::TempDir, BTreeSet<String>)> {
@@ -1930,7 +1967,7 @@ impl InstructionRepositoryService {
         }
     }
 
-    fn validation_issue_set_for_root(
+    pub(super) fn validation_issue_set_for_root(
         &self,
         repository: &InstructionRepositoryRef,
         repository_root: &Path,
@@ -2084,7 +2121,7 @@ impl InstructionRepositoryService {
             .collect()
     }
 
-    fn validation_sources_for_root(
+    pub(super) fn validation_sources_for_root(
         &self,
         repository: &InstructionRepositoryRef,
         repository_root: &Path,
