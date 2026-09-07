@@ -10,6 +10,8 @@ use forms::EditForm;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum EditAction {
+    CopyGlobal,
+    CopyProject,
     Recoveries,
     RetryLocalStorage,
     LocalRecoveries,
@@ -186,6 +188,10 @@ impl EditingUi {
                     conflict.branch.as_deref().unwrap_or("detached")
                 );
                 for file in &conflict.files {
+                    self.document.push_str(&format!(
+                        "\nExecutable modes: base {}, working {}, proposed {}\n",
+                        file.base_executable, file.working_executable, file.proposed_executable
+                    ));
                     self.document.push_str(&format!("\nFILE {}\nOPENED BASE\n{}\nCURRENT WORKING SOURCE\n{}\nYOUR PROPOSED VERSION\n{}\n", file.path, file.base.as_deref().unwrap_or("(absent)"), file.working.as_deref().unwrap_or("(absent)"), file.proposed.as_deref().unwrap_or("(delete)")));
                 }
                 self.conflict = Some(conflict);
@@ -250,7 +256,11 @@ impl EditingUi {
                 self.review = None;
                 self.document.clear();
                 self.scroll = 0;
-                self.file_index = self.file_index.min(draft.files.len().saturating_sub(1));
+                if self.draft.as_ref().is_none_or(|old| old.id != draft.id) {
+                    self.file_index = draft.files.iter().position(|file| matches!(&file.metadata, InstructionEditMetadata::Resource(fields) if fields.kind == InstructionEditKind::Skill)).unwrap_or(0);
+                } else {
+                    self.file_index = self.file_index.min(draft.files.len().saturating_sub(1));
+                }
                 self.recovery_id = Some(draft.id.clone());
                 let committed = draft.committed.clone();
                 self.draft = Some(draft);
@@ -364,6 +374,12 @@ impl EditingUi {
             self.document.push_str(&format!("ERROR: {error}\n"));
         }
         for file in &review.files {
+            if file.committed_executable != file.proposed_executable {
+                self.document.push_str(&format!(
+                    "\n{}: executable mode {} -> {}\n",
+                    file.path, file.committed_executable, file.proposed_executable
+                ));
+            }
             self.document.push_str(&format!("\nFILE {}\n", file.path));
             let before = file.committed.as_deref().unwrap_or_default();
             let after = file.proposed.as_deref().unwrap_or_default();
@@ -448,6 +464,12 @@ impl InstructionManager {
         }
         self.editing.wrapped.clear();
         match action {
+            EditAction::CopyGlobal | EditAction::CopyProject => {
+                let mut form = EditForm::start(action, None);
+                form.anchor = Some(self.form_anchor());
+                self.editing.form = Some(form);
+                self.editing.visible = true;
+            }
             EditAction::RetryLocalStorage => {}
             EditAction::LocalRecoveries => {
                 self.editing.local_request = Some(local_recovery::LocalRecoveryRequest::List);
@@ -1048,6 +1070,12 @@ impl InstructionManager {
         if self.editing.storage_blocked {
             entries.insert(0, (EditAction::RetryLocalStorage, "Retry local recovery storage", "After repairing storage, explicitly resume persistence before the pending action", "choose"));
         }
+        if !self.editing.visible {
+            entries.extend([
+                (EditAction::CopyGlobal, "Copy skill to global", "Capture the complete selected external package into a reviewed managed global draft", "choose"),
+                (EditAction::CopyProject, "Copy skill to project", "Capture the complete external package in this project's configured instruction store", "choose"),
+            ]);
+        }
         entries.into_iter().map(|(action, label, hint, key)| {
             let disabled = if action == EditAction::RetryLocalStorage { None } else if self.editing.busy() { Some("Wait for the current operation; its receipt is preserved.".into()) }
             else if matches!(action, EditAction::ReconcileProposed | EditAction::EditCurrent) && self.editing.conflict.is_none() { Some("Compare the draft with current source first.".into()) }
@@ -1056,12 +1084,16 @@ impl InstructionManager {
             else if self.editing.visible {
                 if matches!(action, EditAction::LocalRecoveries | EditAction::ReviewLocalValues | EditAction::Recoveries | EditAction::Close | EditAction::GlobalRepository | EditAction::ProjectRepository | EditAction::RepositoryReceipt) { None }
                 else if draft.is_none() { Some("No attached draft. Close this view or recover its retained draft.".into()) }
+                else if matches!(action, EditAction::Body | EditAction::Metadata) && draft.and_then(|draft| draft.files.get(self.editing.file_index)).is_some_and(|file| matches!(file.metadata, InstructionEditMetadata::Binary { .. })) { Some("Binary package bytes are retained exactly. They are not editable as prompt text.".into()) }
                 else if action == EditAction::Save && draft.is_some_and(|draft| !draft.reviewed || draft.branch.is_none()) { Some("Review this exact draft successfully on an attached branch before Save.".into()) }
                 else if matches!(action, EditAction::Diff | EditAction::Preview) && self.editing.review.is_none() { Some("Review changes first.".into()) }
                 else if draft.is_some_and(|draft| draft.save_started) && matches!(action, EditAction::Body | EditAction::Metadata) { Some("This Save has started or completed. Resolve its receipt, then open a new edit.".into()) }
                 else { None }
             } else if self.snapshot.is_none() || self.rows_loading() { Some("Refresh source inspection before choosing an edit target.".into()) }
             else if matches!(action, EditAction::LocalRecoveries | EditAction::ReviewLocalValues | EditAction::Recoveries | EditAction::GlobalRepository | EditAction::ProjectRepository | EditAction::RepositoryReceipt | EditAction::CreateGlobal | EditAction::CreateProject | EditAction::GlobalSettings | EditAction::ProjectSettings) { None }
+            else if matches!(action, EditAction::CopyGlobal | EditAction::CopyProject) {
+                row.filter(|row| row.origin == InstructionOrigin::External && row.kind == "skill").is_none().then(|| "Select an external skill source, including an explicitly shadowed source.".into())
+            }
             else if row.is_none_or(|row| row.origin != InstructionOrigin::Managed) { Some("Select a managed resource. External skills use Copy; ecosystem files retain separate ownership.".into()) }
             else if action == EditAction::Redefine && row.is_some_and(|row| row.scope != "global" || matches!(row.kind.as_str(), "model-roster" | "store-settings")) { Some("Select a global instruction, not global-only model policy or store settings.".into()) }
             else if action == EditAction::Addendum && row.is_some_and(|row| row.kind != "agent") { Some("Select the agent that should receive the addendum.".into()) }

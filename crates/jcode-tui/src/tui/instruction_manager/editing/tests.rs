@@ -10,6 +10,7 @@ fn synthetic_draft() -> InstructionEditDraft {
         repository: "/synthetic/instructions".into(),
         branch: Some("main".into()),
         files: vec![InstructionEditFile {
+            executable: false,
             key: "modules/example.md".into(),
             path: "modules/example.md".into(),
             body: "BODY 合成 {{literal}}".into(),

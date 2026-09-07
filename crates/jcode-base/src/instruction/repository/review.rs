@@ -17,7 +17,7 @@ impl InstructionRepositoryService {
         let expected = request
             .expected_files
             .iter()
-            .map(|file| (file.relative_path.clone(), file.fingerprint.clone()))
+            .map(|file| (file.relative_path.clone(), file.clone()))
             .collect();
         let mut observed = request.clone();
         for file in &mut observed.expected_files {
@@ -25,7 +25,7 @@ impl InstructionRepositoryService {
             if actual != *file
                 && !super::mutation::path_matches_final_state(
                     &file.relative_path,
-                    &actual.fingerprint,
+                    &actual,
                     &expected,
                     &request.mutations,
                 )
@@ -90,6 +90,11 @@ impl InstructionRepositoryService {
         let git = GitRepository::new(&repository.root);
         let branch = git.branch()?;
         self.check_review_base(repository, request)?;
+        let modes = git
+            .tree_entries(&request.expected_head)?
+            .into_iter()
+            .map(|entry| (entry.path, entry.mode == "100755"))
+            .collect::<std::collections::BTreeMap<_, _>>();
         let mut files = Vec::new();
         for base in &request.expected_files {
             let working = read_bytes(repository, &base.relative_path)?;
@@ -97,6 +102,9 @@ impl InstructionRepositoryService {
                 return Err(stale(repository, "Target changed while capturing review"));
             }
             files.push(InstructionReviewedFile {
+                working_executable: base.executable,
+                committed_executable: modes.get(&base.relative_path).copied().unwrap_or(false),
+                proposed_executable: base.executable,
                 relative_path: base.relative_path.clone(),
                 committed: git.show_file(&request.expected_head, &base.relative_path)?,
                 proposed: working.clone(),
@@ -108,6 +116,11 @@ impl InstructionRepositoryService {
                 InstructionFileMutation::Write {
                     relative_path,
                     content,
+                }
+                | InstructionFileMutation::WriteFile {
+                    relative_path,
+                    content,
+                    ..
                 } => {
                     reviewed_file(&mut files, relative_path)?.proposed = Some(content.clone());
                 }
@@ -133,6 +146,20 @@ impl InstructionRepositoryService {
                 }
             }
         }
+        for mutation in &request.mutations {
+            if let InstructionFileMutation::WriteFile {
+                relative_path,
+                executable,
+                ..
+            } = mutation
+            {
+                reviewed_file(&mut files, relative_path)?.proposed_executable = *executable;
+            }
+            if let InstructionFileMutation::Rename { from, to } = mutation {
+                let mode = reviewed_file(&mut files, from)?.working_executable;
+                reviewed_file(&mut files, to)?.proposed_executable = mode;
+            }
+        }
         let (snapshot, path_issues) = self.committed_validation_snapshot(repository)?;
         let before =
             self.validation_issue_set_for_root(repository, snapshot.path(), path_issues.clone())?;
@@ -143,7 +170,30 @@ impl InstructionRepositoryService {
         let mut remaining_path_issues = path_issues;
         for file in &files {
             match &file.proposed {
-                Some(content) => atomic_write(&candidate, &file.relative_path, content)?,
+                Some(content) => {
+                    let mode = request
+                        .mutations
+                        .iter()
+                        .find_map(|mutation| match mutation {
+                            InstructionFileMutation::WriteFile {
+                                relative_path,
+                                executable,
+                                ..
+                            } if relative_path == &file.relative_path => Some(*executable),
+                            _ => None,
+                        });
+                    if let Some(mode) = mode {
+                        super::mutation::atomic_write_path_mode(
+                            &candidate.root.join(&file.relative_path),
+                            content,
+                            true,
+                            Some(mode),
+                        )
+                        .map_err(|error| stale(repository, &error.to_string()))?;
+                    } else {
+                        atomic_write(&candidate, &file.relative_path, content)?;
+                    }
+                }
                 None => {
                     let path = safe_target(&candidate, &file.relative_path, false)?;
                     match std::fs::remove_file(&path) {

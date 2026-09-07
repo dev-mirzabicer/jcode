@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 mod recovery;
-const DRAFT_SCHEMA: u32 = 1;
+const DRAFT_SCHEMA: u32 = 2;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -83,10 +83,10 @@ impl InstructionDraftWorkspace {
                 expected_files: bases.iter().map(|base| base.base.clone()).collect(),
                 mutations: bases
                     .iter()
-                    .map(|base| match &base.content {
+                    .map(|base| match base.source_bytes() {
                         Some(content) => InstructionFileMutation::Write {
                             relative_path: base.relative_path.clone(),
-                            content: content.as_bytes().to_vec(),
+                            content: content.to_vec(),
                         },
                         None => InstructionFileMutation::Delete {
                             relative_path: base.relative_path.clone(),
@@ -316,13 +316,14 @@ impl InstructionRepositoryService {
     ) -> InstructionRepositoryResult<InstructionEditingDraft> {
         let path = self.editing_draft_path(repository, id)?;
         let bytes = read_record_bytes(&path)?;
-        let record: InstructionEditingDraft = serde_json::from_slice(&bytes).map_err(|error| {
-            draft_error(&format!(
-                "Draft recovery record is invalid and remains at {}: {error}",
-                path.display()
-            ))
-        })?;
-        if record.schema != DRAFT_SCHEMA
+        let mut record: InstructionEditingDraft =
+            serde_json::from_slice(&bytes).map_err(|error| {
+                draft_error(&format!(
+                    "Draft recovery record is invalid and remains at {}: {error}",
+                    path.display()
+                ))
+            })?;
+        if !matches!(record.schema, 1 | DRAFT_SCHEMA)
             || record.id != id
             || record.session_id != session_id
             || record.repository != *repository
@@ -331,6 +332,7 @@ impl InstructionRepositoryService {
                 "Draft does not belong to this session and configured repository, or its schema is unsupported",
             ));
         }
+        record.schema = DRAFT_SCHEMA;
         super::mutation::validate_request_paths(&record.request)?;
         if record.request.operation_id != format!("draft-{}-{}", record.id, record.generation)
             || record.request.expected_files
@@ -345,6 +347,11 @@ impl InstructionRepositoryService {
             ));
         }
         for base in &record.bases {
+            if base.content.is_some() && base.binary_content.is_some() {
+                return Err(draft_error(
+                    "Draft has conflicting text and binary representations",
+                ));
+            }
             if base.repository != *repository
                 || base.base_head != record.request.expected_head
                 || base.base_branch != record.base_branch

@@ -14,7 +14,8 @@ mod managed;
 pub use invocation::SkillInvocation;
 pub use managed::{
     ManagedSkillCopyDisposition, ManagedSkillCopyOutcome, ManagedSkillCopyRequest,
-    ManagedSkillDestination, copy_external_skill,
+    ManagedSkillDestination, PreparedManagedSkillCopy, capture_managed_skill_package,
+    copy_external_skill, prepare_external_skill_copy,
 };
 
 /// Where an effective skill package comes from.

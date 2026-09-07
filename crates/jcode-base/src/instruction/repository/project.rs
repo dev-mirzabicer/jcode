@@ -736,7 +736,7 @@ fn harden_private_checkout(root: &Path) -> InstructionRepositoryResult<()> {
             if file_type.is_dir() {
                 pending.push(entry.path());
             } else if file_type.is_file() {
-                crate::platform::set_permissions_owner_only(&entry.path()).map_err(|error| {
+                super::mutation::secure_private_file(&entry.path()).map_err(|error| {
                     InstructionRepositoryError::new(
                         InstructionRepositoryErrorKind::Io,
                         "secure private instruction checkout file",

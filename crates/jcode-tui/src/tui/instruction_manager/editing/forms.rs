@@ -166,6 +166,15 @@ impl EditForm {
             choices,
             last_field: 0,
         };
+        if matches!(action, EditAction::CopyGlobal | EditAction::CopyProject) {
+            form.title = if action == EditAction::CopyGlobal {
+                "Copy skill to global"
+            } else {
+                "Copy skill to project"
+            }
+            .into();
+            form.fields[0].label = "Package ID (empty: derive from name)".into();
+        }
         if matches!(action, EditAction::CreateGlobal | EditAction::CreateProject) {
             form.fields.push(Field::choice(
                 FieldKey::Kind,
@@ -459,6 +468,16 @@ impl EditForm {
         }
         self.stash_alias();
         match &self.purpose {
+            Purpose::Action(EditAction::CopyGlobal | EditAction::CopyProject) => {
+                Ok(FormResult::Begin(InstructionEditAction::CopySkill {
+                    scope: if matches!(self.purpose, Purpose::Action(EditAction::CopyProject)) {
+                        InstructionEditScope::Project
+                    } else {
+                        InstructionEditScope::Global
+                    },
+                    destination_id: optional(self.value(FieldKey::Id)),
+                }))
+            }
             Purpose::Action(EditAction::CreateGlobal | EditAction::CreateProject) => {
                 let fields = self.resource_fields(None);
                 if fields.id.is_empty() {

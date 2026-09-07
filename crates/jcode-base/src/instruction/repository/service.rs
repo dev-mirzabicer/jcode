@@ -801,21 +801,17 @@ impl InstructionRepositoryService {
         let base_branch = git.branch()?;
         let captured = super::review::read_bytes(repository, relative_path)?;
         let base = InstructionFileState {
+            executable: super::mutation::file_executable(&repository.root.join(relative_path))?,
             relative_path: relative_path.to_path_buf(),
             fingerprint: super::review::captured_fingerprint(captured.as_deref()),
         };
-        let content = captured
-            .map(String::from_utf8)
-            .transpose()
-            .map_err(|error| {
-                InstructionRepositoryError::new(
-                    InstructionRepositoryErrorKind::InvalidUtf8,
-                    "open instruction draft",
-                    error.to_string(),
-                )
-                .repository(repository)
-                .path(relative_path)
-            })?;
+        let (content, binary_content) = match captured {
+            None => (None, None),
+            Some(bytes) => match String::from_utf8(bytes) {
+                Ok(text) => (Some(text), None),
+                Err(error) => (None, Some(error.into_bytes())),
+            },
+        };
         let draft = InstructionDraft {
             draft_id: crate::id::new_id("instruction_draft"),
             repository: repository.clone(),
@@ -824,6 +820,7 @@ impl InstructionRepositoryService {
             base_head,
             base_branch,
             content,
+            binary_content,
         };
         self.validate_draft(&draft)?;
         Ok(draft)
@@ -2863,7 +2860,7 @@ fn harden_repository_tree(root: &Path) -> InstructionRepositoryResult<()> {
             if metadata.is_dir() {
                 directories.push(entry.path());
             } else if metadata.is_file() {
-                crate::platform::set_permissions_owner_only(&entry.path()).map_err(|error| {
+                super::mutation::secure_private_file(&entry.path()).map_err(|error| {
                     InstructionRepositoryError::new(
                         InstructionRepositoryErrorKind::Io,
                         "secure instruction repository file",

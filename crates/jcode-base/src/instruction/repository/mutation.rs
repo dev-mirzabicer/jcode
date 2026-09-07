@@ -67,6 +67,7 @@ pub(super) fn fingerprint(
         }
     };
     Ok(InstructionFileState {
+        executable: file_executable(&target)?,
         relative_path: relative_path.to_path_buf(),
         fingerprint,
     })
@@ -105,6 +106,17 @@ pub(super) fn atomic_write_path(
     bytes: &[u8],
     owner_only: bool,
 ) -> std::io::Result<()> {
+    atomic_write_path_mode(target, bytes, owner_only, None)
+}
+pub(super) fn atomic_write_path_mode(
+    target: &Path,
+    bytes: &[u8],
+    owner_only: bool,
+    executable: Option<bool>,
+) -> std::io::Result<()> {
+    let executable = executable.unwrap_or_else(|| {
+        std::fs::metadata(target).is_ok_and(|metadata| metadata_executable(&metadata))
+    });
     let parent = target.parent().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "target has no parent")
     })?;
@@ -130,12 +142,13 @@ pub(super) fn atomic_write_path(
         } else {
             set_managed_file_permissions(&temporary, target)?;
         }
+        set_file_executable(&temporary, executable)?;
         file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);
         replace_file(&temporary, target)?;
         if owner_only {
-            crate::platform::set_permissions_owner_only(target)?;
+            secure_private_file(target)?;
         }
         #[cfg(unix)]
         if let Ok(directory) = std::fs::File::open(parent) {
@@ -217,14 +230,14 @@ where
     let expected_by_path = request
         .expected_files
         .iter()
-        .map(|state| (state.relative_path.clone(), state.fingerprint.clone()))
+        .map(|state| (state.relative_path.clone(), state.clone()))
         .collect::<BTreeMap<_, _>>();
     for expected in &request.expected_files {
         let actual = fingerprint(repository, &expected.relative_path)?;
         if actual != *expected
             && !path_matches_final_state(
                 &expected.relative_path,
-                &actual.fingerprint,
+                &actual,
                 &expected_by_path,
                 &request.mutations,
             )
@@ -330,10 +343,21 @@ pub(super) fn validate_request_paths(
 fn apply_mutations(
     repository: &InstructionRepositoryRef,
     mutations: &[InstructionFileMutation],
-    expected_by_path: &BTreeMap<PathBuf, InstructionTargetFingerprint>,
+    expected_by_path: &BTreeMap<PathBuf, InstructionFileState>,
 ) -> InstructionRepositoryResult<()> {
     for mutation in mutations {
         match mutation {
+            InstructionFileMutation::WriteFile {
+                relative_path,
+                content,
+                executable,
+            } => {
+                let target = safe_target(repository, relative_path, true)?;
+                atomic_write_path_mode(&target, content, repository.owner_only, Some(*executable))
+                    .map_err(|error| {
+                        io_error(repository, "write exact package file", &target, error)
+                    })?;
+            }
             InstructionFileMutation::Write {
                 relative_path,
                 content,
@@ -359,8 +383,10 @@ fn apply_mutations(
                 if !source.exists()
                     && target.exists()
                     && expected_by_path.get(from).is_some_and(|expected| {
-                        fingerprint(repository, to)
-                            .is_ok_and(|actual| actual.fingerprint == *expected)
+                        fingerprint(repository, to).is_ok_and(|actual| {
+                            actual.fingerprint == expected.fingerprint
+                                && actual.executable == expected.executable
+                        })
                     })
                 {
                     continue;
@@ -390,30 +416,43 @@ fn apply_mutations(
 
 pub(super) fn path_matches_final_state(
     path: &Path,
-    actual: &InstructionTargetFingerprint,
-    expected_by_path: &BTreeMap<PathBuf, InstructionTargetFingerprint>,
+    actual: &InstructionFileState,
+    expected_by_path: &BTreeMap<PathBuf, InstructionFileState>,
     mutations: &[InstructionFileMutation],
 ) -> bool {
+    let same_bytes = |bytes: &[u8]| {
+        actual.fingerprint
+            == InstructionTargetFingerprint::File {
+                sha256: sha256(bytes),
+                bytes: bytes.len() as u64,
+            }
+    };
     mutations.iter().any(|mutation| match mutation {
         InstructionFileMutation::Write {
             relative_path,
             content,
         } if relative_path == path => {
-            actual
-                == &InstructionTargetFingerprint::File {
-                    sha256: sha256(content),
-                    bytes: content.len() as u64,
-                }
+            same_bytes(content)
+                && expected_by_path
+                    .get(path)
+                    .is_some_and(|expected| expected.executable == actual.executable)
         }
+        InstructionFileMutation::WriteFile {
+            relative_path,
+            content,
+            executable,
+        } if relative_path == path => same_bytes(content) && actual.executable == *executable,
         InstructionFileMutation::Delete { relative_path } if relative_path == path => {
-            actual == &InstructionTargetFingerprint::Missing
+            actual.fingerprint == InstructionTargetFingerprint::Missing
         }
-        InstructionFileMutation::Rename { from, to } if from == path => {
-            actual == &InstructionTargetFingerprint::Missing
+        InstructionFileMutation::Rename { from, .. } if from == path => {
+            actual.fingerprint == InstructionTargetFingerprint::Missing
         }
-        InstructionFileMutation::Rename { from, to } if to == path => expected_by_path
-            .get(from)
-            .is_some_and(|source| source == actual),
+        InstructionFileMutation::Rename { from, to } if to == path => {
+            expected_by_path.get(from).is_some_and(|source| {
+                source.fingerprint == actual.fingerprint && source.executable == actual.executable
+            })
+        }
         _ => false,
     })
 }
@@ -581,4 +620,52 @@ fn replace_file(temporary: &Path, target: &Path) -> std::io::Result<()> {
         std::fs::remove_file(target)?;
     }
     std::fs::rename(temporary, target)
+}
+
+pub(super) fn metadata_executable(metadata: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        false
+    }
+}
+pub(super) fn file_executable(path: &Path) -> InstructionRepositoryResult<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(metadata.is_file() && metadata_executable(&metadata)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(InstructionRepositoryError::new(
+            InstructionRepositoryErrorKind::Io,
+            "inspect executable file mode",
+            error.to_string(),
+        )
+        .path(path)),
+    }
+}
+fn set_file_executable(path: &Path, executable: bool) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(path)?.permissions().mode() & 0o777;
+        let mode = if executable {
+            mode | ((mode & 0o444) >> 2)
+        } else {
+            mode & !0o111
+        };
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, executable);
+    }
+    Ok(())
+}
+pub(super) fn secure_private_file(path: &Path) -> std::io::Result<()> {
+    let executable = std::fs::metadata(path).is_ok_and(|metadata| metadata_executable(&metadata));
+    crate::platform::set_permissions_owner_only(path)?;
+    set_file_executable(path, executable)
 }

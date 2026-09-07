@@ -171,6 +171,31 @@ blindly repeated. Failed requests retain form values for correction and a new
 review. Seed recreation keeps old source and Git history in its named backup.
 Existing sessions continue to use their stored instructions throughout.
 
+## Skill packages
+
+Select an external skill, including a shadowed source, then choose **Copy skill to
+global** or **Copy skill to project**. An optional package ID handles invocation
+names that are not valid repository IDs. Copy captures the complete package,
+binary references, original entry-point source and attribution into an unsaved
+draft. It does not initialize a missing destination or execute package scripts.
+Review shows the destination and whether that copy will be effective in the
+source project. Existing active skill text stays frozen.
+
+Managed skill Rename, Delete and project redefinition cover the entire package,
+not only `SKILL.md`. Rename changes the stable resource ID and package path while
+preserving its invocation name unless metadata is explicitly edited. Existing
+colliding packages are not overwritten. Auxiliary text files use plain body
+editing. Binary files show their byte count and SHA-256 while retaining complete
+original bytes in the private draft. They cannot be rewritten through a text
+editor. On Unix, executable file modes survive Copy, rename and ordinary edits;
+private stores retain owner execute access without granting group/other access.
+Mode changes are visible in review and included in stale-state checks.
+
+Invalid UTF-8 instruction files remain recoverable through a valid historical
+revision. Draft capture preserves their original bytes and does not mistake them
+for missing or empty source. Private draft schema 2 adds mode-aware file state
+and still reads existing schema-1 recovery records.
+
 ## Retained drafts and unsent client values
 
 **Recover drafts and operations** lists retained server drafts and repository

@@ -3,8 +3,10 @@ use super::*;
 
 pub(super) struct EditPlan {
     pub repository: InstructionRepositoryRef,
-    pub files: BTreeMap<PathBuf, Option<String>>,
-    pub observed: BTreeMap<PathBuf, Option<String>>,
+    pub head: String,
+    pub files: BTreeMap<PathBuf, Option<Vec<u8>>>,
+    pub executables: BTreeMap<PathBuf, bool>,
+    pub observed: BTreeMap<PathBuf, InstructionFileState>,
     pub subject: String,
     pub warnings: Vec<String>,
 }
@@ -14,6 +16,13 @@ pub(super) fn plan(
     target: &ResolvedManagementTarget,
     action: InstructionEditAction,
 ) -> Result<EditPlan> {
+    if let InstructionEditAction::CopySkill {
+        scope,
+        destination_id,
+    } = action
+    {
+        return copy_skill(service, target, scope, destination_id.as_deref());
+    }
     let selected = || -> Result<(InstructionRepositoryRef, PathBuf)> {
         let row = target
             .row
@@ -43,6 +52,20 @@ pub(super) fn plan(
             .to_path_buf();
         Ok((repository, path))
     };
+    if target
+        .resource
+        .as_ref()
+        .is_some_and(|resource| resource.kind == InstructionKind::Skill)
+        && matches!(
+            action,
+            InstructionEditAction::Rename { .. }
+                | InstructionEditAction::Delete
+                | InstructionEditAction::RedefineInProject
+        )
+    {
+        let (repository, path) = selected()?;
+        return skill_package(service, target, repository, path, action);
+    }
     let (repository, path, creation) = match &action {
         InstructionEditAction::Create { scope, fields } => {
             let repository = resolve_repository(service, &target.context, *scope)?;
@@ -87,13 +110,19 @@ pub(super) fn plan(
         }
     };
     let base = service.open_draft(&repository, &path).map_err(repo_error)?;
-    if creation && base.content.is_some() {
+    if creation && base.source_bytes().is_some() {
         return Err(fail(
             "create resource",
             "Destination already exists. Edit it rather than overwriting it.",
         ));
     }
-    let mut plan = EditPlan { repository: repository.clone(), files: BTreeMap::new(), observed: BTreeMap::from([(path.clone(), base.content.clone())]), subject: format!("instruction: edit {}", path.display()), warnings: vec!["Source changes affect later activations or occurrences. Current session system and active-skill instructions remain unchanged.".into()] };
+    let mut plan = EditPlan { repository: repository.clone(), head: base.base_head.clone(), files: BTreeMap::new(), executables: BTreeMap::from([(path.clone(), base.base.executable)]), observed: BTreeMap::from([(path.clone(), base.base.clone())]), subject: format!("instruction: edit {}", path.display()), warnings: vec!["Source changes affect later activations or occurrences. Current session system and active-skill instructions remain unchanged.".into()] };
+    if base.binary_content.is_some() && !matches!(action, InstructionEditAction::Restore { .. }) {
+        return Err(fail(
+            "edit invalid source",
+            "Source is not UTF-8. Its bytes are preserved; restore a valid Git revision instead of treating it as empty.",
+        ));
+    }
     let current = base.content.clone().unwrap_or_default();
     let proposed = match action {
         InstructionEditAction::Edit
@@ -165,7 +194,7 @@ pub(super) fn plan(
             let replacement = InstructionId::parse(id).map_err(|error| fail("rename", error))?;
             let original = parse(&repository, &path, &current)?;
             if replacement == original.id {
-                plan.files.insert(path, Some(current));
+                plan.files.insert(path, Some(current.into_bytes()));
                 return Ok(plan);
             }
             protect_registered(&original)?;
@@ -180,19 +209,22 @@ pub(super) fn plan(
             let dest = service
                 .open_draft(&repository, &destination)
                 .map_err(repo_error)?;
-            if dest.content.is_some() {
+            if dest.source_bytes().is_some() {
                 return Err(fail("rename", "New resource ID/path already exists"));
             }
             let mut renamed = original;
             renamed.id = replacement;
             renamed.path = repository.root.join(&destination);
-            plan.observed.insert(destination.clone(), None);
+            plan.executables
+                .insert(destination.clone(), base.base.executable);
+            plan.observed.insert(destination.clone(), dest.base);
             plan.files.insert(
                 destination,
                 Some(
                     renamed
                         .to_markdown()
-                        .map_err(|error| fail("rename", error))?,
+                        .map_err(|error| fail("rename", error))?
+                        .into_bytes(),
                 ),
             );
             plan.files.insert(path, None);
@@ -215,7 +247,7 @@ pub(super) fn plan(
             ));
         }
     };
-    plan.files.insert(path, Some(proposed));
+    plan.files.insert(path, Some(proposed.into_bytes()));
     Ok(plan)
 }
 
@@ -235,12 +267,6 @@ fn protect_registered(document: &InstructionDocument) -> Result<()> {
         return Err(fail(
             "change resource identity",
             "This code-registered resource has a fixed identity. Edit its display metadata/body, or create a separate user resource.",
-        ));
-    }
-    if document.kind == InstructionKind::Skill {
-        return Err(fail(
-            "change skill identity",
-            "Skill packages require package-aware rename/delete, including references and binary files",
         ));
     }
     Ok(())
@@ -354,8 +380,7 @@ fn repair_references(
                 "Source changed while planning reference repairs; refresh",
             ));
         }
-        plan.observed
-            .insert(relative.clone(), capture.content.clone());
+        plan.observed.insert(relative.clone(), capture.base.clone());
         let content = if replacement.is_some() {
             rewritten
                 .to_markdown()
@@ -363,7 +388,7 @@ fn repair_references(
         } else {
             capture.content.unwrap_or_default()
         };
-        plan.files.insert(relative, Some(content));
+        plan.files.insert(relative, Some(content.into_bytes()));
     }
     for repository in std::iter::once(plan.repository.clone())
         .chain(project.filter(|project| project.root != plan.repository.root))
@@ -396,11 +421,15 @@ fn repair_references(
             service
                 .open_draft(&repository, &path)
                 .map_err(repo_error)?
-                .content,
+                .base,
         );
         plan.files.insert(
             path,
-            Some(toml::to_string_pretty(&manifest).map_err(|error| fail("repair default", error))?),
+            Some(
+                toml::to_string_pretty(&manifest)
+                    .map_err(|error| fail("repair default", error))?
+                    .into_bytes(),
+            ),
         );
         if replacement.is_none() {
             plan.warnings
@@ -408,4 +437,217 @@ fn repair_references(
         }
     }
     Ok(())
+}
+
+fn copy_skill(
+    service: &InstructionRepositoryService,
+    target: &ResolvedManagementTarget,
+    scope: InstructionEditScope,
+    destination_id: Option<&str>,
+) -> Result<EditPlan> {
+    let row = target
+        .row
+        .as_ref()
+        .filter(|row| row.kind == "skill" && row.origin == InstructionOrigin::External)
+        .ok_or_else(|| fail("Copy skill", "Select an external skill source"))?;
+    let path = target
+        .path
+        .as_ref()
+        .ok_or_else(|| fail("Copy skill", "Source path is unavailable"))?;
+    let base = crate::skill::SkillRegistry::inspect_global_sources()
+        .map_err(|error| fail("Copy discovery", error))?;
+    let registry = crate::skill::SkillRegistry::effective_for_working_dir_with_repositories(
+        &base,
+        target.context.working_dir.as_deref(),
+        service,
+    );
+    let source = registry
+        .catalog_entries()
+        .into_iter()
+        .find(|entry| {
+            entry.source.package_root.join("SKILL.md") == *path && !entry.source.kind.is_managed()
+        })
+        .ok_or_else(|| fail("Copy skill", "Selected source changed; refresh discovery"))?;
+    let operation = uuid::Uuid::new_v4().to_string();
+    let prepared = crate::skill::prepare_external_skill_copy(
+        service,
+        &registry,
+        crate::skill::ManagedSkillCopyRequest {
+            skill_name: &source.name,
+            source: Some(&source.source),
+            working_dir: target.context.working_dir.as_deref(),
+            destination: if scope == InstructionEditScope::Global {
+                crate::skill::ManagedSkillDestination::Global
+            } else {
+                crate::skill::ManagedSkillDestination::Project
+            },
+            destination_id,
+            operation_id: &operation,
+        },
+    )
+    .map_err(repo_error)?;
+    let observed = prepared
+        .request
+        .expected_files
+        .into_iter()
+        .map(|state| (state.relative_path.clone(), state))
+        .collect();
+    let executables = prepared
+        .request
+        .mutations
+        .iter()
+        .filter_map(|mutation| match mutation {
+            InstructionFileMutation::WriteFile {
+                relative_path,
+                executable,
+                ..
+            } => Some((relative_path.clone(), *executable)),
+            _ => None,
+        })
+        .collect();
+    let files = prepared
+        .request
+        .mutations
+        .into_iter()
+        .map(|mutation| match mutation {
+            InstructionFileMutation::Write {
+                relative_path,
+                content,
+            }
+            | InstructionFileMutation::WriteFile {
+                relative_path,
+                content,
+                ..
+            } => Ok((relative_path, Some(content))),
+            _ => Err(fail(
+                "Copy skill",
+                "Prepared Copy contained a non-write mutation",
+            )),
+        })
+        .collect::<Result<_>>()?;
+    Ok(EditPlan {
+        repository: prepared.repository,
+        head: prepared.request.expected_head,
+        files,
+        executables,
+        observed,
+        subject: prepared.request.message,
+        warnings: vec![format!(
+            "Copy {} from {}. The complete captured package and attribution are retained. Source files are not modified and no scripts are executed. Effective in the source project after Save: {}. Existing active skill text remains frozen.",
+            prepared.invocation_name, row.scope, prepared.effective_for_source_project
+        )],
+    })
+}
+
+fn skill_package(
+    service: &InstructionRepositoryService,
+    target: &ResolvedManagementTarget,
+    source_repo: InstructionRepositoryRef,
+    path: PathBuf,
+    action: InstructionEditAction,
+) -> Result<EditPlan> {
+    let root = path
+        .parent()
+        .ok_or_else(|| fail("skill package", "Entry point has no package directory"))?
+        .to_path_buf();
+    let source = crate::skill::capture_managed_skill_package(service, &source_repo, &root)
+        .map_err(repo_error)?;
+    let entry = source
+        .get(&path)
+        .ok_or_else(|| fail("skill package", "SKILL.md is absent"))?;
+    let mut document = parse(
+        &source_repo,
+        &path,
+        std::str::from_utf8(entry).map_err(|error| fail("skill entry", error))?,
+    )?;
+    let (repository, destination, delete_source, rename) = match &action {
+        InstructionEditAction::Delete => (source_repo.clone(), root.clone(), true, None),
+        InstructionEditAction::Rename { id } => {
+            let id = InstructionId::parse(id).map_err(|error| fail("skill ID", error))?;
+            let destination = PathBuf::from("skills").join(id.as_str());
+            (
+                source_repo.clone(),
+                destination,
+                id != document.id,
+                Some(id),
+            )
+        }
+        InstructionEditAction::RedefineInProject => {
+            if source_repo.kind != InstructionRepositoryKind::Global {
+                return Err(fail("skill redefinition", "Select a global package"));
+            }
+            (
+                resolve_repository(service, &target.context, InstructionEditScope::Project)?,
+                root.clone(),
+                false,
+                None,
+            )
+        }
+        _ => return Err(fail("skill package", "Invalid package action")),
+    };
+    let deleting = matches!(action, InstructionEditAction::Delete);
+    if !deleting
+        && (repository.root != source_repo.root || destination != root)
+        && !crate::skill::capture_managed_skill_package(service, &repository, &destination)
+            .map_err(repo_error)?
+            .is_empty()
+    {
+        return Err(fail(
+            "skill destination",
+            "Destination package contains existing files. Nothing was overwritten.",
+        ));
+    }
+    let head = service
+        .inspect(&repository)
+        .map_err(repo_error)?
+        .head
+        .ok_or_else(|| fail("skill package", "Destination has no baseline commit"))?;
+    let mut plan = EditPlan { repository: repository.clone(), head, files: BTreeMap::new(), executables: BTreeMap::new(), observed: BTreeMap::new(), subject: if deleting { format!("skill: delete {}", document.id) } else if let Some(id) = &rename { format!("skill: rename package {} to {id}", document.id) } else { format!("skill: redefine {} in project", document.id) }, warnings: vec!["The complete package, including references and binary files, is one reviewed transaction. Existing active skill snapshots remain unchanged. Resource-ID rename preserves the invocation name; change its metadata explicitly if you also want a new slash name.".into()] };
+    for (source_path, mut content) in source {
+        let observed_source = service
+            .open_draft(&source_repo, &source_path)
+            .map_err(repo_error)?;
+        if observed_source.source_bytes() != Some(content.as_slice()) {
+            return Err(fail(
+                "skill source",
+                "Package changed during planning. Refresh before proceeding.",
+            ));
+        }
+        if delete_source || deleting {
+            plan.observed
+                .insert(source_path.clone(), observed_source.base.clone());
+            plan.files.insert(source_path.clone(), None);
+        }
+        if !deleting {
+            let destination_path = destination.join(
+                source_path
+                    .strip_prefix(&root)
+                    .map_err(|error| fail("package path", error))?,
+            );
+            if source_path == path
+                && let Some(id) = &rename
+            {
+                document.id = id.clone();
+                document.path = repository.root.join(&destination_path);
+                content = document
+                    .to_markdown()
+                    .map_err(|error| fail("rename skill metadata", error))?
+                    .into_bytes();
+            }
+            let base = service
+                .open_draft(&repository, &destination_path)
+                .map_err(repo_error)?;
+            if base.base_head != plan.head {
+                return Err(fail(
+                    "skill destination",
+                    "Repository changed during planning",
+                ));
+            }
+            plan.executables
+                .insert(destination_path.clone(), observed_source.base.executable);
+            plan.observed.insert(destination_path.clone(), base.base);
+            plan.files.insert(destination_path, Some(content));
+        }
+    }
+    Ok(plan)
 }

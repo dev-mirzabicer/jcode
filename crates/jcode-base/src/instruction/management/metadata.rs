@@ -210,6 +210,9 @@ pub(super) fn file(
                 .collect::<Result<Vec<_>>>()?;
             return Ok((InstructionEditMetadata::Roster(entries), String::new()));
         }
+        if auxiliary(path) {
+            return Ok((InstructionEditMetadata::Ecosystem, source.into()));
+        }
         let document = parse(repository, path, source)?;
         Ok((
             InstructionEditMetadata::Resource(fields(&document)),
@@ -225,6 +228,7 @@ pub(super) fn file(
         )
     });
     InstructionEditFile {
+        executable: false,
         key: key.clone(),
         path: key,
         metadata,
@@ -238,6 +242,15 @@ pub(super) fn apply(
     original: &str,
     change: &InstructionDraftChange,
 ) -> Result<String> {
+    if auxiliary(path) {
+        return match change {
+            InstructionDraftChange::Body { body, .. } => Ok(body.clone()),
+            _ => Err(fail(
+                "package reference",
+                "Package reference text uses plain body editing; it is not resource metadata",
+            )),
+        };
+    }
     match change {
         InstructionDraftChange::RepairSource { source, .. } => {
             let invalid_roster = path == Path::new(crate::model_roster::ROSTER_PATH)
@@ -329,4 +342,32 @@ pub(super) fn apply(
         }
         _ => Err(fail("metadata", "Metadata does not apply to this file")),
     }
+}
+
+pub(super) fn auxiliary(path: &Path) -> bool {
+    path.starts_with("skills") && path.file_name().is_some_and(|name| name != "SKILL.md")
+}
+pub(super) fn binary_file(path: &Path, bytes: &[u8]) -> InstructionEditFile {
+    use sha2::{Digest, Sha256};
+    let sha256 = format!("{:x}", Sha256::digest(bytes));
+    InstructionEditFile {
+        executable: false,
+        key: path.to_string_lossy().into_owned(),
+        path: path.to_string_lossy().into_owned(),
+        body: format!(
+            "Binary file: {} bytes. SHA-256 {sha256}. Complete bytes are retained in the private draft; no text substitution is saved.",
+            bytes.len()
+        ),
+        metadata: InstructionEditMetadata::Binary {
+            bytes: bytes.len(),
+            sha256,
+        },
+        deleted: false,
+    }
+}
+pub(super) fn display_bytes(bytes: Option<Vec<u8>>) -> Option<String> {
+    bytes.map(|bytes| match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(error) => binary_file(Path::new("binary"), &error.into_bytes()).body,
+    })
 }

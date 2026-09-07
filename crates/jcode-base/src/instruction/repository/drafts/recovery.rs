@@ -32,22 +32,41 @@ impl InstructionDraftWorkspace {
                     InstructionFileMutation::Write {
                         relative_path,
                         content,
-                    } if relative_path == &base.relative_path => {
-                        Some(String::from_utf8(content.clone()).map(Some))
                     }
+                    | InstructionFileMutation::WriteFile {
+                        relative_path,
+                        content,
+                        ..
+                    } if relative_path == &base.relative_path => Some(Some(display_bytes(content))),
                     InstructionFileMutation::Delete { relative_path }
                         if relative_path == &base.relative_path =>
                     {
-                        Some(Ok(None))
+                        Some(None)
                     }
                     _ => None,
                 })
-                .ok_or_else(|| draft_error("Comparison requires complete write/delete mutations"))?
-                .map_err(|error| draft_error(&format!("Draft content is not UTF-8: {error}")))?;
+                .ok_or_else(|| {
+                    draft_error("Comparison requires complete write/delete mutations")
+                })?;
             files.push(InstructionConflictFile {
+                base_executable: base.base.executable,
+                working_executable: capture.base.executable,
+                proposed_executable: record
+                    .request
+                    .mutations
+                    .iter()
+                    .find_map(|mutation| match mutation {
+                        InstructionFileMutation::WriteFile {
+                            relative_path,
+                            executable,
+                            ..
+                        } if relative_path == &base.relative_path => Some(*executable),
+                        _ => None,
+                    })
+                    .unwrap_or(base.base.executable),
                 path: base.relative_path.to_string_lossy().into_owned(),
-                base: base.content.clone(),
-                working: capture.content.clone(),
+                base: base.source_bytes().map(display_bytes),
+                working: capture.source_bytes().map(display_bytes),
                 proposed,
             });
             current.push(capture);
@@ -210,7 +229,7 @@ impl InstructionRepositoryService {
             match read() {
                 Ok(header) if header.session_id != session => {}
                 Ok(header)
-                    if header.schema == DRAFT_SCHEMA
+                    if matches!(header.schema, 1 | DRAFT_SCHEMA)
                         && uuid::Uuid::parse_str(&header.id).is_ok()
                         && entry.path().file_stem().and_then(|value| value.to_str())
                             == Some(&header.id) =>
@@ -241,5 +260,16 @@ impl InstructionRepositoryService {
                 .then(left.id.cmp(&right.id))
         });
         Ok((drafts, errors))
+    }
+}
+
+fn display_bytes(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => text.into(),
+        Err(_) => format!(
+            "Binary file: {} bytes; SHA-256 {}. Complete bytes are retained, not replaced by this description.",
+            bytes.len(),
+            super::super::mutation::sha256(bytes)
+        ),
     }
 }

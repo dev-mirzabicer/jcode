@@ -73,10 +73,15 @@ pub enum InstructionEditMetadata {
         detail: String,
     },
     Ecosystem,
+    Binary {
+        bytes: usize,
+        sha256: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstructionEditFile {
+    pub executable: bool,
     pub key: String,
     pub path: String,
     pub body: String,
@@ -131,6 +136,8 @@ pub enum InstructionEditAction {
     CommitExternal,
     CopySkill {
         scope: InstructionEditScope,
+        #[serde(default)]
+        destination_id: Option<String>,
     },
     Settings {
         scope: InstructionEditScope,
@@ -222,6 +229,9 @@ pub struct InstructionEditReview {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstructionEditComparison {
+    pub working_executable: bool,
+    pub committed_executable: bool,
+    pub proposed_executable: bool,
     pub path: String,
     pub working: Option<String>,
     pub committed: Option<String>,

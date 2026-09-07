@@ -249,6 +249,8 @@ pub struct InstructionStoreRecreation {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct InstructionFileState {
+    #[serde(default)]
+    pub executable: bool,
     pub relative_path: PathBuf,
     pub fingerprint: InstructionTargetFingerprint,
 }
@@ -289,10 +291,30 @@ pub struct InstructionDraft {
     pub base_head: String,
     pub base_branch: Option<String>,
     pub content: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_draft_bytes"
+    )]
+    pub binary_content: Option<Vec<u8>>,
+}
+impl InstructionDraft {
+    pub fn source_bytes(&self) -> Option<&[u8]> {
+        self.content
+            .as_deref()
+            .map(str::as_bytes)
+            .or(self.binary_content.as_deref())
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum InstructionFileMutation {
+    WriteFile {
+        relative_path: PathBuf,
+        #[serde(with = "draft_bytes")]
+        content: Vec<u8>,
+        executable: bool,
+    },
     Write {
         relative_path: PathBuf,
         #[serde(with = "draft_bytes")]
@@ -305,6 +327,31 @@ pub enum InstructionFileMutation {
         from: PathBuf,
         to: PathBuf,
     },
+}
+
+mod optional_draft_bytes {
+    use base64::Engine;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    pub fn serialize<S: Serializer>(
+        value: &Option<Vec<u8>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        value
+            .as_ref()
+            .map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes))
+            .serialize(serializer)
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Vec<u8>>, D::Error> {
+        Option::<String>::deserialize(deserializer)?
+            .map(|value| {
+                base64::engine::general_purpose::STANDARD
+                    .decode(value)
+                    .map_err(serde::de::Error::custom)
+            })
+            .transpose()
+    }
 }
 
 mod draft_bytes {
@@ -326,7 +373,9 @@ mod draft_bytes {
 impl InstructionFileMutation {
     pub fn affected_paths(&self) -> Vec<&PathBuf> {
         match self {
-            Self::Write { relative_path, .. } | Self::Delete { relative_path } => {
+            Self::WriteFile { relative_path, .. }
+            | Self::Write { relative_path, .. }
+            | Self::Delete { relative_path } => {
                 vec![relative_path]
             }
             Self::Rename { from, to } => vec![from, to],
@@ -369,6 +418,9 @@ pub struct InstructionCommitReview {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InstructionReviewedFile {
+    pub working_executable: bool,
+    pub committed_executable: bool,
+    pub proposed_executable: bool,
     pub relative_path: PathBuf,
     pub working: Option<Vec<u8>>,
     pub committed: Option<Vec<u8>>,

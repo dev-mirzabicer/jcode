@@ -513,28 +513,9 @@ pub fn copy_external_skill(
     registry: &SkillRegistry,
     request: ManagedSkillCopyRequest<'_>,
 ) -> Result<ManagedSkillCopyOutcome, InstructionRepositoryError> {
-    let (skill, source) = match request.source {
-        Some(source) => (
-            registry
-                .candidate(request.skill_name, source)
-                .ok_or_else(|| copy_error("selected skill source is no longer in the catalog"))?,
-            source.clone(),
-        ),
-        None => (
-            registry
-                .resolve(request.skill_name)
-                .map_err(|error| copy_error(error.to_string()))?
-                .ok_or_else(|| {
-                    copy_error(format!("skill '{}' was not found", request.skill_name))
-                })?,
-            registry
-                .source(request.skill_name)
-                .cloned()
-                .ok_or_else(|| copy_error("effective skill has no source identity"))?,
-        ),
-    };
+    let (skill, source) = select_copy_source(registry, &request)?;
 
-    let repository = destination_repository(repositories, &request)?;
+    let repository = destination_repository(repositories, &request, true)?;
     let skill_id = match request.destination_id {
         Some(id) => {
             InstructionId::parse(id.to_string()).map_err(|error| copy_error(error.to_string()))?
@@ -590,30 +571,18 @@ pub fn copy_external_skill(
     if working_conflicts || committed_has_extra {
         return Err(copy_collision(&repository, &package_root));
     }
-    if existing == desired && committed == desired {
-        return Ok(ManagedSkillCopyOutcome {
-            disposition: ManagedSkillCopyDisposition::NoChange,
-            repository,
-            skill_id: skill_id.to_string(),
-            invocation_name: skill.name.clone(),
-            commit: head,
-            changed_paths: Vec::new(),
-            effective_for_source_project: destination_is_effective(
-                request.destination,
-                source.kind,
-            ),
-        });
-    }
 
     let mut expected_files = Vec::new();
     let mut mutations = Vec::new();
     for (relative_path, content) in &desired {
         let draft = repositories.open_draft(&repository, relative_path)?;
         expected_files.push(draft.base);
-        mutations.push(InstructionFileMutation::Write {
-            relative_path: relative_path.clone(),
-            content: content.clone(),
-        });
+        mutations.push(copy_file_mutation(
+            &source,
+            &package_root,
+            relative_path.clone(),
+            content.clone(),
+        )?);
     }
     let outcome = repositories.commit(
         &repository,
@@ -642,15 +611,156 @@ pub fn copy_external_skill(
     })
 }
 
+fn select_copy_source<'a>(
+    registry: &'a SkillRegistry,
+    request: &ManagedSkillCopyRequest<'_>,
+) -> Result<(&'a Skill, SkillSource), InstructionRepositoryError> {
+    let selected = match request.source {
+        Some(source) => (
+            registry
+                .candidate(request.skill_name, source)
+                .ok_or_else(|| copy_error("selected skill source is no longer in the catalog"))?,
+            source.clone(),
+        ),
+        None => (
+            registry
+                .resolve(request.skill_name)
+                .map_err(|error| copy_error(error.to_string()))?
+                .ok_or_else(|| {
+                    copy_error(format!("skill '{}' was not found", request.skill_name))
+                })?,
+            registry
+                .source(request.skill_name)
+                .cloned()
+                .ok_or_else(|| copy_error("effective skill has no source identity"))?,
+        ),
+    };
+
+    Ok(selected)
+}
+
+/// Complete immutable package capture for a manager draft. Unlike Copy's
+/// compatibility entry point, preparation never bootstraps or publishes a store.
+pub struct PreparedManagedSkillCopy {
+    pub repository: InstructionRepositoryRef,
+    pub request: InstructionCommitRequest,
+    pub invocation_name: String,
+    pub effective_for_source_project: bool,
+}
+
+pub fn prepare_external_skill_copy(
+    repositories: &InstructionRepositoryService,
+    registry: &SkillRegistry,
+    request: ManagedSkillCopyRequest<'_>,
+) -> Result<PreparedManagedSkillCopy, InstructionRepositoryError> {
+    let (skill, source) = select_copy_source(registry, &request)?;
+    if source.kind.is_managed() {
+        return Err(copy_error("Select an external skill to Copy"));
+    }
+    let repository = destination_repository(repositories, &request, false)?;
+    let id = match request.destination_id {
+        Some(id) => InstructionId::parse(id).map_err(|error| copy_error(error.to_string()))?,
+        None => copied_skill_id(skill)?,
+    };
+    let package_root = PathBuf::from("skills").join(id.as_str());
+    let desired = copied_package(skill, &source, &package_root, &id)?;
+    let existing = existing_package_files(&repository.root, &package_root)?;
+    let head = repositories.inspect(&repository)?.head.ok_or_else(|| {
+        copy_error("Initialize the destination instruction repository before Copy")
+    })?;
+    let committed = repositories.files_at_revision_under(&repository, &head, &package_root)?;
+    if existing
+        .iter()
+        .any(|(path, content)| desired.get(path) != Some(content))
+        || committed.keys().any(|path| !desired.contains_key(path))
+    {
+        return Err(copy_collision(&repository, &package_root));
+    }
+    let mut expected_files = Vec::new();
+    let mut mutations = Vec::new();
+    for (path, content) in desired {
+        let base = repositories.open_draft(&repository, &path)?;
+        if base.base_head != head {
+            return Err(copy_error(
+                "Destination changed during Copy preparation; refresh",
+            ));
+        }
+        expected_files.push(base.base);
+        mutations.push(copy_file_mutation(&source, &package_root, path, content)?);
+    }
+    Ok(PreparedManagedSkillCopy {
+        repository,
+        request: InstructionCommitRequest {
+            operation_id: request.operation_id.into(),
+            message: format!("skill: copy {} from {}", skill.name, source.kind),
+            expected_head: head,
+            expected_files,
+            mutations,
+        },
+        invocation_name: skill.name.clone(),
+        effective_for_source_project: destination_is_effective(request.destination, source.kind),
+    })
+}
+
+fn copy_file_mutation(
+    source: &SkillSource,
+    package: &Path,
+    path: PathBuf,
+    content: Vec<u8>,
+) -> Result<InstructionFileMutation, InstructionRepositoryError> {
+    let relative = path
+        .strip_prefix(package)
+        .map_err(|error| copy_error(error.to_string()))?;
+    let source_path = source.package_root.join(relative);
+    let executable = match std::fs::symlink_metadata(&source_path) {
+        Ok(metadata) if metadata.is_file() => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                metadata.permissions().mode() & 0o111 != 0
+            }
+            #[cfg(not(unix))]
+            {
+                false
+            }
+        }
+        Ok(_) => {
+            return Err(copy_error(
+                "Copy source became a symlink or nonregular file",
+            ));
+        }
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                && (relative.starts_with(".jcode-source")
+                    || relative == Path::new(".jcode-source.toml")) =>
+        {
+            false
+        }
+        Err(error) => {
+            return Err(copy_error(format!(
+                "Read package executable metadata: {error}"
+            )));
+        }
+    };
+    Ok(InstructionFileMutation::WriteFile {
+        relative_path: path,
+        content,
+        executable,
+    })
+}
+
 fn destination_repository(
     repositories: &InstructionRepositoryService,
     request: &ManagedSkillCopyRequest<'_>,
+    initialize: bool,
 ) -> Result<InstructionRepositoryRef, InstructionRepositoryError> {
     match request.destination {
         ManagedSkillDestination::Global => {
-            SystemPromptComposer::from_repository_service(repositories.clone())
-                .ensure_global_store()
-                .map_err(|error| copy_error(error.to_string()))?;
+            if initialize {
+                SystemPromptComposer::from_repository_service(repositories.clone())
+                    .ensure_global_store()
+                    .map_err(|error| copy_error(error.to_string()))?;
+            }
             repositories.global_repository()
         }
         ManagedSkillDestination::Project => {
@@ -763,6 +873,17 @@ fn collect_package(
     destination_root: &Path,
     files: &mut BTreeMap<PathBuf, Vec<u8>>,
 ) -> Result<(), InstructionRepositoryError> {
+    let metadata = std::fs::symlink_metadata(directory).map_err(|error| {
+        copy_error(format!(
+            "Inspect package directory {}: {error}",
+            directory.display()
+        ))
+    })?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(copy_error(
+            "Package capture requires real directories, not symlinks",
+        ));
+    }
     for entry in std::fs::read_dir(directory).map_err(|error| {
         copy_error(format!(
             "read skill package {}: {error}",
@@ -800,6 +921,16 @@ fn collect_package(
         }
     }
     Ok(())
+}
+
+/// Capture a managed package through the same regular-file policy as Copy.
+pub fn capture_managed_skill_package(
+    repositories: &InstructionRepositoryService,
+    repository: &InstructionRepositoryRef,
+    package_root: &Path,
+) -> Result<BTreeMap<PathBuf, Vec<u8>>, InstructionRepositoryError> {
+    repositories.open_draft(repository, package_root.join("SKILL.md"))?;
+    existing_package_files(&repository.root, package_root)
 }
 
 fn existing_package_files(

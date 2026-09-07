@@ -259,8 +259,15 @@ impl ManagerState {
                     )
                     .map_err(repo_error)?
                     .clone();
+                if opened.request.expected_head != plan.head {
+                    self.workspace.close();
+                    return Err(fail(
+                        "open draft",
+                        "Repository changed while planning the edit. Refresh.",
+                    ));
+                }
                 for base in &opened.bases {
-                    if plan.observed.get(&base.relative_path) != Some(&base.content) {
+                    if plan.observed.get(&base.relative_path) != Some(&base.base) {
                         self.workspace.close();
                         return Err(fail(
                             "open edit",
@@ -272,9 +279,19 @@ impl ManagerState {
                     .files
                     .into_iter()
                     .map(|(relative_path, content)| match content {
-                        Some(content) => InstructionFileMutation::Write {
+                        Some(content) => InstructionFileMutation::WriteFile {
+                            executable: plan
+                                .executables
+                                .get(&relative_path)
+                                .copied()
+                                .or_else(|| {
+                                    plan.observed
+                                        .get(&relative_path)
+                                        .map(|base| base.executable)
+                                })
+                                .unwrap_or(false),
                             relative_path,
-                            content: content.into_bytes(),
+                            content,
                         },
                         None => InstructionFileMutation::Delete { relative_path },
                     })
@@ -314,6 +331,11 @@ impl ManagerState {
                     if let InstructionFileMutation::Write {
                         relative_path,
                         content,
+                    }
+                    | InstructionFileMutation::WriteFile {
+                        relative_path,
+                        content,
+                        ..
                     } = mutation
                         && relative_path.to_str() == Some(file)
                     {
@@ -350,17 +372,14 @@ impl ManagerState {
                     .files
                     .into_iter()
                     .map(|file| {
-                        let utf8 = |bytes: Option<Vec<u8>>| {
-                            bytes
-                                .map(String::from_utf8)
-                                .transpose()
-                                .map_err(|error| fail("review content", error))
-                        };
                         Ok(InstructionEditComparison {
+                            working_executable: file.working_executable,
+                            committed_executable: file.committed_executable,
+                            proposed_executable: file.proposed_executable,
                             path: file.relative_path.to_string_lossy().into_owned(),
-                            working: utf8(file.working)?,
-                            committed: utf8(file.committed)?,
-                            proposed: utf8(file.proposed)?,
+                            working: metadata::display_bytes(file.working),
+                            committed: metadata::display_bytes(file.committed),
+                            proposed: metadata::display_bytes(file.proposed),
                         })
                     })
                     .collect::<Result<_>>()?;
@@ -485,15 +504,15 @@ impl ManagerState {
                 InstructionFileMutation::Write {
                     relative_path,
                     content,
-                } => {
-                    let source = std::str::from_utf8(content)
-                        .map_err(|error| fail("draft content", error))?;
-                    Ok(metadata::file(
-                        &record.repository,
-                        relative_path,
-                        Some(source),
-                    ))
                 }
+                | InstructionFileMutation::WriteFile {
+                    relative_path,
+                    content,
+                    ..
+                } => Ok(match std::str::from_utf8(content) {
+                    Ok(source) => metadata::file(&record.repository, relative_path, Some(source)),
+                    Err(_) => metadata::binary_file(relative_path, content),
+                }),
                 InstructionFileMutation::Delete { relative_path } => {
                     let original = record
                         .bases
@@ -510,6 +529,29 @@ impl ManagerState {
                 )),
             })
             .collect::<Result<_>>()?;
+        let mut files: Vec<InstructionEditFile> = files;
+        for file in &mut files {
+            file.executable = record
+                .request
+                .mutations
+                .iter()
+                .find_map(|mutation| match mutation {
+                    InstructionFileMutation::WriteFile {
+                        relative_path,
+                        executable,
+                        ..
+                    } if relative_path.to_string_lossy() == file.key => Some(*executable),
+                    _ => None,
+                })
+                .or_else(|| {
+                    record
+                        .bases
+                        .iter()
+                        .find(|base| base.relative_path.to_string_lossy() == file.key)
+                        .map(|base| base.base.executable)
+                })
+                .unwrap_or(false);
+        }
         Ok(InstructionEditDraft {
             id: record.id.clone(),
             generation: record.generation,

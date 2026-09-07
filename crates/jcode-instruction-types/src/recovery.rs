@@ -35,6 +35,9 @@ pub struct InstructionDraftConflict {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstructionConflictFile {
+    pub base_executable: bool,
+    pub working_executable: bool,
+    pub proposed_executable: bool,
     pub path: String,
     pub base: Option<String>,
     pub working: Option<String>,
