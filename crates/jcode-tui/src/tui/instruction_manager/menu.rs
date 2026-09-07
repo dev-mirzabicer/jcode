@@ -804,7 +804,9 @@ impl InstructionManager {
         }
         if matches!(
             item.action,
-            MenuAction::Key(KeyCode::Char('1'..='8' | 'a' | 'b' | 'i')) | MenuAction::Edit(_)
+            MenuAction::Key(KeyCode::Char('1'..='8' | 'a' | 'b' | 'i'))
+                | MenuAction::Edit(_)
+                | MenuAction::Recovery(super::editing::RecoveryChoice::Historical { .. })
         ) && (menu.context != self.selected_target() || menu.snapshot != self.snapshot_id())
         {
             self.menu = None;

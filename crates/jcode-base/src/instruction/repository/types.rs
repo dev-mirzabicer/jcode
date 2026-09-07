@@ -545,6 +545,12 @@ pub struct InstructionLegacyImportPlan {
     pub managed_content: String,
 }
 
+impl InstructionLegacyImportPlan {
+    pub fn receipt(&self) -> LegacyImportReceipt {
+        super::service::receipt_for_plan(self)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InstructionLegacyImportOutcome {
     Imported {

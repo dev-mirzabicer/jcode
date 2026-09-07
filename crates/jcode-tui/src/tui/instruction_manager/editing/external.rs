@@ -240,6 +240,7 @@ mod tests {
             file: "modules/source.md".into(),
             body: "初期 {{literal}}".repeat(100_000),
             repair: false,
+            metadata_field: None,
         };
         let path = prepare(root.path(), &request).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), request.body);

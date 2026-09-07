@@ -1022,86 +1022,112 @@ fn compatibility_agent_document() -> Result<InstructionDocument, InstructionErro
     })
 }
 
+pub fn known_legacy_import(
+    scope: InstructionScope,
+    directory: &Path,
+    kind: LegacyInstructionSourceKind,
+) -> Result<InstructionLegacyImportSpec, InstructionError> {
+    let (filename, suffix, target) = match kind {
+        LegacyInstructionSourceKind::SystemPrompt => {
+            let mut document = compatibility_agent_document()?;
+            document.scope = scope;
+            (
+                "system-prompt.md",
+                "system-prompt",
+                legacy_target(&document),
+            )
+        }
+        LegacyInstructionSourceKind::PromptOverlay => (
+            "prompt-overlay.md",
+            "prompt-overlay",
+            InstructionLegacyImportTarget {
+                relative_path: "system/common.md".into(),
+                id: InstructionId::parse(COMMON_ID)?,
+                kind: InstructionKind::System,
+                scope,
+                template_mode: TemplateMode::Plain,
+                metadata: InstructionMetadata::default(),
+            },
+        ),
+        LegacyInstructionSourceKind::PreferredTools => (
+            "preferred-tools.md",
+            "preferred-tools",
+            InstructionLegacyImportTarget {
+                relative_path: "tools/preferred-tools.md".into(),
+                id: InstructionId::parse("preferred-tools")?,
+                kind: InstructionKind::ToolGuidance,
+                scope,
+                template_mode: TemplateMode::Plain,
+                metadata: InstructionMetadata::default(),
+            },
+        ),
+        LegacyInstructionSourceKind::SwarmPrompt => (
+            "swarm-prompt.md",
+            "swarm-routing",
+            InstructionLegacyImportTarget {
+                relative_path: "tools/swarm-routing.md".into(),
+                id: InstructionId::parse("swarm-routing")?,
+                kind: InstructionKind::ToolGuidance,
+                scope,
+                template_mode: TemplateMode::Plain,
+                metadata: InstructionMetadata::default(),
+            },
+        ),
+        _ => {
+            return Err(InstructionError::InvalidDocument {
+                path: directory.into(),
+                detail: "Not a known compatibility import".into(),
+            });
+        }
+    };
+    Ok(InstructionLegacyImportSpec {
+        import_id: format!("{scope}-{suffix}"),
+        source_kind: kind,
+        source_path: directory.join(filename),
+        target,
+    })
+}
 fn global_legacy_imports(
     repositories: &InstructionRepositoryService,
     prior: Option<&InstructionStoreManifest>,
 ) -> Result<Vec<InstructionLegacyImportSpec>, SystemPromptActivationError> {
     let root = repositories.global_repository()?.root;
-    let Some(jcode_home) = root.parent() else {
-        return Err(SystemPromptActivationError::Compatibility(
-            "global instruction repository has no Jcode home parent".to_string(),
-        ));
-    };
+    let home = root.parent().ok_or_else(|| {
+        SystemPromptActivationError::Compatibility(
+            "global instruction repository has no Jcode home parent".into(),
+        )
+    })?;
     let mut imports = Vec::new();
-    let system_prompt = jcode_home.join("system-prompt.md");
-    if read_nonblank(system_prompt.clone())?.is_some() {
-        let document = compatibility_agent_document()?;
-        imports.push(InstructionLegacyImportSpec {
-            import_id: "global-system-prompt".to_string(),
-            source_kind: LegacyInstructionSourceKind::SystemPrompt,
-            source_path: system_prompt,
-            target: legacy_target(&document),
-        });
-    }
-    let overlay = jcode_home.join("prompt-overlay.md");
-    if read_present(overlay.clone())?.is_some() {
-        let document = InstructionDocument {
-            id: InstructionId::parse(COMMON_ID)?,
-            kind: InstructionKind::System,
-            scope: InstructionScope::Global,
-            template_mode: TemplateMode::Plain,
-            metadata: InstructionMetadata::default(),
-            body: String::new(),
-            path: PathBuf::from("system/common.md"),
+    for kind in [
+        LegacyInstructionSourceKind::SystemPrompt,
+        LegacyInstructionSourceKind::PromptOverlay,
+        LegacyInstructionSourceKind::PreferredTools,
+        LegacyInstructionSourceKind::SwarmPrompt,
+    ] {
+        let spec = known_legacy_import(InstructionScope::Global, home, kind)?;
+        let allowed = match kind {
+            LegacyInstructionSourceKind::PreferredTools => prior.is_none_or(|manifest| {
+                manifest.seed_version < PREFERRED_TOOLS_CUTOVER_SEED
+                    && !manifest.legacy_imports.contains_key(&spec.import_id)
+            }),
+            LegacyInstructionSourceKind::SwarmPrompt => prior.is_none_or(|manifest| {
+                manifest.seed_version < 26 && !manifest.legacy_imports.contains_key(&spec.import_id)
+            }),
+            _ => true,
         };
-        imports.push(InstructionLegacyImportSpec {
-            import_id: "global-prompt-overlay".to_string(),
-            source_kind: LegacyInstructionSourceKind::PromptOverlay,
-            source_path: overlay,
-            target: legacy_target(&document),
-        });
-    }
-    if prior.is_none_or(|manifest| {
-        manifest.seed_version < PREFERRED_TOOLS_CUTOVER_SEED
-            && !manifest
-                .legacy_imports
-                .contains_key("global-preferred-tools")
-    }) {
-        let source_path = jcode_home.join("preferred-tools.md");
-        if read_present(source_path.clone())?.is_some() {
-            imports.push(InstructionLegacyImportSpec {
-                import_id: "global-preferred-tools".into(),
-                source_kind: LegacyInstructionSourceKind::PreferredTools,
-                source_path,
-                target: InstructionLegacyImportTarget {
-                    relative_path: "tools/preferred-tools.md".into(),
-                    id: InstructionId::parse("preferred-tools")?,
-                    kind: InstructionKind::ToolGuidance,
-                    scope: InstructionScope::Global,
-                    template_mode: TemplateMode::Plain,
-                    metadata: InstructionMetadata::default(),
-                },
-            });
+        if !allowed {
+            continue;
         }
-    }
-    if prior.is_none_or(|manifest| {
-        manifest.seed_version < 26 && !manifest.legacy_imports.contains_key("global-swarm-routing")
-    }) {
-        let source_path = jcode_home.join("swarm-prompt.md");
-        if read_nonblank(source_path.clone())?.is_some() {
-            imports.push(InstructionLegacyImportSpec {
-                import_id: "global-swarm-routing".into(),
-                source_kind: LegacyInstructionSourceKind::SwarmPrompt,
-                source_path,
-                target: InstructionLegacyImportTarget {
-                    relative_path: "tools/swarm-routing.md".into(),
-                    id: InstructionId::parse("swarm-routing")?,
-                    kind: InstructionKind::ToolGuidance,
-                    scope: InstructionScope::Global,
-                    template_mode: TemplateMode::Plain,
-                    metadata: InstructionMetadata::default(),
-                },
-            });
+        let content = if matches!(
+            kind,
+            LegacyInstructionSourceKind::SystemPrompt | LegacyInstructionSourceKind::SwarmPrompt
+        ) {
+            read_nonblank(spec.source_path.clone())?
+        } else {
+            read_present(spec.source_path.clone())?
+        };
+        if content.is_some() {
+            imports.push(spec);
         }
     }
     Ok(imports)

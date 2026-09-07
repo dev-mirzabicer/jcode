@@ -192,6 +192,12 @@ pub(super) fn file(
         }
         if path == Path::new(crate::model_roster::ROSTER_PATH) {
             let roster = ModelRoster::parse(source).map_err(|error| fail("model roster", error))?;
+            if !roster.validate().is_empty() {
+                return Err(fail(
+                    "model roster repair",
+                    "Some aliases are invalid. Complete original source is retained for explicit repair; no invalid alias was dropped.",
+                ));
+            }
             let entries = roster
                 .list()
                 .into_iter()
@@ -242,6 +248,11 @@ pub(super) fn apply(
     original: &str,
     change: &InstructionDraftChange,
 ) -> Result<String> {
+    if let InstructionDraftChange::Metadata { metadata, .. } = change
+        && self::file(repository, path, Some(original)).metadata == *metadata
+    {
+        return Ok(original.into());
+    }
     if auxiliary(path) {
         return match change {
             InstructionDraftChange::Body { body, .. } => Ok(body.clone()),

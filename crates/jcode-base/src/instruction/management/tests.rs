@@ -394,3 +394,5 @@ fn management_rejects_expired_snapshot_and_project_context_changes() {
 }
 
 mod package_tests;
+
+mod history_ecosystem_tests;

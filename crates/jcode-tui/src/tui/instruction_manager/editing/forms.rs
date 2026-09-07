@@ -73,6 +73,7 @@ pub(super) enum FormButton {
     AddAlias,
     DeleteAlias,
     ReviewTarget,
+    EditValue,
 }
 #[derive(Clone, Serialize, Deserialize)]
 enum Purpose {
@@ -99,6 +100,8 @@ impl Picker {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct FormAnchor {
+    #[serde(default)]
+    pub revision: Option<String>,
     pub snapshot: Option<String>,
     pub target: Option<InstructionInspectionTarget>,
     pub draft: Option<(String, u64, String)>,
@@ -119,6 +122,12 @@ pub(super) struct EditForm {
     last_field: usize,
 }
 impl EditForm {
+    pub(crate) fn set_external_value(&mut self, index: usize, value: String) {
+        if let Some(field) = self.fields.get_mut(index) {
+            field.value = value;
+            field.cursor = field.value.len();
+        }
+    }
     pub fn repair_cursors(&mut self) {
         self.selected = self
             .selected
@@ -160,7 +169,11 @@ impl EditForm {
             selected: 0,
             picker: None,
             error: String::new(),
-            buttons: vec![FormButton::Submit, FormButton::ReviewTarget],
+            buttons: vec![
+                FormButton::Submit,
+                FormButton::ReviewTarget,
+                FormButton::EditValue,
+            ],
             offset: 0,
             purpose: Purpose::Action(action),
             choices,
@@ -229,7 +242,11 @@ impl EditForm {
             selected: 0,
             picker: None,
             error: String::new(),
-            buttons: vec![FormButton::Submit, FormButton::ReviewTarget],
+            buttons: vec![
+                FormButton::Submit,
+                FormButton::ReviewTarget,
+                FormButton::EditValue,
+            ],
             offset: 0,
             purpose: Purpose::Settings,
             choices: choices.clone(),
@@ -318,6 +335,8 @@ impl EditForm {
         self.fields.clear();
         self.buttons = vec![
             FormButton::Submit,
+            FormButton::ReviewTarget,
+            FormButton::EditValue,
             FormButton::AddCandidate,
             FormButton::RemoveItem,
             FormButton::Earlier,
@@ -529,6 +548,7 @@ impl EditForm {
     }
     fn button(&mut self, button: FormButton) -> Option<Result<FormResult, String>> {
         match button {
+            FormButton::EditValue => return Some(Ok(FormResult::EditValue)),
             FormButton::ReviewTarget => return Some(Ok(FormResult::ReviewTarget)),
             FormButton::Submit => return Some(self.submit()),
             FormButton::AddReference => {
@@ -776,6 +796,7 @@ fn availability(value: InstructionEditAvailability) -> &'static str {
     }
 }
 enum FormResult {
+    EditValue,
     ReviewTarget,
     Repository(InstructionEditScope, InstructionRepositoryAction),
     Begin(InstructionEditAction),
@@ -804,6 +825,40 @@ impl InstructionManager {
                 }
             }
             Some(FormEvent::Submit(Ok(result))) => {
+                if matches!(result, FormResult::EditValue) {
+                    let Some(form) = &self.editing.form else {
+                        return;
+                    };
+                    let index = form.last_field;
+                    let Some(field) = form.fields.get(index) else {
+                        return;
+                    };
+                    if field.closed() {
+                        if let Some(form) = &mut self.editing.form {
+                            form.error = "Use the constrained picker for this field.".into();
+                        }
+                        return;
+                    }
+                    self.editing.editor = Some(EditorRequest {
+                        draft: self
+                            .editing
+                            .draft
+                            .as_ref()
+                            .map(|draft| draft.id.clone())
+                            .or_else(|| self.snapshot_id())
+                            .unwrap_or_else(|| "unsent-form".into()),
+                        generation: self
+                            .editing
+                            .draft
+                            .as_ref()
+                            .map_or(0, |draft| draft.generation),
+                        file: format!("metadata-field-{index}"),
+                        body: field.value.clone(),
+                        repair: false,
+                        metadata_field: Some(index),
+                    });
+                    return;
+                }
                 if matches!(result, FormResult::ReviewTarget) {
                     self.review_local_values();
                     return;
@@ -823,7 +878,7 @@ impl InstructionManager {
                 }
                 self.editing.submitted_form = self.editing.form.take();
                 match result {
-                    FormResult::ReviewTarget => {}
+                    FormResult::ReviewTarget | FormResult::EditValue => {}
                     FormResult::Repository(scope, action) => {
                         self.editing.queued =
                             Some(InstructionManagementRequest::PlanRepository { scope, action });

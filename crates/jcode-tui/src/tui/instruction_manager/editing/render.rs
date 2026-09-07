@@ -164,7 +164,14 @@ impl InstructionManager {
                 format!(
                     "{:?} · {} · {}",
                     draft.scope,
-                    draft.branch.as_deref().unwrap_or("DETACHED"),
+                    draft
+                        .branch
+                        .as_deref()
+                        .unwrap_or(if draft.working_file_only {
+                            "working file, no commit"
+                        } else {
+                            "DETACHED"
+                        }),
                     draft
                         .files
                         .get(self.editing.file_index)
@@ -195,7 +202,11 @@ impl InstructionManager {
                     draft
                         .branch
                         .as_deref()
-                        .unwrap_or("DETACHED: close draft and select a branch before Save"),
+                        .unwrap_or(if draft.working_file_only {
+                            "Not applicable: parent remains uncommitted"
+                        } else {
+                            "DETACHED: close draft and select a branch before Save"
+                        }),
                     draft.id,
                     draft.generation,
                     draft.warnings.join("\n")
@@ -342,6 +353,7 @@ impl InstructionManager {
 }
 fn button_label(button: FormButton) -> &'static str {
     match button {
+        FormButton::EditValue => "Edit complete selected value in external editor",
         FormButton::ReviewTarget => "Review current target and retained values",
         FormButton::Submit => "Use these draft values",
         FormButton::AddReference => "Add module reference",

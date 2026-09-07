@@ -1056,6 +1056,32 @@ impl InstructionRepositoryService {
     /// Read every committed regular file under one repository-relative prefix.
     /// Skill Copy uses this binary-safe view to distinguish an identical
     /// committed package from matching working files left before publication.
+    pub fn file_modes_at_revision(
+        &self,
+        repository: &InstructionRepositoryRef,
+        commit: &str,
+        root: &Path,
+    ) -> InstructionRepositoryResult<BTreeMap<PathBuf, bool>> {
+        validate_relative_path(root)?;
+        GitRepository::new(&repository.root)
+            .tree_entries(commit)?
+            .into_iter()
+            .filter(|entry| entry.path.starts_with(root))
+            .map(|entry| {
+                validate_relative_path(&entry.path)?;
+                if !matches!(entry.mode.as_str(), "100644" | "100755") {
+                    return Err(InstructionRepositoryError::new(
+                        InstructionRepositoryErrorKind::InvalidPath,
+                        "read historical package modes",
+                        "Historical package contains unsupported file types",
+                    )
+                    .path(&entry.path));
+                }
+                Ok((entry.path, entry.mode == "100755"))
+            })
+            .collect()
+    }
+
     pub fn files_at_revision_under(
         &self,
         repository: &InstructionRepositoryRef,
@@ -2706,7 +2732,7 @@ fn prepare_seed(
     ))
 }
 
-fn receipt_for_plan(plan: &InstructionLegacyImportPlan) -> LegacyImportReceipt {
+pub(super) fn receipt_for_plan(plan: &InstructionLegacyImportPlan) -> LegacyImportReceipt {
     LegacyImportReceipt {
         source_kind: plan.spec.source_kind,
         source_path: plan.spec.source_path.clone(),

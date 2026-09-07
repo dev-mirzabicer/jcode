@@ -8,6 +8,7 @@ use crate::tui::{backend::RemoteConnection, instruction_manager::InstructionMana
 use crossterm::event::{KeyCode, KeyModifiers};
 use std::cell::RefCell;
 enum LocalRecoveryOutput {
+    Exported(String),
     Archived(String),
     Listed(Vec<LocalRecoveryRow>),
     Loaded(Box<LocalSnapshot>),
@@ -336,6 +337,10 @@ impl App {
                     "Editor returned. Local draft: {}. Source is unchanged until reviewed Save.",
                     path.display()
                 );
+                if let Some(index) = request.metadata_field {
+                    manager.editing.set_external_metadata_value(index, body);
+                    return true;
+                }
                 let change = if request.repair {
                     crate::protocol::InstructionDraftChange::RepairSource {
                         file: request.file,
@@ -378,10 +383,19 @@ impl App {
                     self.instruction_ui.recovery_redraw = true;
                     if let Some(manager) = &self.instruction_ui.manager {
                         let mut manager = manager.borrow_mut();
+                        manager.editing.local_loading = false;
                         if manager.session != expected_session {
                             return true;
                         }
                         match result {
+                            Ok(LocalRecoveryOutput::Exported(path)) => {
+                                manager.editing.document = format!(
+                                    "EXPORTED REVISION\n\nComplete historical bytes were written to a new client-local directory:\n{path}\n\nNo source or Git history changed."
+                                );
+                                manager.editing.status = "Revision export completed.".into();
+                                manager.editing.visible = true;
+                                manager.editing.wrapped.clear();
+                            }
                             Ok(LocalRecoveryOutput::Archived(key)) => {
                                 manager.archived_local_intent(key)
                             }
@@ -400,7 +414,13 @@ impl App {
                     }
                 }
                 Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                    self.instruction_ui.local_recovery_receiver = None
+                    self.instruction_ui.local_recovery_receiver = None;
+                    if let Some(manager) = &self.instruction_ui.manager {
+                        let mut manager = manager.borrow_mut();
+                        manager.editing.local_loading = false;
+                        manager.editing.archiving = false;
+                        manager.editing.status="Local operation stopped before returning a receipt. Source was not replayed. Inspect retained state and retry explicitly.".into();
+                    }
                 }
                 Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
             }
@@ -423,6 +443,15 @@ impl App {
                 self.remote_client_instance_id.clone(),
             )
         });
+        if let Some(export) = manager.editing.export.take() {
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            let root = crate::storage::durable_state_dir();
+            tokio::task::spawn_blocking(move || {
+                let result = crate::tui::instruction_manager::editing::export::write_revision(&root, export).map(|path| LocalRecoveryOutput::Exported(path.display().to_string())).map_err(|error| format!("Revision export failed: {error:#}. Source remains unchanged; export the same revision again after repair."));
+                let _ = sender.send(result);
+            });
+            self.instruction_ui.local_recovery_receiver = Some((session.clone(), receiver));
+        }
         if let Some(key) = manager.editing.local_request.take() {
             let (sender, receiver) = tokio::sync::oneshot::channel();
             let store = store.clone();

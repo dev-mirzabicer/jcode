@@ -1,4 +1,5 @@
 //! Unsaved local intent and correlated manager mutation replies.
+pub(crate) mod export;
 pub(crate) mod external;
 mod forms;
 pub(crate) mod local_recovery;
@@ -10,6 +11,9 @@ use forms::EditForm;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum EditAction {
+    ImportLegacy,
+    RestoreHead,
+    ExportRevision,
     CopyGlobal,
     CopyProject,
     Recoveries,
@@ -55,10 +59,13 @@ pub(crate) struct EditorRequest {
     pub file: String,
     pub body: String,
     pub repair: bool,
+    pub metadata_field: Option<usize>,
 }
 
 #[derive(Default)]
 pub(crate) struct EditingUi {
+    pub export: Option<InstructionRevisionExport>,
+    pub local_loading: bool,
     pub visible: bool,
     pub recovery_dirty: bool,
     pub storage_blocked: bool,
@@ -85,6 +92,7 @@ pub(crate) struct EditingUi {
     pub hits: Vec<(Rect, EditAction)>,
     pub field_hits: Vec<(Rect, usize)>,
     pub confirm: Option<EditAction>,
+    confirm_anchor: Option<forms::FormAnchor>,
     pub failed: bool,
     pub recovery_id: Option<String>,
     pub repository_plan: Option<InstructionRepositoryPlan>,
@@ -93,8 +101,19 @@ pub(crate) struct EditingUi {
     pub conflict: Option<InstructionDraftConflict>,
 }
 impl EditingUi {
+    pub(crate) fn set_external_metadata_value(&mut self, index: usize, value: String) {
+        if let Some(form) = &mut self.form {
+            form.set_external_value(index, value);
+        }
+        self.status="Complete metadata value retained in the unsaved form. Submit it, then Review before Save.".into();
+        self.recovery_dirty = true;
+    }
     fn busy(&self) -> bool {
-        self.archiving || self.queued.is_some() || self.pending.is_some() || self.editor.is_some()
+        self.local_loading
+            || self.archiving
+            || self.queued.is_some()
+            || self.pending.is_some()
+            || self.editor.is_some()
     }
     pub fn reserve(&mut self, id: u64, session: &str) -> Option<InstructionManagementRequest> {
         let request = self.queued.take()?;
@@ -129,6 +148,14 @@ impl EditingUi {
             _ => false,
         };
         match &reply.result {
+            InstructionManagementResult::FileSaved { draft, .. } if !matches!(request,InstructionManagementRequest::Save{draft:expected,..} if draft==expected) =>
+            {
+                return false;
+            }
+            InstructionManagementResult::RevisionExport(export) if !matches!(request, InstructionManagementRequest::ExportRevision { revision, .. } if revision == &export.revision) =>
+            {
+                return false;
+            }
             InstructionManagementResult::Recoveries(_)
                 if !matches!(request, InstructionManagementRequest::Recoveries) =>
             {
@@ -177,6 +204,33 @@ impl EditingUi {
         self.recovery_dirty = true;
         self.wrapped.clear();
         match reply.result {
+            InstructionManagementResult::FileSaved {
+                draft,
+                path,
+                no_change,
+            } => {
+                self.status = format!(
+                    "{} working file {path}. No parent staging or commit occurred.",
+                    if no_change { "Unchanged" } else { "Saved" }
+                );
+                self.document = self.status.clone();
+                self.review = None;
+                self.suspended_request = None;
+                self.local_loaded = None;
+                if let Some(current) = &mut self.draft
+                    && current.id == draft
+                {
+                    current.save_started = true;
+                    current.committed = Some("working file saved, not committed".into());
+                }
+            }
+
+            InstructionManagementResult::RevisionExport(export) => {
+                self.local_loading = true;
+                self.export = Some(export);
+                self.status =
+                    "Writing complete revision export to a new client-local directory…".into();
+            }
             InstructionManagementResult::Recoveries(list) => {
                 self.status = "Choose retained unsaved work or inspect an operation receipt. No source action runs automatically.".into();
                 self.recoveries = Some(list);
@@ -358,14 +412,23 @@ impl EditingUi {
         self.scroll = 0;
         let Some(review) = &self.review else { return };
         self.document.push_str(&format!(
-            "REVIEWED LOCAL COMMIT\n{}\nRepository: {}\nBranch: {}\n\n",
+            "{}\n{}\nRepository/source: {}\nBranch: {}\n\n",
+            if review.draft.working_file_only {
+                "REVIEWED WORKING-FILE SAVE (NO COMMIT)"
+            } else {
+                "REVIEWED LOCAL COMMIT"
+            },
             review.draft.subject,
             review.draft.repository,
             review
                 .draft
                 .branch
                 .as_deref()
-                .unwrap_or("DETACHED: Save unavailable")
+                .unwrap_or(if review.draft.working_file_only {
+                    "Not applicable: parent remains uncommitted"
+                } else {
+                    "DETACHED: Save unavailable"
+                })
         ));
         for warning in &review.draft.warnings {
             self.document.push_str(&format!("{warning}\n"));
@@ -388,7 +451,15 @@ impl EditingUi {
                 &diff
                     .unified_diff()
                     .header(
-                        &format!("HEAD/{}", file.path),
+                        &format!(
+                            "{}/{}",
+                            if review.draft.working_file_only {
+                                "opened"
+                            } else {
+                                "HEAD"
+                            },
+                            file.path
+                        ),
                         &format!("draft/{}", file.path),
                     )
                     .to_string(),
@@ -429,6 +500,25 @@ impl InstructionManager {
     pub(super) fn edit_action(&mut self, action: EditAction) {
         if action == EditAction::RetryLocalStorage {
             self.editing.storage_blocked = false;
+            if !self.editing.visible
+                && self.rows_loading()
+                && matches!(
+                    action,
+                    EditAction::Open
+                        | EditAction::Clear
+                        | EditAction::Delete
+                        | EditAction::Restore
+                        | EditAction::RestoreHead
+                        | EditAction::ImportLegacy
+                        | EditAction::Redefine
+                        | EditAction::CopyGlobal
+                        | EditAction::CopyProject
+                )
+            {
+                self.status =
+                    "Wait for the selected source to finish loading before editing it.".into();
+                return;
+            }
             self.editing.recovery_dirty = true;
             self.editing.status =
                 "Retrying local recovery persistence before any pending source action.".into();
@@ -464,6 +554,22 @@ impl InstructionManager {
         }
         self.editing.wrapped.clear();
         match action {
+            EditAction::ImportLegacy => self.begin_edit(InstructionEditAction::ImportLegacy),
+            EditAction::RestoreHead => {
+                if let (Some(snapshot), Some(target)) = (self.snapshot_id(), self.selected_target())
+                {
+                    self.editing.queued = Some(InstructionManagementRequest::Begin {
+                        snapshot,
+                        target,
+                        action: InstructionEditAction::Restore {
+                            revision: "HEAD".into(),
+                        },
+                    });
+                    self.editing.visible = true;
+                }
+            }
+            EditAction::ExportRevision => self.history_resource_action(true),
+
             EditAction::CopyGlobal | EditAction::CopyProject => {
                 let mut form = EditForm::start(action, None);
                 form.anchor = Some(self.form_anchor());
@@ -472,6 +578,7 @@ impl InstructionManager {
             }
             EditAction::RetryLocalStorage => {}
             EditAction::LocalRecoveries => {
+                self.editing.local_loading = true;
                 self.editing.local_request = Some(local_recovery::LocalRecoveryRequest::List);
             }
             EditAction::ReviewLocalValues => self.review_local_values(),
@@ -556,6 +663,7 @@ impl InstructionManager {
             }
             EditAction::Clear | EditAction::Delete | EditAction::Restore | EditAction::Discard => {
                 self.editing.visible = true;
+                self.editing.confirm_anchor = Some(self.form_anchor());
                 self.editing.confirm = Some(action);
                 self.editing.document = match action { EditAction::Clear => "Clear the selected body? Identity remains, and empty project instructions suppress global prose. You will review the diff before committing.", EditAction::Delete => "Delete this user resource? Project deletion reveals global guidance. Referencing files must be repaired in the same reviewed commit. Nothing is written until Save.", EditAction::Restore => "Restore this selected Git revision through a new reviewed commit? Other files and parent history remain untouched.", _ => "Discard the unsaved draft? This removes its recovery record. It does not undo a completed Save or external working changes." }.into();
                 self.editing.scroll = 0;
@@ -584,6 +692,7 @@ impl InstructionManager {
                                 generation: draft.generation,
                                 file: file.key.clone(),
                                 body: file.body.clone(),
+                                metadata_field: None,
                                 repair: matches!(
                                     file.metadata,
                                     InstructionEditMetadata::Damaged { .. }
@@ -598,7 +707,9 @@ impl InstructionManager {
             }
             EditAction::Review | EditAction::Save => {
                 if let Some(draft) = &self.editing.draft {
-                    if action == EditAction::Save && (!draft.reviewed || draft.branch.is_none()) {
+                    if action == EditAction::Save
+                        && (!draft.reviewed || (draft.branch.is_none() && !draft.working_file_only))
+                    {
                         self.editing.status =
                             "Save needs a validated reviewed draft on an attached branch.".into();
                         return;
@@ -715,6 +826,18 @@ impl InstructionManager {
             }
             match code {
                 KeyCode::Char('y' | 'Y') => {
+                    if matches!(
+                        action,
+                        EditAction::Clear
+                            | EditAction::Delete
+                            | EditAction::Restore
+                            | EditAction::Discard
+                    ) && self.editing.confirm_anchor.as_ref() != Some(&self.form_anchor())
+                    {
+                        self.editing.confirm = None;
+                        self.editing.status="Selection, revision or draft changed during confirmation. Nothing was applied; choose the action again.".into();
+                        return true;
+                    }
                     self.editing.confirm = None;
                     self.editing.document.clear();
                     match action {
@@ -736,24 +859,7 @@ impl InstructionManager {
                         }
                         EditAction::Clear => self.begin_edit(InstructionEditAction::Clear),
                         EditAction::Delete => self.begin_edit(InstructionEditAction::Delete),
-                        EditAction::Restore => {
-                            if let Some(revision) = self
-                                .revision_selection
-                                .as_ref()
-                                .map(|selection| selection.from.clone())
-                                .or_else(|| {
-                                    self.history
-                                        .get(self.history_selected)
-                                        .map(|entry| entry.commit.clone())
-                                })
-                            {
-                                self.begin_edit(InstructionEditAction::Restore { revision });
-                            } else {
-                                self.editing.status =
-                                    "Select a revision in Git history first.".into();
-                                self.editing.visible = false;
-                            }
-                        }
+                        EditAction::Restore => self.history_resource_action(false),
                         EditAction::Discard => {
                             if let Some(draft) = &self.editing.draft {
                                 self.editing.queued = Some(InstructionManagementRequest::Discard {
@@ -1076,8 +1182,31 @@ impl InstructionManager {
                 (EditAction::CopyProject, "Copy skill to project", "Capture the complete external package in this project's configured instruction store", "choose"),
             ]);
         }
+        if !self.editing.visible {
+            entries.extend([
+                (
+                    EditAction::ImportLegacy,
+                    "Import legacy source",
+                    "Review exact captured legacy source and its cutover receipt together",
+                    "choose",
+                ),
+                (
+                    EditAction::RestoreHead,
+                    "Restore committed version",
+                    "Review the selected resource at current Git HEAD; no history rewrite",
+                    "choose",
+                ),
+                (
+                    EditAction::ExportRevision,
+                    "Export selected revision",
+                    "Write complete historical file/package bytes to a new local export directory",
+                    "choose",
+                ),
+            ]);
+        }
         entries.into_iter().map(|(action, label, hint, key)| {
             let disabled = if action == EditAction::RetryLocalStorage { None } else if self.editing.busy() { Some("Wait for the current operation; its receipt is preserved.".into()) }
+            else if matches!(action,EditAction::CompareCurrent|EditAction::ReconcileProposed|EditAction::EditCurrent) && draft.is_some_and(|draft|draft.working_file_only){Some("Review shows the current AGENTS.md working version. Close this preserved draft and edit the current source if it changed.".into())}
             else if matches!(action, EditAction::ReconcileProposed | EditAction::EditCurrent) && self.editing.conflict.is_none() { Some("Compare the draft with current source first.".into()) }
             else if action == EditAction::RetrySave && draft.is_none_or(|draft| !draft.save_started) { Some("No previous Save needs recovery.".into()) }
             else if action == EditAction::RepositoryReceipt && self.editing.repository_plan.is_none() { Some("No repository operation has been prepared in this manager.".into()) }
@@ -1085,7 +1214,7 @@ impl InstructionManager {
                 if matches!(action, EditAction::LocalRecoveries | EditAction::ReviewLocalValues | EditAction::Recoveries | EditAction::Close | EditAction::GlobalRepository | EditAction::ProjectRepository | EditAction::RepositoryReceipt) { None }
                 else if draft.is_none() { Some("No attached draft. Close this view or recover its retained draft.".into()) }
                 else if matches!(action, EditAction::Body | EditAction::Metadata) && draft.and_then(|draft| draft.files.get(self.editing.file_index)).is_some_and(|file| matches!(file.metadata, InstructionEditMetadata::Binary { .. })) { Some("Binary package bytes are retained exactly. They are not editable as prompt text.".into()) }
-                else if action == EditAction::Save && draft.is_some_and(|draft| !draft.reviewed || draft.branch.is_none()) { Some("Review this exact draft successfully on an attached branch before Save.".into()) }
+                else if action == EditAction::Save && draft.is_some_and(|draft| !draft.reviewed || (draft.branch.is_none() && !draft.working_file_only)) { Some("Review this exact draft successfully on an attached branch before Save.".into()) }
                 else if matches!(action, EditAction::Diff | EditAction::Preview) && self.editing.review.is_none() { Some("Review changes first.".into()) }
                 else if draft.is_some_and(|draft| draft.save_started) && matches!(action, EditAction::Body | EditAction::Metadata) { Some("This Save has started or completed. Resolve its receipt, then open a new edit.".into()) }
                 else { None }
@@ -1094,6 +1223,9 @@ impl InstructionManager {
             else if matches!(action, EditAction::CopyGlobal | EditAction::CopyProject) {
                 row.filter(|row| row.origin == InstructionOrigin::External && row.kind == "skill").is_none().then(|| "Select an external skill source, including an explicitly shadowed source.".into())
             }
+            else if action == EditAction::ImportLegacy { row.filter(|row| row.origin == InstructionOrigin::Legacy).is_none().then(|| "Select a legacy compatibility source.".into()) }
+            else if matches!(action, EditAction::Restore | EditAction::ExportRevision) && matches!(self.selected_target(), Some(InstructionInspectionTarget::Repository(_))) { if self.history_visible || self.revision_selection.is_some() { None } else { Some("Choose a revision in repository history first.".into()) } }
+            else if action==EditAction::Open && row.is_some_and(|row|row.kind=="AGENTS.md"){None}
             else if row.is_none_or(|row| row.origin != InstructionOrigin::Managed) { Some("Select a managed resource. External skills use Copy; ecosystem files retain separate ownership.".into()) }
             else if action == EditAction::Redefine && row.is_some_and(|row| row.scope != "global" || matches!(row.kind.as_str(), "model-roster" | "store-settings")) { Some("Select a global instruction, not global-only model policy or store settings.".into()) }
             else if action == EditAction::Addendum && row.is_some_and(|row| row.kind != "agent") { Some("Select the agent that should receive the addendum.".into()) }
@@ -1120,6 +1252,13 @@ impl InstructionManager {
 
 #[derive(Clone)]
 pub(super) enum RecoveryChoice {
+    Historical {
+        snapshot: String,
+        target: InstructionInspectionTarget,
+        revision: String,
+        path: String,
+        export: bool,
+    },
     Local(String),
     Draft(InstructionEditScope, String),
     Operation(String),
@@ -1192,10 +1331,34 @@ impl InstructionManager {
         self.editing.recovery_dirty = true;
         self.editing.visible = true;
         if let RecoveryChoice::Local(key) = choice {
+            self.editing.local_loading = true;
             self.editing.local_request = Some(local_recovery::LocalRecoveryRequest::Load(key));
             return;
         }
         self.editing.queued = Some(match choice {
+            RecoveryChoice::Historical {
+                snapshot,
+                target,
+                revision,
+                path,
+                export,
+            } => {
+                if export {
+                    InstructionManagementRequest::ExportRevision {
+                        snapshot,
+                        target,
+                        revision,
+                        path: Some(path),
+                    }
+                } else {
+                    InstructionManagementRequest::Begin {
+                        snapshot,
+                        target,
+                        action: InstructionEditAction::RestorePath { revision, path },
+                    }
+                }
+            }
+
             RecoveryChoice::Local(_) => return,
             RecoveryChoice::Draft(scope, draft) => {
                 InstructionManagementRequest::Resume { scope, draft }
@@ -1204,5 +1367,66 @@ impl InstructionManager {
                 InstructionManagementRequest::RepositoryReceipt { operation_id }
             }
         });
+    }
+}
+
+impl InstructionManager {
+    fn history_resource_action(&mut self, export: bool) {
+        use super::menu::{Menu, MenuAction, MenuItem};
+        let Some(snapshot) = self.snapshot_id() else {
+            return;
+        };
+        let Some(target) = self.selected_target() else {
+            return;
+        };
+        let revision = self
+            .revision_selection
+            .as_ref()
+            .map(|selection| selection.from.clone())
+            .or_else(|| {
+                self.history
+                    .get(self.history_selected)
+                    .map(|entry| entry.commit.clone())
+            });
+        let Some(revision) = revision else {
+            self.editing.status = "Choose a historical revision first.".into();
+            return;
+        };
+        if matches!(target, InstructionInspectionTarget::Resource(_)) {
+            self.editing.visible = true;
+            self.editing.queued = Some(if export {
+                InstructionManagementRequest::ExportRevision {
+                    snapshot,
+                    target,
+                    revision,
+                    path: None,
+                }
+            } else {
+                InstructionManagementRequest::Begin {
+                    snapshot,
+                    target,
+                    action: InstructionEditAction::Restore { revision },
+                }
+            });
+        } else {
+            let Some(entry) = self.history.iter().find(|entry| entry.commit == revision) else {
+                self.editing.status = "Return to history and select this revision again.".into();
+                return;
+            };
+            let items = entry.paths.iter().map(|path| MenuItem { label: path.clone(), hint: if export { "Export complete historical file or skill package into a new local directory. Source is unchanged." } else { "Restore this historical file or complete skill package as a reviewed new commit." }.into(), key: "Enter".into(), action: MenuAction::Recovery(RecoveryChoice::Historical { snapshot: snapshot.clone(), target: target.clone(), revision: revision.clone(), path: path.clone(), export }), disabled: None }).collect();
+            self.editing.visible = false;
+            self.menu = Some(Menu {
+                title: "Choose historical path".into(),
+                items,
+                query: String::new(),
+                selected: 0,
+                context: Some(target),
+                snapshot: Some(snapshot),
+                revision: Some(revision),
+                parent: None,
+                explanation: false,
+                explanation_scroll: 0,
+            });
+        }
     }
 }

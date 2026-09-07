@@ -196,6 +196,47 @@ revision. Draft capture preserves their original bytes and does not mistake them
 for missing or empty source. Private draft schema 2 adds mode-aware file state
 and still reads existing schema-1 recovery records.
 
+## History, legacy imports, and ecosystem inputs
+
+**Restore committed version** prepares current Git HEAD for review. **Restore
+revision** restores selected historical source through a new commit, never reset
+or history rewrite. For a skill, restoration covers the complete historical
+package, including reference bytes and executable modes. Newer files absent in
+that package revision are listed for removal in the same diff. Repository-wide
+history offers a changed-path picker, so deleted user resources remain restorable.
+
+**Export selected revision** writes exact historical file or package bytes into a
+new owner-only client-local directory under `instruction-exports` in durable
+state. The final path is shown in the manager. Export does not change source,
+Git history, or session instructions, and never overwrites an existing export.
+Binary references remain binary, not summaries.
+
+**Import legacy source** captures an eligible compatibility file and creates a
+reviewed draft containing both its managed definition and cutover receipt. The
+original file remains untouched. A pre-existing managed destination is shown in
+the diff rather than silently replaced. An already imported source directs you
+to its managed definition, preventing duplicate contributions. Global and project
+imports use the same canonical target identities as activation.
+
+`AGENTS.md` remains a dedicated ecosystem input. Its editor opens a private draft,
+then Review and Save update only the working file. The review explicitly says
+**no parent commit**. It never stages or commits the parent's unrelated files.
+A concurrent external edit blocks Save while retaining both versions. Its
+private draft and completed working-file receipt survive reconnect/reload. Small
+owner-only edit-lock metadata under the source parent's `.jcode` directory
+coordinates writers without adopting that parent as an instruction repository.
+
+Typed metadata forms retain complete values. **Edit complete selected value in
+external editor** supports long or multiline descriptions and human notes without
+a native multiline editor. Constrained enum fields stay pickers. Invalid roster
+aliases do not disappear: a damaged roster exposes its complete original source
+for explicit repair. Submitting unchanged metadata preserves original formatting.
+
+Global rename analysis uses global ownership for global consumers. If automatic
+repair would change a reference supplied by an active project shadow, it stops
+and asks for an explicit cross-repository migration instead. Confirmations remain
+bound to their original resource, revision and draft generation.
+
 ## Retained drafts and unsent client values
 
 **Recover drafts and operations** lists retained server drafts and repository

@@ -91,6 +91,8 @@ pub struct InstructionEditFile {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstructionEditDraft {
+    #[serde(default)]
+    pub working_file_only: bool,
     pub id: String,
     pub generation: u64,
     pub title: String,
@@ -117,6 +119,7 @@ pub struct InstructionEditChoices {
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum InstructionEditAction {
     Edit,
+    ImportLegacy,
     Create {
         scope: InstructionEditScope,
         fields: InstructionResourceFields,
@@ -132,6 +135,10 @@ pub enum InstructionEditAction {
     },
     Restore {
         revision: String,
+    },
+    RestorePath {
+        revision: String,
+        path: String,
     },
     CommitExternal,
     CopySkill {
@@ -164,6 +171,12 @@ pub enum InstructionDraftChange {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case")]
 pub enum InstructionManagementRequest {
+    ExportRevision {
+        snapshot: String,
+        target: InstructionInspectionTarget,
+        revision: String,
+        path: Option<String>,
+    },
     Recoveries,
     CompareDraft {
         draft: String,
@@ -255,6 +268,12 @@ pub struct InstructionManagementFailure {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "result", content = "data", rename_all = "snake_case")]
 pub enum InstructionManagementResult {
+    FileSaved {
+        draft: String,
+        path: String,
+        no_change: bool,
+    },
+    RevisionExport(InstructionRevisionExport),
     Recoveries(super::InstructionRecoveryList),
     DraftConflict(super::InstructionDraftConflict),
     RepositoryChoices(super::InstructionRepositoryChoices),
@@ -278,4 +297,16 @@ pub enum InstructionManagementResult {
 pub struct InstructionManagementReply {
     pub session_id: String,
     pub result: InstructionManagementResult,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstructionRevisionExport {
+    pub revision: String,
+    pub files: Vec<InstructionExportFile>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstructionExportFile {
+    pub path: String,
+    pub base64: String,
+    pub executable: bool,
 }

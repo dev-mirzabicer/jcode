@@ -3,6 +3,7 @@ use ratatui::{Terminal, backend::TestBackend};
 
 fn synthetic_draft() -> InstructionEditDraft {
     InstructionEditDraft {
+        working_file_only: false,
         id: "draft-synthetic".into(),
         generation: 4,
         title: "Synthetic edit".into(),
@@ -361,4 +362,36 @@ fn stale_form_requires_comparison_before_rebinding_to_a_new_draft_generation() {
         manager.editing.queued,
         Some(InstructionManagementRequest::Update { generation: 5, .. })
     ));
+}
+
+#[test]
+fn stale_destructive_confirmation_does_not_apply_to_a_new_generation() {
+    let mut manager = manager();
+    manager.edit_action(EditAction::Discard);
+    manager.editing.draft.as_mut().unwrap().generation += 1;
+    manager.key(KeyCode::Char('y'), KeyModifiers::NONE);
+    assert!(manager.editing.queued.is_none());
+    assert!(manager.editing.status.contains("changed"));
+}
+
+#[test]
+fn complete_metadata_value_uses_external_editor_without_dispatching_a_source_change() {
+    let mut manager = manager();
+    manager.edit_action(EditAction::Metadata);
+    let form = manager.editing.form.as_mut().unwrap();
+    form.selected = 1;
+    form.fields[1].value = "line one\n合成 line two".into();
+    manager.key(KeyCode::Left, KeyModifiers::NONE);
+    let form = manager.editing.form.as_mut().unwrap();
+    form.selected = form.fields.len()
+        + form
+            .buttons
+            .iter()
+            .position(|button| *button == super::forms::FormButton::EditValue)
+            .unwrap();
+    manager.key(KeyCode::Enter, KeyModifiers::NONE);
+    let editor = manager.editing.editor.as_ref().unwrap();
+    assert_eq!(editor.body, "line one\n合成 line two");
+    assert_eq!(editor.metadata_field, Some(1));
+    assert!(manager.editing.queued.is_none());
 }

@@ -51,6 +51,7 @@ fn resolve_repository(
 
 #[derive(Default)]
 struct ManagerState {
+    ecosystem: Option<EcosystemWorkspace>,
     workspace: InstructionDraftWorkspace,
     context: Option<InspectionContext>,
     warnings: Vec<String>,
@@ -110,7 +111,139 @@ impl ManagerState {
                 "The attached draft belongs to another session. Close it before switching.",
             ));
         }
+        if let Some(ecosystem) = self.ecosystem.as_mut() {
+            if matches!(
+                request,
+                InstructionManagementRequest::Update { .. }
+                    | InstructionManagementRequest::Review { .. }
+                    | InstructionManagementRequest::Save { .. }
+                    | InstructionManagementRequest::Discard { .. }
+                    | InstructionManagementRequest::Close
+            ) {
+                let result = ecosystem
+                    .handle(
+                        service,
+                        &context.session_id,
+                        context.working_dir.as_deref(),
+                        request,
+                    )
+                    .map_err(repo_error)?;
+                if matches!(
+                    result,
+                    InstructionManagementResult::Closed | InstructionManagementResult::Discarded
+                ) {
+                    self.ecosystem = None;
+                }
+                return Ok(result);
+            }
+            if !matches!(
+                request,
+                InstructionManagementRequest::Recoveries
+                    | InstructionManagementRequest::RepositoryReceipt { .. }
+            ) {
+                return Err(fail(
+                    "ecosystem draft",
+                    "Close the AGENTS.md draft before another operation",
+                ));
+            }
+        }
+        if let InstructionManagementRequest::Resume { draft, .. } = &request
+            && draft.starts_with("ecosystem-")
+        {
+            if self.workspace.draft().is_some() {
+                return Err(fail(
+                    "resume ecosystem",
+                    "Close the current managed draft first",
+                ));
+            }
+            let workspace = service
+                .resume_ecosystem(&context.session_id, context.working_dir.as_deref(), draft)
+                .map_err(repo_error)?;
+            let result = workspace.snapshot();
+            self.ecosystem = Some(workspace);
+            return Ok(InstructionManagementResult::Draft(result));
+        }
         match request {
+            InstructionManagementRequest::ExportRevision {
+                snapshot,
+                target,
+                revision,
+                path,
+            } => {
+                use base64::Engine;
+                let target = resolver
+                    .resolve(&context.session_id, &snapshot, &target)
+                    .map_err(|error| fail("export revision", error.detail))?;
+                if target.context.working_dir != context.working_dir {
+                    return Err(fail("export revision", "Project context changed. Refresh."));
+                }
+                let repository = target
+                    .repository
+                    .as_ref()
+                    .filter(|repository| !repository.id.starts_with("external:"))
+                    .ok_or_else(|| {
+                        fail(
+                            "export revision",
+                            "Select an instruction repository revision",
+                        )
+                    })?;
+                let path = if let Some(path) = target.path {
+                    path.strip_prefix(&repository.root)
+                        .map_err(|error| fail("export path", error))?
+                        .to_path_buf()
+                } else {
+                    let path = PathBuf::from(path.ok_or_else(|| {
+                        fail(
+                            "export revision",
+                            "Choose a changed path from this revision",
+                        )
+                    })?);
+                    let history = service
+                        .history_page(repository, None, &revision, 0, 1)
+                        .map_err(repo_error)?;
+                    if history.first().is_none_or(|entry| {
+                        entry.commit != revision || !entry.changed_paths.contains(&path)
+                    }) {
+                        return Err(fail(
+                            "export revision",
+                            "Path is not part of this selected revision",
+                        ));
+                    }
+                    path
+                };
+                let root = if path.starts_with("skills") {
+                    let component = path
+                        .components()
+                        .nth(1)
+                        .ok_or_else(|| fail("export package", "Invalid package path"))?;
+                    PathBuf::from("skills").join(component.as_os_str())
+                } else {
+                    path
+                };
+                let modes = service
+                    .file_modes_at_revision(repository, &revision, &root)
+                    .map_err(repo_error)?;
+                let files = service
+                    .files_at_revision_under(repository, &revision, &root)
+                    .map_err(repo_error)?
+                    .into_iter()
+                    .map(|(path, bytes)| InstructionExportFile {
+                        executable: modes.get(&path).copied().unwrap_or(false),
+                        path: path.to_string_lossy().into_owned(),
+                        base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+                    })
+                    .collect::<Vec<_>>();
+                if files.is_empty() {
+                    return Err(fail(
+                        "export revision",
+                        "This path is absent in the selected revision; choose its earlier content revision",
+                    ));
+                }
+                Ok(InstructionManagementResult::RevisionExport(
+                    InstructionRevisionExport { revision, files },
+                ))
+            }
+
             InstructionManagementRequest::Recoveries => {
                 let mut list = InstructionRecoveryList {
                     drafts: Vec::new(),
@@ -145,6 +278,13 @@ impl ManagerState {
                 ) {
                     Ok((operations, errors)) => {
                         list.operations = operations;
+                        list.errors.extend(errors);
+                    }
+                    Err(error) => list.errors.push(error.to_string()),
+                }
+                match service.retained_ecosystem(&context.session_id) {
+                    Ok((rows, errors)) => {
+                        list.drafts.extend(rows);
                         list.errors.extend(errors);
                     }
                     Err(error) => list.errors.push(error.to_string()),
@@ -245,6 +385,41 @@ impl ManagerState {
                         "select edit target",
                         "Project context changed. Refresh inspection.",
                     ));
+                }
+                if matches!(action, InstructionEditAction::Edit)
+                    && resolved
+                        .row
+                        .as_ref()
+                        .is_some_and(|row| row.kind == "AGENTS.md")
+                {
+                    if self.workspace.draft().is_some() {
+                        return Err(fail(
+                            "ecosystem draft",
+                            "Close the current managed draft first",
+                        ));
+                    }
+                    let scope = if resolved
+                        .row
+                        .as_ref()
+                        .is_some_and(|row| row.scope == "global")
+                    {
+                        InstructionEditScope::Global
+                    } else {
+                        InstructionEditScope::Project
+                    };
+                    let workspace = service
+                        .open_ecosystem(
+                            &context.session_id,
+                            context.working_dir.as_deref(),
+                            scope,
+                            resolved.path.as_deref().ok_or_else(|| {
+                                fail("ecosystem draft", "Source path unavailable")
+                            })?,
+                        )
+                        .map_err(repo_error)?;
+                    let result = workspace.snapshot();
+                    self.ecosystem = Some(workspace);
+                    return Ok(InstructionManagementResult::Draft(result));
                 }
                 let plan = plans::plan(service, &resolved, action)?;
                 let paths = plan.files.keys().cloned().collect::<Vec<_>>();
@@ -553,6 +728,7 @@ impl ManagerState {
                 .unwrap_or(false);
         }
         Ok(InstructionEditDraft {
+            working_file_only: false,
             id: record.id.clone(),
             generation: record.generation,
             title: record.request.message.clone(),

@@ -485,6 +485,7 @@ impl InstructionManager {
     pub(super) fn form_anchor(&self) -> forms::FormAnchor {
         if let Some(draft) = &self.editing.draft {
             forms::FormAnchor {
+                revision: None,
                 snapshot: None,
                 target: None,
                 draft: Some((
@@ -499,6 +500,19 @@ impl InstructionManager {
             }
         } else {
             forms::FormAnchor {
+                revision: self
+                    .revision_selection
+                    .as_ref()
+                    .map(|value| value.from.clone())
+                    .or_else(|| {
+                        self.history_visible
+                            .then(|| {
+                                self.history
+                                    .get(self.history_selected)
+                                    .map(|entry| entry.commit.clone())
+                            })
+                            .flatten()
+                    }),
                 snapshot: self.snapshot_id(),
                 target: self.selected_target(),
                 draft: None,

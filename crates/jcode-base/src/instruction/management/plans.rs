@@ -23,6 +23,12 @@ pub(super) fn plan(
     {
         return copy_skill(service, target, scope, destination_id.as_deref());
     }
+    if let InstructionEditAction::RestorePath { revision, path } = &action {
+        return historical_path(service, target, revision, path);
+    }
+    if matches!(action, InstructionEditAction::ImportLegacy) {
+        return import_legacy(service, target);
+    }
     let selected = || -> Result<(InstructionRepositoryRef, PathBuf)> {
         let row = target
             .row
@@ -109,6 +115,26 @@ pub(super) fn plan(
             (repository, path, false)
         }
     };
+    let action = if let InstructionEditAction::Restore { revision } = action {
+        let revision = if revision == "HEAD" {
+            service
+                .inspect(&repository)
+                .map_err(repo_error)?
+                .head
+                .ok_or_else(|| fail("restore HEAD", "Repository has no baseline"))?
+        } else {
+            revision
+        };
+        InstructionEditAction::Restore { revision }
+    } else {
+        action
+    };
+    if let InstructionEditAction::Restore { revision } = &action
+        && path.starts_with("skills")
+        && path.file_name().is_some_and(|name| name == "SKILL.md")
+    {
+        return restore_package(service, repository, &path, revision);
+    }
     let base = service.open_draft(&repository, &path).map_err(repo_error)?;
     if creation && base.source_bytes().is_some() {
         return Err(fail(
@@ -125,6 +151,12 @@ pub(super) fn plan(
     }
     let current = base.content.clone().unwrap_or_default();
     let proposed = match action {
+        InstructionEditAction::ImportLegacy => {
+            return Err(fail(
+                "import",
+                "Import must resolve its compatibility source",
+            ));
+        }
         InstructionEditAction::Edit
         | InstructionEditAction::CommitExternal
         | InstructionEditAction::Settings { .. } => current,
@@ -175,6 +207,10 @@ pub(super) fn plan(
         }
         InstructionEditAction::Clear => {
             let mut document = parse(&repository, &path, &current)?;
+            if document.body.is_empty() {
+                plan.files.insert(path, Some(current.into_bytes()));
+                return Ok(plan);
+            }
             document.body.clear();
             plan.subject = format!("instruction: clear {}", document.id);
             plan.warnings.push("Clear retains resource identity and intentionally contributes an empty body. It does not reveal a global definition.".into());
@@ -239,6 +275,12 @@ pub(super) fn plan(
             plan.subject = format!("instruction: delete {}", original.id);
             plan.warnings.push("Deletion removes the resource. Deleting a project redefinition reveals the global definition. Referencing files are included in this draft for explicit repair before Save.".into());
             return Ok(plan);
+        }
+        InstructionEditAction::RestorePath { .. } => {
+            return Err(fail(
+                "restore",
+                "Historical path must be resolved by its repository",
+            ));
         }
         InstructionEditAction::CopySkill { .. } => {
             return Err(fail(
@@ -341,6 +383,9 @@ fn repair_references(
     let sources = service
         .instruction_sources(project.as_ref())
         .map_err(repo_error)?;
+    let global_runtime = InstructionRuntime::discover(InstructionSources::new(
+        service.global_repository().map_err(repo_error)?.root,
+    ));
     let runtime = InstructionRuntime::discover(sources);
     let target = InstructionResourceRef {
         scope: original.scope,
@@ -361,7 +406,25 @@ fn repair_references(
                     ),
                 )
             })?;
-        let (found, rewritten) = rewritten(&runtime, document, &target, replacement)?;
+        let owner_runtime = if document.scope == InstructionScope::Global {
+            &global_runtime
+        } else {
+            &runtime
+        };
+        let (found, rewritten) = rewritten(owner_runtime, document, &target, replacement)?;
+        if found
+            && replacement.is_some()
+            && document.scope == InstructionScope::Global
+            && project.is_some()
+        {
+            let (_, effective_rewrite) = self::rewritten(&runtime, document, &target, replacement)?;
+            if effective_rewrite != rewritten {
+                return Err(fail(
+                    "project shadow migration",
+                    "Renaming this global resource would also change an unqualified reference currently supplied by a project shadow. Migrate the project shadow/references explicitly before removing the old global identity. No automatic cross-repository rewrite was performed.",
+                ));
+            }
+        }
         if !found {
             continue;
         }
@@ -401,7 +464,12 @@ fn repair_references(
         };
         let reference = InstructionSelector::parse(InstructionKind::Agent, default)
             .map_err(|error| fail("default reference", error))?;
-        if !matches(&runtime, &reference, &target) {
+        let owner_runtime = if repository.kind == InstructionRepositoryKind::Global {
+            &global_runtime
+        } else {
+            &runtime
+        };
+        if !matches(owner_runtime, &reference, &target) {
             continue;
         }
         if repository.root != plan.repository.root {
@@ -626,6 +694,7 @@ fn skill_package(
             );
             if source_path == path
                 && let Some(id) = &rename
+                && *id != document.id
             {
                 document.id = id.clone();
                 document.path = repository.root.join(&destination_path);
@@ -650,4 +719,212 @@ fn skill_package(
         }
     }
     Ok(plan)
+}
+
+fn historical_path(
+    service: &InstructionRepositoryService,
+    target: &ResolvedManagementTarget,
+    revision: &str,
+    path: &str,
+) -> Result<EditPlan> {
+    let repository = target
+        .repository
+        .as_ref()
+        .filter(|repository| !repository.id.starts_with("external:"))
+        .ok_or_else(|| {
+            fail(
+                "restore history",
+                "Select an instruction repository revision",
+            )
+        })?
+        .clone();
+    let entries = service
+        .history_page(&repository, None, revision, 0, 1)
+        .map_err(repo_error)?;
+    let entry = entries
+        .first()
+        .filter(|entry| entry.commit == revision)
+        .ok_or_else(|| fail("restore history", "Revision was not found"))?;
+    let path = PathBuf::from(path);
+    if !entry.changed_paths.contains(&path) {
+        return Err(fail(
+            "restore history",
+            "Choose a changed path from this exact revision",
+        ));
+    }
+    let package = path
+        .strip_prefix("skills")
+        .ok()
+        .and_then(|relative| relative.components().next())
+        .map(|component| {
+            PathBuf::from("skills")
+                .join(component.as_os_str())
+                .join("SKILL.md")
+        });
+    if let Some(package) = package {
+        return restore_package(service, repository, &package, revision);
+    }
+    let content = service
+        .content_at_revision(&repository, revision, &path)
+        .map_err(repo_error)?;
+    if path != Path::new("instruction-store.toml")
+        && path != Path::new(crate::model_roster::ROSTER_PATH)
+    {
+        parse(&repository, &path, &content.content)?;
+    }
+    let base = service.open_draft(&repository, &path).map_err(repo_error)?;
+    let mode = service
+        .file_modes_at_revision(&repository, revision, &path)
+        .map_err(repo_error)?
+        .get(&path)
+        .copied()
+        .unwrap_or(false);
+    Ok(EditPlan { repository, head: base.base_head, files: BTreeMap::from([(path.clone(),Some(content.content.into_bytes()))]), executables: BTreeMap::from([(path.clone(),mode)]), observed: BTreeMap::from([(path,base.base)]), subject: format!("instruction: restore historical resource from {revision}"), warnings: vec!["Restore publishes the selected historical content as a new reviewed commit. Parent history and unrelated paths remain untouched.".into()] })
+}
+fn restore_package(
+    service: &InstructionRepositoryService,
+    repository: InstructionRepositoryRef,
+    entry: &Path,
+    revision: &str,
+) -> Result<EditPlan> {
+    let root = entry
+        .parent()
+        .ok_or_else(|| fail("restore package", "Invalid package path"))?;
+    let files = service
+        .files_at_revision_under(&repository, revision, root)
+        .map_err(repo_error)?;
+    if !files.contains_key(entry) {
+        return Err(fail(
+            "restore package",
+            "Choose a revision containing this package's SKILL.md",
+        ));
+    }
+    let modes = service
+        .file_modes_at_revision(&repository, revision, root)
+        .map_err(repo_error)?;
+    let current = crate::skill::capture_managed_skill_package(service, &repository, root)
+        .map_err(repo_error)?;
+    let head = service
+        .inspect(&repository)
+        .map_err(repo_error)?
+        .head
+        .ok_or_else(|| fail("restore package", "No current baseline"))?;
+    let mut plan = EditPlan { repository: repository.clone(), head, files: files.into_iter().map(|(path,bytes)| (path,Some(bytes))).collect(), executables: modes, observed: BTreeMap::new(), subject: format!("skill: restore {} from {revision}", root.display()), warnings: vec!["This restores the complete historical skill package, including reference bytes and executable modes. Newer package files absent in that revision will be removed in the same reviewed commit. Existing active skill snapshots remain unchanged.".into()] };
+    for path in current.keys() {
+        plan.files.entry(path.clone()).or_insert(None);
+    }
+    for path in plan.files.keys() {
+        let base = service.open_draft(&repository, path).map_err(repo_error)?;
+        if base.base_head != plan.head {
+            return Err(fail(
+                "restore package",
+                "Repository changed during preparation",
+            ));
+        }
+        plan.observed.insert(path.clone(), base.base);
+    }
+    Ok(plan)
+}
+
+fn import_legacy(
+    service: &InstructionRepositoryService,
+    target: &ResolvedManagementTarget,
+) -> Result<EditPlan> {
+    let row = target
+        .row
+        .as_ref()
+        .filter(|row| row.origin == InstructionOrigin::Legacy)
+        .ok_or_else(|| {
+            fail(
+                "legacy import",
+                "Select a legacy compatibility source, not AGENTS.md or an external skill",
+            )
+        })?;
+    let selected_path = target
+        .path
+        .as_deref()
+        .ok_or_else(|| fail("legacy import", "Source identity is missing"))?;
+    let source = service
+        .discover_known_legacy_sources(target.context.working_dir.as_deref())
+        .map_err(repo_error)?
+        .into_iter()
+        .find(|source| source.path == selected_path)
+        .ok_or_else(|| {
+            fail(
+                "legacy import",
+                "Selected source is not a known compatibility input",
+            )
+        })?;
+    let repository = resolve_repository(
+        service,
+        &target.context,
+        if source.scope == InstructionScope::Global {
+            InstructionEditScope::Global
+        } else {
+            InstructionEditScope::Project
+        },
+    )?;
+    let directory = source
+        .path
+        .parent()
+        .ok_or_else(|| fail("legacy import", "Source directory is missing"))?;
+    let spec = known_legacy_import(source.scope, directory, source.source_kind)
+        .map_err(|error| fail("import target", error))?;
+    let import = service
+        .plan_legacy_import(&spec)
+        .map_err(repo_error)?
+        .ok_or_else(|| fail("legacy import", "Source is absent"))?;
+    let manifest_path = PathBuf::from("instruction-store.toml");
+    let captured = service
+        .open_draft(&repository, &manifest_path)
+        .map_err(repo_error)?;
+    let mut manifest: InstructionStoreManifest =
+        toml::from_str(captured.content.as_deref().unwrap_or_default())
+            .map_err(|error| fail("import manifest", error))?;
+    if manifest.legacy_imports.contains_key(&spec.import_id) {
+        return Err(fail(
+            "legacy import",
+            "This source already has a durable import receipt. Edit or restore its managed resource; the preserved legacy file is inactive.",
+        ));
+    }
+    let destination = service
+        .open_draft(&repository, &spec.target.relative_path)
+        .map_err(repo_error)?;
+    if destination.base_head != captured.base_head {
+        return Err(fail(
+            "legacy import",
+            "Repository changed during preparation",
+        ));
+    }
+    manifest
+        .legacy_imports
+        .insert(spec.import_id, import.receipt());
+    Ok(EditPlan {
+        repository,
+        head: captured.base_head,
+        files: BTreeMap::from([
+            (
+                manifest_path.clone(),
+                Some(
+                    toml::to_string_pretty(&manifest)
+                        .map_err(|error| fail("import manifest", error))?
+                        .into_bytes(),
+                ),
+            ),
+            (
+                spec.target.relative_path.clone(),
+                Some(import.managed_content.into_bytes()),
+            ),
+        ]),
+        executables: BTreeMap::new(),
+        observed: BTreeMap::from([
+            (manifest_path, captured.base),
+            (spec.target.relative_path, destination.base),
+        ]),
+        subject: format!("instruction: import {} compatibility source", row.scope),
+        warnings: vec![format!(
+            "Import preserves the complete captured source from {} and retains the original file. The managed definition and cutover receipt are one reviewed commit. If a managed destination exists, its replacement is visible in the diff. Existing sessions keep their frozen instructions.",
+            selected_path.display()
+        )],
+    })
 }

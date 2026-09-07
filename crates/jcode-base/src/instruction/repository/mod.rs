@@ -1,5 +1,7 @@
 mod actions;
 mod drafts;
+mod ecosystem;
+pub use ecosystem::EcosystemWorkspace;
 mod git;
 mod lease;
 mod mutation;
