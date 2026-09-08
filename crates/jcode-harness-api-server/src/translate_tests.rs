@@ -113,7 +113,7 @@ fn fresh_creation_rejects_active_turn_and_overlapping_attachment_without_losing_
     };
     assert_eq!(subscribe["startup_context_caller"], "harness_api_create");
     assert_eq!(subscribe["agent"], "global:other");
-    let pending = state.pending_attach.unwrap();
+    let pending = state.pending_attach.clone().unwrap();
     for request in ["create_session", "attach_session"] {
         let overlapping = only_reply_event(state.api_request_to_legacy(&json!({
             "req": request, "id": 33, "session_id": "other"
@@ -126,10 +126,10 @@ fn fresh_creation_rejects_active_turn_and_overlapping_attachment_without_losing_
             }
         ));
         assert_eq!(
-            state.pending_attach.unwrap().subscribe_id,
+            state.pending_attach.as_ref().unwrap().subscribe_id,
             pending.subscribe_id
         );
-        assert_eq!(state.pending_attach.unwrap().api_id, 32);
+        assert_eq!(state.pending_attach.as_ref().unwrap().api_id, 32);
     }
 }
 
@@ -210,6 +210,102 @@ fn missing_attach_is_rejected_without_fresh_session_fallback() {
             ..
         }
     ));
+}
+
+#[test]
+fn early_state_cannot_turn_failed_creation_into_success() {
+    for failure_kind in ["error", "startup_context_failed"] {
+        let mut state = state_with_session();
+        state.api_request_to_legacy(&json!({"req": "create_session", "id": 41}));
+        let pending = state.pending_attach.clone().unwrap();
+        let early_state = json!({"type": "state", "id": pending.state_id, "session_id": "s1", "is_processing": false});
+        assert!(state.legacy_event_to_api(&early_state).is_empty());
+        assert!(state.pending_attach.is_some());
+        assert_eq!(state.session_id.as_deref(), Some("s1"));
+        let replies = state.legacy_event_to_api(&json!({
+            "type": failure_kind, "id": pending.subscribe_id, "message": "synthetic rejection",
+            "failure": {"kind": "invalid_request", "message": "synthetic rejection", "issues": []}
+        }));
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0].reply_to, Some(41));
+        assert!(matches!(
+            replies[0].event,
+            ApiEvent::Error { .. } | ApiEvent::StartupContextCreationFailed { .. }
+        ));
+        assert!(state.pending_attach.is_none());
+        assert!(state.legacy_event_to_api(&early_state).is_empty());
+        assert!(
+            state
+                .legacy_event_to_api(&json!({"type": "done", "id": pending.subscribe_id}))
+                .is_empty()
+        );
+        assert_eq!(state.session_id.as_deref(), Some("s1"));
+    }
+}
+
+#[test]
+fn early_state_waits_for_matching_subscribe_completion() {
+    let mut state = state_with_session();
+    state.api_request_to_legacy(&json!({"req": "create_session", "id": 42}));
+    let pending = state.pending_attach.clone().unwrap();
+    assert!(
+        state
+            .legacy_event_to_api(
+                &json!({"type": "state", "id": pending.state_id, "session_id": "s2"})
+            )
+            .is_empty()
+    );
+    assert!(
+        state
+            .legacy_event_to_api(&json!({"type": "done", "id": pending.subscribe_id + 100}))
+            .is_empty()
+    );
+    assert_eq!(state.session_id.as_deref(), Some("s1"));
+    let replies = state.legacy_event_to_api(&json!({"type": "done", "id": pending.subscribe_id}));
+    assert_eq!(replies.len(), 1);
+    assert_eq!(replies[0].reply_to, Some(42));
+    assert!(
+        matches!(&replies[0].event, ApiEvent::Attached { session } if session.session_id == "s2")
+    );
+    assert!(
+        state
+            .legacy_event_to_api(
+                &json!({"type": "state", "id": pending.state_id, "session_id": "stale"})
+            )
+            .is_empty()
+    );
+    assert_eq!(state.session_id.as_deref(), Some("s2"));
+}
+
+#[test]
+fn changing_attachment_rejects_scoped_calls_but_keeps_fresh_pipeline_compatibility() {
+    let mut state = state_with_session();
+    state.api_request_to_legacy(&json!({"req": "create_session", "id": 50}));
+    for req in [
+        "send_message",
+        "clear",
+        "set_agent",
+        "inspect_agent",
+        "get_history",
+    ] {
+        let event = only_reply_event(state.api_request_to_legacy(&json!({
+            "req": req, "id": 51, "session_id": "s1", "content": "synthetic", "agent": "global:jcode"
+        })));
+        assert!(matches!(
+            event,
+            ApiEvent::Error {
+                code: ErrorCode::InvalidRequest,
+                ..
+            }
+        ));
+    }
+    assert!(state.pending_message_id.is_none());
+    assert_eq!(state.pending_attach.as_ref().unwrap().api_id, 50);
+    let mut fresh = BridgeState::default();
+    fresh.api_request_to_legacy(&json!({"req": "create_session", "id": 52}));
+    let output = fresh
+        .api_request_to_legacy(&json!({"req": "send_message", "id": 53, "content": "synthetic"}));
+    assert!(matches!(&output[0], Outbound::Legacy(request) if request["type"] == "message"));
 }
 
 #[test]
@@ -456,19 +552,37 @@ fn attaching_probes_and_reports_the_model() {
     // The daemon answers the probe with a `history`-shaped reply carrying no
     // messages. That must become an unsolicited model_info event, not a reply
     // to some client request that never asked for history.
-    let frames = state.legacy_event_to_api(&json!({
+    let early = state.legacy_event_to_api(&json!({
         "type": "history", "id": catalog_id, "messages": [],
         "provider_name": "anthropic", "provider_model": "claude-sonnet-4-5",
     }));
-    assert_eq!(frames.len(), 1);
+    assert!(
+        early.is_empty(),
+        "model metadata waits for an identified attachment"
+    );
+    let pending = state.pending_attach.clone().unwrap();
+    assert!(
+        state
+            .legacy_event_to_api(&json!({"type": "done", "id": pending.subscribe_id}))
+            .is_empty()
+    );
+    let frames = state.legacy_event_to_api(
+        &json!({"type": "state", "id": pending.state_id, "session_id": "new-session"}),
+    );
+    assert_eq!(frames.len(), 2);
+    assert!(matches!(frames[0].event, ApiEvent::Attached { .. }));
     assert_eq!(
-        frames[0].reply_to, None,
+        frames[1].reply_to, None,
         "the probe was not client-initiated"
     );
-    match &frames[0].event {
+    match &frames[1].event {
         ApiEvent::ModelInfo {
-            provider, model, ..
+            session_id,
+            provider,
+            model,
+            ..
         } => {
+            assert_eq!(session_id, "new-session");
             assert_eq!(provider.as_deref(), Some("anthropic"));
             assert_eq!(model.as_deref(), Some("claude-sonnet-4-5"));
         }

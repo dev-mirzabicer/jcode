@@ -162,12 +162,16 @@ enum PendingAttachKind {
     Attach,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct PendingAttach {
     subscribe_id: u64,
     state_id: u64,
     api_id: u64,
     kind: PendingAttachKind,
+    subscribe_succeeded: bool,
+    observed_session: Option<SessionInfo>,
+    replacing_attachment: bool,
+    model_probe: Option<Value>,
 }
 
 impl BridgeState {
@@ -176,10 +180,47 @@ impl BridgeState {
         self.next_legacy_id
     }
 
+    fn finish_pending_attachment(&mut self) -> Vec<ServerFrame> {
+        let Some(pending) = self.pending_attach.as_mut() else {
+            return vec![];
+        };
+        if !pending.subscribe_succeeded {
+            return vec![];
+        }
+        let Some(session) = pending.observed_session.take() else {
+            return vec![];
+        };
+        let api_id = pending.api_id;
+        let model_probe = pending.model_probe.take();
+        self.session_id = Some(session.session_id.clone());
+        self.pending_attach = None;
+        let mut replies = vec![ServerFrame::reply(api_id, ApiEvent::Attached { session })];
+        if let Some(event) = model_probe {
+            self.note_models(&event);
+            replies.push(ServerFrame::event(
+                self.model_info(self.session_id.clone().unwrap_or_default(), &event),
+            ));
+        }
+        replies
+    }
+
     /// Translate one API request (raw JSON) into outbound actions.
     pub fn api_request_to_legacy(&mut self, request: &Value) -> Vec<Outbound> {
         let api_id = request["id"].as_u64().unwrap_or(0);
         let req = request["req"].as_str().unwrap_or("");
+
+        if self
+            .pending_attach
+            .as_ref()
+            .is_some_and(|pending| pending.replacing_attachment)
+            && REQUIRES_ATTACH.contains(&req)
+        {
+            return Self::error_reply(
+                api_id,
+                ErrorCode::InvalidRequest,
+                "Session attachment is changing on this connection; wait for its outcome before sending session-scoped requests.",
+            );
+        }
 
         // Stateful requests only mean something once this connection is
         // attached. Forwarding one before then is not merely useless: the
@@ -326,6 +367,10 @@ impl BridgeState {
                     subscribe_id: id,
                     state_id,
                     api_id,
+                    subscribe_succeeded: false,
+                    observed_session: None,
+                    replacing_attachment: self.session_id.is_some(),
+                    model_probe: None,
                     kind: if req == "create_session" {
                         PendingAttachKind::Create
                     } else {
@@ -849,41 +894,39 @@ impl BridgeState {
                 })]
             }
             "state" => {
-                let session_id = event["session_id"].as_str().unwrap_or("").to_string();
-                if !session_id.is_empty() {
-                    self.session_id = Some(session_id.clone());
-                }
                 let id = event["id"].as_u64().unwrap_or(0);
-                if let Some(pending) = self.pending_attach
-                    && pending.state_id == id
-                {
-                    self.pending_attach = None;
-                    return vec![ServerFrame::reply(
-                        pending.api_id,
-                        ApiEvent::Attached {
-                            session: SessionInfo {
-                                transcript_bytes: Self::transcript_bytes(&session_id),
-                                session_id,
-                                working_dir: None,
-                                title: None,
-                                status: if event["is_processing"].as_bool().unwrap_or(false) {
-                                    "processing".into()
-                                } else {
-                                    "idle".into()
-                                },
-                                archived: false,
-                                archived_at_ms: None,
-                            },
-                        },
-                    )];
-                }
-                vec![]
+                let Some(pending) = self
+                    .pending_attach
+                    .as_mut()
+                    .filter(|pending| pending.state_id == id)
+                else {
+                    return vec![];
+                };
+                let session_id = event["session_id"].as_str().unwrap_or("").to_string();
+                pending.observed_session = Some(SessionInfo {
+                    transcript_bytes: Self::transcript_bytes(&session_id),
+                    session_id,
+                    working_dir: None,
+                    title: None,
+                    status: if event["is_processing"].as_bool().unwrap_or(false) {
+                        "processing".into()
+                    } else {
+                        "idle".into()
+                    },
+                    archived: false,
+                    archived_at_ms: None,
+                });
+                // Direct state replies can overtake the queued Subscribe
+                // outcome. State alone is not proof that creation succeeded.
+                self.finish_pending_attachment()
             }
             "startup_context_failed" => {
                 let id = event["id"].as_u64().unwrap_or(0);
                 let Some(pending) = self
                     .pending_attach
+                    .as_ref()
                     .filter(|pending| pending.subscribe_id == id)
+                    .cloned()
                 else {
                     return vec![];
                 };
@@ -985,6 +1028,14 @@ impl BridgeState {
             })],
             "done" => {
                 let id = event["id"].as_u64().unwrap_or(0);
+                if let Some(pending) = self
+                    .pending_attach
+                    .as_mut()
+                    .filter(|pending| pending.subscribe_id == id)
+                {
+                    pending.subscribe_succeeded = true;
+                    return self.finish_pending_attachment();
+                }
                 // Subscribe and other requests also emit `done`; only a
                 // completed `message` is a turn boundary.
                 if self.pending_message_id == Some(id) {
@@ -1022,6 +1073,10 @@ impl BridgeState {
                 // carries no messages: it is model identity, not transcript.
                 if self.pending_model_probe == Some(id) {
                     self.pending_model_probe = None;
+                    if let Some(pending) = self.pending_attach.as_mut() {
+                        pending.model_probe = Some(event.clone());
+                        return vec![];
+                    }
                     self.note_models(event);
                     return vec![ServerFrame::event(self.model_info(session(self), event))];
                 }
@@ -1290,6 +1345,7 @@ impl BridgeState {
                 let message = event["message"].as_str().unwrap_or("").to_string();
                 let attach_api_id = self
                     .pending_attach
+                    .as_ref()
                     .filter(|pending| pending.subscribe_id == id)
                     .map(|pending| pending.api_id);
                 if attach_api_id.is_some() {
