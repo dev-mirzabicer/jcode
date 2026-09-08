@@ -295,6 +295,20 @@ impl BridgeState {
                 }
             }
             "create_session" | "attach_session" => {
+                if self.pending_attach.is_some() {
+                    return Self::error_reply(
+                        api_id,
+                        ErrorCode::InvalidRequest,
+                        "A session attachment is already pending on this connection; wait for its outcome.",
+                    );
+                }
+                if req == "create_session" && self.pending_message_id.is_some() {
+                    return Self::error_reply(
+                        api_id,
+                        ErrorCode::InvalidRequest,
+                        "Cannot create a new session while this API connection has an active turn. Wait for the turn to finish or use another connection.",
+                    );
+                }
                 if req == "attach_session" {
                     let target = request["session_id"].as_str().unwrap_or_default();
                     if Self::session_record_path(target).is_none_or(|path| !path.is_file()) {

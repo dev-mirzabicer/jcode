@@ -17,6 +17,17 @@ Selectors accept `name`, `global:name`, or `project:name`. Unqualified selectors
 
 The Rust SDK exposes `create_session_with_agent`. The TypeScript SDK accepts the optional second `createSession(workingDir, agent)` argument. The Harness bridge advertises `initial_agent_selection`; both SDKs reject an agent-bearing request before sending it when the connected bridge lacks that capability.
 
+Each Harness `CreateSession`, including a later call on an already attached
+connection, prepares a fresh primary session from the requested project and
+selection/defaults. It does not reattach the old session or silently ignore a
+selector. A busy attached connection rejects creation without interrupting its
+turn; use another connection for concurrent work. Overlapping attachment requests
+on one API connection also reject instead of replacing pending request identity.
+Failed preparation retains the previous attachment and removes unpublished state.
+Other clients attached to the old session remain there. A lost response after
+publication is an uncertain delivery outcome, not permission to assume rollback
+and blindly repeat creation; inspect durable sessions before retrying.
+
 ## Commands
 
 ```text

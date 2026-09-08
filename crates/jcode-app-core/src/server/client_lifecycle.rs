@@ -88,6 +88,13 @@ type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<S
 const RELOAD_STARTING_GUARD_MAX_AGE: Duration = Duration::from_secs(30);
 const REQUEST_HANDLER_STALL_THRESHOLDS_MS: [u64; 3] = [2_000, 10_000, 60_000];
 
+struct FreshPrimaryRuntime {
+    provider: Arc<dyn Provider>,
+    registry: Registry,
+    friendly_name: Option<String>,
+    is_selfdev: bool,
+}
+
 fn required_subscribe_working_dir(working_dir: Option<&str>) -> std::result::Result<&str, String> {
     let working_dir = working_dir
         .map(str::trim)
@@ -645,9 +652,9 @@ pub(super) async fn handle_client_with_instruction_repositories(
 
     let client_start = std::time::Instant::now();
 
-    let provider = provider_template.fork_for_new_session();
+    let mut provider = provider_template.fork_for_new_session();
     let t0 = std::time::Instant::now();
-    let registry = Registry::new(provider.clone()).await;
+    let mut registry = Registry::new(provider.clone()).await;
     let registry_ms = t0.elapsed().as_millis();
 
     let mut swarm_enabled = crate::config::config().features.swarm;
@@ -782,7 +789,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
         client_start.elapsed().as_millis()
     ));
     let mut client_session_id = new_agent.session_id().to_string();
-    let friendly_name = new_agent.session_short_name().map(|s| s.to_string());
+    let mut friendly_name = new_agent.session_short_name().map(|s| s.to_string());
     let client_connection_id = id::new_id("conn");
     let connected_at = Instant::now();
     let (disconnect_tx, mut disconnect_rx) = mpsc::unbounded_channel::<()>();
@@ -1746,9 +1753,9 @@ pub(super) async fn handle_client_with_instruction_repositories(
                 id,
                 working_dir: subscribe_working_dir,
                 selfdev,
-                target_session_id,
-                agent: _,
-                startup_context_caller: _,
+                mut target_session_id,
+                agent: requested_agent,
+                startup_context_caller,
                 client_instance_id,
                 client_has_local_history,
                 allow_session_takeover,
@@ -1764,6 +1771,124 @@ pub(super) async fn handle_client_with_instruction_repositories(
                     });
                     continue;
                 }
+                let mut fresh_runtime = None;
+                if client_subscribed
+                    && startup_context_caller
+                        == Some(crate::protocol::StartupContextPrimaryCaller::HarnessApiCreate)
+                {
+                    if target_session_id.is_some() {
+                        let _ = client_event_tx.send(ServerEvent::Error {
+                            id,
+                            message: "Harness creation cannot also name an attach target.".into(),
+                            retry_after_secs: None,
+                        });
+                        continue;
+                    }
+                    if reject_if_agent_busy_for_request(
+                        id,
+                        "create a new session",
+                        &client_session_id,
+                        client_is_processing,
+                        &agent,
+                        &client_event_tx,
+                    ) {
+                        continue;
+                    }
+                    let selection =
+                        match crate::instruction::AgentSelection::parse(requested_agent.as_deref())
+                        {
+                            Ok(selection) => selection,
+                            Err(error) => {
+                                let _ = client_event_tx.send(ServerEvent::Error {
+                                    id,
+                                    message: format!("Invalid initial agent selection: {error}"),
+                                    retry_after_secs: None,
+                                });
+                                continue;
+                            }
+                        };
+                    let next_provider = provider_template.fork_for_new_session();
+                    let next_registry = Registry::new(Arc::clone(&next_provider)).await;
+                    let is_selfdev = selfdev.unwrap_or(false);
+                    let prepared =
+                        crate::hooks::with_client_terminal_env(terminal_env.clone(), async {
+                            Agent::new_with_startup_context_and_agent_with_repositories(
+                                Arc::clone(&next_provider),
+                                next_registry.clone(),
+                                subscribe_working_dir.as_deref(),
+                                crate::agent::StartupContextActivation::primary(
+                                    crate::agent::StartupContextCaller::HarnessApi,
+                                ),
+                                selection,
+                                is_selfdev,
+                                (*instruction_repositories).clone(),
+                            )
+                        })
+                        .await;
+                    let (mut prepared, _) = match prepared {
+                        Ok(prepared) => prepared,
+                        Err(error) => {
+                            let _ = client_event_tx.send(ServerEvent::StartupContextFailed {
+                                id,
+                                failure: super::startup_context::primary_activation_failure(&error),
+                            });
+                            continue;
+                        }
+                    };
+                    let next_id = prepared.session_id().to_string();
+                    let next_name = prepared.session_short_name().map(str::to_string);
+                    let next_stop = prepared.graceful_shutdown_signal();
+                    let next_queue = prepared.soft_interrupt_queue();
+                    let next_background = prepared.background_tool_signal();
+
+                    // Publish and claim under the attachment owner's lock order.
+                    // Recheck idle while retaining the old Agent guard through
+                    // the claim, so another turn cannot race the handoff. Never
+                    // replace the old shared Agent as /clear would do.
+                    let mut connections = client_connections.write().await;
+                    let mut live_sessions = sessions.write().await;
+                    let idle = agent.try_lock();
+                    if idle.is_err() || !connections.contains_key(&client_connection_id) {
+                        drop(idle);
+                        drop(live_sessions);
+                        drop(connections);
+                        prepared.mark_closed();
+                        crate::tool::clear_session_tool_policy(&next_id);
+                        let cleanup = crate::session::remove_unpublished_session(&next_id)
+                            .err()
+                            .map(|error| format!("; unpublished session cleanup failed: {error}"))
+                            .unwrap_or_default();
+                        let _ = client_event_tx.send(ServerEvent::Error {
+                            id,
+                            message: format!("Session attachment changed or became busy during creation; the previous session was retained{cleanup}"),
+                            retry_after_secs: None,
+                        });
+                        continue;
+                    }
+                    live_sessions.insert(next_id.clone(), Arc::new(Mutex::new(prepared)));
+                    if let Some(connection) = connections.get_mut(&client_connection_id) {
+                        connection.session_id = next_id.clone();
+                        connection.last_seen = Instant::now();
+                    }
+                    drop(idle);
+                    drop(live_sessions);
+                    drop(connections);
+                    shutdown_signals
+                        .write()
+                        .await
+                        .insert(next_id.clone(), next_stop);
+                    register_session_interrupt_queue(&soft_interrupt_queues, &next_id, next_queue)
+                        .await;
+                    super::register_background_tool_signal(&next_id, next_background);
+                    target_session_id = Some(next_id);
+                    fresh_runtime = Some(FreshPrimaryRuntime {
+                        provider: next_provider,
+                        registry: next_registry,
+                        friendly_name: next_name,
+                        is_selfdev,
+                    });
+                }
+
                 // Every Subscribe carries an authoritative snapshot. An empty
                 // snapshot must clear terminal vars inherited by the daemon
                 // rather than retaining a prior pane's values.
@@ -1777,8 +1902,13 @@ pub(super) async fn handle_client_with_instruction_repositories(
                     }
                 }
                 if let Some(target_session_id) = target_session_id {
-                    if crate::session::session_exists(&target_session_id) {
+                    if fresh_runtime.is_some() || crate::session::session_exists(&target_session_id)
+                    {
                         let pre_resume_session_id = client_session_id.clone();
+                        let (attach_provider, attach_registry) = fresh_runtime
+                            .as_ref()
+                            .map(|fresh| (&fresh.provider, &fresh.registry))
+                            .unwrap_or((&provider, &registry));
                         agent = crate::hooks::with_client_terminal_env(
                             active_terminal_env.clone(),
                             handle_resume_session(
@@ -1793,8 +1923,8 @@ pub(super) async fn handle_client_with_instruction_repositories(
                                 &client_connection_id,
                                 &agent,
                                 &startup_context,
-                                &provider,
-                                &registry,
+                                attach_provider,
+                                attach_registry,
                                 &sessions,
                                 &shutdown_signals,
                                 &soft_interrupt_queues,
@@ -1827,6 +1957,15 @@ pub(super) async fn handle_client_with_instruction_repositories(
                         )
                         .await;
                         if client_session_id == target_session_id {
+                            if let Some(fresh) = fresh_runtime.take() {
+                                provider = fresh.provider;
+                                registry = fresh.registry;
+                                friendly_name = fresh.friendly_name;
+                                client_selfdev = fresh.is_selfdev;
+                                client_primary_startup_activated = true;
+                                swarm_enabled = crate::config::config().features.swarm;
+                                *global_session_id.write().await = client_session_id.clone();
+                            }
                             handle_subscribe(
                                 id,
                                 subscribe_working_dir,
@@ -1863,7 +2002,9 @@ pub(super) async fn handle_client_with_instruction_repositories(
                             break;
                         }
                     } else {
-                        if !allow_fresh_fallback {
+                        if startup_context_caller
+                            == Some(crate::protocol::StartupContextPrimaryCaller::HarnessApiAttach)
+                        {
                             let _ = client_event_tx.send(ServerEvent::Error {
                                 id,
                                 message: "Target session became unavailable; attach did not create a replacement session"

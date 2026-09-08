@@ -3,7 +3,7 @@ use crate::message::{ContentBlock, Message, StreamEvent, ToolDefinition};
 use crate::provider::{EventStream, Provider};
 use async_trait::async_trait;
 use futures::stream;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 struct IsolatedRuntimeDir {
@@ -1130,6 +1130,186 @@ async fn fresh_shared_subscribe_activates_explicit_agent_before_publication() {
             .contains("SYNTHETIC_EXPLICIT_AGENT")
     );
     assert!(session.first_provider_dispatch_at().is_none());
+}
+
+#[tokio::test]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "the shared-server matrix serializes JCODE_HOME and runtime state across real connections"
+)]
+async fn repeated_harness_creation_is_fresh_and_failure_preserves_the_attached_session() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    let first_project = tempfile::tempdir().unwrap();
+    let second_project = tempfile::tempdir().unwrap();
+    let (server_stream, client_stream) = crate::transport::stream_pair().unwrap();
+    let sessions = Arc::new(RwLock::new(HashMap::new()));
+    let connections = Arc::new(RwLock::new(HashMap::new()));
+    let (debug_tx, _) = broadcast::channel(8);
+    let (swarm_tx, _) = broadcast::channel(8);
+    let (global_tx, _) = broadcast::channel(8);
+    let server = tokio::spawn(handle_client(
+        server_stream,
+        Arc::clone(&sessions),
+        global_tx,
+        Arc::new(CompleteImmediatelyProvider),
+        Arc::new(crate::context::ContextTransactionService::new()),
+        crate::server::startup_context::test_coordinator(),
+        Arc::new(RwLock::new(false)),
+        Arc::new(RwLock::new(String::new())),
+        Arc::new(RwLock::new(1)),
+        Arc::clone(&connections),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        FileTouchService::new(),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(ClientDebugState::default())),
+        debug_tx,
+        Arc::new(RwLock::new(std::collections::VecDeque::new())),
+        Arc::new(AtomicU64::new(0)),
+        swarm_tx,
+        "creation-fixture".into(),
+        String::new(),
+        Arc::new(crate::mcp::SharedMcpPool::from_default_config()),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        AwaitMembersRuntime::default(),
+        SwarmMutationRuntime::default(),
+    ));
+    let (read, mut write) = client_stream.into_split();
+    let mut read = BufReader::new(read);
+    async fn exchange(
+        read: &mut BufReader<crate::transport::ReadHalf>,
+        write: &mut crate::transport::WriteHalf,
+        request: serde_json::Value,
+    ) -> Vec<ServerEvent> {
+        let id = request["id"].as_u64().unwrap();
+        write
+            .write_all((request.to_string() + "\n").as_bytes())
+            .await
+            .unwrap();
+        let mut events = Vec::new();
+        loop {
+            let mut line = String::new();
+            tokio::time::timeout(Duration::from_secs(30), read.read_line(&mut line))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!line.is_empty(), "creation connection closed");
+            let event = decode_request_or_event(&line);
+            let terminal = matches!(&event,
+                ServerEvent::Done { id: event_id }
+                | ServerEvent::Error { id: event_id, .. }
+                | ServerEvent::StartupContextFailed { id: event_id, .. } if *event_id == id);
+            events.push(event);
+            if terminal {
+                return events;
+            }
+        }
+    }
+    let create = |id, project: &Path, agent: &str| {
+        serde_json::json!({
+            "type": "subscribe", "id": id, "working_dir": project,
+            "agent": agent, "startup_context_caller": "harness_api_create", "selfdev": false,
+        })
+    };
+    let first = exchange(
+        &mut read,
+        &mut write,
+        create(1, first_project.path(), "global:jcode"),
+    )
+    .await;
+    let first_id = first
+        .iter()
+        .find_map(|event| match event {
+            ServerEvent::SessionId { session_id } => Some(session_id.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let first_before = Session::load(&first_id).unwrap();
+    let global = crate::instruction::InstructionRepositoryService::new()
+        .global_repository()
+        .unwrap();
+    std::fs::write(global.root.join("agents/explicit.md"),
+        "---\nid: explicit\nkind: agent\nname: Explicit\ndescription: Synthetic fixture\navailability: both\n---\nSYNTHETIC SECOND PROFILE").unwrap();
+    let failed = exchange(
+        &mut read,
+        &mut write,
+        create(2, second_project.path(), "global:missing"),
+    )
+    .await;
+    assert!(matches!(
+        failed.last(),
+        Some(ServerEvent::StartupContextFailed { id: 2, .. })
+    ));
+    assert_eq!(sessions.read().await.len(), 1);
+    assert_eq!(
+        connections.read().await.values().next().unwrap().session_id,
+        first_id
+    );
+    assert_eq!(
+        Session::load(&first_id).unwrap().system_prompt,
+        first_before.system_prompt
+    );
+
+    exchange(
+        &mut read,
+        &mut write,
+        create(3, second_project.path(), "global:explicit"),
+    )
+    .await;
+    let second_id = connections
+        .read()
+        .await
+        .values()
+        .next()
+        .unwrap()
+        .session_id
+        .clone();
+    assert_ne!(second_id, first_id);
+    let second = Session::load(&second_id).unwrap();
+    assert_eq!(second.active_agent().unwrap().id, "explicit");
+    assert_eq!(
+        second.working_dir.as_deref(),
+        second_project.path().to_str()
+    );
+    assert!(
+        second
+            .system_prompt_text()
+            .unwrap()
+            .contains("SYNTHETIC SECOND PROFILE")
+    );
+    assert!(second.first_provider_dispatch_at().is_none());
+    assert!(second.active_skill.is_none());
+    assert_eq!(
+        serde_json::to_value(Session::load(&first_id).unwrap().messages).unwrap(),
+        serde_json::to_value(first_before.messages).unwrap()
+    );
+
+    let current = sessions.read().await.get(&second_id).unwrap().clone();
+    let busy = current.lock().await;
+    let rejected = exchange(
+        &mut read,
+        &mut write,
+        create(4, first_project.path(), "global:jcode"),
+    )
+    .await;
+    assert!(matches!(
+        rejected.last(),
+        Some(ServerEvent::Error { id: 4, .. })
+    ));
+    assert_eq!(
+        connections.read().await.values().next().unwrap().session_id,
+        second_id
+    );
+    drop(busy);
+    drop(write);
+    server.await.unwrap().unwrap();
+    assert!(connections.read().await.is_empty());
 }
 
 #[tokio::test]

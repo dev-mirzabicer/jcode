@@ -83,6 +83,57 @@ fn state_with_session() -> BridgeState {
 }
 
 #[test]
+fn fresh_creation_rejects_active_turn_and_overlapping_attachment_without_losing_state() {
+    let mut state = state_with_session();
+    state.api_request_to_legacy(&json!({
+        "req": "send_message", "id": 30, "session_id": "s1", "content": "synthetic turn"
+    }));
+    let active_turn = state.pending_message_id.expect("active turn");
+    let busy = only_reply_event(state.api_request_to_legacy(&json!({
+        "req": "create_session", "id": 31, "agent": "global:other"
+    })));
+    assert!(matches!(
+        busy,
+        ApiEvent::Error {
+            code: ErrorCode::InvalidRequest,
+            ..
+        }
+    ));
+    assert_eq!(state.pending_message_id, Some(active_turn));
+    assert!(state.pending_attach.is_none());
+    assert_eq!(state.session_id.as_deref(), Some("s1"));
+
+    state.legacy_event_to_api(&json!({"type": "done", "id": active_turn}));
+    assert!(state.pending_message_id.is_none());
+    let outgoing = state.api_request_to_legacy(&json!({
+        "req": "create_session", "id": 32, "agent": "global:other"
+    }));
+    let Outbound::Legacy(subscribe) = &outgoing[0] else {
+        panic!("idle creation must reach the explicit server creation route");
+    };
+    assert_eq!(subscribe["startup_context_caller"], "harness_api_create");
+    assert_eq!(subscribe["agent"], "global:other");
+    let pending = state.pending_attach.unwrap();
+    for request in ["create_session", "attach_session"] {
+        let overlapping = only_reply_event(state.api_request_to_legacy(&json!({
+            "req": request, "id": 33, "session_id": "other"
+        })));
+        assert!(matches!(
+            overlapping,
+            ApiEvent::Error {
+                code: ErrorCode::InvalidRequest,
+                ..
+            }
+        ));
+        assert_eq!(
+            state.pending_attach.unwrap().subscribe_id,
+            pending.subscribe_id
+        );
+        assert_eq!(state.pending_attach.unwrap().api_id, 32);
+    }
+}
+
+#[test]
 fn create_session_maps_to_subscribe() {
     let mut state = BridgeState::default();
     let out = state.api_request_to_legacy(&json!({
