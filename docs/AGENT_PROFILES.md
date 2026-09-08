@@ -24,7 +24,8 @@ selector. A busy attached connection rejects creation without interrupting its
 turn; use another connection for concurrent work. Overlapping attachment requests
 on one API connection also reject instead of replacing pending request identity.
 Failed preparation retains the previous attachment and removes unpublished state.
-Other clients attached to the old session remain there. A lost response after
+Reattaching the current session is idempotent and does not close its Agent or
+displace another attached client. Other clients attached to the old session remain there. A lost response after
 publication is an uncertain delivery outcome, not permission to assume rollback
 and blindly repeat creation; inspect durable sessions before retrying.
 

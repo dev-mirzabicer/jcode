@@ -15,7 +15,7 @@ Reference documentation for the jcode codebase.
 - Architecture: `SERVER_ARCHITECTURE.md`, `MODULAR_ARCHITECTURE_RFC.md`, `CRATE_OWNERSHIP_BOUNDARIES.md`
 - Swarm: `SWARM_ARCHITECTURE.md`, `SWARM_TASK_GRAPH.md`
 - Instructions: [overview](INSTRUCTIONS.md), [migration and recovery](INSTRUCTION_MIGRATION.md), [inspection and editing manager](INSTRUCTION_MANAGER.md)
-- Agent profiles and prompt freezing: `AGENT_PROFILES.md`, `SYSTEM_PROMPT_CONFIG.md`; managed Git stores: `INSTRUCTION_STORES.md`; skills: `SKILLS.md`; launch-time model policy: `MODEL_ROSTER.md`; maintainer ownership and future adoption: `dev/INSTRUCTION_RUNTIME.md`
+- Agent profiles and prompt freezing: `AGENT_PROFILES.md`, `SYSTEM_PROMPT_CONFIG.md`; managed Git stores: `INSTRUCTION_STORES.md`; skills: `SKILLS.md`; launch-time model policy: `MODEL_ROSTER.md`; maintainer ownership and future adoption: `dev/INSTRUCTION_RUNTIME.md`; combined acceptance: `dev/INSTRUCTION_INTEGRATION_ACCEPTANCE.md`
 - Agent memory policy: `MEMORY_POLICY.md`; dormant implementation: `MEMORY_ARCHITECTURE.md`
 - Process RAM and allocator diagnostics: `MEMORY_BUDGET.md`, `MEMORY_INCIDENT_RUNBOOK.md`
 - Startup Context: `STARTUP_CONTEXT.md`, `dev/STARTUP_CONTEXT_ACCEPTANCE.md`

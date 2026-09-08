@@ -1,0 +1,25 @@
+{
+  "kind": "one-time migration equality, not prompt quality test",
+  "binary": "jcode v0.75.224-dev (4bb32574b, dirty)",
+  "baseline_revision": "6860452868b26ae534635a12753c789cd177b3ca",
+  "cases": [
+    {
+      "inventory_id": "INS-SYS-001",
+      "resource_id": "jcode",
+      "bytes": 1558,
+      "sha256": "00a42f2fbefa67a8d96be95c7b79eb01c6298268d143e96a23f71287b9bfd72b",
+      "equal": true,
+      "pages": 1
+    },
+    {
+      "inventory_id": "INS-SYS-002",
+      "resource_id": "mermaid",
+      "bytes": 49,
+      "sha256": "278bbb0f35cfd4307816fb80d063784c3b2cf7877c6f61a7ca33bd9ddaf79823",
+      "equal": true,
+      "pages": 1
+    }
+  ],
+  "provider_requests": 0,
+  "artifact": "/Users/mirzabicer/.jcode/scratch/wp11/core-equality/live-5me1gnx5"
+}

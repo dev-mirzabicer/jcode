@@ -55,6 +55,16 @@ It is schema-versioned. Modes are `submodule`, `external-remote`, `external-loca
 - A missing committed file is read from current Git `HEAD` only when the caller explicitly requests the accepted fallback policy.
 - Managed reads and writes reject path traversal and symlink escape.
 
+## Complete committed snapshots
+
+Review and publication validation use the complete committed tree, not unrelated
+uncommitted dependencies. Snapshot capture batches raw Git object reads rather
+than launching Git once per file. Private disk-backed query/capture files avoid
+pipe deadlocks and whole-store RAM buffering. Archives and checkouts are not used,
+so export-ignore, export-subst and filters cannot alter the captured bytes. Every
+object identity, type, complete length and delimiter is checked before the
+snapshot is accepted. Validation, concurrency and publication rules are unchanged.
+
 ## Saving and Git history
 
 Repository mutations use:

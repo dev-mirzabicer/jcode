@@ -1,6 +1,6 @@
 # Production model-instruction inventory
 
-**Status:** Phase 3 WP-01 baseline and migration ledger
+**Status:** Original baseline retained, with final Phase 3 migration reconciliation
 
 **Implementation starting revision:** `6860452868b26ae534635a12753c789cd177b3ca`
 
@@ -17,6 +17,14 @@ This is the authoritative Phase 3 migration map for production human-readable te
 The inventory is source-traced, not keyword-derived. Searches were navigation aids. Every candidate below was followed to a production provider request, stored model-visible message, tool definition, or model-visible tool result. Human-only copy, tests, probes, structural protocol text, protected context-curator prompts, dormant memory prompts, provider-required text, and self-development mechanics remain listed with explicit exclusions so later packages do not rediscover or accidentally migrate them.
 
 `Current source` means the implementation-starting revision above. Later migrations update `Final disposition` and `Final evidence` without rewriting this baseline as though it were current.
+
+## Final reconciliation
+
+[WP-11 reconciliation](instruction-inventory/WP11_RECONCILIATION.md) maps all 129
+rows to final owners, one-time equality and explicit exceptions. It includes the
+last unprofiled compatibility-source cutover, required imported common targets,
+central-text review and preserved literal whitespace. The original source column
+below remains historical; it is not rewritten to obscure migration provenance.
 
 ## Field definitions
 
