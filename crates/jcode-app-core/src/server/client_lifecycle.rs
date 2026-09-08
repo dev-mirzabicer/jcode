@@ -1848,7 +1848,13 @@ pub(super) async fn handle_client_with_instruction_repositories(
                     let mut connections = client_connections.write().await;
                     let mut live_sessions = sessions.write().await;
                     let idle = agent.try_lock();
-                    if idle.is_err() || !connections.contains_key(&client_connection_id) {
+                    let unchanged_attachment = idle
+                        .as_ref()
+                        .is_ok_and(|current| current.session_id() == client_session_id.as_str())
+                        && connections
+                            .get(&client_connection_id)
+                            .is_some_and(|connection| connection.session_id == client_session_id);
+                    if !unchanged_attachment {
                         drop(idle);
                         drop(live_sessions);
                         drop(connections);

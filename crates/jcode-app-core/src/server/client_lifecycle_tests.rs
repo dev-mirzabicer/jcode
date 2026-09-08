@@ -1307,6 +1307,51 @@ async fn repeated_harness_creation_is_fresh_and_failure_preserves_the_attached_s
         second_id
     );
     drop(busy);
+    let session_root = crate::session::session_path(&second_id)
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let artifacts = || {
+        std::fs::read_dir(&session_root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    let before_stale = artifacts();
+    connections
+        .write()
+        .await
+        .values_mut()
+        .next()
+        .unwrap()
+        .session_id = "externally-changed-attachment".into();
+    let stale = exchange(
+        &mut read,
+        &mut write,
+        create(5, first_project.path(), "global:jcode"),
+    )
+    .await;
+    assert!(matches!(
+        stale.last(),
+        Some(ServerEvent::Error { id: 5, .. })
+    ));
+    assert_eq!(
+        artifacts(),
+        before_stale,
+        "stale creation left owned artifacts"
+    );
+    assert_eq!(
+        connections.read().await.values().next().unwrap().session_id,
+        "externally-changed-attachment"
+    );
+    connections
+        .write()
+        .await
+        .values_mut()
+        .next()
+        .unwrap()
+        .session_id = second_id;
     drop(write);
     server.await.unwrap().unwrap();
     assert!(connections.read().await.is_empty());
