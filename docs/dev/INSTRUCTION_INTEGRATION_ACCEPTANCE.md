@@ -1,6 +1,6 @@
 # Integrated instruction acceptance
 
-**Status:** Candidate evidence prepared for Mirza review. This is not package or phase acceptance.
+**Status:** WP-11 accepted by Mirza on 2026-09-08 at 20:27 UTC. Independent Phase 3 acceptance remains separate.
 
 This record reconciles the instruction framework across the runtime, repositories,
 primary callers, active session state, manager, model policy and protected
@@ -244,7 +244,7 @@ not a claim that deterministic tests judge it and not final WP11 acceptance.
   represented as a product fix. Resource-failed/interrupted tests are not passing
   evidence.
 
-Final package candidate approval and independent Phase 3 closeout remain pending.
+WP-11 approval is recorded below. Independent Phase 3 closeout remains pending.
 No known in-scope product defect remains in the candidate; reported platform,
 provider, baseline-test and system-service boundaries remain explicit.
 
@@ -267,4 +267,9 @@ client startup; it remains a failed repeat, not erased by the successful run.
 Final runtime checks did not change any of the 213 tracked instruction files,
 13 dormant memory files or five protected checkout files. Later evidence or
 approval-only commits are distinguished from this activated implementation.
-This is candidate completion only. Mirza's WP11 approval is still required.
+Mirza approved this WP11 candidate on 2026-09-08 at 20:27 UTC, conditional on
+our professional assessment that it meets the agreed robustness standard. That
+assessment was affirmed within the accepted scope and the explicitly disclosed
+verification boundaries. The approval authorizes the requested downstream
+fast-forward/publication and durable work-package closeout. It does not claim
+zero undiscovered defects or accept Phase 3 before its independent closeout.

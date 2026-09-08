@@ -1,5 +1,5 @@
 {
-  "status": "candidate verification complete, user approval pending",
+  "status": "WP-11 accepted by Mirza; independent Phase 3 closeout pending",
   "source_commit": "642275def6e976cf7bd8aa68958ab15bdf01643a",
   "source_tree": "ee2ec1efa55ba409866efc87730ce2f997e5e74e",
   "runtime": "642275def-dirty-dffcd9d0a568",
@@ -93,5 +93,7 @@
   "dormant_memory_files_unchanged": 13,
   "central_prose_review": "Mirza approved unchanged current text 2026-09-08 17:20 UTC",
   "inference_boundary": "localhost fixtures only, no paid inference",
-  "phase_acceptance": "independent closeout remains required"
+  "phase_acceptance": "independent closeout remains required",
+  "approval_utc": "2026-09-08T20:27:03Z",
+  "accepted_candidate_source": "496485228fb1a046a03cbb8dc7eb8eb7386bdfc5"
 }
