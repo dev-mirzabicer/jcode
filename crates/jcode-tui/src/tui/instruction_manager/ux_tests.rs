@@ -60,7 +60,8 @@ fn ux_explicit_filters_show_choices_and_preserve_other_filters() {
     assert!(manager.menu.is_none());
     assert_eq!(manager.filter.scope.as_deref(), Some("project"));
     assert_eq!(manager.filter.search, "retained search");
-    assert!(manager.filter_summary().contains("project"));
+    assert_eq!(manager.scope_label(), "Project");
+    assert!(render(&mut manager, 80, 24).contains("Scope: Project"));
     assert!(
         matches!(&manager.queued,Some(InstructionInspectionRequest::Resources{filter,..}) if filter==&manager.filter)
     );
@@ -446,4 +447,16 @@ fn ux_source_copy_destination_collisions_are_explicit_and_selection_correlated()
     manager.choose_menu();
     assert!(manager.editing.queued.is_none());
     assert!(manager.status.contains("changed"));
+}
+
+#[test]
+fn ux_snapshot_page_never_presents_a_catalog_scope_or_an_edit_destination() {
+    let mut manager = populated();
+    manager.filter.scope = Some("global".into());
+    manager.choose_navigation(navigation::SESSION);
+    let screen = render(&mut manager, 150, 40);
+    let chrome = screen.lines().take(3).collect::<Vec<_>>().join("\n");
+    assert!(!chrome.contains("Scope:"));
+    assert!(!chrome.contains("Edit global"));
+    assert_eq!(manager.areas[1].width, 0);
 }

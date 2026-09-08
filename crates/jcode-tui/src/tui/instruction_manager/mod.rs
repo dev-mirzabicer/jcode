@@ -1,4 +1,4 @@
-//! One read-only state machine for wide and narrow local/remote inspection.
+//! Shared type/scope navigation, complete inspection and source-aware editing.
 pub(crate) mod editing;
 mod menu;
 mod navigation;
@@ -82,6 +82,7 @@ impl InstructionManager {
     pub fn new(session: String, roster: bool) -> Self {
         let filter = InstructionFilter {
             kind: Some(if roster { "model-roster" } else { "agent" }.into()),
+            scope: roster.then(|| "global".into()),
             grouped: true,
             main_catalog: true,
             ..Default::default()
@@ -284,8 +285,12 @@ impl InstructionManager {
                 };
                 self.wrap_key = None;
                 self.history_visible = false;
-                self.status =
-                    "Exact captured detail. Scroll or N/P to traverse all content pages.".into();
+                self.status = if self.pane == Pane::Detail {
+                    "Exact captured detail. Scroll or N/P to traverse all content pages."
+                } else {
+                    "Preview ready. Enter reads the item; Edit names the source it will change."
+                }
+                .into();
             }
             InstructionInspectionResult::History(page) => {
                 if let InstructionInspectionRequest::History { offset, .. } = pending.request
@@ -804,6 +809,7 @@ impl InstructionManager {
                     );
                 }
             }
+            KeyCode::Char('i') => self.edit_action(editing::EditAction::ImportLegacy),
             KeyCode::Char('a') if self.history_visible => {
                 self.history_base = self
                     .history

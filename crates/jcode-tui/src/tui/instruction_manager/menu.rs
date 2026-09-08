@@ -465,12 +465,6 @@ impl InstructionManager {
         if !f.search.is_empty() {
             parts.push(format!("Search: {}", f.search));
         }
-        if let Some(kind) = &f.kind {
-            parts.push(format!("Type: {kind}"));
-        }
-        if let Some(scope) = &f.scope {
-            parts.push(format!("Scope: {scope}"));
-        }
         if let Some(valid) = f.valid {
             parts.push(if valid { "Valid only" } else { "Invalid only" }.into());
         }

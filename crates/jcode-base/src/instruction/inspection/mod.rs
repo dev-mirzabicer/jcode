@@ -62,6 +62,7 @@ struct Repository {
 }
 
 struct Resource {
+    skill_name: Option<String>,
     row: InstructionRow,
     path: PathBuf,
     managed: Option<InstructionResourceRef>,

@@ -3,7 +3,10 @@ use super::*;
 impl InstructionInspector {
     fn family(resource: &Resource) -> (String, String) {
         let identity = if resource.row.kind == "skill" {
-            resource.row.name.clone()
+            resource
+                .skill_name
+                .clone()
+                .unwrap_or_else(|| resource.row.key.clone())
         } else if resource.managed.is_some()
             || resource.alias.is_some()
             || resource.row.kind == "AGENTS.md"

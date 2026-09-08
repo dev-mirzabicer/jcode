@@ -378,6 +378,11 @@ fn previews_reuse_composer_and_graph_without_seed_upgrade_or_session_change() {
     assert!(
         detail(&mut inspector, &key, InstructionInspectionView::Metadata)
             .text
+            .contains("Availability: Primary and isolated executions")
+    );
+    assert!(
+        detail(&mut inspector, &key, InstructionInspectionView::Source)
+            .text
             .contains("availability: both")
     );
     assert_eq!(head, git(&fixture.root, &["rev-parse", "HEAD"]));

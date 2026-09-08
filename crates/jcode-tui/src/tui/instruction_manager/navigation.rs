@@ -100,6 +100,9 @@ impl InstructionManager {
         } else {
             self.destination = Destination::Catalog;
             self.filter.kind = CATEGORIES[index].1.map(str::to_string);
+            if index == 7 {
+                self.filter.scope = Some("global".into());
+            }
             self.filter.origin = (index == 9).then_some(InstructionOrigin::Legacy);
             self.filter.main_catalog = index != 9;
             self.filter.grouped = true;
@@ -130,7 +133,7 @@ impl InstructionManager {
         self.filter_changed();
     }
     pub(super) fn open_scope_choices(&mut self) {
-        let items=[("Effective here",None,"One named item with all source versions. Applicability follows current files, not the running session snapshot."),("Global",Some("global"),"Browse global definitions. Edit writes their global source only."),("Project",Some("project"),"Browse definitions stored for this project. Missing definitions are not implicitly created.")].into_iter().map(|(label,scope,hint)|MenuItem{label:format!("{}{}",if self.filter.scope.as_deref()==scope{"* "}else{""},label),hint:hint.into(),key:"Enter".into(),action:MenuAction::Scope(scope.map(str::to_string)),disabled:None}).collect();
+        let items=[("Effective here",None,"One named item with all source versions. Applicability follows current files, not the running session snapshot."),("Global",Some("global"),"Browse global definitions. Edit writes their global source only."),("Project",Some("project"),"Browse definitions stored for this project. Missing definitions are not implicitly created.")].into_iter().map(|(label,scope,hint)|MenuItem{label:format!("{}{}",if self.filter.scope.as_deref()==scope{"* "}else{""},label),hint:hint.into(),key:"Enter".into(),action:MenuAction::Scope(scope.map(str::to_string)),disabled:(self.filter.kind.as_deref()==Some("model-roster") && scope==Some("project")).then(||"Model roster policy is global-only. Projects do not redefine aliases.".into())}).collect();
         self.navigation_menu("Choose scope", items);
     }
     fn navigation_menu(&mut self, title: &str, items: Vec<MenuItem>) {
@@ -269,6 +272,10 @@ impl InstructionManager {
         self.pane = pane;
     }
     pub(super) fn new_instruction(&mut self) {
+        if self.filter.kind.as_deref() == Some("model-roster") {
+            self.edit_action(EditAction::Open);
+            return;
+        }
         if self.destination != Destination::Catalog
             || self.filter.origin == Some(InstructionOrigin::Legacy)
         {

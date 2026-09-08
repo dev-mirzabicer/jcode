@@ -189,93 +189,91 @@ impl InstructionInspector {
 
     fn session_metadata(&self) -> String {
         let mut text = format!(
-            "Session: {}\nActive agent: {}\nProject: {}\nSelf-development composition: {}\n\nDefault precedence: explicit selection, project default, global default, effective unqualified jcode.\nResume uses exact stored instructions, not this preview. No provider request or activation occurs here.\n",
-            self.context.session_id,
+            "CURRENT SESSION SNAPSHOT\n\nActive agent: {}\nSession: {}\nProject: {}\n\nThis page cannot be an edit destination. Source pages manage files; this page shows the session's captured instructions. Profile changes appended later remain in session history.\n\nCAPTURED SYSTEM PROMPT\n",
             self.context.active_agent.as_deref().unwrap_or("none"),
+            self.context.session_id,
             self.context
                 .working_dir
                 .as_deref()
-                .map_or_else(|| "none".into(), |path| path.display().to_string()),
-            yes(self.context.is_selfdev)
+                .map_or_else(|| "none".into(), |path| path.display().to_string())
         );
-        for store in self
-            .stores
-            .values()
-            .filter_map(|store| store.reference.as_ref())
-            .filter(|store| !store.id.starts_with("external:"))
-        {
-            match self.repositories.load_manifest(store) {
-                Ok(manifest) => text.push_str(&format!(
-                    "\n{} default agent: {}\nSchema: {}  Seed: {}\n",
-                    store.kind,
-                    manifest
-                        .default_agent
-                        .as_deref()
-                        .unwrap_or("Not configured; continue to the next precedence tier"),
-                    manifest.schema_version,
-                    manifest.seed_version
-                )),
-                Err(error) => text.push_str(&format!("\n{} settings error: {error}\n", store.kind)),
-            }
-        }
+        text.push_str(
+            self.context
+                .stored_system
+                .as_deref()
+                .unwrap_or("No stored system prompt for this session."),
+        );
         text
     }
 
     fn metadata(&self, resource: &Resource, runtime: &InstructionRuntime) -> String {
         let row = &resource.row;
-        let mut text = format!(
-            "{}\n{}\n\n{} source · {}\n{}\n\n",
-            row.name,
-            row.description,
+        let mut text = format!("{}\n", row.name);
+        if !row.description.is_empty() {
+            text.push_str(&format!("{}\n", row.description));
+        }
+        text.push_str(&format!(
+            "\n{} · {} · {}\n",
             row.scope,
             if row.origin == InstructionOrigin::Managed {
-                "Managed instructions"
+                "Managed"
             } else if row.origin == InstructionOrigin::External && row.kind == "skill" {
-                "Externally installed skill: Copy to edit"
+                "Externally installed skill"
             } else {
                 "Dedicated or original file"
             },
             if row.effective {
-                "Applies in this project using current source files."
+                "applies here"
             } else {
-                "Not selected here; another source takes precedence."
+                "not selected here"
             }
-        );
+        ));
         if row.origin == InstructionOrigin::Managed || row.kind == "AGENTS.md" {
+            let relative = self
+                .stores
+                .get(&row.repository)
+                .and_then(|store| store.reference.as_ref())
+                .and_then(|repository| resource.path.strip_prefix(&repository.root).ok())
+                .unwrap_or(&resource.path);
             text.push_str(&format!(
-                "Edit {} writes only: {}\n",
+                "Edit {} writes: {}\n",
                 row.scope,
-                resource.path.display()
+                relative.display()
             ));
+        } else if row.kind == "skill" {
+            text.push_str("Copy to global or project to edit. Original files stay untouched.\n");
         }
-        text.push_str("Source edits do not replace current session snapshots. Choose Current session instructions to inspect active text.\n");
+        text.push_str("Existing sessions keep their captured instructions.\n");
         let mut versions = self.alternatives(resource);
         versions.sort_by_key(|variant| variant.row.key != row.key);
         for variant in versions {
+            let branch = self
+                .stores
+                .get(&variant.row.repository)
+                .and_then(|store| store.row.branch.as_deref());
             text.push_str(&format!(
-                "\n{} · {} · {}\n{}\n",
-                variant.row.scope,
-                if variant.row.origin == InstructionOrigin::Managed {
-                    "Managed"
-                } else if variant.row.origin == InstructionOrigin::Legacy {
-                    "Legacy original"
+                "\n{} SOURCE{}{}\n",
+                variant.row.scope.to_uppercase(),
+                if variant.row.key == row.key {
+                    " · selected"
                 } else {
-                    "External"
+                    " · alternative"
                 },
-                if variant.row.effective {
-                    "applies here"
-                } else {
-                    "shadowed here"
-                },
-                variant.path.display()
+                branch.map_or(String::new(), |branch| format!(" · {branch}"))
             ));
-            match self.read_source(variant) {
-                Ok(source) => text.push_str(&source),
-                Err(error) => text.push_str(&format!("Source error: {}", error.detail)),
+            if let Some(reference) = &variant.managed
+                && let Ok(document) = runtime.resolve(&selector(reference))
+            {
+                text.push_str(&document.body);
+            } else {
+                match self.read_source(variant) {
+                    Ok(source) => text.push_str(&source),
+                    Err(error) => text.push_str(&format!("Source error: {}", error.detail)),
+                }
             }
             text.push('\n');
         }
-        text.push_str("\nTECHNICAL DETAILS AND CONSUMERS\n");
+        text.push_str("\nTECHNICAL DETAILS AND EXACT SOURCE LOCATIONS\n");
         text.push_str(&self.technical_metadata(resource, runtime));
         text
     }

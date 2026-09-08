@@ -164,6 +164,7 @@ impl InstructionInspector {
                 inspector.resources.insert(
                     key.clone(),
                     Resource {
+                        skill_name: None,
                         row: InstructionRow {
                             description: String::new(),
                             variants: Vec::new(),
@@ -427,6 +428,7 @@ impl InstructionInspector {
         self.resources.insert(
             key.clone(),
             Resource {
+                skill_name: None,
                 row: InstructionRow {
                     description: String::new(),
                     variants: Vec::new(),
@@ -436,7 +438,20 @@ impl InstructionInspector {
                         .unwrap_or_default()
                         .to_string_lossy()
                         .into(),
-                    name: path.display().to_string(),
+                    name: if kind == "skill" {
+                        format!(
+                            "Unidentified skill: {}",
+                            path.parent()
+                                .and_then(|path| path.file_name())
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                        )
+                    } else {
+                        path.file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned()
+                    },
                     kind: kind.into(),
                     scope: scope.into(),
                     repository,
@@ -497,6 +512,7 @@ impl InstructionInspector {
                 .values_mut()
                 .find(|resource| resource.path == path)
             {
+                resource.skill_name = Some(entry.name.clone());
                 resource.row.name = entry.name.clone();
                 resource.row.description = registry
                     .candidate(&entry.name, &entry.source)
@@ -530,13 +546,14 @@ impl InstructionInspector {
                 .values_mut()
                 .find(|resource| resource.path == path)
             {
+                resource.skill_name = Some(entry.name.clone());
                 resource.row.name = entry.name.clone();
                 resource.row.description = registry
                     .candidate(&entry.name, &entry.source)
                     .map(|skill| skill.description.clone())
                     .unwrap_or_default();
                 resource.annotation = format!(
-                    "Source: {}\nExternal skill: read-only. Copy to managed global/project store is available in WP-10, not executed by this inspector.\n",
+                    "Source: {}\nExternal skill: original files are not edited in place. Copy creates a managed global/project draft.\n",
                     entry.source.kind
                 );
             }
@@ -700,6 +717,14 @@ impl InstructionInspector {
                     })
             }),
         );
+        if let Some(resource) = self
+            .resources
+            .values_mut()
+            .find(|resource| resource.path == path && resource.alias.is_none())
+        {
+            resource.row.name = "Model roster settings".into();
+            resource.row.description = "Edit the complete global alias roster".into();
+        }
         let Ok(roster) = parsed else {
             return;
         };
@@ -717,7 +742,7 @@ impl InstructionInspector {
         for (alias, warning) in entries {
             let key = format!("model-roster:{alias}");
             self.resources.insert(key.clone(), Resource {
-                row: InstructionRow { description: String::new(), variants: Vec::new(), key, id: alias.clone(), name: alias.clone(), kind: "model-roster".into(), scope: "global".into(), repository: global.id.clone(), origin: InstructionOrigin::Managed, effective: true, redefines_global: false, high_impact: false, valid: warning.is_none(), warning },
+                        skill_name: None,                row: InstructionRow { description: roster.inspect(&alias).map(|entry|entry.description.clone()).unwrap_or_default(), variants: Vec::new(), key, id: alias.clone(), name: alias.clone(), kind: "model-roster".into(), scope: "global".into(), repository: global.id.clone(), origin: InstructionOrigin::Managed, effective: true, redefines_global: false, high_impact: false, valid: warning.is_none(), warning },
                 path: path.clone(), managed: None, alias: Some(alias), annotation: "Global-only launch policy. Preview uses independent provider construction, without inference or modifying the primary provider.".into(),
             });
         }

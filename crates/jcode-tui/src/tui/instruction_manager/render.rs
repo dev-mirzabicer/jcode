@@ -78,7 +78,7 @@ impl InstructionManager {
             return;
         }
         let compact = area.height < 12;
-        let filtered = true;
+        let filtered = self.destination == Destination::Catalog;
         let top = if compact {
             2
         } else if filtered {
@@ -167,6 +167,17 @@ impl InstructionManager {
             result.push((KeyCode::F(4), setup));
             result
         };
+        let nav = if self.destination == Destination::Session {
+            vec![(KeyCode::F(1), "F1 Types")]
+        } else if self.destination == Destination::Repositories {
+            vec![
+                (KeyCode::F(1), "F1 Types"),
+                (KeyCode::F(2), "F2 Repositories"),
+                (KeyCode::F(3), "F3 Details"),
+            ]
+        } else {
+            nav
+        };
         self.buttons(
             frame,
             Rect::new(area.x, area.y + 1, area.width, 1),
@@ -188,22 +199,36 @@ impl InstructionManager {
                 let edit_label = self.active_row().map(|row| {
                     if row.origin == InstructionOrigin::External && row.kind != "AGENTS.md" {
                         "Copy to edit".into()
+                    } else if row.origin == InstructionOrigin::Legacy {
+                        "I Import original".into()
                     } else {
                         format!("E Edit {}", row.scope)
                     }
                 });
                 let mut actions = vec![
                     (KeyCode::Char('/'), "/ Search"),
-                    (KeyCode::F(6), "F6 New"),
+                    (
+                        KeyCode::F(6),
+                        if self.filter.kind.as_deref() == Some("model-roster") {
+                            "F6 Aliases"
+                        } else {
+                            "F6 New"
+                        },
+                    ),
                     (KeyCode::Char('v'), "V Sources"),
                     (KeyCode::Char(' '), "Space Actions"),
                 ];
+                if edit_label.as_deref() == Some("Copy to edit") {
+                    actions.retain(|(key, _)| *key != KeyCode::Char('v'));
+                }
                 if let Some(label) = &edit_label {
                     actions.insert(
                         0,
                         (
                             if label == "Copy to edit" {
                                 KeyCode::Char('v')
+                            } else if label == "I Import original" {
+                                KeyCode::Char('i')
                             } else {
                                 KeyCode::Char('e')
                             },
@@ -223,8 +248,6 @@ impl InstructionManager {
                         (KeyCode::Char('4'), "4 Exact system snapshot"),
                         (KeyCode::Char(' '), "Space Actions"),
                     ];
-                } else if !self.project_configured() {
-                    actions.push((KeyCode::F(4), "F4 Project setup"));
                 }
                 self.buttons(
                     frame,
@@ -237,7 +260,15 @@ impl InstructionManager {
                 line(
                     frame,
                     Rect::new(area.x, area.y + 3, area.width, 1),
-                    &self.filter_summary(),
+                    &if self.filter.search.is_empty()
+                        && self.filter.valid.is_none()
+                        && self.filter.effective.is_none()
+                        && self.filter.repository.is_none()
+                    {
+                        "G = global   P = project   ext = installed source".into()
+                    } else {
+                        self.filter_summary()
+                    },
                     theme.muted,
                 );
             }
@@ -257,7 +288,13 @@ impl InstructionManager {
             self.controls.clear();
         }
         let body = chunks[1];
-        if area.width >= 140 && !self.expanded {
+        if self.destination == Destination::Session && area.width >= 90 && !self.expanded {
+            let panes = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Length(27), Constraint::Min(1)])
+                .split(body);
+            self.areas = [panes[0], Rect::default(), panes[1]];
+        } else if area.width >= 140 && !self.expanded {
             let panes = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([
@@ -430,7 +467,15 @@ impl InstructionManager {
             line(
                 frame,
                 rect,
-                &format!("{} {}", if selected { ">" } else { " " }, label),
+                &format!(
+                    "{} {}",
+                    if selected && self.pane == pane {
+                        ">"
+                    } else {
+                        " "
+                    },
+                    label
+                ),
                 if selected && self.pane == pane {
                     theme.selected
                 } else {
@@ -652,7 +697,7 @@ impl InstructionManager {
             frame,
             Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
             &format!(
-                "G global · P project · ext external | {}-{} / {}",
+                "Items {}-{} of {}",
                 self.row_offset + 1,
                 self.row_offset + self.rows.len(),
                 self.row_total
