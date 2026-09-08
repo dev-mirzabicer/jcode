@@ -16,9 +16,15 @@ printf 'Artifacts: %s\n' "$out"
 git rev-parse HEAD > "$out/source-head.txt"
 git diff --binary > "$out/working.patch"
 failed=0
+start_from=${2:-base-all}
+started=false
 run() {
   local label=$1 code
   shift
+  if [[ "$started" == false ]]; then
+    if [[ "$label" != "$start_from" ]]; then return; fi
+    started=true
+  fi
   printf 'JCODE_PROGRESS {"message":"Instruction integration: %s"}\n' "$label"
   "$@" > "$out/$label.log" 2>&1
   code=$?
@@ -37,24 +43,28 @@ run() {
     fi
   fi
 }
-run base-all scripts/dev_cargo.sh test --profile selfdev -p jcode-base --lib -- --test-threads=1
+run base-all scripts/dev_cargo.sh test --no-fail-fast --profile selfdev -p jcode-base --lib -- --test-threads=1
 # Fresh processes isolate the known cwd-sensitive aggregate-test boundary.
 for family in skill:: model_roster:: prompt::prompt_tests transfer_handoff startup_context; do
   label=${family//:/_}
-  run "base-$label" scripts/dev_cargo.sh test --profile selfdev -p jcode-base --lib "$family" -- --test-threads=1
+  run "base-$label" scripts/dev_cargo.sh test --no-fail-fast --profile selfdev -p jcode-base --lib "$family" -- --test-threads=1
 done
-run app-core scripts/dev_cargo.sh test --profile selfdev -p jcode-app-core --lib -- --test-threads=1
-run domains scripts/dev_cargo.sh test --profile selfdev -p jcode-command-risk -p jcode-context-core -p jcode-instruction-types -p jcode-overnight-core -p jcode-plan -p jcode-protocol -p jcode-session-types -p jcode-swarm-core -p jcode-task-types -p jcode-provider-core -p jcode-provider-claude-cli-runtime --lib -- --test-threads=1
-run openrouter scripts/dev_cargo.sh test --profile selfdev -p jcode-provider-openrouter-runtime --lib -- --test-threads=1
-run harness scripts/dev_cargo.sh test --profile selfdev -p jcode-harness-api -p jcode-harness-api-server --lib -- --test-threads=1
-run sdk scripts/dev_cargo.sh test --profile selfdev -p jcode-sdk -- --test-threads=1
+run app-core scripts/dev_cargo.sh test --no-fail-fast --profile selfdev -p jcode-app-core --lib -- --test-threads=1
+run domains scripts/dev_cargo.sh test --no-fail-fast --profile selfdev -p jcode-command-risk -p jcode-context-core -p jcode-instruction-types -p jcode-overnight-core -p jcode-plan -p jcode-protocol -p jcode-session-types -p jcode-swarm-core -p jcode-task-types -p jcode-provider-core -p jcode-provider-claude-cli-runtime --lib -- --test-threads=1
+run openrouter scripts/dev_cargo.sh test --no-fail-fast --profile selfdev -p jcode-provider-openrouter-runtime --lib -- --test-threads=1
+run harness scripts/dev_cargo.sh test --no-fail-fast --profile selfdev -p jcode-harness-api -p jcode-harness-api-server --lib -- --test-threads=1
+run sdk scripts/dev_cargo.sh test --no-fail-fast --profile selfdev -p jcode-sdk -- --test-threads=1
 for family in instruction_manager agent_profile skill startup_context context_editor replay kv_cache command remote; do
-  run "tui-$family" scripts/dev_cargo.sh test --profile selfdev -p jcode-tui --lib "$family" -- --test-threads=1
+  run "tui-$family" scripts/dev_cargo.sh test --no-fail-fast --profile selfdev -p jcode-tui --lib "$family" -- --test-threads=1
 done
-run tui-messages scripts/dev_cargo.sh test --profile selfdev -p jcode-tui-messages --lib -- --test-threads=1
+run tui-messages scripts/dev_cargo.sh test --no-fail-fast --profile selfdev -p jcode-tui-messages --lib -- --test-threads=1
 run root-check scripts/dev_cargo.sh check --profile selfdev -p jcode --all-targets
 run strict scripts/dev_cargo.sh clippy --profile selfdev -p jcode -p jcode-app-core -p jcode-base -p jcode-command-risk -p jcode-context-core -p jcode-harness-api -p jcode-harness-api-server -p jcode-instruction-types -p jcode-overnight-core -p jcode-plan -p jcode-protocol -p jcode-provider-claude-cli-runtime -p jcode-provider-core -p jcode-provider-openrouter-runtime -p jcode-sdk -p jcode-session-types -p jcode-swarm-core -p jcode-task-types -p jcode-tui -p jcode-tui-messages --all-targets -- -D warnings
 run formatting cargo fmt --all -- --check
 run diff git diff --check
+if [[ "$started" == false ]]; then
+  printf 'Unknown starting check: %s\n' "$start_from" >&2
+  failed=1
+fi
 printf 'Artifacts: %s\n' "$out"
 exit "$failed"
