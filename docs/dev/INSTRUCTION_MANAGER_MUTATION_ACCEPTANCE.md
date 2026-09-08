@@ -1,6 +1,6 @@
 # Instruction manager mutation verification
 
-**Status:** Candidate verification. WP-10 has not been accepted by Mirza.
+**Status:** Accepted by Mirza on 2026-09-08 at 13:25 UTC, after the type-first UX refinement. Historical candidate observations below retain their original source/runtime boundaries.
 
 **Final activated boundary:** `8f56ad57a`, runtime `8f56ad57a-dirty-efbe29180b11`, `jcode v0.75.211-dev`. Full combined acceptance ran at `712d37527`; the subsequent help/close-race changes have focused tests and an activated production TUI smoke. These boundaries are recorded separately, not conflated.
 
@@ -179,3 +179,24 @@ The real global instruction store remains at
 The five original dirty checkout paths remain byte-identical. Only probe and
 verification-document updates differ from the final activated runtime source.
 The revised candidate is awaiting Mirza's approval.
+
+## WP-10 acceptance, 2026-09-08
+
+Mirza approved the revised activated manager at 13:25 UTC with “Approved 100%”.
+He said the interface implements what he asked for very well, while explicitly
+not claiming he had edited sources or tested every detail himself. His human UX
+approval complements the mechanism and real-client evidence above; it does not
+expand those checks to untested platforms or hosted authentication flows.
+
+Mirza also asked about non-trivial skill packages. The existing implementation
+and tests cover nested `references/` directories, additional Markdown files,
+binary assets and executable modes. Copy, package rename/delete, historical
+restore and export preserve complete package contents. `SKILL.md` remains the
+entry point, and supporting references are read as needed rather than all being
+injected automatically. No new skill prose or invocation policy was introduced
+in response to that question.
+
+Accepted runtime: `5811f10da-dirty-fa5642aab7fd`, current/shared equal and canary
+passed. The final evidence/approval documentation and probe updates beyond that
+runtime do not change product source. Phase 3 remains Implementing, with WP-11
+responsible for its already-approved integrated acceptance and reconciliation.

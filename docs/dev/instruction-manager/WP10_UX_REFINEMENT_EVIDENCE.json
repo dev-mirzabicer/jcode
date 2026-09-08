@@ -1,5 +1,5 @@
 {
-  "status": "candidate, not accepted",
+  "status": "accepted by Mirza",
   "approved_direction_date": "2026-09-08",
   "observed_runtime": {
     "type_first": true,
@@ -40,5 +40,11 @@
       "artifact": "/Users/mirzabicer/.jcode/scratch/wp10/refined-final-live/live-e193n5m6",
       "binary": "jcode v0.75.216-dev (5811f10da, dirty)"
     }
+  },
+  "approval": {
+    "date": "2026-09-08",
+    "time_utc": "13:25",
+    "scope": "WP-10 including revised type-first UX",
+    "human_review_limit": "Visual/workflow review; Mirza did not claim to exercise every mutation himself"
   }
 }
