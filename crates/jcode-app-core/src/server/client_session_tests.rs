@@ -224,12 +224,6 @@ async fn live_target_claim_is_atomic_with_detached_source_cleanup() {
             &target_id,
             Vec::new(),
         )));
-        let source_agent = Arc::new(Mutex::new(build_test_agent_with_id(
-            provider.clone(),
-            registry.clone(),
-            &source_id,
-            Vec::new(),
-        )));
         let sessions = Arc::new(RwLock::new(HashMap::from([(
             target_id.clone(),
             Arc::clone(&target_agent),
@@ -257,7 +251,6 @@ async fn live_target_claim_is_atomic_with_detached_source_cleanup() {
             let barrier = Arc::clone(&barrier);
             let sessions = Arc::clone(&sessions);
             let connections = Arc::clone(&connections);
-            let source_agent = Arc::clone(&source_agent);
             let target_id = target_id.clone();
             tokio::spawn(async move {
                 barrier.wait().await;
@@ -265,7 +258,6 @@ async fn live_target_claim_is_atomic_with_detached_source_cleanup() {
                     &target_id,
                     "incoming",
                     Some("instance-a"),
-                    &source_agent,
                     &sessions,
                     &connections,
                 )

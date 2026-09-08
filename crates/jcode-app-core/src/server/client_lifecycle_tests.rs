@@ -1295,6 +1295,27 @@ async fn repeated_harness_creation_is_fresh_and_failure_preserves_the_attached_s
     );
 
     let current = sessions.read().await.get(&second_id).unwrap().clone();
+    let reattached = exchange(
+        &mut read,
+        &mut write,
+        serde_json::json!({
+            "type": "subscribe", "id": 30, "working_dir": second_project.path(),
+            "target_session_id": second_id, "startup_context_caller": "harness_api_attach",
+        }),
+    )
+    .await;
+    assert!(matches!(
+        reattached.last(),
+        Some(ServerEvent::Done { id: 30 })
+    ));
+    assert!(Arc::ptr_eq(
+        sessions.read().await.get(&second_id).unwrap(),
+        &current
+    ));
+    assert_eq!(
+        Session::load(&second_id).unwrap().system_prompt,
+        second.system_prompt
+    );
     let busy = current.lock().await;
     let rejected = exchange(
         &mut read,

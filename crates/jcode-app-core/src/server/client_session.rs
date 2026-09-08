@@ -1198,16 +1198,12 @@ async fn claim_live_target_agent(
     session_id: &str,
     client_connection_id: &str,
     client_instance_id: Option<&str>,
-    source_agent: &Arc<Mutex<Agent>>,
     sessions: &SessionAgents,
     client_connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
 ) -> Option<Arc<Mutex<Agent>>> {
     let mut connections = client_connections.write().await;
     let sessions_guard = sessions.read().await;
-    let target = sessions_guard
-        .get(session_id)
-        .filter(|existing| !Arc::ptr_eq(existing, source_agent))
-        .cloned()?;
+    let target = sessions_guard.get(session_id).cloned()?;
 
     let info = connections.get_mut(client_connection_id)?;
     info.session_id = session_id.to_string();
@@ -1280,7 +1276,6 @@ pub(super) async fn handle_resume_session(
         &session_id,
         client_connection_id,
         incoming_client_instance_id.as_deref(),
-        agent,
         sessions,
         client_connections,
     )
@@ -1289,7 +1284,9 @@ pub(super) async fn handle_resume_session(
     if let Some(live_target_agent) = live_target_agent.as_ref() {
         let old_session_id = client_session_id.clone();
 
-        let conflicting_live_client = {
+        let conflicting_live_client = if old_session_id == session_id {
+            None
+        } else {
             let connections = client_connections.read().await;
             connections
                 .values()
@@ -1318,23 +1315,25 @@ pub(super) async fn handle_resume_session(
             incoming_client_instance_id
         ));
 
-        cleanup_detached_source_session_if_unused(
-            &old_session_id,
-            client_connection_id,
-            agent,
-            sessions,
-            shutdown_signals,
-            soft_interrupt_queues,
-            client_connections,
-            swarm_members,
-            swarms_by_id,
-            file_touch,
-            channel_subscriptions,
-            channel_subscriptions_by_session,
-            swarm_plans,
-            swarm_coordinators,
-        )
-        .await;
+        if old_session_id != session_id {
+            cleanup_detached_source_session_if_unused(
+                &old_session_id,
+                client_connection_id,
+                agent,
+                sessions,
+                shutdown_signals,
+                soft_interrupt_queues,
+                client_connections,
+                swarm_members,
+                swarms_by_id,
+                file_touch,
+                channel_subscriptions,
+                channel_subscriptions_by_session,
+                swarm_plans,
+                swarm_coordinators,
+            )
+            .await;
+        }
 
         if let Some(conflict) = conflicting_live_client {
             let incoming_instance_id = incoming_client_instance_id.as_deref();
