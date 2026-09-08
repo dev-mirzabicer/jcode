@@ -1927,38 +1927,12 @@ impl InstructionRepositoryService {
                 .path(&validation_dir)
             })?;
         let mut issues = BTreeSet::new();
+        let mut regular = Vec::new();
         for entry in git.tree_entries(&head)? {
             validate_relative_path(&entry.path)?;
             match entry.mode.as_str() {
                 "100644" | "100755" => {
-                    let bytes = git.show_file(&head, &entry.path)?.ok_or_else(|| {
-                        InstructionRepositoryError::new(
-                            InstructionRepositoryErrorKind::RepositoryDamaged,
-                            "materialize committed instruction snapshot",
-                            "Git tree entry disappeared while reading the same commit",
-                        )
-                        .repository(repository)
-                        .path(&entry.path)
-                    })?;
-                    let target = snapshot.path().join(&entry.path);
-                    if let Some(parent) = target.parent() {
-                        std::fs::create_dir_all(parent).map_err(|error| {
-                            repository_io_error(
-                                repository,
-                                "create committed snapshot directory",
-                                parent,
-                                error,
-                            )
-                        })?;
-                    }
-                    std::fs::write(&target, bytes).map_err(|error| {
-                        repository_io_error(
-                            repository,
-                            "write committed instruction snapshot",
-                            &target,
-                            error,
-                        )
-                    })?;
+                    regular.push(entry);
                 }
                 "120000" => {
                     issues.insert(format!("path:{}:symlink", entry.path.display()));
@@ -1971,6 +1945,7 @@ impl InstructionRepositoryService {
                 }
             }
         }
+        git.materialize_blobs(&regular, snapshot.path())?;
         Ok((snapshot, issues))
     }
 

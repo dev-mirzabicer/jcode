@@ -1,6 +1,6 @@
 use super::types::*;
 use std::ffi::{OsStr, OsString};
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -22,6 +22,7 @@ struct GitBinding {
 
 #[derive(Clone, Debug)]
 pub(super) struct GitTreeEntry {
+    pub(super) object_id: String,
     pub(super) mode: String,
     pub(super) path: PathBuf,
 }
@@ -290,6 +291,104 @@ impl GitRepository {
         Ok(self.show_file(&head, relative_path)?.is_some())
     }
 
+    /// Read exact blobs, not an archive/checkout that can apply attributes.
+    /// File-backed input/output avoids pipe deadlocks and buffering the whole
+    /// repository in RAM. Both files are private temporary snapshot artifacts.
+    pub(super) fn materialize_blobs(
+        &self,
+        entries: &[GitTreeEntry],
+        directory: &Path,
+    ) -> InstructionRepositoryResult<()> {
+        let io_error = |operation: &str, error: std::io::Error| {
+            InstructionRepositoryError::new(
+                InstructionRepositoryErrorKind::Io,
+                operation,
+                error.to_string(),
+            )
+            .path(directory)
+        };
+        let malformed = || {
+            InstructionRepositoryError::new(
+                InstructionRepositoryErrorKind::GitCommand,
+                "read committed blob batch",
+                "Git returned an incomplete or mismatched blob batch",
+            )
+            .path(&self.root)
+        };
+        let mut input = tempfile::tempfile_in(directory)
+            .map_err(|error| io_error("create blob query", error))?;
+        let mut output_file = tempfile::tempfile_in(directory)
+            .map_err(|error| io_error("create blob capture", error))?;
+        for entry in entries {
+            super::mutation::validate_relative_path(&entry.path)?;
+            validate_commit_id(&entry.object_id)?;
+            if !matches!(entry.mode.as_str(), "100644" | "100755") {
+                return Err(malformed());
+            }
+            writeln!(input, "{}", entry.object_id)
+                .map_err(|error| io_error("write blob query", error))?;
+        }
+        if entries.is_empty() {
+            return Ok(());
+        }
+        input
+            .rewind()
+            .map_err(|error| io_error("rewind blob query", error))?;
+        let capture = output_file
+            .try_clone()
+            .map_err(|error| io_error("open blob capture", error))?;
+        let result = self
+            .command_with_env(
+                ["cat-file", "--batch"],
+                std::iter::empty::<(&OsStr, &OsStr)>(),
+            )?
+            .stdin(Stdio::from(input))
+            .stdout(Stdio::from(capture))
+            .output()
+            .map_err(|error| io_error("read Git blob batch", error))?;
+        if !result.status.success() {
+            return Err(git_failure("read committed blob batch", &self.root, result));
+        }
+        output_file
+            .rewind()
+            .map_err(|error| io_error("rewind blob capture", error))?;
+        let mut reader = BufReader::new(output_file);
+        for entry in entries {
+            let mut header = String::new();
+            reader
+                .read_line(&mut header)
+                .map_err(|error| io_error("read blob header", error))?;
+            let fields = header.split_whitespace().collect::<Vec<_>>();
+            if fields.len() != 3 || fields[0] != entry.object_id || fields[1] != "blob" {
+                return Err(malformed());
+            }
+            let size: u64 = fields[2].parse().map_err(|_| malformed())?;
+            let target = directory.join(&entry.path);
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|error| io_error("create snapshot directory", error))?;
+            }
+            let mut file = std::fs::File::create(&target)
+                .map_err(|error| io_error("create snapshot file", error))?;
+            let copied = std::io::copy(&mut reader.by_ref().take(size), &mut file)
+                .map_err(|error| io_error("copy complete committed blob", error))?;
+            let mut delimiter = [0u8];
+            if copied != size || reader.read_exact(&mut delimiter).is_err() || delimiter != *b"\n"
+            {
+                return Err(malformed());
+            }
+        }
+        let mut trailing = [0u8];
+        if reader
+            .read(&mut trailing)
+            .map_err(|error| io_error("finish blob capture", error))?
+            != 0
+        {
+            return Err(malformed());
+        }
+        Ok(())
+    }
+
     pub(super) fn file_existed_in_history(
         &self,
         relative_path: &Path,
@@ -420,7 +519,17 @@ impl GitRepository {
                         "Git tree entry has no mode",
                     )
                 })?;
+                let object_id = metadata.split(|byte| *byte == b' ').nth(2).ok_or_else(|| {
+                    InstructionRepositoryError::new(
+                        InstructionRepositoryErrorKind::GitCommand,
+                        "parse instruction tree",
+                        "Git tree entry has no object identity",
+                    )
+                })?;
+                let object_id = utf8_field("tree object", object_id)?;
+                validate_commit_id(&object_id)?;
                 Ok(GitTreeEntry {
+                    object_id,
                     mode: utf8_field("tree mode", mode)?,
                     path: path_from_git_bytes(path),
                 })
@@ -1422,6 +1531,22 @@ impl GitRepository {
         K: AsRef<OsStr>,
         V: AsRef<OsStr>,
     {
+        let command = self.command_with_env(args, env)?;
+        execute_command(command, stdin, Some(&self.root))
+    }
+
+    fn command_with_env<I, S, E, K, V>(
+        &self,
+        args: I,
+        env: E,
+    ) -> InstructionRepositoryResult<Command>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+        E: IntoIterator<Item = (K, V)>,
+        K: AsRef<OsStr>,
+        V: AsRef<OsStr>,
+    {
         let binding = self.binding.as_ref().map_err(Clone::clone)?;
         let mut environment = vec![
             (
@@ -1437,13 +1562,12 @@ impl GitRepository {
             env.into_iter()
                 .map(|(key, value)| (key.as_ref().to_os_string(), value.as_ref().to_os_string())),
         );
-        execute_git(
+        Ok(git_command(
             Some(&binding.work_tree),
             args,
             environment,
-            stdin,
             &binding.script_policy,
-        )
+        ))
     }
 }
 
@@ -1584,6 +1708,26 @@ where
     K: AsRef<OsStr>,
     V: AsRef<OsStr>,
 {
+    execute_command(
+        git_command(current_dir, args, env, script_policy),
+        stdin,
+        current_dir,
+    )
+}
+
+fn git_command<I, S, E, K, V>(
+    current_dir: Option<&Path>,
+    args: I,
+    env: E,
+    script_policy: &[OsString],
+) -> Command
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+    E: IntoIterator<Item = (K, V)>,
+    K: AsRef<OsStr>,
+    V: AsRef<OsStr>,
+{
     let mut command = Command::new("git");
     command
         .args([
@@ -1628,6 +1772,14 @@ where
     for (key, value) in env {
         command.env(key, value);
     }
+    command
+}
+
+fn execute_command(
+    mut command: Command,
+    stdin: Option<&[u8]>,
+    current_dir: Option<&Path>,
+) -> InstructionRepositoryResult<Output> {
     if stdin.is_some() {
         command.stdin(Stdio::piped());
     } else {

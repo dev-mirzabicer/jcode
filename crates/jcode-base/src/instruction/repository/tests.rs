@@ -75,6 +75,112 @@ fn managed(id: &str, kind: &str, body: &str) -> String {
     format!("---\nid: {id}\nkind: {kind}\n---\n\n{body}")
 }
 
+#[test]
+fn blob_batch_rejects_missing_non_blob_and_unsafe_entries() {
+    let fixture = Fixture::new();
+    let repository = fixture.initialize().repository;
+    let git = GitRepository::new(&repository.root);
+    let head = git.head().unwrap().unwrap();
+    let entry = git.tree_entries(&head).unwrap().into_iter().next().unwrap();
+    for object_id in ["0".repeat(head.len()), head.clone()] {
+        let output = tempfile::tempdir_in(&fixture.state).unwrap();
+        let mut invalid = entry.clone();
+        invalid.object_id = object_id;
+        assert!(git.materialize_blobs(&[invalid], output.path()).is_err());
+        assert_eq!(std::fs::read_dir(output.path()).unwrap().count(), 0);
+    }
+    for path in ["../escape", ".git/config"] {
+        let output = tempfile::tempdir_in(&fixture.state).unwrap();
+        let mut invalid = entry.clone();
+        invalid.path = path.into();
+        assert!(git.materialize_blobs(&[invalid], output.path()).is_err());
+        assert_eq!(std::fs::read_dir(output.path()).unwrap().count(), 0);
+    }
+    let output = tempfile::tempdir_in(&fixture.state).unwrap();
+    let mut invalid = entry;
+    invalid.mode = "120000".into();
+    assert!(git.materialize_blobs(&[invalid], output.path()).is_err());
+    assert_eq!(git.head().unwrap().as_deref(), Some(head.as_str()));
+}
+
+#[test]
+fn committed_snapshot_batches_literal_blobs_without_touching_working_state() {
+    let fixture = Fixture::new();
+    let repository = fixture.initialize().repository;
+    let assets = repository.root.join("assets");
+    std::fs::create_dir_all(&assets).unwrap();
+    let binary = [0xff, 0, b'\n', b'X'].repeat(600_000);
+    std::fs::write(assets.join("hidden.bin"), &binary).unwrap();
+    std::fs::write(assets.join("subst.txt"), "$Format:%H$\n").unwrap();
+    std::fs::write(assets.join("empty"), []).unwrap();
+    // The query stream exceeds normal pipe capacity; file-backed batch I/O
+    // must still complete even when the first blob is larger than a pipe.
+    for index in 0..1700 {
+        std::fs::write(
+            assets.join(format!("file-{index:04}")),
+            format!("SYNTHETIC {index}\n"),
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        repository.root.join(".gitattributes"),
+        "assets/hidden.bin export-ignore\nassets/subst.txt export-subst\nassets/* filter=fixture\n",
+    )
+    .unwrap();
+    git(&repository.root, &["add", "."]);
+    git(
+        &repository.root,
+        &["commit", "-m", "synthetic snapshot fixtures"],
+    );
+    git(
+        &repository.root,
+        &["config", "filter.fixture.smudge", "false"],
+    );
+    std::fs::write(assets.join("subst.txt"), "UNCOMMITTED").unwrap();
+    let before_head = git(&repository.root, &["rev-parse", "HEAD"]);
+    let before_index = std::fs::read(repository.root.join(".git/index")).unwrap();
+    let before_status = git(&repository.root, &["status", "--porcelain"]);
+    let started = Instant::now();
+    let (snapshot, issues) = fixture
+        .service
+        .committed_validation_snapshot(&repository)
+        .unwrap();
+    assert!(issues.is_empty());
+    assert_eq!(
+        std::fs::read(snapshot.path().join("assets/hidden.bin")).unwrap(),
+        binary
+    );
+    assert_eq!(
+        std::fs::read_to_string(snapshot.path().join("assets/subst.txt")).unwrap(),
+        "$Format:%H$\n"
+    );
+    assert!(
+        std::fs::read(snapshot.path().join("assets/empty"))
+            .unwrap()
+            .is_empty()
+    );
+    for index in 0..1700 {
+        assert_eq!(
+            std::fs::read_to_string(snapshot.path().join(format!("assets/file-{index:04}")))
+                .unwrap(),
+            format!("SYNTHETIC {index}\n")
+        );
+    }
+    assert_eq!(git(&repository.root, &["rev-parse", "HEAD"]), before_head);
+    assert_eq!(
+        std::fs::read(repository.root.join(".git/index")).unwrap(),
+        before_index
+    );
+    assert_eq!(
+        git(&repository.root, &["status", "--porcelain"]),
+        before_status
+    );
+    println!(
+        "1700-file exact snapshot completed in {:?}",
+        started.elapsed()
+    );
+}
+
 fn git(root: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
         .args(args)
