@@ -112,3 +112,48 @@ Human acceptance of the activated manager and permission to integrate/publish re
 The final UI review corrected stale read-only help and made `?` open contextual draft actions. A direct Q-close racing an accepted update now retains the reply and then detaches the server draft, rather than retaining its lease behind a closed view. The new race/help tests and the full 42-test manager family pass. Strict base/TUI all-target lint also passes, including the supplemental resource-action journey. These are runtime-tail changes, not a claim that the earlier full live run used this later source.
 
 Final activation and tail smoke passed at `8f56ad57a-dirty-efbe29180b11`: current/shared equality, canary, complete editing help, contextual Draft actions, and direct close detaching an in-flight review. Source/index/HEAD stayed unchanged and no inference request occurred. Artifacts: `$HOME/.jcode/scratch/wp10/final-tail/live-suj57kjr`. Initial smoke attempts encountered first-run overlays and an incorrect menu-title expectation; the actual UI was inspected, the probe assumptions corrected, and the complete tail passed. Only this evidence documentation differs from activated source after the final record commit.
+
+## Revised UX candidate after field review, 2026-09-08
+
+Mirza withheld UX acceptance of the earlier candidate. The passing mechanism
+checks above did not establish that its mixed repository/resource navigation was
+understandable. The September 8 decision round approved type-first navigation,
+Effective-here/Global/Project views, source-aware edit actions, automatic review,
+convenient cross-scope copies, visible external/source badges and separate
+repository-administration and current-session pages. This remains WP-10, not a
+new package or a task deferred to WP-11.
+
+The new catalog presentation groups real source identities without reimplementing
+runtime precedence. Skill grouping uses catalog-owned invocation identity;
+unidentified invalid skills remain separate diagnostics. Scope copies preserve
+original files, refuse destination collisions and warn about high-impact project
+definitions. Selected content precedes technical metadata. Source view still
+retains exact original frontmatter, and session snapshots show no misleading
+source-scope selector or edit destination.
+
+Observed checks: 14 inspection tests, 48 final manager tests, both cross-scope
+copy tests and strict base/TUI/protocol/instruction-types lint passed. The full
+instruction run passed 119 tests and exposed an obsolete assertion requiring raw
+YAML in Overview. It was replaced by a structured availability assertion plus an
+exact Source-view assertion, and the complete inspection family passed. Likewise,
+the old duplicated scope-summary assertion now checks the dedicated visible scope
+control. The 24×8 content-floor regression exposed during layout work was fixed
+without weakening its content-access assertion.
+
+`scripts/test_instruction_manager_ux.py` passed through real isolated server and
+client homes at activated `014c0a6fe-dirty-1cb92b00cd4f`. It exercises type and
+scope navigation, direct editor entry, automatic diff review, explicit Save,
+global-to-project copy, collision explanations, separate setup/repository/session
+pages, and skill names plus scope/external badges at 80/60/24 columns. It made no
+model requests and preserved the running session's captured system prompt. Actual
+frames were inspected, and a second pass removed redundant labels and the stale
+scope indicator from session inspection. Exact evidence is recorded in
+[WP10_UX_REFINEMENT_EVIDENCE.json](instruction-manager/WP10_UX_REFINEMENT_EVIDENCE.json).
+
+The active category uses a [+] marker, while focus has its own cursor/border.
+There is one border per pane, no extra nested frame, and no marker repeated on
+every type. The narrow floor retains source badges, scope/setup controls and a
+real content row. Existing pagination mechanisms are unchanged.
+
+This revised result still requires Mirza's activated UX review and approval.
+No accepted work-package closeout or downstream publication is implied.

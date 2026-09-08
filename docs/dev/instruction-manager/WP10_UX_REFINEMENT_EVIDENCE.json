@@ -1,0 +1,25 @@
+{
+  "status": "candidate, not accepted",
+  "approved_direction_date": "2026-09-08",
+  "observed_runtime": {
+    "type_first": true,
+    "scope_versions_and_explicit_edit_ownership": true,
+    "direct_editor_and_automatic_review": true,
+    "global_to_project_copy": true,
+    "external_name_scope_badges_at_80_60_24": true,
+    "setup_and_session_pages": true,
+    "current_prompt_unchanged": true,
+    "model_requests": 0,
+    "artifact": "/Users/mirzabicer/.jcode/scratch/wp10/refined-activated/live-5utmkji9",
+    "binary": "jcode v0.75.214-dev (014c0a6fe, dirty)"
+  },
+  "inspection_tests": 14,
+  "manager_tests_final": 48,
+  "cross_scope_tests": 2,
+  "strict_lint": "passed",
+  "limitations": [
+    "Physical verification on macOS arm64",
+    "Final impact-warning prefix changes have focused tests; their activation is recorded separately",
+    "No current-session instruction replacement or real project repository setup performed"
+  ]
+}
