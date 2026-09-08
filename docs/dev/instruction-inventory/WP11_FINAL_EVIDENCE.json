@@ -1,0 +1,97 @@
+{
+  "status": "candidate verification complete, user approval pending",
+  "source_commit": "642275def6e976cf7bd8aa68958ab15bdf01643a",
+  "source_tree": "ee2ec1efa55ba409866efc87730ce2f997e5e74e",
+  "runtime": "642275def-dirty-dffcd9d0a568",
+  "current_shared_equal": true,
+  "canary": "passed",
+  "reload_state": "SocketReady",
+  "activated_checks": {
+    "callers": {
+      "binary": "jcode v0.75.235-dev (642275def, dirty)",
+      "artifact": "/Users/mirzabicer/.jcode/scratch/wp11/candidate-callers/live-8e9yr2cm",
+      "direct_repl": true,
+      "invalid_cli_no_orphan": true,
+      "harness_capabilities": [
+        "sessions",
+        "streaming",
+        "persisted_session_discovery",
+        "runtime_info",
+        "api_key_provisioning",
+        "session_archive",
+        "session_retention",
+        "session_files",
+        "startup_context_creation_errors",
+        "initial_agent_selection",
+        "agent_profile_controls",
+        "workflow_prompt_rendering"
+      ],
+      "harness_explicit_agent": true,
+      "harness_invalid_no_orphan": true,
+      "harness_recovery_attach": true,
+      "repeated_create_distinct": true,
+      "fresh_project_and_source": true,
+      "new_create_resolves_defaults": true,
+      "peer_keeps_old_session": true,
+      "harness_failure_event": "startup_context_creation_failed",
+      "provider_requests": 0
+    },
+    "lifecycle": {
+      "binary": "jcode v0.75.235-dev (642275def, dirty)",
+      "artifact": "/Users/mirzabicer/.jcode/scratch/wp11/candidate-lifecycle/live-tdigmql1",
+      "localhost_model_requests": 3,
+      "source_edit_freezing": true,
+      "append_only_switch": true,
+      "context_lock": true,
+      "rewind_undo": true,
+      "split": true,
+      "reinvocation": true,
+      "replacement": true,
+      "daemon_restart": true,
+      "clear_current_source": true,
+      "catalog_recovery": true
+    },
+    "manager": {
+      "binary": "jcode v0.75.235-dev (642275def, dirty)",
+      "production_apis": true,
+      "separate_client_home": true,
+      "editor_failure_and_retry": true,
+      "physical_mouse_save": true,
+      "physical_repository_review_cancel_apply": true,
+      "physical_sizes": [
+        [
+          150,
+          40
+        ],
+        [
+          80,
+          24
+        ],
+        [
+          60,
+          24
+        ],
+        [
+          24,
+          10
+        ]
+      ],
+      "same_client_physical_resize": true,
+      "server_restart_draft_recovery": true,
+      "physical_unsent_form_recovery": true,
+      "session_instructions_unchanged": true,
+      "complete_journal_aware_replay_unchanged": true,
+      "manager_inference_requests": 0,
+      "localhost_bootstrap_requests": 1,
+      "artifact": "/Users/mirzabicer/.jcode/scratch/wp11/final-isolated-manager/live-67gyoqcz"
+    }
+  },
+  "final_regression_artifacts": "/Users/mirzabicer/.jcode/scratch/wp11/final-regressions",
+  "migration_rows": 129,
+  "protected_checkout_files_unchanged": 5,
+  "tracked_instruction_files_unchanged": 213,
+  "dormant_memory_files_unchanged": 13,
+  "central_prose_review": "Mirza approved unchanged current text 2026-09-08 17:20 UTC",
+  "inference_boundary": "localhost fixtures only, no paid inference",
+  "phase_acceptance": "independent closeout remains required"
+}

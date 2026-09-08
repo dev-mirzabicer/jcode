@@ -247,3 +247,24 @@ not a claim that deterministic tests judge it and not final WP11 acceptance.
 Final package candidate approval and independent Phase 3 closeout remain pending.
 No known in-scope product defect remains in the candidate; reported platform,
 provider, baseline-test and system-service boundaries remain explicit.
+
+## Final activated candidate boundary
+
+The final activated candidate is source `642275def6e976cf7bd8aa68958ab15bdf01643a`,
+tree `ee2ec1efa55ba409866efc87730ce2f997e5e74e`, runtime
+`642275def-dirty-dffcd9d0a568`, with equal current/shared channels, passed canary
+and SocketReady. [The compact final evidence](instruction-inventory/WP11_FINAL_EVIDENCE.json)
+records actual final-binary caller, lifecycle and complete manager results.
+
+All three passed on that binary. The full manager run includes editor failure and
+retry, explicit Save, package/import/ecosystem/stale recovery, physical mouse and
+keyboard, all four sizes via resize, client-restart unsent-form recovery and
+server-restart draft recovery. The final isolated run is
+`~/.jcode/scratch/wp11/final-isolated-manager/live-67gyoqcz`. A preceding serial
+repeat passed its caller/lifecycle and manager operations but timed out during
+client startup; it remains a failed repeat, not erased by the successful run.
+
+Final runtime checks did not change any of the 213 tracked instruction files,
+13 dormant memory files or five protected checkout files. Later evidence or
+approval-only commits are distinguished from this activated implementation.
+This is candidate completion only. Mirza's WP11 approval is still required.
