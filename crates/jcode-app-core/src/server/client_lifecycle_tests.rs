@@ -563,6 +563,10 @@ impl Drop for IsolatedRuntimeDir {
 fn cancel_aborts_detached_streaming_turn_with_stale_stop_signal() -> anyhow::Result<()> {
     let _lock = crate::storage::lock_test_env();
     let _env = IsolatedReloadRecoveryEnv::new();
+    // Bootstrap is fixture setup, not part of the timed streaming/recovery operation.
+    crate::instruction::SystemPromptComposer::new()
+        .ensure_global_store()
+        .unwrap();
     let session_id = "session_detached_streaming_cancel_428";
 
     let rt = tokio::runtime::Runtime::new().expect("runtime");
@@ -2330,6 +2334,10 @@ async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attac
 fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Result<()> {
     let _lock = crate::storage::lock_test_env();
     let _env = IsolatedReloadRecoveryEnv::new();
+    // Bootstrap is fixture setup, not part of the timed streaming/recovery operation.
+    crate::instruction::SystemPromptComposer::new()
+        .ensure_global_store()
+        .unwrap();
     let session_id = "session_accepted_reload_recovery";
     let continuation = "stored continuation accepted by server";
 
@@ -3404,6 +3412,10 @@ fn decode_request_or_event(line: &str) -> ServerEvent {
 fn managed_workflow_rendering_uses_server_project_sources_without_a_turn() {
     let _lock = crate::storage::lock_test_env();
     let _env = IsolatedReloadRecoveryEnv::new();
+    // Bootstrap is fixture setup, not part of the timed streaming/recovery operation.
+    crate::instruction::SystemPromptComposer::new()
+        .ensure_global_store()
+        .unwrap();
     let project = tempfile::tempdir().unwrap();
     let repositories = crate::instruction::InstructionRepositoryService::new();
     let seed = crate::instruction::InstructionStoreSeed {

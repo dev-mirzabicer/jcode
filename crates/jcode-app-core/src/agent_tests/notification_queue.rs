@@ -23,8 +23,9 @@ async fn queued_notice_uses_recipient_project_and_persists_exact_history() {
     let service = crate::instruction::InstructionRepositoryService::new();
     crate::instruction::SystemPromptComposer::new().ensure_global_store().unwrap();
     let project = tempfile::tempdir().unwrap();
-    let configured = service.configure_non_git_project(project.path(), "queued-fixture", None, &crate::instruction::shipped_instruction_seed().unwrap(), &[]).unwrap();
+    let configured = service.configure_non_git_project(project.path(), "queued-fixture", None, &crate::instruction::InstructionStoreSeed::empty(), &[]).unwrap();
     let source = configured.repository.root.join("notifications/todo-auto-poke.md");
+    std::fs::create_dir_all(source.parent().unwrap()).unwrap();
     let write = |body: &str| std::fs::write(&source, format!("---\nid: todo-auto-poke\nkind: notification\ntemplate: handlebars\n---\n{body}")).unwrap();
     write("PROJECT-OLD {{count}}");
     let provider = QueuedNoticeRecordingProvider::default();

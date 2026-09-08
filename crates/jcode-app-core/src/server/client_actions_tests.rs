@@ -132,7 +132,13 @@ fn clone_split_session_uses_persisted_session_state() {
         None,
         None,
     );
-    parent.working_dir = Some("/tmp/jcode-split-test".to_string());
+    let project = tempfile::tempdir().unwrap();
+    parent.working_dir = Some(project.path().to_string_lossy().into_owned());
+    crate::instruction::SystemPromptComposer::new()
+        .ensure_global_store()
+        .unwrap();
+    std::fs::write(temp.path().join("instructions/notifications/session-fork.md"),
+        "---\nid: session-fork\nkind: notification\ntemplate: handlebars\n---\nSYNTHETIC FORK {{parent_id}}").unwrap();
     parent.model = Some("gpt-test".to_string());
     parent.provider_key = Some("provider-test".to_string());
     parent.route_api_method = Some("route-test".to_string());
@@ -201,7 +207,8 @@ fn clone_split_session_uses_persisted_session_state() {
     );
     let fork_notice_text = fork_notice.content_preview();
     assert!(
-        fork_notice_text.contains("forked") && fork_notice_text.contains(parent.id.as_str()),
+        fork_notice_text.contains("SYNTHETIC FORK")
+            && fork_notice_text.contains(parent.id.as_str()),
         "fork notice should mention the parent session: {fork_notice_text}"
     );
     assert!(child.compaction.is_none());

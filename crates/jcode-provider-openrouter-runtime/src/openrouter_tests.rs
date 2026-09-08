@@ -1014,6 +1014,7 @@ fn test_configured_api_base_rejects_insecure_http_remote() {
 fn autodetects_single_saved_openai_compatible_profile() {
     let _lock = ENV_LOCK.lock();
     let temp = TempDir::new().expect("create temp dir");
+    let _instance_home = EnvVarGuard::remove("JCODE_HOME");
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
     let _home = EnvVarGuard::set("HOME", temp.path());
     let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
@@ -1039,6 +1040,7 @@ fn autodetects_single_saved_openai_compatible_profile() {
 fn autodetects_single_saved_local_openai_compatible_profile() {
     let _lock = ENV_LOCK.lock();
     let temp = TempDir::new().expect("create temp dir");
+    let _instance_home = EnvVarGuard::remove("JCODE_HOME");
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
     let _home = EnvVarGuard::set("HOME", temp.path());
     let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
@@ -1169,6 +1171,7 @@ fn does_not_guess_when_multiple_saved_openai_compatible_profiles_exist() {
 fn autodetected_profile_seeds_default_model_and_cache_namespace() {
     let _lock = ENV_LOCK.lock();
     let temp = TempDir::new().expect("create temp dir");
+    let _instance_home = EnvVarGuard::remove("JCODE_HOME");
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
     let _home = EnvVarGuard::set("HOME", temp.path());
     let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
@@ -1987,6 +1990,7 @@ fn named_profile_context_window_survives_provider_qualified_model() {
 fn named_openai_compatible_loads_api_key_from_env_file() {
     let _lock = ENV_LOCK.lock();
     let temp = TempDir::new().expect("create temp dir");
+    let _instance_home = EnvVarGuard::remove("JCODE_HOME");
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
     let _home = EnvVarGuard::set("HOME", temp.path());
     let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));

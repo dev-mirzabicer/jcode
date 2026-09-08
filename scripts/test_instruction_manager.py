@@ -344,7 +344,9 @@ if __name__ == "__main__":
             (ROOT/f'actions-{cols}x{lines}.json').write_text(json.dumps(actions_frame,indent=2))
             debug(f'tester:{tid}:keys:o,v,e,r,v,i,e,w,enter')
             tester_state(tid,lambda state:state.get('section')=='Metadata' and state.get('pending_id') is None and state.get('menu') is None)
-            overview_frame=frame(tid,'WORKING',motion='home')
+            # At the narrow floor the identity header fills the first viewport.
+            # Keep the complete-content assertion and reach its body with real keys.
+            overview_frame=frame(tid,'WORKING',motion='down')
             (ROOT/f'overview-{cols}x{lines}.json').write_text(json.dumps(overview_frame,indent=2))
             debug(f'tester:{tid}:keys:esc')
             tester_state(tid,lambda state:state.get('pane')=='Resources')

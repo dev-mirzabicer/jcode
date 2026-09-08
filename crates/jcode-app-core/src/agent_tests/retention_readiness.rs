@@ -291,7 +291,8 @@ async fn retention_readiness_scorecard() {
     let mut d0 = Agent::new(provider.clone(), registry.clone());
     d0.session
         .rename_title(Some("Retention cohort project".to_string()));
-    d0.session.working_dir = Some("/synthetic/retention-project".to_string());
+    let project = tempfile::tempdir().expect("retention project");
+    d0.session.working_dir = Some(project.path().to_string_lossy().into_owned());
     d0.session.record_memory_injection(
         "cohort preference".to_string(),
         "Prefer deterministic validation".to_string(),
@@ -329,7 +330,7 @@ async fn retention_readiness_scorecard() {
     let d1_message_count = persisted_d1.messages.len();
     let title_preserved = persisted_d1.custom_title.as_deref() == Some("Retention cohort project");
     let working_dir_preserved =
-        persisted_d1.working_dir.as_deref() == Some("/synthetic/retention-project");
+        persisted_d1.working_dir.as_deref() == project.path().to_str();
     let memory_marker_preserved = persisted_d1
         .injected_memory_ids()
         .iter()

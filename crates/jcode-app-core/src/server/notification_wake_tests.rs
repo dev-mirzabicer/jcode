@@ -3,7 +3,7 @@ async fn managed_wake_turn_renders_recipient_scope_and_fails_visibly_before_disp
     use super::live_turn::{LiveTurnReminder, LiveTurnSwarmContext, run_live_turn_if_idle};
     use crate::instruction::notification::Notification;
     use crate::instruction::{
-        InstructionRepositoryService, SystemPromptComposer, shipped_instruction_seed,
+        InstructionRepositoryService, InstructionStoreSeed, SystemPromptComposer,
     };
     let _guard = crate::storage::lock_test_env();
     let home = tempfile::tempdir().unwrap();
@@ -16,7 +16,7 @@ async fn managed_wake_turn_renders_recipient_scope_and_fails_visibly_before_disp
             project.path(),
             "wake-fixture",
             None,
-            &shipped_instruction_seed().unwrap(),
+            &InstructionStoreSeed::empty(),
             &[],
         )
         .unwrap();
@@ -24,6 +24,7 @@ async fn managed_wake_turn_renders_recipient_scope_and_fails_visibly_before_disp
         .repository
         .root
         .join("notifications/background-task-completed.md");
+    std::fs::create_dir_all(source.parent().unwrap()).unwrap();
     let write_source = |body: &str| {
         std::fs::write(&source, format!("---\nid: background-task-completed\nkind: notification\ntemplate: handlebars\n---\n{body}")).unwrap()
     };

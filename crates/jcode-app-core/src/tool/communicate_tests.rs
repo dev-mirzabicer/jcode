@@ -1111,16 +1111,27 @@ async fn spawn_execute_rejects_missing_label_before_sending_request() {
 }
 
 #[test]
-fn description_includes_swarm_prompt_guidance() {
+fn description_receives_session_routing_at_request_preparation() {
+    let home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    crate::instruction::SystemPromptComposer::new()
+        .ensure_global_store()
+        .unwrap();
+    std::fs::write(
+        home.root().join("instructions/tools/swarm-routing.md"),
+        "---\nid: swarm-routing\nkind: tool-guidance\n---\nSYNTHETIC ROUTING",
+    )
+    .unwrap();
     let tool = CommunicateTool::new();
-    let description = tool.description();
+    let original = tool.description().to_string();
+    assert!(!original.contains("SYNTHETIC ROUTING"));
+    let session = crate::session::Session::create(None, None);
+    let mut tools = vec![tool.to_definition()];
+    crate::tool::instruction_guidance::preview(&session, &mut tools).unwrap();
+    assert!(tools[0].description.starts_with(&original));
+    assert!(tools[0].description.ends_with("SYNTHETIC ROUTING"));
     assert!(
-        description.starts_with("Coordinate agents"),
-        "description should lead with the short coordination summary"
-    );
-    assert!(
-        description.contains("Swarm prompt"),
-        "description should embed the swarm prompt section"
+        session.swarm_routing_prompt.is_none(),
+        "preview does not freeze before preflight"
     );
 }
 
