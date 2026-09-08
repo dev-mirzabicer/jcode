@@ -1,3 +1,6 @@
+#[path = "composition_compatibility.rs"]
+mod compatibility;
+
 const PREFERRED_TOOLS_CUTOVER_SEED: u32 = 25;
 use super::ConsumerScopePolicy;
 use super::{
@@ -504,64 +507,9 @@ fn compose_activation(
         ));
     }
 
-    push_optional_system(
-        &environment.runtime,
-        InstructionScope::Global,
-        COMMON_ID,
-        environment
-            .global_manifest
-            .legacy_imports
-            .contains_key("global-prompt-overlay"),
-        &mut parts,
-    )?;
-    let project_overlay_imported = environment
-        .project_manifest
-        .as_ref()
-        .is_some_and(|manifest| {
-            manifest
-                .legacy_imports
-                .values()
-                .any(|receipt| receipt.source_kind == LegacyInstructionSourceKind::PromptOverlay)
-        });
-    let project_legacy_overlay = environment
-        .project_root
-        .as_ref()
-        .map(|root| read_present(root.join(".jcode/prompt-overlay.md")))
-        .transpose()?
-        .flatten();
-    if project_overlay_imported {
-        push_optional_system(
-            &environment.runtime,
-            InstructionScope::Project,
-            COMMON_ID,
-            true,
-            &mut parts,
-        )?;
-    } else {
-        let managed_common = InstructionSelector::project(InstructionKind::System, COMMON_ID)?;
-        match environment.runtime.resolve(&managed_common) {
-            Ok(_) if project_legacy_overlay.is_some() => {
-                return Err(SystemPromptActivationError::Compatibility(
-                        "project legacy prompt-overlay.md and managed project:common both exist without an import receipt"
-                            .to_string(),
-                    ));
-            }
-            Ok(_) => push_optional_system(
-                &environment.runtime,
-                InstructionScope::Project,
-                COMMON_ID,
-                false,
-                &mut parts,
-            )?,
-            Err(InstructionError::ResourceNotFound { .. }) => {
-                if let Some(content) = project_legacy_overlay {
-                    parts.push(format!(
-                        "# Project Prompt Overlay (.jcode/prompt-overlay.md)\n\n{}",
-                        content.trim()
-                    ));
-                }
-            }
-            Err(error) => return Err(error.into()),
+    for scope in [InstructionScope::Global, InstructionScope::Project] {
+        if let Some((text, _)) = common_section(environment, scope)? {
+            parts.push(text);
         }
     }
 
@@ -751,7 +699,7 @@ fn available_skills_registration() -> Result<ConsumerRegistration, InstructionEr
         AVAILABLE_SKILLS_ID,
         InstructionKind::System,
         "system/available-skills.md",
-        "primary system-prompt composition",
+        "primary activation and unprofiled compatibility composition",
         "Managed available-skills prose; activation supplies the sorted effective skill names and descriptions and freezes the complete result.",
     )?;
     registration.required = true;
@@ -800,30 +748,78 @@ fn render_required_system(
         .map(|rendered| rendered.text)
 }
 
-fn push_optional_system(
-    runtime: &super::InstructionRuntime,
-    scope: InstructionScope,
-    id: &str,
-    legacy_overlay: bool,
-    parts: &mut Vec<String>,
-) -> Result<(), InstructionError> {
-    let selector = match scope {
-        InstructionScope::Global => InstructionSelector::global(InstructionKind::System, id)?,
-        InstructionScope::Project => InstructionSelector::project(InstructionKind::System, id)?,
+fn common_registration(scope: InstructionScope) -> Result<ConsumerRegistration, InstructionError> {
+    let mut registration = ConsumerRegistration::new(
+        format!("common-{scope}"),
+        COMMON_ID,
+        InstructionKind::System,
+        "system/common.md",
+        "paired common system sections",
+        "Both scopes contribute independently. Primary composition is global-first; unprofiled compatibility callers retain project-first order.",
+    )?;
+    registration.required = false;
+    registration.scope_policy = match scope {
+        InstructionScope::Global => ConsumerScopePolicy::GlobalOnly,
+        InstructionScope::Project => ConsumerScopePolicy::ProjectOnly,
     };
-    match runtime.render(&selector, &()) {
-        Ok(rendered) if legacy_overlay => {
-            let heading = match scope {
-                InstructionScope::Global => "# Global Prompt Overlay (~/.jcode/prompt-overlay.md)",
-                InstructionScope::Project => "# Project Prompt Overlay (.jcode/prompt-overlay.md)",
-            };
-            parts.push(format!("{heading}\n\n{}", rendered.text.trim()));
+    Ok(registration)
+}
+
+fn common_section(
+    environment: &CompositionEnvironment,
+    scope: InstructionScope,
+) -> Result<Option<(String, usize)>, SystemPromptActivationError> {
+    let manifest = match scope {
+        InstructionScope::Global => Some(&environment.global_manifest),
+        InstructionScope::Project => environment.project_manifest.as_ref(),
+    };
+    let imported = manifest.is_some_and(|manifest| {
+        manifest
+            .legacy_imports
+            .values()
+            .any(|receipt| receipt.source_kind == LegacyInstructionSourceKind::PromptOverlay)
+    });
+    let legacy = if scope == InstructionScope::Project && !imported {
+        environment
+            .project_root
+            .as_ref()
+            .map(|root| read_present(root.join(".jcode/prompt-overlay.md")))
+            .transpose()?
+            .flatten()
+    } else {
+        None
+    };
+    if let Some(legacy) = legacy {
+        match environment.runtime.resolve(&InstructionSelector::project(InstructionKind::System, COMMON_ID)?) {
+            Ok(_) => return Err(SystemPromptActivationError::Compatibility(
+                "project legacy prompt-overlay.md and managed project:common both exist without an import receipt".into(),
+            )),
+            Err(InstructionError::ResourceNotFound { .. }) => return Ok(Some((
+                format!("# Project Prompt Overlay (.jcode/prompt-overlay.md)\n\n{}", legacy.trim()),
+                legacy.len(),
+            ))),
+            Err(error) => return Err(error.into()),
         }
-        Ok(rendered) if !rendered.text.is_empty() => parts.push(rendered.text),
-        Ok(_) | Err(InstructionError::ResourceNotFound { .. }) => {}
-        Err(error) => return Err(error),
     }
-    Ok(())
+    let mut registration = common_registration(scope)?;
+    // An import receipt makes its destination mandatory. Missing is damage,
+    // not an empty optional layer and never a reason to revive the old file.
+    registration.required = imported;
+    let rendered = match environment.runtime.render_registered(&registration, &()) {
+        Ok(rendered) => rendered.text,
+        Err(InstructionError::ResourceNotFound { .. }) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let size = rendered.len();
+    if imported {
+        let heading = match scope {
+            InstructionScope::Global => "# Global Prompt Overlay (~/.jcode/prompt-overlay.md)",
+            InstructionScope::Project => "# Project Prompt Overlay (.jcode/prompt-overlay.md)",
+        };
+        Ok(Some((format!("{heading}\n\n{}", rendered.trim()), size)))
+    } else {
+        Ok((!rendered.is_empty()).then_some((rendered, size)))
+    }
 }
 
 fn push_project_addenda(
@@ -1216,23 +1212,9 @@ pub fn composition_registrations() -> Result<Vec<ConsumerRegistration>, Instruct
     for id in [KERNEL_ID, MERMAID_ID] {
         registrations.push(ConsumerRegistration::new(format!("primary-system-{id}"), id, InstructionKind::System, format!("system/{id}.md"), "primary system composer", "Required when the owning composition slot is selected; capability policy remains code-owned.")?);
     }
-    registrations.push(ConsumerRegistration::new("compatibility-agent", COMPATIBILITY_AGENT_ID, InstructionKind::Agent, "agents/jcode.md", "default profile fallback", "Required only when the compatibility agent is selected. Other agent identities remain independent.")?);
+    registrations.push(ConsumerRegistration::new("compatibility-agent", COMPATIBILITY_AGENT_ID, InstructionKind::Agent, "agents/jcode.md", "primary compatibility selection and unprofiled compatibility body", "Named activation enforces availability. Unprofiled callers consume the compatibility body without adopting profile policy. Other agent identities remain independent.")?);
     for scope in [InstructionScope::Global, InstructionScope::Project] {
-        let mut common = ConsumerRegistration::new(
-            format!("common-{scope}"),
-            COMMON_ID,
-            InstructionKind::System,
-            "system/common.md",
-            "paired common system sections",
-            "Both scopes contribute independently, global before project.",
-        )?;
-        common.required = false;
-        common.scope_policy = if scope == InstructionScope::Global {
-            ConsumerScopePolicy::GlobalOnly
-        } else {
-            ConsumerScopePolicy::ProjectOnly
-        };
-        registrations.push(common);
+        registrations.push(common_registration(scope)?);
         registrations.push(preferred_tools_registration(scope)?);
     }
     Ok(registrations)
@@ -1423,6 +1405,250 @@ mod tests {
             composer
                 .list_primary_agents(Some(&fixture.project))
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn compatibility_composition_reads_managed_sources_without_adopting_profiles() {
+        let fixture = Fixture::new();
+        std::fs::write(fixture.jcode_home.join("system-prompt.md"), "OLD BASE").unwrap();
+        std::fs::write(fixture.jcode_home.join("prompt-overlay.md"), "OLD COMMON").unwrap();
+        let composer = fixture.composer();
+        let skills = vec![SkillInfo {
+            name: "synthetic".into(),
+            description: "fixture".into(),
+        }];
+        let render = || {
+            composer.compatibility_split(
+                None,
+                &skills,
+                false,
+                None,
+                Some(&fixture.project),
+                PromptCapabilities { mermaid: true },
+            )
+        };
+        let original = render().unwrap().0;
+        assert!(original.static_part.contains("OLD BASE"));
+        let root = fixture.jcode_home.join("instructions");
+        for (kind, id, path, text) in [
+            (
+                InstructionKind::Agent,
+                "jcode",
+                "agents/jcode.md",
+                "NEW BASE",
+            ),
+            (
+                InstructionKind::System,
+                "common",
+                "system/common.md",
+                "NEW COMMON",
+            ),
+            (
+                InstructionKind::System,
+                "mermaid",
+                "system/mermaid.md",
+                "NEW CAPABILITY",
+            ),
+            (
+                InstructionKind::System,
+                "available-skills",
+                "system/available-skills.md",
+                "NEW CATALOG {{skills}}",
+            ),
+            (
+                InstructionKind::System,
+                "kernel",
+                "system/kernel.md",
+                "PRIMARY KERNEL ONLY",
+            ),
+        ] {
+            let mut source = document(InstructionScope::Global, kind, id, path, text);
+            if id == "jcode" {
+                source.metadata.agent.as_mut().unwrap().availability = AgentAvailability::Isolated;
+            }
+            if id == "available-skills" {
+                source.template_mode = TemplateMode::Handlebars;
+            }
+            std::fs::write(root.join(path), source.to_markdown().unwrap()).unwrap();
+        }
+        // Inactive originals cannot regain authority or cause parse failures.
+        std::fs::write(fixture.jcode_home.join("system-prompt.md"), "INACTIVE BASE").unwrap();
+        std::fs::write(fixture.jcode_home.join("prompt-overlay.md"), [0xff]).unwrap();
+        let current = render().unwrap().0;
+        for expected in [
+            "NEW BASE",
+            "NEW COMMON",
+            "NEW CAPABILITY",
+            "NEW CATALOG",
+            "synthetic",
+        ] {
+            assert!(current.static_part.contains(expected), "{expected}");
+        }
+        for absent in [
+            "OLD BASE",
+            "OLD COMMON",
+            "INACTIVE BASE",
+            "PRIMARY KERNEL ONLY",
+        ] {
+            assert!(!current.static_part.contains(absent), "{absent}");
+        }
+        assert!(current.dynamic_part.is_empty());
+        std::fs::write(root.join("system/available-skills.md"), "invalid").unwrap();
+        assert!(render().is_err());
+        assert!(
+            composer
+                .compatibility_split(
+                    None,
+                    &[],
+                    false,
+                    None,
+                    Some(&fixture.project),
+                    PromptCapabilities { mermaid: false }
+                )
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn compatibility_uses_canonical_project_sources_and_ignores_primary_defaults() {
+        let fixture = Fixture::new();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-q"])
+                .arg(&fixture.project)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let nested = fixture.project.join("nested");
+        for (directory, body) in [
+            (&fixture.project, "ROOT SOURCE"),
+            (&nested, "NESTED SOURCE"),
+        ] {
+            std::fs::create_dir_all(directory.join(".jcode")).unwrap();
+            std::fs::write(directory.join(".jcode/system-prompt.md"), body).unwrap();
+            std::fs::write(directory.join("AGENTS.md"), format!("ECOSYSTEM {body}")).unwrap();
+        }
+        let composer = fixture.composer();
+        let initialized = composer.ensure_global_store().unwrap();
+        let mut manifest = fixture
+            .service()
+            .load_manifest(&initialized.repository)
+            .unwrap();
+        manifest.default_agent = Some("absent-primary-default".into());
+        std::fs::write(
+            initialized.repository.root.join("instruction-store.toml"),
+            toml::to_string(&manifest).unwrap(),
+        )
+        .unwrap();
+        let (text, _) = composer
+            .compatibility_full(
+                None,
+                &[],
+                false,
+                None,
+                Some(&nested),
+                PromptCapabilities { mermaid: false },
+            )
+            .unwrap();
+        assert!(text.starts_with("ROOT SOURCE"));
+        assert!(text.contains("ECOSYSTEM ROOT SOURCE"));
+        assert!(!text.contains("NESTED SOURCE"));
+        assert!(
+            composer
+                .activate(fixture.request(AgentSelection::Default))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn imported_common_is_required_in_primary_and_compatibility_composition() {
+        let fixture = Fixture::new();
+        std::fs::write(
+            fixture.jcode_home.join("prompt-overlay.md"),
+            "IMPORTED GLOBAL",
+        )
+        .unwrap();
+        let composer = fixture.composer();
+        composer.ensure_global_store().unwrap();
+        let global = fixture.jcode_home.join("instructions/system/common.md");
+        let saved = std::fs::read(&global).unwrap();
+        std::fs::remove_file(&global).unwrap();
+        assert!(
+            composer
+                .activate(fixture.request(AgentSelection::Default))
+                .is_err()
+        );
+        assert!(
+            composer
+                .compatibility_full(
+                    None,
+                    &[],
+                    false,
+                    None,
+                    Some(&fixture.project),
+                    PromptCapabilities { mermaid: false }
+                )
+                .is_err()
+        );
+        std::fs::write(&global, saved).unwrap();
+
+        let legacy = fixture.project.join(".jcode");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("prompt-overlay.md"), "IMPORTED PROJECT").unwrap();
+        let import = known_legacy_import(
+            InstructionScope::Project,
+            &legacy,
+            LegacyInstructionSourceKind::PromptOverlay,
+        )
+        .unwrap();
+        let configured = fixture
+            .service()
+            .configure_non_git_project(
+                &fixture.project,
+                "project-common-fixture",
+                None,
+                &InstructionStoreSeed::empty(),
+                &[import],
+            )
+            .unwrap();
+        let project_common = configured.repository.root.join("system/common.md");
+        assert!(
+            composer
+                .activate(fixture.request(AgentSelection::Default))
+                .is_ok()
+        );
+        std::fs::remove_file(&project_common).unwrap();
+        assert!(
+            composer
+                .activate(fixture.request(AgentSelection::Default))
+                .is_err()
+        );
+        assert!(
+            composer
+                .compatibility_split(
+                    None,
+                    &[],
+                    false,
+                    None,
+                    Some(&fixture.project),
+                    PromptCapabilities { mermaid: false }
+                )
+                .is_err()
+        );
+        let empty = document(
+            InstructionScope::Project,
+            InstructionKind::System,
+            "common",
+            "system/common.md",
+            "",
+        );
+        std::fs::write(project_common, empty.to_markdown().unwrap()).unwrap();
+        assert!(
+            composer
+                .activate(fixture.request(AgentSelection::Default))
+                .is_ok()
         );
     }
 

@@ -1,0 +1,187 @@
+{
+  "baseline_revision": "fd0553b3c",
+  "route": "production full/split compatibility prompt builders",
+  "cases": [
+    {
+      "case": 0,
+      "outputs": {
+        "full": {
+          "bytes": 682,
+          "sha256": "f3a568ee01b581021cd496410b0e9700ea92360f57e013e9eb6ebbcac2e7c9fe",
+          "equal": true
+        },
+        "static": {
+          "bytes": 630,
+          "sha256": "be5a564964291b25c3e070e2be5900514b5f69bd2731f9a29d23c73f7b641890",
+          "equal": true
+        },
+        "dynamic": {
+          "bytes": 50,
+          "sha256": "fcbf8467323bfa7ccc57333eefbc454770db62692f4d6b59f62b52cf0f7ec84f",
+          "equal": true
+        }
+      }
+    },
+    {
+      "case": 1,
+      "outputs": {
+        "full": {
+          "bytes": 665,
+          "sha256": "85da73da2bc24b221daef320b0d0b271e3a0ee9a1aa223bebb5e05ffed27a9d5",
+          "equal": true
+        },
+        "static": {
+          "bytes": 613,
+          "sha256": "2ab54917aa4734b5885e1039f22ce813c980c5bfefab25b2a4166a5cf4e03732",
+          "equal": true
+        },
+        "dynamic": {
+          "bytes": 50,
+          "sha256": "fcbf8467323bfa7ccc57333eefbc454770db62692f4d6b59f62b52cf0f7ec84f",
+          "equal": true
+        }
+      }
+    },
+    {
+      "case": 2,
+      "outputs": {
+        "full": {
+          "bytes": 680,
+          "sha256": "d7f53e39db1abb98ebf9332e52fdab1651cb00817639060bb743fbe2e5b3e8e8",
+          "equal": true
+        },
+        "static": {
+          "bytes": 628,
+          "sha256": "833f5f644f04684a8854010fed145878a8cc97eedfc787a3fed658a73ff63100",
+          "equal": true
+        },
+        "dynamic": {
+          "bytes": 50,
+          "sha256": "fcbf8467323bfa7ccc57333eefbc454770db62692f4d6b59f62b52cf0f7ec84f",
+          "equal": true
+        }
+      }
+    },
+    {
+      "case": 3,
+      "outputs": {
+        "full": {
+          "bytes": 663,
+          "sha256": "0962f6c87bace14f9be4a2e431911ad841e52a172dd7797ed2e3f8d2820c85d5",
+          "equal": true
+        },
+        "static": {
+          "bytes": 611,
+          "sha256": "11caa626ea40d247e0ba28c43222ccd0249f5cb4961f61767d208e345e73351c",
+          "equal": true
+        },
+        "dynamic": {
+          "bytes": 50,
+          "sha256": "fcbf8467323bfa7ccc57333eefbc454770db62692f4d6b59f62b52cf0f7ec84f",
+          "equal": true
+        }
+      }
+    },
+    {
+      "case": 4,
+      "outputs": {
+        "full": {
+          "bytes": 733,
+          "sha256": "123ce043d1c27fdcdf2bf8430905e8c0baf6b0941a49cc22ceee2654f0c33b0a",
+          "equal": true
+        },
+        "static": {
+          "bytes": 681,
+          "sha256": "adbe13048dc40b985794d2cfeeb7bdbe8c8101c0ea7c469f52d3ea9b3cd697e4",
+          "equal": true
+        },
+        "dynamic": {
+          "bytes": 50,
+          "sha256": "fcbf8467323bfa7ccc57333eefbc454770db62692f4d6b59f62b52cf0f7ec84f",
+          "equal": true
+        }
+      }
+    },
+    {
+      "case": 5,
+      "outputs": {
+        "full": {
+          "bytes": 716,
+          "sha256": "4d95414add23788d02f80aebfb4b5204e4f205a190273f6051b371f20465a288",
+          "equal": true
+        },
+        "static": {
+          "bytes": 664,
+          "sha256": "49a9822a11557c695cca77426d9393581ce6bbee2b20804eeee05408f1776281",
+          "equal": true
+        },
+        "dynamic": {
+          "bytes": 50,
+          "sha256": "fcbf8467323bfa7ccc57333eefbc454770db62692f4d6b59f62b52cf0f7ec84f",
+          "equal": true
+        }
+      }
+    },
+    {
+      "case": 6,
+      "outputs": {
+        "full": {
+          "bytes": 731,
+          "sha256": "59073ed6e27f96fe31a283f07f58f147b02fb6ad41773b2a066981d6dce710f5",
+          "equal": true
+        },
+        "static": {
+          "bytes": 679,
+          "sha256": "d621fabaf17c46d5e39a7ada8a18552f65c6f7062bb2243440b824156a97b0bf",
+          "equal": true
+        },
+        "dynamic": {
+          "bytes": 50,
+          "sha256": "fcbf8467323bfa7ccc57333eefbc454770db62692f4d6b59f62b52cf0f7ec84f",
+          "equal": true
+        }
+      }
+    },
+    {
+      "case": 7,
+      "outputs": {
+        "full": {
+          "bytes": 714,
+          "sha256": "c33a0bc3f3e6df2e8ae1981cae0de04f7296fcf2b9980b1991376228b0980182",
+          "equal": true
+        },
+        "static": {
+          "bytes": 662,
+          "sha256": "1b8a15008a9dca1cd4b4409ee5b8539a64486539096fd899d8579cef20d49ebb",
+          "equal": true
+        },
+        "dynamic": {
+          "bytes": 50,
+          "sha256": "fcbf8467323bfa7ccc57333eefbc454770db62692f4d6b59f62b52cf0f7ec84f",
+          "equal": true
+        }
+      }
+    }
+  ],
+  "note": "One-time migration evidence with synthetic file/data inputs and original rendered scaffolding. No prose test retained.",
+  "fixture_contract": {
+    "global_legacy_base": "GLOBAL BASE \u03a9\n",
+    "global_legacy_overlay": "GLOBAL OVERLAY\n",
+    "project_legacy_overlay": "PROJECT OVERLAY\n",
+    "global_preferred_tools": "GLOBAL TOOLS\n",
+    "project_preferred_tools": "PROJECT TOOLS\n",
+    "global_agents_md": "GLOBAL ECOSYSTEM\n",
+    "case_bit_0": "Project AGENTS.md empty when set, otherwise PROJECT ECOSYSTEM followed by newline",
+    "case_bit_1": "Project legacy base PROJECT BASE followed by newline when set, otherwise absent",
+    "case_bit_2": "Mermaid capability enabled when set",
+    "available_skills": [
+      {
+        "name": "synthetic",
+        "description": "Synthetic description"
+      }
+    ],
+    "active_skill": "SYNTHETIC ACTIVE",
+    "memory_input": "SYNTHETIC MEMORY",
+    "selfdev": false
+  }
+}

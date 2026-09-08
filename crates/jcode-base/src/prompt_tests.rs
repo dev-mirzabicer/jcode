@@ -2,7 +2,15 @@ use super::*;
 
 #[test]
 fn mermaid_prompt_module_follows_capability() {
-    let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    crate::instruction::SystemPromptComposer::new()
+        .ensure_global_store()
+        .unwrap();
+    std::fs::write(
+        home.root().join("instructions/system/mermaid.md"),
+        "---\nid: mermaid\nkind: system\n---\nSYNTHETIC CAPABILITY",
+    )
+    .unwrap();
     let (enabled, _) = build_system_prompt_split_with_capabilities(
         None,
         &[],
@@ -12,7 +20,7 @@ fn mermaid_prompt_module_follows_capability() {
         PromptCapabilities { mermaid: true },
     )
     .unwrap();
-    assert!(enabled.static_part.contains(MERMAID_PROMPT));
+    assert!(enabled.static_part.contains("SYNTHETIC CAPABILITY"));
 
     let (disabled, _) = build_system_prompt_split_with_capabilities(
         None,
@@ -23,7 +31,7 @@ fn mermaid_prompt_module_follows_capability() {
         PromptCapabilities { mermaid: false },
     )
     .unwrap();
-    assert!(!disabled.static_part.contains(MERMAID_PROMPT));
+    assert!(!disabled.static_part.contains("SYNTHETIC CAPABILITY"));
 }
 
 #[test]
@@ -50,10 +58,10 @@ fn test_load_agents_md_files_uses_sandboxed_global_files() {
     .unwrap();
 
     let project_dir = tempfile::TempDir::new().unwrap();
-    let (content, info) = load_agents_md_files_from_dir(Some(project_dir.path()));
+    let (content, info) =
+        build_system_prompt_full(None, &[], false, None, Some(project_dir.path())).unwrap();
 
     assert!(info.has_global_agents_md);
-    let content = content.expect("global instructions content");
     assert!(content.contains("# Global Instructions (~/AGENTS.md)"));
     assert!(!content.contains("~/.AGENTS.md"));
     assert!(content.contains("sandboxed global agents instructions"));
@@ -115,19 +123,6 @@ fn test_prompt_overlay_files_are_loaded_from_project_and_global_jcode_dirs() {
         "project prompt overlay instructions",
     )
     .unwrap();
-
-    let direct = load_prompt_overlay_files_from_dir(Some(project_dir.path()));
-
-    assert!(direct.0.is_some(), "expected prompt overlay content");
-    let direct_content = direct.0.unwrap();
-    assert!(
-        direct_content.contains("project prompt overlay instructions"),
-        "expected project prompt overlay content"
-    );
-    assert!(
-        direct_content.contains("global prompt overlay instructions"),
-        "expected global prompt overlay content"
-    );
 
     let (prompt, info) =
         build_system_prompt_full(None, &[], false, None, Some(project_dir.path())).unwrap();
@@ -374,30 +369,27 @@ fn test_selfdev_prompt_uses_desktop2_focus_for_desktop2_working_dir() {
 
 #[test]
 fn project_system_prompt_file_replaces_default_base_prompt() {
-    let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
-    use crate::prompt::load_base_system_prompt;
-
-    let dir = std::env::temp_dir().join(format!("jcode-sysprompt-{}", std::process::id()));
-    let jcode_dir = dir.join(".jcode");
-    std::fs::create_dir_all(&jcode_dir).unwrap();
+    let home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
     std::fs::write(
-        jcode_dir.join("system-prompt.md"),
-        "You are a custom agent.\n",
+        home.root().join("system-prompt.md"),
+        "SYNTHETIC GLOBAL BASE",
     )
     .unwrap();
-
-    assert_eq!(
-        load_base_system_prompt(Some(&dir)),
-        "You are a custom agent."
-    );
-
-    let (prompt, _info) = build_system_prompt_full(None, &[], false, None, Some(&dir)).unwrap();
-    assert!(prompt.contains("You are a custom agent."));
-    assert!(!prompt.contains("Jcode is open source"));
-
-    // Empty override falls back to the built-in default.
-    std::fs::write(jcode_dir.join("system-prompt.md"), "   \n").unwrap();
-    assert_eq!(load_base_system_prompt(Some(&dir)), DEFAULT_SYSTEM_PROMPT);
-
-    std::fs::remove_dir_all(&dir).ok();
+    let project = tempfile::tempdir().unwrap();
+    let directory = project.path().join(".jcode");
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join("system-prompt.md"),
+        "SYNTHETIC PROJECT BASE\n",
+    )
+    .unwrap();
+    let (custom, _) =
+        build_system_prompt_full(None, &[], false, None, Some(project.path())).unwrap();
+    assert!(custom.starts_with("SYNTHETIC PROJECT BASE"));
+    assert!(!custom.contains("SYNTHETIC GLOBAL BASE"));
+    std::fs::write(directory.join("system-prompt.md"), "   \n").unwrap();
+    let (fallback, _) =
+        build_system_prompt_full(None, &[], false, None, Some(project.path())).unwrap();
+    assert!(fallback.starts_with("SYNTHETIC GLOBAL BASE"));
+    assert!(!fallback.contains("SYNTHETIC PROJECT BASE"));
 }

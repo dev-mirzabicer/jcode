@@ -90,6 +90,29 @@ Raw session export, Markdown export, replay instruction state and full tool intr
 
 ## Source and failure semantics
 
+### Unprofiled compatibility callers
+
+Internal callers that have not adopted named-profile activation use the same
+managed `jcode` body, Mermaid, common guidance, preferred-tool guidance and
+available-skills resources through the instruction composer. They no longer
+read inactive global originals or use a second embedded prose path. Their
+project scope resolves through the canonical project identity, including from
+nested working directories, rather than a separate subtree instruction store.
+
+This source cutover does not activate a named role: compatibility callers retain
+their existing project-first paired order, full/split delivery and current
+request/invocation lifetime. They do not acquire profile defaults, the profile
+kernel, addenda, availability policy or new frozen profile state. Primary
+sessions continue to use exact stored system text. Future isolated and async
+owners explicitly adopt profile activation and its lifecycle rather than
+assuming that a working directory implies it.
+
+Fork and other notification occurrences still render their own current source.
+Reusing stored system/skill text does not require those profile source files,
+but creating a new notification can fail if its required source is unavailable.
+That failure does not justify silently dropping a notice or reviving a legacy
+instruction file.
+
 Working files are authoritative, including intentionally empty bodies where the owner retains meaningful structure. A present invalid project redefinition fails rather than exposing global prose. Missing previously adopted singleton resources are damage, not permission to recreate defaults. New shipped paths use the existing versioned, scoped Git seed-adoption transaction. It preserves current files and does not push a repository.
 
 An ordinary instruction edit affects the next workflow invocation. It does not rewrite earlier messages, change the frozen primary system prompt, or reactivate a completed workflow. Human prompt quality is reviewed separately from synthetic mechanism tests and one-time migration byte evidence.

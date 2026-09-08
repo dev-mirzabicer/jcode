@@ -6,31 +6,6 @@ use std::process::Command;
 /// Default system prompt for jcode (embedded at compile time)
 pub const DEFAULT_SYSTEM_PROMPT: &str = include_str!("prompt/system_prompt.md");
 
-/// Load the base system prompt, allowing the user to fully replace the built-in
-/// [`DEFAULT_SYSTEM_PROMPT`]. Precedence: project `./.jcode/system-prompt.md`,
-/// then global `~/.jcode/system-prompt.md`, then the built-in default.
-///
-/// This is a *replacement* hook. To merely add guidance on top of the default,
-/// use `.jcode/prompt-overlay.md` instead.
-pub fn load_base_system_prompt(working_dir: Option<&Path>) -> String {
-    let project_dir = working_dir.unwrap_or(Path::new("."));
-    let candidates = [
-        Some(project_dir.join(".jcode").join("system-prompt.md")),
-        crate::storage::jcode_dir()
-            .ok()
-            .map(|dir| dir.join("system-prompt.md")),
-    ];
-    for path in candidates.into_iter().flatten() {
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            let trimmed = content.trim();
-            if !trimmed.is_empty() {
-                return trimmed.to_string();
-            }
-        }
-    }
-    DEFAULT_SYSTEM_PROMPT.to_string()
-}
-
 /// Prompt guidance for the optional Mermaid rendering capability.
 pub const MERMAID_PROMPT: &str = "# Mermaid\n\nRender fenced `mermaid` blocks inline.";
 
@@ -52,17 +27,6 @@ impl PromptCapabilities {
             mermaid: crate::config::config().features.mermaid,
         }
     }
-}
-
-fn base_system_prompt_parts(
-    capabilities: PromptCapabilities,
-    working_dir: Option<&Path>,
-) -> Vec<String> {
-    let mut parts = vec![load_base_system_prompt(working_dir)];
-    if capabilities.mermaid {
-        parts.push(MERMAID_PROMPT.to_string());
-    }
-    parts
 }
 
 /// Reasoning-effort sentinel that means "use the strongest reasoning the model
@@ -196,23 +160,6 @@ impl SplitSystemPrompt {
 pub struct SkillInfo {
     pub name: String,
     pub description: String,
-}
-
-/// Render the current code-owned available-skills catalog section. WP-05 moves
-/// its prose to the managed instruction store; WP-03 freezes the complete
-/// rendered result at session activation without changing its bytes.
-pub fn build_available_skills_prompt(available_skills: &[SkillInfo]) -> Option<String> {
-    if available_skills.is_empty() {
-        return None;
-    }
-    let mut section = "# Available Skills\n\nYou have access to the following skills that the user can invoke with `/skillname`:\n".to_string();
-    for skill in available_skills {
-        section.push_str(&format!("\n- `/{} ` - {}", skill.name, skill.description));
-    }
-    section.push_str(
-        "\n\nWhen a user asks about available skills or capabilities, mention these skills.",
-    );
-    Some(section)
 }
 
 /// Information about what's loaded in the context window
@@ -394,66 +341,14 @@ pub fn build_system_prompt_full_with_capabilities(
     working_dir: Option<&Path>,
     capabilities: PromptCapabilities,
 ) -> Result<(String, ContextInfo), crate::instruction::SystemPromptActivationError> {
-    let mut parts = base_system_prompt_parts(capabilities, working_dir);
-    let mut info = ContextInfo {
-        system_prompt_chars: parts.join("\n\n").len(),
-        ..Default::default()
-    };
-
-    // Add self-dev guidance only in active self-dev sessions. Normal sessions
-    // learn about the on-ramp from the mode-aware `selfdev` tool schema.
-    if is_selfdev {
-        let selfdev_prompt = build_selfdev_prompt_for_working_dir(working_dir);
-        info.selfdev_chars = selfdev_prompt.len();
-        parts.push(selfdev_prompt);
-    }
-
-    // Add AGENTS.md instructions with tracking (from working_dir or cwd)
-    let (md_content, md_info) = load_agents_md_files_from_dir(working_dir);
-    if let Some(content) = md_content {
-        parts.push(content);
-    }
-    // Merge file info
-    info.has_project_agents_md = md_info.has_project_agents_md;
-    info.project_agents_md_chars = md_info.project_agents_md_chars;
-    info.has_global_agents_md = md_info.has_global_agents_md;
-    info.global_agents_md_chars = md_info.global_agents_md_chars;
-
-    // Add optional prompt overlays from ~/.jcode/ and ./.jcode/
-    let (overlay_content, overlay_chars) = load_prompt_overlay_files_from_dir(working_dir);
-    if let Some(content) = overlay_content {
-        info.prompt_overlay_chars = overlay_chars;
-        parts.push(content);
-    }
-
-    // Add optional preferred-tool guidance from ~/.jcode/ and ./.jcode/
-    let (preferred_tools_content, preferred_tools_chars) =
-        crate::instruction::SystemPromptComposer::new().legacy_preferred_tools(working_dir)?;
-    if let Some(content) = preferred_tools_content {
-        info.preferred_tools_chars = preferred_tools_chars;
-        parts.push(content);
-    }
-
-    if let Some(memory) = memory_prompt {
-        info.memory_chars = memory.len();
-        parts.push(memory.to_string());
-    }
-
-    // Add available skills list
-    if let Some(skills_section) = build_available_skills_prompt(available_skills) {
-        info.skills_chars = skills_section.len();
-        parts.push(skills_section);
-    }
-
-    // Add active skill prompt
-    if let Some(skill) = skill_prompt {
-        parts.push(format!("# Active Skill\n\n{}", skill));
-    }
-
-    let prompt = parts.join("\n\n");
-    info.total_chars = prompt.len();
-
-    Ok((prompt, info))
+    crate::instruction::SystemPromptComposer::new().compatibility_full(
+        skill_prompt,
+        available_skills,
+        is_selfdev,
+        memory_prompt,
+        working_dir,
+        capabilities,
+    )
 }
 
 /// Build system prompt split into static (cacheable) and dynamic parts
@@ -483,78 +378,14 @@ pub fn build_system_prompt_split_with_capabilities(
     working_dir: Option<&Path>,
     capabilities: PromptCapabilities,
 ) -> Result<(SplitSystemPrompt, ContextInfo), crate::instruction::SystemPromptActivationError> {
-    let mut static_parts = base_system_prompt_parts(capabilities, working_dir);
-    let mut dynamic_parts = Vec::new();
-    let mut info = ContextInfo {
-        system_prompt_chars: static_parts.join("\n\n").len(),
-        ..Default::default()
-    };
-
-    // === STATIC CONTENT (cacheable) ===
-
-    // Add self-dev guidance only in active self-dev sessions. Normal sessions
-    // learn about the on-ramp from the mode-aware `selfdev` tool schema.
-    if is_selfdev {
-        let selfdev_prompt = build_selfdev_prompt_static_for_working_dir(working_dir);
-        info.selfdev_chars = selfdev_prompt.len();
-        static_parts.push(selfdev_prompt);
-    }
-
-    // Add AGENTS.md instructions (static per project)
-    let (md_content, md_info) = load_agents_md_files_from_dir(working_dir);
-    if let Some(content) = md_content {
-        static_parts.push(content);
-    }
-    info.has_project_agents_md = md_info.has_project_agents_md;
-    info.project_agents_md_chars = md_info.project_agents_md_chars;
-    info.has_global_agents_md = md_info.has_global_agents_md;
-    info.global_agents_md_chars = md_info.global_agents_md_chars;
-
-    // Add optional prompt overlays from ~/.jcode/ and ./.jcode/
-    let (overlay_content, overlay_chars) = load_prompt_overlay_files_from_dir(working_dir);
-    if let Some(content) = overlay_content {
-        info.prompt_overlay_chars = overlay_chars;
-        static_parts.push(content);
-    }
-
-    // Add optional preferred-tool guidance (static per project/user)
-    let (preferred_tools_content, preferred_tools_chars) =
-        crate::instruction::SystemPromptComposer::new().legacy_preferred_tools(working_dir)?;
-    if let Some(content) = preferred_tools_content {
-        info.preferred_tools_chars = preferred_tools_chars;
-        static_parts.push(content);
-    }
-
-    // Add available skills list (fairly static)
-    if let Some(skills_section) = build_available_skills_prompt(available_skills) {
-        info.skills_chars = skills_section.len();
-        static_parts.push(skills_section);
-    }
-
-    // === TURN CONTEXT (not cached) ===
-
-    // Memory prompt (changes per conversation)
-    if let Some(memory) = memory_prompt {
-        info.memory_chars = memory.len();
-        dynamic_parts.push(memory.to_string());
-    }
-
-    // Active skill prompt (changes per skill invocation)
-    if let Some(skill) = skill_prompt {
-        dynamic_parts.push(format!("# Active Skill\n\n{}", skill));
-    }
-
-    let static_part = static_parts.join("\n\n");
-    let dynamic_part = dynamic_parts.join("\n\n");
-    info.total_chars = static_part.len() + dynamic_part.len();
-
-    Ok((
-        SplitSystemPrompt {
-            static_part,
-            dynamic_part,
-        },
-        info,
-    ))
+    crate::instruction::SystemPromptComposer::new().compatibility_split(
+        skill_prompt,
+        available_skills,
+        is_selfdev,
+        memory_prompt,
+        working_dir,
+        capabilities,
+    )
 }
 
 /// Build self-dev tools prompt section (static version without dynamic socket path)
@@ -601,7 +432,7 @@ pub(crate) fn build_selfdev_prompt_static_for_working_dir(working_dir: Option<&P
     build_selfdev_prompt_static_for_context(SelfDevProductContext::from_working_dir(working_dir))
 }
 
-fn build_selfdev_prompt_for_working_dir(working_dir: Option<&Path>) -> String {
+pub(crate) fn build_selfdev_prompt_for_working_dir(working_dir: Option<&Path>) -> String {
     build_selfdev_prompt_for_context(SelfDevProductContext::from_working_dir(working_dir))
 }
 
@@ -810,95 +641,6 @@ fn gpu_summary() -> Option<String> {
         None
     } else {
         Some(gpus.join("; "))
-    }
-}
-
-/// Load AGENTS.md files from a specific working directory
-pub fn load_agents_md_files_from_dir(working_dir: Option<&Path>) -> (Option<String>, ContextInfo) {
-    let mut contents = vec![];
-    let mut info = ContextInfo::default();
-
-    // Helper to load a file if it exists, returns (formatted_content, raw_size)
-    let load_file = |path: &Path, label: &str| -> Option<(String, usize)> {
-        if path.exists() {
-            std::fs::read_to_string(path).ok().map(|content| {
-                let raw_size = content.len();
-                let formatted = format!("# {}\n\n{}", label, content.trim());
-                (formatted, raw_size)
-            })
-        } else {
-            None
-        }
-    };
-
-    // Project-level files (from specified working directory or current directory)
-    let project_dir = working_dir.unwrap_or(Path::new("."));
-    if let Some((content, size)) = load_file(
-        &project_dir.join("AGENTS.md"),
-        "Project Instructions (AGENTS.md)",
-    ) {
-        info.has_project_agents_md = true;
-        info.project_agents_md_chars = size;
-        contents.push(content);
-    }
-
-    // Home directory files
-    if let Ok(global_agents_md) = crate::storage::user_home_path("AGENTS.md")
-        && let Some((content, size)) =
-            load_file(&global_agents_md, "Global Instructions (~/AGENTS.md)")
-    {
-        info.has_global_agents_md = true;
-        info.global_agents_md_chars = size;
-        contents.push(content);
-    }
-
-    if contents.is_empty() {
-        (None, info)
-    } else {
-        (Some(contents.join("\n\n")), info)
-    }
-}
-
-/// Load optional prompt overlay markdown from ~/.jcode/ and ./.jcode/
-fn load_prompt_overlay_files_from_dir(working_dir: Option<&Path>) -> (Option<String>, usize) {
-    let mut contents = vec![];
-    let mut total_chars = 0usize;
-
-    let load_file = |path: &Path, label: &str| -> Option<(String, usize)> {
-        if path.exists() {
-            std::fs::read_to_string(path).ok().map(|content| {
-                let raw_size = content.len();
-                let formatted = format!("# {}\n\n{}", label, content.trim());
-                (formatted, raw_size)
-            })
-        } else {
-            None
-        }
-    };
-
-    let project_dir = working_dir.unwrap_or(Path::new("."));
-    if let Some((content, size)) = load_file(
-        &project_dir.join(".jcode").join("prompt-overlay.md"),
-        "Project Prompt Overlay (.jcode/prompt-overlay.md)",
-    ) {
-        total_chars += size;
-        contents.push(content);
-    }
-
-    if let Ok(global_overlay) = crate::storage::jcode_dir().map(|dir| dir.join("prompt-overlay.md"))
-        && let Some((content, size)) = load_file(
-            &global_overlay,
-            "Global Prompt Overlay (~/.jcode/prompt-overlay.md)",
-        )
-    {
-        total_chars += size;
-        contents.push(content);
-    }
-
-    if contents.is_empty() {
-        (None, 0)
-    } else {
-        (Some(contents.join("\n\n")), total_chars)
     }
 }
 
