@@ -28,10 +28,6 @@ enum Disposition {
     ClientInternal,
     /// A real gap. Worth exposing, not yet done. Every entry needs a reason
     /// that says what a client cannot build without it.
-    #[expect(
-        dead_code,
-        reason = "the capability ledger supports explicit gaps even when the current ledger has none"
-    )]
     Gap(&'static str),
 }
 
@@ -41,13 +37,23 @@ use Disposition::{ClientInternal, Covered, Gap};
 ///
 /// Sorted by name so additions produce clean diffs.
 const LEDGER: &[(&str, Disposition)] = &[
+    (
+        "ActivateSkill",
+        Gap(
+            "SDK clients cannot directly activate an active-skill snapshot; activation is currently an internal TUI/REPL control.",
+        ),
+    ),
     ("ApplyContextDraft", ClientInternal),
+    ("ApplyStartupContextSelection", ClientInternal),
     ("BackgroundTool", ClientInternal),
     ("Cancel", Covered),
     ("CancelContextDraft", ClientInternal),
     ("CancelSoftInterrupts", Covered),
+    ("CancelStartupContextApply", ClientInternal),
+    ("CancelStartupContextSearch", ClientInternal),
     ("Clear", Covered),
     ("ClientDebugResponse", ClientInternal),
+    ("CloseStartupContextEditor", ClientInternal),
     ("CycleModel", ClientInternal),
     ("GetCompactedHistory", ClientInternal),
     ("GetAgentCatalog", Covered),
@@ -58,26 +64,38 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("GetContextTransactionDetail", ClientInternal),
     ("GetHistory", Covered),
     ("GetModelCatalog", Covered),
+    ("GetStartupContextApplyStatus", ClientInternal),
+    ("GetStartupContextFileDetail", ClientInternal),
+    ("GetStartupContextStatus", ClientInternal),
     ("InputShell", ClientInternal),
     ("InspectInstructions", ClientInternal),
     ("ManageInstructions", ClientInternal),
     ("ListContextTransactions", ClientInternal),
+    ("ListStartupContextDirectory", ClientInternal),
     ("Message", Covered),
     ("NotifyAuthChanged", Covered),
+    ("OpenStartupContextEditor", ClientInternal),
     ("PrepareContextDraft", ClientInternal),
+    ("PreviewContextCuratorPlan", ClientInternal),
     ("PreviewContextDraftSelection", ClientInternal),
     ("PreviewContextRanges", ClientInternal),
+    ("PreviewStartupContextFile", ClientInternal),
+    ("PreviewStartupContextSelection", ClientInternal),
     ("QueuedMessages", ClientInternal),
     ("RefreshModels", ClientInternal),
     ("ReapplyContextTransaction", ClientInternal),
     ("Reload", ClientInternal),
     ("RenameSession", Covered),
+    ("RenderWorkflowPrompt", Covered),
+    ("RenewStartupContextEditorLease", ClientInternal),
     ("ResumeAllSessions", ClientInternal),
     ("ResumeSession", ClientInternal),
     ("RevertContextTransaction", ClientInternal),
     ("Rewind", Covered),
     ("RewindUndo", Covered),
     ("RunSubagent", ClientInternal),
+    ("SaveContextCuratorDefault", ClientInternal),
+    ("SearchStartupContextFiles", ClientInternal),
     ("SetContextEmergencyPolicy", ClientInternal),
     ("SetAgent", Covered),
     ("SetFeature", ClientInternal),

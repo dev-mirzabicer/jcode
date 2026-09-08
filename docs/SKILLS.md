@@ -119,6 +119,12 @@ source.
 
 For a remote TUI, a bare invocation uses a dedicated `ActivateSkill` control request. A trailing prompt carries `activate_skill` on the message request so the server renders and persists the skill before accepting the turn. Failure rejects the turn before provider dispatch. `SkillActivated` is the authoritative UI confirmation, and reconnect snapshots restore the active skill identity.
 
+The curated Harness API and SDKs can inspect existing active skill text but do
+not currently expose a direct skill-activation operation or an `activate_skill`
+field on `SendMessage`. Sending slash text through that API is not a substitute
+for the TUI's typed activation control. This boundary is recorded explicitly in
+the Harness capability ledger rather than advertised as public support.
+
 The outer dynamic prompt framing remains:
 
 ```text
