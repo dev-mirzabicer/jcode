@@ -157,3 +157,25 @@ real content row. Existing pagination mechanisms are unchanged.
 
 This revised result still requires Mirza's activated UX review and approval.
 No accepted work-package closeout or downstream publication is implied.
+
+Final revised UX activation is `5811f10da-dirty-fa5642aab7fd`, with current/shared
+channels equal and canary passed. The final production run passed at
+`$HOME/.jcode/scratch/wp10/refined-final-live/live-e193n5m6`, including real PTY
+resize events through 80/60/24 columns, direct editor/automatic review, explicit
+Save, global/project source selection, copy/collision handling, separate setup and
+session pages, unchanged captured prompt and zero model requests. The final two
+cross-scope tests, 48 manager tests and strict lint passed before activation.
+
+Some intervening multi-process fixture launches/debug relays timed out. One
+failed before Jcode produced output; another had a loaded manager in its terminal
+log but no debug reply. No product success was inferred from those failures.
+The final probe uses the same client-owned debug-file protocol directly, avoiding
+the extra CLI relay, and resizes its established real client. Its earlier Global
+filter was explicitly changed to Effective here before expecting a project skill.
+That corrects the probe's assumption without weakening source-scope assertions.
+
+The real global instruction store remains at
+`c0af670a32ff2156693f27a2dab48d4dcb0043d2` with only its unrelated `.DS_Store`.
+The five original dirty checkout paths remain byte-identical. Only probe and
+verification-document updates differ from the final activated runtime source.
+The revised candidate is awaiting Mirza's approval.

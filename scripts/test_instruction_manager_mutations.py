@@ -21,6 +21,32 @@ def bootstrap_response(self):
 f.FixtureProvider.do_POST=bootstrap_response
 
 clients=[]
+server_debug=f.debug
+
+def owned_client_debug(command):
+    parts=command.split(':',2)
+    if len(parts)!=3 or parts[0]!='tester' or not any(client[3]==parts[1] for client in clients):
+        return server_debug(command)
+    tid,operation=parts[1:]
+    if operation.startswith('keys:'):
+        keys(tid,operation.removeprefix('keys:'))
+        return 'OK: physical PTY input'
+    number=next(index for index,client in enumerate(clients) if client[3]==tid)
+    request=f.ROOT/f'client-{number}.cmd';response=f.ROOT/f'client-{number}.response'
+    file_command={'frame':'screen-json','frame-normalized':'screen-json-normalized'}.get(operation,operation)
+    if response.exists():response.unlink()
+    temporary=request.with_suffix('.new');temporary.write_text(file_command);os.replace(temporary,request)
+    deadline=time.monotonic()+15
+    while True:
+        if response.exists():
+            text=response.read_text()
+            if text:
+                response.unlink()
+                with (f.ROOT/'debug.jsonl').open('a') as log:log.write(json.dumps({'command':command,'code':0,'stdout':text,'stderr':'','transport':'owned client debug file'})+'\n')
+                return text
+        if time.monotonic()>deadline:raise TimeoutError('Owned client did not answer '+command)
+        time.sleep(.025)
+f.debug=owned_client_debug
 (f.ROOT/'mutation-probe.py').write_text(Path(__file__).read_text())
 
 def complete_replay(session):
@@ -92,7 +118,7 @@ def spawn_client(session,cols,rows,reuse=None):
     thread=threading.Thread(target=drain,daemon=True);thread.start()
     tid=f'wp10-client-{number}';record={'id':tid,'pid':child.pid,'binary':f.BIN,'cwd':str(f.project),'started_at':'2026-09-07T00:00:00Z','debug_cmd_path':str(command),'debug_response_path':str(response),'stdout_path':str(output),'stderr_path':str(output)}
     registry=f.home/'testers.json';entries=json.loads(registry.read_text()) if registry.exists() else [];entries.append(record);registry.write_text(json.dumps(entries))
-    clients.append([child,master,home,tid]);f.debug(f'tester:{tid}:wait');keys(tid,'esc,esc');f.debug(f'tester:{tid}:set_input:/instructions');keys(tid,'enter');f.tester_state(tid,lambda state:state.get('visible') and state.get('rows_loaded',0)>0 and state.get('pending_id') is None)
+    clients.append([child,master,home,tid]);f.debug(f'tester:{tid}:wait');keys(tid,'esc,esc');keys(tid,','.join('/instructions')+',enter');f.tester_state(tid,lambda state:state.get('visible') and state.get('rows_loaded',0)>0 and state.get('pending_id') is None)
     return tid
 
 if __name__ == '__main__':

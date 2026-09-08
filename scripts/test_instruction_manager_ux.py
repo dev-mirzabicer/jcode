@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Approved type/scope/source UX through real isolated clients and physical keys."""
-import json, os, subprocess, time
+import fcntl, json, os, signal, struct, subprocess, termios, time
 from pathlib import Path
 import test_instruction_manager_mutations as m
 f=m.f
@@ -50,15 +50,19 @@ try:
     m.keys(tid,'v');select_menu(tid,'Copy to project and edit');collision=f.frame(tid,'already exists',motion='home');(f.ROOT/'copy-collision.json').write_text(json.dumps(collision,indent=2))
     m.keys(tid,'esc')
     m.keys(tid,'esc');choose_type(tid,12,'Current session instructions');snapshot=f.frame(tid,'not',motion='home');(f.ROOT/'session-snapshot.json').write_text(json.dumps(snapshot,indent=2))
-    choose_type(tid,11,'Repositories & sync');repositories=f.frame(tid,'Global instructions',motion='home');(f.ROOT/'repositories.json').write_text(json.dumps(repositories,indent=2));stop_last()
+    choose_type(tid,11,'Repositories & sync');repositories=f.frame(tid,'Global instructions',motion='home');(f.ROOT/'repositories.json').write_text(json.dumps(repositories,indent=2))
     for width,height in [(80,24),(60,24),(24,10)]:
-        tid=m.spawn_client(session,width,height);choose_type(tid,1,'Skills')
+        child,master,_,_=m.clients[-1]
+        fcntl.ioctl(master,termios.TIOCSWINSZ,struct.pack('HHHH',height,width,0,0));os.kill(child.pid,signal.SIGWINCH)
+        choose_type(tid,1,'Skills')
+        m.keys(tid,'s');select_menu(tid,'Effective here');state(tid,lambda value:value.get('browse_scope')=='Effective here' and value.get('pending_id') is None)
         view=f.frame(tid,'Design',motion='home');(f.ROOT/f'skills-{width}.json').write_text(json.dumps(view,indent=2))
         text='\n'.join(row.get('content_preview','') for row in view['rendered_text']['recent_messages'])
         assert '[P ext]' in text,text;assert 'SKILL.md' not in text,text;assert 'READ ONLY' not in text
-        stop_last()
+        assert view['terminal_size']==[width,height],view['terminal_size']
+    stop_last()
     assert json.loads(session_file.read_text())['system_prompt']==frozen;assert not f.posts
-    result={'type_first':True,'scope_versions_and_explicit_edit_ownership':True,'direct_editor_and_automatic_review':True,'global_to_project_copy':True,'external_name_scope_badges_at_80_60_24':True,'setup_and_session_pages':True,'current_prompt_unchanged':True,'model_requests':0,'artifact':str(f.ROOT),'binary':subprocess.check_output([f.BIN,'--version'],text=True).strip()}
+    result={'type_first':True,'scope_versions_and_explicit_edit_ownership':True,'direct_editor_and_automatic_review':True,'global_to_project_copy':True,'external_name_scope_badges_at_80_60_24':True,'setup_and_session_pages':True,'physical_resize_path':True,'current_prompt_unchanged':True,'model_requests':0,'artifact':str(f.ROOT),'binary':subprocess.check_output([f.BIN,'--version'],text=True).strip()}
     (f.ROOT/'ux-result.json').write_text(json.dumps(result,indent=2));print(json.dumps(result),flush=True)
 finally:
     for child,master,_,_ in m.clients:

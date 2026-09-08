@@ -18,8 +18,27 @@
   "cross_scope_tests": 2,
   "strict_lint": "passed",
   "limitations": [
-    "Physical verification on macOS arm64",
-    "Final impact-warning prefix changes have focused tests; their activation is recorded separately",
-    "No current-session instruction replacement or real project repository setup performed"
-  ]
+    "Verification on macOS arm64",
+    "Earlier multi-process fixture runs passed; later fixture launches/debug relays intermittently timed out, including one before Jcode produced output",
+    "Final physical run uses the existing client debug-file channel and real PTY keyboard/resize events",
+    "No current-session instruction replacement, real project setup or instruction-store push performed"
+  ],
+  "final_runtime": {
+    "identity": "5811f10da-dirty-fa5642aab7fd",
+    "current_shared_equal": true,
+    "canary_passed": true,
+    "physical_verification": {
+      "type_first": true,
+      "scope_versions_and_explicit_edit_ownership": true,
+      "direct_editor_and_automatic_review": true,
+      "global_to_project_copy": true,
+      "external_name_scope_badges_at_80_60_24": true,
+      "setup_and_session_pages": true,
+      "physical_resize_path": true,
+      "current_prompt_unchanged": true,
+      "model_requests": 0,
+      "artifact": "/Users/mirzabicer/.jcode/scratch/wp10/refined-final-live/live-e193n5m6",
+      "binary": "jcode v0.75.216-dev (5811f10da, dirty)"
+    }
+  }
 }
