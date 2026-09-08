@@ -76,6 +76,83 @@ fn managed(id: &str, kind: &str, body: &str) -> String {
 }
 
 #[test]
+fn git_metadata_alias_reads_and_drafts_are_rejected() {
+    let fixture = Fixture::new();
+    let repository = fixture.initialize().repository;
+    for path in [".GiT/config", ".GIT/HEAD", "skills/example/.Git/config"] {
+        for policy in [
+            InstructionReadPolicy::WorkingTreeOnly,
+            InstructionReadPolicy::AllowHeadFallback,
+        ] {
+            let error = fixture
+                .service
+                .read_file(&repository, path, policy)
+                .expect_err("Git metadata is not managed instruction content");
+            assert_eq!(error.kind, InstructionRepositoryErrorKind::InvalidPath);
+        }
+        let error = fixture.service.open_draft(&repository, path).unwrap_err();
+        assert_eq!(error.kind, InstructionRepositoryErrorKind::InvalidPath);
+    }
+    for path in [".github/guidance.md", ".gitignore", ".gitmodules"] {
+        super::mutation::validate_relative_path(Path::new(path)).unwrap();
+    }
+}
+
+#[test]
+fn git_metadata_alias_commit_is_rejected_before_writing() {
+    let fixture = Fixture::new();
+    let repository = fixture.initialize().repository;
+    let head = git(&repository.root, &["rev-parse", "HEAD"]);
+    let index = std::fs::read(repository.root.join(".git/index")).unwrap();
+    let config = std::fs::read(repository.root.join(".git/config")).unwrap();
+    let path = PathBuf::from(".GiT/instruction-write-probe");
+    let request = InstructionCommitRequest {
+        operation_id: "git-metadata-alias-probe".into(),
+        message: "Synthetic reserved path probe".into(),
+        expected_head: head.clone(),
+        expected_files: vec![InstructionFileState {
+            relative_path: path.clone(),
+            fingerprint: InstructionTargetFingerprint::Missing,
+            executable: false,
+        }],
+        mutations: vec![InstructionFileMutation::Write {
+            relative_path: path.clone(),
+            content: b"synthetic metadata write".to_vec(),
+        }],
+    };
+    let error = fixture.service.commit(&repository, &request).unwrap_err();
+    assert!(
+        !repository.root.join(&path).exists(),
+        "Rejected commits must not write through a Git-directory alias"
+    );
+    assert_eq!(error.kind, InstructionRepositoryErrorKind::InvalidPath);
+    assert!(error.existing_state_unchanged);
+    assert_eq!(git(&repository.root, &["rev-parse", "HEAD"]), head);
+    assert_eq!(
+        std::fs::read(repository.root.join(".git/index")).unwrap(),
+        index
+    );
+    assert_eq!(
+        std::fs::read(repository.root.join(".git/config")).unwrap(),
+        config
+    );
+}
+
+#[test]
+fn git_metadata_alias_seed_is_rejected_before_materialization() {
+    let fixture = Fixture::new();
+    let mut seed = seed();
+    seed.files.push(InstructionSeedFile {
+        relative_path: ".GiT/instruction-seed-probe".into(),
+        content: b"synthetic metadata seed".to_vec(),
+    });
+    let error = fixture.service.initialize_global(&seed, &[]).unwrap_err();
+    assert_eq!(error.kind, InstructionRepositoryErrorKind::InvalidPath);
+    let repository = fixture.service.global_repository().unwrap();
+    assert!(!repository.root.join(".GiT/instruction-seed-probe").exists());
+}
+
+#[test]
 fn blob_batch_rejects_missing_non_blob_and_unsafe_entries() {
     let fixture = Fixture::new();
     let repository = fixture.initialize().repository;
@@ -89,7 +166,7 @@ fn blob_batch_rejects_missing_non_blob_and_unsafe_entries() {
         assert!(git.materialize_blobs(&[invalid], output.path()).is_err());
         assert_eq!(std::fs::read_dir(output.path()).unwrap().count(), 0);
     }
-    for path in ["../escape", ".git/config"] {
+    for path in ["../escape", ".git/config", ".GiT/config"] {
         let output = tempfile::tempdir_in(&fixture.state).unwrap();
         let mut invalid = entry.clone();
         invalid.path = path.into();

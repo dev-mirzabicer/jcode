@@ -25,7 +25,10 @@ pub(super) fn validate_relative_path(path: &Path) -> InstructionRepositoryResult
                     )
                     .path(path)
                 })?;
-                if value == ".git" || value.contains(['\0', '\n', '\r', ':']) {
+                // Git metadata has the same identity under case-insensitive
+                // filesystems. Reject aliases before any working-tree access,
+                // not only later when Git refuses to stage the path.
+                if value.eq_ignore_ascii_case(".git") || value.contains(['\0', '\n', '\r', ':']) {
                     return Err(invalid_path(
                         path,
                         "path contains a reserved or Git-ambiguous component",
