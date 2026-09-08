@@ -300,6 +300,10 @@ fn repository_forms_require_review_and_explicit_confirmation_at_every_width() {
             .draw(|frame| manager.render(frame, frame.area()))
             .unwrap();
         assert_eq!(manager.editing.confirm, Some(EditAction::ApplyRepository));
+        let header = (1..width.saturating_sub(1))
+            .map(|x| terminal.backend().buffer()[(x, 1)].symbol())
+            .collect::<String>();
+        assert!(header.starts_with("Global · Configure"), "{header}");
         manager.key(KeyCode::Enter, KeyModifiers::NONE);
         assert!(manager.editing.queued.is_none());
         assert!(manager.editing.form.is_some());

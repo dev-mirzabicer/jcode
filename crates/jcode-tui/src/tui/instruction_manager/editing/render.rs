@@ -26,6 +26,7 @@ impl InstructionManager {
             .title(
                 if self.editing.draft.is_none()
                     && (self.editing.repository_plan.is_some()
+                        || self.editing.repository_receipt.is_some()
                         || self
                             .editing
                             .form
@@ -151,7 +152,11 @@ impl InstructionManager {
                 Rect::new(inner.x, inner.bottom().saturating_sub(2), inner.width, 1),
             );
             frame.render_widget(
-                Paragraph::new("Changes stay in the draft until reviewed Save."),
+                Paragraph::new(if form.is_repository() {
+                    "Review the repository action before explicit confirmation."
+                } else {
+                    "Changes stay in the draft until reviewed Save."
+                }),
                 Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
             );
             return;
@@ -178,6 +183,18 @@ impl InstructionManager {
                         .map(|file| file.path.as_str())
                         .unwrap_or("draft")
                 )
+            })
+            .or_else(|| {
+                self.editing
+                    .repository_receipt
+                    .as_ref()
+                    .map(|receipt| receipt.title.clone())
+            })
+            .or_else(|| {
+                self.editing
+                    .repository_plan
+                    .as_ref()
+                    .map(|plan| format!("{:?} · {}", plan.scope, plan.title))
             })
             .unwrap_or_else(|| "Prepare a reviewed edit".into());
         frame.render_widget(
