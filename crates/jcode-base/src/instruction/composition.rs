@@ -412,14 +412,17 @@ impl SystemPromptComposer {
             }
         }
 
-        let compatibility = render_agent_profile(
+        // Legacy project guidance can contribute a selectable compatibility
+        // profile without a managed document. It is optional for catalog
+        // listing: damage to that profile must not hide unrelated agents.
+        // Explicit/default activation still reports the original source error.
+        if let Ok(compatibility) = render_agent_profile(
             &environment,
             AgentSelection::Explicit(InstructionSelector::unqualified(
                 InstructionKind::Agent,
                 COMPATIBILITY_AGENT_ID,
             )?),
-        )?;
-        if !entries
+        ) && !entries
             .iter()
             .any(|entry| entry.agent == compatibility.agent)
         {
@@ -1374,6 +1377,53 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn agent_catalog_isolates_unavailable_compatibility_profile() {
+        let fixture = Fixture::new();
+        let composer = fixture.composer();
+        composer.ensure_global_store().unwrap();
+        let root = fixture.jcode_home.join("instructions");
+        let alternate = document(
+            InstructionScope::Global,
+            InstructionKind::Agent,
+            "alternate",
+            "agents/alternate.md",
+            "SYNTHETIC ALTERNATE",
+        );
+        std::fs::write(
+            root.join("agents/alternate.md"),
+            alternate.to_markdown().unwrap(),
+        )
+        .unwrap();
+        let compatibility = root.join("agents/jcode.md");
+        for damaged in [Some("---\nid: jcode\nkind: agent\n---\nINVALID"), None] {
+            if let Some(content) = damaged {
+                std::fs::write(&compatibility, content).unwrap();
+            } else {
+                std::fs::remove_file(&compatibility).unwrap();
+            }
+            let selected = composer
+                .activate(fixture.request(AgentSelection::parse(Some("global:alternate")).unwrap()))
+                .expect("unrelated valid agent still activates");
+            let catalog = composer
+                .list_primary_agents(Some(&fixture.project))
+                .expect("catalog must allow recovery through another valid agent");
+            assert_eq!(catalog.len(), 1);
+            assert_eq!(catalog[0].agent, selected.state.active_agent);
+            assert!(
+                composer
+                    .activate(fixture.request(AgentSelection::Default))
+                    .is_err()
+            );
+        }
+        std::fs::write(root.join("instruction-store.toml"), "invalid manifest").unwrap();
+        assert!(
+            composer
+                .list_primary_agents(Some(&fixture.project))
+                .is_err()
+        );
     }
 
     #[test]
