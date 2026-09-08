@@ -89,10 +89,12 @@ it into the chat composer. No pagination or instruction-size limit changed.
 
 ## Reviewed editing
 
-Use **Actions → Edit instruction** (or **Ctrl-E**) on a managed resource. A draft
-captures complete working source, branch, HEAD and file identity without changing
-the authoritative file. In the draft, **B** opens the body in a private local
-file using `$VISUAL`, then `$EDITOR`, then `nano`. Quoted executable paths and
+Use the source-named **Edit** action (or **E / Ctrl-E**) on a managed resource.
+A draft captures complete working source, branch, HEAD and file identity without
+changing the authoritative file, then opens the appropriate editor or typed form.
+Editor return automatically prepares validation and the complete diff. In the
+draft, **B** reopens the body in a private local file using `$VISUAL`, then
+`$EDITOR`, then `nano`. Quoted executable paths and
 arguments are parsed without a shell. Editors that launch a GUI must use their
 own wait argument. A remote client edits its local draft and sends typed content
 to the source-owning server, never a remote shell command.
@@ -104,7 +106,8 @@ typed fields and searchable choices. Roster candidates can be added, removed and
 reordered. Human-only notes remain outside model-facing discovery. Form errors
 retain entered values instead of replacing them with a raw configuration editor.
 
-**R** validates the complete proposed commit and affected consumers using typed
+Editor return and submitted metadata validate automatically. **R** explicitly
+revalidates the complete proposed commit and affected consumers using typed
 synthetic preview data. **D** shows exact committed/working-versus-draft diffs,
 and **V** shows affected component previews. These are not the current session's
 stored instructions. **S** saves a successfully reviewed draft on an attached
@@ -276,11 +279,13 @@ No prompt-source watcher or runtime prompt-version state is involved.
 
 ## Detail views
 
-Select a resource, then press:
+Select a resource, then choose a named view from **Views** or **Actions**:
 
 1. **Source:** complete original UTF-8 file, including exact frontmatter.
-2. **Overview:** identity, availability, template mode, scope, source path,
-   validation, owner, code-consumer contracts, and complete frontmatter.
+2. **Overview:** content-first presentation with readable identity, availability,
+   template mode, scope, source path, validation, owner and code-consumer contracts.
+   Exact original frontmatter is available in Source rather than duplicated as
+   raw YAML in the overview.
 3. **Rendered preview:** plain/Handlebars result, effective agent component with addenda,
    skill body, or model-roster availability and resolution preview. Available
    typed skill-catalog values are supplied. Occurrence-specific values that do

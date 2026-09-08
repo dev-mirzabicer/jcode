@@ -221,15 +221,52 @@ The separate [`model_roster`](../MODEL_ROSTER.md) domain owns global TOML policy
 
 Primary composition, notifications and roster loading share `prepare_global_store_for_read`. A ready current-seed store validates only selected resources at runtime. Initialization, seed adoption and repository publication retain complete validation. This prevents an unrelated invalid roster from disabling valid primary instructions without weakening selected-source or repository-damage failures.
 
-## Handoff to later packages
+## Adding or changing an instruction consumer
 
-- WP-02 supplies validated Git-backed global and project roots plus import receipts through `InstructionRepositoryService`.
-- WP-03 supplies complete primary composition, exact session freezing, initial selection, and lifecycle foundations.
-- WP-04 supplies append transitions, explicit system replacement, context protection, rewind pinning, inspection, exports, and public control interfaces.
-- WP-05 supplies managed and external skill discovery, deterministic source precedence, restricted rendering, complete Copy transactions, and exact active rendered-text snapshots.
-- WP-06 and WP-07 migrate inventory rows through registered typed consumers.
-- WP-09 provides the read-only manager over catalog summaries, diagnostics, exact paged content, graphs, Git state, and composer/roster previews. WP-10 supplies reviewed editing, complete package management, ecosystem working-file drafts and explicit repository controls over the existing owners.
-- WP-11 reconciles every inventory row and verifies exact migration equality or an approved exception.
+1. Trace the production delivery sink and decide whether the material is editable
+   behavioral prose or code-owned structure. Record its inventory identity and
+   consumer. Keep provider-required text, tool schemas, context-curator prompts,
+   dormant memory and self-development mechanics with their existing owners.
+2. Reuse `InstructionConsumer<T>` with the smallest typed value contract. For
+   occurrence prose, extend `notification::Notification` and its registration/seed
+   entry. Workflow families use `instruction::workflow`. Set required/empty and
+   scope policy explicitly. A file alone cannot introduce a new workflow trigger.
+3. Put source in the corresponding seed asset and expose its registration to the
+   manager. Inspection and draft validation reuse the same registration, dependency
+   graph and synthetic preview-value contract. Do not infer consumers from prose.
+4. Increment the shipped seed version only when a new path must be adopted. Seed
+   upgrades preserve current working files and historical committed deletions.
+   Changing a bundled asset does not silently replace the user's existing file.
+   Evolving existing downstream content requires explicit reviewed edits.
+5. At the delivery owner, render before the state transition or provider dispatch
+   it governs. If a prior operation already completed, retain its factual receipt
+   and report prose failure separately. Remote rendering belongs to the source-owning
+   server unless the existing workflow is explicitly client-supervised.
+6. Use synthetic fixtures for loading, invalid shadows, typed values, empty/missing
+   content, complete rendering, persistence, cache placement and failures. For a
+   prose-preserving migration, record a one-time before/after production-renderer
+   comparison and remove the disposable prose probe. Human review accepts new
+   central prose; permanent tests do not grade or freeze it.
+
+The [migration guide](../INSTRUCTION_MIGRATION.md) covers operational cutover and
+recovery. Keep one source of truth: sessions store exact active text, repositories
+store editable source, and the manager projects both without conflating them.
+
+## Explicit future-owner adoption
+
+| Owner | Reuse | Work still owned there | Safe behavior before adoption |
+|---|---|---|---|
+| Phase 4, isolated delegation | `InstructionRuntime::render_agent` with isolated availability, repository source/error contracts, `ModelRosterService::resolve` and serializable `ModelRosterResolution` | Deliberately supplied child context, permissions, launch/persistence, cancellation, concurrency, result and post-launch retry policy; decide Startup Context activation explicitly | No isolated tool is introduced by the instruction framework. Existing Swarm model policy is unchanged. |
+| Phase 5, primary roles | `SystemPromptComposer`, agents/addenda/modules, `/agent` controls and manager | Joint authorship and field review of the real role set and workflows | Only the compatibility `jcode` profile is shipped. No role fixes a model, tool permission, memory or Startup Context policy. |
+| Phase 6, skill corpus | Managed/external skill catalog, complete package Copy, active snapshot lifecycle and manager | Curated content and any changed invocation/deactivation policy | Existing skill policy stays intact. References remain package files read on demand. |
+| Phase 7, tooling | Registered tool-guidance resources and existing tool/schema owners | Tool selection, credentials, permissions and jointly accepted operating guidance | No new tool is installed and no schema/permission boundary moves merely because guidance is editable. |
+| Phase 9, async execution | Agent/resource identity, roster resolution and concrete restore, repository `read_file` with explicit `AllowHeadFallback` | Durable jobs, per-run atomic activation, caller-specific missing-file recovery, quotas, approvals and retry/replacement policy | No new scheduler/job or automatic roster adoption. HEAD fallback is an explicit absent-working-file primitive, never a blanket invalid-source fallback. |
+| Phase 10, maintenance | Inventory, migration evidence, managed Git history, seed adoption and integrated verification | Upstream/downstream reconciliation, deliberate seed/content updates, model policy stewardship and exceptional sensitive-history repair | Ordinary management never rewrites history or pushes automatically. Running/resumed instruction and model identities remain unchanged by source edits. |
+
+For every future execution, validate complete context and permissions before
+publication/dispatch and persist the chosen concrete model/route/effort with the
+execution. Resume reconstructs that choice, not the latest alias. Do not introduce
+a second renderer, repository manager, credential parser or transcript.
 
 ## Git-backed instruction repository service
 
@@ -319,7 +356,7 @@ It deliberately excludes `AGENTS.md` and external skills. Import copies the comp
 
 ### Production boundary
 
-App-core `Server` owns the repository service. Construction performs no repository I/O. Primary activation is live across shared-server sessions, app-core turns, local prompt construction, CLI run, direct REPL, ACP, and Harness creation. Clear and transfer reuse the same server-owned service. WP-09 and WP-10 add the central manager protocol and TUI over the existing typed service.
+App-core `Server` owns the repository service. Construction performs no repository I/O. Primary activation is live across shared-server sessions, app-core turns, local prompt construction, CLI run, direct REPL, ACP, and Harness creation. Clear and transfer reuse the same server-owned service. The central manager protocol and TUI use the existing typed service for inspection, reviewed editing and repository controls.
 
 ## Managed notification delivery
 

@@ -585,6 +585,12 @@ Jcode also supports easy multi-account switching. Ran out of tokens on your firs
 
 ## Customizability / Self-Dev
 
+Use `/instructions` to manage named agents, global/project guidance, complete skill
+packages and their Git history. `/agent` selects a profile, while `/agent inspect`
+shows exact active text. Source edits do not silently change a running session.
+See the [instruction overview](docs/INSTRUCTIONS.md) and
+[migration and recovery guide](docs/INSTRUCTION_MIGRATION.md).
+
 Jcode is inventing a new form of customizability. One that doesn't limit you to what a plugin or extension can do. Tell your jcode agent to enter self dev mode, and it will start modifying its own source code. Jcode is optimized to iterate on itself. There is significant infrastructure around self developement, which allows it to edit, build, and test its own source code, then reload its own binary and continue work in your (potentially many) sessions, fully automatically. 
 
 It is reccomended that you use a frontier model for this. The jcode codebase is not a simple one, and weaker models can make subtle, breaking changes. GPT 5.5 or the latest available frontier model works well.

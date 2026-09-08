@@ -66,7 +66,7 @@ The stable true-system slots are:
 6. Project common guidance or compatible project overlay
 7. Dedicated global then project `AGENTS.md`
 8. Applicable project agent addenda
-9. Global then project preferred-tool compatibility guidance
+9. Global then project managed preferred-tool guidance, with unimported project compatibility input where applicable
 10. Available-skills catalog snapshot
 
 An ordinary post-dispatch transition renders only the complete target agent, its modules, applicable project redefinition, and applicable project addenda. It does not duplicate the kernel or independent system sections.

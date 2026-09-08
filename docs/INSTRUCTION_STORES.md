@@ -48,7 +48,9 @@ It is schema-versioned. Modes are `submodule`, `external-remote`, `external-loca
 ## Runtime authority
 
 - A present working file is authoritative, even before commit.
-- An intentionally empty file remains valid.
+- An intentionally empty resource body remains valid where its consumer permits
+  it. Keep the required frontmatter. A blank manifest or roster is not a valid
+  empty resource.
 - A present invalid file fails the affected runtime operation rather than falling back to another scope.
 - A missing committed file is read from current Git `HEAD` only when the caller explicitly requests the accepted fallback policy.
 - Managed reads and writes reject path traversal and symlink escape.
@@ -138,7 +140,10 @@ waiting for a writer on Unix.
 
 Fetch, pull, push, branch checkout, branch creation, remote configuration, and repository setup are explicit operations. Jcode never automatically pulls or pushes.
 
-Pull requires a clean instruction repository. Fast-forward-only and merge behavior are distinct. Conflicts remain visible and preserve local work.
+Pull requires a clean instruction repository. The manager exposes fast-forward-only
+pull and rejects divergence. The lower-level repository API also has an explicit
+merge strategy, but the manager does not select it. Conflicts remain visible and
+require deliberate Git recovery before further mutation.
 
 ## Initialization and recovery
 

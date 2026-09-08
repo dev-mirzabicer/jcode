@@ -4,7 +4,7 @@ Workflow prose uses the same [instruction runtime](dev/INSTRUCTION_RUNTIME.md) a
 
 ## Implemented consumers
 
-The Phase 3 migration is in progress. The authoritative row-by-row status is [the instruction inventory](dev/INSTRUCTION_INVENTORY.md).
+The workflow families below use managed sources. [The instruction inventory](dev/INSTRUCTION_INVENTORY.md) records their source owners, one-time migration equality evidence and approved exceptions.
 
 ### Transfer handoff
 
@@ -86,7 +86,7 @@ Compatibility prompt APIs now propagate instruction failures before provider use
 
 The implementation adds one optional session string, not another Swarm manager. Request preparation renders the current complete description only when Swarm is actually exposed. Successful preflight is followed by an atomic capture before dispatch. A budget-blocked or invalid source is not frozen. Later turns, tool-list rebuilds, resume and split reuse that exact description without source access. Fresh contexts, clear and transfer capture again. Source edits do not change running snapshots. First adoption by an already dispatched session resets native continuation and attributes one intentional cache transition. Tool locking and its one-time late-MCP rebuild remain independent.
 
-Raw session export, Markdown export, replay instruction state and full tool introspection retain the captured description. Lightweight startup metadata skips the body. `/swarm-prompt` remains a local external-editor compatibility command and selects the effective managed or unimported project source. On a genuinely remote connection, this local editor does not edit the server's filesystem. Central remote editing remains the manager's later-phase responsibility. Swarm enablement, routing policy and launch semantics remain unchanged; Phase 4 decides whether to disable or replace it.
+Raw session export, Markdown export, replay instruction state and full tool introspection retain the captured description. Lightweight startup metadata skips the body. `/swarm-prompt` remains a local external-editor compatibility command and selects the effective managed or unimported project source. On a genuinely remote connection, this local editor does not edit the server's filesystem. Use `/swarm-prompt inspect` or `/instructions` for the [central manager](INSTRUCTION_MANAGER.md), whose reviewed editing uses the connected server's sources. Swarm enablement, routing policy and launch semantics remain unchanged; Phase 4 decides whether to disable or replace it.
 
 ## Source and failure semantics
 
