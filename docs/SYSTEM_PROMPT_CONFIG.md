@@ -14,7 +14,10 @@ Global managed instructions live in:
 
 Configured project stores use the repository modes in [`INSTRUCTION_STORES.md`](INSTRUCTION_STORES.md). The working tree is runtime authority. The global shipped seed contains the profile kernel, an empty common layer, Mermaid guidance, managed available-skills prose, the `jcode` compatibility agent, and managed transition and replacement notifications. Existing initialized stores adopt newly shipped seed paths through a versioned local commit that does not overwrite existing working files or recreate later user deletions.
 
-A global store is initialized on the first primary activation. Server construction alone performs no instruction repository I/O.
+A genuinely new global store is initialized before its first managed-source use,
+including primary activation. Managed compatibility rendering, notifications and
+roster reads use the same preparation boundary. Server construction and read-only
+manager inspection alone do not initialize it.
 
 ## Initial agent selection
 

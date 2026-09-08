@@ -6,8 +6,10 @@ cutover and old sessions, not changes to prompt wording or agent behavior.
 ## Existing installations
 
 The global store is a standalone private Git repository at
-`~/.jcode/instructions`. First primary activation creates it when it has never
-been initialized. The rest of `~/.jcode` is not versioned with instructions.
+`~/.jcode/instructions`. First managed-source use, such as primary activation,
+creates it when it has never been initialized. Managed compatibility rendering,
+notification/workflow rendering and roster reads share that preparation boundary.
+The rest of `~/.jcode` is not versioned with instructions.
 Ordinary server construction and manager inspection do not initialize it.
 
 `instruction-store.toml` records `schema_version`, `seed_version`, optional

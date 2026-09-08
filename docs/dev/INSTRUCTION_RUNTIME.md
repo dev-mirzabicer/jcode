@@ -304,7 +304,9 @@ Repeated initialization first validates the complete working manifest, resources
 - A present working file is authoritative, including an empty file.
 - Present invalid UTF-8 or invalid resource text remains present and is reported by the affected runtime operation.
 - `AllowHeadFallback` is an explicit caller policy. It is not used by ordinary interactive reads.
-- Managed paths must be UTF-8, repository-relative, traversal-free, and outside `.git`.
+- Managed paths must be UTF-8, repository-relative, traversal-free, and outside
+  `.git`. That component is rejected case-insensitively at every depth, before
+  reads, drafts, mutations, seed or committed-snapshot materialization.
 - Repository roots and every existing path component are checked with `symlink_metadata`. Managed reads and writes fail closed rather than following a symlink outside the configured repository.
 - Project configuration discovery, reads, and writes also reject a symlinked `.jcode` directory or configuration file, including dangling symlinks.
 

@@ -2,7 +2,7 @@
 
 **Status:** Phase 3 Git repository infrastructure, primary activation, versioned seed adoption, and the [instruction manager](INSTRUCTION_MANAGER.md) with reviewed editing and explicit repository controls.
 
-Jcode has a typed service for Git-versioned managed instructions. App-core `Server` owns the service. Server construction performs no repository I/O; the first primary instruction activation initializes or validates the global store and then uses the same service for activation, clear, and transfer.
+Jcode has a typed service for Git-versioned managed instructions. App-core `Server` owns the service. Server construction performs no repository I/O. Primary activation, managed notification/workflow rendering and roster reads share global-store preparation, which may initialize a genuinely new store or adopt new seed paths before use. Activation, clear and transfer use this same service.
 
 ## Locations
 
@@ -54,6 +54,10 @@ It is schema-versioned. Modes are `submodule`, `external-remote`, `external-loca
 - A present invalid file fails the affected runtime operation rather than falling back to another scope.
 - A missing committed file is read from current Git `HEAD` only when the caller explicitly requests the accepted fallback policy.
 - Managed reads and writes reject path traversal and symlink escape.
+- Every managed path component excludes `.git` case-insensitively, including
+  nested package paths. Spellings such as `.GiT` cannot read or modify Git
+  metadata on case-insensitive filesystems. Seed and snapshot materialization
+  use the same boundary before writing files.
 
 ## Complete committed snapshots
 
@@ -180,7 +184,12 @@ Import leaves the original untouched, records its SHA-256 and empty/blank semant
 
 The first new primary session initializes the global store, resolves any configured project repository, and passes those roots to the typed composer. Initialization, seed upgrades, and Git publication retain full-store validation. Ordinary reads of a ready, current-seed store validate only selected resources and dependencies, so an invalid unrelated roster alias or agent cannot block valid composition or notification rendering. This shared read policy covers primary selection, clear, transfer, notification occurrences, and roster loading. Repository/manifest damage and invalid selected sources still fail visibly, without seed or global-only fallback.
 
-The global store is not initialized by ordinary server construction, read-only repository service access, internal non-primary agents, or documentation commands. See [`AGENT_PROFILES.md`](AGENT_PROFILES.md) for composition and lifecycle.
+Ordinary server or Agent construction, read-only inspection and documentation
+commands do not initialize the global store. An unprofiled internal caller's
+managed compatibility rendering can initialize it through shared source
+preparation. That does not adopt primary profile defaults, freezing or Startup
+Context policy. See [`WORKFLOW_INSTRUCTIONS.md`](WORKFLOW_INSTRUCTIONS.md) for
+that distinction and [`AGENT_PROFILES.md`](AGENT_PROFILES.md) for primary lifecycle.
 
 ## Current boundary
 
