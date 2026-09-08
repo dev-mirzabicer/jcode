@@ -101,6 +101,11 @@ pub(crate) struct EditingUi {
     pub conflict: Option<InstructionDraftConflict>,
 }
 impl EditingUi {
+    pub(super) fn set_creation_kind(&mut self, kind: Option<&str>) {
+        if let Some(form) = &mut self.form {
+            form.set_creation_kind(kind);
+        }
+    }
     pub(crate) fn set_external_metadata_value(&mut self, index: usize, value: String) {
         if let Some(form) = &mut self.form {
             form.set_external_value(index, value);
@@ -774,7 +779,7 @@ impl InstructionManager {
             EditAction::Preview => self.editing.show_previews(),
         }
     }
-    fn begin_edit(&mut self, action: InstructionEditAction) {
+    pub(super) fn begin_edit(&mut self, action: InstructionEditAction) {
         let Some(snapshot) = &self.snapshot else {
             self.status = "Refresh inspection before editing.".into();
             return;
@@ -1277,6 +1282,13 @@ impl InstructionManager {
                 .is_some_and(|(_, _, request)| {
                     matches!(request, InstructionManagementRequest::Update { .. })
                 });
+        let begin_action = self.editing.pending.as_ref().and_then(|(_, _, request)| {
+            if let InstructionManagementRequest::Begin { action, .. } = request {
+                Some(action.clone())
+            } else {
+                None
+            }
+        });
         let resumed = self
             .editing
             .pending
@@ -1297,6 +1309,55 @@ impl InstructionManager {
         if acknowledged_update {
             self.editing.local_loaded = None;
             self.editing.suspended_request = None;
+        }
+        if acknowledged_update
+            && self.visible
+            && let Some(draft) = &self.editing.draft
+        {
+            self.editing.queued = Some(InstructionManagementRequest::Review {
+                draft: draft.id.clone(),
+                generation: draft.generation,
+            });
+            self.editing.status =
+                "Checking the edited draft and preparing its complete diff…".into();
+        }
+        if self.visible
+            && !self.editing.failed
+            && let Some(action) = begin_action
+        {
+            if matches!(
+                action,
+                InstructionEditAction::Edit
+                    | InstructionEditAction::Create { .. }
+                    | InstructionEditAction::RedefineInProject
+                    | InstructionEditAction::CopyToScope { .. }
+                    | InstructionEditAction::CopySkill { .. }
+                    | InstructionEditAction::Addendum { .. }
+                    | InstructionEditAction::Settings { .. }
+            ) {
+                let structured = self
+                    .editing
+                    .draft
+                    .as_ref()
+                    .and_then(|draft| draft.files.get(self.editing.file_index))
+                    .is_some_and(|file| {
+                        matches!(
+                            file.metadata,
+                            InstructionEditMetadata::Roster(_)
+                                | InstructionEditMetadata::StoreSettings { .. }
+                        )
+                    });
+                self.edit_action(if structured {
+                    EditAction::Metadata
+                } else {
+                    EditAction::Body
+                });
+            } else if let Some(draft) = &self.editing.draft {
+                self.editing.queued = Some(InstructionManagementRequest::Review {
+                    draft: draft.id.clone(),
+                    generation: draft.generation,
+                });
+            }
         }
         if is_recovery {
             self.open_recovery_menu();

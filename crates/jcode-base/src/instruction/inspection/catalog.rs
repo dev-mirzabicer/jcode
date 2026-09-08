@@ -165,6 +165,8 @@ impl InstructionInspector {
                     key.clone(),
                     Resource {
                         row: InstructionRow {
+                            description: String::new(),
+                            variants: Vec::new(),
                             key,
                             id: resource.id.to_string(),
                             name: name.clone(),
@@ -218,6 +220,14 @@ impl InstructionInspector {
                     true,
                     None,
                 );
+            }
+        }
+        for resource in inspector.resources.values_mut() {
+            if let Some(reference) = &resource.managed
+                && let Ok(document) = runtime.resolve(&selector(reference))
+            {
+                resource.row.description =
+                    document.metadata.description.clone().unwrap_or_default();
             }
         }
         inspector.collect_skills(cancel)?;
@@ -418,6 +428,8 @@ impl InstructionInspector {
             key.clone(),
             Resource {
                 row: InstructionRow {
+                    description: String::new(),
+                    variants: Vec::new(),
                     key,
                     id: path
                         .file_name()
@@ -485,6 +497,11 @@ impl InstructionInspector {
                 .values_mut()
                 .find(|resource| resource.path == path)
             {
+                resource.row.name = entry.name.clone();
+                resource.row.description = registry
+                    .candidate(&entry.name, &entry.source)
+                    .map(|skill| skill.description.clone())
+                    .unwrap_or_default();
                 resource.row.effective = entry.effective;
                 resource.annotation.push_str(&format!(
                     "Skill invocation name: {}\nSource: {}\n",
@@ -513,7 +530,11 @@ impl InstructionInspector {
                 .values_mut()
                 .find(|resource| resource.path == path)
             {
-                resource.row.name = entry.name;
+                resource.row.name = entry.name.clone();
+                resource.row.description = registry
+                    .candidate(&entry.name, &entry.source)
+                    .map(|skill| skill.description.clone())
+                    .unwrap_or_default();
                 resource.annotation = format!(
                     "Source: {}\nExternal skill: read-only. Copy to managed global/project store is available in WP-10, not executed by this inspector.\n",
                     entry.source.kind
@@ -696,7 +717,7 @@ impl InstructionInspector {
         for (alias, warning) in entries {
             let key = format!("model-roster:{alias}");
             self.resources.insert(key.clone(), Resource {
-                row: InstructionRow { key, id: alias.clone(), name: alias.clone(), kind: "model-roster".into(), scope: "global".into(), repository: global.id.clone(), origin: InstructionOrigin::Managed, effective: true, redefines_global: false, high_impact: false, valid: warning.is_none(), warning },
+                row: InstructionRow { description: String::new(), variants: Vec::new(), key, id: alias.clone(), name: alias.clone(), kind: "model-roster".into(), scope: "global".into(), repository: global.id.clone(), origin: InstructionOrigin::Managed, effective: true, redefines_global: false, high_impact: false, valid: warning.is_none(), warning },
                 path: path.clone(), managed: None, alias: Some(alias), annotation: "Global-only launch policy. Preview uses independent provider construction, without inference or modifying the primary provider.".into(),
             });
         }

@@ -188,7 +188,22 @@ fn ux_sticky_identity_menus_and_hit_regions_work_at_every_floor() {
         render(&mut manager, width, height);
         assert!(!manager.menu_hits.is_empty());
         assert!(manager.controls.iter().any(|(_, key)| *key == KeyCode::Esc));
-        let rect = manager.menu_hits[0].0;
+        let index = manager
+            .menu
+            .as_ref()
+            .unwrap()
+            .items
+            .iter()
+            .position(|item| item.label == "Source")
+            .unwrap();
+        manager.menu.as_mut().unwrap().selected = index;
+        render(&mut manager, width, height);
+        let rect = manager
+            .menu_hits
+            .iter()
+            .find(|(_, i)| *i == index)
+            .unwrap()
+            .0;
         manager.mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: rect.x,
@@ -331,4 +346,104 @@ fn ux_narrow_action_explanations_are_complete_and_scrollable() {
     assert!(!manager.menu.as_ref().unwrap().explanation);
     manager.key(KeyCode::Esc, KeyModifiers::NONE);
     assert!(manager.menu.is_none());
+}
+
+#[test]
+fn ux_types_scopes_and_secondary_pages_change_real_navigation_without_editing_destinations() {
+    let mut manager = super::tests::populated();
+    manager.queued = None;
+    manager.key(KeyCode::F(1), KeyModifiers::NONE);
+    manager.key(KeyCode::Down, KeyModifiers::NONE);
+    assert_eq!(manager.category_label(), "Skills");
+    assert_eq!(manager.filter.kind.as_deref(), Some("skill"));
+    assert!(manager.filter.grouped);
+    assert_eq!(manager.pane, Pane::Repositories);
+    manager.choose_scope(Some("project".into()));
+    assert_eq!(manager.scope_label(), "Project");
+    assert_eq!(manager.filter.scope.as_deref(), Some("project"));
+    assert!(manager.editing.queued.is_none());
+    manager.choose_navigation(navigation::REPOSITORIES);
+    assert_eq!(manager.category_label(), "Repositories & sync");
+    assert_eq!(
+        manager.selected_target(),
+        Some(InstructionInspectionTarget::Repository("global".into()))
+    );
+    manager.choose_navigation(navigation::SESSION);
+    assert_eq!(
+        manager.selected_target(),
+        Some(InstructionInspectionTarget::Session)
+    );
+    assert!(manager.editing.queued.is_none());
+}
+
+#[test]
+fn ux_names_scope_external_badges_and_setup_are_visible_without_selection() {
+    let mut manager = super::tests::populated();
+    manager.queued = None;
+    manager.filter.kind = Some("skill".into());
+    manager.rows[0].id = "SKILL.md".into();
+    manager.rows[0].name = "frontend-fixture".into();
+    manager.rows[0].kind = "skill".into();
+    manager.rows[0].origin = InstructionOrigin::External;
+    manager.rows[0].description = "Design synthetic interfaces".into();
+    for (width, height) in [(150, 40), (80, 24), (60, 24), (24, 10)] {
+        let screen = super::tests::render(&mut manager, width, height);
+        assert!(!screen.contains("READ ONLY"));
+        assert!(!screen.contains("SKILL.md"));
+        assert!(screen.contains("[G ext]"));
+        assert!(screen.contains("frontend"));
+        assert!(
+            manager
+                .controls
+                .iter()
+                .any(|(_, key)| *key == KeyCode::F(4)),
+            "Project setup must have a visible hit region at {width}"
+        );
+    }
+}
+
+#[test]
+fn ux_source_copy_destination_collisions_are_explicit_and_selection_correlated() {
+    let mut manager = super::tests::populated();
+    manager.queued = None;
+    manager.rows[0].variants = vec![
+        InstructionSourceVariant {
+            key: "global-source".into(),
+            name: "Synthetic".into(),
+            scope: "global".into(),
+            repository: "global".into(),
+            origin: InstructionOrigin::Managed,
+            path: "/global/agent.md".into(),
+            effective: false,
+            valid: true,
+        },
+        InstructionSourceVariant {
+            key: "project-source".into(),
+            name: "Synthetic project".into(),
+            scope: "project".into(),
+            repository: "project".into(),
+            origin: InstructionOrigin::Managed,
+            path: "/project/agent.md".into(),
+            effective: true,
+            valid: true,
+        },
+    ];
+    manager.open_sources();
+    let menu = manager.menu.as_ref().unwrap();
+    assert!(menu.items.iter().any(|item| item.label == "Edit project"));
+    assert!(
+        menu.items
+            .iter()
+            .any(|item| item.label == "Copy to project and edit" && item.disabled.is_some())
+    );
+    let index = menu
+        .items
+        .iter()
+        .position(|item| item.label == "Edit project")
+        .unwrap();
+    manager.menu.as_mut().unwrap().selected = index;
+    manager.rows[0].key = "changed".into();
+    manager.choose_menu();
+    assert!(manager.editing.queued.is_none());
+    assert!(manager.status.contains("changed"));
 }

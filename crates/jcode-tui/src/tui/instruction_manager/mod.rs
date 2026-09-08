@@ -1,6 +1,8 @@
 //! One read-only state machine for wide and narrow local/remote inspection.
 pub(crate) mod editing;
 mod menu;
+mod navigation;
+use navigation::Destination;
 mod render;
 use menu::{FilterField, Menu};
 #[cfg(test)]
@@ -26,6 +28,7 @@ pub(crate) struct Pending {
 }
 
 pub(crate) struct InstructionManager {
+    destination: Destination,
     pub editing: editing::EditingUi,
     pub visible: bool,
     pub session: String,
@@ -78,10 +81,13 @@ pub(crate) struct InstructionManager {
 impl InstructionManager {
     pub fn new(session: String, roster: bool) -> Self {
         let filter = InstructionFilter {
-            kind: roster.then(|| "model-roster".into()),
+            kind: Some(if roster { "model-roster" } else { "agent" }.into()),
+            grouped: true,
+            main_catalog: true,
             ..Default::default()
         };
         Self {
+            destination: Destination::Catalog,
             editing: editing::EditingUi::default(),
             visible: true,
             session,
@@ -92,7 +98,7 @@ impl InstructionManager {
             row_total: 0,
             row_next: None,
             selected: 0,
-            repository_selected: 0,
+            repository_selected: if roster { 7 } else { 0 },
             pane: Pane::Resources,
             view: InstructionInspectionView::Source,
             target: None,
@@ -107,7 +113,7 @@ impl InstructionManager {
             history_visible: false,
             help: false,
             search_editing: false,
-            status: "Loading read-only inspection…".into(),
+            status: "Loading instruction types and sources…".into(),
             queued: Some(InstructionInspectionRequest::Open { filter }),
             pending: None,
             areas: [Rect::default(); 3],
@@ -232,13 +238,17 @@ impl InstructionManager {
         if !result_matches {
             return false;
         }
+        let listed = matches!(
+            &reply.result,
+            InstructionInspectionResult::Opened(_) | InstructionInspectionResult::Resources(_)
+        );
         let pending = self.pending.take().expect("matched pending");
         match reply.result {
             InstructionInspectionResult::Opened(snapshot) => {
                 let selected_key = self.rows.get(self.selected).map(|row| row.key.clone());
                 self.set_rows(snapshot.resources.clone(), selected_key.as_deref());
                 self.snapshot = Some(snapshot);
-                self.status = "Read-only. Sources captured for browsing. R refreshes; previews never activate.".into();
+                self.status = "Sources loaded. Choose a type and scope; each Edit action names its destination.".into();
             }
             InstructionInspectionResult::Resources(page) => {
                 if let InstructionInspectionRequest::Resources { offset, filter, .. } =
@@ -249,7 +259,7 @@ impl InstructionManager {
                 }
                 let selected_key = self.rows.get(self.selected).map(|row| row.key.clone());
                 self.set_rows(page, selected_key.as_deref());
-                self.status = "Resource page loaded".into();
+                self.status = "Instructions loaded".into();
             }
             InstructionInspectionResult::Text(page) => {
                 if let InstructionInspectionRequest::Text {
@@ -323,6 +333,13 @@ impl InstructionManager {
                 self.visible = false;
             }
         }
+        if listed && self.filter.grouped {
+            if self.destination == Destination::Session {
+                self.detail(InstructionInspectionView::Metadata, None);
+            } else {
+                self.preview_selection();
+            }
+        }
         true
     }
 
@@ -343,8 +360,24 @@ impl InstructionManager {
     }
 
     fn filter_changed(&mut self) {
+        self.repository_selected = if self.filter.origin == Some(InstructionOrigin::Legacy) {
+            9
+        } else {
+            navigation::CATEGORIES
+                .iter()
+                .take(9)
+                .position(|(_, kind)| kind.map(str::to_string) == self.filter.kind)
+                .unwrap_or(10)
+        };
         self.last_error = false;
         self.pane = Pane::Resources;
+        self.text = None;
+        self.target = None;
+        self.detail_row = None;
+        self.wrapped.clear();
+        self.wrap_key = None;
+        self.history_visible = false;
+        self.revision_open = false;
         self.pending = None;
         if let Some(snapshot) = self.snapshot_id() {
             self.queued = Some(InstructionInspectionRequest::Resources {
@@ -361,16 +394,14 @@ impl InstructionManager {
     }
 
     fn selected_target(&self) -> Option<InstructionInspectionTarget> {
-        if self.pane == Pane::Repositories {
-            if self.repository_selected == 0 {
-                Some(InstructionInspectionTarget::Session)
-            } else {
-                self.snapshot
-                    .as_ref()?
-                    .repositories
-                    .get(self.repository_selected - 1)
-                    .map(|store| InstructionInspectionTarget::Repository(store.key.clone()))
-            }
+        if self.destination == Destination::Session {
+            Some(InstructionInspectionTarget::Session)
+        } else if self.pane == Pane::Repositories {
+            None
+        } else if self.destination == Destination::Repositories && self.pane == Pane::Resources {
+            self.managed_repositories()
+                .get(self.selected)
+                .map(|store| InstructionInspectionTarget::Repository(store.key.clone()))
         } else if self.pane == Pane::Resources {
             self.rows
                 .get(self.selected)
@@ -441,6 +472,9 @@ impl InstructionManager {
     }
 
     fn page(&mut self, forward: bool) {
+        if self.destination != Destination::Catalog && self.pane != Pane::Detail {
+            return;
+        }
         let Some(snapshot) = self.snapshot_id() else {
             return;
         };
@@ -500,13 +534,15 @@ impl InstructionManager {
     fn navigate(&mut self, down: bool, amount: usize) {
         let max_scroll = self.wrapped.len().saturating_sub(self.detail_height);
         let (position, count) = match self.pane {
-            Pane::Repositories => (
-                &mut self.repository_selected,
-                self.snapshot
-                    .as_ref()
-                    .map_or(1, |snapshot| snapshot.repositories.len() + 1),
-            ),
-            Pane::Resources => (&mut self.selected, self.rows.len()),
+            Pane::Repositories => (&mut self.repository_selected, navigation::SESSION + 1),
+            Pane::Resources => {
+                let count = if self.destination == Destination::Repositories {
+                    self.managed_repositories().len()
+                } else {
+                    self.rows.len()
+                };
+                (&mut self.selected, count)
+            }
             Pane::Detail if self.history_visible => {
                 (&mut self.history_selected, self.history.len())
             }
@@ -518,8 +554,18 @@ impl InstructionManager {
         } else {
             position.saturating_sub(amount)
         };
+        let changed = *position != previous;
         if *position == previous && amount != usize::MAX && self.pane != Pane::Repositories {
             self.page(down);
+        }
+        if changed {
+            if self.pane == Pane::Repositories {
+                let index = self.repository_selected;
+                self.choose_navigation(index);
+                self.pane = Pane::Repositories;
+            } else if self.pane == Pane::Resources {
+                self.preview_selection();
+            }
         }
     }
 
@@ -540,7 +586,7 @@ impl InstructionManager {
             self.search_cursor += text.len();
             self.filter_changed();
         } else {
-            self.status = "Read-only view: press / before pasting search text.".into();
+            self.status = "Press / to search, or choose Edit to change the selected source.".into();
         }
         true
     }
@@ -699,8 +745,14 @@ impl InstructionManager {
             KeyCode::PageUp => self.navigate(false, 12),
             KeyCode::PageDown => self.navigate(true, 12),
             KeyCode::Home => match self.pane {
-                Pane::Repositories => self.repository_selected = 0,
-                Pane::Resources => self.selected = 0,
+                Pane::Repositories => {
+                    self.choose_navigation(0);
+                    self.pane = Pane::Repositories;
+                }
+                Pane::Resources => {
+                    self.selected = 0;
+                    self.preview_selection();
+                }
                 Pane::Detail => {
                     self.scroll = 0;
                     self.history_selected = 0;
@@ -710,17 +762,26 @@ impl InstructionManager {
             KeyCode::Char('n') => self.page(true),
             KeyCode::Char('p') => self.page(false),
             KeyCode::Char('f') => self.open_filters(FilterField::All),
-            KeyCode::Char('s') => self.open_filters(FilterField::Scope),
+            KeyCode::Char('s') => self.open_scope_choices(),
+            KeyCode::Char('e') => self.edit_action(editing::EditAction::Open),
+            KeyCode::F(6) => self.new_instruction(),
+            KeyCode::Char('v') => self.open_sources(),
+            KeyCode::F(5) => self.edit_action(editing::EditAction::GlobalRepository),
+            KeyCode::F(4) => self.edit_action(editing::EditAction::ProjectRepository),
             KeyCode::Char('g') => {
                 self.filter.redefinitions =
                     (self.filter.redefinitions != Some(true)).then_some(true);
                 self.filter_changed();
             }
-            KeyCode::Char('v') => self.open_filters(FilterField::Validity),
-            KeyCode::Char('e') => self.open_filters(FilterField::Effectiveness),
             KeyCode::Char('o') => self.open_filters(FilterField::Origin),
             KeyCode::Char('c') => {
-                self.filter = InstructionFilter::default();
+                self.destination = Destination::Catalog;
+                self.repository_selected = 10;
+                self.filter = InstructionFilter {
+                    grouped: true,
+                    main_catalog: true,
+                    ..Default::default()
+                };
                 self.filter_changed();
             }
             KeyCode::Char('z') => self.expanded = !self.expanded,
@@ -776,17 +837,15 @@ impl InstructionManager {
                 }
             }
             KeyCode::Enter | KeyCode::Right => {
+                if self.pane == Pane::Repositories {
+                    self.choose_navigation(self.repository_selected);
+                    return true;
+                }
+
                 if self.pane == Pane::Detail {
                     self.open_actions(true);
                 } else {
-                    self.detail(
-                        if self.pane == Pane::Repositories {
-                            InstructionInspectionView::Metadata
-                        } else {
-                            InstructionInspectionView::Source
-                        },
-                        None,
-                    );
+                    self.detail(InstructionInspectionView::Metadata, None);
                 }
             }
             _ => {}
@@ -863,8 +922,15 @@ impl InstructionManager {
             {
                 self.pane = *pane;
                 match pane {
-                    Pane::Repositories => self.repository_selected = *index,
-                    Pane::Resources => self.selected = *index,
+                    Pane::Repositories => {
+                        let index = *index;
+                        self.choose_navigation(index);
+                        self.pane = Pane::Repositories;
+                    }
+                    Pane::Resources => {
+                        self.selected = *index;
+                        self.preview_selection();
+                    }
                     Pane::Detail => self.history_selected = *index,
                 };
                 return;
@@ -881,6 +947,10 @@ impl InstructionManager {
     }
 
     fn back(&mut self) {
+        if self.destination == Destination::Session && self.pane != Pane::Repositories {
+            self.pane = Pane::Repositories;
+            return;
+        }
         if self.revision_open && self.pane == Pane::Detail {
             let loading = self.pending.is_some() || self.queued.is_some();
             self.pending = None;
@@ -939,6 +1009,6 @@ impl InstructionManager {
     pub fn debug(&self) -> serde_json::Value {
         serde_json::json!({
             "editing": { "visible":self.editing.visible, "draft":self.editing.draft.as_ref().map(|draft|&draft.id), "generation":self.editing.draft.as_ref().map(|draft|draft.generation), "reviewed":self.editing.draft.as_ref().is_some_and(|draft|draft.reviewed), "working_file_only":self.editing.draft.as_ref().is_some_and(|draft|draft.working_file_only), "pending":self.editing.pending.as_ref().map(|(id,_,_)|id), "failed":self.editing.failed, "storage_blocked":self.editing.storage_blocked },
- "visible": self.visible, "section": format!("{:?}", self.view), "pane": format!("{:?}", self.pane), "resource_id": self.rows.get(self.selected).map(|row| &row.id), "scope": self.filter.scope, "rows_loaded": self.rows.len(), "resource_offset": self.row_offset, "detail_pages_visited": self.text_offsets.len(), "detail_bytes_loaded": self.text.as_ref().map_or(0, |page| page.text.len()), "valid": self.rows.get(self.selected).map(|row| row.valid), "repositories": self.snapshot.as_ref().map(|snapshot| snapshot.repositories.iter().map(|store| serde_json::json!({"id":store.key,"kind":store.kind,"dirty":store.dirty,"detached":store.detached,"conflicts":store.conflicts,"active_lease":store.active_lease})).collect::<Vec<_>>()), "pending_id": self.pending.as_ref().map(|pending| pending.id), "menu": self.menu.as_ref().map(|menu| &menu.title), "scroll":self.scroll,"detail_view":self.view_label(), "layout": if self.areas.iter().filter(|area| area.width > 0).count() > 1 { "wide" } else { "tabs" } })
+ "category":self.category_label(),"browse_scope":self.scope_label(),"visible": self.visible, "section": format!("{:?}", self.view), "pane": format!("{:?}", self.pane), "resource_id": self.rows.get(self.selected).map(|row| &row.id), "scope": self.filter.scope, "rows_loaded": self.rows.len(), "resource_offset": self.row_offset, "detail_pages_visited": self.text_offsets.len(), "detail_bytes_loaded": self.text.as_ref().map_or(0, |page| page.text.len()), "valid": self.rows.get(self.selected).map(|row| row.valid), "repositories": self.snapshot.as_ref().map(|snapshot| snapshot.repositories.iter().map(|store| serde_json::json!({"id":store.key,"kind":store.kind,"dirty":store.dirty,"detached":store.detached,"conflicts":store.conflicts,"active_lease":store.active_lease})).collect::<Vec<_>>()), "pending_id": self.pending.as_ref().map(|pending| pending.id), "menu": self.menu.as_ref().map(|menu| &menu.title), "scroll":self.scroll,"detail_view":self.view_label(), "layout": if self.areas.iter().filter(|area| area.width > 0).count() > 1 { "wide" } else { "tabs" } })
     }
 }

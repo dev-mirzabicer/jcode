@@ -13,6 +13,10 @@ pub const TEXT_PAGE_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstructionFilter {
+    #[serde(default)]
+    pub grouped: bool,
+    #[serde(default)]
+    pub main_catalog: bool,
     pub search: String,
     pub kind: Option<String>,
     pub scope: Option<String>,
@@ -33,6 +37,10 @@ pub enum InstructionOrigin {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstructionRow {
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub variants: Vec<InstructionSourceVariant>,
     /// Opaque, snapshot-local identity. Never interpreted as a filesystem path.
     pub key: String,
     pub id: String,
@@ -48,6 +56,18 @@ pub struct InstructionRow {
     pub high_impact: bool,
     pub valid: bool,
     pub warning: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstructionSourceVariant {
+    pub key: String,
+    pub name: String,
+    pub scope: String,
+    pub repository: String,
+    pub origin: InstructionOrigin,
+    pub path: String,
+    pub effective: bool,
+    pub valid: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

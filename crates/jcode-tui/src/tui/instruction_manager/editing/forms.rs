@@ -122,6 +122,16 @@ pub(super) struct EditForm {
     last_field: usize,
 }
 impl EditForm {
+    pub(super) fn set_creation_kind(&mut self, kind: Option<&str>) {
+        if let Some(kind) = kind
+            && let Some(field) = self.fields.iter_mut().find(|field| {
+                field.key == FieldKey::Kind && field.options.iter().any(|option| option == kind)
+            })
+        {
+            field.value = kind.into();
+            field.cursor = field.value.len();
+        }
+    }
     pub(crate) fn set_external_value(&mut self, index: usize, value: String) {
         if let Some(field) = self.fields.get_mut(index) {
             field.value = value;

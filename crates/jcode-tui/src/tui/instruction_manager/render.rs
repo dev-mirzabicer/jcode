@@ -78,7 +78,7 @@ impl InstructionManager {
             return;
         }
         let compact = area.height < 12;
-        let filtered = self.filter != InstructionFilter::default();
+        let filtered = true;
         let top = if compact {
             2
         } else if filtered {
@@ -95,16 +95,14 @@ impl InstructionManager {
                 Constraint::Length(bottom),
             ])
             .split(area);
-        let title = if area.width >= 65 {
+        let title = if self.destination == Destination::Catalog {
             format!(
-                "Instructions   READ ONLY   |   Active agent: {}",
-                self.snapshot
-                    .as_ref()
-                    .and_then(|snapshot| snapshot.active_agent.as_deref())
-                    .unwrap_or("not available")
+                "Instructions · {} · {}",
+                self.category_label(),
+                self.scope_label()
             )
         } else {
-            "Instructions [read only]".into()
+            self.category_label().to_string()
         };
         line(
             frame,
@@ -116,18 +114,14 @@ impl InstructionManager {
             (
                 KeyCode::F(1),
                 if area.width >= 60 {
-                    "F1 Repositories"
+                    "F1 Types"
                 } else {
-                    "Repos"
+                    "Types"
                 },
             ),
             (
                 KeyCode::F(2),
-                if area.width >= 60 {
-                    "F2 Resources"
-                } else {
-                    "List"
-                },
+                if area.width >= 60 { "F2 List" } else { "List" },
             ),
             (
                 KeyCode::F(3),
@@ -138,6 +132,41 @@ impl InstructionManager {
                 },
             ),
         ];
+        let scope_button = if area.width < 44 {
+            format!(
+                "S {}",
+                if self.filter.scope.is_none() {
+                    "Here"
+                } else {
+                    self.scope_label()
+                }
+            )
+        } else {
+            format!("S Scope: {}", self.scope_label())
+        };
+        let setup = if self.project_configured() {
+            "F4 Project"
+        } else {
+            "F4 Project setup"
+        };
+        let nav = if area.width < 44 {
+            vec![
+                (KeyCode::F(1), "Types"),
+                (KeyCode::Char('s'), scope_button.as_str()),
+                (KeyCode::F(4), "F4 Setup"),
+            ]
+        } else if area.width < 90 {
+            vec![
+                (KeyCode::F(1), "F1 Types"),
+                (KeyCode::Char('s'), scope_button.as_str()),
+                (KeyCode::F(4), setup),
+            ]
+        } else {
+            let mut result = nav.to_vec();
+            result.push((KeyCode::Char('s'), scope_button.as_str()));
+            result.push((KeyCode::F(4), setup));
+            result
+        };
         self.buttons(
             frame,
             Rect::new(area.x, area.y + 1, area.width, 1),
@@ -156,16 +185,51 @@ impl InstructionManager {
                     theme.accent,
                 );
             } else {
+                let edit_label = self.active_row().map(|row| {
+                    if row.origin == InstructionOrigin::External && row.kind != "AGENTS.md" {
+                        "Copy to edit".into()
+                    } else {
+                        format!("E Edit {}", row.scope)
+                    }
+                });
+                let mut actions = vec![
+                    (KeyCode::Char('/'), "/ Search"),
+                    (KeyCode::F(6), "F6 New"),
+                    (KeyCode::Char('v'), "V Sources"),
+                    (KeyCode::Char(' '), "Space Actions"),
+                ];
+                if let Some(label) = &edit_label {
+                    actions.insert(
+                        0,
+                        (
+                            if label == "Copy to edit" {
+                                KeyCode::Char('v')
+                            } else {
+                                KeyCode::Char('e')
+                            },
+                            label.as_str(),
+                        ),
+                    );
+                }
+                if self.destination == Destination::Repositories {
+                    actions = vec![
+                        (KeyCode::F(5), "F5 Global controls"),
+                        (KeyCode::F(4), "F4 Project setup"),
+                        (KeyCode::Char('6'), "6 History"),
+                        (KeyCode::Char(' '), "Space Actions"),
+                    ];
+                } else if self.destination == Destination::Session {
+                    actions = vec![
+                        (KeyCode::Char('4'), "4 Exact system snapshot"),
+                        (KeyCode::Char(' '), "Space Actions"),
+                    ];
+                } else if !self.project_configured() {
+                    actions.push((KeyCode::F(4), "F4 Project setup"));
+                }
                 self.buttons(
                     frame,
                     Rect::new(area.x, area.y + 2, area.width, 1),
-                    &[
-                        (KeyCode::Char('/'), "/ Search"),
-                        (KeyCode::Char('f'), "F Filters"),
-                        (KeyCode::Char('t'), "T Views"),
-                        (KeyCode::Char(' '), "Space Actions"),
-                        (KeyCode::Char('r'), "R Refresh"),
-                    ],
+                    &actions,
                     &theme,
                 );
             }
@@ -382,30 +446,37 @@ impl InstructionManager {
         if area.width == 0 {
             return;
         }
-        let inner = self.pane(frame, area, "Repositories", Pane::Repositories, theme);
-        let mut rows = vec!["Session & active instructions".into()];
-        if let Some(snapshot) = &self.snapshot {
-            rows.extend(snapshot.repositories.iter().map(|store| {
-                format!(
-                    "{}{}{}",
-                    store.kind,
-                    if store.detached {
-                        " [detached]"
-                    } else if store.conflicts > 0 {
-                        " [conflict]"
-                    } else if store.dirty {
-                        " [changed]"
-                    } else {
-                        ""
-                    },
-                    if store.active_lease { " [busy]" } else { "" }
-                )
-            }));
-        }
+        let inner = self.pane(frame, area, "Types & pages", Pane::Repositories, theme);
+        let rows = navigation::CATEGORIES
+            .iter()
+            .map(|(name, _)| name.to_string())
+            .chain([
+                "Repositories & sync".into(),
+                "Current session instructions".into(),
+            ])
+            .collect::<Vec<_>>();
+        let active = if self.destination == Destination::Repositories {
+            navigation::REPOSITORIES
+        } else if self.destination == Destination::Session {
+            navigation::SESSION
+        } else if self.filter.origin == Some(InstructionOrigin::Legacy) {
+            9
+        } else {
+            navigation::CATEGORIES
+                .iter()
+                .take(9)
+                .position(|(_, kind)| kind.map(str::to_string) == self.filter.kind)
+                .unwrap_or(10)
+        };
+        let labels = rows
+            .into_iter()
+            .enumerate()
+            .map(|(i, label)| format!("{}{label}", if i == active { "[+] " } else { "" }))
+            .collect::<Vec<_>>();
         self.draw_rows(
             frame,
             inner,
-            &rows,
+            &labels,
             self.repository_selected,
             Pane::Repositories,
             theme,
@@ -416,20 +487,57 @@ impl InstructionManager {
         if area.width == 0 {
             return;
         }
-        let label = if self.filter.redefinitions == Some(true) {
-            "Redefinitions"
-        } else {
-            "Resources"
-        };
+        let label = self.category_label().to_string();
         let inner = self.pane(
             frame,
             area,
-            &format!("{label} · {} results", self.row_total),
+            &format!(
+                "{label} · {}",
+                if self.destination == Destination::Repositories {
+                    self.managed_repositories().len()
+                } else {
+                    self.row_total
+                }
+            ),
             Pane::Resources,
             theme,
         );
+        if self.destination == Destination::Session {
+            text(
+                frame,
+                inner,
+                "Current session snapshots are inspect-only. They are not editable stores.",
+                theme.muted,
+            );
+            return;
+        }
+        if self.destination == Destination::Repositories {
+            let rows = self
+                .managed_repositories()
+                .into_iter()
+                .map(|store| {
+                    format!(
+                        "{} · {}{}{}",
+                        if store.key == "global" {
+                            "Global instructions"
+                        } else {
+                            "Project instructions"
+                        },
+                        store.branch.as_deref().unwrap_or("no attached branch"),
+                        if store.dirty { " · changes" } else { "" },
+                        if store.health != "Ready" {
+                            " · needs attention"
+                        } else {
+                            ""
+                        }
+                    )
+                })
+                .collect::<Vec<_>>();
+            self.draw_rows(frame, inner, &rows, self.selected, Pane::Resources, theme);
+            return;
+        }
         if self.rows_loading() {
-            line(frame, inner, "Loading resources…", theme.warning);
+            line(frame, inner, "Loading instructions…", theme.warning);
             return;
         }
         if self.rows.is_empty() {
@@ -439,56 +547,112 @@ impl InstructionManager {
                 if self.last_error {
                     "Source discovery failed.\nEnter Views or Space Actions to inspect the error or refresh."
                 } else {
-                    "No matching resources.\nF: adjust filters\nC: clear all filters\nR: refresh sources"
+                    "No matching instructions in this type and scope.\nF6: create here · S: change scope\nF4: set up project instructions · /: search"
                 },
                 theme.muted,
             );
             return;
         }
-        let labels = self
-            .rows
-            .iter()
-            .map(|row| {
-                format!(
-                    "{}{}{}{}",
-                    if row.high_impact {
-                        "[HIGH] "
-                    } else if row.redefines_global {
-                        "[override] "
-                    } else {
-                        ""
-                    },
-                    if !row.valid {
-                        "[invalid] "
-                    } else if !row.effective {
-                        "[shadowed] "
-                    } else {
-                        ""
-                    },
-                    row.id,
-                    if row.scope == "project" {
-                        " · project"
-                    } else {
-                        ""
-                    }
-                )
-            })
-            .collect::<Vec<_>>();
         let body = Rect::new(
             inner.x,
             inner.y,
             inner.width,
             inner.height.saturating_sub(1),
         );
-        self.draw_rows(frame, body, &labels, self.selected, Pane::Resources, theme);
-        let row = self.rows.get(self.selected).expect("nonempty selection");
+        let row_height = if body.height >= 10 { 2 } else { 1 };
+        let visible = usize::from(body.height / row_height).max(1);
+        let start = self
+            .selected
+            .saturating_sub(visible / 2)
+            .min(self.rows.len().saturating_sub(visible));
+        for (index, row) in self.rows.iter().enumerate().skip(start).take(visible) {
+            let y = body.y + u16::try_from(index - start).unwrap_or(0) * row_height;
+            let rect = Rect::new(body.x, y, body.width.saturating_sub(1), row_height);
+            let scope = if self.filter.scope.is_none()
+                && row
+                    .variants
+                    .iter()
+                    .any(|variant| variant.scope == "global" && variant.effective)
+                && row
+                    .variants
+                    .iter()
+                    .any(|variant| variant.scope == "project" && variant.effective)
+            {
+                "G+P"
+            } else if row.scope == "project" {
+                "P"
+            } else {
+                "G"
+            };
+            let badges = format!(
+                "[{scope}{}]",
+                if row.origin == InstructionOrigin::External {
+                    " ext"
+                } else if row.origin == InstructionOrigin::Legacy {
+                    " original"
+                } else {
+                    ""
+                }
+            );
+            let name = if row.name.is_empty() {
+                row.id.as_str()
+            } else {
+                row.name.as_str()
+            };
+            let label = format!(
+                "{} {badges} {name}{}{}",
+                if index == self.selected { ">" } else { " " },
+                if !row.valid { " [invalid]" } else { "" },
+                if row.high_impact {
+                    " [high impact]"
+                } else {
+                    ""
+                }
+            );
+            line(
+                frame,
+                Rect::new(rect.x, rect.y, rect.width, 1),
+                &label,
+                if index == self.selected && self.pane == Pane::Resources {
+                    theme.selected
+                } else {
+                    Style::default()
+                },
+            );
+            if row_height == 2 {
+                let subtitle = if !row.description.is_empty() {
+                    row.description.clone()
+                } else if row.variants.len() > 1 {
+                    format!(
+                        "{} source versions · V to compare or edit",
+                        row.variants.len()
+                    )
+                } else {
+                    format!(
+                        "{} · {}",
+                        row.kind,
+                        if row.effective {
+                            "applies here"
+                        } else {
+                            "not selected here"
+                        }
+                    )
+                };
+                line(
+                    frame,
+                    Rect::new(rect.x + 2, rect.y + 1, rect.width.saturating_sub(2), 1),
+                    &subtitle,
+                    theme.muted,
+                );
+            }
+            self.list_hits.push((rect, Pane::Resources, index));
+        }
+        scrollbar(frame, body, start, self.rows.len(), theme);
         line(
             frame,
             Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
             &format!(
-                "{} | {} | {}-{} / {}",
-                row.scope,
-                row.kind,
+                "G global · P project · ext external | {}-{} / {}",
                 self.row_offset + 1,
                 self.row_offset + self.rows.len(),
                 self.row_total
@@ -666,7 +830,7 @@ impl InstructionManager {
                 text(
                     frame,
                     body,
-                    "Choose a repository or resource.\nEnter opens it.\nSpace lists actions.\n\nThis manager is read only.",
+                    "Choose an instruction type, then select an item.\nE edits its named source. V compares source versions.\nRepository administration and current-session snapshots are separate pages.",
                     theme.muted,
                 );
             }
@@ -906,7 +1070,7 @@ impl InstructionManager {
             .collect::<Vec<_>>()
             .join("\n");
         let help = format!(
-            "INSTRUCTION MANAGER\n\nOpening and browsing are read-only. Mutations use explicit reviewed actions.\n\nBrowse with arrows or J/K. Enter opens a resource or repository.\nSpace / : / Ctrl-P: searchable Actions. T: choose a view.\nF: filters with explicit values. /: search resources.\nSearch supports arrows, Home/End, Delete, Backspace, Ctrl-U and paste.\n\nEsc / Left / Backspace returns from revision to history, from detail to browsing, then repositories. Q closes directly.\nTab / Shift-Tab moves focus. F1 repositories, F2 resources, F3 reading.\nZ expands/collapses the focused pane. PageUp/Down scroll.\nN/P changes transport page. At content page boundaries, scrolling continues to the adjacent page. Home/End stays within the page.\n\nVIEWS\n{view_help}\n\nHISTORY\nEnter reads a revision. I shows complete commit details. A marks a base. B compares base to selected.\nEsc restores the same history selection and base. Reading and comparing never apply changes. Named Actions provides Restore and Export.\n\nFILTER SHORTCUTS\nS scope, V validation, E effectiveness, O origin, G toggles redefinitions.\nC clears all filters.\nCurrent: {}\n\nR refreshes sources. X cancels loading. No file, session prompt, model, branch or remote is changed.\nSource is the original file. Preview uses current source and captured inspection inputs. Session / Stored system prompt is exact active text, not a new preview.\nComplete content is paged, never shortened. Scope/identity and position stay visible while scrolling.\nTerminal control characters are shown as escapes. Mouse accelerates keyboard actions; Shift normally bypasses mouse capture for terminal text selection.\n\nAt 80 and 60 columns this is one navigable pane. At wide widths repositories/list/reader share space. At least 24x8 is required.\n\nEDITING\nCtrl-E edits a selected source. Actions offers create, redefine, addendum, Copy, clear, rename/delete, import, restore/export and repository controls.\nInside a draft: B external body editor, M typed metadata, R Review, S Save. Space or ? opens named draft actions. Tab/Shift-Tab selects another affected file. Esc closes and preserves the draft; Discard is separate and confirmed. AGENTS.md saves its working file without a parent commit.\nReview current target and retained values before reusing a stale form. Recover drafts and operations lists server records; Recover local unsent changes lists private client intent. Recovery never automatically replays Save or network operations.\nRepository operations display their destination and consequences, then Y applies once; Enter/N returns without applying. Ordinary reviewed Save needs no second confirmation.\n\nEsc closes help and restores your reading position.",
+            "INSTRUCTION MANAGER\n\nOpening and browsing are read-only. Mutations use explicit reviewed actions.\n\nChoose a type with F1 and arrows. The active category is marked [+]. Select an item to preview its content; Enter opens the full reading view.\nSpace / : / Ctrl-P: searchable Actions. T: choose a view.\nF: filters with explicit values. /: search resources.\nSearch supports arrows, Home/End, Delete, Backspace, Ctrl-U and paste.\n\nEsc / Left / Backspace returns from revision to history, from detail to browsing, then repositories. Q closes directly.\nTab / Shift-Tab moves focus. F1 types/pages, F2 list, F3 reading. S chooses Effective here, Global or Project. F4 opens project setup, F5 global repository controls, F6 creates an instruction. E edits the selected named source; V shows source versions and cross-scope copying.\nZ expands/collapses the focused pane. PageUp/Down scroll.\nN/P changes transport page. At content page boundaries, scrolling continues to the adjacent page. Home/End stays within the page.\n\nVIEWS\n{view_help}\n\nHISTORY\nEnter reads a revision. I shows complete commit details. A marks a base. B compares base to selected.\nEsc restores the same history selection and base. Reading and comparing never apply changes. Named Actions provides Restore and Export.\n\nFILTER SHORTCUTS\nS scope, F filters, O origin, G toggles redefinitions. E edits; V shows source versions.\nC clears all filters.\nCurrent: {}\n\nR refreshes sources. X cancels loading. No file, session prompt, model, branch or remote is changed.\nSource is the original file. Preview uses current source and captured inspection inputs. Session / Stored system prompt is exact active text, not a new preview.\nComplete content is paged, never shortened. Scope/identity and position stay visible while scrolling. Effective here follows current source resolution, not the active session snapshot. Session snapshots and Repositories & sync have separate pages.\nTerminal control characters are shown as escapes. Mouse accelerates keyboard actions; Shift normally bypasses mouse capture for terminal text selection.\n\nAt 80 and 60 columns this is one navigable pane. Scope and project setup remain visible. [G] means global, [P] project, and [ext] an external installed source. At wide widths repositories/list/reader share space. At least 24x8 is required.\n\nEDITING\nE or Ctrl-E opens the selected source in the appropriate editor. Returning from the body editor or submitting metadata prepares validation and diff review automatically. Save is always explicit. Actions offers create, redefine, addendum, Copy, clear, rename/delete, import, restore/export and repository controls.\nInside a draft: B external body editor, M typed metadata, R Review, S Save. Space or ? opens named draft actions. Tab/Shift-Tab selects another affected file. Esc closes and preserves the draft; Discard is separate and confirmed. AGENTS.md saves its working file without a parent commit.\nReview current target and retained values before reusing a stale form. Recover drafts and operations lists server records; Recover local unsent changes lists private client intent. Recovery never automatically replays Save or network operations.\nRepository operations display their destination and consequences, then Y applies once; Enter/N returns without applying. Ordinary reviewed Save needs no second confirmation.\n\nEsc closes help and restores your reading position.",
             self.filter_summary()
         );
         let body = Rect::new(area.x, area.y, area.width, area.height - 1);
@@ -945,7 +1109,7 @@ impl InstructionManager {
             FrameCaptureBuilder, MessageCapture, RectCapture, WidgetPlacementCapture,
         };
         let mut capture = FrameCaptureBuilder::new(area.width, area.height);
-        capture.state.status = "instruction manager (read-only)".into();
+        capture.state.status = "instruction manager".into();
         capture.state.scroll_offset = self.scroll;
         capture.render_order.push("instruction_manager".into());
         let cells = frame.buffer_mut();

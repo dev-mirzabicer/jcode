@@ -16,6 +16,8 @@ pub(super) fn populated() -> InstructionManager {
     let mut manager = InstructionManager::new("fixture".into(), false);
     manager.reserve(1);
     let rows = vec![InstructionRow {
+        description: String::new(),
+        variants: Vec::new(),
         key: "resource-1".into(),
         id: "synthetic".into(),
         name: "Synthetic".into(),
@@ -54,6 +56,22 @@ pub(super) fn populated() -> InstructionManager {
     assert!(manager.accept(
         1,
         reply("snapshot", InstructionInspectionResult::Opened(snapshot))
+    ));
+    // Complete the automatic overview request, as a real source-owning adapter does.
+    manager.reserve(2);
+    assert!(manager.accept(
+        2,
+        reply(
+            "snapshot",
+            InstructionInspectionResult::Text(InstructionTextPage {
+                document: "initial-overview".into(),
+                title: "Synthetic".into(),
+                offset: 0,
+                total_bytes: 8,
+                next: None,
+                text: "Overview".into()
+            })
+        )
     ));
     manager
 }
@@ -171,7 +189,7 @@ fn instruction_manager_all_layouts_preserve_complete_scrolling_and_mouse_control
         let rect = manager
             .controls
             .iter()
-            .find(|(_, key)| *key == KeyCode::F(2))
+            .find(|(_, key)| *key == KeyCode::F(1))
             .unwrap()
             .0;
         manager.mouse(MouseEvent {
@@ -180,9 +198,10 @@ fn instruction_manager_all_layouts_preserve_complete_scrolling_and_mouse_control
             row: rect.y,
             modifiers: KeyModifiers::NONE,
         });
-        assert_eq!(manager.pane, Pane::Resources);
+        assert_eq!(manager.pane, Pane::Repositories);
+        manager.key(KeyCode::F(2), KeyModifiers::NONE);
         let cells = render(&mut manager, width, height);
-        assert!(cells.contains("synthetic"));
+        assert!(cells.contains("Synthetic"));
         for a in manager.areas {
             assert!(a.width == 0 || (a.right() <= width && a.bottom() <= height));
         }
@@ -199,7 +218,7 @@ fn instruction_manager_all_layouts_preserve_complete_scrolling_and_mouse_control
 fn instruction_manager_filters_history_cancel_and_render_only_fixture_are_structural() {
     let mut manager = populated();
     // Approved UX refinement replaces blind cycling with explicit choices.
-    for ch in ['f', 's', 'v', 'e', 'o'] {
+    for ch in ['f', 's', 'o'] {
         key(&mut manager, ch);
         assert!(manager.menu.is_some());
         assert!(manager.queued.is_none());
@@ -222,7 +241,14 @@ fn instruction_manager_filters_history_cancel_and_render_only_fixture_are_struct
     assert_eq!(manager.filter.search, "a界");
     manager.key(KeyCode::Enter, KeyModifiers::NONE);
     key(&mut manager, 'c');
-    assert_eq!(manager.filter, InstructionFilter::default());
+    assert_eq!(
+        manager.filter,
+        InstructionFilter {
+            grouped: true,
+            main_catalog: true,
+            ..Default::default()
+        }
+    );
     let rows = manager.rows.clone();
     manager.reserve(4);
     assert!(manager.accept(

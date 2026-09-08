@@ -834,3 +834,86 @@ fn readable_overviews_preserve_repository_facts_and_exact_revision_source() {
     assert_eq!(source, document("shared", "module", "SHARED"));
     assert_eq!(git(&fixture.root, &["rev-parse", "HEAD"]), head);
 }
+
+#[test]
+fn grouped_browsing_preserves_scope_versions_invalid_shadows_and_human_skill_names() {
+    let _guard = crate::storage::lock_test_env();
+    let fixture = Fixture::new();
+    fixture.seed();
+    let project=fixture.repositories.configure_non_git_project(&fixture.project,"grouped-project",None,&InstructionStoreSeed{manifest:InstructionStoreManifest::current(),files:vec![InstructionSeedFile{relative_path:"agents/jcode.md".into(),content:b"---\nid: jcode\nkind: agent\nname: Project agent\ndescription: Project description\navailability: both\n---\nPROJECT BODY".to_vec()}]},&[]).unwrap().repository;
+    let external = fixture.project.join(".jcode/skills/installed");
+    std::fs::create_dir_all(&external).unwrap();
+    std::fs::write(
+        external.join("SKILL.md"),
+        "---\nname: Sample\ndescription: Installed project skill\n---\nEXTERNAL SKILL",
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.project.join(".jcode/prompt-overlay.md"),
+        "LEGACY ORIGINAL",
+    )
+    .unwrap();
+    let mut inspector = fixture.open();
+    let filter = InstructionFilter {
+        grouped: true,
+        main_catalog: true,
+        kind: Some("agent".into()),
+        ..Default::default()
+    };
+    let page = inspector.rows(&filter, 0);
+    assert_eq!(page.total, 1);
+    let row = &page.rows[0];
+    assert_eq!(row.name, "Project agent");
+    assert_eq!(row.scope, "project");
+    assert_eq!(row.variants.len(), 2);
+    let overview = detail(
+        &mut inspector,
+        &row.key,
+        InstructionInspectionView::Metadata,
+    );
+    assert!(overview.text.contains("PROJECT BODY"));
+    assert!(overview.text.contains("AGENT"));
+    let global = inspector.rows(
+        &InstructionFilter {
+            scope: Some("global".into()),
+            ..filter.clone()
+        },
+        0,
+    );
+    assert_eq!(global.rows[0].name, "Fixture");
+    assert!(!global.rows[0].effective);
+    assert_eq!(global.rows[0].variants.len(), 2);
+    let skills = inspector.rows(
+        &InstructionFilter {
+            kind: Some("skill".into()),
+            search: "Sample".into(),
+            ..filter.clone()
+        },
+        0,
+    );
+    assert_eq!(skills.total, 1, "{:?}", skills.rows);
+    assert_eq!(skills.rows[0].name, "Sample");
+    assert_eq!(skills.rows[0].origin, InstructionOrigin::External);
+    assert_eq!(skills.rows[0].description, "Installed project skill");
+    assert_eq!(skills.rows[0].variants.len(), 2);
+    assert!(
+        inspector
+            .rows(
+                &InstructionFilter {
+                    grouped: true,
+                    main_catalog: true,
+                    ..Default::default()
+                },
+                0
+            )
+            .rows
+            .iter()
+            .all(|row| row.origin != InstructionOrigin::Legacy)
+    );
+    std::fs::write(project.root.join("agents/jcode.md"), [0xff]).unwrap();
+    let invalid = fixture.open().rows(&filter, 0);
+    assert_eq!(invalid.total, 1);
+    assert_eq!(invalid.rows[0].scope, "project");
+    assert!(!invalid.rows[0].valid);
+    assert_eq!(invalid.rows[0].variants.len(), 2);
+}

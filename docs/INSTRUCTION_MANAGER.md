@@ -22,72 +22,70 @@ The model roster uses the existing independent provider-construction API.
 Availability is catalog/constructor evidence, not a claim about quota or a
 successful inference request.
 
-## Navigation
+## Types, scopes and source ownership
 
-Start by browsing or searching the resource list, then **Enter** to read a file.
-**Space** opens searchable **Actions**, and **T** opens **Choose a view**. Every
-inspection workflow has a named entry, shortcut and explanation. Unavailable
-views explain why instead of starting an operation that cannot apply.
+The first page shows **Agents**, not a mixed file inventory. The type navigator
+also provides Skills, Project additions, Shared modules, Notifications,
+System/workflow guidance, Tool guidance, Model roster and AGENTS.md guidance.
+Imports and original compatibility files have a secondary page. All-types search
+is available when you need it.
 
-**F** opens **Filters**. Choose a field, then an explicit value. The selected
-value is labeled, other filters stay unchanged, and active filters remain visible.
-Use **C** to clear every filter. Search filters the resource list by ID, name,
-type or scope; it never edits source.
+Choose a type with the mouse or F1 and arrows. The [+] marker identifies the
+active page and the list updates immediately. Scope stays visible in the header:
 
-The spatial model is repositories/session, resource list, and reading pane:
+- **Effective here** groups equivalent sources under one named item. It preserves
+  the runtime's actual applicability rules, including invalid shadows and paired
+  additive contributions. It does not describe the running session's frozen text.
+- **Global** browses global definitions directly.
+- **Project** browses definitions stored for this project. Empty project scope
+  offers setup or creation rather than pretending global files belong to it.
 
-- At 140+ columns, all three panes are visible.
-- At 90–139 columns, the list and reading pane share the screen. F1 exchanges the
-  left navigator for repositories/session.
-- At 80 columns, in a 60-column split, and down to 24×8, the focused pane occupies
-  the available width. No operation requires a hidden pane or unlabeled button.
-- Below 24×8, a truthful size message replaces the layout. Resize to continue or
-  Q/Escape to close. No resource size limit is involved.
+Skill rows display invocation names and descriptions, never only `SKILL.md`.
+[G] and [P] indicate scope; `ext` identifies externally installed sources before
+you select them. The source overview includes complete versions and technical
+details. Select **Sources** to view or edit a specific global/project version.
 
-The focused pane has a text marker and strong selection styling, not color alone.
-Z expands or collapses the focused pane. Source identity, view and content position
-stay visible while reading. Lists scroll continuously and show a scrollbar.
+Selecting an existing item never changes its owning source. **Edit global** and
+**Edit project** name the exact destination. **Copy to project/global and edit**
+creates a private draft of the complete source in the other scope. Existing
+versions are shown as alternatives and cannot be overwritten implicitly. External
+skills offer complete-package Copy instead of in-place editing.
+
+Repository administration is separate under **Repositories & sync**. Global and
+project controls cover setup, branches, history and explicit synchronization.
+The header offers **Project setup** directly, including the conventional submodule
+workflow for Git projects. Enclosing Git repositories for external files are
+source metadata, not extra managed instruction stores in the navigator.
+
+**Current session instructions** is an inspect-only snapshot page. It is not a
+save destination, and editing source elsewhere does not replace that snapshot.
 
 | Input | Action |
 |---|---|
-| Enter / Right on resource | Read complete source |
-| Enter / Right on repository or session | Open its readable Overview |
-| Space / `:` / Ctrl-P | Searchable Actions |
-| T or Enter in reading pane | Choose a view |
-| F | Explicit filter fields and values |
-| `/` | Search the resource list |
-| Enter/Escape in search | Finish search and retain results |
-| Left/Right, Home/End, Delete, Backspace, Ctrl-U in search | Edit search text; Ctrl-U clears it |
-| Tab / Shift-Tab | Move between panes |
-| F1 / F2 / F3 | Repositories / resources / reading |
-| Up/Down or J/K | Navigate a list or scroll |
-| PageUp/PageDown | Move farther within the current page |
-| Home/End outside search | Start/end of this transport page |
-| N/P | Next/previous resource, history, or captured content page |
-| Escape / Left / Backspace outside text entry | Back to history or browsing, then repositories |
-| S / V / E / O | Direct scope / validation / effectiveness / origin filter menu |
-| G | Toggle project-redefinition grouping |
-| C | Clear all filters, including search and repository |
+| F1 / F2 / F3 | Types and pages / item list / reading |
+| Arrows or J/K | Select a type, item or scroll content |
+| Enter | Open the selected page or complete overview |
+| S | Explicit scope choices |
+| E or Ctrl-E | Edit the selected source |
+| V | Source versions and cross-scope copying |
+| F4 / F5 | Project setup/controls / global repository controls |
+| F6 | Create in an explicitly selected scope |
+| Space / colon / Ctrl-P | Searchable contextual Actions |
+| F | Additional filters |
+| Slash | Search within the current type and scope |
+| C | Clear filters and search across all instruction types |
+| N/P | Next/previous transport page |
+| PageUp/PageDown, Home/End | Scroll the current content page |
+| Escape / Left / Backspace | Back without saving |
+| Q | Close and preserve unsaved drafts |
 | R / X | Refresh sources / cancel inspection loading |
-| `?` | Complete, scrollable help |
-| Q | Close directly and return to chat |
+| ? | Complete help; inside a draft, contextual draft actions |
 
-Menus use arrows and Enter, or type to filter their named entries. Escape backs
-out without applying a choice. `?` shows a complete scrollable explanation of a
-menu entry. Selecting a disabled entry opens its reason, without a request.
-Pasted text belongs to the search/menu field, not the hidden composer or file-drop
-handler. Search supports Unicode cursor editing.
-
-Visible pane labels, controls, menu entries and list rows are clickable. The mouse
-wheel scrolls the surface under the pointer. A menu clears underlying hit regions,
-so clicks cannot trigger invisible actions. Most terminals allow Shift to bypass
-mouse capture for terminal-native selection.
-
-Back from a revision returns to the same history selection and comparison base.
-Back from a completed reading view keeps its captured content and position; help
-has a separate scroll position. Canceling an in-flight request rejects its stale
-reply. Refresh/reconnect recaptures source state rather than claiming the old view
-is fresh. None of these operations activates instructions.
+At wide widths the type navigator, item list and reading pane share the screen.
+At 80/60 columns the focused pane fills the view. Scope/setup and contextual
+controls remain reachable at the tested 24×8 minimum. Mouse hit regions match
+visible controls. Search and metadata fields own pasted text rather than leaking
+it into the chat composer. No pagination or instruction-size limit changed.
 
 ## Reviewed editing
 

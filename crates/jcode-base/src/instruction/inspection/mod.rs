@@ -3,6 +3,7 @@
 mod catalog;
 mod detail;
 mod overview;
+mod presentation;
 mod worker;
 pub use worker::InspectionWorker;
 pub use worker::InstructionTargetResolver;
@@ -219,51 +220,6 @@ impl InstructionInspector {
             InstructionInspectionRequest::Open { .. } => {
                 Err(fail("open", "Open requires a fresh session context"))
             }
-        }
-    }
-
-    fn rows(&self, filter: &InstructionFilter, offset: usize) -> InstructionRowsPage {
-        let search = filter.search.to_lowercase();
-        let matches = |resource: &&Resource| {
-            let row = &resource.row;
-            filter.kind.as_ref().is_none_or(|kind| kind == &row.kind)
-                && filter
-                    .scope
-                    .as_ref()
-                    .is_none_or(|scope| scope == &row.scope)
-                && filter
-                    .repository
-                    .as_ref()
-                    .is_none_or(|key| key == &row.repository)
-                && filter.origin.is_none_or(|origin| origin == row.origin)
-                && filter
-                    .effective
-                    .is_none_or(|effective| effective == row.effective)
-                && filter.valid.is_none_or(|valid| valid == row.valid)
-                && filter
-                    .redefinitions
-                    .is_none_or(|value| value == row.redefines_global)
-                && (search.is_empty()
-                    || [&row.id, &row.name, &row.kind, &row.scope]
-                        .iter()
-                        .any(|value| value.to_lowercase().contains(&search)))
-        };
-        let total = self.resources.values().filter(matches).count();
-        let offset = offset.min(total);
-        let rows = self
-            .resources
-            .values()
-            .filter(matches)
-            .skip(offset)
-            .take(ROW_PAGE_SIZE)
-            .map(|resource| resource.row.clone())
-            .collect::<Vec<_>>();
-        let end = offset + rows.len();
-        InstructionRowsPage {
-            offset,
-            total,
-            next: (end < total).then_some(end),
-            rows,
         }
     }
 

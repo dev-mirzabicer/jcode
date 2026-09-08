@@ -125,6 +125,9 @@ pub enum InstructionEditAction {
         fields: InstructionResourceFields,
     },
     RedefineInProject,
+    CopyToScope {
+        scope: InstructionEditScope,
+    },
     Addendum {
         id: String,
     },

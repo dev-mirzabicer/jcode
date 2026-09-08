@@ -441,3 +441,48 @@ fn question_mark_opens_contextual_draft_actions_without_leaking_input() {
     );
     assert!(manager.editing.queued.is_none());
 }
+
+#[test]
+fn edit_opens_local_editor_and_successful_update_reviews_without_ever_saving_automatically() {
+    let mut manager = manager();
+    manager.editing.draft = None;
+    manager.editing.queued = Some(InstructionManagementRequest::Begin {
+        snapshot: "snapshot".into(),
+        target: InstructionInspectionTarget::Resource("source".into()),
+        action: InstructionEditAction::Edit,
+    });
+    manager.editing.reserve(70, "synthetic-session");
+    assert!(manager.accept_management(
+        70,
+        InstructionManagementReply {
+            session_id: "synthetic-session".into(),
+            result: InstructionManagementResult::Draft(synthetic_draft())
+        }
+    ));
+    assert_eq!(
+        manager.editing.editor.take().unwrap().body,
+        "BODY 合成 {{literal}}"
+    );
+    manager.editing.queued = Some(InstructionManagementRequest::Update {
+        draft: "draft-synthetic".into(),
+        generation: 4,
+        change: InstructionDraftChange::Body {
+            file: "modules/example.md".into(),
+            body: "NEW".into(),
+        },
+    });
+    manager.editing.reserve(71, "synthetic-session");
+    let mut updated = synthetic_draft();
+    updated.generation = 5;
+    assert!(manager.accept_management(
+        71,
+        InstructionManagementReply {
+            session_id: "synthetic-session".into(),
+            result: InstructionManagementResult::Draft(updated)
+        }
+    ));
+    assert!(matches!(
+        manager.editing.queued,
+        Some(InstructionManagementRequest::Review { generation: 5, .. })
+    ));
+}

@@ -224,6 +224,65 @@ impl InstructionInspector {
     fn metadata(&self, resource: &Resource, runtime: &InstructionRuntime) -> String {
         let row = &resource.row;
         let mut text = format!(
+            "{}\n{}\n\n{} source · {}\n{}\n\n",
+            row.name,
+            row.description,
+            row.scope,
+            if row.origin == InstructionOrigin::Managed {
+                "Managed instructions"
+            } else if row.origin == InstructionOrigin::External && row.kind == "skill" {
+                "Externally installed skill: Copy to edit"
+            } else {
+                "Dedicated or original file"
+            },
+            if row.effective {
+                "Applies in this project using current source files."
+            } else {
+                "Not selected here; another source takes precedence."
+            }
+        );
+        if row.origin == InstructionOrigin::Managed || row.kind == "AGENTS.md" {
+            text.push_str(&format!(
+                "Edit {} writes only: {}\n",
+                row.scope,
+                resource.path.display()
+            ));
+        }
+        text.push_str("Source edits do not replace current session snapshots. Choose Current session instructions to inspect active text.\n");
+        let mut versions = self.alternatives(resource);
+        versions.sort_by_key(|variant| variant.row.key != row.key);
+        for variant in versions {
+            text.push_str(&format!(
+                "\n{} · {} · {}\n{}\n",
+                variant.row.scope,
+                if variant.row.origin == InstructionOrigin::Managed {
+                    "Managed"
+                } else if variant.row.origin == InstructionOrigin::Legacy {
+                    "Legacy original"
+                } else {
+                    "External"
+                },
+                if variant.row.effective {
+                    "applies here"
+                } else {
+                    "shadowed here"
+                },
+                variant.path.display()
+            ));
+            match self.read_source(variant) {
+                Ok(source) => text.push_str(&source),
+                Err(error) => text.push_str(&format!("Source error: {}", error.detail)),
+            }
+            text.push('\n');
+        }
+        text.push_str("\nTECHNICAL DETAILS AND CONSUMERS\n");
+        text.push_str(&self.technical_metadata(resource, runtime));
+        text
+    }
+
+    fn technical_metadata(&self, resource: &Resource, runtime: &InstructionRuntime) -> String {
+        let row = &resource.row;
+        let mut text = format!(
             "RESOURCE OVERVIEW\n\nID: {}\nDisplay name: {}\nType: {}\nScope: {}\nOrigin: {:?}\nRepository: {}\nPath: {}\nLookup at catalog capture: {}\nValidation at catalog capture: {}\n\n{}\n",
             row.id,
             row.name,
@@ -268,16 +327,6 @@ impl InstructionInspector {
                 },
                 Err(error) => text.push_str(&error.detail),
             }
-        }
-        match self.read_source(resource) {
-            Ok(source) => {
-                text.push_str("\nComplete frontmatter (exact source):\n");
-                text.push_str(
-                    frontmatter(&source)
-                        .unwrap_or("No YAML frontmatter. Source view retains the complete file."),
-                );
-            }
-            Err(error) => text.push_str(&format!("\nSource error: {}", error.detail)),
         }
         text
     }
@@ -620,21 +669,4 @@ impl InstructionInspector {
             text,
         ))
     }
-}
-
-fn frontmatter(source: &str) -> Option<&str> {
-    let mut offset = 0;
-    let mut lines = source.split_inclusive('\n');
-    let first = lines.next()?;
-    if first.trim_end_matches(['\r', '\n']) != "---" {
-        return None;
-    }
-    offset += first.len();
-    for line in lines {
-        offset += line.len();
-        if line.trim_end_matches(['\r', '\n']) == "---" {
-            return Some(&source[..offset]);
-        }
-    }
-    Some(source)
 }

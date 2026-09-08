@@ -62,7 +62,9 @@ impl App {
         if let Some(editing) = retained_editing {
             manager.editing = editing;
         }
-        manager.filter.kind = kind.map(str::to_string);
+        if let Some(kind) = kind {
+            manager.filter.kind = Some(kind.into());
+        }
         manager.queued = Some(InstructionInspectionRequest::Open {
             filter: manager.filter.clone(),
         });

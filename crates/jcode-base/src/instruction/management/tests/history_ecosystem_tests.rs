@@ -415,3 +415,90 @@ fn manager_create_global_project_redefine_addendum_clear_and_external_commit_are
             );
         });
 }
+
+#[test]
+fn cross_scope_copy_preserves_original_and_refuses_existing_destinations() {
+    let _guard = crate::storage::lock_test_env();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let mut fixture = Fixture::new();
+            let project = fixture.context.working_dir.clone().unwrap();
+            let project_repo = fixture
+                .service
+                .configure_non_git_project(
+                    &project,
+                    "scope-copy",
+                    None,
+                    &InstructionStoreSeed::empty(),
+                    &[],
+                )
+                .unwrap()
+                .repository;
+            let original =
+                std::fs::read(fixture.repository.root.join("modules/literal.md")).unwrap();
+            let draft = fixture
+                .begin(
+                    "literal",
+                    InstructionEditAction::CopyToScope {
+                        scope: InstructionEditScope::Project,
+                    },
+                )
+                .await;
+            assert!(!project_repo.root.join("modules/literal.md").exists());
+            super::package_tests::save(&fixture, &draft).await;
+            assert_eq!(
+                std::fs::read(fixture.repository.root.join("modules/literal.md")).unwrap(),
+                original
+            );
+            assert_eq!(
+                std::fs::read(project_repo.root.join("modules/literal.md")).unwrap(),
+                original
+            );
+            let snapshot = fixture.open("literal").await;
+            let row = snapshot
+                .resources
+                .rows
+                .iter()
+                .find(|row| row.scope == "project")
+                .unwrap();
+            let collision = fixture
+                .request(InstructionManagementRequest::Begin {
+                    snapshot: snapshot.snapshot,
+                    target: InstructionInspectionTarget::Resource(row.key.clone()),
+                    action: InstructionEditAction::CopyToScope {
+                        scope: InstructionEditScope::Global,
+                    },
+                })
+                .await;
+            assert!(matches!(collision, InstructionManagementResult::Failed(_)));
+            assert_eq!(
+                std::fs::read(fixture.repository.root.join("modules/literal.md")).unwrap(),
+                original
+            );
+            std::fs::write(
+                project_repo.root.join("modules/project-only.md"),
+                "---\nid: project-only\nkind: module\n---\nPROJECT ONLY",
+            )
+            .unwrap();
+            let promoted = fixture
+                .begin(
+                    "project-only",
+                    InstructionEditAction::CopyToScope {
+                        scope: InstructionEditScope::Global,
+                    },
+                )
+                .await;
+            super::package_tests::save(&fixture, &promoted).await;
+            assert!(
+                fixture
+                    .repository
+                    .root
+                    .join("modules/project-only.md")
+                    .exists()
+            );
+            assert!(project_repo.root.join("modules/project-only.md").exists());
+        });
+}

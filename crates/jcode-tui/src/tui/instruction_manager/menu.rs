@@ -14,6 +14,11 @@ pub(super) enum FilterField {
 }
 #[derive(Clone)]
 pub(super) enum MenuAction {
+    Navigate(usize),
+    Scope(Option<String>),
+    Source(InstructionRow, bool),
+    CopyScope(InstructionEditScope),
+    New(InstructionEditScope),
     Recovery(super::editing::RecoveryChoice),
     Edit(super::editing::EditAction),
     Key(KeyCode),
@@ -224,7 +229,20 @@ impl InstructionManager {
             self.open_edit_menu();
             return;
         }
-        let mut items = Vec::new();
+        let mut items = if views_only {
+            Vec::new()
+        } else {
+            self.source_actions()
+        };
+        if !views_only {
+            items.extend([
+            MenuItem{label:"Choose instruction type".into(),hint:"Type-first browsing. This does not select a save destination.".into(),key:"F1".into(),action:MenuAction::Key(KeyCode::F(1)),disabled:None},
+            MenuItem{label:format!("Scope: {}",self.scope_label()),hint:"Choose Effective here, Global or Project.".into(),key:"S".into(),action:MenuAction::Key(KeyCode::Char('s')),disabled:None},
+            MenuItem{label:"Repositories & sync".into(),hint:"Global/project setup, branches and explicit synchronization. Not an editing destination selector.".into(),key:"choose".into(),action:MenuAction::Navigate(navigation::REPOSITORIES),disabled:None},
+            MenuItem{label:"Current session instructions".into(),hint:"Inspect the exact active snapshot without changing it.".into(),key:"choose".into(),action:MenuAction::Navigate(navigation::SESSION),disabled:None},
+        ]);
+        }
+
         for (view, key, label, hint) in VIEWS {
             items.push(MenuItem {
                 label: if view == InstructionInspectionView::System
@@ -806,6 +824,9 @@ impl InstructionManager {
             item.action,
             MenuAction::Key(KeyCode::Char('1'..='8' | 'a' | 'b' | 'i'))
                 | MenuAction::Edit(_)
+                | MenuAction::Source(_, _)
+                | MenuAction::CopyScope(_)
+                | MenuAction::New(_)
                 | MenuAction::Recovery(super::editing::RecoveryChoice::Historical { .. })
         ) && (menu.context != self.selected_target() || menu.snapshot != self.snapshot_id())
         {
@@ -834,6 +855,11 @@ impl InstructionManager {
         }
         self.menu = None;
         match item.action {
+            MenuAction::Navigate(index) => self.choose_navigation(index),
+            MenuAction::Scope(scope) => self.choose_scope(scope),
+            MenuAction::Source(row, edit) => self.choose_source(row, edit),
+            MenuAction::CopyScope(scope) => self.copy_scope(scope),
+            MenuAction::New(scope) => self.start_creation(scope),
             MenuAction::Recovery(choice) => self.choose_recovery(choice),
             MenuAction::Edit(action) => self.edit_action(action),
             MenuAction::Key(key) => {

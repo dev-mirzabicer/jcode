@@ -72,6 +72,23 @@ pub(super) fn plan(
         let (repository, path) = selected()?;
         return skill_package(service, target, repository, path, action);
     }
+    if let InstructionEditAction::CopyToScope { scope } = action {
+        let (source, path) = selected()?;
+        if target
+            .resource
+            .as_ref()
+            .is_some_and(|resource| resource.kind == InstructionKind::Skill)
+        {
+            return skill_package(
+                service,
+                target,
+                source,
+                path,
+                InstructionEditAction::CopyToScope { scope },
+            );
+        }
+        return copy_managed(service, target, source, path, scope);
+    }
     let (repository, path, creation) = match &action {
         InstructionEditAction::Create { scope, fields } => {
             let repository = resolve_repository(service, &target.context, *scope)?;
@@ -151,6 +168,12 @@ pub(super) fn plan(
     }
     let current = base.content.clone().unwrap_or_default();
     let proposed = match action {
+        InstructionEditAction::CopyToScope { .. } => {
+            return Err(fail(
+                "copy source",
+                "Copy requires an explicit source and destination",
+            ));
+        }
         InstructionEditAction::ImportLegacy => {
             return Err(fail(
                 "import",
@@ -640,6 +663,16 @@ fn skill_package(
                 Some(id),
             )
         }
+        InstructionEditAction::CopyToScope { scope } => {
+            let repository = resolve_repository(service, &target.context, *scope)?;
+            if repository.root == source_repo.root {
+                return Err(fail(
+                    "copy package",
+                    "Source and destination are the same repository",
+                ));
+            }
+            (repository, root.clone(), false, None)
+        }
         InstructionEditAction::RedefineInProject => {
             if source_repo.kind != InstructionRepositoryKind::Global {
                 return Err(fail("skill redefinition", "Select a global package"));
@@ -670,7 +703,7 @@ fn skill_package(
         .map_err(repo_error)?
         .head
         .ok_or_else(|| fail("skill package", "Destination has no baseline commit"))?;
-    let mut plan = EditPlan { repository: repository.clone(), head, files: BTreeMap::new(), executables: BTreeMap::new(), observed: BTreeMap::new(), subject: if deleting { format!("skill: delete {}", document.id) } else if let Some(id) = &rename { format!("skill: rename package {} to {id}", document.id) } else { format!("skill: redefine {} in project", document.id) }, warnings: vec!["The complete package, including references and binary files, is one reviewed transaction. Existing active skill snapshots remain unchanged. Resource-ID rename preserves the invocation name; change its metadata explicitly if you also want a new slash name.".into()] };
+    let mut plan = EditPlan { repository: repository.clone(), head, files: BTreeMap::new(), executables: BTreeMap::new(), observed: BTreeMap::new(), subject: if deleting { format!("skill: delete {}", document.id) } else if let Some(id) = &rename { format!("skill: rename package {} to {id}", document.id) } else { format!("skill: copy {} to {}", document.id,metadata::scope(&repository)) }, warnings: vec!["The complete package, including references and binary files, is one reviewed transaction. Existing active skill snapshots remain unchanged. Resource-ID rename preserves the invocation name; change its metadata explicitly if you also want a new slash name.".into()] };
     for (source_path, mut content) in source {
         let observed_source = service
             .open_draft(&source_repo, &source_path)
@@ -925,6 +958,59 @@ fn import_legacy(
         warnings: vec![format!(
             "Import preserves the complete captured source from {} and retains the original file. The managed definition and cutover receipt are one reviewed commit. If a managed destination exists, its replacement is visible in the diff. Existing sessions keep their frozen instructions.",
             selected_path.display()
+        )],
+    })
+}
+
+fn copy_managed(
+    service: &InstructionRepositoryService,
+    target: &ResolvedManagementTarget,
+    source: InstructionRepositoryRef,
+    path: PathBuf,
+    destination: InstructionEditScope,
+) -> Result<EditPlan> {
+    let repository = resolve_repository(service, &target.context, destination)?;
+    if repository.root == source.root {
+        return Err(fail(
+            "copy source",
+            "Source and destination are the same repository",
+        ));
+    }
+    let captured = service.open_draft(&source, &path).map_err(repo_error)?;
+    let content = captured.content.as_deref().ok_or_else(|| {
+        fail(
+            "copy source",
+            "Source must be a complete valid UTF-8 resource",
+        )
+    })?;
+    let parsed = parse(&source, &path, content)?;
+    let base = service.open_draft(&repository, &path).map_err(repo_error)?;
+    if base.source_bytes().is_some() {
+        return Err(fail(
+            "copy destination",
+            format!(
+                "{} already exists. Select that scope's existing source to edit or compare it; Copy did not overwrite it.",
+                repository.root.join(&path).display()
+            ),
+        ));
+    }
+    service.validate_draft(&captured).map_err(repo_error)?;
+    Ok(EditPlan {
+        repository: repository.clone(),
+        head: base.base_head,
+        files: BTreeMap::from([(path.clone(), Some(content.as_bytes().to_vec()))]),
+        executables: BTreeMap::from([(path.clone(), captured.base.executable)]),
+        observed: BTreeMap::from([(path, base.base)]),
+        subject: format!(
+            "instruction: copy {} to {}",
+            parsed.id,
+            metadata::scope(&repository)
+        ),
+        warnings: vec![format!(
+            "Copy {} from {} to {}. This creates a private draft with the complete original text. Save publishes only the destination. References resolve in the destination scope and must validate before Save. Existing session instructions remain unchanged.",
+            parsed.id,
+            parsed.scope,
+            metadata::scope(&repository)
         )],
     })
 }
