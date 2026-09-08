@@ -5,7 +5,7 @@ Creates private disposable state and local HTTP fixtures. Never sends paid
 model requests, changes real instruction stores, or operates a real account.
 Artifacts remain under --artifact-dir; owned daemons and testers are stopped.
 """
-import argparse, hashlib, http.server, json, os, shlex, socket, subprocess, sys, tempfile, threading, time
+import argparse, hashlib, http.server, json, os, shlex, shutil, socket, subprocess, sys, tempfile, threading, time
 from pathlib import Path
 parser = argparse.ArgumentParser(description='Sandboxed read-only instruction manager acceptance. All model endpoints are local fixtures.')
 parser.add_argument('--binary', default=str(Path.home() / '.jcode/builds/current/jcode'))
@@ -55,6 +55,29 @@ events = []
 counter = 20
 log = open(ROOT / 'server.log', 'wb')
 
+def capture_timeout_diagnostics(label):
+    """Observe only this probe's daemon. A timeout remains a failed check."""
+    if proc and proc.poll() is None:
+        try:
+            process_list = subprocess.run(['ps', '-axo', 'pid,ppid,stat,etime,command'], capture_output=True, text=True, timeout=5)
+            rows = process_list.stdout.splitlines()
+            owned = {proc.pid}
+            for _ in range(4):
+                for row in rows[1:]:
+                    parts = row.split(None, 4)
+                    if len(parts) == 5 and int(parts[1]) in owned:
+                        owned.add(int(parts[0]))
+            selected = [row for row in rows[1:] if row.split() and int(row.split()[0]) in owned]
+            (ROOT / f'{label}.processes').write_text('\n'.join(selected) + '\n')
+        except subprocess.TimeoutExpired:
+            (ROOT / f'{label}.processes').write_text('Process inspection also timed out.\n')
+    if proc and proc.poll() is None and shutil.which('sample'):
+        try:
+            result = subprocess.run(['sample', str(proc.pid), '1', '10', '-file', str(ROOT / f'{label}.sample')], capture_output=True, text=True, timeout=10)
+            (ROOT / f'{label}.diagnostic').write_text(result.stdout + result.stderr)
+        except subprocess.TimeoutExpired as error:
+            (ROOT / f'{label}.diagnostic').write_text('Diagnostic sampling also timed out.\n' + repr(error.stdout) + '\n' + repr(error.stderr))
+
 def start():
     global proc, client, reader
     proc = subprocess.Popen(args, env=env, stdout=log, stderr=log)
@@ -70,6 +93,7 @@ def start():
         except (FileNotFoundError, ConnectionRefusedError):
             client.close()
             if time.monotonic() > deadline:
+                capture_timeout_diagnostics('startup-timeout')
                 raise
             time.sleep(0.1)
     reader = client.makefile('rb')
@@ -182,6 +206,7 @@ def tester_state(tid, predicate=lambda state: True):
         if predicate(state):
             return state
         if time.monotonic() > deadline:
+            capture_timeout_diagnostics('manager-timeout')
             raise TimeoutError('manager state did not converge: ' + result)
         time.sleep(0.1)
 

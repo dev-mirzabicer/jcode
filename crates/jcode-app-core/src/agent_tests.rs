@@ -1408,12 +1408,20 @@ async fn live_agent_request_matches_combined_projection_without_automatic_contex
     let _guard = crate::storage::lock_test_env();
     let provider = Arc::new(ProjectedRequestProvider::new(1_000));
     let provider_dyn: Arc<dyn Provider> = provider.clone();
-    let mut agent = Agent::new_with_session(
-        provider_dyn,
-        Registry::empty(),
-        combined_projected_session(),
-        None,
-    );
+    let mut session = combined_projected_session();
+    // This is a projection/dispatch check with a fixed small provider budget,
+    // not a test of whichever editable instructions happen to be on disk.
+    session.install_system_prompt(crate::session::StoredSystemPromptState {
+        text: "SYNTHETIC PROJECTION FIXTURE".into(),
+        active_agent: crate::session::StoredAgentReference {
+            scope: crate::instruction::InstructionScope::Global,
+            id: "jcode".into(),
+            display_name: "Synthetic".into(),
+        },
+        first_provider_dispatch_at: None,
+        active_transition_message_id: None,
+    });
+    let mut agent = Agent::new_with_session(provider_dyn, Registry::empty(), session, None);
     agent.set_memory_enabled(false);
     let raw_message_count_before = agent.session.messages.len();
     let raw_before = serde_json::to_vec(&agent.session.messages).unwrap();
