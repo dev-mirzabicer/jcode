@@ -460,3 +460,15 @@ fn ux_snapshot_page_never_presents_a_catalog_scope_or_an_edit_destination() {
     assert!(!chrome.contains("Edit global"));
     assert_eq!(manager.areas[1].width, 0);
 }
+
+#[test]
+fn ux_consequential_and_invalid_badges_precede_long_names_at_the_narrow_floor() {
+    let mut manager = populated();
+    manager.rows[0].name = "A very long descriptive instruction name".into();
+    manager.rows[0].high_impact = true;
+    let screen = render(&mut manager, 24, 10);
+    assert!(screen.contains("[!]"));
+    manager.rows[0].valid = false;
+    let screen = render(&mut manager, 24, 10);
+    assert!(screen.contains("[invalid]"));
+}

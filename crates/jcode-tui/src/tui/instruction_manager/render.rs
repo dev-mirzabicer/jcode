@@ -645,11 +645,12 @@ impl InstructionManager {
                 row.name.as_str()
             };
             let label = format!(
-                "{} {badges} {name}{}{}",
+                "{} {}{badges} {name}",
                 if index == self.selected { ">" } else { " " },
-                if !row.valid { " [invalid]" } else { "" },
-                if row.high_impact {
-                    " [high impact]"
+                if !row.valid {
+                    "[invalid] "
+                } else if row.high_impact {
+                    "[!] "
                 } else {
                     ""
                 }

@@ -502,3 +502,17 @@ fn cross_scope_copy_preserves_original_and_refuses_existing_destinations() {
             assert!(project_repo.root.join("modules/project-only.md").exists());
         });
 }
+
+#[test]
+fn cross_scope_project_agent_copy_has_an_explicit_high_impact_warning() {
+    let _guard = crate::storage::lock_test_env();
+    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+        let mut fixture=Fixture::new();let project=fixture.context.working_dir.clone().unwrap();
+        let project_repo=fixture.service.configure_non_git_project(&project,"copy-warning",None,&InstructionStoreSeed::empty(),&[]).unwrap().repository;
+        std::fs::create_dir_all(fixture.repository.root.join("agents")).unwrap();
+        std::fs::write(fixture.repository.root.join("agents/copy-agent.md"),"---\nid: copy-agent\nkind: agent\nname: Synthetic copy agent\ndescription: Synthetic\navailability: both\n---\nBODY").unwrap();
+        let draft=fixture.begin("copy-agent",InstructionEditAction::CopyToScope{scope:InstructionEditScope::Project}).await;
+        assert!(draft.warnings.iter().any(|warning|warning.contains("HIGH IMPACT")));
+        assert!(!project_repo.root.join("agents/copy-agent.md").exists());
+    });
+}

@@ -995,6 +995,20 @@ fn copy_managed(
         ));
     }
     service.validate_draft(&captured).map_err(repo_error)?;
+    let mut warnings = vec![format!(
+        "Copy {} from {} to {}. This creates a private draft with the complete original text. Save publishes only the destination. References resolve in the destination scope and must validate before Save. Existing session instructions remain unchanged.",
+        parsed.id,
+        parsed.scope,
+        metadata::scope(&repository)
+    )];
+    if destination == InstructionEditScope::Project
+        && matches!(
+            parsed.kind,
+            InstructionKind::System | InstructionKind::Agent | InstructionKind::Notification
+        )
+    {
+        warnings.push("HIGH IMPACT: this project definition can change system, agent or control guidance for future project activations or occurrences. Project precedence and any paired additive behavior follow this resource's registered policy. Review before Save.".into());
+    }
     Ok(EditPlan {
         repository: repository.clone(),
         head: base.base_head,
@@ -1006,11 +1020,6 @@ fn copy_managed(
             parsed.id,
             metadata::scope(&repository)
         ),
-        warnings: vec![format!(
-            "Copy {} from {} to {}. This creates a private draft with the complete original text. Save publishes only the destination. References resolve in the destination scope and must validate before Save. Existing session instructions remain unchanged.",
-            parsed.id,
-            parsed.scope,
-            metadata::scope(&repository)
-        )],
+        warnings,
     })
 }
