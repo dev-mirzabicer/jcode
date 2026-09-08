@@ -373,8 +373,7 @@ impl GitRepository {
             let copied = std::io::copy(&mut reader.by_ref().take(size), &mut file)
                 .map_err(|error| io_error("copy complete committed blob", error))?;
             let mut delimiter = [0u8];
-            if copied != size || reader.read_exact(&mut delimiter).is_err() || delimiter != *b"\n"
-            {
+            if copied != size || reader.read_exact(&mut delimiter).is_err() || delimiter != *b"\n" {
                 return Err(malformed());
             }
         }
