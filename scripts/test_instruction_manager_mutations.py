@@ -2,7 +2,7 @@
 """Production manager mutation acceptance in private homes and local Git remotes.
 Uses the read-only probe's daemon/protocol/debug helpers, never paid inference.
 """
-import fcntl, json, os, pty, shlex, struct, subprocess, sys, termios, threading, time
+import fcntl, json, os, pty, shlex, signal, struct, subprocess, sys, termios, threading, time
 from pathlib import Path
 # Assign a controlling PTY in a fresh interpreter, avoiding unsafe preexec_fn
 # callbacks after the fixture HTTP thread has started.
@@ -164,11 +164,17 @@ if __name__ == '__main__':
         print('JCODE_PROGRESS '+json.dumps({'message':'Production mutation, package, import, ecosystem and stale-source APIs passed','current':1,'total':3}),flush=True)
         desired=f.ROOT/'editor-content';desired.write_text('UI EDIT 合成');mode=f.ROOT/'editor-mode';mode.write_text('success');editor=f.ROOT/'editor with spaces.py'
         editor.write_text('import sys,termios,json\nfrom pathlib import Path\np=Path(sys.argv[-1])\nassert termios.tcgetattr(0)[3]&termios.ICANON\np.write_text(Path('+repr(str(desired))+').read_text())\nsys.exit(3 if Path('+repr(str(mode))+').read_text()=="fail" else 0)\n')
+        tid=spawn_client(session,150,40)
+        def resize_client(cols, rows):
+            child,master,_,_=clients[-1]
+            fcntl.ioctl(master,termios.TIOCSWINSZ,struct.pack('HHHH',rows,cols,0,0))
+            os.kill(child.pid,signal.SIGWINCH)
         for cols,rows in [(150,40),(80,24),(60,24),(24,10)]:
-            tid=spawn_client(session,cols,rows);keys(tid,'c,/,u,i,-,m,o,d,u,l,e,enter');f.tester_state(tid,lambda state:state.get('rows_loaded')==1 and state.get('pending_id') is None);mode.write_text('fail');keys(tid,'ctrl+e');ui(tid,lambda state:state.get('failed') and state.get('pending') is None)
+            resize_client(cols,rows)
+            keys(tid,'c,/,u,i,-,m,o,d,u,l,e,enter');f.tester_state(tid,lambda state:state.get('rows_loaded')==1 and state.get('pending_id') is None);mode.write_text('fail');keys(tid,'ctrl+e');ui(tid,lambda state:state.get('failed') and state.get('pending') is None)
             mode.write_text('success');desired.write_text(f'UI EDIT {cols} 合成');keys(tid,'b');ui(tid,lambda state:not state.get('failed') and state.get('generation',0)>=2 and state.get('pending') is None)
             ui(tid,lambda state:state.get('reviewed') and state.get('pending') is None)
-            view=f.frame(tid,'UI EDIT',motion='end');(f.ROOT/f'edit-review-{cols}.json').write_text(json.dumps(view,indent=2))
+            view=f.frame(tid,'UI EDIT',motion='end');assert view['terminal_size']==[cols,rows];(f.ROOT/f'edit-review-{cols}.json').write_text(json.dumps(view,indent=2))
             if cols==150:
                 button=next(item['rect'] for item in view['layout']['widget_placements'] if item['kind']=='instruction-action-S')
                 f.debug(f"tester:{tid}:mouse:click:{button['x']},{button['y']}")
@@ -199,13 +205,14 @@ if __name__ == '__main__':
                 f.frame(tid,'Repository action completed.',motion='home')
                 ui(tid,lambda state:state.get('pending') is None and not state.get('failed'))
                 keys(tid,'esc');ui(tid,lambda state:not state.get('visible'))
-            child,master,_,_=clients[-1];child.terminate();child.wait(timeout=10);os.close(master);clients[-1][1]=None
         print('JCODE_PROGRESS '+json.dumps({'message':'Separate-home physical editor failure/retry/review/Save passed at all four sizes','current':2,'total':3}),flush=True)
         # Recover actual unsent form state after the client process exits. Its PTY
         # is owned by this probe, independent of the server process lifetime.
-        tid=spawn_client(session,80,24);keys(tid,'c,/,u,i,-,m,o,d,u,l,e,enter');f.tester_state(tid,lambda state:state.get('rows_loaded')==1 and state.get('pending_id') is None);keys(tid,'ctrl+e');opened=ui(tid,lambda state:state.get('draft') and state.get('reviewed') and state.get('pending') is None)
+        recovery_client=len(clients)-1
+        resize_client(80,24)
+        keys(tid,'c,/,u,i,-,m,o,d,u,l,e,enter');f.tester_state(tid,lambda state:state.get('rows_loaded')==1 and state.get('pending_id') is None);keys(tid,'ctrl+e');opened=ui(tid,lambda state:state.get('draft') and state.get('reviewed') and state.get('pending') is None)
         retained_id=opened['editing']['draft'];keys(tid,'m');keys(tid,'r,e,t,a,i,n,e,d,-,n,a,m,e')
-        capsule_root=f.ROOT/'client-runtime-4/durable-state/instruction-editor/client-recovery'
+        capsule_root=f.ROOT/f'client-runtime-{recovery_client}'/'durable-state/instruction-editor/client-recovery'
         deadline=time.monotonic()+20
         while True:
             records=[json.loads(path.read_text()) for path in capsule_root.rglob('*.json')]
@@ -213,7 +220,7 @@ if __name__ == '__main__':
             if time.monotonic()>deadline:raise TimeoutError('Unsent form did not reach private recovery storage')
             time.sleep(.1)
         child,master,_,_=clients[-1];child.terminate();child.wait(timeout=10);os.close(master);clients[-1][1]=None
-        tid=spawn_client(session,80,24,reuse=4);keys(tid,'space');keys(tid,'l,o,c,a,l,space,u,n,s,e,n,t,enter');f.tester_state(tid,lambda state:state.get('menu')=='Local unsent changes');keys(tid,'enter')
+        tid=spawn_client(session,80,24,reuse=recovery_client);keys(tid,'space');keys(tid,'l,o,c,a,l,space,u,n,s,e,n,t,enter');f.tester_state(tid,lambda state:state.get('menu')=='Local unsent changes');keys(tid,'enter')
         ui(tid,lambda state:state.get('draft')==retained_id and state.get('pending') is None)
         recovered=f.frame(tid,'retained-name',motion='home');(f.ROOT/'recovered-local-form.json').write_text(json.dumps(recovered,indent=2))
         assert 'name: retained-name' not in (store/'modules/ui-module.md').read_text()
@@ -227,7 +234,7 @@ if __name__ == '__main__':
         for key in ['system_prompt','active_skill','model','reasoning_effort','route_api_method']:assert original_session.get(key)==current_session.get(key),key
         current_replay=complete_replay(session);(f.ROOT/'final-replay.json').write_text(json.dumps(current_replay,indent=2));assert original_replay==current_replay,'complete journal-aware replay changed'
         assert len(f.posts)==bootstrap_requests,f.posts
-        evidence={'binary':subprocess.check_output([f.BIN,'--version'],text=True).strip(),'production_apis':True,'separate_client_home':True,'editor_failure_and_retry':True,'physical_mouse_save':True,'physical_repository_review_cancel_apply':True,'physical_sizes':[[150,40],[80,24],[60,24],[24,10]],'server_restart_draft_recovery':True,'physical_unsent_form_recovery':True,'session_instructions_unchanged':True,'complete_journal_aware_replay_unchanged':True,'manager_inference_requests':len(f.posts)-bootstrap_requests,'localhost_bootstrap_requests':bootstrap_requests,'artifact':str(f.ROOT)}
+        evidence={'binary':subprocess.check_output([f.BIN,'--version'],text=True).strip(),'production_apis':True,'separate_client_home':True,'editor_failure_and_retry':True,'physical_mouse_save':True,'physical_repository_review_cancel_apply':True,'physical_sizes':[[150,40],[80,24],[60,24],[24,10]],'same_client_physical_resize':True,'server_restart_draft_recovery':True,'physical_unsent_form_recovery':True,'session_instructions_unchanged':True,'complete_journal_aware_replay_unchanged':True,'manager_inference_requests':len(f.posts)-bootstrap_requests,'localhost_bootstrap_requests':bootstrap_requests,'artifact':str(f.ROOT)}
         (f.ROOT/'mutation-evidence.json').write_text(json.dumps(evidence,indent=2));print(json.dumps(evidence),flush=True)
     finally:
         for child,master,_,_ in clients:
@@ -238,10 +245,10 @@ if __name__ == '__main__':
             try:
                 if master is not None:os.close(master)
             except OSError:pass
-        (f.ROOT/'events.json').write_text(json.dumps(f.events));(f.ROOT/'provider-posts.json').write_text(json.dumps(f.posts))
         if f.client:f.client.close()
         if f.proc and f.proc.poll() is None:
             f.proc.terminate()
             try:f.proc.wait(timeout=10)
             except subprocess.TimeoutExpired:f.proc.kill();f.proc.wait()
         f.http.shutdown();f.log.close()
+        (f.ROOT/'events.json').write_text(json.dumps(f.events));(f.ROOT/'provider-posts.json').write_text(json.dumps(f.posts))
