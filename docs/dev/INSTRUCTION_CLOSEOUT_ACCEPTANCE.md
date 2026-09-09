@@ -1,6 +1,6 @@
 # Independent Phase 3 closeout verification
 
-**Status:** Candidate verified on 2026-09-08. Final Phase 3 acceptance is pending.
+**Status:** Phase 3 accepted by Mirza on 2026-09-09 at 08:25 UTC, after independent candidate verification on 2026-09-08.
 
 This is independent combined-source evidence, not a replacement for the original
 [migration inventory](INSTRUCTION_INVENTORY.md) or [requirement/journey map](INSTRUCTION_INTEGRATION_ACCEPTANCE.md).
@@ -21,8 +21,9 @@ No acceptance is inferred from work-package reports alone.
 - Runtime: `fb05a0e91-dirty-129501add786`. Current and shared channels match,
   canary passed, reload reached SocketReady on 2026-09-08 at 22:08 UTC.
 - Later evidence-only commits do not change that tested implementation.
-- Closeout branch: `mirza/phase-03-closeout`. Integration/publication requires
-  the candidate's explicit user approval.
+- Closeout branch: `mirza/phase-03-closeout`. Mirza's phase approval authorizes
+  the requested local-main fast-forward and downstream publication. The private
+  phase completion report records the final immutable publication boundary.
 
 ## Findings and repairs
 
@@ -226,6 +227,20 @@ Main artifact root: `~/.jcode/scratch/phase-03-closeout-20260908/`.
   `incremental-cleanup.json`, complete phase chronology/path/diff artifacts and
   `WORKING_AUDIT.md` retain non-content safety and audit evidence.
 
-No known in-scope product defect remains after the closeout repair. Final human
-phase approval, downstream integration/publication and the authoritative private
-completion/capability-map/roadmap updates are still required.
+## Final human acceptance
+
+Mirza accepted Phase 3 on 2026-09-09 at 08:25:35 UTC, conditional on the agent's
+professional confidence in the agreed robustness standard:
+
+> I trust your judgement 100% and approve Phase 3. Let's meticulously closeout this phase robustly.
+
+The agent affirmed that confidence within the agreed scope and disclosed
+verification limits, with no known in-scope defect or deferred correctness work.
+This is not a claim of zero undiscovered defects. The approval answered the
+candidate's explicit request for phase acceptance and local-main/downstream
+integration, followed by durable program closeout.
+
+The authoritative private `PHASE_COMPLETION.md` records final source/tree,
+publication, runtime and capability-map/roadmap completion. Earlier failed tests,
+resource-constrained attempts and platform/provider boundaries remain exactly the
+reported evidence rather than becoming passing claims through approval.

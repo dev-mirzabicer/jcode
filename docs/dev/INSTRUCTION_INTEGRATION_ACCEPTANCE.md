@@ -1,10 +1,11 @@
 # Integrated instruction acceptance
 
-**Status:** WP-11 accepted by Mirza on 2026-09-08 at 20:27 UTC. Independent Phase 3 acceptance remains separate.
+**Status:** WP-11 accepted by Mirza on 2026-09-08 at 20:27 UTC. Independent Phase 3 closeout was subsequently accepted on 2026-09-09 at 08:25 UTC.
 
 The later [independent closeout verification](INSTRUCTION_CLOSEOUT_ACCEPTANCE.md)
 records the final combined-source rerun, Git metadata safety repair, activated
-journeys and retained evidence boundaries. This WP-11 record remains historical.
+journeys and retained evidence boundaries. This WP-11 record remains historical,
+including its references to phase acceptance that was pending at that time.
 
 This record reconciles the instruction framework across the runtime, repositories,
 primary callers, active session state, manager, model policy and protected
