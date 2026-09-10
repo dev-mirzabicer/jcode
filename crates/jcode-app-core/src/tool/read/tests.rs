@@ -11,6 +11,7 @@ fn make_ctx(working_dir: std::path::PathBuf) -> ToolContext {
         stdin_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: ToolExecutionMode::Direct,
+        invocation: Default::default(),
     }
 }
 
@@ -169,7 +170,9 @@ fn read_tool_schema_advertises_only_canonical_public_fields() {
     assert!(properties.contains_key("file_path"));
     assert!(properties.contains_key("start_line"));
     assert!(properties.contains_key("limit"));
-    assert!(!properties.contains_key("end_line"));
+    // D-13 makes the upper bound public alongside exact continuation.
+    assert!(properties.contains_key("end_line"));
+    assert!(properties.contains_key("read_point"));
     assert!(!properties.contains_key("offset"));
 }
 

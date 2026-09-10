@@ -61,6 +61,7 @@ fn managed_refusal_never_changes_command_enforcement() {
             stdin_request_tx: None,
             graceful_shutdown_signal: None,
             execution_mode: ToolExecutionMode::Direct,
+            invocation: Default::default(),
         };
         // Even if the gate regresses, this command can only overwrite a
         // disposable fixture, never a user path.

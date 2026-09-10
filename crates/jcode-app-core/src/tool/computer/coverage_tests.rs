@@ -18,6 +18,7 @@ fn ctx() -> ToolContext {
         stdin_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: ToolExecutionMode::Direct,
+        invocation: Default::default(),
     }
 }
 

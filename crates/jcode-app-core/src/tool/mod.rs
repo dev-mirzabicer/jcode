@@ -909,6 +909,7 @@ impl Registry {
                 title: output.title,
                 metadata: output.metadata,
                 images: output.images,
+                source: output.source,
             };
         }
 
@@ -942,6 +943,7 @@ impl Registry {
                 title: output.title,
                 metadata: output.metadata,
                 images: output.images,
+                source: output.source,
             };
         }
 
@@ -981,6 +983,7 @@ impl Registry {
             title: output.title,
             metadata: output.metadata,
             images: output.images,
+            source: output.source,
         }
     }
 

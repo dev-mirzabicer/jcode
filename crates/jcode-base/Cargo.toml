@@ -59,6 +59,7 @@ jcode-logging = { path = "../jcode-logging" }
 # OAuth
 base64 = "0.22"
 sha2 = "0.10"
+rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled"] }
 jcode-transport = { path = "../jcode-transport" }
 rand = "0.9.3"
 hex = "0.4"

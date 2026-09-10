@@ -818,6 +818,7 @@ fn launch_manual_subagent(app: &mut App, spec: ManualSubagentSpec) {
             stdin_request_tx: None,
             graceful_shutdown_signal: None,
             execution_mode: crate::tool::ToolExecutionMode::Direct,
+            invocation: Default::default(),
         };
 
         let start = Instant::now();

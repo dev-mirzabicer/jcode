@@ -74,6 +74,7 @@ async fn swarm_retirement_registry_direct_alias_batch_and_cached_definitions() {
         stdin_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: ToolExecutionMode::Direct,
+        invocation: Default::default(),
     };
     for name in ["swarm", "communicate"] {
         // Only real aliases should be used here. The alias assertion ensures a

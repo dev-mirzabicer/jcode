@@ -101,6 +101,7 @@ fn failed_managed_notice_preserves_the_successful_config_write() {
         stdin_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: ToolExecutionMode::Direct,
+        invocation: Default::default(),
     };
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -247,6 +248,7 @@ async fn the_write_tool_reports_config_changes_end_to_end_async() {
         stdin_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: crate::tool::ToolExecutionMode::Direct,
+        invocation: Default::default(),
     };
 
     let output = crate::tool::write::WriteTool
@@ -301,6 +303,7 @@ async fn apply_patch_reports_config_changes_async() {
         stdin_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: crate::tool::ToolExecutionMode::Direct,
+        invocation: Default::default(),
     };
 
     let patch_text = format!(

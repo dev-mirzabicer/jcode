@@ -493,6 +493,9 @@ pub struct Config {
     /// Built-in tool exposure configuration
     pub tools: ToolConfig,
 
+    /// Shared tool-result presentation. This is not a producer acquisition limit.
+    pub output: OutputConfig,
+
     /// Agent Client Protocol adapter configuration
     pub acp: AcpConfig,
 
@@ -552,6 +555,68 @@ pub struct Config {
 
     /// Global "launch a new jcode" hotkeys (macOS). Baked once by auto-import.
     pub launch_hotkeys: LaunchHotkeysConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct OutputConfig {
+    pub default_size: Option<jcode_tool_types::presentation::OutputSize>,
+    pub per_tool: BTreeMap<String, jcode_tool_types::presentation::OutputSize>,
+}
+
+impl OutputConfig {
+    pub fn target(
+        &self,
+        tool: &str,
+        requested: Option<jcode_tool_types::presentation::OutputSize>,
+    ) -> std::num::NonZeroUsize {
+        use jcode_tool_types::presentation::{OutputSize, OutputSizeAlias};
+        requested
+            .or_else(|| {
+                self.per_tool
+                    .get(jcode_tool_types::resolve_tool_name(tool))
+                    .copied()
+            })
+            .or(self.default_size)
+            .unwrap_or(OutputSize::Alias(
+                if jcode_tool_types::resolve_tool_name(tool) == "read" {
+                    OutputSizeAlias::Medium
+                } else {
+                    OutputSizeAlias::Small
+                },
+            ))
+            .target()
+    }
+}
+
+#[cfg(test)]
+mod output_config_tests {
+    use super::*;
+    use jcode_tool_types::presentation::{OutputSize, OutputSizeAlias};
+
+    #[test]
+    fn shared_presentation_precedence_and_aliases() {
+        let mut config = OutputConfig::default();
+        assert_eq!(config.target("read", None).get(), 40_000);
+        assert_eq!(config.target("bash", None).get(), 20_000);
+        config.default_size = Some(OutputSize::Alias(OutputSizeAlias::Large));
+        assert_eq!(config.target("read", None).get(), 60_000);
+        config
+            .per_tool
+            .insert("read".into(), OutputSize::Alias(OutputSizeAlias::Small));
+        assert_eq!(config.target("functions.Read", None).get(), 20_000);
+        assert_eq!(
+            config
+                .target(
+                    "read",
+                    Some(OutputSize::Characters(
+                        std::num::NonZeroUsize::new(123).unwrap()
+                    ))
+                )
+                .get(),
+            123
+        );
+    }
 }
 
 /// Agent Client Protocol adapter configuration.

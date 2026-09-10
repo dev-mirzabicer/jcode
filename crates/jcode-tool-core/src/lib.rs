@@ -5,6 +5,28 @@ use jcode_message_types::ToolDefinition;
 use jcode_tool_types::ToolOutput;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputStream {
+    Text,
+    Stdout,
+    Stderr,
+}
+
+/// Implemented by the output owner. A successful write acknowledges retention,
+/// not merely placement in an untracked in-memory preview buffer.
+pub trait OutputCapture: Send + Sync {
+    fn write(&self, stream: OutputStream, bytes: &[u8]) -> Result<()>;
+    fn reference(&self) -> Result<jcode_tool_types::OutputReference>;
+}
+
+#[derive(Clone, Default)]
+pub struct InvocationContext {
+    pub ancestors: Vec<String>,
+    pub output_target: Option<std::num::NonZeroUsize>,
+    pub capture: Option<Arc<dyn OutputCapture>>,
+}
 
 pub const TOOL_INTENT_DESCRIPTION: &str =
     "Required short label shown in the UI: why this call is being made.";
@@ -108,6 +130,7 @@ pub struct ToolContext {
     pub stdin_request_tx: Option<tokio::sync::mpsc::UnboundedSender<StdinInputRequest>>,
     pub graceful_shutdown_signal: Option<InterruptSignal>,
     pub execution_mode: ToolExecutionMode,
+    pub invocation: InvocationContext,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,6 +141,9 @@ pub enum ToolExecutionMode {
 
 impl ToolContext {
     pub fn for_subcall(&self, tool_call_id: String) -> Self {
+        let mut invocation = InvocationContext::default();
+        invocation.ancestors.clone_from(&self.invocation.ancestors);
+        invocation.ancestors.push(self.tool_call_id.clone());
         Self {
             session_id: self.session_id.clone(),
             message_id: self.message_id.clone(),
@@ -126,6 +152,7 @@ impl ToolContext {
             stdin_request_tx: self.stdin_request_tx.clone(),
             graceful_shutdown_signal: self.graceful_shutdown_signal.clone(),
             execution_mode: self.execution_mode,
+            invocation,
         }
     }
 

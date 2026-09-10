@@ -10,7 +10,6 @@ use serde_json::{Value, json};
 use std::path::Path;
 
 const DEFAULT_LIMIT: usize = 5000;
-const MAX_LINE_LEN: usize = 2000;
 
 pub struct ReadTool;
 
@@ -31,6 +30,10 @@ struct ReadInput {
     offset: Option<usize>,
     #[serde(default)]
     limit: Option<usize>,
+    #[serde(default)]
+    read_point: Option<String>,
+    #[serde(default)]
+    output_size: Option<jcode_tool_types::presentation::OutputSize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,16 +47,6 @@ struct NormalizedReadRange {
     offset: usize,
     limit: usize,
     style: ReadRangeStyle,
-}
-
-impl NormalizedReadRange {
-    fn next_offset(self) -> usize {
-        self.offset + self.limit
-    }
-
-    fn next_start_line(self) -> usize {
-        self.next_offset() + 1
-    }
 }
 
 fn normalize_read_range(params: &ReadInput) -> Result<NormalizedReadRange> {
@@ -140,6 +133,15 @@ impl Tool for ReadTool {
                     "type": "integer",
                     "description": "1-based start line for text files."
                 },
+                "end_line": {
+                    "type": "integer",
+                    "description": "Inclusive upper line bound, also usable with read_point."
+                },
+                "read_point": {
+                    "type": "string",
+                    "description": "Exact continuation point from a previous read of this file. Replaces start_line/offset."
+                },
+                "output_size": jcode_tool_types::presentation::schema(),
                 "limit": {
                     "type": "integer",
                     "description": "Max text lines to read. Default 5000."
@@ -150,6 +152,13 @@ impl Tool for ReadTool {
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: ReadInput = serde_json::from_value(input)?;
+        anyhow::ensure!(
+            params.read_point.is_none()
+                || (params.start_line.is_none()
+                    && params.offset.is_none()
+                    && params.limit.is_none()),
+            "read_point replaces start_line/offset/limit; use end_line for an upper bound"
+        );
         let range = normalize_read_range(&params)?;
 
         let path = ctx.resolve_path(Path::new(&params.file_path));
@@ -187,88 +196,54 @@ impl Tool for ReadTool {
             )));
         }
 
-        // Read file
-        let content = tokio::fs::read_to_string(&path).await?;
-
-        // Single-pass: count lines while building output
-        let mut output = String::with_capacity(range.limit.min(2000) * 80);
-        let mut total_lines = 0usize;
-        let mut truncated_line_count = 0usize;
-        let end_exclusive = range.offset + range.limit;
+        let target = crate::config::config()
+            .output
+            .target("read", params.output_size);
+        let end_line = if params.read_point.is_some() {
+            params.end_line.map(|line| line as u64)
+        } else {
+            Some(
+                range
+                    .offset
+                    .checked_add(range.limit)
+                    .ok_or_else(|| anyhow::anyhow!("Read line range overflows"))?
+                    as u64,
+            )
+        };
+        anyhow::ensure!(range.limit > 0, "limit must be positive");
+        let request = crate::execution::reader::ReadRequest {
+            path: path.clone(),
+            point: params.read_point,
+            start_line: range.offset as u64 + 1,
+            end_line,
+            target,
+        };
+        let root = crate::storage::jcode_dir()?;
+        let mut output = tokio::task::spawn_blocking(move || {
+            crate::execution::reader::SourceReader::new(&root).read(request)
+        })
+        .await??;
+        if let jcode_tool_types::OutputSource::ReadPage(page) = &output.source
+            && page.next_point.is_none()
+            && page.end_byte < std::fs::metadata(&path)?.len()
         {
-            use std::fmt::Write;
-            for (i, line) in content.lines().enumerate() {
-                total_lines = i + 1;
-                if i < range.offset {
-                    continue;
-                }
-                if i >= end_exclusive {
-                    // Still need to count remaining lines
-                    continue;
-                }
-                let line_num = i + 1;
-                if line.len() > MAX_LINE_LEN {
-                    truncated_line_count += 1;
-                    let _ = writeln!(
-                        output,
-                        "{:>5}\t{}...",
-                        line_num,
-                        crate::util::truncate_str(line, MAX_LINE_LEN)
-                    );
-                } else {
-                    let _ = writeln!(output, "{:>5}\t{}", line_num, line);
-                }
-            }
+            let hint = match range.style {
+                ReadRangeStyle::StartEnd => format!("start_line={}", page.end_line),
+                ReadRangeStyle::OffsetLimit => format!("offset={}", page.end_line - 1),
+            };
+            output.output.push_str(&format!(
+                "\n[Selected line range complete; use {hint} to continue.]"
+            ));
         }
-
-        let end = end_exclusive.min(total_lines);
-
-        // Publish file touch event for swarm coordination
         Bus::global().publish(BusEvent::FileTouch(FileTouch {
-            session_id: ctx.session_id.clone(),
-            path: path.to_path_buf(),
+            session_id: ctx.session_id,
+            path,
             op: FileOp::Read,
             intent: None,
-            summary: Some(format!(
-                "read lines {}-{} of {}",
-                range.offset + 1,
-                end,
-                total_lines
-            )),
+            summary: Some("read source page".to_string()),
             detail: None,
         }));
-
-        if truncated_line_count > 0 || end < total_lines {
-            crate::logging::warn(&format!(
-                "[tool:read] returned truncated output for {} in session {} (tool_call={} range={}..{} total_lines={} truncated_lines={})",
-                params.file_path,
-                ctx.session_id,
-                ctx.tool_call_id,
-                range.offset + 1,
-                end,
-                total_lines,
-                truncated_line_count
-            ));
-        }
-
-        // Add metadata
-        if end < total_lines {
-            let continuation_hint = match range.style {
-                ReadRangeStyle::OffsetLimit => format!("offset={}", range.next_offset()),
-                ReadRangeStyle::StartEnd => format!("start_line={}", range.next_start_line()),
-            };
-            output.push_str(&format!(
-                "\n... {} more lines (use {} to continue)\n",
-                total_lines - end,
-                continuation_hint
-            ));
-        }
-
-        if output.is_empty() {
-            Ok(ToolOutput::new("(empty file)"))
-        } else {
-            Ok(ToolOutput::new(output))
-        }
+        Ok(output)
     }
 }
 

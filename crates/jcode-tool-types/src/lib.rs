@@ -1,12 +1,46 @@
-#[derive(Debug, Clone)]
+pub mod presentation;
+
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolOutput {
     pub output: String,
     pub title: Option<String>,
     pub metadata: Option<serde_json::Value>,
     pub images: Vec<ToolImage>,
+    #[serde(default)]
+    pub source: OutputSource,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum OutputSource {
+    #[default]
+    Inline,
+    Retained(OutputReference),
+    ReadPage(ReadPageReference),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutputReference {
+    pub invocation_id: String,
+    pub path: std::path::PathBuf,
+    pub bytes: u64,
+    pub complete: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadPageReference {
+    pub path: std::path::PathBuf,
+    pub start_byte: u64,
+    pub end_byte: u64,
+    pub start_line: u64,
+    pub end_line: u64,
+    pub retry_point: String,
+    pub next_point: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolImage {
     pub media_type: String,
     pub data: String,
@@ -20,6 +54,7 @@ impl ToolOutput {
             title: None,
             metadata: None,
             images: Vec::new(),
+            source: OutputSource::Inline,
         }
     }
 
