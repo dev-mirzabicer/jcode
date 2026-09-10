@@ -2,6 +2,8 @@
 
 Workflow prose uses the same [instruction runtime](dev/INSTRUCTION_RUNTIME.md) and [Git-backed stores](INSTRUCTION_STORES.md) as agent profiles and notifications. Existing workflow owners retain their triggers, provider/model selection, permissions, task data, framing, persistence, and execution policy. Editing prose does not create or enable a workflow.
 
+**Downstream availability:** The legacy review/judge, automatic review/judge, refactor, triage and overnight execution workflows are now retired while Swarm is globally unavailable. Their source and history remain intact. The descriptions below preserve their dormant mechanisms, not current launch availability. [Swarm policy](SWARM_POLICY.md#legacy-dependent-workflows) describes the gates and recovery of old pending startup input. Transfer, structured output, ordinary plan/improve and generic scheduling remain independent.
+
 ## Implemented consumers
 
 The workflow families below use managed sources. [The instruction inventory](dev/INSTRUCTION_INVENTORY.md) records their source owners, one-time migration equality evidence and approved exceptions.
@@ -21,6 +23,8 @@ All selected prose renders before reply directives are consumed or a specialist 
 Ambient mode remains disabled when `[ambient].enabled = false`. The migration does not enable it, change scheduling, adopt the model roster, or add profile selection. Dormant memory prose remains outside managed instructions and the hard-disabled memory policy is unchanged. Phase 9 owns future unattended execution and retry policy.
 
 ### Swarm effort directives
+
+Swarm is [globally unavailable by default](SWARM_POLICY.md). While disabled, these resources are not read or rendered, even for a restored historical effort sentinel. The following mechanism is retained for deliberate enabled-path maintenance.
 
 `system/swarm-effort.md` and `system/swarm-deep-effort.md` supply the dynamic suffix selected by the existing effort sentinels. Each request renders current prose in its session project scope. Ordinary reasoning efforts do not access these sources. Static system text, tools, model routing, effort mapping and Swarm execution policy remain unchanged.
 
@@ -66,6 +70,8 @@ Pending preparation is request/session/working-directory correlated and cancella
 
 ### Swarm worker and task-control instructions
 
+These instruction assets remain dormant while Swarm is globally unavailable. Runtime gates precede launch, coordination and restoration. Source inspection does not reactivate a workflow.
+
 Worker report, deep-node/gate, assignment, restart, wake, synthesis, salvage, replacement and stand-down prose uses `swarm-*` managed resources. The existing planner/integrator uses its coordinator's scope. Worker and displaced-worker guidance uses their respective member working directories. Data hydration, status/assignment rules, admission limits, scheduling, model selection and delivery channels remain unchanged.
 
 Swarm core retains the structural report/deep markers, wrapper spacing, idempotency and existing bounded-node selector. It accepts lazy render callbacks rather than owning another loader. Already-framed contracts do not read sources again. Assignment contracts render before plan mutation, and stand-down guidance renders before takeover. An invalid source leaves the prior assignment intact. Pre-mutation source failures notify duplicate waiters without caching the failure as a completed mutation, allowing an identical explicit retry after repair. Successful operation replay remains unchanged.
@@ -82,11 +88,13 @@ Compatibility prompt APIs now propagate instruction failures before provider use
 
 ### Swarm routing guidance
 
+Current availability is governed by [Swarm policy](SWARM_POLICY.md). Global disablement removes the tool and routing contribution without changing any historical snapshot. The lifecycle below describes the retained enabled mechanism.
+
 `tools/swarm-routing.md` replaces the process-wide cached prose in the Swarm tool definition. It resolves in the session's scope. Nonblank global legacy guidance imports once at the seed-26 cutover, retaining the original file. Unimported project legacy overrides remain compatible. A managed empty project definition suppresses global guidance, while an invalid one blocks rather than falling back.
 
 The implementation adds one optional session string, not another Swarm manager. Request preparation renders the current complete description only when Swarm is actually exposed. Successful preflight is followed by an atomic capture before dispatch. A budget-blocked or invalid source is not frozen. Later turns, tool-list rebuilds, resume and split reuse that exact description without source access. Fresh contexts, clear and transfer capture again. Source edits do not change running snapshots. First adoption by an already dispatched session resets native continuation and attributes one intentional cache transition. Tool locking and its one-time late-MCP rebuild remain independent.
 
-Raw session export, Markdown export, replay instruction state and full tool introspection retain the captured description. Lightweight startup metadata skips the body. `/swarm-prompt` remains a local external-editor compatibility command and selects the effective managed or unimported project source. On a genuinely remote connection, this local editor does not edit the server's filesystem. Use `/swarm-prompt inspect` or `/instructions` for the [central manager](INSTRUCTION_MANAGER.md), whose reviewed editing uses the connected server's sources. Swarm enablement, routing policy and launch semantics remain unchanged; Phase 4 decides whether to disable or replace it.
+Raw session export, Markdown export and replay instruction state retain the historical captured description. Lightweight startup metadata skips the body. Current tool introspection omits unavailable Swarm. `/swarm-prompt` and the Swarm model-role picker reject while globally disabled. The [central manager](INSTRUCTION_MANAGER.md) can still inspect retained instruction resources through `/instructions`; reading or editing those resources does not grant runtime availability. Replacement isolated delegation remains a separate implementation.
 
 ## Source and failure semantics
 

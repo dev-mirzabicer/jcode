@@ -1,6 +1,8 @@
 # Swarm as a Task DAG (Design)
 
-Status: Being implemented (supersedes the agent-first framing in
+**Downstream status:** Retained dormant design and implementation reference. Swarm is globally unavailable by default under [Swarm availability policy](SWARM_POLICY.md). Historical implementation claims below are not current availability claims.
+
+Original implementation status: Being implemented (supersedes the agent-first framing in
 `SWARM_ARCHITECTURE.md`). The DAG engine, deep/light modes, gates, growth
 mechanics, and comm migration steps 1-2 (artifact dataflow, subtree-scoped
 broadcast) are live; channel/shared-context deprecation (steps 3-4) is pending.

@@ -92,7 +92,7 @@ The following remain late request material rather than part of the stored static
 
 - Exact active rendered skill text from `Session.active_skill`
 - Current-turn system reminders
-- Swarm effort directives
+- Swarm effort directives only when Swarm is globally available; this downstream defaults to [hard-disabled Swarm](SWARM_POLICY.md)
 - Memory only in runtimes where memory is enabled; Mirza's downstream globally disables it
 
 Tool definitions retain their independent lock and one intentional late-MCP rebuild behavior.

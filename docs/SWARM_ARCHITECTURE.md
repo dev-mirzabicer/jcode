@@ -1,6 +1,8 @@
 # Swarm Architecture
 
-Status: Largely implemented (see `SWARM_TASK_GRAPH.md` for the DAG-first model
+**Downstream status:** Retained but globally unavailable by default. [Swarm availability policy](SWARM_POLICY.md) controls current behavior. The following describes the dormant implementation, not an available workflow or permission to reactivate it.
+
+Original implementation status: Largely implemented (see `SWARM_TASK_GRAPH.md` for the DAG-first model
 that supersedes the agent-first framing here; its staged comm migration is in
 progress)
 

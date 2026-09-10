@@ -13,7 +13,7 @@ Reference documentation for the jcode codebase.
 ## Key entry points
 
 - Architecture: `SERVER_ARCHITECTURE.md`, `MODULAR_ARCHITECTURE_RFC.md`, `CRATE_OWNERSHIP_BOUNDARIES.md`
-- Swarm: `SWARM_ARCHITECTURE.md`, `SWARM_TASK_GRAPH.md`
+- Swarm availability: [hard-disable policy](SWARM_POLICY.md); retained dormant implementation: `SWARM_ARCHITECTURE.md`, `SWARM_TASK_GRAPH.md`
 - Instructions: [overview](INSTRUCTIONS.md), [migration and recovery](INSTRUCTION_MIGRATION.md), [inspection and editing manager](INSTRUCTION_MANAGER.md)
 - Instruction framework verification: [independent phase closeout](dev/INSTRUCTION_CLOSEOUT_ACCEPTANCE.md)
 - Agent profiles and prompt freezing: `AGENT_PROFILES.md`, `SYSTEM_PROMPT_CONFIG.md`; managed Git stores: `INSTRUCTION_STORES.md`; skills: `SKILLS.md`; launch-time model policy: `MODEL_ROSTER.md`; maintainer ownership and future adoption: `dev/INSTRUCTION_RUNTIME.md`; combined acceptance: `dev/INSTRUCTION_INTEGRATION_ACCEPTANCE.md`
