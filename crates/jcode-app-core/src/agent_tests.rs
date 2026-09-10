@@ -37,6 +37,7 @@ fn swarm_retirement_locked_tools_change_once_without_rewriting_history() {
         previous: std::env::var_os("JCODE_SWARM_ENABLED"),
     };
     crate::env::set_var("JCODE_SWARM_ENABLED", "false");
+    crate::config::invalidate_config_cache();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -145,6 +146,7 @@ impl Drop for AgentTestEnvRestore {
         } else {
             crate::env::remove_var(self.key);
         }
+        crate::config::invalidate_config_cache();
     }
 }
 

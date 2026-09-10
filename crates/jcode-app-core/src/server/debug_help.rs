@@ -1,6 +1,6 @@
 pub(super) fn is_swarm_command(command: &str) -> bool {
     let command = command.trim();
-    command == "swarm"
+    matches!(command, "swarm" | "swarm_status")
         || command.starts_with("swarm:")
         || command.starts_with("swarm_message:")
         || command.starts_with("swarm_message_async:")

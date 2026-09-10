@@ -83,6 +83,10 @@ fn swarm_retirement_local_enter_and_discovery_preserve_session_and_dormant_sourc
     let efforts =
         crate::tui::app::helpers::inferred_reasoning_efforts(Some("openai"), Some("gpt-5.4"));
     assert!(efforts.contains(&"high"));
+    assert_eq!(
+        crate::tui::app::helpers::effort_display_label("swarm-deep"),
+        "Legacy effort (Swarm unavailable)"
+    );
     assert!(
         !efforts
             .iter()

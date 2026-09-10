@@ -115,6 +115,9 @@ pub(super) async fn dispatch_swarm_await_completion(
     event_counter: &Arc<AtomicU64>,
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
 ) {
+    if !crate::config::config().features.swarm {
+        return;
+    }
     if event.notify
         && fanout_session_event(
             swarm_members,

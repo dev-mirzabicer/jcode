@@ -6,6 +6,7 @@ impl SwarmAvailabilityEnv {
     fn disabled() -> Self {
         let previous = std::env::var_os("JCODE_SWARM_ENABLED");
         crate::env::set_var("JCODE_SWARM_ENABLED", "false");
+        crate::config::invalidate_config_cache();
         Self(previous)
     }
 }
@@ -17,6 +18,7 @@ impl Drop for SwarmAvailabilityEnv {
         } else {
             crate::env::remove_var("JCODE_SWARM_ENABLED");
         }
+        crate::config::invalidate_config_cache();
     }
 }
 
@@ -24,8 +26,15 @@ impl Drop for SwarmAvailabilityEnv {
 async fn swarm_retirement_registry_direct_alias_batch_and_cached_definitions() {
     let home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
     let _availability = SwarmAvailabilityEnv::disabled();
-    std::fs::write(home.root().join("config.toml"), "[features]\nswarm = true\n").unwrap();
-    assert!(!crate::config::config().features.swarm, "global environment override must win over serialized true");
+    std::fs::write(
+        home.root().join("config.toml"),
+        "[features]\nswarm = true\n",
+    )
+    .unwrap();
+    assert!(
+        !crate::config::config().features.swarm,
+        "global environment override must win over serialized true"
+    );
     let registry = Registry::new(Arc::new(MockProvider)).await;
     assert!(!registry.tools.read().await.contains_key("swarm"));
     // Represent a registry created before global disablement, without ever

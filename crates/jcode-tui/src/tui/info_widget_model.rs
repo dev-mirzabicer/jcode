@@ -339,6 +339,9 @@ fn append_model_runtime_metadata(spans: &mut Vec<Span<'static>>, data: &InfoWidg
 
 fn short_reasoning_effort(effort: &str) -> Option<&str> {
     let effort = effort.trim();
+    if crate::prompt::is_swarm_effort(effort) && !crate::config::config().features.swarm {
+        return Some("legacy");
+    }
     if effort.is_empty() {
         return None;
     }

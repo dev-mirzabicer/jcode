@@ -1,5 +1,84 @@
 use super::*;
 
+#[test]
+fn swarm_retirement_debug_aliases_are_classified_without_gating_generic_controls() {
+    for command in [
+        "swarm",
+        "swarm_status",
+        "swarm:graph:fixture",
+        "swarm:notify:fixture text",
+        "swarm_message:text",
+        "swarm_message_async:text",
+    ] {
+        assert!(
+            crate::server::debug_help::is_swarm_command(command),
+            "{command}"
+        );
+        let namespaced = format!("server:{command}");
+        let (_, unwrapped) = crate::server::debug_help::parse_namespaced_command(&namespaced);
+        assert!(crate::server::debug_help::is_swarm_command(unwrapped));
+    }
+    for command in [
+        "state",
+        "sessions",
+        "background:tasks",
+        "cancel",
+        "reload",
+        "tool:read {}",
+    ] {
+        assert!(
+            !crate::server::debug_help::is_swarm_command(command),
+            "{command}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn swarm_retirement_stale_await_completion_cannot_notify_or_wake() {
+    let _lock = crate::storage::lock_test_env();
+    let root = tempfile::tempdir().unwrap();
+    let _env = configure_test_env(&root);
+    let _off = ScopedEnvVar::set("JCODE_SWARM_ENABLED", "false");
+    let provider = Arc::new(StreamingMockProvider::default());
+    let agent = test_agent(provider.clone()).await;
+    let session_id = agent.lock().await.session_id().to_string();
+    let before = agent.lock().await.message_count();
+    let server = Server::new(provider.clone());
+    server
+        .sessions
+        .write()
+        .await
+        .insert(session_id.clone(), agent.clone());
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    server
+        .swarm_state
+        .members
+        .write()
+        .await
+        .insert(session_id.clone(), attached_swarm_member(&session_id, tx));
+    crate::server::background_tasks::dispatch_swarm_await_completion(
+        &crate::bus::SwarmAwaitCompleted {
+            session_id,
+            completed: true,
+            summary: "fixture".into(),
+            notification: "fixture".into(),
+            notify: true,
+            wake: true,
+        },
+        &server.sessions,
+        &server.soft_interrupt_queues,
+        &server.swarm_state.members,
+        &server.swarm_state.swarms_by_id,
+        &server.event_history,
+        &server.event_counter,
+        &server.swarm_event_tx,
+    )
+    .await;
+    assert!(rx.try_recv().is_err());
+    assert!(provider.requests.lock().unwrap().is_empty());
+    assert_eq!(agent.lock().await.message_count(), before);
+}
+
 #[tokio::test]
 async fn swarm_retirement_await_and_mutation_files_do_not_expire_migrate_or_resume() {
     use crate::server::{await_members_state as awaits, swarm_mutation_state as mutations};
@@ -13,13 +92,19 @@ async fn swarm_retirement_await_and_mutation_files_do_not_expire_migrate_or_resu
         "notify":true, "wake":true
     })).unwrap();
     let mutation = mutations::PersistedSwarmMutationState {
-        key:"retained".into(), action:"spawn".into(), session_id:"fixture".into(),
-        created_at_unix_ms:0, final_response:None,
+        key: "retained".into(),
+        action: "spawn".into(),
+        session_id: "fixture".into(),
+        created_at_unix_ms: 0,
+        final_response: None,
     };
     let mut fixtures = Vec::new();
     for (directory, bytes) in [
         ("jcode-await-members", serde_json::to_vec(&awaited).unwrap()),
-        ("jcode-swarm-mutations", serde_json::to_vec(&mutation).unwrap()),
+        (
+            "jcode-swarm-mutations",
+            serde_json::to_vec(&mutation).unwrap(),
+        ),
     ] {
         let path = crate::server::durable_state::state_path(directory, "retained");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -34,12 +119,26 @@ async fn swarm_retirement_await_and_mutation_files_do_not_expire_migrate_or_resu
     let provider = Arc::new(StreamingMockProvider::default());
     let server = Server::new(provider.clone());
     crate::server::comm_await::resume_background_awaits(
-        &server.swarm_state.members, &server.swarm_state.swarms_by_id,
-        &server.swarm_event_tx, &server.await_members_runtime,
-    ).await;
+        &server.swarm_state.members,
+        &server.swarm_state.swarms_by_id,
+        &server.swarm_event_tx,
+        &server.await_members_runtime,
+    )
+    .await;
     server.recover_headless_sessions_on_startup().await;
     let (tx, mut rx) = mpsc::unbounded_channel();
-    assert!(mutations::begin_or_replay(&server.swarm_mutation_runtime, "retained", "spawn", "fixture", 1, &tx).await.is_none());
+    assert!(
+        mutations::begin_or_replay(
+            &server.swarm_mutation_runtime,
+            "retained",
+            "spawn",
+            "fixture",
+            1,
+            &tx
+        )
+        .await
+        .is_none()
+    );
     assert_retired(rx.try_recv().unwrap());
     assert!(server.sessions.read().await.is_empty());
     assert!(provider.requests.lock().unwrap().is_empty());
@@ -177,8 +276,25 @@ async fn swarm_retirement_all_first_request_protocols_reject_without_sessions_or
     let _off = ScopedEnvVar::set("JCODE_SWARM_ENABLED", "false");
     let provider = Arc::new(StreamingMockProvider::default());
     let server = Server::new(provider.clone());
-    for request in retirement_requests() {
-        assert!(request.is_swarm_request());
+    let mut requests = retirement_requests();
+    assert!(
+        requests
+            .iter()
+            .all(crate::protocol::Request::is_swarm_request)
+    );
+    requests.push(crate::protocol::Request::SetFeature {
+        id: 500,
+        feature: crate::protocol::FeatureToggle::Swarm,
+        enabled: true,
+    });
+    for (id, effort) in [(501, "swarm"), (502, "swarm-deep")] {
+        requests.push(crate::protocol::Request::SetReasoningEffort {
+            id,
+            effort: effort.into(),
+            target_session_id: None,
+        });
+    }
+    for request in requests {
         let (client, task) = retirement_connection(&server).await;
         let (reader, mut writer) = client.into_split();
         let mut reader = tokio::io::BufReader::new(reader);

@@ -514,6 +514,9 @@ fn copy_to_clipboard_osc52(text: &str) -> bool {
 }
 
 pub(super) fn effort_display_label(effort: &str) -> &str {
+    if crate::prompt::is_swarm_effort(effort) && !crate::config::config().features.swarm {
+        return "Legacy effort (Swarm unavailable)";
+    }
     match effort {
         "swarm" => "Swarm (light fan-out) [Beta]",
         "swarm-deep" => "Swarm Deep (Max + task graph) [Beta]",

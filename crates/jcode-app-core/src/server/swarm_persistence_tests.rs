@@ -19,6 +19,7 @@ impl Drop for EnvGuard {
         } else {
             crate::env::remove_var("JCODE_RUNTIME_DIR");
         }
+        crate::config::invalidate_config_cache();
     }
 }
 
@@ -30,6 +31,7 @@ fn test_env(dir: &tempfile::TempDir) -> EnvGuard {
     // These fixtures deliberately exercise the retained enabled implementation,
     // exclusively in their private runtime directory.
     crate::env::set_var("JCODE_SWARM_ENABLED", "true");
+    crate::config::invalidate_config_cache();
     EnvGuard {
         _lock: lock,
         runtime: previous,
@@ -50,6 +52,7 @@ fn swarm_retirement_storage_is_untouched_before_migration_pruning_or_writes() {
         std::fs::write(file, b"synthetic dormant bytes, not valid JSON").unwrap();
     }
     crate::env::set_var("JCODE_SWARM_ENABLED", "false");
+    crate::config::invalidate_config_cache();
     let loaded = load_runtime_state();
     assert!(loaded.plans.is_empty() && loaded.members.is_empty());
     assert!(loaded.coordinators.is_empty() && loaded.swarms_by_id.is_empty());
