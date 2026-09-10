@@ -1,5 +1,80 @@
 use super::*;
 
+#[test]
+fn swarm_retirement_remote_stop_updates_authoritative_metadata_not_partial_client_history() {
+    let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let _off = AvailabilityGuard::disabled();
+    let mut app = create_test_app();
+    let mut authoritative = app.session.clone();
+    authoritative.title = Some("authoritative fixture".into());
+    authoritative.improve_mode = Some(crate::session::SessionImproveMode::RefactorRun);
+    authoritative.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "AUTHORITATIVE HISTORY".into(),
+            cache_control: None,
+        }],
+    );
+    authoritative.save().unwrap();
+    let before = serde_json::to_value(&authoritative.messages).unwrap();
+    app.is_remote = true;
+    app.remote_session_id = Some(authoritative.id.clone());
+    app.session.messages.clear();
+    app.session.title = Some("partial client".into());
+    app.improve_mode = Some(crate::tui::app::ImproveMode::RefactorRun);
+    assert!(crate::tui::app::commands::handle_unavailable_swarm_command(
+        &mut app,
+        "/refactor stop"
+    ));
+    let saved = crate::session::Session::load(&authoritative.id).unwrap();
+    assert_eq!(serde_json::to_value(&saved.messages).unwrap(), before);
+    assert_eq!(saved.title, authoritative.title);
+    assert_eq!(saved.system_prompt, authoritative.system_prompt);
+    assert!(saved.improve_mode.is_none() && app.improve_mode.is_none());
+
+    app.remote_session_id = Some("missing-retirement-stop-fixture".into());
+    app.improve_mode = Some(crate::tui::app::ImproveMode::RefactorRun);
+    let before = serde_json::to_value(&app.session).unwrap();
+    assert!(crate::tui::app::commands::handle_unavailable_swarm_command(
+        &mut app,
+        "/refactor stop"
+    ));
+    assert_eq!(serde_json::to_value(&app.session).unwrap(), before);
+    assert_eq!(
+        app.improve_mode,
+        Some(crate::tui::app::ImproveMode::RefactorRun)
+    );
+}
+
+#[test]
+fn swarm_retirement_explicit_remote_off_still_reaches_feature_owner() {
+    use crossterm::event::KeyEvent;
+    use tokio::io::AsyncBufReadExt;
+    let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let _off = AvailabilityGuard::disabled();
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.runtime_mode = crate::tui::app::AppRuntimeMode::RemoteClient;
+    app.remote_session_id = Some("retirement-off".into());
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let _entered = runtime.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.set_session_id("retirement-off".into());
+    remote.mark_history_loaded();
+    let mut reader = tokio::io::BufReader::new(remote.take_dummy_peer().unwrap());
+    runtime.block_on(async {
+        for (command, expected) in [("/autoreview off", crate::protocol::FeatureToggle::Autoreview), ("/autojudge off", crate::protocol::FeatureToggle::Autojudge)] {
+            app.input = command.into(); app.cursor_pos = app.input.len();
+            crate::tui::app::remote::handle_remote_key_event(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut remote).await.unwrap();
+            let mut line = String::new();
+            tokio::time::timeout(Duration::from_secs(2), reader.read_line(&mut line)).await.unwrap().unwrap();
+            let request: crate::protocol::Request = serde_json::from_str(&line).unwrap();
+            assert!(matches!(request, crate::protocol::Request::SetFeature { feature, enabled:false, .. } if feature == expected));
+        }
+    });
+    assert!(!app.autoreview_enabled && !app.autojudge_enabled);
+}
+
 struct AvailabilityGuard(Option<std::ffi::OsString>);
 
 impl AvailabilityGuard {

@@ -38,35 +38,21 @@ pub(super) fn handle_unavailable_swarm_command(app: &mut App, input: &str) -> bo
         if command == "/overnight" && matches!(argument, "status" | "log" | "review" | "cancel") {
             return false;
         }
+        // Explicit off still belongs to the normal local/server feature owner.
+        if matches!(command, "/autoreview" | "/autojudge") && argument == "off" {
+            return false;
+        }
         app.set_swarm_feature_enabled(false);
         app.autoreview_enabled = false;
         app.autojudge_enabled = false;
-        if matches!(command, "/autoreview" | "/autojudge") && argument == "off" {
-            if command == "/autoreview" {
-                app.set_autoreview_feature_enabled(false);
-            } else {
-                app.set_autojudge_feature_enabled(false);
-            }
-        }
-        if command == "/refactor" && argument == "stop" {
-            if app.improve_mode.is_some_and(|mode| mode.is_refactor()) {
-                app.improve_mode = None;
-            }
-            if app.session.improve_mode.is_some_and(|mode| {
-                matches!(
-                    mode,
-                    crate::session::SessionImproveMode::RefactorRun
-                        | crate::session::SessionImproveMode::RefactorPlan
-                )
-            }) {
-                app.session.improve_mode = None;
-                if let Err(error) = app.session.save() {
-                    app.push_display_message(DisplayMessage::error(format!(
-                        "Could not persist stopped workflow: {error}"
-                    )));
-                    return true;
-                }
-            }
+        if command == "/refactor"
+            && argument == "stop"
+            && let Err(error) = stop_retired_refactor(app)
+        {
+            app.push_display_message(DisplayMessage::error(format!(
+                "Could not persist stopped workflow: {error}"
+            )));
+            return true;
         }
         app.push_display_message(DisplayMessage::system(
             crate::config::SWARM_WORKFLOW_UNAVAILABLE.to_string(),
@@ -98,6 +84,34 @@ pub(super) fn handle_unavailable_swarm_command(app: &mut App, input: &str) -> bo
         ));
     }
     true
+}
+
+fn stop_retired_refactor(app: &mut App) -> anyhow::Result<()> {
+    let clear_mode = |session: &mut crate::session::Session| {
+        if matches!(
+            session.improve_mode,
+            Some(
+                crate::session::SessionImproveMode::RefactorRun
+                    | crate::session::SessionImproveMode::RefactorPlan
+            )
+        ) {
+            session.improve_mode = None;
+        }
+    };
+    if app.is_remote {
+        // The client may hold only a projected or partial session. Reuse the
+        // metadata owner, which loads authoritative history before updating it.
+        super::remote::persist_remote_session_metadata(app, clear_mode)?;
+    } else {
+        let mut candidate = app.session.clone();
+        clear_mode(&mut candidate);
+        candidate.save()?;
+        app.session = candidate;
+    }
+    if app.improve_mode.is_some_and(|mode| mode.is_refactor()) {
+        app.improve_mode = None;
+    }
+    Ok(())
 }
 const POKE_OFF_UI_HINT: &str = "/poke off to stop.";
 
