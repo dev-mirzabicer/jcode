@@ -297,14 +297,16 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
         "/improve resume",
         "Resume the last saved improve loop/plan",
     ));
-    lines.push(help_entry(
-        "/refactor",
-        "Run a safe refactor loop with independent review",
-    ));
-    lines.push(help_entry(
-        "/refactor resume",
-        "Resume the last saved refactor loop/plan",
-    ));
+    if crate::config::config().features.swarm {
+        lines.push(help_entry(
+            "/refactor",
+            "Run a safe refactor loop with independent review",
+        ));
+        lines.push(help_entry(
+            "/refactor resume",
+            "Resume the last saved refactor loop/plan",
+        ));
+    }
     lines.push(help_entry(
         "/splitview [on|off|status]",
         "Mirror the current chat in the side panel",

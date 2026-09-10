@@ -34,10 +34,56 @@ pub(super) fn handle_unavailable_swarm_command(app: &mut App, input: &str) -> bo
     let mut tokens = input.split_whitespace();
     let command = tokens.next().unwrap_or_default();
     let argument = tokens.next().unwrap_or_default();
+    if crate::workflow::is_swarm_dependent_command(command) {
+        if command == "/overnight" && matches!(argument, "status" | "log" | "review" | "cancel") {
+            return false;
+        }
+        app.set_swarm_feature_enabled(false);
+        app.autoreview_enabled = false;
+        app.autojudge_enabled = false;
+        if matches!(command, "/autoreview" | "/autojudge") && argument == "off" {
+            if command == "/autoreview" {
+                app.set_autoreview_feature_enabled(false);
+            } else {
+                app.set_autojudge_feature_enabled(false);
+            }
+        }
+        if command == "/refactor" && argument == "stop" {
+            if app.improve_mode.is_some_and(|mode| mode.is_refactor()) {
+                app.improve_mode = None;
+            }
+            if app.session.improve_mode.is_some_and(|mode| {
+                matches!(
+                    mode,
+                    crate::session::SessionImproveMode::RefactorRun
+                        | crate::session::SessionImproveMode::RefactorPlan
+                )
+            }) {
+                app.session.improve_mode = None;
+                if let Err(error) = app.session.save() {
+                    app.push_display_message(DisplayMessage::error(format!(
+                        "Could not persist stopped workflow: {error}"
+                    )));
+                    return true;
+                }
+            }
+        }
+        app.push_display_message(DisplayMessage::system(
+            crate::config::SWARM_WORKFLOW_UNAVAILABLE.to_string(),
+        ));
+        return true;
+    }
     let unavailable = matches!(command, "/swarm" | "/swarm-prompt")
         || (command == "/effort" && crate::prompt::is_swarm_effort(argument))
         || (matches!(command, "/agents" | "/agent-models")
-            && parse_agents_target(argument) == Some(crate::tui::AgentModelTarget::Swarm));
+            && matches!(
+                parse_agents_target(argument),
+                Some(
+                    crate::tui::AgentModelTarget::Swarm
+                        | crate::tui::AgentModelTarget::Review
+                        | crate::tui::AgentModelTarget::Judge
+                )
+            ));
     if !unavailable {
         return false;
     }

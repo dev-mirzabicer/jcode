@@ -72,7 +72,12 @@ impl App {
             targets.insert(3, AgentModelTarget::Memory);
         }
         if !crate::config::config().features.swarm {
-            targets.retain(|target| *target != AgentModelTarget::Swarm);
+            targets.retain(|target| {
+                !matches!(
+                    target,
+                    AgentModelTarget::Swarm | AgentModelTarget::Review | AgentModelTarget::Judge
+                )
+            });
         }
         let models: Vec<PickerEntry> = targets
             .into_iter()
@@ -233,7 +238,11 @@ impl App {
     }
 
     pub(crate) fn open_agent_model_picker(&mut self, target: AgentModelTarget) {
-        if target == AgentModelTarget::Swarm && !crate::config::config().features.swarm {
+        if matches!(
+            target,
+            AgentModelTarget::Swarm | AgentModelTarget::Review | AgentModelTarget::Judge
+        ) && !crate::config::config().features.swarm
+        {
             self.push_display_message(DisplayMessage::error(
                 crate::config::SWARM_UNAVAILABLE.to_string(),
             ));

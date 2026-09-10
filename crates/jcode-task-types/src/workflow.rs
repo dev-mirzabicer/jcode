@@ -32,6 +32,14 @@ pub enum ReviewWorkflowKind {
 }
 
 impl WorkflowPromptRequest {
+    /// Legacy workflows whose execution contract depends on Swarm.
+    pub fn requires_swarm(&self) -> bool {
+        match self {
+            Self::ReviewStartup { .. } => true,
+            Self::Command { command } => command.requires_swarm(),
+            Self::StructuredInitial { .. } | Self::StructuredCorrection { .. } => false,
+        }
+    }
     /// Heap-owned input bytes for diagnostics, not a rendering limit.
     pub fn allocated_bytes(&self) -> usize {
         match self {
@@ -117,6 +125,19 @@ pub enum CommandWorkflow {
     },
 }
 impl CommandWorkflow {
+    pub fn requires_swarm(&self) -> bool {
+        matches!(
+            self,
+            Self::Triage { .. }
+                | Self::Refactor { .. }
+                | Self::RefactorStop
+                | Self::RefactorResume { .. }
+                | Self::ImproveResume {
+                    mode: WorkflowLoopMode::RefactorRun | WorkflowLoopMode::RefactorPlan,
+                    ..
+                }
+        )
+    }
     pub fn allocated_bytes(&self) -> usize {
         match self {
             Self::Triage { focus } => focus.capacity(),

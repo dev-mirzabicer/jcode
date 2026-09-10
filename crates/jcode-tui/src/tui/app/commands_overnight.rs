@@ -13,6 +13,9 @@ const OVERNIGHT_ERROR_LIMIT: u8 = 2;
 const OVERNIGHT_MAX_POKES: u16 = 48;
 
 pub(super) fn handle_overnight_command(app: &mut App, trimmed: &str) -> bool {
+    if super::commands::handle_unavailable_swarm_command(app, trimmed) {
+        return true;
+    }
     let Some(command) = crate::overnight::parse_overnight_command(trimmed) else {
         return false;
     };
@@ -287,6 +290,9 @@ impl App {
         &mut self,
         manifest: &crate::overnight::OvernightManifest,
     ) {
+        if !crate::config::config().features.swarm {
+            return;
+        }
         let fingerprint = overnight_fingerprint_for_app(self, manifest);
         self.overnight_auto_poke = Some(OvernightAutoPokeState {
             run_id: manifest.run_id.clone(),
@@ -315,6 +321,10 @@ impl App {
     }
 
     pub(super) fn schedule_overnight_poke_followup_if_needed(&mut self) -> bool {
+        if !crate::config::config().features.swarm {
+            self.overnight_auto_poke = None;
+            return false;
+        }
         if self.overnight_auto_poke.is_none()
             || self.pending_queued_dispatch
             || self.pending_turn
@@ -429,7 +439,7 @@ impl App {
     }
 }
 
-fn is_overnight_auto_poke_message(message: &str) -> bool {
+pub(super) fn is_overnight_auto_poke_message(message: &str) -> bool {
     message.starts_with("Overnight auto-poke for run `")
 }
 

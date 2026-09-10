@@ -7,11 +7,30 @@ pub use jcode_task_types::{
 };
 use std::path::Path;
 
+/// Human command discovery, independent of instruction wording or saved state.
+pub fn is_swarm_dependent_command(command: &str) -> bool {
+    matches!(
+        command,
+        "/review"
+            | "/judge"
+            | "/autoreview"
+            | "/autojudge"
+            | "/refactor"
+            | "/triage"
+            | "/overnight"
+    )
+}
+
 pub fn render_prompt(
     repositories: &InstructionRepositoryService,
     working_dir: Option<&Path>,
     request: &WorkflowPromptRequest,
 ) -> Result<String, SystemPromptActivationError> {
+    if request.requires_swarm() && !crate::config::config().features.swarm {
+        return Err(SystemPromptActivationError::Compatibility(
+            crate::config::SWARM_WORKFLOW_UNAVAILABLE.into(),
+        ));
+    }
     match request {
         WorkflowPromptRequest::Command { command } => {
             crate::instruction::workflow::render_command(repositories, working_dir, command)

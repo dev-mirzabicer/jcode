@@ -132,6 +132,9 @@ impl App {
         }
         if !crate::config::config().features.swarm {
             self.set_swarm_feature_enabled(false);
+            self.autoreview_enabled = false;
+            self.autojudge_enabled = false;
+            self.overnight_auto_poke = None;
         }
         crate::logging::info("KEYBINDINGS: reloaded from config change");
         // Confirm the pickup to the user. Without this, an edit that is
@@ -385,10 +388,12 @@ impl App {
         let features = config().features.clone();
         let autoreview_enabled = session
             .autoreview_enabled
-            .unwrap_or(config().autoreview.enabled);
+            .unwrap_or(config().autoreview.enabled)
+            && features.swarm;
         let autojudge_enabled = session
             .autojudge_enabled
-            .unwrap_or(config().autojudge.enabled);
+            .unwrap_or(config().autojudge.enabled)
+            && features.swarm;
         let context_limit = provider.context_window() as u64;
         let mut runtime_memory_log = if crate::runtime_memory_log::client_logging_enabled() {
             Some(crate::runtime_memory_log::RuntimeMemoryLogController::new(
@@ -820,10 +825,12 @@ impl App {
         let features = config().features.clone();
         let autoreview_enabled = session
             .autoreview_enabled
-            .unwrap_or(config().autoreview.enabled);
+            .unwrap_or(config().autoreview.enabled)
+            && features.swarm;
         let autojudge_enabled = session
             .autojudge_enabled
-            .unwrap_or(config().autojudge.enabled);
+            .unwrap_or(config().autojudge.enabled)
+            && features.swarm;
         let context_limit = provider.context_window() as u64;
         let mut runtime_memory_log = if crate::runtime_memory_log::client_logging_enabled() {
             Some(crate::runtime_memory_log::RuntimeMemoryLogController::new(
@@ -1340,11 +1347,13 @@ impl App {
         self.autoreview_enabled = self
             .session
             .autoreview_enabled
-            .unwrap_or(crate::config::config().autoreview.enabled);
+            .unwrap_or(crate::config::config().autoreview.enabled)
+            && crate::config::config().features.swarm;
         self.autojudge_enabled = self
             .session
             .autojudge_enabled
-            .unwrap_or(crate::config::config().autojudge.enabled);
+            .unwrap_or(crate::config::config().autojudge.enabled)
+            && crate::config::config().features.swarm;
         if let Some(model) = self.session.model.clone() {
             self.update_context_limit_for_model(&model);
         }

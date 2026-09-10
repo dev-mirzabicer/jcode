@@ -842,6 +842,15 @@ pub(super) async fn handle_split(
     workflow: Option<&jcode_task_types::WorkflowPromptRequest>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
+    if workflow.is_some_and(|workflow| workflow.requires_swarm())
+        && !crate::config::config().features.swarm
+    {
+        let _ = client_event_tx.send(ServerEvent::WorkflowSplitFailed {
+            id,
+            message: crate::config::SWARM_WORKFLOW_UNAVAILABLE.into(),
+        });
+        return;
+    }
     let started = Instant::now();
     crate::logging::event_info(
         "SESSION_LIFECYCLE",

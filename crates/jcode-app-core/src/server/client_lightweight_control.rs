@@ -35,6 +35,31 @@ pub(super) fn unavailable_swarm_response(request: &Request) -> Option<ServerEven
     if crate::config::config().features.swarm {
         return None;
     }
+    if let Request::SplitWithWorkflow { id, workflow } = request
+        && workflow.requires_swarm()
+    {
+        return Some(ServerEvent::WorkflowSplitFailed {
+            id: *id,
+            message: crate::config::SWARM_WORKFLOW_UNAVAILABLE.into(),
+        });
+    }
+    if matches!(request, Request::RenderWorkflowPrompt { workflow, .. } if workflow.requires_swarm())
+        || matches!(
+            request,
+            Request::SetFeature {
+                feature: crate::protocol::FeatureToggle::Autoreview
+                    | crate::protocol::FeatureToggle::Autojudge,
+                enabled: true,
+                ..
+            }
+        )
+    {
+        return Some(ServerEvent::Error {
+            id: request.id(),
+            message: crate::config::SWARM_WORKFLOW_UNAVAILABLE.into(),
+            retry_after_secs: None,
+        });
+    }
     let requires_swarm = request.is_swarm_request()
         || matches!(
             request,

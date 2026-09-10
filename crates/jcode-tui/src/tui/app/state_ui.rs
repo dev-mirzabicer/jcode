@@ -3,6 +3,7 @@ use super::*;
 use crate::tui::ui::tools_ui;
 use crate::tui::{TuiState, backend};
 
+#[derive(Default)]
 pub(super) struct RestoredReloadInput {
     pub input: String,
     pub cursor: usize,
@@ -339,6 +340,9 @@ impl App {
         message: String,
         hints: Option<(crate::workflow::ReviewWorkflowKind, &str)>,
     ) -> anyhow::Result<()> {
+        if hints.is_some() {
+            crate::config::require_swarm_workflow()?;
+        }
         if message.trim().is_empty() {
             return Ok(());
         }
@@ -390,6 +394,57 @@ impl App {
         let data = std::fs::read_to_string(&path).ok()?;
 
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) {
+            // Legacy review launch receipts have dedicated startup-hint fields.
+            // Overnight uses its existing code-owned queue marker. Neither check
+            // interprets editable instruction prose or conversation titles.
+            fn contains_overnight_marker(value: &serde_json::Value) -> bool {
+                match value {
+                    serde_json::Value::String(text) => {
+                        super::commands_overnight::is_overnight_auto_poke_message(text)
+                    }
+                    serde_json::Value::Array(values) => {
+                        values.iter().any(contains_overnight_marker)
+                    }
+                    serde_json::Value::Object(values) => {
+                        values.values().any(contains_overnight_marker)
+                    }
+                    _ => false,
+                }
+            }
+            let retired_startup = value
+                .get("startup_display_message_title")
+                .is_some_and(serde_json::Value::is_string)
+                || [
+                    "queued_messages",
+                    "hidden_queued_system_messages",
+                    "interleave_message",
+                    "pending_soft_interrupts",
+                    "pending_soft_interrupt_resend",
+                    "rate_limit_pending_message",
+                ]
+                .iter()
+                .any(|key| value.get(key).is_some_and(contains_overnight_marker));
+            if retired_startup && !crate::config::config().features.swarm {
+                let retained =
+                    path.with_extension(format!("retired-swarm-{}", crate::id::new_id("input")));
+                let message = match std::fs::rename(&path, &retained) {
+                    Ok(()) => format!(
+                        "{} Pending input was not replayed. The complete original receipt is retained at {}.",
+                        crate::config::SWARM_WORKFLOW_UNAVAILABLE,
+                        retained.display()
+                    ),
+                    Err(error) => format!(
+                        "{} Pending input was not replayed. Could not move its original receipt at {}: {error}",
+                        crate::config::SWARM_WORKFLOW_UNAVAILABLE,
+                        path.display()
+                    ),
+                };
+                return Some(RestoredReloadInput {
+                    startup_status_notice: Some("Legacy workflow unavailable".into()),
+                    startup_display_message: Some(("Retained pending workflow".into(), message)),
+                    ..Default::default()
+                });
+            }
             let input = value
                 .get("input")
                 .and_then(|v| v.as_str())

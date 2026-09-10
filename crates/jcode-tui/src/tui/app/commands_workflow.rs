@@ -348,6 +348,9 @@ fn queue_test(app: &mut App, body: String) {
     });
 }
 fn dispatch_local(app: &mut App, command: &C, body: String) -> anyhow::Result<()> {
+    if command.requires_swarm() {
+        crate::config::require_swarm_workflow()?;
+    }
     persist_mode(app, command, false)?;
     if matches!(command, C::Test { .. }) {
         queue_test(app, body);
@@ -374,6 +377,9 @@ async fn dispatch_remote(
     command: &C,
     body: String,
 ) -> anyhow::Result<()> {
+    if command.requires_swarm() {
+        crate::config::require_swarm_workflow()?;
+    }
     persist_mode(app, command, true)?;
     if matches!(command, C::Test { .. }) {
         queue_test(app, body);

@@ -7,6 +7,11 @@ pub fn render_command(
     working_dir: Option<&Path>,
     command: &CommandWorkflow,
 ) -> Result<String, SystemPromptActivationError> {
+    if command.requires_swarm() && !crate::config::config().features.swarm {
+        return Err(SystemPromptActivationError::Compatibility(
+            crate::config::SWARM_WORKFLOW_UNAVAILABLE.into(),
+        ));
+    }
     let runtime = super::super::notification::occurrence_runtime(repositories, working_dir)?;
     Ok(render_in(&runtime, command)?)
 }

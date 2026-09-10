@@ -166,6 +166,31 @@ fn registration(
 }
 
 impl Workflow<'_> {
+    fn is_legacy_swarm_workflow(&self) -> bool {
+        matches!(
+            self,
+            Self::ReviewStartup { .. }
+                | Self::AutoreviewStartup { .. }
+                | Self::JudgeStartup { .. }
+                | Self::AutojudgeStartup { .. }
+                | Self::OvernightCoordinator { .. }
+                | Self::OvernightVisible { .. }
+                | Self::OvernightDefaultMission
+                | Self::OvernightContinuation { .. }
+                | Self::OvernightHandoff { .. }
+                | Self::OvernightMorning { .. }
+                | Self::OvernightPostWake { .. }
+                | Self::OvernightFinal { .. }
+                | Self::OvernightPokeIntro { .. }
+                | Self::OvernightPokeDiagnostic { .. }
+                | Self::OvernightPokeHandoff
+                | Self::OvernightPokeMorningReport
+                | Self::OvernightPokePostWake
+                | Self::OvernightPokeFinalWrap
+                | Self::OvernightPokeContinue
+        )
+    }
+
     pub fn render(
         &self,
         working_dir: Option<&Path>,
@@ -178,6 +203,11 @@ impl Workflow<'_> {
         repositories: &InstructionRepositoryService,
         working_dir: Option<&Path>,
     ) -> Result<String, SystemPromptActivationError> {
+        if self.is_legacy_swarm_workflow() && !crate::config::config().features.swarm {
+            return Err(SystemPromptActivationError::Compatibility(
+                crate::config::SWARM_WORKFLOW_UNAVAILABLE.into(),
+            ));
+        }
         let runtime = super::notification::occurrence_runtime(repositories, working_dir)?;
         Ok(self.render_in(&runtime)?)
     }

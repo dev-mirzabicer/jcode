@@ -1985,10 +1985,12 @@ pub(in crate::tui::app) fn handle_server_event(
             app.session.subagent_model = subagent_model;
             app.session.autoreview_enabled = autoreview_enabled;
             app.session.autojudge_enabled = autojudge_enabled;
-            app.autoreview_enabled =
-                autoreview_enabled.unwrap_or(crate::config::config().autoreview.enabled);
-            app.autojudge_enabled =
-                autojudge_enabled.unwrap_or(crate::config::config().autojudge.enabled);
+            app.autoreview_enabled = autoreview_enabled
+                .unwrap_or(crate::config::config().autoreview.enabled)
+                && crate::config::config().features.swarm;
+            app.autojudge_enabled = autojudge_enabled
+                .unwrap_or(crate::config::config().autojudge.enabled)
+                && crate::config::config().features.swarm;
             if upstream_provider.is_some() {
                 app.upstream_provider = upstream_provider;
             }

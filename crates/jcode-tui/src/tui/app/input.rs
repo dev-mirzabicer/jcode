@@ -1574,6 +1574,18 @@ impl App {
     }
 
     pub(super) fn schedule_auto_poke_followup_if_needed(&mut self) -> bool {
+        if !crate::config::config().features.swarm
+            && (self.improve_mode.is_some_and(|mode| mode.is_refactor())
+                || self.session.improve_mode.is_some_and(|mode| {
+                    matches!(
+                        mode,
+                        crate::session::SessionImproveMode::RefactorRun
+                            | crate::session::SessionImproveMode::RefactorPlan
+                    )
+                }))
+        {
+            return false;
+        }
         if !self.auto_poke_incomplete_todos
             || self.pending_queued_dispatch
             || self.pending_turn

@@ -53,6 +53,7 @@ pub struct OvernightStartOptions {
 }
 
 pub fn start_overnight_run(options: OvernightStartOptions) -> Result<OvernightLaunch> {
+    crate::config::require_swarm_workflow()?;
     let run_id = crate::id::new_id("overnight");
     let started_at = Utc::now();
     let duration = ChronoDuration::minutes(options.duration.minutes as i64);
@@ -238,6 +239,7 @@ async fn run_supervisor(
     registry: Registry,
     child_is_canary: bool,
 ) -> Result<()> {
+    crate::config::require_swarm_workflow()?;
     record_event(
         &manifest,
         "preflight_started",
@@ -269,6 +271,7 @@ async fn run_supervisor(
 
     loop {
         let current = load_manifest(&manifest.run_id)?;
+        crate::config::require_swarm_workflow()?;
         if matches!(current.status, OvernightRunStatus::CancelRequested) {
             record_event(
                 &current,

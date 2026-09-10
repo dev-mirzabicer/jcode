@@ -237,12 +237,12 @@ impl App {
     }
 
     pub(super) fn set_autoreview_feature_enabled(&mut self, enabled: bool) {
-        self.autoreview_enabled = enabled;
+        self.autoreview_enabled = enabled && crate::config::config().features.swarm;
         self.session.autoreview_enabled = Some(enabled);
     }
 
     pub(super) fn set_autojudge_feature_enabled(&mut self, enabled: bool) {
-        self.autojudge_enabled = enabled;
+        self.autojudge_enabled = enabled && crate::config::config().features.swarm;
         self.session.autojudge_enabled = Some(enabled);
     }
 

@@ -88,7 +88,10 @@ pub(super) fn save_agent_model_override(
     target: AgentModelTarget,
     model: Option<&str>,
 ) -> anyhow::Result<()> {
-    if target == AgentModelTarget::Swarm {
+    if matches!(
+        target,
+        AgentModelTarget::Swarm | AgentModelTarget::Review | AgentModelTarget::Judge
+    ) {
         crate::config::require_swarm()?;
     }
     let mut cfg = crate::config::Config::load();

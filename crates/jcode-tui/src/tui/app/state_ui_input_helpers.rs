@@ -260,6 +260,12 @@ pub(crate) fn registered_command_entries() -> impl Iterator<Item = (&'static str
     REGISTERED_COMMANDS
         .iter()
         .filter(|command| !command.hidden)
+        .filter(|command| {
+            crate::config::config().features.swarm
+                || !crate::workflow::is_swarm_dependent_command(
+                    command.name.split_whitespace().next().unwrap_or_default(),
+                )
+        })
         .filter(|command| command.name != "/memory" || crate::config::config().features.memory)
         .filter(|command| {
             !matches!(
@@ -400,6 +406,12 @@ impl App {
         let mut commands: Vec<(String, &'static str)> = REGISTERED_COMMANDS
             .iter()
             .filter(|command| !command.hidden)
+            .filter(|command| {
+                crate::config::config().features.swarm
+                    || !crate::workflow::is_swarm_dependent_command(
+                        command.name.split_whitespace().next().unwrap_or_default(),
+                    )
+            })
             .filter(|command| command.name != "/memory" || crate::config::config().features.memory)
             .filter(|command| {
                 !matches!(
@@ -576,6 +588,14 @@ impl App {
             return self.rank_suggestions(input, suggestions);
         }
 
+        if !crate::config::config().features.swarm
+            && crate::workflow::is_swarm_dependent_command(
+                input.split_whitespace().next().unwrap_or_default(),
+            )
+        {
+            return Vec::new();
+        }
+
         if prefix.starts_with("/agent-models ") || prefix.starts_with("/agents ") {
             let command = if prefix.starts_with("/agents ") {
                 "/agents"
@@ -598,6 +618,10 @@ impl App {
                         "Configure memory sidecar model",
                     ),
                 );
+            }
+            if !crate::config::config().features.swarm {
+                suggestions
+                    .retain(|(name, _)| !name.ends_with(" review") && !name.ends_with(" judge"));
             }
             return self.rank_suggestions(input, suggestions);
         }

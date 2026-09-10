@@ -264,7 +264,9 @@ prompt_entry_animation = true
 # Memory is a global availability gate. When false, recall, extraction,
 # memory tools, memory CLI operations, and ambient memory work are unavailable.
 memory = false
-# Swarm: multi-session coordination features
+# Global Swarm availability. False also retires dependent legacy workflows.
+# Tools, coordination, worker restoration and session reactivation are unavailable.
+# Global environment override: JCODE_SWARM_ENABLED
 swarm = false
 # Mermaid: render Mermaid code blocks and tell the model that diagrams are supported
 mermaid = true

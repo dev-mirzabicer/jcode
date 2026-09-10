@@ -544,6 +544,7 @@ pub(super) fn prepare_review_spawned_session(
     title_override: Option<String>,
     parent_session_id_override: Option<String>,
 ) -> anyhow::Result<()> {
+    crate::config::require_swarm_workflow()?;
     let mut session = crate::session::Session::load(session_id)?;
     {
         session.autoreview_enabled = Some(false);
@@ -747,6 +748,12 @@ pub(super) fn queue_review_spawn_remote(
     model_override: Option<String>,
     provider_key_override: Option<String>,
 ) {
+    if !crate::config::config().features.swarm {
+        app.push_display_message(DisplayMessage::system(
+            crate::config::SWARM_WORKFLOW_UNAVAILABLE.to_string(),
+        ));
+        return;
+    }
     app.pending_split_parent_session_id = Some(parent_session_id.clone());
     app.pending_split_workflow = Some(super::PendingSplitWorkflow {
         workflow: WorkflowPromptRequest::ReviewStartup {
@@ -781,6 +788,10 @@ pub(super) fn queue_autojudge_remote(app: &mut App) {
 }
 
 pub(super) fn maybe_trigger_autoreview_local(app: &mut App) {
+    if !crate::config::config().features.swarm {
+        app.autoreview_enabled = false;
+        return;
+    }
     if !app.autoreview_enabled || app.is_remote || app.is_replay {
         return;
     }
@@ -794,6 +805,10 @@ pub(super) fn maybe_trigger_autoreview_local(app: &mut App) {
 }
 
 pub(super) fn maybe_trigger_autojudge_local(app: &mut App) {
+    if !crate::config::config().features.swarm {
+        app.autojudge_enabled = false;
+        return;
+    }
     if !app.autojudge_enabled || app.is_remote || app.is_replay {
         return;
     }

@@ -30,6 +30,13 @@ const CONFIG_CACHE_CHECK_INTERVAL: Duration = if cfg!(test) {
 pub const SWARM_UNAVAILABLE: &str =
     "Swarm is disabled by global configuration and cannot be enabled for this session.";
 
+pub const SWARM_WORKFLOW_UNAVAILABLE: &str = "This legacy workflow is retired while Swarm is globally unavailable. Its code, instructions, and history are retained.";
+
+pub fn require_swarm_workflow() -> anyhow::Result<()> {
+    anyhow::ensure!(config().features.swarm, SWARM_WORKFLOW_UNAVAILABLE);
+    Ok(())
+}
+
 /// Check the existing global feature authority before coordination or storage access.
 pub fn require_swarm() -> anyhow::Result<()> {
     anyhow::ensure!(config().features.swarm, SWARM_UNAVAILABLE);

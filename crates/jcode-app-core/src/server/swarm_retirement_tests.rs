@@ -1,5 +1,116 @@
 use super::*;
 
+fn legacy_workflows() -> Vec<crate::workflow::WorkflowPromptRequest> {
+    use crate::workflow::{
+        CommandWorkflow as C, ReviewWorkflowKind as R, WorkflowLoopMode as M,
+        WorkflowPromptRequest as W,
+    };
+    let mut workflows = [R::Review, R::Autoreview, R::Judge, R::Autojudge]
+        .into_iter()
+        .map(|mode| W::ReviewStartup {
+            mode,
+            parent_session_id: "fixture".into(),
+        })
+        .collect::<Vec<_>>();
+    workflows.extend(
+        [
+            C::Triage {
+                focus: "fixture".into(),
+            },
+            C::Refactor {
+                plan_only: false,
+                focus: None,
+            },
+            C::Refactor {
+                plan_only: true,
+                focus: None,
+            },
+            C::RefactorStop,
+            C::RefactorResume {
+                mode: M::RefactorRun,
+                todos: vec![],
+            },
+            C::ImproveResume {
+                mode: M::RefactorPlan,
+                todos: vec![],
+            },
+        ]
+        .into_iter()
+        .map(|command| W::Command { command }),
+    );
+    workflows
+}
+
+#[tokio::test]
+async fn swarm_retirement_legacy_workflows_reject_before_source_session_or_provider_access() {
+    use crate::protocol::Request;
+    use tokio::io::AsyncWriteExt;
+    let _lock = crate::storage::lock_test_env();
+    let root = tempfile::tempdir().unwrap();
+    let _env = configure_test_env(&root);
+    let _off = ScopedEnvVar::set("JCODE_SWARM_ENABLED", "false");
+    let provider = Arc::new(StreamingMockProvider::default());
+    let server = Server::new(provider.clone());
+    let repositories = crate::instruction::InstructionRepositoryService::from_paths(
+        root.path().join("missing"),
+        root.path().join("missing-state"),
+    );
+    for workflow in legacy_workflows() {
+        assert!(workflow.requires_swarm());
+        let error = crate::workflow::render_prompt(&repositories, None, &workflow).unwrap_err();
+        assert_eq!(error.to_string(), crate::config::SWARM_WORKFLOW_UNAVAILABLE);
+        for request in [
+            Request::RenderWorkflowPrompt {
+                id: 1,
+                workflow: workflow.clone(),
+            },
+            Request::SplitWithWorkflow {
+                id: 1,
+                workflow: workflow.clone(),
+            },
+        ] {
+            let (client, task) = retirement_connection(&server).await;
+            let (reader, mut writer) = client.into_split();
+            let mut reader = tokio::io::BufReader::new(reader);
+            writer
+                .write_all((serde_json::to_string(&request).unwrap() + "\n").as_bytes())
+                .await
+                .unwrap();
+            let response = retirement_terminal(&mut reader, 1).await;
+            match (request, response) {
+                (
+                    Request::SplitWithWorkflow { .. },
+                    ServerEvent::WorkflowSplitFailed { message, .. },
+                )
+                | (Request::RenderWorkflowPrompt { .. }, ServerEvent::Error { message, .. }) => {
+                    assert_eq!(message, crate::config::SWARM_WORKFLOW_UNAVAILABLE)
+                }
+                other => panic!("unexpected workflow result: {other:?}"),
+            }
+            drop(writer);
+            task.await.unwrap().unwrap();
+        }
+    }
+    let parent = crate::session::Session::create(None, None);
+    let result = crate::overnight::start_overnight_run(crate::overnight::OvernightStartOptions {
+        duration: crate::overnight::parse_duration("1h").unwrap(),
+        mission: None,
+        parent_session: parent,
+        provider: provider.clone(),
+        registry: Registry::empty(),
+        working_dir: Some(root.path().into()),
+        use_current_session: false,
+    });
+    assert_eq!(
+        result.unwrap_err().to_string(),
+        crate::config::SWARM_WORKFLOW_UNAVAILABLE
+    );
+    assert!(server.sessions.read().await.is_empty());
+    assert!(provider.requests.lock().unwrap().is_empty());
+    assert!(!root.path().join("missing").exists());
+    assert!(!root.path().join("home/overnight").exists());
+}
+
 #[test]
 fn swarm_retirement_debug_aliases_are_classified_without_gating_generic_controls() {
     for command in [
@@ -253,7 +364,7 @@ async fn retirement_terminal(
             let mut line = String::new();
             assert_ne!(reader.read_line(&mut line).await.unwrap(), 0, "connection closed before {id}");
             let event: ServerEvent = serde_json::from_str(&line).unwrap();
-            if matches!(&event, ServerEvent::Error {id: value, ..} | ServerEvent::Done {id: value} | ServerEvent::Pong {id: value} if *value == id) {
+            if matches!(&event, ServerEvent::Error {id: value, ..} | ServerEvent::WorkflowSplitFailed {id:value,..} | ServerEvent::Done {id: value} | ServerEvent::Pong {id: value} if *value == id) {
                 return event;
             }
         }

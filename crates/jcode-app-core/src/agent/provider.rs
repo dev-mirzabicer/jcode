@@ -292,10 +292,16 @@ impl Agent {
     }
 
     pub fn autoreview_enabled(&self) -> Option<bool> {
+        if !crate::config::config().features.swarm {
+            return Some(false);
+        }
         self.session.autoreview_enabled
     }
 
     pub fn set_autoreview_enabled(&mut self, enabled: bool) -> Result<()> {
+        if enabled {
+            crate::config::require_swarm_workflow()?;
+        }
         self.session.autoreview_enabled = Some(enabled);
         self.log_env_snapshot("set_autoreview_enabled");
         self.session.save()?;
@@ -303,10 +309,16 @@ impl Agent {
     }
 
     pub fn autojudge_enabled(&self) -> Option<bool> {
+        if !crate::config::config().features.swarm {
+            return Some(false);
+        }
         self.session.autojudge_enabled
     }
 
     pub fn set_autojudge_enabled(&mut self, enabled: bool) -> Result<()> {
+        if enabled {
+            crate::config::require_swarm_workflow()?;
+        }
         self.session.autojudge_enabled = Some(enabled);
         self.log_env_snapshot("set_autojudge_enabled");
         self.session.save()?;
