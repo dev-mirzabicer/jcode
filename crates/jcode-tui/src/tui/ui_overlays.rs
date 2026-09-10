@@ -196,13 +196,19 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
         "/agent-models",
         "Configure models for special agent roles",
     ));
-    lines.push(help_entry(
-        "/swarm-prompt",
-        "Open the active swarm routing prompt in your editor",
-    ));
+    if crate::config::config().features.swarm {
+        lines.push(help_entry(
+            "/swarm-prompt",
+            "Open the active swarm routing prompt in your editor",
+        ));
+    }
     lines.push(help_entry(
         "/effort <level>",
-        "Set effort (none|minimal|low|medium|high|xhigh|max|swarm|swarm-deep)",
+        if crate::config::config().features.swarm {
+            "Set effort (none|minimal|low|medium|high|xhigh|max|swarm|swarm-deep)"
+        } else {
+            "Set effort (none|minimal|low|medium|high|xhigh|max)"
+        },
     ));
     lines.push(help_entry(
         "/fast [on|off|status|default ...]",
@@ -363,7 +369,9 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
         "/initiatives",
         "Open initiatives overview / resume an initiative",
     ));
-    lines.push(help_entry("/swarm [on|off]", "Toggle swarm features"));
+    if crate::config::config().features.swarm {
+        lines.push(help_entry("/swarm [on|off]", "Toggle swarm features"));
+    }
 
     lines.push(Line::from(""));
     lines.push(separator());
@@ -598,7 +606,7 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     lines.push(key_entry(&alt("X"), "Show/dismiss todo list card in chat"));
     lines.push(key_entry(
         &crate::tui::keybind::effort_switch_keys_label(),
-        "Cycle effort (reasoning + swarm)",
+        "Cycle available reasoning effort",
     ));
     if cfg!(target_os = "macos") {
         lines.push(key_entry(

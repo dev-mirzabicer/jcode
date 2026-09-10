@@ -25,6 +25,34 @@ use std::process::Command;
 use std::time::Instant;
 
 pub(super) const REVIEW_PREFERRED_MODEL: &str = "gpt-5.5";
+
+/// Shared local/remote rejection before a command can edit sources or send controls.
+pub(super) fn handle_unavailable_swarm_command(app: &mut App, input: &str) -> bool {
+    if crate::config::config().features.swarm {
+        return false;
+    }
+    let mut tokens = input.split_whitespace();
+    let command = tokens.next().unwrap_or_default();
+    let argument = tokens.next().unwrap_or_default();
+    let unavailable = matches!(command, "/swarm" | "/swarm-prompt")
+        || (command == "/effort" && crate::prompt::is_swarm_effort(argument))
+        || (matches!(command, "/agents" | "/agent-models")
+            && parse_agents_target(argument) == Some(crate::tui::AgentModelTarget::Swarm));
+    if !unavailable {
+        return false;
+    }
+    app.set_swarm_feature_enabled(false);
+    if command == "/swarm" && matches!(argument, "" | "status" | "off") {
+        app.push_display_message(DisplayMessage::system(
+            crate::config::SWARM_UNAVAILABLE.to_string(),
+        ));
+    } else {
+        app.push_display_message(DisplayMessage::error(
+            crate::config::SWARM_UNAVAILABLE.to_string(),
+        ));
+    }
+    true
+}
 const POKE_OFF_UI_HINT: &str = "/poke off to stop.";
 
 const TODO_COMPLETION_CONTINUATION_MESSAGE: &str =
@@ -1679,6 +1707,9 @@ pub(super) fn handle_git_status_completed(app: &mut App, completed: GitStatusCom
 }
 
 pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
+    if handle_unavailable_swarm_command(app, trimmed) {
+        return true;
+    }
     if super::commands_workflow::handle(app, trimmed) {
         return true;
     }
@@ -2839,6 +2870,9 @@ fn ensure_swarm_prompt_edit_path(
 }
 
 pub(super) fn handle_swarm_prompt_command(app: &mut App, trimmed: &str) -> bool {
+    if handle_unavailable_swarm_command(app, trimmed) {
+        return true;
+    }
     if trimmed != "/swarm-prompt"
         && trimmed != "/swarm-prompt edit"
         && trimmed != "/swarm-prompt open"
@@ -3054,17 +3088,27 @@ pub(super) fn handle_agents_command(app: &mut App, trimmed: &str) -> bool {
     }
 
     let Some(target) = parse_agents_target(rest) else {
-        let targets = if crate::config::config().features.memory {
-            "swarm|review|judge|memory|ambient"
-        } else {
-            "swarm|review|judge|ambient"
-        };
+        let features = &crate::config::config().features;
+        let mut targets = vec!["review", "judge", "ambient"];
+        if features.memory {
+            targets.push("memory");
+        }
+        if features.swarm {
+            targets.push("swarm");
+        }
+        let targets = targets.join("|");
         app.push_display_message(DisplayMessage::error(format!(
             "Usage: /agent-models or /agent-models <{targets}>"
         )));
         return true;
     };
 
+    if target == crate::tui::AgentModelTarget::Swarm && !crate::config::config().features.swarm {
+        app.push_display_message(DisplayMessage::error(
+            crate::config::SWARM_UNAVAILABLE.to_string(),
+        ));
+        return true;
+    }
     app.open_agent_model_picker(target);
     true
 }

@@ -531,7 +531,17 @@ pub(super) fn inferred_reasoning_efforts(
     provider_name: Option<&str>,
     model_name: Option<&str>,
 ) -> Vec<&'static str> {
-    jcode_provider_core::inferred_reasoning_efforts(provider_name, model_name)
+    available_feature_efforts(jcode_provider_core::inferred_reasoning_efforts(
+        provider_name,
+        model_name,
+    ))
+}
+
+pub(super) fn available_feature_efforts(mut efforts: Vec<&'static str>) -> Vec<&'static str> {
+    if !crate::config::config().features.swarm {
+        efforts.retain(|effort| !crate::prompt::is_swarm_effort(effort));
+    }
+    efforts
 }
 
 pub(super) fn effort_bar(index: usize, total: usize) -> String {

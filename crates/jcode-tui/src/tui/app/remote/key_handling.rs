@@ -923,6 +923,9 @@ async fn handle_remote_key_internal(
             if !app.input.is_empty() {
                 let prepared = input::take_prepared_input(app);
                 let trimmed = prepared.expanded.trim();
+                if app_mod::commands::handle_unavailable_swarm_command(app, trimmed) {
+                    return Ok(());
+                }
 
                 if let Some(topic) = trimmed
                     .strip_prefix("/help ")

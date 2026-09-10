@@ -71,6 +71,9 @@ impl App {
         if crate::config::config().features.memory {
             targets.insert(3, AgentModelTarget::Memory);
         }
+        if !crate::config::config().features.swarm {
+            targets.retain(|target| *target != AgentModelTarget::Swarm);
+        }
         let models: Vec<PickerEntry> = targets
             .into_iter()
             .map(|target| {
@@ -230,6 +233,12 @@ impl App {
     }
 
     pub(crate) fn open_agent_model_picker(&mut self, target: AgentModelTarget) {
+        if target == AgentModelTarget::Swarm && !crate::config::config().features.swarm {
+            self.push_display_message(DisplayMessage::error(
+                crate::config::SWARM_UNAVAILABLE.to_string(),
+            ));
+            return;
+        }
         let configured = load_agent_model_override(target);
         let inherit_summary = agent_model_default_summary(target, self);
         self.open_model_picker();

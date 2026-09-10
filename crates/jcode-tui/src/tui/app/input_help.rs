@@ -3,6 +3,11 @@ use super::*;
 impl App {
     pub(super) fn command_help(&self, topic: &str) -> Option<String> {
         let topic = topic.trim().trim_start_matches('/').to_lowercase();
+        if !crate::config::config().features.swarm
+            && matches!(topic.as_str(), "swarm" | "swarm-prompt")
+        {
+            return Some(crate::config::SWARM_UNAVAILABLE.to_string());
+        }
         let help = match topic.as_str() {
             "help" | "commands" => {
                 "/help\nShow general command list and keyboard shortcuts.\n\n/help <command>\nShow detailed help for one command."
@@ -41,7 +46,7 @@ impl App {
                 "/agent\nOpen the primary-agent picker.\n\n/agent <name|global:name|project:name>\nBefore first dispatch, replace provisional system composition. After first dispatch, append the complete target profile without a model call.\n\n/agent replace [name|global:name|project:name]\nOpen the replacement picker or explicitly install the selected agent as a new true system prompt. This resets provider continuation and intentionally transitions the prompt cache.\n\n/agent inspect\nShow exact current system prompt, active profile delivery, and active skill text. Agent changes are idle-only."
             }
             "agent-models" | "agents" => {
-                "/agent-models\nOpen the special-role model config picker.\n\n/agent-models <swarm|review|judge|memory|ambient>\nJump straight to that role's saved model override.\n\n/agents remains a compatibility alias; use /agent for primary profiles."
+                "/agent-models\nOpen the available special-role model config picker.\n\n/agent-models <role>\nJump straight to an available role's saved model override. Globally unavailable roles are not offered.\n\n/agents remains a compatibility alias; use /agent for primary profiles."
             }
             "swarm-prompt" => {
                 "/swarm-prompt\nOpen the active swarm routing prompt in $VISUAL or $EDITOR.\n\nJcode uses a nonblank project override at ./.jcode/swarm-prompt.md when present, then ~/.jcode/swarm-prompt.md, then the built-in default. If no editable override exists, this command creates the global file from the built-in default. Restart or reload Jcode after editing because running agent tool registries cache the prompt."
@@ -102,6 +107,9 @@ impl App {
             }
             "judge" => {
                 "/judge\nLaunch a one-shot headed judge session immediately.\n\nThe judge will DM this session when done. If OpenAI ChatGPT OAuth is available, it prefers gpt-5.5."
+            }
+            "effort" if !crate::config::config().features.swarm => {
+                "/effort\nShow current effort.\n\n/effort <level>\nSet reasoning effort (none|minimal|low|medium|high|xhigh|max). Available levels depend on the model.\n\nAlso: {effort_keys} to cycle."
             }
             "effort" => {
                 "/effort\nShow current effort.\n\n/effort <level>\nSet effort (none|minimal|low|medium|high|xhigh|max|swarm|swarm-deep). Which levels apply depends on the model. The swarm rungs run at max reasoning and turn on swarm orchestration (light fan-out or the deep task graph).\n\nAlso: {effort_keys} to cycle."

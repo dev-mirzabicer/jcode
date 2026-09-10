@@ -672,7 +672,7 @@ impl App {
             let (provider_name, provider_model) = self.remote_effort_identity();
             inferred_reasoning_efforts(provider_name.as_deref(), provider_model.as_deref())
         } else {
-            self.provider.available_efforts()
+            super::helpers::available_feature_efforts(self.provider.available_efforts())
         };
         if efforts.is_empty() {
             self.set_status_notice("Reasoning effort not available for this provider");
@@ -1238,7 +1238,7 @@ pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
     if trimmed == "/effort" {
         app.record_keybinding_slow(crate::tui::app::shortcut_hints::LearnableAction::EffortCycle);
         let current = app.provider.reasoning_effort();
-        let efforts = app.provider.available_efforts();
+        let efforts = super::helpers::available_feature_efforts(app.provider.available_efforts());
         if efforts.is_empty() {
             app.push_display_message(DisplayMessage::system(
                 "Reasoning effort not available for this provider.".to_string(),
@@ -1269,6 +1269,9 @@ pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
     }
 
     if let Some(level) = trimmed.strip_prefix("/effort ") {
+        if super::commands::handle_unavailable_swarm_command(app, trimmed) {
+            return true;
+        }
         app.record_keybinding_slow(crate::tui::app::shortcut_hints::LearnableAction::EffortCycle);
         let level = level.trim();
         match app.provider.set_reasoning_effort(level) {
@@ -1282,7 +1285,8 @@ pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
                     "✓ Reasoning effort → {}",
                     label
                 )));
-                let efforts = app.provider.available_efforts();
+                let efforts =
+                    super::helpers::available_feature_efforts(app.provider.available_efforts());
                 let idx = new_effort
                     .as_ref()
                     .and_then(|e| efforts.iter().position(|x| *x == e.as_str()))

@@ -1109,7 +1109,7 @@ impl App {
                 self.remote_provider_model.as_deref(),
             )
         } else {
-            self.provider.available_efforts()
+            super::helpers::available_feature_efforts(self.provider.available_efforts())
         };
 
         let cache_signature = self.model_picker_cache_signature(
@@ -1348,7 +1348,7 @@ impl App {
                 self.remote_provider_model.as_deref(),
             )
         } else {
-            self.provider.available_efforts()
+            super::helpers::available_feature_efforts(self.provider.available_efforts())
         };
         let current_signature = self.model_picker_cache_signature(
             &current_model,
@@ -1937,7 +1937,7 @@ impl App {
                 self.remote_provider_model.as_deref(),
             )
         } else {
-            self.provider.available_efforts()
+            super::helpers::available_feature_efforts(self.provider.available_efforts())
         };
         let signature = self.model_picker_cache_signature(
             &current_model,
@@ -3441,6 +3441,17 @@ impl App {
                         }
                     }
                     PickerAction::Model => {
+                        if !crate::config::config().features.swarm
+                            && entry
+                                .effort
+                                .as_deref()
+                                .is_some_and(crate::prompt::is_swarm_effort)
+                        {
+                            self.push_display_message(DisplayMessage::error(
+                                crate::config::SWARM_UNAVAILABLE.to_string(),
+                            ));
+                            return Ok(());
+                        }
                         if !route.available {
                             self.push_display_message(DisplayMessage::error(
                                 crate::tui::app::model_context::unavailable_model_route_message(

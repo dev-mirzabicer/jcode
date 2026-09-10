@@ -1,4 +1,6 @@
 #![cfg_attr(test, allow(clippy::clone_on_copy))]
+#[path = "tests/swarm_retirement.rs"]
+mod swarm_retirement;
 include!("tests/support_failover/part_01.rs");
 include!("tests/support_failover/part_02.rs");
 include!("tests/context_budget.rs");

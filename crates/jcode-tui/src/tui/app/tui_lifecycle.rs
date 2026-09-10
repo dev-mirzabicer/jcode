@@ -130,6 +130,9 @@ impl App {
         if !crate::config::config().features.memory {
             self.set_memory_feature_enabled(false);
         }
+        if !crate::config::config().features.swarm {
+            self.set_swarm_feature_enabled(false);
+        }
         crate::logging::info("KEYBINDINGS: reloaded from config change");
         // Confirm the pickup to the user. Without this, an edit that is
         // already live is indistinguishable from one that silently did

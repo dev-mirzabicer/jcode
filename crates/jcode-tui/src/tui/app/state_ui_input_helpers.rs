@@ -261,6 +261,12 @@ pub(crate) fn registered_command_entries() -> impl Iterator<Item = (&'static str
         .iter()
         .filter(|command| !command.hidden)
         .filter(|command| command.name != "/memory" || crate::config::config().features.memory)
+        .filter(|command| {
+            !matches!(
+                command.name,
+                "/swarm" | "/swarm-prompt" | "/swarm-prompt inspect"
+            ) || crate::config::config().features.swarm
+        })
         .map(|command| (command.name, command.help))
 }
 
@@ -395,6 +401,12 @@ impl App {
             .iter()
             .filter(|command| !command.hidden)
             .filter(|command| command.name != "/memory" || crate::config::config().features.memory)
+            .filter(|command| {
+                !matches!(
+                    command.name,
+                    "/swarm" | "/swarm-prompt" | "/swarm-prompt inspect"
+                ) || crate::config::config().features.swarm
+            })
             .filter_map(|command| {
                 let name = command.name.to_string();
                 seen.insert(name.clone()).then_some((name, command.help))
@@ -571,11 +583,13 @@ impl App {
                 "/agent-models"
             };
             let mut suggestions = vec![
-                (format!("{command} swarm"), "Configure swarm/subagent model"),
                 (format!("{command} review"), "Configure code review model"),
                 (format!("{command} judge"), "Configure judge model"),
                 (format!("{command} ambient"), "Configure ambient model"),
             ];
+            if crate::config::config().features.swarm {
+                suggestions.insert(0, (format!("{command} swarm"), "Configure Swarm model"));
+            }
             if crate::config::config().features.memory {
                 suggestions.insert(
                     3,
@@ -1039,6 +1053,9 @@ impl App {
         }
 
         if prefix.starts_with("/swarm ") {
+            if !crate::config::config().features.swarm {
+                return Vec::new();
+            }
             return self.rank_suggestions(
                 input,
                 vec![
