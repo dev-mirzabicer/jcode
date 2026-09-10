@@ -1,3 +1,11 @@
+pub(super) fn is_swarm_command(command: &str) -> bool {
+    let command = command.trim();
+    command == "swarm"
+        || command.starts_with("swarm:")
+        || command.starts_with("swarm_message:")
+        || command.starts_with("swarm_message_async:")
+}
+
 pub(super) fn parse_namespaced_command(command: &str) -> (&str, &str) {
     let trimmed = command.trim();
     if let Some(idx) = trimmed.find(':') {
@@ -13,7 +21,7 @@ pub(super) fn parse_namespaced_command(command: &str) -> (&str, &str) {
 }
 
 pub(super) fn debug_help_text() -> String {
-    r#"Debug socket commands (namespaced):
+    let mut help = r#"Debug socket commands (namespaced):
 
 SERVER COMMANDS (server: prefix or no prefix):
   state                    - Get agent state
@@ -24,8 +32,6 @@ SERVER COMMANDS (server: prefix or no prefix):
   last_response            - Get last assistant response
   message:<text>           - Send message to agent
   message_async:<text>     - Send message async (returns job id)
-  swarm_message:<text>     - Plan and run subtasks via swarm workers, then integrate
-  swarm_message_async:<text> - Async swarm message (returns job id)
   tool:<name> <json>       - Execute tool directly
   cancel                   - Cancel in-flight generation (urgent interrupt)
   clear                    - Clear conversation history
@@ -56,8 +62,6 @@ SERVER COMMANDS (server: prefix or no prefix):
   clients                  - List connected TUI clients
   clients:map              - Map connected clients to sessions
   server:info              - Server identity, health, uptime
-  swarm                    - List swarm members + status (alias: swarm:members)
-  swarm:help               - Full swarm command reference
   create_session                - Create headless session
   create_session:<path>         - Create session with working dir
   create_session:selfdev:<path> - Create headless self-dev session
@@ -67,23 +71,6 @@ SERVER COMMANDS (server: prefix or no prefix):
   trigger_extraction       - Force end-of-session memory extraction
   available_models         - List all available models
   reload                   - Trigger server reload with current binary
-
-SWARM COMMANDS (swarm: prefix):
-  swarm:members            - List all swarm members with details
-  swarm:list               - List all swarms with member counts
-  swarm:info:<swarm_id>    - Full info for a swarm
-  swarm:coordinators       - List all coordinators
-  swarm:roles              - List all members with roles
-  swarm:plans              - List all swarm plans
-  swarm:plan_version:<id>  - Show plan version for a swarm
-  swarm:proposals          - List pending plan proposals
-  swarm:context            - List all shared context
-  swarm:touches            - List all file touches
-  swarm:conflicts          - Files touched by multiple sessions
-  swarm:channels           - List channel subscriptions
-  swarm:broadcast:<msg>    - Broadcast to swarm members
-  swarm:notify:<sid> <msg> - Send DM to specific session
-  swarm:help               - Full swarm command reference
 
 AMBIENT COMMANDS (ambient: prefix):
   ambient:status              - Ambient + schedule runner state, counts, next due items
@@ -177,11 +164,19 @@ Examples:
   {"type":"debug_command","id":2,"command":"client:frame"}
   {"type":"debug_command","id":3,"command":"tester:list"}
   {"type":"debug_command","id":4,"command":"set_provider:openai","session_id":"..."}
-  {"type":"debug_command","id":5,"command":"swarm:info:/home/user/project"}"#
-        .to_string()
+  {"type":"debug_command","id":5,"command":"server:info"}"#
+        .to_string();
+    if crate::config::config().features.swarm {
+        help.push_str("\n\n");
+        help.push_str(&swarm_debug_help_text());
+    }
+    help
 }
 
 pub(super) fn swarm_debug_help_text() -> String {
+    if !crate::config::config().features.swarm {
+        return crate::config::SWARM_UNAVAILABLE.to_string();
+    }
     r#"Swarm debug commands (swarm: prefix):
 
 MEMBERS & STRUCTURE:

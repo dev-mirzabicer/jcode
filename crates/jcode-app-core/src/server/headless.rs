@@ -99,10 +99,12 @@ pub(super) async fn create_headless_session(
     // Inline swarm mode renders a live gallery of worker viewports in the
     // coordinator TUI; enable the per-agent output tap so this worker streams a
     // throttled output tail onto the bus.
-    if matches!(
-        crate::config::config().agents.swarm_spawn_mode,
-        crate::config::SwarmSpawnMode::Inline
-    ) {
+    if swarm_enabled
+        && matches!(
+            crate::config::config().agents.swarm_spawn_mode,
+            crate::config::SwarmSpawnMode::Inline
+        )
+    {
         new_agent.set_inline_output_tap(true);
     }
     if provider_key_override.is_some() {

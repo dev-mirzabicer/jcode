@@ -38,6 +38,24 @@ fn memory_is_globally_disabled_by_default() {
 }
 
 #[test]
+fn swarm_retirement_defaults_and_explicit_global_compatibility() {
+    assert!(!Config::default().features.swarm);
+    assert!(!toml::from_str::<Config>("").unwrap().features.swarm);
+    assert!(
+        toml::from_str::<Config>("[features]\nswarm = true\n")
+            .unwrap()
+            .features
+            .swarm
+    );
+    assert!(
+        !toml::from_str::<Config>(&Config::default_config_file_contents())
+            .unwrap()
+            .features
+            .swarm
+    );
+}
+
+#[test]
 fn obsolete_compaction_config_keys_are_ignored_and_never_serialized() {
     let config: Config = toml::from_str(
         r#"

@@ -214,6 +214,9 @@ pub(super) async fn spawn_or_resume_await_members(
     swarm_event_tx: broadcast::Sender<SwarmEvent>,
     await_members_runtime: AwaitMembersRuntime,
 ) {
+    if !crate::config::config().features.swarm {
+        return;
+    }
     let key = state.key.clone();
     let swarm_id = state.swarm_id.clone();
     let requested_ids = state.requested_ids.clone();
@@ -326,6 +329,14 @@ pub(super) async fn handle_comm_await_members(
     wake: bool,
     ctx: CommAwaitMembersContext<'_>,
 ) {
+    if !crate::config::config().features.swarm {
+        let _ = ctx.client_event_tx.send(ServerEvent::Error {
+            id,
+            message: crate::config::SWARM_UNAVAILABLE.to_string(),
+            retry_after_secs: None,
+        });
+        return;
+    }
     let swarm_id = {
         let members = ctx.swarm_members.read().await;
         members
@@ -611,6 +622,9 @@ pub(super) async fn resume_background_awaits(
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
     await_members_runtime: &AwaitMembersRuntime,
 ) {
+    if !crate::config::config().features.swarm {
+        return;
+    }
     let pending: Vec<PersistedAwaitMembersState> = all_pending_await_members_including_expired()
         .into_iter()
         .filter(|state| state.background)

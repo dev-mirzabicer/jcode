@@ -50,6 +50,9 @@ pub(super) async fn send_request_with_timeout(
     request: Request,
     timeout: Option<std::time::Duration>,
 ) -> Result<ServerEvent> {
+    if request.is_swarm_request() {
+        crate::config::require_swarm()?;
+    }
     let path = crate::server::socket_path();
     let stream = connect_swarm_socket(&path).await?;
     let (reader, mut writer) = stream.into_split();

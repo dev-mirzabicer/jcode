@@ -470,6 +470,14 @@ pub(super) async fn handle_set_feature(
             }
         }
         FeatureToggle::Swarm => {
+            if enabled && !crate::config::config().features.swarm {
+                let _ = client_event_tx.send(ServerEvent::Error {
+                    id,
+                    message: crate::config::SWARM_UNAVAILABLE.to_string(),
+                    retry_after_secs: None,
+                });
+                return;
+            }
             if *swarm_enabled == enabled {
                 let _ = client_event_tx.send(ServerEvent::Done { id });
                 return;

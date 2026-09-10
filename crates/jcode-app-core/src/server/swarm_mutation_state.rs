@@ -109,10 +109,16 @@ pub(super) fn request_key(session_id: &str, action: &str, components: &[String])
 }
 
 pub(super) fn load_state(key: &str) -> Option<PersistedSwarmMutationState> {
+    if !crate::config::config().features.swarm {
+        return None;
+    }
     load_json_state(SWARM_MUTATION_DIR, key, is_stale)
 }
 
 pub(super) fn save_state(state: &PersistedSwarmMutationState) {
+    if !crate::config::config().features.swarm {
+        return;
+    }
     save_json_state(
         SWARM_MUTATION_DIR,
         &state.key,
@@ -207,6 +213,14 @@ async fn begin_with_mode(
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
     replay_final: bool,
 ) -> Option<PersistedSwarmMutationState> {
+    if !crate::config::config().features.swarm {
+        let _ = client_event_tx.send(ServerEvent::Error {
+            id: request_id,
+            message: crate::config::SWARM_UNAVAILABLE.to_string(),
+            retry_after_secs: None,
+        });
+        return None;
+    }
     {
         // Hold the sync lock across the persisted-final check, waiter
         // registration, and active-claim. If the original executor finishes

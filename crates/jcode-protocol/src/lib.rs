@@ -708,10 +708,15 @@ impl Request {
     }
 
     pub fn is_lightweight_control_request(&self) -> bool {
+        matches!(self, Request::Ping { .. }) || self.is_swarm_request()
+    }
+
+    /// Coordination requests belong to Swarm, unlike generic session notification,
+    /// cancellation, background delivery, and presence controls.
+    pub fn is_swarm_request(&self) -> bool {
         matches!(
             self,
-            Request::Ping { .. }
-                | Request::CommShare { .. }
+            Request::CommShare { .. }
                 | Request::CommRead { .. }
                 | Request::CommMessage { .. }
                 | Request::CommList { .. }

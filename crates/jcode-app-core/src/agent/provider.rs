@@ -236,6 +236,9 @@ impl Agent {
     }
 
     pub fn set_reasoning_effort(&mut self, effort: &str) -> Result<Option<String>> {
+        if crate::prompt::is_swarm_effort(effort) {
+            crate::config::require_swarm()?;
+        }
         self.provider.set_reasoning_effort(effort)?;
         let current = self.provider.reasoning_effort();
         self.session.reasoning_effort = current.clone();

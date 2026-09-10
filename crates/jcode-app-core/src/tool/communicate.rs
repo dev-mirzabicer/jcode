@@ -2225,6 +2225,7 @@ impl Tool for CommunicateTool {
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
+        crate::config::require_swarm()?;
         let mut params: CommunicateInput = serde_json::from_value(input)?;
 
         // `to_session` and `target_session` both name a single session id. Historically

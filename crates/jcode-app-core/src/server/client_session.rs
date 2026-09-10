@@ -358,6 +358,7 @@ async fn ensure_client_swarm_member(
     event_counter: &Arc<std::sync::atomic::AtomicU64>,
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
 ) -> bool {
+    let swarm_enabled = swarm_enabled && crate::config::config().features.swarm;
     let (working_dir, derived_swarm_id, fallback_name) = {
         // A target-aware subscribe can attach to an agent that is in the middle
         // of a turn. Never wait for that turn's agent lock just to populate
@@ -404,6 +405,10 @@ async fn ensure_client_swarm_member(
                 .event_txs
                 .insert(client_connection_id.to_string(), client_event_tx.clone());
             member.swarm_enabled = swarm_enabled;
+            if !swarm_enabled {
+                member.swarm_id = None;
+                member.role = "agent".to_string();
+            }
             member.is_headless = false;
             if member_name.is_some() {
                 member.friendly_name = member_name.clone();

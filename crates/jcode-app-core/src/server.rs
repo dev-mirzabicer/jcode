@@ -870,6 +870,9 @@ impl Server {
             let members = self.swarm_state.members.read().await;
             members
                 .values()
+                .filter(|member| {
+                    crate::config::config().features.swarm || member.swarm_id.is_none()
+                })
                 .filter(|member| headless_member_should_restore(&member.status, member.is_headless))
                 .map(|member| member.session_id.clone())
                 .collect::<Vec<_>>()
@@ -1372,44 +1375,46 @@ impl Server {
             .await;
         });
 
-        // Resume any background `swarm await_members` watchers that were active
-        // before this (re)start. Their results are delivered via notify/wake, so
-        // they can pick up transparently without the agent rerunning the wait.
-        {
-            let resume_swarm_members = Arc::clone(&self.swarm_state.members);
-            let resume_swarms_by_id = Arc::clone(&self.swarm_state.swarms_by_id);
-            let resume_swarm_event_tx = self.swarm_event_tx.clone();
-            let resume_await_runtime = self.await_members_runtime.clone();
+        if crate::config::config().features.swarm {
+            // Resume any background `swarm await_members` watchers that were active
+            // before this (re)start. Their results are delivered via notify/wake, so
+            // they can pick up transparently without the agent rerunning the wait.
+            {
+                let resume_swarm_members = Arc::clone(&self.swarm_state.members);
+                let resume_swarms_by_id = Arc::clone(&self.swarm_state.swarms_by_id);
+                let resume_swarm_event_tx = self.swarm_event_tx.clone();
+                let resume_await_runtime = self.await_members_runtime.clone();
+                tokio::spawn(async move {
+                    comm_await::resume_background_awaits(
+                        &resume_swarm_members,
+                        &resume_swarms_by_id,
+                        &resume_swarm_event_tx,
+                        &resume_await_runtime,
+                    )
+                    .await;
+                });
+            }
+
+            let stale_swarm_members = Arc::clone(&self.swarm_state.members);
+            let stale_swarms_by_id = Arc::clone(&self.swarm_state.swarms_by_id);
+            let stale_swarm_plans = Arc::clone(&self.swarm_state.plans);
+            let stale_swarm_coordinators = Arc::clone(&self.swarm_state.coordinators);
             tokio::spawn(async move {
-                comm_await::resume_background_awaits(
-                    &resume_swarm_members,
-                    &resume_swarms_by_id,
-                    &resume_swarm_event_tx,
-                    &resume_await_runtime,
-                )
-                .await;
+                let mut interval =
+                    tokio::time::interval(crate::server::swarm::swarm_task_sweep_interval());
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    interval.tick().await;
+                    refresh_swarm_task_staleness(
+                        &stale_swarm_members,
+                        &stale_swarms_by_id,
+                        &stale_swarm_plans,
+                        &stale_swarm_coordinators,
+                    )
+                    .await;
+                }
             });
         }
-
-        let stale_swarm_members = Arc::clone(&self.swarm_state.members);
-        let stale_swarms_by_id = Arc::clone(&self.swarm_state.swarms_by_id);
-        let stale_swarm_plans = Arc::clone(&self.swarm_state.plans);
-        let stale_swarm_coordinators = Arc::clone(&self.swarm_state.coordinators);
-        tokio::spawn(async move {
-            let mut interval =
-                tokio::time::interval(crate::server::swarm::swarm_task_sweep_interval());
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                interval.tick().await;
-                refresh_swarm_task_staleness(
-                    &stale_swarm_members,
-                    &stale_swarms_by_id,
-                    &stale_swarm_plans,
-                    &stale_swarm_coordinators,
-                )
-                .await;
-            }
-        });
 
         let gc_sessions = Arc::clone(&self.sessions);
         let gc_swarm_state = self.swarm_state.clone();
@@ -1432,18 +1437,22 @@ impl Server {
                 // Backstop for coordinator cleanup: close finished spawned
                 // workers that have been idle past the reap window so they do
                 // not accumulate one leaked client process each.
-                reap_idle_spawned_workers(
-                    &gc_sessions,
-                    &gc_swarm_state,
-                    &gc_channel_subscriptions,
-                    &gc_channel_subscriptions_by_session,
-                    &gc_soft_interrupt_queues,
-                )
-                .await;
+                if crate::config::config().features.swarm {
+                    reap_idle_spawned_workers(
+                        &gc_sessions,
+                        &gc_swarm_state,
+                        &gc_channel_subscriptions,
+                        &gc_channel_subscriptions_by_session,
+                        &gc_soft_interrupt_queues,
+                    )
+                    .await;
+                }
             }
         });
 
         // Keep the machine awake while any session is actively streaming/processing.
+
+        // Presence and power inhibition serve ordinary sessions too.
         // This watches the same "running" member signal Waybar surfaces as
         // "N streaming" and toggles a best-effort OS power inhibitor accordingly.
         Self::spawn_power_inhibitor(Arc::clone(&self.swarm_state.members));

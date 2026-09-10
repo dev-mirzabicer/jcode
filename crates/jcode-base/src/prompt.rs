@@ -108,6 +108,9 @@ pub fn append_swarm_effort_directive(
     effort: Option<&str>,
     working_dir: Option<&Path>,
 ) -> Result<(), crate::instruction::SystemPromptActivationError> {
+    if !crate::config::config().features.swarm {
+        return Ok(());
+    }
     use crate::instruction::workflow::Workflow;
     let resource = match effort {
         Some(effort) if is_deep_swarm_effort(effort) => Workflow::SwarmDeepEffort,

@@ -162,10 +162,16 @@ pub(super) fn request_key(
 }
 
 pub(super) fn load_state(key: &str) -> Option<PersistedAwaitMembersState> {
+    if !crate::config::config().features.swarm {
+        return None;
+    }
     load_json_state(AWAIT_MEMBERS_DIR, key, is_stale)
 }
 
 pub(super) fn save_state(state: &PersistedAwaitMembersState) {
+    if !crate::config::config().features.swarm {
+        return;
+    }
     save_json_state(AWAIT_MEMBERS_DIR, &state.key, state, "await_members state")
 }
 
@@ -250,6 +256,9 @@ pub(super) fn all_pending_await_members() -> Vec<PersistedAwaitMembersState> {
 /// be finalized with a timeout instead of silently dropping the promised
 /// notify/wake.
 pub(super) fn all_pending_await_members_including_expired() -> Vec<PersistedAwaitMembersState> {
+    if !crate::config::config().features.swarm {
+        return Vec::new();
+    }
     let dir = state_dir(AWAIT_MEMBERS_DIR);
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();

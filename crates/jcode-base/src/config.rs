@@ -27,6 +27,15 @@ const CONFIG_CACHE_CHECK_INTERVAL: Duration = if cfg!(test) {
     Duration::from_millis(500)
 };
 
+pub const SWARM_UNAVAILABLE: &str =
+    "Swarm is disabled by global configuration and cannot be enabled for this session.";
+
+/// Check the existing global feature authority before coordination or storage access.
+pub fn require_swarm() -> anyhow::Result<()> {
+    anyhow::ensure!(config().features.swarm, SWARM_UNAVAILABLE);
+    Ok(())
+}
+
 const CONFIG_ENV_KEYS: &[&str] = &[
     "HOME",
     "JCODE_ACP_PROFILE",

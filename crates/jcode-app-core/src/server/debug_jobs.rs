@@ -75,6 +75,7 @@ pub(super) async fn maybe_start_async_debug_job(
     debug_jobs: Arc<RwLock<HashMap<String, DebugJob>>>,
 ) -> Result<Option<String>> {
     if trimmed.starts_with("swarm_message_async:") {
+        crate::config::require_swarm()?;
         let msg = trimmed
             .strip_prefix("swarm_message_async:")
             .unwrap_or("")

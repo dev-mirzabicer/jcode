@@ -505,6 +505,9 @@ impl Config {
     /// Returns `true` when it rewrote the config. Best-effort: errors are
     /// logged and swallowed.
     pub fn migrate_legacy_swarm_spawn_mode_once() -> bool {
+        if !super::config().features.swarm {
+            return false;
+        }
         let Ok(dir) = jcode_dir() else {
             return false;
         };

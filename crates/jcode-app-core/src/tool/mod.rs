@@ -138,6 +138,11 @@ fn accepts_large_output(input: &Value) -> bool {
     }
 }
 
+/// Global availability overrides both session policy and previously cached registries.
+pub fn tool_is_globally_available(name: &str) -> bool {
+    jcode_tool_types::resolve_tool_name(name) != "swarm" || crate::config::config().features.swarm
+}
+
 /// Registry of available tools (Arc-wrapped for sharing)
 ///
 /// Clone creates fresh context accounting so each subagent gets independent
@@ -318,6 +323,9 @@ impl Registry {
         if !crate::config::config().features.memory {
             tools.remove("memory");
         }
+        if !crate::config::config().features.swarm {
+            tools.remove("swarm");
+        }
         // SkillTool needs the skills registry reference (shared across sessions)
         Self::insert_tool(
             &mut tools,
@@ -395,6 +403,7 @@ impl Registry {
         let tools = self.tools.read().await;
         let mut defs: Vec<ToolDefinition> = tools
             .iter()
+            .filter(|(name, _)| tool_is_globally_available(name))
             .filter(|(name, _)| {
                 allowed_tools
                     .map(|set| tool_name_is_allowed(set, name))
@@ -430,6 +439,7 @@ impl Registry {
             .map_err(|_| "tool definitions are currently being updated")?;
         let mut definitions = tools
             .iter()
+            .filter(|(name, _)| tool_is_globally_available(name))
             .filter(|(name, _)| {
                 allowed_tools
                     .map(|set| tool_name_is_allowed(set, name))
@@ -449,7 +459,11 @@ impl Registry {
 
     pub async fn tool_names(&self) -> Vec<String> {
         let tools = self.tools.read().await;
-        tools.keys().cloned().collect()
+        tools
+            .keys()
+            .filter(|name| tool_is_globally_available(name))
+            .cloned()
+            .collect()
     }
 
     /// Enable test mode for memory tools (isolated storage)
@@ -700,6 +714,9 @@ impl Registry {
 
     /// Execute a tool by name
     pub async fn execute(&self, name: &str, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
+        if !tool_is_globally_available(name) {
+            anyhow::bail!(crate::config::SWARM_UNAVAILABLE);
+        }
         // Mark this call in-flight for the whole execution so the missing
         // tool-output repair paths do not mistake a slow tool for an
         // interrupted one and inject a duplicate synthetic result. See
@@ -722,7 +739,11 @@ impl Registry {
             None => {
                 // List available tools so the model can recover instead of
                 // spiraling through hallucinated names like "ToolSearch" (#104).
-                let mut available: Vec<&str> = tools.keys().map(|k| k.as_str()).collect();
+                let mut available: Vec<&str> = tools
+                    .keys()
+                    .map(|k| k.as_str())
+                    .filter(|name| tool_is_globally_available(name))
+                    .collect();
                 available.sort_unstable();
                 let suggestions = Self::closest_tool_names(name, &available);
                 let mut msg = format!("Unknown tool: {name}.");

@@ -6,6 +6,9 @@ use crate::provider::{EventStream, Provider};
 use async_trait::async_trait;
 use serde_json::Value;
 
+#[path = "swarm_retirement_tests.rs"]
+mod swarm_retirement;
+
 struct MockProvider;
 
 #[async_trait]

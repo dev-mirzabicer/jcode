@@ -29,6 +29,102 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
+#[test]
+fn swarm_retirement_locked_tools_change_once_without_rewriting_history() {
+    let home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let _off = AgentTestEnvRestore {
+        key: "JCODE_SWARM_ENABLED",
+        previous: std::env::var_os("JCODE_SWARM_ENABLED"),
+    };
+    crate::env::set_var("JCODE_SWARM_ENABLED", "false");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let provider = Arc::new(NoValidationSwitchProvider::new("fixture"));
+        let mut agent = Agent::new_with_disabled_startup_context(
+            provider.clone(),
+            Registry::empty(),
+            home.root().to_str(),
+        );
+        agent
+            .session
+            .set_swarm_routing_prompt("HISTORICAL SYNTHETIC ROUTING".into());
+        agent.session.reasoning_effort = Some("swarm-deep".into());
+        agent.session.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "HISTORICAL USER SOURCE".into(),
+                cache_control: None,
+            }],
+        );
+        let before = serde_json::to_value(&agent.session.messages).unwrap();
+        let tool = |name: &str| ToolDefinition {
+            name: name.into(),
+            description: "SYNTHETIC".into(),
+            input_schema: serde_json::json!({}),
+        };
+        agent.locked_tools = Some(vec![tool("read"), tool("swarm")]);
+        agent.mcp_late_register_resolved = true;
+        let invalidations = provider.invalidations.load(Ordering::SeqCst);
+        let first = agent.tool_definitions().await.unwrap();
+        let second = agent.tool_definitions().await.unwrap();
+        assert_eq!(
+            first
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["read"]
+        );
+        assert_eq!(
+            serde_json::to_value(first).unwrap(),
+            serde_json::to_value(second).unwrap()
+        );
+        assert_eq!(
+            provider.invalidations.load(Ordering::SeqCst),
+            invalidations + 1
+        );
+        assert_eq!(
+            serde_json::to_value(&agent.session.messages).unwrap(),
+            before
+        );
+        assert_eq!(
+            agent.session.swarm_routing_prompt.as_deref(),
+            Some("HISTORICAL SYNTHETIC ROUTING")
+        );
+        assert_eq!(
+            agent.session.reasoning_effort.as_deref(),
+            Some("swarm-deep")
+        );
+        assert_eq!(
+            agent.set_reasoning_effort("swarm").unwrap_err().to_string(),
+            crate::config::SWARM_UNAVAILABLE
+        );
+        let mut split = crate::prompt::SplitSystemPrompt {
+            static_part: "SYSTEM".into(),
+            dynamic_part: "DYNAMIC".into(),
+        };
+        crate::prompt::append_swarm_effort_directive(
+            &mut split,
+            Some("swarm-deep"),
+            Some(home.root()),
+        )
+        .unwrap();
+        assert_eq!(
+            (split.static_part.as_str(), split.dynamic_part.as_str()),
+            ("SYSTEM", "DYNAMIC")
+        );
+        // Request preparation must not initialize or read the dormant routing source.
+        assert!(
+            !home
+                .root()
+                .join("instructions/tools/swarm-routing.md")
+                .exists()
+        );
+    });
+}
+
 struct AgentTestEnvRestore {
     key: &'static str,
     previous: Option<OsString>,

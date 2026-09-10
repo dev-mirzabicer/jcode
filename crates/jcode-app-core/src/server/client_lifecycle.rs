@@ -17,6 +17,7 @@ use super::client_lifecycle_logging::{
 };
 use super::client_lightweight_control::{
     LightweightControlContext, handle_lightweight_control_request, parse_swarm_spawn_mode,
+    unavailable_swarm_response,
 };
 use super::client_session::{
     handle_clear_session, handle_reload, handle_resume_session, handle_subscribe,
@@ -577,6 +578,11 @@ pub(super) async fn handle_client_with_instruction_repositories(
 
         match decode_request(&line) {
             Ok(request) => {
+                if let Some(error) = unavailable_swarm_response(&request) {
+                    write_direct_event(&writer, &ServerEvent::Ack { id: request.id() }).await?;
+                    write_direct_event(&writer, &error).await?;
+                    return Ok(());
+                }
                 if request.is_lightweight_control_request() {
                     handle_lightweight_control_request(
                         request,
@@ -1365,6 +1371,11 @@ pub(super) async fn handle_client_with_instruction_repositories(
                 ));
                 crate::logging::event_info("SERVER_REQUEST_LIFECYCLE", fields);
             }
+        }
+
+        if let Some(error) = unavailable_swarm_response(&request) {
+            let _ = client_event_tx.send(error);
+            continue;
         }
 
         let (request, queued_messages) = match request {

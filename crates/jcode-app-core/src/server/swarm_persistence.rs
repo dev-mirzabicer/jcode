@@ -89,6 +89,7 @@ fn persisted_plan_is_expired(
             >= retention.as_millis() as u64
 }
 
+#[derive(Default)]
 pub(super) struct LoadedSwarmRuntimeState {
     pub plans: HashMap<String, VersionedPlan>,
     pub coordinators: HashMap<String, String>,
@@ -238,6 +239,9 @@ fn read_primary_version(swarm_id: &str) -> SwarmStateFileVersion {
 }
 
 pub(super) fn capture_swarm_state_version(swarm_id: &str) -> SwarmStateFileVersion {
+    if !crate::config::config().features.swarm {
+        return SwarmStateFileVersion(None);
+    }
     let file_lock = swarm_file_lock(swarm_id);
     let _guard = file_lock
         .lock()
@@ -246,6 +250,9 @@ pub(super) fn capture_swarm_state_version(swarm_id: &str) -> SwarmStateFileVersi
 }
 
 fn remove_snapshot_files(swarm_id: &str) -> bool {
+    if !crate::config::config().features.swarm {
+        return false;
+    }
     let path = state_path(swarm_id);
     // First atomically replace the primary with an empty tombstone. The write
     // may rotate the old primary to `.bak`, but load_runtime_state ignores that
@@ -441,6 +448,10 @@ fn from_persisted_member(
 }
 
 pub(super) fn load_runtime_state() -> LoadedSwarmRuntimeState {
+    // Loading also migrates and prunes. Do not even inspect dormant storage.
+    if !crate::config::config().features.swarm {
+        return LoadedSwarmRuntimeState::default();
+    }
     migrate_legacy_state();
     let dir = state_dir();
     let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -586,6 +597,9 @@ pub(super) fn persist_swarm_state(
     coordinator_session_id: Option<&str>,
     swarm_members: &[SwarmMember],
 ) {
+    if !crate::config::config().features.swarm {
+        return;
+    }
     let file_lock = swarm_file_lock(swarm_id);
     let _guard = file_lock
         .lock()
@@ -647,6 +661,9 @@ pub(super) fn remove_swarm_state_if_version(
     expected: &SwarmStateFileVersion,
 ) -> bool {
     let file_lock = swarm_file_lock(swarm_id);
+    if !crate::config::config().features.swarm {
+        return false;
+    }
     let _guard = file_lock
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());

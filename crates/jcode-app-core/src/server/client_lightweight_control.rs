@@ -31,6 +31,27 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
+pub(super) fn unavailable_swarm_response(request: &Request) -> Option<ServerEvent> {
+    if crate::config::config().features.swarm {
+        return None;
+    }
+    let requires_swarm = request.is_swarm_request()
+        || matches!(
+            request,
+            Request::SetFeature {
+                feature: crate::protocol::FeatureToggle::Swarm,
+                enabled: true,
+                ..
+            }
+        )
+        || matches!(request, Request::SetReasoningEffort { effort, .. } if crate::prompt::is_swarm_effort(effort));
+    requires_swarm.then(|| ServerEvent::Error {
+        id: request.id(),
+        message: crate::config::SWARM_UNAVAILABLE.to_string(),
+        retry_after_secs: None,
+    })
+}
+
 pub(super) fn parse_swarm_spawn_mode(
     id: u64,
     spawn_mode: Option<String>,
@@ -108,6 +129,11 @@ pub(super) async fn handle_lightweight_control_request(
     }
 
     write_direct_event(&writer, &ServerEvent::Ack { id: request.id() }).await?;
+
+    if let Some(error) = unavailable_swarm_response(&request) {
+        write_direct_event(&writer, &error).await?;
+        return Ok(());
+    }
 
     let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
     let writer_clone = Arc::clone(&writer);

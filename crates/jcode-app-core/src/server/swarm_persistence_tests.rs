@@ -4,10 +4,16 @@ use std::time::{Duration, Instant};
 struct EnvGuard {
     _lock: std::sync::MutexGuard<'static, ()>,
     runtime: Option<std::ffi::OsString>,
+    swarm: Option<std::ffi::OsString>,
 }
 
 impl Drop for EnvGuard {
     fn drop(&mut self) {
+        if let Some(value) = self.swarm.take() {
+            crate::env::set_var("JCODE_SWARM_ENABLED", value);
+        } else {
+            crate::env::remove_var("JCODE_SWARM_ENABLED");
+        }
         if let Some(value) = self.runtime.take() {
             crate::env::set_var("JCODE_RUNTIME_DIR", value);
         } else {
@@ -19,11 +25,46 @@ impl Drop for EnvGuard {
 fn test_env(dir: &tempfile::TempDir) -> EnvGuard {
     let lock = storage::lock_test_env();
     let previous = std::env::var_os("JCODE_RUNTIME_DIR");
+    let swarm = std::env::var_os("JCODE_SWARM_ENABLED");
     crate::env::set_var("JCODE_RUNTIME_DIR", dir.path());
+    // These fixtures deliberately exercise the retained enabled implementation,
+    // exclusively in their private runtime directory.
+    crate::env::set_var("JCODE_SWARM_ENABLED", "true");
     EnvGuard {
         _lock: lock,
         runtime: previous,
+        swarm,
     }
+}
+
+#[test]
+fn swarm_retirement_storage_is_untouched_before_migration_pruning_or_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let _env = test_env(&dir);
+    let durable = state_dir();
+    let legacy = legacy_state_dir();
+    std::fs::create_dir_all(&durable).unwrap();
+    std::fs::create_dir_all(&legacy).unwrap();
+    let path = state_path("retained");
+    for file in [&path, &path.with_extension("bak"), &legacy.join("old.json")] {
+        std::fs::write(file, b"synthetic dormant bytes, not valid JSON").unwrap();
+    }
+    crate::env::set_var("JCODE_SWARM_ENABLED", "false");
+    let loaded = load_runtime_state();
+    assert!(loaded.plans.is_empty() && loaded.members.is_empty());
+    assert!(loaded.coordinators.is_empty() && loaded.swarms_by_id.is_empty());
+    let version = capture_swarm_state_version("retained");
+    assert_eq!(version, SwarmStateFileVersion(None));
+    persist_swarm_state("retained", None, None, &[]);
+    remove_swarm_state("retained");
+    assert!(!remove_swarm_state_if_version("retained", &version));
+    for file in [&path, &path.with_extension("bak"), &legacy.join("old.json")] {
+        assert_eq!(
+            std::fs::read(file).unwrap(),
+            b"synthetic dormant bytes, not valid JSON"
+        );
+    }
+    assert!(!durable.join("old.json").exists());
 }
 
 #[test]

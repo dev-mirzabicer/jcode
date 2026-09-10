@@ -24,6 +24,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 use tokio::time::timeout;
 
+#[path = "swarm_retirement_tests.rs"]
+mod swarm_retirement;
+
 struct EnvGuard {
     prev_home: Option<OsString>,
     prev_runtime_dir: Option<OsString>,

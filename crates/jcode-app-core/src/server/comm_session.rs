@@ -577,6 +577,7 @@ pub(super) async fn spawn_swarm_agent(
     soft_interrupt_queues: &SessionInterruptQueues,
     client_connections: &ClientConnections,
 ) -> anyhow::Result<String> {
+    crate::config::require_swarm()?;
     let resolved_working_dir =
         resolve_spawn_working_dir(working_dir, req_session_id, sessions, swarm_members).await;
     let coordinator = resolve_coordinator_spawn_identity(req_session_id, sessions).await;

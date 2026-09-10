@@ -265,7 +265,7 @@ prompt_entry_animation = true
 # memory tools, memory CLI operations, and ambient memory work are unavailable.
 memory = false
 # Swarm: multi-session coordination features
-swarm = true
+swarm = false
 # Mermaid: render Mermaid code blocks and tell the model that diagrams are supported
 mermaid = true
 # Auto-poke: automatically nudge the model to continue when it stops with

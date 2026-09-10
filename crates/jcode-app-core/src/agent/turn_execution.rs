@@ -818,6 +818,21 @@ impl Agent {
     }
 
     pub(super) async fn tool_definitions(&mut self) -> Result<Vec<ToolDefinition>> {
+        if let Some(locked) = self.locked_tools.as_mut() {
+            let before = locked.len();
+            locked.retain(|tool| crate::tool::tool_is_globally_available(&tool.name));
+            if locked.len() != before {
+                self.provider
+                    .invalidate_context_continuation("Swarm globally disabled");
+                self.provider_session_id = None;
+                self.session.provider_session_id = None;
+                self.cache_tracker.reset();
+                crate::cache_invalidation::record(
+                    "Swarm globally disabled",
+                    "removed unavailable tool from locked definitions",
+                );
+            }
+        }
         if self.session.is_canary {
             self.registry.register_selfdev_tools().await;
         }

@@ -503,6 +503,9 @@ pub(super) async fn touch_swarm_task_progress(
     swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
     swarm_coordinators: &Arc<RwLock<HashMap<String, String>>>,
 ) -> bool {
+    if !crate::config::config().features.swarm {
+        return false;
+    }
     let now_ms = now_unix_ms();
     let revived = {
         let mut plans = swarm_plans.write().await;
@@ -557,6 +560,9 @@ pub(super) async fn refresh_swarm_task_staleness(
     swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
     swarm_coordinators: &Arc<RwLock<HashMap<String, String>>>,
 ) {
+    if !crate::config::config().features.swarm {
+        return;
+    }
     let now_ms = now_unix_ms();
     let stale_after_ms = swarm_task_stale_after().as_millis() as u64;
     let changed_swarm_ids = {
@@ -744,6 +750,9 @@ pub(super) async fn broadcast_swarm_status(
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
 ) {
+    if !crate::config::config().features.swarm {
+        return;
+    }
     let session_ids: Vec<String> = {
         let swarms = swarms_by_id.read().await;
         swarms
@@ -841,6 +850,9 @@ pub(super) async fn broadcast_swarm_plan_with_previous(
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
 ) {
+    if !crate::config::config().features.swarm {
+        return;
+    }
     let (version, items, summary, mut participants): (
         u64,
         Vec<PlanItem>,
@@ -928,6 +940,9 @@ pub(super) async fn send_swarm_plan_to_session(
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
 ) {
+    if !crate::config::config().features.swarm {
+        return;
+    }
     let swarm_id = {
         let members = swarm_members.read().await;
         members
@@ -1000,6 +1015,9 @@ pub(super) async fn remove_session_from_swarm(
     swarm_coordinators: &Arc<RwLock<HashMap<String, String>>>,
     swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
 ) {
+    if !crate::config::config().features.swarm {
+        return;
+    }
     let started = Instant::now();
     log_swarm_lifecycle(
         "member_remove_start",
@@ -1421,7 +1439,9 @@ pub(super) async fn update_member_status_with_report_tldr(
             (None, None, false, false, String::new(), false, None)
         }
     };
-    if let Some(ref id) = swarm_id {
+    if crate::config::config().features.swarm
+        && let Some(ref id) = swarm_id
+    {
         if !member_changed {
             return;
         }
@@ -1534,6 +1554,7 @@ pub(super) async fn run_swarm_task(
     subagent_type: &str,
     prompt: &str,
 ) -> Result<String> {
+    crate::config::require_swarm()?;
     let started = Instant::now();
     let (provider, registry, session_id, working_dir, coordinator_model, provider_key, route) = {
         let agent = agent.lock().await;
@@ -1621,6 +1642,7 @@ pub(super) async fn run_swarm_task(
 }
 
 pub(super) async fn run_swarm_message(agent: Arc<Mutex<Agent>>, message: &str) -> Result<String> {
+    crate::config::require_swarm()?;
     let started = Instant::now();
     log_swarm_lifecycle(
         "message_start",

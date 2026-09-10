@@ -3,6 +3,9 @@ use crate::{message::ToolDefinition, session::Session};
 
 /// Read-only request preparation. Do not freeze a source that fails preflight.
 pub fn preview(session: &Session, tools: &mut [ToolDefinition]) -> anyhow::Result<()> {
+    if !crate::config::config().features.swarm {
+        return Ok(());
+    }
     let Some(tool) = tools.iter_mut().find(|tool| tool.name == "swarm") else {
         return Ok(());
     };
@@ -26,6 +29,9 @@ pub fn preview(session: &Session, tools: &mut [ToolDefinition]) -> anyhow::Resul
 /// After successful request preflight, persist the exact description already
 /// counted for this request. Returns whether an old session needs continuation reset.
 pub fn commit(session: &mut Session, tools: &[ToolDefinition]) -> anyhow::Result<bool> {
+    if !crate::config::config().features.swarm {
+        return Ok(false);
+    }
     if session.swarm_routing_prompt.is_some() {
         return Ok(false);
     }

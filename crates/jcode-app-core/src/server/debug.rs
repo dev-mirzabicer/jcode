@@ -427,7 +427,13 @@ pub(super) async fn handle_debug_client(
                     }
                     _ => {
                         // Server commands (default)
-                        if let Some(output) = maybe_handle_job_command(cmd, &debug_jobs).await? {
+                        if super::debug_help::is_swarm_command(cmd)
+                            && !crate::config::config().features.swarm
+                        {
+                            Err(anyhow::anyhow!(crate::config::SWARM_UNAVAILABLE))
+                        } else if let Some(output) =
+                            maybe_handle_job_command(cmd, &debug_jobs).await?
+                        {
                             Ok(output)
                         } else if let Some(output) = maybe_handle_session_admin_command(
                             cmd,

@@ -1006,7 +1006,8 @@ fn default_true() -> bool {
 pub struct FeatureConfig {
     /// Globally enable memory retrieval, extraction, tools, and maintenance (default: false)
     pub memory: bool,
-    /// Enable swarm coordination features (default: true)
+    /// Globally enable Swarm coordination, tools, and restoration (default: false).
+    /// Session controls cannot exceed this availability boundary.
     pub swarm: bool,
     /// Enable Mermaid rendering and Mermaid-specific model guidance (default: true)
     pub mermaid: bool,
@@ -1034,7 +1035,7 @@ impl Default for FeatureConfig {
     fn default() -> Self {
         Self {
             memory: false,
-            swarm: true,
+            swarm: false,
             mermaid: true,
             auto_poke: true,
             message_timestamps: true,
