@@ -1,4 +1,4 @@
-use super::ExecutionStore;
+use super::{ExecutionStore, RunRecord};
 use anyhow::{Context, Result, ensure};
 use rusqlite::params;
 use sha2::{Digest, Sha256};
@@ -24,6 +24,17 @@ impl ManagedRead {
         })
     }
     pub fn open(root: &Path, path: &Path) -> Result<Option<Self>> {
+        Self::open_with_stop(root, path, None)
+    }
+    pub fn open_with_stop(
+        root: &Path,
+        path: &Path,
+        stop: Option<&jcode_agent_runtime::InterruptSignal>,
+    ) -> Result<Option<Self>> {
+        ensure!(
+            !stop.is_some_and(|signal| signal.is_set()),
+            "Managed output read cancelled"
+        );
         let directory = root.join("execution/outputs");
         let Ok(relative) = path.strip_prefix(&directory) else {
             return Ok(None);
@@ -53,11 +64,12 @@ impl ManagedRead {
             record.output_path.as_deref() == Some(path),
             "Managed source does not match its recorded output path"
         );
-        let file = store.open_output_file(&id)?;
+        let mut file = store.open_output_file(&id)?;
         ensure!(
             file.metadata()?.len() >= record.output_bytes,
             "Managed output lost committed bytes"
         );
+        ensure_legacy_index(&store, &record, &mut file, stop)?;
         Ok(Some(Self {
             id,
             length: record.output_bytes,
@@ -95,6 +107,133 @@ impl ManagedRead {
         self.chunk_start = start;
         Ok(())
     }
+}
+
+#[derive(serde::Deserialize)]
+struct LegacyIntegrity {
+    schema: u32,
+    invocation_id: String,
+    text_sha256: Option<String>,
+    source: jcode_tool_types::OutputSource,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+struct IndexedChunk {
+    start: u64,
+    end: u64,
+    digest: String,
+}
+
+fn ensure_legacy_index(
+    store: &ExecutionStore,
+    record: &RunRecord,
+    file: &mut File,
+    stop: Option<&jcode_agent_runtime::InterruptSignal>,
+) -> Result<()> {
+    if record.output_bytes == 0 {
+        return Ok(());
+    }
+    let has_chunks = |connection: &rusqlite::Connection| -> Result<bool> {
+        Ok(connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM output_chunks WHERE run_id=?1)",
+            [&record.id],
+            |row| row.get(0),
+        )?)
+    };
+    if has_chunks(&store.connection()?)? {
+        return Ok(());
+    }
+    ensure!(
+        record.state.terminal(),
+        "Legacy live output has no committed chunk index; wait for its owning runtime to finish"
+    );
+    let _lease = super::storage::output_lease(store, &record.id)?;
+    if has_chunks(&store.connection()?)? {
+        return Ok(());
+    }
+    let manifest = record
+        .result_path
+        .as_ref()
+        .context("Legacy output has no integrity receipt; original completeness is unknown")?;
+    ensure!(
+        std::fs::symlink_metadata(manifest)?.is_file(),
+        "Legacy output receipt changed type"
+    );
+    let identity: LegacyIntegrity = crate::storage::read_json(manifest)?;
+    ensure!(
+        identity.schema == 1 && identity.invocation_id == record.id,
+        "Legacy output receipt identity mismatch"
+    );
+    ensure!(
+        matches!(&identity.source,jcode_tool_types::OutputSource::Retained(reference) if reference.invocation_id==record.id && Some(&reference.path)==record.output_path.as_ref() && reference.bytes==record.output_bytes),
+        "Legacy receipt does not describe this committed output"
+    );
+    let expected = identity
+        .text_sha256
+        .context("Legacy output has no original digest; do not fabricate an intact result")?;
+    // Stage only bounded chunk metadata, not another copy of the source body.
+    // No database write transaction is held during the potentially long scan.
+    let directory = store.root().join("index-imports");
+    crate::storage::ensure_dir(&directory)?;
+    ensure!(
+        std::fs::symlink_metadata(&directory)?.is_dir(),
+        "Index staging directory changed type"
+    );
+    let mut staged = tempfile::NamedTempFile::new_in(&directory)?;
+    jcode_core::fs::set_permissions_owner_only(staged.path())?;
+    let mut position = 0u64;
+    let mut total = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    file.seek(SeekFrom::Start(0))?;
+    while position < record.output_bytes {
+        ensure!(
+            !stop.is_some_and(|signal| signal.is_set()),
+            "Legacy read-index import cancelled before publication"
+        );
+        let n = (record.output_bytes - position).min(buffer.len() as u64) as usize;
+        file.read_exact(&mut buffer[..n])?;
+        total.update(&buffer[..n]);
+        let chunk = IndexedChunk {
+            start: position,
+            end: position + n as u64,
+            digest: format!("{:x}", Sha256::digest(&buffer[..n])),
+        };
+        serde_json::to_writer(staged.as_file_mut(), &chunk)?;
+        std::io::Write::write_all(staged.as_file_mut(), b"\n")?;
+        position = chunk.end;
+    }
+    ensure!(
+        expected == format!("{:x}", total.finalize()),
+        "Legacy output changed since its original capture; no read index was published"
+    );
+    staged.as_file_mut().seek(SeekFrom::Start(0))?;
+    ensure!(
+        !stop.is_some_and(|signal| signal.is_set()),
+        "Legacy read-index import cancelled before publication"
+    );
+    let mut connection = store.connection()?;
+    let transaction =
+        connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    if !has_chunks(&transaction)? {
+        let unchanged:bool=transaction.query_row("SELECT EXISTS(SELECT 1 FROM runs WHERE id=?1 AND owner=?2 AND output_bytes=?3 AND state=?4)",params![record.id,record.owner,i64::try_from(record.output_bytes)?,record.state.as_str()],|row|row.get(0))?;
+        ensure!(unchanged, "Legacy execution changed during index import");
+        use std::io::BufRead;
+        let reader = std::io::BufReader::new(staged.as_file_mut());
+        let mut insert = transaction.prepare(
+            "INSERT INTO output_chunks(run_id,start_byte,end_byte,sha256) VALUES (?1,?2,?3,?4)",
+        )?;
+        for line in reader.lines() {
+            let chunk: IndexedChunk = serde_json::from_str(&line?)?;
+            insert.execute(params![
+                record.id,
+                i64::try_from(chunk.start)?,
+                i64::try_from(chunk.end)?,
+                chunk.digest
+            ])?;
+        }
+    }
+    transaction.commit()?;
+    file.seek(SeekFrom::Start(0))?;
+    Ok(())
 }
 impl Read for ManagedRead {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {

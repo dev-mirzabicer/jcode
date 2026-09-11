@@ -187,8 +187,11 @@ impl SourceReader {
     pub fn read(&self, request: ReadRequest) -> Result<ToolOutput> {
         ensure!(request.start_line > 0, "start_line must be positive");
         let (source, file, managed_id, running, length) = if let Some(managed) =
-            super::managed_read::ManagedRead::open(&self.root, &request.path)?
-        {
+            super::managed_read::ManagedRead::open_with_stop(
+                &self.root,
+                &request.path,
+                request.stop.as_ref(),
+            )? {
             let id = managed.id.clone();
             let running = managed.running;
             let length = managed.length;
@@ -523,6 +526,95 @@ mod tests {
         input.stop = Some(signal);
         assert!(SourceReader::new(directory.path()).read(input).is_err());
         assert!(!directory.path().join("execution/read-points").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_sealed_output_index_import_verifies_digest_and_is_idempotent() -> Result<()> {
+        for damaged in [false, true] {
+            let directory = tempfile::tempdir()?;
+            let (capture, path) = managed_capture(directory.path())?;
+            let text = format!("{}TAIL", "α".repeat(50_000));
+            capture.write(OutputStream::Text, text.as_bytes())?;
+            let id = capture.reference()?.invocation_id;
+            let mut output = ToolOutput::new("");
+            output.source = OutputSource::Retained(capture.reference()?);
+            capture.seal(output, RunState::Completed)?;
+            drop(capture);
+            let store = ExecutionStore::open(directory.path())?;
+            store
+                .connection()?
+                .execute("DELETE FROM output_chunks WHERE run_id=?1", [&id])?;
+            if damaged {
+                std::fs::write(&path, vec![b'x'; text.len()])?;
+            }
+            let reader = SourceReader::new(directory.path());
+            let result = reader.read(request(&path, 100, None));
+            let chunks = || -> Result<i64> {
+                Ok(store.connection()?.query_row(
+                    "SELECT COUNT(*) FROM output_chunks WHERE run_id=?1",
+                    [&id],
+                    |row| row.get(0),
+                )?)
+            };
+            if damaged {
+                assert!(result.is_err());
+                assert_eq!(chunks()?, 0);
+            } else {
+                let result = result?;
+                assert!(result.output.contains("α"));
+                let count = chunks()?;
+                assert!(count > 0);
+                reader.read(request(&path, 100, None))?;
+                assert_eq!(chunks()?, count);
+                assert_eq!(std::fs::read_to_string(&path)?, text);
+                assert_eq!(
+                    std::fs::read_dir(directory.path().join("execution/index-imports"))?.count(),
+                    0
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_index_failure_is_retryable_without_partial_publication_or_fabricated_integrity()
+    -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let (capture, path) = managed_capture(directory.path())?;
+        let text = "x".repeat(200_000);
+        capture.write(OutputStream::Text, text.as_bytes())?;
+        let id = capture.reference()?.invocation_id;
+        let mut output = ToolOutput::new("");
+        output.source = OutputSource::Retained(capture.reference()?);
+        capture.seal(output, RunState::Completed)?;
+        drop(capture);
+        let store = ExecutionStore::open(directory.path())?;
+        store
+            .connection()?
+            .execute("DELETE FROM output_chunks WHERE run_id=?1", [&id])?;
+        store.connection()?.execute_batch("CREATE TRIGGER fail_index_import BEFORE INSERT ON output_chunks WHEN NEW.start_byte>0 BEGIN SELECT RAISE(FAIL,'injected index publication failure'); END;")?;
+        let reader = SourceReader::new(directory.path());
+        assert!(reader.read(request(&path, 100, None)).is_err());
+        let count: i64 = store.connection()?.query_row(
+            "SELECT COUNT(*) FROM output_chunks WHERE run_id=?1",
+            [&id],
+            |row| row.get(0),
+        )?;
+        assert_eq!(count, 0);
+        store
+            .connection()?
+            .execute_batch("DROP TRIGGER fail_index_import;")?;
+        reader.read(request(&path, 100, None))?;
+        assert_eq!(std::fs::read_to_string(&path)?, text);
+        store
+            .connection()?
+            .execute("DELETE FROM output_chunks WHERE run_id=?1", [&id])?;
+        let manifest = store.inspect(&id)?.unwrap().result_path.unwrap();
+        let mut value: serde_json::Value = crate::storage::read_json(&manifest)?;
+        value.as_object_mut().unwrap().remove("text_sha256");
+        crate::storage::write_json_secret(&manifest, &value)?;
+        assert!(reader.read(request(&path, 100, None)).is_err());
         Ok(())
     }
 

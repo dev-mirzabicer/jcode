@@ -128,8 +128,13 @@ position. Cancelled source reads do not advance a delivered position.
 Archive reads validate the original recorded volume identity without creating
 archive directories or moving data back. The native owned-fixture test exercises
 continuation before and after real relocation and rejects offline reads without
-creating a fake mount. Outputs from older capture schemas without a chunk index
-still require explicit legacy-import reconciliation.
+creating a fake mount. Older sealed outputs without a chunk index receive a
+one-time streaming index import only when their original manifest digest and
+committed byte count verify. The import stages chunk metadata, holds no database
+write transaction during source scanning, and atomically publishes the index.
+Cancellation or publication failure leaves source bytes unchanged and no partial
+index. Missing original digests, changed bytes and legacy live ownership fail
+explicitly rather than fabricating intact historical output.
 
 PDF reads decode an exact in-memory source snapshot and retain the complete
 selected derived page text, not a duplicate of the original PDF binary. Page
