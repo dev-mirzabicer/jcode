@@ -195,24 +195,21 @@ impl ExecutionStore {
     }
 
     pub(super) fn connection(&self) -> Result<Connection> {
-        let path = self.root.join("index.sqlite");
-        // Precreate with owner-only mode. WAL/SHM inherit the database mode and
-        // the containing directory is private even during first open.
-        let mut options = std::fs::OpenOptions::new();
-        options.create(true).append(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-        }
-        let file = options.open(&path)?;
-        ensure!(
-            !std::fs::symlink_metadata(&path)?.file_type().is_symlink(),
-            "Execution database may not be a symlink"
-        );
+        let path = self
+            .root
+            .canonicalize()
+            .context("Resolve execution metadata directory")?
+            .join("index.sqlite");
+        // SQLite must own every database descriptor: closing an unrelated raw
+        // descriptor can release this process's POSIX locks held by another
+        // live SQLite connection. The private parent protects initial creation;
+        // set the database mode before WAL/SHM creation so they inherit it.
+        let connection = Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::default() | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .context("Open execution metadata")?;
         jcode_core::fs::set_permissions_owner_only(&path)?;
-        drop(file);
-        let connection = Connection::open(&path).context("Open execution metadata")?;
         connection.busy_timeout(Duration::from_secs(10))?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
@@ -586,6 +583,89 @@ mod tests {
             .count();
         assert_eq!(winners, 1);
         assert_eq!(store.list("session", None, 10)?.len(), 1);
+        Ok(())
+    }
+}
+
+#[cfg(all(test, unix))]
+mod sqlite_lock_tests {
+    use super::*;
+    #[test]
+    fn foreign_writer_probe() -> Result<()> {
+        let Some(root) = std::env::var_os("JCODE_SQLITE_LOCK_PROBE") else {
+            return Ok(());
+        };
+        let root = PathBuf::from(root);
+        let mut connection = Connection::open(root.join("execution/index.sqlite"))?;
+        connection.busy_timeout(Duration::from_millis(50))?;
+        let outcome = if connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .is_ok()
+        {
+            "acquired"
+        } else {
+            "blocked"
+        };
+        std::fs::write(root.join("writer-outcome"), outcome)?;
+        Ok(())
+    }
+    #[test]
+    fn opening_another_store_connection_never_releases_a_live_sqlite_lock() -> Result<()> {
+        for journal in ["DELETE", "WAL"] {
+            let root = tempfile::tempdir()?;
+            let store = ExecutionStore::open(root.path())?;
+            let mut connection = store.connection()?;
+            connection.pragma_update(None, "journal_mode", journal)?;
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            // The second connection may legitimately reject a journal-mode change
+            // while a transaction is active. It must not release the first lock.
+            let _second = store.connection();
+            let status = std::process::Command::new(std::env::current_exe()?)
+                .args([
+                    "--exact",
+                    "execution::store::sqlite_lock_tests::foreign_writer_probe",
+                    "--nocapture",
+                ])
+                .env("JCODE_SQLITE_LOCK_PROBE", root.path())
+                .status()?;
+            assert!(status.success());
+            assert_eq!(
+                std::fs::read_to_string(root.path().join("writer-outcome"))?,
+                "blocked",
+                "Another process acquired a writer lock while our original transaction was alive"
+            );
+            drop(transaction);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_owned_open_rejects_database_symlinks_and_keeps_private_modes() -> Result<()> {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let root = tempfile::tempdir()?;
+        let outside = root.path().join("external");
+        std::fs::write(&outside, b"keep exact bytes")?;
+        let execution = root.path().join("execution");
+        std::fs::create_dir(&execution)?;
+        symlink(&outside, execution.join("index.sqlite"))?;
+        let original = std::fs::metadata(&outside)?.permissions().mode();
+        assert!(ExecutionStore::open(root.path()).is_err());
+        assert_eq!(std::fs::read(&outside)?, b"keep exact bytes");
+        assert_eq!(std::fs::metadata(&outside)?.permissions().mode(), original);
+        let clean = tempfile::tempdir()?;
+        let store = ExecutionStore::open(clean.path())?;
+        assert_eq!(
+            std::fs::metadata(store.root().join("index.sqlite"))?
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(store.root())?.permissions().mode() & 0o777,
+            0o700
+        );
         Ok(())
     }
 }
