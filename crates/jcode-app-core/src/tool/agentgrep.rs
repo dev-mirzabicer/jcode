@@ -180,6 +180,16 @@ impl AgentGrepTool {
 
 #[async_trait]
 impl Tool for AgentGrepTool {
+    fn execution_policy(
+        &self,
+        _: &Value,
+        _: &ToolContext,
+    ) -> Result<jcode_tool_core::ExecutionPolicy> {
+        Ok(jcode_tool_core::ExecutionPolicy {
+            cooperative_stop: true,
+            ..Default::default()
+        })
+    }
     fn name(&self) -> &str {
         "agentgrep"
     }
@@ -261,6 +271,12 @@ impl Tool for AgentGrepTool {
 }
 
 fn run_agentgrep_blocking(params: &AgentGrepInput, ctx: &ToolContext) -> Result<ToolOutput> {
+    anyhow::ensure!(
+        !ctx.graceful_shutdown_signal
+            .as_ref()
+            .is_some_and(|signal| signal.is_set()),
+        "Search stopped before acquisition"
+    );
     if ctx.working_dir.is_none() {
         let explicit_path = params.path.as_deref().or(params.file.as_deref());
         if explicit_path.is_none_or(|path| !Path::new(path).is_absolute()) {
@@ -330,7 +346,7 @@ fn execute_linked_agentgrep(
             let max_regions = params.max_regions.or(Some(DEFAULT_GREP_MAX_REGIONS));
             Ok(
                 ToolOutput::new(render_grep_output(&result, &args, max_regions))
-                    .with_title("agentgrep grep"),
+                    .with_title("agentgrep grep").with_metadata(json!({"agentgrep_result":result.to_json(),"rendered_max_regions":max_regions})),
             )
         }
         "find" => {
@@ -338,13 +354,17 @@ fn execute_linked_agentgrep(
             let root = resolve_search_root(ctx, args.path.as_deref())?;
             let result =
                 filter_find_result_to_exact_file(run_find(&root, &args), exact_file.as_deref());
-            Ok(ToolOutput::new(render_find_output(&result, &args)).with_title("agentgrep find"))
+            Ok(ToolOutput::new(render_find_output(&result, &args))
+                .with_title("agentgrep find")
+                .with_metadata(json!({"agentgrep_result":result})))
         }
         "outline" => {
             let args = build_outline_args(params, ctx, context_json_path)?;
             let root = resolve_search_root(ctx, args.path.as_deref())?;
             let result = run_outline(&root, &args).map_err(anyhow::Error::msg)?;
-            Ok(ToolOutput::new(render_outline_output(&result)).with_title("agentgrep outline"))
+            Ok(ToolOutput::new(render_outline_output(&result))
+                .with_title("agentgrep outline")
+                .with_metadata(json!({"agentgrep_result":result})))
         }
         "trace" | "smart" => {
             let (args, query) = build_smart_args_and_query(params, ctx, context_json_path)?;
@@ -354,7 +374,8 @@ fn execute_linked_agentgrep(
                 exact_file.as_deref(),
             );
             Ok(ToolOutput::new(render_smart_output(&result, &args))
-                .with_title(format!("agentgrep {}", params.mode)))
+                .with_title(format!("agentgrep {}", params.mode))
+                .with_metadata(json!({"agentgrep_result":result})))
         }
         _ => Err(anyhow::anyhow!(
             "Unsupported agentgrep mode: {}. Use grep, find, outline, or trace.",

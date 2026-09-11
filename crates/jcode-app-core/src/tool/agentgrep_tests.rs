@@ -980,3 +980,35 @@ fn grep_defaults_to_a_bounded_match_count() {
         DEFAULT_GREP_MAX_REGIONS
     );
 }
+
+#[test]
+fn acquired_agentgrep_structure_is_retained_independently_of_rendered_region_count() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(
+        directory.path().join("source.rs"),
+        "fn first() { needle(); }\nfn second() { needle(); }\n",
+    )
+    .unwrap();
+    let output =
+        run_agentgrep_blocking(&grep_input("needle", Some(1)), &test_ctx(directory.path()))
+            .unwrap();
+    let metadata = output.metadata.unwrap();
+    assert_eq!(metadata["rendered_max_regions"], 1);
+    assert_eq!(metadata["agentgrep_result"]["total_matches"], 2);
+    assert!(metadata["agentgrep_result"]["files"].is_array());
+}
+
+#[test]
+fn pre_cancelled_agentgrep_does_not_start_acquisition() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut ctx = test_ctx(directory.path());
+    let signal = jcode_agent_runtime::InterruptSignal::new();
+    signal.fire();
+    ctx.graceful_shutdown_signal = Some(signal);
+    assert!(
+        run_agentgrep_blocking(&grep_input("needle", None), &ctx)
+            .unwrap_err()
+            .to_string()
+            .contains("stopped before acquisition")
+    );
+}

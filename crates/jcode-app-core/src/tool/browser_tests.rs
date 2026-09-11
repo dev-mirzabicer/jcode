@@ -363,3 +363,13 @@ async fn readiness_does_not_trust_a_stale_setup_marker_async() {
         jcode_base::env::remove_var("JCODE_HOME");
     }
 }
+
+#[test]
+fn browser_rendering_keeps_complete_received_response_metadata() {
+    let text = format!("{}TAIL", "α".repeat(30_000));
+    let response = json!({"content":text,"raw":{"vendor_payload":"retained","data":"media-payload"},"other":42});
+    let output = render_browser_output("snapshot", "fixture".into(), response.clone());
+    assert_eq!(output.metadata, Some(response));
+    assert!(output.output.ends_with("TAIL"));
+    assert!(output.output.len() > 50_000);
+}
