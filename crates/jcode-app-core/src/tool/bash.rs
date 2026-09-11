@@ -259,6 +259,16 @@ fn parse_checkpoint_marker(line: &str) -> Option<BackgroundTaskProgress> {
     )
 }
 
+pub(crate) fn parse_command_progress(line: &str) -> Result<Option<(BackgroundTaskProgress, bool)>> {
+    if let Some(progress) = parse_checkpoint_marker(line) {
+        return Ok(Some((progress, true)));
+    }
+    if let Some(progress) = parse_progress_marker_with_checkpoint(line) {
+        return Ok(Some(progress));
+    }
+    Ok(parse_heuristic_progress(line)?.map(|progress| (progress, false)))
+}
+
 fn progress_message_from_line(line: &str, matched_fragment: &str) -> Option<String> {
     let trimmed = line.trim();
     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case(matched_fragment.trim()) {

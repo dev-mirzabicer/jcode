@@ -354,6 +354,26 @@ impl CaptureState {
 }
 
 impl OutputCapture for Capture {
+    fn report_progress(
+        &self,
+        progress: jcode_background_types::BackgroundTaskProgress,
+        checkpoint: bool,
+    ) -> Result<()> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        ensure!(
+            !state.sealed && state.seal_intent.is_none(),
+            "Cannot report progress after terminal publication"
+        );
+        state.storage.store.record_progress(
+            &state.record.id,
+            &state.record.owner,
+            progress,
+            checkpoint,
+        )
+    }
     fn append_part(&self, name: &str, bytes: &[u8]) -> Result<()> {
         let file = part_filename(name)?;
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());

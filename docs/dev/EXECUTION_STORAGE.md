@@ -295,6 +295,29 @@ This does not yet establish complete raw provider-ingress capture, uncorrelated
 result recovery or native-SDK fallback semantics. Those boundaries remain in the
 producer reconciliation ledger and final WP-02 verification scope.
 
+## Native progress and metadata ownership
+
+Command drains retain raw bytes before interpreting progress. The existing Bash
+marker and heuristic parsers feed an execution-owned monotonic progress record.
+Status parsing is bounded independently of capture, so oversized or invalid
+marker lines remain in the raw output even when they are not interpreted as
+progress. Status messages/units are short projections; they are not replacements
+for the captured output.
+
+Durable `bg wait` supports progress/checkpoint return without owning or stopping
+the command. Current progress survives manager recreation. The original runtime
+receives native-worker progress events, and in-process captured commands publish
+through the same ordinary background event channel. Shared equivalence and
+informativeness rules avoid timestamp-only updates and less-informative parsed
+status replacing reported progress.
+
+SQLite exclusively owns database descriptors. Do not pre-open/close index.sqlite
+through ordinary filesystem APIs in a process with live SQLite connections:
+POSIX close semantics can release another connection's locks. The execution
+store uses SQLite's NOFOLLOW open after resolving ancestor aliases, and hardens
+permissions before WAL/SHM creation. Real cross-process tests cover lock
+preservation in both WAL and rollback modes plus symlink/private-mode checks.
+
 ## Verification
 
 Run through coordinated self-development tests:

@@ -172,17 +172,6 @@ pub use jcode_background_types::{
     format_progress_display, format_progress_summary, render_progress_bar,
 };
 
-pub(super) fn progress_equivalent(a: &BackgroundTaskProgress, b: &BackgroundTaskProgress) -> bool {
-    a.kind == b.kind
-        && a.percent == b.percent
-        && a.message == b.message
-        && a.current == b.current
-        && a.total == b.total
-        && a.unit == b.unit
-        && a.eta_seconds == b.eta_seconds
-        && a.source == b.source
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct RunningBackgroundProgress {
     pub task_id: String,

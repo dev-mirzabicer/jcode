@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-const SCHEMA: i64 = 9;
+const SCHEMA: i64 = 10;
 
 pub use jcode_tool_types::RunState;
 
@@ -45,6 +45,8 @@ impl Invocation {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<super::ExecutionProgress>,
     pub id: String,
     pub session_id: String,
     pub message_id: String,
@@ -188,6 +190,11 @@ impl ExecutionStore {
             ALTER TABLE output_locations ADD COLUMN archive_spec TEXT;
             ALTER TABLE output_allocations ADD COLUMN archive_spec TEXT;
             PRAGMA user_version=9;",
+            )?;
+        }
+        if version < 10 {
+            transaction.execute_batch(
+                "ALTER TABLE runs ADD COLUMN progress TEXT; PRAGMA user_version=10;",
             )?;
         }
         transaction.commit()?;
@@ -408,6 +415,17 @@ fn query_record(connection: &Connection, id: &str) -> Result<Option<RunRecord>> 
                 )
             })?;
             Ok(RunRecord {
+                progress: row
+                    .get::<_, Option<String>>("progress")?
+                    .map(|value| serde_json::from_str(&value))
+                    .transpose()
+                    .map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?,
                 id: row.get("id")?,
                 session_id: row.get("session_id")?,
                 message_id: row.get("message_id")?,

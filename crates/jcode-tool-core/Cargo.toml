@@ -8,6 +8,7 @@ name = "jcode_tool_core"
 path = "src/lib.rs"
 
 [dependencies]
+jcode-background-types = { path = "../jcode-background-types" }
 anyhow = "1"
 async-trait = "0.1"
 jcode-agent-runtime = { path = "../jcode-agent-runtime" }

@@ -4340,6 +4340,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "jcode-agent-runtime",
+ "jcode-background-types",
  "jcode-message-types",
  "jcode-tool-types",
  "serde_json",

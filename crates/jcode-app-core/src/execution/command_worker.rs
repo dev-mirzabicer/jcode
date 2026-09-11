@@ -86,6 +86,7 @@ pub(crate) async fn launch(
     let mut child = crate::platform::spawn_detached(&mut program)?;
     let mut stopped = false;
     let mut ready = false;
+    let mut last_progress = 0;
     loop {
         let current = {
             let store = store.clone();
@@ -97,6 +98,21 @@ pub(crate) async fn launch(
             })
             .await??
         };
+        if current.background
+            && let Some(progress) = &current.progress
+            && progress.sequence > last_progress
+        {
+            last_progress = progress.sequence;
+            crate::bus::Bus::global().publish(crate::bus::BusEvent::BackgroundTaskProgress(
+                crate::bus::BackgroundTaskProgressEvent {
+                    task_id: id.clone(),
+                    tool_name: current.tool.clone(),
+                    display_name: None,
+                    session_id: current.session_id.clone(),
+                    progress: progress.value.clone(),
+                },
+            ));
+        }
         if current.state.terminal() {
             if current.output_path.is_some()
                 && let Some(ready) = &ctx.invocation.ready

@@ -75,33 +75,13 @@ pub(super) async fn execute(params: BgInput, ctx: ToolContext) -> Result<ToolOut
                 .with_title("Stop request submitted; inspect status for actual completion"))
         }
         "wait" => {
-            let result = if params.max_wait_seconds == Some(0) {
-                None
-            } else {
-                let wait = crate::execution::control(id, ControlOperation::Wait);
-                if let Some(seconds) = params.max_wait_seconds {
-                    tokio::time::timeout(Duration::from_secs(seconds), wait)
-                        .await
-                        .ok()
-                } else {
-                    Some(wait.await)
-                }
-            };
-            let (record, reason) = match result {
-                Some(Ok(ControlReply::Snapshot { record })) => (*record, "terminal"),
-                Some(Ok(ControlReply::Unavailable { message })) => anyhow::bail!("{message}"),
-                Some(Err(error)) => return Err(error),
-                Some(Ok(_)) => anyhow::bail!("Execution owner did not return a terminal snapshot"),
-                None => {
-                    let record = snapshot(id).await?;
-                    let reason = if record.state.terminal() {
-                        "terminal"
-                    } else {
-                        "timeout"
-                    };
-                    (record, reason)
-                }
-            };
+            let (record, reason) = wait_snapshot(
+                id,
+                record,
+                params.max_wait_seconds,
+                params.return_on_progress.unwrap_or(true),
+            )
+            .await?;
             let preview = params.include_output_preview.unwrap_or(
                 record.state.terminal() && record.state != crate::execution::RunState::Completed,
             );
@@ -210,6 +190,56 @@ fn tail_start(file: &mut std::fs::File, end: u64, lines: usize) -> Result<u64> {
         position = start;
     }
     Ok(0)
+}
+
+async fn wait_snapshot(
+    id: &str,
+    initial: RunRecord,
+    seconds: Option<u64>,
+    progress: bool,
+) -> Result<(RunRecord, &'static str)> {
+    if initial.state.terminal() {
+        return Ok((initial, "terminal"));
+    }
+    if seconds == Some(0) {
+        return Ok((initial, "timeout"));
+    }
+    let sequence = initial
+        .progress
+        .as_ref()
+        .map(|value| value.sequence)
+        .unwrap_or(0);
+    let completion = crate::execution::control(id, ControlOperation::Wait);
+    tokio::pin!(completion);
+    let deadline = seconds
+        .map(|value| {
+            tokio::time::Instant::now()
+                .checked_add(Duration::from_secs(value))
+                .context("Wait deadline exceeds the platform clock")
+        })
+        .transpose()?;
+    let mut poll = tokio::time::interval(Duration::from_millis(250));
+    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            biased;
+            result=&mut completion=>return match result? {
+                ControlReply::Snapshot{record}=>Ok((*record,"terminal")),
+                ControlReply::Unavailable{message}=>Err(anyhow::anyhow!(message)),
+                _=>Err(anyhow::anyhow!("Execution owner did not return a terminal snapshot")),
+            },
+            _=async{if let Some(deadline)=deadline{tokio::time::sleep_until(deadline).await}else{std::future::pending::<()>().await}}=>{
+                let record=snapshot(id).await?;let reason=if record.state.terminal(){"terminal"}else{"timeout"};return Ok((record,reason));
+            },
+            _=poll.tick(),if progress=>{
+                let record=snapshot(id).await?;
+                if record.state.terminal(){return Ok((record,"terminal"));}
+                if let Some(value)=&record.progress && value.sequence>sequence {
+                    let reason=if value.checkpoint{"checkpoint"}else{"progress"};return Ok((record,reason));
+                }
+            },
+        }
+    }
 }
 
 #[cfg(test)]

@@ -18,6 +18,11 @@ pub enum OutputStream {
 /// Implemented by the output owner. A successful write acknowledges retention,
 /// not merely placement in an untracked in-memory preview buffer.
 pub trait OutputCapture: Send + Sync {
+    fn report_progress(
+        &self,
+        progress: jcode_background_types::BackgroundTaskProgress,
+        checkpoint: bool,
+    ) -> Result<()>;
     fn write(&self, stream: OutputStream, bytes: &[u8]) -> Result<()>;
     fn reference(&self) -> Result<jcode_tool_types::OutputReference>;
     fn append_part(&self, name: &str, bytes: &[u8]) -> Result<()>;

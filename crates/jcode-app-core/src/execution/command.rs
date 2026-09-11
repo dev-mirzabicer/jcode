@@ -117,15 +117,59 @@ async fn drain(
     stream: OutputStream,
 ) -> Result<()> {
     let mut buffer = vec![0u8; 64 * 1024];
+    let mut pending = Vec::new();
+    let mut oversized = false;
     loop {
         let count = input.read(&mut buffer).await?;
         if count == 0 {
+            if !oversized && !pending.is_empty() {
+                publish_progress_lines(capture.clone(), vec![pending]).await?;
+            }
             return Ok(());
         }
         let bytes = buffer[..count].to_vec();
-        let capture = capture.clone();
-        tokio::task::spawn_blocking(move || capture.write(stream, &bytes)).await??;
+        let writer = capture.clone();
+        tokio::task::spawn_blocking(move || writer.write(stream, &bytes)).await??;
+        // Bound only the status parser's scratch space. Every original byte,
+        // including oversized or invalid markers, has already been captured.
+        let mut lines = Vec::new();
+        for part in buffer[..count].split_inclusive(|byte| *byte == b'\n') {
+            if !oversized {
+                if pending.len() + part.len() > 64 * 1024 {
+                    pending.clear();
+                    oversized = true;
+                } else {
+                    pending.extend_from_slice(part);
+                }
+            }
+            if part.last() == Some(&b'\n') {
+                if !oversized {
+                    lines.push(std::mem::take(&mut pending));
+                }
+                oversized = false;
+            }
+        }
+        if !lines.is_empty() {
+            publish_progress_lines(capture.clone(), lines).await?;
+        }
     }
+}
+
+async fn publish_progress_lines(
+    capture: Arc<dyn OutputCapture>,
+    lines: Vec<Vec<u8>>,
+) -> Result<()> {
+    tokio::task::spawn_blocking(move || {
+        for line in lines {
+            if let Ok(line) = std::str::from_utf8(&line)
+                && let Some((progress, checkpoint)) = crate::tool::parse_command_progress(line)?
+            {
+                capture.report_progress(progress, checkpoint)?;
+            }
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await?
 }
 async fn signal_group(pid: u32, signal: i32) -> Result<()> {
     if let Err(error) = crate::platform::signal_detached_process_group(pid, signal)

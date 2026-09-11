@@ -40,6 +40,22 @@ pub struct BackgroundTaskProgress {
 }
 
 impl BackgroundTaskProgress {
+    pub fn equivalent_to(&self, other: &Self) -> bool {
+        self.kind == other.kind
+            && self.percent == other.percent
+            && self.message == other.message
+            && self.current == other.current
+            && self.total == other.total
+            && self.unit == other.unit
+            && self.eta_seconds == other.eta_seconds
+            && self.source == other.source
+    }
+    pub fn is_less_informative_than(&self, previous: &Self) -> bool {
+        (previous.percent.is_some() || previous.total.is_some_and(|total| total > 0))
+            && self.percent.is_none()
+            && !self.total.is_some_and(|total| total > 0)
+            && self.source == BackgroundTaskProgressSource::ParsedOutput
+    }
     pub fn normalize(mut self) -> Self {
         if let (Some(current), Some(total)) = (self.current, self.total)
             && total > 0

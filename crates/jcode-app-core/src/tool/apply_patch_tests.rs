@@ -336,6 +336,13 @@ struct StopAfterReceipt {
     stop: jcode_agent_runtime::InterruptSignal,
 }
 impl jcode_tool_core::OutputCapture for StopAfterReceipt {
+    fn report_progress(
+        &self,
+        progress: crate::bus::BackgroundTaskProgress,
+        checkpoint: bool,
+    ) -> Result<()> {
+        jcode_tool_core::OutputCapture::report_progress(self.capture.as_ref(), progress, checkpoint)
+    }
     fn write(&self, stream: jcode_tool_core::OutputStream, bytes: &[u8]) -> Result<()> {
         jcode_tool_core::OutputCapture::write(self.capture.as_ref(), stream, bytes)?;
         self.stop.fire();

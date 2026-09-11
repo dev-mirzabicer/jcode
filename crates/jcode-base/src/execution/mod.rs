@@ -1,7 +1,9 @@
 //! Shared execution persistence and source/output reading.
 mod acceptance;
 mod delivery;
+mod progress;
 pub use delivery::{BackgroundDelivery, DeliveryAttempt, DeliveryChannel, DeliveryState};
+pub use progress::ExecutionProgress;
 #[cfg(unix)]
 pub mod command_handoff;
 pub mod control_transport;

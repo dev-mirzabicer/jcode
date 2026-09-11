@@ -959,3 +959,44 @@ async fn same_target_patch_move_does_not_delete_the_written_source() -> anyhow::
     );
     Ok(())
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn native_command_progress_and_checkpoint_keep_raw_bytes_and_wake_only_waiters()
+-> anyhow::Result<()> {
+    let registry = Registry::new(Arc::new(MockProvider)).await;
+    let ctx = context();
+    let id = crate::execution::invocation_id(&ctx);
+    let mut bus = crate::bus::Bus::global().subscribe();
+    registry.execute("bash",serde_json::json!({"command":"sleep 1; printf 'JCODE_PRO'; sleep 0.1; printf 'GRESS {\"percent\":25,\"message\":\"first\"}\n'; sleep 1; printf 'JCODE_CHECKPOINT {\"message\":\"checkpoint reached\"}\n'; sleep 2; printf done","run_in_background":true,"notify":false,"wake":false}),ctx).await?;
+    let first=registry.execute("bg",serde_json::json!({"action":"wait","task_id":id,"return_on_progress":true,"max_wait_seconds":10}),context()).await?;
+    assert_eq!(first.metadata.as_ref().unwrap()["reason"], "progress");
+    assert_eq!(
+        first.metadata.as_ref().unwrap()["run"]["progress"]["value"]["percent"],
+        25.0
+    );
+    let second=registry.execute("bg",serde_json::json!({"action":"wait","task_id":id,"return_on_progress":true,"max_wait_seconds":10}),context()).await?;
+    assert_eq!(second.metadata.as_ref().unwrap()["reason"], "checkpoint");
+    let status = crate::background::global().status(&id).await.unwrap();
+    assert!(status.progress.is_some());
+    assert!(matches!(
+        status.event_history.last().unwrap().kind,
+        crate::background::BackgroundTaskEventKind::Checkpoint
+    ));
+    let record = crate::execution::wait_for(&id).await?;
+    assert_eq!(record.state, crate::execution::RunState::Completed);
+    let raw = std::fs::read_to_string(record.output_path.unwrap().with_file_name("stdout.bin"))?;
+    assert!(
+        raw.contains("JCODE_PROGRESS") && raw.contains("JCODE_CHECKPOINT") && raw.ends_with("done")
+    );
+    let mut progress_seen = false;
+    while let Ok(event) = bus.try_recv() {
+        if let crate::bus::BusEvent::BackgroundTaskProgress(event) = event
+            && event.task_id == id
+        {
+            progress_seen = true;
+        }
+    }
+    assert!(progress_seen);
+    Ok(())
+}

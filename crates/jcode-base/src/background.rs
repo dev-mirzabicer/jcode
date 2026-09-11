@@ -5,7 +5,7 @@
 
 use crate::bus::{
     BackgroundTaskCompleted, BackgroundTaskProgress, BackgroundTaskProgressEvent,
-    BackgroundTaskProgressSource, BackgroundTaskStatus, Bus, BusEvent,
+    BackgroundTaskStatus, Bus, BusEvent,
 };
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -34,8 +34,8 @@ pub fn runtime_instance_id() -> &'static str {
     model::process_instance_token()
 }
 use model::{
-    EXIT_MARKER_PREFIX, RunningTask, normalize_delivery, progress_equivalent,
-    progress_event_record, progress_wait_reason, push_task_event, task_dir, terminal_event_record,
+    EXIT_MARKER_PREFIX, RunningTask, normalize_delivery, progress_event_record,
+    progress_wait_reason, push_task_event, task_dir, terminal_event_record,
 };
 
 struct AbortAdoptedOnDrop(tokio::task::AbortHandle);
@@ -1226,18 +1226,11 @@ impl BackgroundTaskManager {
 
         let progress = progress.normalize();
         if let Some(existing) = status.progress.as_ref() {
-            if progress_equivalent(existing, &progress) {
+            if existing.equivalent_to(&progress) {
                 return Ok(Some(status));
             }
 
-            let existing_is_more_determinate = existing.percent.is_some()
-                || matches!((existing.current, existing.total), (_, Some(total)) if total > 0);
-            let new_is_less_determinate = progress.percent.is_none()
-                && !matches!((progress.current, progress.total), (_, Some(total)) if total > 0);
-            if existing_is_more_determinate
-                && new_is_less_determinate
-                && matches!(progress.source, BackgroundTaskProgressSource::ParsedOutput)
-            {
+            if progress.is_less_informative_than(existing) {
                 return Ok(Some(status));
             }
         }

@@ -53,8 +53,27 @@ fn projected(store: &ExecutionStore, id: &str) -> Result<Option<TaskStatusFile>>
         detached: false,
         notify: delivery.notify,
         wake: delivery.wake,
-        progress: None,
-        event_history: Vec::new(),
+        progress: record
+            .progress
+            .as_ref()
+            .map(|progress| progress.value.clone()),
+        event_history: record
+            .progress
+            .map(|progress| {
+                vec![BackgroundTaskEventRecord {
+                    kind: if progress.checkpoint {
+                        BackgroundTaskEventKind::Checkpoint
+                    } else {
+                        BackgroundTaskEventKind::Progress
+                    },
+                    timestamp: progress.value.updated_at.clone(),
+                    message: progress.value.message.clone(),
+                    status: None,
+                    exit_code: None,
+                    progress: Some(progress.value),
+                }]
+            })
+            .unwrap_or_default(),
     }))
 }
 
