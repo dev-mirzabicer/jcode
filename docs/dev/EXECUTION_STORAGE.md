@@ -204,6 +204,11 @@ durable execution, not the lifetime or preview text of a delivery wrapper.
 The ordinary background manager can be recreated and still inspect or control
 registered execution IDs. Legacy task storage remains a separate compatibility
 boundary and does not gain ownership guarantees by interpreting an old PID.
+New Unix detached registrations retain boot/birth-bound process identity.
+Cancellation requires that identity, verifies the owned group actually quiesced,
+and propagates terminal-receipt persistence errors. Old files without verified
+identity fail before signalling. This compatibility safeguard does not claim
+native Windows process-handle support or infer safe control from a reused PID.
 
 Delivery flags and notification/wake outcomes live in the execution index.
 Registration is idempotent and precedes model-visible acceptance. Missing parents

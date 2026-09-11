@@ -46,6 +46,8 @@ fn projected(store: &ExecutionStore, id: &str) -> Result<Option<TaskStatusFile>>
         completed_at,
         duration_secs,
         pid: None,
+        #[cfg(unix)]
+        process_identity: None,
         owner_pid: None,
         owner_instance: Some(record.owner),
         detached: false,

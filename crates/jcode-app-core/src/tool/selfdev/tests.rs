@@ -1198,6 +1198,8 @@ async fn build_ignores_stale_pending_requests_when_computing_queue_position() {
             completed_at: None,
             duration_secs: None,
             pid: None,
+            #[cfg(unix)]
+            process_identity: None,
             owner_pid: None,
             owner_instance: None,
             detached: false,
@@ -1298,6 +1300,8 @@ fn reconcile_pending_state_maps_superseded_background_status() {
             completed_at: Some(Utc::now().to_rfc3339()),
             duration_secs: Some(1.0),
             pid: None,
+            #[cfg(unix)]
+            process_identity: None,
             owner_pid: None,
             owner_instance: None,
             detached: false,
@@ -1387,6 +1391,8 @@ fn reconcile_keeps_running_request_not_yet_registered_in_live_task_map() {
             completed_at: None,
             duration_secs: None,
             pid: None,
+            #[cfg(unix)]
+            process_identity: None,
             owner_pid: None,
             owner_instance: None,
             detached: false,

@@ -173,7 +173,17 @@ impl BackgroundTaskManager {
             return status;
         };
 
-        let reaped_exit = crate::platform::try_reap_child_process(pid).ok().flatten();
+        #[cfg(unix)]
+        let reaped_exit =
+            if status.process_identity.as_ref().is_some_and(|identity| {
+                identity.pid == pid && identity.matches_live().unwrap_or(false)
+            }) {
+                crate::platform::try_reap_child_process(pid).ok().flatten()
+            } else {
+                None
+            };
+        #[cfg(not(unix))]
+        let reaped_exit = None;
 
         if reaped_exit.is_none() && crate::platform::is_process_running(pid) {
             return status;
@@ -402,6 +412,8 @@ impl BackgroundTaskManager {
             completed_at: None,
             duration_secs: None,
             pid: Some(pid),
+            #[cfg(unix)]
+            process_identity: crate::execution::process::ProcessIdentity::capture(pid).ok(),
             // Detached processes outlive this server, so no in-process owner:
             // reconciliation must never clobber them.
             owner_pid: None,
@@ -473,6 +485,8 @@ impl BackgroundTaskManager {
             completed_at: None,
             duration_secs: None,
             pid: None,
+            #[cfg(unix)]
+            process_identity: None,
             owner_pid: Some(std::process::id()),
             owner_instance: Some(model::process_instance_token().to_string()),
             detached: false,
@@ -548,6 +562,8 @@ impl BackgroundTaskManager {
                 completed_at: Some(chrono::Utc::now().to_rfc3339()),
                 duration_secs: Some(duration_secs),
                 pid: None,
+                #[cfg(unix)]
+                process_identity: None,
                 owner_pid: Some(std::process::id()),
                 owner_instance: Some(model::process_instance_token().to_string()),
                 detached: false,
@@ -743,6 +759,8 @@ impl BackgroundTaskManager {
             completed_at: None,
             duration_secs: None,
             pid: None,
+            #[cfg(unix)]
+            process_identity: None,
             owner_pid: Some(std::process::id()),
             owner_instance: Some(model::process_instance_token().to_string()),
             detached: false,
@@ -871,6 +889,8 @@ impl BackgroundTaskManager {
                 completed_at: Some(chrono::Utc::now().to_rfc3339()),
                 duration_secs: Some(duration_secs),
                 pid: None,
+                #[cfg(unix)]
+                process_identity: None,
                 owner_pid: Some(std::process::id()),
                 owner_instance: Some(model::process_instance_token().to_string()),
                 detached: false,
@@ -1367,6 +1387,41 @@ impl BackgroundTaskManager {
         }).await?
     }
 
+    #[cfg(unix)]
+    async fn stop_detached_group(status: &TaskStatusFile, grace: Duration) -> Result<()> {
+        let pid = status
+            .pid
+            .ok_or_else(|| anyhow::anyhow!("Detached task has no process ID"))?;
+        let grace_deadline = tokio::time::Instant::now()
+            .checked_add(grace)
+            .ok_or_else(|| anyhow::anyhow!("Stop grace period exceeds the platform clock range"))?;
+
+        let identity=status.process_identity.as_ref().ok_or_else(||anyhow::anyhow!("Legacy detached task has no verified process identity. No PID was signalled; inspect the original owner."))?;
+        anyhow::ensure!(
+            identity.pid == pid,
+            "Detached task PID conflicts with its stored process identity"
+        );
+        identity.signal_group(libc::SIGTERM)?;
+        tokio::time::sleep_until(grace_deadline).await;
+        if crate::platform::process_group_has_live_members(pid).await? {
+            identity.signal_group(libc::SIGKILL)?;
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while crate::platform::process_group_has_live_members(pid).await? {
+            anyhow::ensure!(
+                tokio::time::Instant::now() < deadline,
+                "Detached stop was requested but the owned group is still quiescing"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    async fn stop_detached_group(_status: &TaskStatusFile, _grace: Duration) -> Result<()> {
+        anyhow::bail!("Legacy detached task lacks a verified process handle; no PID was signalled")
+    }
+
     /// Cancel a running task
     pub async fn cancel(&self, task_id: &str) -> Result<bool> {
         self.cancel_with_grace(task_id, std::time::Duration::from_millis(400))
@@ -1393,29 +1448,14 @@ impl BackgroundTaskManager {
             let Some(mut status) = self.read_status_file(&status_path).await else {
                 return Ok(false);
             };
-            status = self
-                .finalize_detached_status_if_needed(status, &status_path)
-                .await;
             if status.status != BackgroundTaskStatus::Running || !status.detached {
                 return Ok(false);
             }
 
-            let Some(pid) = status.pid else {
+            if status.pid.is_none() {
                 return Ok(false);
-            };
-
-            #[cfg(unix)]
-            {
-                let _ = crate::platform::signal_detached_process_group(pid, libc::SIGTERM);
-                tokio::time::sleep(_graceful_timeout).await;
-                if crate::platform::is_process_running(pid) {
-                    let _ = crate::platform::signal_detached_process_group(pid, libc::SIGKILL);
-                }
             }
-            #[cfg(windows)]
-            {
-                let _ = crate::platform::signal_detached_process_group(pid, 0);
-            }
+            Self::stop_detached_group(&status, _graceful_timeout).await?;
 
             let completed_at = Utc::now();
             status.status = BackgroundTaskStatus::Failed;
@@ -1430,7 +1470,10 @@ impl BackgroundTaskManager {
                 &mut status,
                 terminal_event_record(event_status, event_exit_code, event_error.as_deref()),
             );
-            self.write_status_file(&status_path, &status).await;
+            tokio::task::spawn_blocking(move || {
+                crate::storage::write_json_secret(&status_path, &status)
+            })
+            .await??;
             Ok(true)
         }
     }

@@ -59,6 +59,9 @@ pub struct TaskStatusFile {
     pub duration_secs: Option<f64>,
     #[serde(default)]
     pub pid: Option<u32>,
+    #[cfg(unix)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_identity: Option<crate::execution::process::ProcessIdentity>,
     /// PID of the process whose in-process future owns (or owned) this task.
     /// `None` for files written by older builds. Used to reconcile phantom
     /// `Running` entries after the owning server crashes or exec-reloads;

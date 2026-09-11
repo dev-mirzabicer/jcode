@@ -379,6 +379,8 @@ fn running_status_fixture(task_id: &str, session_id: &str) -> TaskStatusFile {
         completed_at: None,
         duration_secs: None,
         pid: None,
+        #[cfg(unix)]
+        process_identity: None,
         owner_pid: None,
         owner_instance: None,
         detached: false,
@@ -658,6 +660,59 @@ async fn abort_live_tasks_for_reload_keeps_naturally_finished_status() -> Result
         status.status,
         BackgroundTaskStatus::Completed,
         "a task that finished before the sweep must keep its real status"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn detached_stop_rejects_legacy_pid_without_identity_and_stops_verified_owned_group()
+-> Result<()> {
+    let directory = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(directory.path().into());
+    let mut command = tokio::process::Command::new("sleep");
+    command.arg("30").process_group(0).kill_on_drop(true);
+    let mut child = command.spawn()?;
+    let pid = child.id().unwrap();
+    let info = manager.reserve_task_info();
+    manager
+        .register_detached_task(
+            &info,
+            "fixture",
+            None,
+            "detached-identity",
+            pid,
+            &Utc::now().to_rfc3339(),
+            false,
+            false,
+        )
+        .await;
+    let original: TaskStatusFile = crate::storage::read_json(&info.status_file)?;
+    assert!(original.process_identity.is_some());
+    let mut legacy = original.clone();
+    legacy.process_identity = None;
+    crate::storage::write_json_secret(&info.status_file, &legacy)?;
+    let error = manager
+        .cancel(&info.task_id)
+        .await
+        .expect_err("Unverified PID must not be signalled");
+    assert!(error.to_string().contains("verified process identity"));
+    assert!(child.try_wait()?.is_none());
+    let stored: TaskStatusFile = crate::storage::read_json(&info.status_file)?;
+    assert_eq!(stored.status, BackgroundTaskStatus::Running);
+    crate::storage::write_json_secret(&info.output_file, &"captured-prefix")?;
+    crate::storage::write_json_secret(&info.status_file, &original)?;
+    assert!(manager.cancel(&info.task_id).await?);
+    child.wait().await?;
+    assert!(!crate::platform::process_group_has_live_members(pid).await?);
+    assert_eq!(
+        manager
+            .status(&info.task_id)
+            .await
+            .unwrap()
+            .error
+            .as_deref(),
+        Some("Cancelled by user")
     );
     Ok(())
 }
