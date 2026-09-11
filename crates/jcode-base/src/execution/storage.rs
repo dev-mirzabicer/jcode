@@ -184,7 +184,24 @@ fn private_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn output_lease(store: &ExecutionStore, id: &str) -> Result<File> {
+pub(super) struct OutputLease {
+    root: PathBuf,
+    id: String,
+    _file: File,
+}
+impl OutputLease {
+    pub(super) fn validate(&self, store: &ExecutionStore, id: &str) -> Result<()> {
+        ensure!(
+            self.root == store.root() && self.id == id,
+            "Output lease belongs to a different store or invocation"
+        );
+        Ok(())
+    }
+}
+pub(super) fn output_lease(store: &ExecutionStore, id: &str) -> Result<OutputLease> {
+    try_output_lease(store, id)?.context("Output is owned by an active writer or storage operation")
+}
+pub(super) fn try_output_lease(store: &ExecutionStore, id: &str) -> Result<Option<OutputLease>> {
     ensure!(
         id.starts_with("run-") && id.len() == 68 && id[4..].bytes().all(|b| b.is_ascii_hexdigit()),
         "Invalid invocation identity"
@@ -193,9 +210,16 @@ pub(super) fn output_lease(store: &ExecutionStore, id: &str) -> Result<File> {
     private_directory(&locks)?;
     let path = locks.join(id);
     let file = private_open(&path, false)?;
-    file.try_lock()
-        .context("Output is owned by an active writer or storage operation")?;
-    Ok(file)
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
+        Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+    }
+    Ok(Some(OutputLease {
+        root: store.root().to_path_buf(),
+        id: id.into(),
+        _file: file,
+    }))
 }
 
 fn private_open(path: &Path, truncate: bool) -> Result<File> {
@@ -481,7 +505,7 @@ pub(super) struct BundleStorage {
     pub archived: bool,
     config: StorageConfig,
     environment: Arc<dyn StorageEnvironment>,
-    _lease: File,
+    _lease: OutputLease,
     binding: DirectoryBinding,
 }
 impl BundleStorage {
@@ -1192,6 +1216,61 @@ impl ExecutionStore {
                 |row| Ok((PathBuf::from(row.get::<_, String>(0)?), row.get(1)?)),
             )
             .optional()?)
+    }
+
+    #[cfg(unix)]
+    pub(super) fn recover_owned_storage(&self, id: &str, lease: &OutputLease) -> Result<()> {
+        lease.validate(self, id)?;
+        let connection = self.connection()?;
+        let allocation:Option<(String,bool,Option<String>)>=connection.query_row("SELECT physical,archived,archive_spec FROM output_allocations WHERE id=?1 AND stage='prepared'",[id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional()?;
+        if let Some((path, archived, spec)) = allocation {
+            let record = self.inspect(id)?.context("Allocation has no invocation")?;
+            let parent = if archived {
+                let archive =
+                    spec.context("Interrupted archive allocation has no recorded volume identity")?;
+                let config = StorageConfig {
+                    archive: Some(serde_json::from_str(&archive)?),
+                    ..Default::default()
+                };
+                archive_namespace(self, &config, &NativeEnvironment)?
+            } else {
+                let local = self.root().join("data");
+                private_directory(&local)?;
+                DirectoryBinding::open(&local)?
+            };
+            ensure!(
+                Path::new(&path) == parent.path.join(id),
+                "Allocation differs from its recorded namespace"
+            );
+            complete_allocation(self, &record, &parent, archived, &NativeEnvironment)?;
+        }
+        let pending: Option<String> = connection
+            .query_row(
+                "SELECT manifest_path FROM relocations WHERE id=?1 AND stage<>'complete'",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(path) = pending {
+            let manifest: MoveManifest = crate::storage::read_json(Path::new(&path))?;
+            ensure!(manifest.id == id, "Relocation identity mismatch");
+            let config = StorageConfig {
+                archive: Some(
+                    manifest
+                        .archive_spec
+                        .clone()
+                        .context("Interrupted relocation has no recorded volume identity")?,
+                ),
+                ..Default::default()
+            };
+            let root = archive_namespace(self, &config, &NativeEnvironment)?;
+            ensure!(
+                manifest.destination.parent() == Some(root.path.as_path()),
+                "Relocation differs from its verified archive"
+            );
+            complete_move(self, &manifest, &NativeEnvironment)?;
+        }
+        Ok(())
     }
 }
 

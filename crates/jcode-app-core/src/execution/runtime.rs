@@ -260,7 +260,9 @@ async fn dispatch(
         .unwrap_or_else(|p| p.into_inner())
         .get(&(store.root().to_path_buf(), id.to_string()))
         .cloned();
-    if let Some(run) = live.filter(|run| run.runtime.endpoint.id == endpoint.id) {
+    if let Some(run) = live.filter(|run| {
+        run.runtime.endpoint.id == endpoint.id && run.owns_execution.load(Ordering::SeqCst)
+    }) {
         match action {
             ControlOperation::Stop { cause } => {
                 let changed = run.result.borrow().is_none();

@@ -373,8 +373,34 @@ in-flight guards. Active or unresolved owned work blocks a new provider request
 rather than receiving a fabricated result. The repair does not advance past
 unresolved work. Existing Session persistence and context reconciliation still
 own history mutation, rollback and deliberate cache invalidation. Legacy calls
-without retained records keep their historical missing-output disposition;
-owner-crash and unavailable-output reconciliation remain explicitly tracked.
+without retained records keep their historical missing-output disposition.
+
+## Lost-owner recovery
+
+Runtime registration records a process-image token separately from PID and
+endpoint identity. An absent/unleased endpoint alone never proves that work
+stopped. Recovery requires a terminated process or a verified replacement image,
+an exclusive lease for the exact output, and no live members of a recorded
+native command group. Unverified legacy ownership, live capture, live groups and
+offline storage remain explicit failures, not successful cancellation.
+
+An existing sealed witness is validated and restores its actual terminal outcome.
+Otherwise recovery reuses recorded per-run allocation/relocation operations and
+publishes `Interrupted`, preserving original input and the committed output prefix.
+It writes a separate immutable interruption receipt instead of overwriting the
+original output or claiming unknown filesystem effects were rolled back. This
+receipt uses common character presentation and identifies any partial output.
+
+Registry replay and authoritative history repair use this operation without
+starting the original producer. Replay waiters cannot act as the old producer or
+wait on themselves. Background delivery reconciliation recovers proven lost
+owners and sends the failure receipt only through the original-parent delivery
+machinery. Metadata-only status remains independent of full result retrieval.
+Native acceptance includes real process exit without Rust destructors, refusal
+to retire live groups/captures, original input/prefix preservation, terminal
+witness precedence, Registry/history replay and original-session delivery.
+Unsupported owner-loss platforms remain unproven before storage mutation; no
+native Windows parity is claimed by the macOS tests.
 
 ## Verification
 

@@ -211,9 +211,17 @@ impl BackgroundTaskManager {
             let record = store
                 .inspect(&id)?
                 .context("Unknown completed invocation")?;
-            let path = record
-                .output_path
-                .unwrap_or_else(|| store.root().join("receipts").join(format!("{id}.json")));
+            let path = if record.state == RunState::Interrupted && record.result_path.is_none() {
+                let result = store.result(&record, std::num::NonZeroUsize::new(500).unwrap())?;
+                let jcode_tool_types::OutputSource::Unavailable(reference) = result.source else {
+                    anyhow::bail!("Missing interruption receipt");
+                };
+                reference.receipt_path
+            } else {
+                record
+                    .output_path
+                    .unwrap_or_else(|| store.root().join("receipts").join(format!("{id}.json")))
+            };
             let mut bytes = Vec::new();
             if let Ok(file) = std::fs::File::open(&path) {
                 file.take(2000).read_to_end(&mut bytes)?;
@@ -241,6 +249,21 @@ impl BackgroundTaskManager {
     }
 
     pub async fn retry_managed_delivery(&self) -> Result<()> {
+        let (source, unfinished) = tokio::task::spawn_blocking(move || -> Result<_> {
+            let source = store()?;
+            let unfinished = source.unfinished_background_deliveries()?;
+            Ok((source, unfinished))
+        })
+        .await??;
+        for id in unfinished {
+            // A missing lease or live group is not proof of completion. Keep
+            // such records nonterminal and let explicit inspection show them.
+            if let Err(error) = source.recover_lost_owner(&id).await {
+                crate::logging::debug(&format!(
+                    "Background owner recovery remains unresolved for {id}: {error}"
+                ));
+            }
+        }
         let ids = tokio::task::spawn_blocking(move || {
             let store = store()?;
             store.reconcile_delivery_attempts()?;

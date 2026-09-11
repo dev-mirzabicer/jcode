@@ -165,20 +165,27 @@ impl Registry {
         let name = Self::resolve_tool_name(name).to_string();
         let target = crate::config::config().output.target(&name, None);
         let lookup_name = name.clone();
-        let result=tokio::task::spawn_blocking(move||->Result<Option<ToolOutput>> {
-            if !root.join("execution/index.sqlite").exists(){return Ok(None);}
+        let found=tokio::task::spawn_blocking(move||->Result<_> {
+            if !root.join("execution/index.sqlite").try_exists()?{return Ok(None);}
             let store=crate::execution::ExecutionStore::open(&root)?;
             let Some(record)=store.inspect(&id)? else{return Ok(None);};
             anyhow::ensure!(record.session_id==ctx.session_id && record.message_id==ctx.message_id && Self::resolve_tool_name(&record.tool)==lookup_name,"Retained execution does not match this historical tool use");
             anyhow::ensure!(store.invocation_input(&id)?.input==input,"Retained execution input differs from the historical tool use; no result was substituted");
-            if let Some(accepted)=store.acceptance_result(&id)? {return Ok(Some(accepted));}
-            anyhow::ensure!(record.state.terminal(),"Execution {id} is still active or awaiting recovery. No replacement tool result or repeated operation was created. Inspect or stop that run before continuing.");
-            Ok(Some(store.result(&record,target)?))
+            let accepted=store.acceptance_result(&id)?;
+            Ok(Some((store,record,accepted)))
         }).await??;
-        match result {
-            Some(output) => Ok(Some(self.guard_context_overflow(&name, output).await)),
-            None => Ok(None),
-        }
+        let Some((store, mut record, accepted)) = found else {
+            return Ok(None);
+        };
+        let output = if let Some(accepted) = accepted {
+            accepted
+        } else {
+            if !record.state.terminal() {
+                record=store.recover_lost_owner(&record.id).await?.ok_or_else(||anyhow::anyhow!("Execution {} remains active or unverified. No replacement result or repeated operation was created.",record.id))?;
+            }
+            tokio::task::spawn_blocking(move || store.result(&record, target)).await??
+        };
+        Ok(Some(self.guard_context_overflow(&name, output).await))
     }
     /// The provider has already performed the operation. This boundary only
     /// retains and presents received output; it never invokes a native tool.
@@ -973,6 +980,7 @@ impl Registry {
             }
             jcode_tool_types::OutputSource::Inline=>"No retained reference is available for this failure. Do not blindly repeat an operation with uncertain effects.".to_string(),
             jcode_tool_types::OutputSource::Acceptance(reference)=>format!("Background work was accepted. Receipt: {}. Inspect run {}; do not repeat the original operation.",reference.path.display(),reference.invocation_id),
+            jcode_tool_types::OutputSource::Unavailable(reference)=>format!("Execution {} was interrupted with an unknown final outcome. Read receipt {}; do not repeat the original operation.",reference.invocation_id,reference.receipt_path.display()),
         };
         let pressure = if current >= threshold {
             "CONTEXT LIMIT REACHED"

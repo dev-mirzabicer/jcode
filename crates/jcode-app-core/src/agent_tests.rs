@@ -4669,3 +4669,78 @@ async fn scoped_tool_history_repair_blocks_live_work_without_advancing_past_it()
     assert_eq!(agent.repair_missing_tool_outputs().await?, 1);
     Ok(())
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn history_owner_loss_becomes_one_interruption_receipt_without_replaying_effects()
+-> Result<()> {
+    use jcode_tool_core::OutputCapture;
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir()?;
+    let _home = AgentTestEnvRestore::set_path("JCODE_HOME", home.path());
+    let _runtime = AgentTestEnvRestore::set_path("JCODE_RUNTIME_DIR", &home.path().join("runtime"));
+    let provider: Arc<dyn Provider> = Arc::new(ProjectedRequestProvider::new(1_000_000));
+    let mut agent = Agent::new(provider, Registry::empty());
+    let message = agent.add_message(
+        Role::Assistant,
+        vec![ContentBlock::ToolUse {
+            id: "interrupted-tool".into(),
+            name: "external_result".into(),
+            input: serde_json::json!({}),
+            thought_signature: None,
+        }],
+    );
+    let ctx = ToolContext {
+        session_id: agent.session.id.clone(),
+        message_id: message,
+        tool_call_id: "interrupted-tool".into(),
+        working_dir: None,
+        stdin_request_tx: None,
+        graceful_shutdown_signal: None,
+        execution_mode: ToolExecutionMode::Direct,
+        invocation: Default::default(),
+    };
+    let store = crate::execution::ExecutionStore::open(home.path())?;
+    let lease = home.path().join("runtime.lease");
+    std::fs::File::create(&lease)?;
+    let mut process = std::process::Command::new("true").spawn()?;
+    let pid = process.id();
+    process.wait()?;
+    let mut owner = crate::execution::RuntimeEndpoint::new(
+        uuid::Uuid::new_v4().simple().to_string(),
+        home.path().join("old.sock"),
+        lease,
+        "x".repeat(64),
+    );
+    owner.process_id = pid;
+    store.register_runtime(&owner)?;
+    let invocation = crate::execution::invocation(&ctx, "external_result", serde_json::json!({}));
+    let crate::execution::PreparedInvocation::New(record) =
+        store.prepare(&invocation, &owner.id)?
+    else {
+        panic!()
+    };
+    store.start(&record.id, &owner.id)?;
+    let capture = crate::execution::Capture::create(
+        store.clone(),
+        record.clone(),
+        crate::execution::StorageConfig::default(),
+    )?;
+    capture.write(
+        jcode_tool_core::OutputStream::Stdout,
+        b"partial historical output",
+    )?;
+    let path = capture.reference()?.path;
+    drop(capture);
+    assert_eq!(agent.repair_missing_tool_outputs().await?, 1);
+    assert_eq!(agent.repair_missing_tool_outputs().await?, 0);
+    assert_eq!(
+        store.inspect(&record.id)?.unwrap().state,
+        crate::execution::RunState::Interrupted
+    );
+    assert_eq!(std::fs::read_to_string(path)?, "partial historical output");
+    let stored = Session::load(agent.session_id())?;
+    assert_eq!(stored.messages.iter().flat_map(|message|&message.content).filter(|block|matches!(block,ContentBlock::ToolResult{tool_use_id,is_error:Some(true),..} if tool_use_id=="interrupted-tool")).count(),1);
+    assert_eq!(store.list(agent.session_id(), None, 10)?.len(), 1);
+    Ok(())
+}

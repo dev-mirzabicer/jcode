@@ -12,6 +12,7 @@ mod output;
 #[cfg(unix)]
 pub mod process;
 pub mod reader;
+mod recovery;
 mod runtime;
 pub use output::present;
 pub use runtime::RuntimeEndpoint;

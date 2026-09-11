@@ -322,7 +322,9 @@ impl CaptureState {
                     "Producer supplied a foreign retained-output reference"
                 );
             }
-            OutputSource::ReadPage(_) | OutputSource::Acceptance(_) => {
+            OutputSource::ReadPage(_)
+            | OutputSource::Acceptance(_)
+            | OutputSource::Unavailable(_) => {
                 anyhow::bail!("A source-read page must not enter the output capture sink")
             }
         }

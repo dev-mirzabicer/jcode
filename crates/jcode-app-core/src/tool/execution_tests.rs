@@ -1,5 +1,68 @@
 use super::*;
 
+#[cfg(unix)]
+#[tokio::test]
+async fn replay_of_lost_owner_retains_interruption_without_reexecuting_producer()
+-> anyhow::Result<()> {
+    use jcode_tool_core::OutputCapture;
+    let (registry, tool, _started) = fixture("must not execute".into(), false, false).await;
+    let ctx = context();
+    let input = serde_json::json!({});
+    let store = crate::execution::ExecutionStore::open(&crate::storage::jcode_dir()?)?;
+    let lease = store
+        .root()
+        .join(format!("{}.lease", uuid::Uuid::new_v4().simple()));
+    std::fs::File::create(&lease)?;
+    let mut exited = std::process::Command::new("true").spawn()?;
+    let pid = exited.id();
+    exited.wait()?;
+    let mut owner = crate::execution::RuntimeEndpoint::new(
+        uuid::Uuid::new_v4().simple().to_string(),
+        store.root().join("unavailable.sock"),
+        lease,
+        "k".repeat(64),
+    );
+    owner.process_id = pid;
+    store.register_runtime(&owner)?;
+    let invocation = crate::execution::invocation(&ctx, "execution_fixture", input.clone());
+    let crate::execution::PreparedInvocation::New(record) =
+        store.prepare(&invocation, &owner.id)?
+    else {
+        panic!()
+    };
+    store.start(&record.id, &owner.id)?;
+    let capture = crate::execution::Capture::create(
+        store.clone(),
+        record.clone(),
+        crate::execution::StorageConfig::default(),
+    )?;
+    capture.write(
+        jcode_tool_core::OutputStream::Stdout,
+        b"retained before owner exit",
+    )?;
+    let path = capture.reference()?.path;
+    drop(capture);
+    for _ in 0..2 {
+        let error = registry
+            .execute("execution_fixture", input.clone(), ctx.clone())
+            .await
+            .expect_err("Lost execution must not be reported as success");
+        let output = &error
+            .downcast_ref::<crate::execution::CapturedToolError>()
+            .unwrap()
+            .output;
+        assert!(matches!(output.source, OutputSource::Unavailable(_)));
+        assert!(output.is_error);
+    }
+    assert_eq!(tool.count.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        store.inspect(&record.id)?.unwrap().state,
+        crate::execution::RunState::Interrupted
+    );
+    assert_eq!(std::fs::read_to_string(path)?, "retained before owner exit");
+    Ok(())
+}
+
 #[tokio::test]
 async fn agentgrep_preserves_complete_long_matches_and_selected_trace_regions() -> anyhow::Result<()>
 {
@@ -1050,5 +1113,67 @@ async fn native_command_progress_and_checkpoint_keep_raw_bytes_and_wake_only_wai
         }
     }
     assert!(progress_seen);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn background_owner_loss_recovery_delivers_a_real_receipt_to_the_original_session()
+-> anyhow::Result<()> {
+    let store = crate::execution::ExecutionStore::open(&crate::storage::jcode_dir()?)?;
+    let ctx = context();
+    let invocation = crate::execution::invocation(&ctx, "fixture", serde_json::json!({}));
+    let lease = store
+        .root()
+        .join(format!("{}.lease", uuid::Uuid::new_v4().simple()));
+    std::fs::File::create(&lease)?;
+    let mut exited = std::process::Command::new("true").spawn()?;
+    let pid = exited.id();
+    exited.wait()?;
+    let mut owner = crate::execution::RuntimeEndpoint::new(
+        uuid::Uuid::new_v4().simple().to_string(),
+        store.root().join("gone.sock"),
+        lease,
+        "x".repeat(64),
+    );
+    owner.process_id = pid;
+    store.register_runtime(&owner)?;
+    let crate::execution::PreparedInvocation::New(record) =
+        store.prepare(&invocation, &owner.id)?
+    else {
+        panic!()
+    };
+    store.start(&record.id, &owner.id)?;
+    store.promote(&record.id, &owner.id)?;
+    store.register_background_delivery(&record.id, true, false)?;
+    let mut events = crate::bus::Bus::global().subscribe();
+    crate::background::global().retry_managed_delivery().await?;
+    let mut found = None;
+    while let Ok(event) = events.try_recv() {
+        if let crate::bus::BusEvent::BackgroundTaskCompleted(event) = event
+            && event.task_id == record.id
+        {
+            found = Some(event);
+        }
+    }
+    let event = found.expect("Recovered failure must enter ordinary delivery");
+    assert_eq!(event.session_id, ctx.session_id);
+    assert_eq!(event.status, crate::bus::BackgroundTaskStatus::Failed);
+    assert!(event.output_file.is_file());
+    assert!(std::fs::read_to_string(event.output_file)?.contains("unknown"));
+    assert_eq!(
+        store.inspect(&record.id)?.unwrap().state,
+        crate::execution::RunState::Interrupted
+    );
+    let attempt = store
+        .begin_delivery(&record.id, crate::execution::DeliveryChannel::Notify)?
+        .unwrap();
+    attempt.finish(true)?;
+    crate::background::global().retry_managed_delivery().await?;
+    while let Ok(event) = events.try_recv() {
+        assert!(
+            !matches!(event,crate::bus::BusEvent::BackgroundTaskCompleted(event) if event.task_id==record.id)
+        );
+    }
     Ok(())
 }

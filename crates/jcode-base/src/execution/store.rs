@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-const SCHEMA: i64 = 11;
+const SCHEMA: i64 = 12;
 
 pub use jcode_tool_types::RunState;
 
@@ -202,6 +202,11 @@ impl ExecutionStore {
         if version < 11 {
             transaction.execute_batch(
                 "ALTER TABLE runs ADD COLUMN process_exit TEXT; PRAGMA user_version=11;",
+            )?;
+        }
+        if version < 12 {
+            transaction.execute_batch(
+                "ALTER TABLE runtimes ADD COLUMN process_image TEXT; PRAGMA user_version=12;",
             )?;
         }
         transaction.commit()?;

@@ -41,6 +41,7 @@ impl Drop for AbortProducer {
 }
 
 struct LiveRun {
+    owns_execution: AtomicBool,
     store: ExecutionStore,
     runtime: Arc<runtime::RuntimeHandle>,
     invocation: Invocation,
@@ -126,6 +127,7 @@ pub(crate) async fn execute(
             let (commands, receiver) = mpsc::unbounded_channel();
             let (result, subscription) = watch::channel(None);
             let run = Arc::new(LiveRun {
+                owns_execution: AtomicBool::new(false),
                 store: store.clone(),
                 runtime,
                 invocation,
@@ -307,17 +309,64 @@ async fn supervise(
         tokio::task::spawn_blocking(move || store.prepare(&input, &owner)).await??
     };
     let record = match preparation {
-        PreparedInvocation::New(record) => record,
-        PreparedInvocation::Existing(record) => {
-            let store = store.clone();
-            return tokio::task::spawn_blocking(move||{
-                if let Some(output)=store.acceptance_result(&record.id)? {return Ok(Completion{output,failed:false});}
-                if store.background_delivery(&record.id)?.is_some() {return Ok(Completion{output:store.background_acceptance(&record.id,&record.owner)?,failed:false});}
-                let record=if record.state.terminal(){record}else{store.recover_terminal_output(&record.id)
-                    .context("Invocation already exists without a proven completed result; inspect its owner instead of reexecuting")?};
-                let failed=record.state!=RunState::Completed;
-                Ok(Completion {output:store.result(&record,target)?,failed})
-            }).await?;
+        PreparedInvocation::New(record) => {
+            run.owns_execution.store(true, Ordering::SeqCst);
+            record
+        }
+        PreparedInvocation::Existing(mut record) => {
+            let source = store.clone();
+            let prior = record.clone();
+            let accepted = tokio::task::spawn_blocking(move || -> Result<Option<ToolOutput>> {
+                if let Some(output) = source.acceptance_result(&prior.id)? {
+                    return Ok(Some(output));
+                }
+                if source.background_delivery(&prior.id)?.is_some() {
+                    return source
+                        .background_acceptance(&prior.id, &prior.owner)
+                        .map(Some);
+                }
+                Ok(None)
+            })
+            .await??;
+            if let Some(output) = accepted {
+                return Ok(Completion {
+                    output,
+                    failed: false,
+                });
+            }
+            if !record.state.terminal() {
+                if let Some(recovered) = store.recover_lost_owner(&record.id).await? {
+                    record = recovered;
+                } else {
+                    // This caller is attaching to earlier work, not creating it.
+                    // Stop cancels only this wait and must not signal that owner.
+                    let waiting = crate::execution::runtime::control_in_store(
+                        &store,
+                        &record.id,
+                        ControlOperation::Wait,
+                    );
+                    let reply = tokio::select! {
+                        reply=waiting=>reply?,
+                        _=run.stop.notified()=>anyhow::bail!("Stopped waiting for existing execution {}; its work was not repeated or cancelled",record.id),
+                        _=async{if let Some(parent)=&ctx.graceful_shutdown_signal{parent.notified().await}else{std::future::pending::<()>().await}}=>anyhow::bail!("Stopped waiting for existing execution {}; its work was not repeated or cancelled",record.id),
+                    };
+                    record = match reply {
+                        ControlReply::Snapshot { record } if record.state.terminal() => *record,
+                        ControlReply::Unavailable { message } => anyhow::bail!("{message}"),
+                        _ => anyhow::bail!(
+                            "Existing execution has no proven terminal receipt; inspect its owner rather than repeating effects"
+                        ),
+                    };
+                }
+            }
+            return tokio::task::spawn_blocking(move || {
+                let failed = record.state != RunState::Completed;
+                Ok(Completion {
+                    output: store.result(&record, target)?,
+                    failed,
+                })
+            })
+            .await?;
         }
     };
     let capture_result = {
@@ -509,7 +558,7 @@ pub async fn promote(id: &str) -> Result<bool> {
             .context("Missing invocation during promotion")
     })
     .await??;
-    if current.owner != run.runtime.endpoint.id {
+    if current.owner != run.runtime.endpoint.id || !run.owns_execution.load(Ordering::SeqCst) {
         let result =
             runtime::control_in_store(&run.store, id, ControlOperation::Background).await?;
         if matches!(result, ControlReply::Accepted { changed: true }) {

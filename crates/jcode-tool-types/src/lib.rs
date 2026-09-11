@@ -96,6 +96,14 @@ pub enum OutputSource {
     Retained(OutputReference),
     ReadPage(ReadPageReference),
     Acceptance(AcceptanceReference),
+    Unavailable(UnavailableReference),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnavailableReference {
+    pub invocation_id: String,
+    pub receipt_path: std::path::PathBuf,
+    pub partial_output: Option<OutputReference>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -164,6 +164,49 @@ async fn dropping_a_remote_wait_does_not_stop_the_run() -> Result<()> {
 }
 
 #[tokio::test]
+async fn same_runtime_replay_without_a_live_producer_is_unavailable_not_self_waiting() -> Result<()>
+{
+    let store = ExecutionStore::open(&crate::storage::jcode_dir()?)?;
+    let runtime = ensure_running(&store).await?;
+    let ctx = ToolContext {
+        session_id: uuid::Uuid::new_v4().to_string(),
+        message_id: "message".into(),
+        tool_call_id: "call".into(),
+        working_dir: None,
+        stdin_request_tx: None,
+        graceful_shutdown_signal: None,
+        execution_mode: ToolExecutionMode::Direct,
+        invocation: Default::default(),
+    };
+    let invocation = super::super::invocation(&ctx, "fixture", serde_json::json!({}));
+    let PreparedInvocation::New(record) = store.prepare(&invocation, &runtime.endpoint.id)? else {
+        panic!()
+    };
+    store.start(&record.id, &runtime.endpoint.id)?;
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = calls.clone();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        super::super::execute(
+            invocation,
+            ctx,
+            NonZeroUsize::new(100).unwrap(),
+            Box::new(move |_| {
+                Box::pin(async move {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    Ok(ToolOutput::new("must not execute"))
+                })
+            }),
+        ),
+    )
+    .await?;
+    assert!(result.is_err());
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(store.inspect(&record.id)?.unwrap().state, RunState::Running);
+    Ok(())
+}
+
+#[tokio::test]
 async fn owner_process_fixture() -> Result<()> {
     let Some(path) = std::env::var_os("JCODE_EXECUTION_OWNER_FIXTURE") else {
         return Ok(());

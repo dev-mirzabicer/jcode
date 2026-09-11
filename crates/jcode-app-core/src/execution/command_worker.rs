@@ -263,6 +263,7 @@ async fn worker_with_child(id: &str, child: tokio::process::Command) -> Result<(
     let (commands, mut requests) = mpsc::unbounded_channel();
     let (result, result_rx) = watch::channel(None);
     let run = Arc::new(LiveRun {
+        owns_execution: AtomicBool::new(true),
         store: store.clone(),
         runtime,
         invocation: input,

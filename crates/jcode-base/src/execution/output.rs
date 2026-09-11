@@ -123,17 +123,30 @@ impl ExecutionStore {
     /// Recover only an already-sealed, identity-checked output. Missing or old
     /// manifests do not authorize repeating an operation with uncertain effects.
     pub fn recover_terminal_output(&self, id: &str) -> Result<RunRecord> {
-        let _lease = super::storage::output_lease(self, id)?;
+        let lease = super::storage::output_lease(self, id)?;
+        self.recover_terminal_under_lease(id, &lease)
+    }
+    pub(super) fn terminal_witness(&self, id: &str) -> Result<Option<std::path::PathBuf>> {
+        let local = self.root().join("receipts").join(format!("{id}.json"));
+        if local.try_exists()? {
+            return Ok(Some(local));
+        }
+        let bundle = self.root().join("outputs").join(id).join("manifest.json");
+        Ok(bundle.try_exists()?.then_some(bundle))
+    }
+    pub(super) fn recover_terminal_under_lease(
+        &self,
+        id: &str,
+        lease: &super::storage::OutputLease,
+    ) -> Result<RunRecord> {
+        lease.validate(self, id)?;
         let mut record = self.inspect(id)?.context("Unknown invocation")?;
         if record.state.terminal() {
             return Ok(record);
         }
-        let local = self.root().join("receipts").join(format!("{id}.json"));
-        let manifest_path = if local.exists() {
-            local
-        } else {
-            self.root().join("outputs").join(id).join("manifest.json")
-        };
+        let manifest_path = self.terminal_witness(id)?.context(
+            "No sealed output is available; do not automatically repeat the original operation",
+        )?;
         let manifest: Manifest = crate::storage::read_json(&manifest_path).context(
             "No sealed output is available; do not automatically repeat the original operation",
         )?;
@@ -292,6 +305,9 @@ impl ExecutionStore {
             record.state.terminal(),
             "Invocation is still active; inspect or wait rather than reexecuting"
         );
+        if record.state == RunState::Interrupted && record.result_path.is_none() {
+            return self.interrupted_result(record, target);
+        }
         let manifest_path = record.result_path.as_ref().context("Invocation was interrupted before a retained result was published; do not automatically repeat its effects")?;
         let manifest: Manifest = crate::storage::read_json(manifest_path)
             .context("Retained result is offline or unavailable")?;
@@ -405,7 +421,7 @@ impl ExecutionStore {
                 }
                 continuation = point;
             }
-            OutputSource::Inline | OutputSource::Acceptance(_) => {
+            OutputSource::Inline | OutputSource::Acceptance(_) | OutputSource::Unavailable(_) => {
                 anyhow::bail!("Invalid unretained result manifest")
             }
         }
@@ -417,6 +433,11 @@ impl ExecutionStore {
 }
 
 pub fn present(mut output: ToolOutput, target: NonZeroUsize) -> ToolOutput {
+    if let OutputSource::Unavailable(reference) = &output.source {
+        let prefix = select_prefix(&output.output, target, true);
+        output.output.truncate(prefix.bytes);
+        output.output.push_str(&format!("\n[Interruption receipt: {}. Run: {}. Do not repeat the original operation to retrieve its output.]",reference.receipt_path.display(),reference.invocation_id));
+    }
     if let OutputSource::Retained(reference) = &output.source {
         let prefix = select_prefix(&output.output, target, true);
         output.output.truncate(prefix.bytes);

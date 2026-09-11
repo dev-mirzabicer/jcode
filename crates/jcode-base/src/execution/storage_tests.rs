@@ -148,6 +148,32 @@ fn json_write_failure_preserves_prefix_without_drop_retry() -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn owned_allocation_recovery_is_targeted_and_idempotent() -> Result<()> {
+    for stage in [
+        "allocation_before_files",
+        "allocation_after_files",
+        "allocation_after_location",
+        "allocation_after_alias",
+    ] {
+        let fixture = Fixture::new()?;
+        *fixture.environment.fail_stage.lock().unwrap() = Some(stage);
+        assert!(fixture.bundle().is_err());
+        let lease = output_lease(&fixture.store, &fixture.record.id)?;
+        fixture
+            .store
+            .recover_owned_storage(&fixture.record.id, &lease)?;
+        fixture
+            .store
+            .recover_owned_storage(&fixture.record.id, &lease)?;
+        let record = fixture.store.inspect(&fixture.record.id)?.unwrap();
+        assert_eq!(record.state, crate::execution::RunState::Running);
+        assert_eq!(std::fs::read(record.output_path.unwrap())?, b"");
+    }
+    Ok(())
+}
+
 #[test]
 fn partial_enospc_spills_without_duplicate_bytes() -> Result<()> {
     let fixture = Fixture::new()?;
@@ -516,7 +542,15 @@ fn native_archive_fixture_uses_verified_volume_and_stable_aliases() -> Result<()
             bail!("Expected managed read page");
         };
         let source = fixture.store.output_location(&record.id)?.unwrap().0;
-        let destination = root.path.join(format!("managed-read-{}", record.id));
+        let namespace = archive_namespace(
+            &fixture.store,
+            &StorageConfig {
+                archive: Some(archive.clone()),
+                ..Default::default()
+            },
+            &NativeEnvironment,
+        )?;
+        let destination = namespace.path.join(format!("managed-read-{}", record.id));
         let mut manifest = MoveManifest::capture(&record.id, &source, &destination)?;
         manifest.archive_spec = Some(archive.clone());
         let journal = fixture
@@ -527,7 +561,8 @@ fn native_archive_fixture_uses_verified_volume_and_stable_aliases() -> Result<()
         crate::storage::write_json_secret(&journal, &manifest)?;
         fixture.store.connection()?.execute("INSERT INTO relocations(id,source,destination,stage,manifest_path) VALUES (?1,?2,?3,'copying',?4)",params![record.id,source.to_str(),destination.to_str(),journal.to_str()])?;
         let lease = output_lease(&fixture.store, &record.id)?;
-        complete_move(&fixture.store, &manifest, &NativeEnvironment)?;
+        fixture.store.recover_owned_storage(&record.id, &lease)?;
+        fixture.store.recover_owned_storage(&record.id, &lease)?;
         drop(lease);
         let mut next = request(page.next_point.clone());
         next.target = std::num::NonZeroUsize::new(10_000).unwrap();
