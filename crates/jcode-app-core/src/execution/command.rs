@@ -16,6 +16,7 @@ pub struct CommandSpec {
     pub timeout: Option<Duration>,
 }
 pub struct CommandOutcome {
+    pub status: std::process::ExitStatus,
     pub output: ToolOutput,
     pub stop_cause: Option<StopCause>,
 }
@@ -33,7 +34,29 @@ pub(crate) async fn run_gated(
     stop: InterruptSignal,
     gate: CommandGate,
 ) -> Result<CommandOutcome> {
-    run_with_control(spec, capture, stop, &NativeControl, Some(gate), None).await
+    run_with_control(spec, capture, stop, &NativeControl, Some(gate), None, None).await
+}
+
+pub(crate) async fn run_program(
+    program: tokio::process::Command,
+    working_dir: PathBuf,
+    capture: Arc<dyn OutputCapture>,
+    stop: InterruptSignal,
+) -> Result<CommandOutcome> {
+    run_with_control(
+        CommandSpec {
+            command: String::new(),
+            working_dir,
+            timeout: None,
+        },
+        capture,
+        stop,
+        &NativeControl,
+        None,
+        None,
+        Some(program),
+    )
+    .await
 }
 
 pub struct CommandInput {
@@ -47,7 +70,7 @@ pub async fn run_with_input(
     stop: InterruptSignal,
     input: CommandInput,
 ) -> Result<CommandOutcome> {
-    run_with_control(spec, capture, stop, &NativeControl, None, Some(input)).await
+    run_with_control(spec, capture, stop, &NativeControl, None, Some(input), None).await
 }
 
 async fn serve_input(
@@ -187,7 +210,7 @@ pub async fn run(
     capture: Arc<dyn OutputCapture>,
     stop: InterruptSignal,
 ) -> Result<CommandOutcome> {
-    run_with_control(spec, capture, stop, &NativeControl, None, None).await
+    run_with_control(spec, capture, stop, &NativeControl, None, None, None).await
 }
 
 #[async_trait::async_trait]
@@ -213,10 +236,13 @@ async fn run_with_control(
     control: &dyn ProcessControl,
     gate: Option<CommandGate>,
     input: Option<CommandInput>,
+    program: Option<tokio::process::Command>,
 ) -> Result<CommandOutcome> {
     ensure!(!stop.is_set(), "Command was stopped before launch");
     let (mut command, registration) = if let Some(gate) = gate {
         (gate.program, Some((gate.store, gate.run_id, gate.owner)))
+    } else if let Some(program) = program {
+        (program, None)
     } else {
         let mut command = tokio::process::Command::new("bash");
         command.arg("-c").arg(&spec.command);
@@ -355,6 +381,7 @@ async fn run_with_control(
         .with_error(!status.success() || timed_out || cause.is_some() || exit_signal.is_some() || control_error.is_some());
     output.source = OutputSource::Retained(capture.reference()?);
     Ok(CommandOutcome {
+        status,
         output,
         stop_cause: if control_error.is_none() { cause } else { None },
     })
@@ -392,7 +419,7 @@ mod tests {
         let signal = stop.clone();
         let writer = capture.clone();
         let task = tokio::spawn(async move {
-            run_with_control(spec, writer, signal, &DeniedControl, None, None).await
+            run_with_control(spec, writer, signal, &DeniedControl, None, None, None).await
         });
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         while !ready.exists() {

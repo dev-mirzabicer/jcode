@@ -1,0 +1,21 @@
+{
+  "repository": "https://github.com/1jehuang/agentgrep",
+  "tag": "v0.1.6",
+  "commit": "b01b804008ab0662fa14e6b60b10bff61716e6f1",
+  "license": "MIT",
+  "original_files": {
+    "src/cli.rs": "476efa45fd6a4406650684a39028df47dd9d71dab7a028303d12f6ce0a9d05f6",
+    "src/context.rs": "5fc211724346856008d791696f7a8cc15263afa1bc44404c7e3464b2e23d28c2",
+    "src/find.rs": "000a56dd812f1ae9f1bb5c218e0d9459286a74af54c9cd9e62fcd2117cb27106",
+    "src/lib.rs": "5983ddc447b125e0ed237f9ee3e354636216aa1bb16d4779f527dbf6a0b5dcb0",
+    "src/main.rs": "0006c0acd34565eed2afef6cce5c59e6c87ec58c64f004f0b588ec653b287be7",
+    "src/outline.rs": "c8bee1aaf2a91b32b0cc968cf83f936c0866a2222c0598f014cfeb51929532c8",
+    "src/render.rs": "df9dfe5bde55091b9e371a21429deba35f8b7b25cbbf6d18f914e914fc26271b",
+    "src/search.rs": "2b21608e1b3e9006c5b0d11571dc0e3fac33fcb08424284b7f3c1079e983aa61",
+    "src/smart_dsl.rs": "38e605ee5cbef418ccac40aa780621ea862a669bb7b85c4a9d9c189fa3771cc7",
+    "src/smart_engine.rs": "2f57937a76f2be796a7d4fc0a7a96fca5285595b90fbe06eeb477f09b126829c",
+    "src/structure.rs": "139dffc48686ea776c523f51175f1efb07cd52f24145b89d0389c1ca60dd527b",
+    "src/workspace.rs": "b05c7490ec6004dc6816c6019bf4460463f1c005f0728a055ae4dd19aaa67cc1",
+    "Cargo.toml": "9b0885dbdf313e6892172862fa2e74bddb4f2c3e169d62c1964bb70774afaa7f"
+  }
+}

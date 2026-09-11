@@ -4,11 +4,11 @@ use crate::session::Session;
 use crate::storage;
 use crate::{logging, util};
 use ::agentgrep::cli::{FindArgs, FullRegionMode, GrepArgs, OutlineArgs, SmartArgs};
-use ::agentgrep::find::{FindResult, run_find};
-use ::agentgrep::outline::run_outline;
-use ::agentgrep::search::{GrepResult, run_grep};
+use ::agentgrep::find::{FindResult, run_find_controlled};
+use ::agentgrep::outline::run_outline_controlled;
+use ::agentgrep::search::{GrepResult, run_grep_controlled};
 use ::agentgrep::smart_dsl::{SmartQuery, parse_smart_query};
-use ::agentgrep::smart_engine::{SmartResult, run_smart};
+use ::agentgrep::smart_engine::{SmartResult, run_smart_controlled};
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -21,6 +21,7 @@ use std::sync::OnceLock;
 
 mod args;
 mod context;
+mod execution;
 
 #[cfg(test)]
 use self::args::trace_or_smart_terms_owned;
@@ -328,12 +329,13 @@ fn execute_linked_agentgrep(
     context_json_path: Option<&Path>,
 ) -> Result<ToolOutput> {
     let exact_file = exact_search_file_path(ctx, params.path.as_deref());
+    let control = execution::control(ctx);
     match params.mode.as_str() {
         "grep" => {
             let args = build_grep_args(params, ctx)?;
             let root = resolve_search_root(ctx, args.path.as_deref())?;
             let result = filter_grep_result_to_exact_file(
-                run_grep(&root, &args).map_err(anyhow::Error::msg)?,
+                run_grep_controlled(&root, &args, &control).map_err(anyhow::Error::msg)?,
                 exact_file.as_deref(),
             );
             // Bound the rendered matches by default. `find` and `outline` already
@@ -352,8 +354,10 @@ fn execute_linked_agentgrep(
         "find" => {
             let args = build_find_args(params, ctx)?;
             let root = resolve_search_root(ctx, args.path.as_deref())?;
-            let result =
-                filter_find_result_to_exact_file(run_find(&root, &args), exact_file.as_deref());
+            let result = filter_find_result_to_exact_file(
+                run_find_controlled(&root, &args, &control).map_err(anyhow::Error::msg)?,
+                exact_file.as_deref(),
+            );
             Ok(ToolOutput::new(render_find_output(&result, &args))
                 .with_title("agentgrep find")
                 .with_metadata(json!({"agentgrep_result":result})))
@@ -361,7 +365,8 @@ fn execute_linked_agentgrep(
         "outline" => {
             let args = build_outline_args(params, ctx, context_json_path)?;
             let root = resolve_search_root(ctx, args.path.as_deref())?;
-            let result = run_outline(&root, &args).map_err(anyhow::Error::msg)?;
+            let result =
+                run_outline_controlled(&root, &args, &control).map_err(anyhow::Error::msg)?;
             Ok(ToolOutput::new(render_outline_output(&result))
                 .with_title("agentgrep outline")
                 .with_metadata(json!({"agentgrep_result":result})))
@@ -370,7 +375,7 @@ fn execute_linked_agentgrep(
             let (args, query) = build_smart_args_and_query(params, ctx, context_json_path)?;
             let root = resolve_search_root(ctx, args.path.as_deref())?;
             let result = filter_smart_result_to_exact_file(
-                run_smart(&root, &query, &args).map_err(anyhow::Error::msg)?,
+                run_smart_controlled(&root, &query, &args, &control).map_err(anyhow::Error::msg)?,
                 exact_file.as_deref(),
             );
             Ok(ToolOutput::new(render_smart_output(&result, &args))

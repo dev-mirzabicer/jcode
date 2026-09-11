@@ -47,7 +47,6 @@ dependencies = [
 [[package]]
 name = "agentgrep"
 version = "0.1.6"
-source = "git+https://github.com/1jehuang/agentgrep.git?tag=v0.1.6#b01b804008ab0662fa14e6b60b10bff61716e6f1"
 dependencies = [
  "clap",
  "globset",
@@ -55,6 +54,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

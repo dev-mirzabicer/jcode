@@ -57,7 +57,7 @@ fn agentgrep_rejects_missing_session_cwd_instead_of_using_process_cwd() {
 }
 
 #[test]
-fn render_compacts_huge_grep_match_lines() {
+fn render_preserves_huge_grep_match_lines() {
     let args = GrepArgs {
         query: "set_status_notice".to_string(),
         regex: false,
@@ -78,26 +78,16 @@ fn render_compacts_huge_grep_match_lines() {
     let compact = ::agentgrep::render::compact_rendered_match_line(&line, &args);
 
     assert!(compact.contains("set_status_notice"));
-    assert!(compact.contains("[truncated:"), "{compact}");
-    assert!(
-        compact.chars().count() < 340,
-        "compact output should be bounded, got {} chars: {compact}",
-        compact.chars().count()
-    );
+    assert_eq!(compact, line);
 }
 
 #[test]
-fn render_compacts_huge_trace_region_body_lines() {
+fn render_preserves_huge_trace_region_body_lines() {
     let line = format!("function handleAuth(){{{}}}", "var x=1;".repeat(2000));
 
     let compact = ::agentgrep::render::compact_region_body_line(&line);
 
-    assert!(compact.contains("[truncated:"), "{compact}");
-    assert!(
-        compact.chars().count() < 340,
-        "compact region body line should be bounded, got {} chars",
-        compact.chars().count()
-    );
+    assert_eq!(compact, line);
 
     let short = "fn small() {}";
     assert_eq!(::agentgrep::render::compact_region_body_line(short), short);
@@ -128,7 +118,7 @@ fn grep_max_regions_limits_rendered_match_excerpts() {
 }
 
 #[test]
-fn grep_caps_non_code_file_match_excerpts_by_default() {
+fn grep_preserves_non_code_matches_within_requested_limit() {
     let temp = tempfile::tempdir().expect("tempdir");
     fs::write(
         temp.path().join("timeline.json"),
@@ -146,11 +136,7 @@ fn grep_caps_non_code_file_match_excerpts_by_default() {
     .expect("agentgrep execute")
     .output;
 
-    assert_eq!(output.matches("      - @ ").count(), 3, "{output}");
-    assert!(
-        output.contains("2 more non-code matches omitted"),
-        "{output}"
-    );
+    assert_eq!(output.matches("      - @ ").count(), 5, "{output}");
 }
 
 #[test]

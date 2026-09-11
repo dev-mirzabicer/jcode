@@ -1,4 +1,56 @@
 use super::*;
+
+#[tokio::test]
+async fn agentgrep_preserves_complete_long_matches_and_selected_trace_regions() -> anyhow::Result<()>
+{
+    let registry = Registry::new(Arc::new(MockProvider)).await;
+    let directory = tempfile::tempdir()?;
+    let body = format!(
+        "fn needle() {{ let value = \"{}TAIL\"; }}",
+        "α".repeat(20_000)
+    );
+    std::fs::write(directory.path().join("source.rs"), &body)?;
+    for input in [
+        serde_json::json!({"query":"needle","mode":"grep","output_size":100}),
+        serde_json::json!({"mode":"trace","terms":["subject:needle","relation:defined"],"output_size":100}),
+    ] {
+        let mut ctx = context();
+        ctx.working_dir = Some(directory.path().into());
+        let output = registry.execute("agentgrep", input, ctx).await?;
+        let OutputSource::Retained(reference) = output.source else {
+            panic!()
+        };
+        let retained = std::fs::read_to_string(reference.path)?;
+        assert!(retained.contains(&body));
+        assert!(!output.output.contains("TAIL"));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn native_nonzero_command_exit_is_not_a_completed_success() -> anyhow::Result<()> {
+    let registry = Registry::new(Arc::new(MockProvider)).await;
+    let ctx = context();
+    let id = crate::execution::invocation_id(&ctx);
+    let error = registry
+        .execute(
+            "bash",
+            serde_json::json!({"command":"printf failed-command; exit 7"}),
+            ctx,
+        )
+        .await
+        .expect_err("Nonzero exit must fail");
+    assert!(
+        error
+            .downcast_ref::<crate::execution::CapturedToolError>()
+            .is_some()
+    );
+    let record = crate::execution::wait_for(&id).await?;
+    assert_eq!(record.state, crate::execution::RunState::Failed);
+    assert!(std::fs::read_to_string(record.output_path.unwrap())?.contains("failed-command"));
+    Ok(())
+}
 use jcode_tool_core::OutputStream;
 use jcode_tool_types::{OutputSource, StopCause};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -998,30 +1050,5 @@ async fn native_command_progress_and_checkpoint_keep_raw_bytes_and_wake_only_wai
         }
     }
     assert!(progress_seen);
-    Ok(())
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn native_nonzero_command_exit_is_not_a_completed_success() -> anyhow::Result<()> {
-    let registry = Registry::new(Arc::new(MockProvider)).await;
-    let ctx = context();
-    let id = crate::execution::invocation_id(&ctx);
-    let error = registry
-        .execute(
-            "bash",
-            serde_json::json!({"command":"printf failed-command; exit 7"}),
-            ctx,
-        )
-        .await
-        .expect_err("Nonzero exit must fail");
-    assert!(
-        error
-            .downcast_ref::<crate::execution::CapturedToolError>()
-            .is_some()
-    );
-    let record = crate::execution::wait_for(&id).await?;
-    assert_eq!(record.state, crate::execution::RunState::Failed);
-    assert!(std::fs::read_to_string(record.output_path.unwrap())?.contains("failed-command"));
     Ok(())
 }
