@@ -206,14 +206,27 @@ pub fn display_image(path: &Path, params: &ImageDisplayParams) -> io::Result<boo
 
     // Read the image file
     let data = std::fs::read(path)?;
+    display_image_bytes(&data, path, params)
+}
+
+/// Display an already captured image. The path is a label, not a second read.
+pub fn display_image_bytes(
+    data: &[u8],
+    path: &Path,
+    params: &ImageDisplayParams,
+) -> io::Result<bool> {
+    let protocol = ImageProtocol::detect();
+    if !can_display_to_stdout(protocol, io::stdout().is_terminal()) {
+        return Ok(false);
+    }
 
     // Get image dimensions to calculate aspect ratio
-    let (img_width, img_height) = get_image_dimensions(&data).unwrap_or((0, 0));
+    let (img_width, img_height) = get_image_dimensions(data).unwrap_or((0, 0));
 
     match protocol {
-        ImageProtocol::Kitty => display_kitty(&data, params, img_width, img_height),
-        ImageProtocol::ITerm2 => display_iterm2(&data, path, params, img_width, img_height),
-        ImageProtocol::Sixel => display_sixel(path, params, img_width, img_height),
+        ImageProtocol::Kitty => display_kitty(data, params, img_width, img_height),
+        ImageProtocol::ITerm2 => display_iterm2(data, path, params, img_width, img_height),
+        ImageProtocol::Sixel => display_sixel(data, params, img_width, img_height),
         ImageProtocol::None => Ok(false),
     }
 }
@@ -439,7 +452,7 @@ fn iterm2_payload(
 /// Uses ImageMagick's `convert` command to generate Sixel output.
 /// This is the same approach used by image.nvim and other terminal image tools.
 fn display_sixel(
-    path: &Path,
+    data: &[u8],
     params: &ImageDisplayParams,
     img_width: u32,
     img_height: u32,
@@ -460,14 +473,29 @@ fn display_sixel(
     // -geometry: resize to fit
     // -colors 256: limit palette for Sixel
     // sixel:-: output Sixel to stdout
-    let output = Command::new("convert")
-        .arg(path)
+    let mut child = Command::new("convert")
+        .arg("-")
         .arg("-geometry")
         .arg(format!("{}x{}>", pixel_width, pixel_height))
         .arg("-colors")
         .arg("256")
         .arg("sixel:-")
-        .output()?;
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    let mut input = child
+        .stdin
+        .take()
+        .ok_or_else(|| io::Error::other("Image converter has no stdin"))?;
+    let output = std::thread::scope(|scope| {
+        let writer = scope.spawn(move || input.write_all(data));
+        let output = child.wait_with_output();
+        writer
+            .join()
+            .map_err(|_| io::Error::other("Image input writer panicked"))??;
+        output
+    })?;
 
     if !output.status.success() {
         return Ok(false);
@@ -484,6 +512,20 @@ fn display_sixel(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redirected_byte_display_does_not_open_the_label_path() {
+        if !io::stdout().is_terminal() {
+            assert!(
+                !display_image_bytes(
+                    b"captured fixture bytes",
+                    Path::new("/nonexistent/label-only.png"),
+                    &ImageDisplayParams::from_terminal()
+                )
+                .unwrap()
+            );
+        }
+    }
 
     #[test]
     fn test_protocol_detection() {

@@ -19,6 +19,22 @@ pub fn extract_text(path: &Path) -> Result<String> {
     }
 }
 
+/// Decode the exact bytes captured by a read invocation. Page boundaries come
+/// from the parser, not from guessing delimiters in flattened extracted text.
+pub fn extract_pages(bytes: &[u8]) -> Result<Vec<String>> {
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        pdf_extract::extract_text_from_mem_by_pages(bytes)
+    }));
+    match result {
+        Ok(Ok(pages)) => Ok(pages),
+        Ok(Err(error)) => Err(error.into()),
+        Err(payload) => Err(anyhow!(
+            "PDF text extraction failed (parser panic: {})",
+            panic_message(&payload)
+        )),
+    }
+}
+
 fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
     if let Some(s) = payload.downcast_ref::<&str>() {
         (*s).to_string()
@@ -33,6 +49,11 @@ fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn malformed_snapshot_returns_a_normal_error() {
+        assert!(extract_pages(b"%PDF-1.7\ninvalid body\n%%EOF\n").is_err());
+    }
 
     #[test]
     fn malformed_pdf_returns_error_instead_of_panicking() {

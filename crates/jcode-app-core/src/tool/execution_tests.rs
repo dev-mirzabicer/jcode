@@ -717,3 +717,124 @@ async fn read_tool_resumes_the_retained_presentation_point_without_a_source_copy
     );
     Ok(())
 }
+
+#[cfg(feature = "pdf")]
+fn two_page_pdf(first: &str, second: &str) -> Vec<u8> {
+    let stream = |text: &str| format!("BT /F1 12 Tf 72 720 Td ({text}) Tj ET");
+    let a = stream(first);
+    let b = stream(second);
+    let objects=[
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 7 0 R >> >> /Contents 4 0 R >>".to_string(),
+        format!("<< /Length {} >>\nstream\n{a}\nendstream",a.len()),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 7 0 R >> >> /Contents 6 0 R >>".to_string(),
+        format!("<< /Length {} >>\nstream\n{b}\nendstream",b.len()),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+    ];
+    let mut bytes = b"%PDF-1.4\n".to_vec();
+    let mut offsets = vec![0];
+    for (index, object) in objects.iter().enumerate() {
+        offsets.push(bytes.len());
+        bytes.extend_from_slice(format!("{} 0 obj\n{object}\nendobj\n", index + 1).as_bytes());
+    }
+    let xref = bytes.len();
+    bytes.extend_from_slice(
+        format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+    );
+    for offset in &offsets[1..] {
+        bytes.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    bytes.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    bytes
+}
+
+#[cfg(feature = "pdf")]
+#[tokio::test]
+async fn pdf_pages_are_retained_completely_and_continue_without_archiving_the_original_binary()
+-> anyhow::Result<()> {
+    let registry = Registry::new(Arc::new(MockProvider)).await;
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("document.pdf");
+    let first = format!("{}PAGE_ONE_TAIL", "A".repeat(25_000));
+    let second = format!("{}PAGE_TWO_TAIL", "B".repeat(25_000));
+    let original = two_page_pdf(&first, &second);
+    std::fs::write(&path, &original)?;
+    let output = registry
+        .execute(
+            "read",
+            serde_json::json!({"file_path":path,"output_size":100}),
+            context(),
+        )
+        .await?;
+    assert_eq!(output.metadata.as_ref().unwrap()["pages"], 2);
+    let OutputSource::Retained(reference) = output.source else {
+        panic!()
+    };
+    let complete = std::fs::read_to_string(&reference.path)?;
+    assert!(complete.contains(&first) && complete.contains(&second));
+    let continued=registry.execute("read",serde_json::json!({"file_path":reference.path,"read_point":reference.continuation,"output_size":100_000}),context()).await?;
+    assert!(continued.output.contains("PAGE_TWO_TAIL"));
+    assert_eq!(std::fs::read(&path)?, original);
+    let selected = registry
+        .execute(
+            "read",
+            serde_json::json!({"file_path":path,"start_line":1,"end_line":2}),
+            context(),
+        )
+        .await?;
+    assert_eq!(
+        selected.metadata.as_ref().unwrap()["line_selection"]["max_lines"],
+        2
+    );
+    assert!(!selected.output.contains("PAGE_ONE_TAIL"));
+    for part in std::fs::read_dir(reference.path.parent().unwrap())? {
+        let part = part?;
+        if part.file_type()?.is_file() {
+            assert!(!std::fs::read(part.path())?.starts_with(b"%PDF-"));
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn atomic_image_read_retains_exact_pixels_and_reports_oversized_source_without_reading_it()
+-> anyhow::Result<()> {
+    use base64::Engine;
+    let registry = Registry::new(Arc::new(MockProvider)).await;
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("pixel.png");
+    let bytes=base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")?;
+    std::fs::write(&path, &bytes)?;
+    let output = registry
+        .execute("read", serde_json::json!({"file_path":path}), context())
+        .await?;
+    assert_eq!(output.images.len(), 1);
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD.decode(&output.images[0].data)?,
+        bytes
+    );
+    let large = directory.path().join("large.png");
+    std::fs::File::create(&large)?.set_len(20 * 1024 * 1024 + 1)?;
+    let error = registry
+        .execute("read", serde_json::json!({"file_path":large}), context())
+        .await
+        .unwrap_err();
+    let output = &error
+        .downcast_ref::<crate::execution::CapturedToolError>()
+        .unwrap()
+        .output;
+    assert!(output.images.is_empty() && output.is_error);
+    assert_eq!(
+        output.metadata.as_ref().unwrap()["source_bytes"],
+        20 * 1024 * 1024 + 1
+    );
+    assert_eq!(std::fs::metadata(&large)?.len(), 20 * 1024 * 1024 + 1);
+    Ok(())
+}

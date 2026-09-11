@@ -129,8 +129,23 @@ Archive reads validate the original recorded volume identity without creating
 archive directories or moving data back. The native owned-fixture test exercises
 continuation before and after real relocation and rejects offline reads without
 creating a fake mount. Outputs from older capture schemas without a chunk index
-still require explicit legacy-import reconciliation. Derived PDF/media behavior
-remains WP-02 work and is not established by these text-reader tests.
+still require explicit legacy-import reconciliation.
+
+PDF reads decode an exact in-memory source snapshot and retain the complete
+selected derived page text, not a duplicate of the original PDF binary. Page
+boundaries come from the decoder. Source byte count, SHA-256 and derived format
+identity remain in metadata. Explicit line ranges select lines from the derived
+text. A clipped result continues by reading its retained derived-text path and
+read point; passing that point back to the original PDF is rejected rather than
+silently rerunning extraction. Decoder failures and unsupported PDF builds are
+failed outcomes, not successful metadata substitutes.
+
+Images remain atomic typed media. The existing 20-MiB vision bound is checked
+before acquisition, oversized images keep an explicit original-source reference,
+and captured image bytes are retained unchanged. Terminal rendering uses the
+same captured bytes rather than rereading a possibly changed file. Redirected
+stdout does not emit terminal image escapes. Hosted-provider vision budgets and
+unsupported formats remain explicit provider-boundary verification work.
 
 ## Runtime control
 

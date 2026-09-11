@@ -12,4 +12,4 @@
 pub mod display;
 pub mod metadata;
 
-pub use display::{ImageDisplayParams, ImageProtocol, display_image};
+pub use display::{ImageDisplayParams, ImageProtocol, display_image, display_image_bytes};

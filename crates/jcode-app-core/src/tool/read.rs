@@ -4,7 +4,7 @@ use super::{Tool, ToolContext, ToolOutput};
 use crate::bus::{Bus, BusEvent, FileOp, FileTouch};
 use anyhow::Result;
 use async_trait::async_trait;
-use jcode_terminal_image::{ImageDisplayParams, ImageProtocol, display_image};
+use jcode_terminal_image::{ImageDisplayParams, ImageProtocol, display_image_bytes};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::Path;
@@ -113,11 +113,18 @@ fn normalize_read_range(params: &ReadInput) -> Result<NormalizedReadRange> {
 impl Tool for ReadTool {
     fn execution_policy(
         &self,
-        _: &Value,
+        input: &Value,
         _: &ToolContext,
     ) -> Result<jcode_tool_core::ExecutionPolicy> {
+        let params: ReadInput = serde_json::from_value(input.clone())?;
+        let media = is_image_file(Path::new(&params.file_path))
+            || is_pdf_file(Path::new(&params.file_path));
         Ok(jcode_tool_core::ExecutionPolicy {
-            capture: jcode_tool_core::CaptureMode::SourceRead,
+            capture: if media {
+                jcode_tool_core::CaptureMode::Complete
+            } else {
+                jcode_tool_core::CaptureMode::SourceRead
+            },
             cooperative_stop: true,
             ..Default::default()
         })
@@ -170,6 +177,10 @@ impl Tool for ReadTool {
             "read_point replaces start_line/offset/limit; use end_line for an upper bound"
         );
         let range = normalize_read_range(&params)?;
+        anyhow::ensure!(
+            range.limit > 0 && range.offset.checked_add(range.limit).is_some(),
+            "Read line range must be positive and representable"
+        );
 
         let path = ctx.resolve_path(Path::new(&params.file_path));
         let root = crate::storage::jcode_dir()?;
@@ -192,12 +203,31 @@ impl Tool for ReadTool {
 
         // Check for image files and display in terminal if supported
         if is_image_file(&path) {
-            return handle_image_file(&path, &params.file_path);
+            anyhow::ensure!(
+                params.read_point.is_none(),
+                "Image reads are atomic; a text read point cannot select image pixels"
+            );
+            return tokio::task::spawn_blocking(move || {
+                handle_image_file(&path, &params.file_path)
+            })
+            .await?;
         }
 
         // Check for PDF files and extract text
         if is_pdf_file(&path) {
-            return handle_pdf_file(&path, &params.file_path);
+            anyhow::ensure!(
+                params.read_point.is_none(),
+                "PDF continuation uses the retained derived-text file named in the prior result, not a second extraction of the original PDF"
+            );
+            let selected = (params.start_line.is_some()
+                || params.end_line.is_some()
+                || params.offset.is_some()
+                || params.limit.is_some())
+            .then_some(range);
+            return tokio::task::spawn_blocking(move || {
+                handle_pdf_file(&path, &params.file_path, selected)
+            })
+            .await?;
         }
 
         // Check for binary files
@@ -335,7 +365,13 @@ fn is_image_file(path: &Path) -> bool {
 fn handle_image_file(path: &Path, file_path: &str) -> Result<ToolOutput> {
     let protocol = ImageProtocol::detect();
 
-    let data = std::fs::read(path)?;
+    const MAX_IMAGE_SIZE: u64 = 20 * 1024 * 1024;
+    let source_size = std::fs::metadata(path)?.len();
+    if source_size > MAX_IMAGE_SIZE {
+        return Ok(ToolOutput::new(format!("Image: {file_path} ({source_size} bytes). Image exceeds the existing 20-MiB atomic vision limit; no pixels were sent. The source remains at the original path."))
+            .with_error(true).with_metadata(json!({"source":file_path,"source_bytes":source_size,"vision_available":false})));
+    }
+    let (data, source_digest) = media_bytes(path, Some(MAX_IMAGE_SIZE))?;
     let file_size = data.len() as u64;
 
     let dimensions = get_image_dimensions_from_data(&data);
@@ -355,7 +391,7 @@ fn handle_image_file(path: &Path, file_path: &str) -> Result<ToolOutput> {
     let mut terminal_displayed = false;
     if protocol.is_supported() {
         let params = ImageDisplayParams::from_terminal();
-        match display_image(path, &params) {
+        match display_image_bytes(&data, path, &params) {
             Ok(true) => {
                 terminal_displayed = true;
             }
@@ -380,32 +416,19 @@ fn handle_image_file(path: &Path, file_path: &str) -> Result<ToolOutput> {
         _ => "image/png",
     };
 
-    const MAX_IMAGE_SIZE: u64 = 20 * 1024 * 1024;
-    let mut output = if file_size <= MAX_IMAGE_SIZE {
-        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &data);
-        let display_note = if terminal_displayed {
-            "Displayed in terminal. "
-        } else {
-            ""
-        };
-        ToolOutput::new(format!(
-            "Image: {} ({})\nDimensions: {}\n{}Image sent to model for vision analysis.",
-            file_path, size_str, dim_str, display_note
-        ))
-        .with_labeled_image(media_type, b64, file_path.to_string())
+    let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &data);
+    let display_note = if terminal_displayed {
+        "Displayed in terminal. "
     } else {
-        let display_note = if terminal_displayed {
-            "\nDisplayed in terminal."
-        } else {
-            ""
-        };
-        ToolOutput::new(format!(
-            "Image: {} ({})\nDimensions: {}\nImage too large for vision (max 20MB).{}",
-            file_path, size_str, dim_str, display_note
-        ))
+        ""
     };
+    let mut output = ToolOutput::new(format!(
+        "Image: {} ({})\nDimensions: {}\n{}Image attached for model vision analysis.",
+        file_path, size_str, dim_str, display_note
+    ))
+    .with_labeled_image(media_type, b64, file_path.to_string());
 
-    output = output.with_title(format!("📷 {}", file_path));
+    output = output.with_title(format!("📷 {}", file_path)).with_metadata(json!({"source":file_path,"source_bytes":file_size,"source_sha256":source_digest,"vision_available":true}));
     Ok(output)
 }
 
@@ -462,64 +485,77 @@ fn is_pdf_file(path: &Path) -> bool {
     }
 }
 
-/// Handle reading a PDF file - extract text content
-#[cfg(feature = "pdf")]
-fn handle_pdf_file(path: &Path, file_path: &str) -> Result<ToolOutput> {
-    // Get file metadata
-    let metadata = std::fs::metadata(path)?;
-    let file_size = metadata.len();
-
-    let size_str = if file_size < 1024 {
-        format!("{} bytes", file_size)
-    } else if file_size < 1024 * 1024 {
-        format!("{:.1} KB", file_size as f64 / 1024.0)
-    } else {
-        format!("{:.1} MB", file_size as f64 / 1024.0 / 1024.0)
-    };
-
-    // Extract text from PDF
-    match jcode_pdf::extract_text(path) {
-        Ok(text) => {
-            let mut output = String::new();
-            output.push_str(&format!("PDF: {} ({})\n", file_path, size_str));
-            output.push_str(&format!("{}\n", "=".repeat(60)));
-
-            // Split into pages (pdf_extract uses form feed \x0c as page separator)
-            let pages: Vec<&str> = text.split('\x0c').collect();
-            let page_count = pages.len();
-
-            output.push_str(&format!("Pages: {}\n\n", page_count));
-
-            for (i, page) in pages.iter().enumerate() {
-                let page_text = page.trim();
-                if !page_text.is_empty() {
-                    output.push_str(&format!("--- Page {} ---\n", i + 1));
-                    // Limit each page to reasonable length
-                    if page_text.len() > 10000 {
-                        output.push_str(crate::util::truncate_str(page_text, 10000));
-                        output.push_str("\n... (page truncated)\n");
-                    } else {
-                        output.push_str(page_text);
-                    }
-                    output.push_str("\n\n");
-                }
-            }
-
-            Ok(ToolOutput::new(output))
-        }
-        Err(e) => {
-            // Fall back to metadata only if text extraction fails
-            Ok(ToolOutput::new(format!(
-                "PDF: {} ({})\nCould not extract text: {}\nThis may be a scanned/image-based PDF.",
-                file_path, size_str, e
-            )))
-        }
+/// Read a complete media snapshot into the decoder, without archiving the source binary.
+fn media_bytes(path: &Path, limit: Option<u64>) -> Result<(Vec<u8>, String)> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let before = file.metadata()?;
+    anyhow::ensure!(before.is_file(), "Media source must be a regular file");
+    if let Some(limit) = limit {
+        anyhow::ensure!(before.len() <= limit, "Media exceeds its atomic read limit");
     }
+    let mut bytes = Vec::new();
+    if let Some(limit) = limit {
+        (&mut file).take(limit + 1).read_to_end(&mut bytes)?;
+        anyhow::ensure!(
+            bytes.len() as u64 <= limit,
+            "Media grew beyond its atomic read limit"
+        );
+    } else {
+        file.read_to_end(&mut bytes)?;
+    }
+    let after = file.metadata()?;
+    anyhow::ensure!(
+        before.len() == after.len()
+            && before.modified()? == after.modified()?
+            && bytes.len() as u64 == after.len(),
+        "Media source changed during capture"
+    );
+    let digest = format!("{:x}", Sha256::digest(&bytes));
+    Ok((bytes, digest))
 }
 
-/// Handle reading a PDF file when PDF support is not compiled in.
+#[cfg(feature = "pdf")]
+fn handle_pdf_file(
+    path: &Path,
+    file_path: &str,
+    selection: Option<NormalizedReadRange>,
+) -> Result<ToolOutput> {
+    let (bytes, digest) = media_bytes(path, None)?;
+    let pages=match jcode_pdf::extract_pages(&bytes) {
+        Ok(pages)=>pages,
+        Err(error)=>return Ok(ToolOutput::new(format!("PDF text extraction failed for {file_path}: {error}. The original PDF was not copied into output storage."))
+            .with_error(true).with_metadata(json!({"source":file_path,"source_bytes":bytes.len(),"source_sha256":digest,"decoder":"pdf-extract","extraction_complete":false}))),
+    };
+    let mut output = format!(
+        "PDF: {file_path} ({} bytes)\nPages: {}\n",
+        bytes.len(),
+        pages.len()
+    );
+    for (index, page) in pages.iter().enumerate() {
+        output.push_str(&format!("\n--- Page {} ---\n", index + 1));
+        output.push_str(page);
+        output.push('\n');
+    }
+    let selected =
+        selection.map(|range| json!({"start_line":range.offset+1,"max_lines":range.limit}));
+    if let Some(range) = selection {
+        output = output
+            .split_inclusive('\n')
+            .skip(range.offset)
+            .take(range.limit)
+            .collect();
+    }
+    Ok(ToolOutput::new(output).with_metadata(json!({"source":file_path,"source_bytes":bytes.len(),"source_sha256":digest,"decoder":"pdf-extract","derived_text_format":1,"pages":pages.len(),"extraction_complete":true,"line_selection":selected})))
+}
+
 #[cfg(not(feature = "pdf"))]
-fn handle_pdf_file(path: &Path, file_path: &str) -> Result<ToolOutput> {
+fn handle_pdf_file(
+    path: &Path,
+    file_path: &str,
+    _selection: Option<NormalizedReadRange>,
+) -> Result<ToolOutput> {
     let metadata = std::fs::metadata(path)?;
     let file_size = metadata.len();
 
@@ -534,5 +570,5 @@ fn handle_pdf_file(path: &Path, file_path: &str) -> Result<ToolOutput> {
     Ok(ToolOutput::new(format!(
         "PDF: {} ({})\nPDF text extraction is not available in this build. Rebuild with the `pdf` feature enabled to extract text.",
         file_path, size_str
-    )))
+    )).with_error(true).with_metadata(json!({"source":file_path,"source_bytes":file_size,"extraction_complete":false,"supported":false})))
 }
