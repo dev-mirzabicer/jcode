@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-const SCHEMA: i64 = 1;
+const SCHEMA: i64 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -95,7 +95,7 @@ impl ExecutionStore {
         let version: i64 =
             transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
         ensure!(
-            version == 0 || version == SCHEMA,
+            (0..=SCHEMA).contains(&version),
             "Unsupported execution database schema {version}"
         );
         if version == 0 {
@@ -120,11 +120,33 @@ impl ExecutionStore {
                 PRAGMA user_version=1;"
             )?;
         }
+        if version < 2 {
+            transaction.execute_batch(
+                "CREATE TABLE output_locations (
+                id TEXT PRIMARY KEY REFERENCES runs(id), physical TEXT NOT NULL,
+                archived INTEGER NOT NULL, generation INTEGER NOT NULL DEFAULT 0,
+                capture_error TEXT
+            ); PRAGMA user_version=2;",
+            )?;
+        }
+        if version < 3 {
+            transaction.execute_batch(
+                "CREATE TABLE output_allocations (
+                id TEXT PRIMARY KEY REFERENCES runs(id), physical TEXT NOT NULL,
+                archived INTEGER NOT NULL, owner TEXT NOT NULL,
+                stage TEXT NOT NULL CHECK(stage IN ('prepared','published'))
+            );
+            INSERT INTO output_allocations (id,physical,archived,owner,stage)
+                SELECT l.id,l.physical,l.archived,r.owner,'published'
+                FROM output_locations l JOIN runs r ON r.id=l.id;
+            PRAGMA user_version=3;",
+            )?;
+        }
         transaction.commit()?;
         Ok(store)
     }
 
-    fn connection(&self) -> Result<Connection> {
+    pub(super) fn connection(&self) -> Result<Connection> {
         let path = self.root.join("index.sqlite");
         // Precreate with owner-only mode. WAL/SHM inherit the database mode and
         // the containing directory is private even during first open.
@@ -133,7 +155,7 @@ impl ExecutionStore {
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
         }
         let file = options.open(&path)?;
         ensure!(
@@ -375,6 +397,88 @@ mod tests {
             }
         }
         assert_eq!(new, 1);
+        assert_eq!(store.list("session", None, 10)?.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn subprocess_prepare_fixture() -> Result<()> {
+        let Some(root) = std::env::var_os("JCODE_EXECUTION_RACE_DIR") else {
+            return Ok(());
+        };
+        let root = PathBuf::from(root);
+        let pid = std::process::id();
+        std::fs::write(root.join(format!("ready-{pid}")), b"ready")?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while !root.join("go").exists() {
+            ensure!(
+                std::time::Instant::now() < deadline,
+                "Admission fixture barrier timed out"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let store = ExecutionStore::open(&root)?;
+        if matches!(
+            store.prepare(&invocation(), "owner")?,
+            PreparedInvocation::New(_)
+        ) {
+            std::fs::write(root.join(format!("winner-{pid}")), b"new")?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn independent_processes_cannot_both_claim_the_same_invocation() -> Result<()> {
+        struct Children(Vec<std::process::Child>);
+        impl Drop for Children {
+            fn drop(&mut self) {
+                for child in &mut self.0 {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }
+        }
+        let dir = tempfile::tempdir()?;
+        let store = ExecutionStore::open(dir.path())?;
+        let mut children = Children(Vec::new());
+        for _ in 0..2 {
+            children.0.push(
+                std::process::Command::new(std::env::current_exe()?)
+                    .args([
+                        "--exact",
+                        "execution::store::tests::subprocess_prepare_fixture",
+                        "--nocapture",
+                    ])
+                    .env("JCODE_EXECUTION_RACE_DIR", dir.path())
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .spawn()?,
+            );
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let ready = std::fs::read_dir(dir.path())?
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with("ready-"))
+                .count();
+            if ready == 2 {
+                break;
+            }
+            ensure!(
+                std::time::Instant::now() < deadline,
+                "Child admission fixtures did not become ready"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::fs::write(dir.path().join("go"), b"go")?;
+        for child in &mut children.0 {
+            assert!(child.wait()?.success());
+        }
+        let winners = std::fs::read_dir(dir.path())?
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("winner-"))
+            .count();
+        assert_eq!(winners, 1);
         assert_eq!(store.list("session", None, 10)?.len(), 1);
         Ok(())
     }

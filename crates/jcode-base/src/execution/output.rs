@@ -4,30 +4,122 @@ use base64::Engine;
 use jcode_tool_types::presentation::select_prefix;
 use jcode_tool_types::{OutputReference, OutputSource, ToolImage, ToolOutput};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::num::NonZeroUsize;
 use std::path::Path;
 
 #[derive(Serialize, Deserialize)]
-struct ImagePart {
-    media_type: String,
-    label: Option<String>,
-    file: String,
-    raw_base64: bool,
+pub(super) struct ImagePart {
+    pub(super) media_type: String,
+    pub(super) label: Option<String>,
+    pub(super) file: String,
+    pub(super) raw_base64: bool,
 }
 
 #[derive(Serialize, Deserialize)]
-struct Manifest {
-    schema: u32,
-    invocation_id: String,
-    title: Option<String>,
-    metadata: Option<serde_json::Value>,
-    images: Vec<ImagePart>,
-    source: OutputSource,
+pub(super) struct Manifest {
+    pub(super) schema: u32,
+    pub(super) invocation_id: String,
+    pub(super) title: Option<String>,
+    pub(super) metadata: Option<serde_json::Value>,
+    pub(super) images: Vec<ImagePart>,
+    pub(super) source: OutputSource,
+    #[serde(default)]
+    pub(super) outcome: Option<RunState>,
+    #[serde(default)]
+    pub(super) text_sha256: Option<String>,
 }
 
 impl ExecutionStore {
+    /// Recover only an already-sealed, identity-checked output. Missing or old
+    /// manifests do not authorize repeating an operation with uncertain effects.
+    pub fn recover_terminal_output(&self, id: &str) -> Result<RunRecord> {
+        let _lease = super::storage::output_lease(self, id)?;
+        let mut record = self.inspect(id)?.context("Unknown invocation")?;
+        if record.state.terminal() {
+            return Ok(record);
+        }
+        let local = self.root().join("receipts").join(format!("{id}.json"));
+        let manifest_path = if local.exists() {
+            local
+        } else {
+            self.root().join("outputs").join(id).join("manifest.json")
+        };
+        let manifest: Manifest = crate::storage::read_json(&manifest_path).context(
+            "No sealed output is available; do not automatically repeat the original operation",
+        )?;
+        ensure!(
+            manifest.schema == 1 && manifest.invocation_id == id,
+            "Terminal output identity mismatch"
+        );
+        let outcome = manifest
+            .outcome
+            .context("Legacy output has no proven terminal outcome")?;
+        ensure!(
+            outcome.terminal(),
+            "Output manifest has no terminal outcome"
+        );
+        if let OutputSource::Retained(reference) = &manifest.source {
+            let expected = self.root().join("outputs").join(id).join("output.txt");
+            ensure!(
+                reference.invocation_id == id
+                    && reference.path == expected
+                    && record.output_path.as_ref() == Some(&expected),
+                "Terminal output reference differs from its invocation"
+            );
+            if reference.complete {
+                let mut file = File::open(&expected).context("Sealed output is offline")?;
+                ensure!(
+                    file.metadata()?.len() == reference.bytes,
+                    "Sealed output length changed"
+                );
+                let mut hash = Sha256::new();
+                let mut buffer = [0u8; 64 * 1024];
+                loop {
+                    let n = file.read(&mut buffer)?;
+                    if n == 0 {
+                        break;
+                    }
+                    hash.update(&buffer[..n]);
+                }
+                ensure!(
+                    manifest.text_sha256.as_deref()
+                        == Some(format!("{:x}", hash.finalize()).as_str()),
+                    "Sealed output digest changed"
+                );
+                for image in &manifest.images {
+                    let part = Path::new(&image.file);
+                    ensure!(
+                        part.components().count() == 1 && !image.file.starts_with('.'),
+                        "Invalid retained media path"
+                    );
+                    ensure!(
+                        std::fs::symlink_metadata(expected.parent().unwrap().join(part))?.is_file(),
+                        "Sealed media is unavailable or changed type"
+                    );
+                }
+            } else {
+                ensure!(
+                    outcome != RunState::Completed,
+                    "Incomplete capture cannot recover as completed"
+                );
+            }
+            record.output_bytes = reference.bytes;
+            record.complete = reference.complete;
+        } else {
+            ensure!(
+                matches!(manifest.source, OutputSource::ReadPage(_)),
+                "Unretained output cannot be recovered"
+            );
+        }
+        record.state = outcome;
+        record.result_path = Some(manifest_path);
+        self.finish(&record)?;
+        Ok(record)
+    }
+
     /// Capture precedes terminal publication, presentation and context guarding.
     /// A source read records only its position receipt, never its full source file.
     pub fn retain(
@@ -36,80 +128,45 @@ impl ExecutionStore {
         output: ToolOutput,
         state: RunState,
     ) -> Result<ToolOutput> {
-        ensure!(
-            state.terminal(),
-            "Retention requires an actual terminal outcome"
-        );
-        let actual = self.inspect(&record.id)?.context("Unknown invocation")?;
-        ensure!(
-            actual.owner == record.owner && actual.state == RunState::Running,
-            "Only the running invocation owner can publish output"
-        );
-        let directory = self.root().join("outputs").join(&record.id);
-        crate::storage::ensure_dir(&directory)?;
-        ensure!(
-            !std::fs::symlink_metadata(&directory)?
-                .file_type()
-                .is_symlink(),
-            "New output directory may not be a symlink"
-        );
-        let mut images = Vec::new();
-        for (index, image) in output.images.iter().enumerate() {
-            let (bytes, raw_base64) =
-                match base64::engine::general_purpose::STANDARD.decode(&image.data) {
-                    Ok(bytes) => (bytes, false),
-                    Err(_) => (image.data.as_bytes().to_vec(), true),
-                };
-            let file = format!(
-                "image-{index}.{}",
-                if raw_base64 { "base64" } else { "bin" }
-            );
-            durable_file(&directory.join(&file), &bytes)?;
-            images.push(ImagePart {
-                media_type: image.media_type.clone(),
-                label: image.label.clone(),
-                file,
-                raw_base64,
-            });
-        }
-        let mut output = output;
-        if matches!(output.source, OutputSource::Inline) {
-            let path = directory.join("output.txt");
-            durable_file(&path, output.output.as_bytes())?;
-            record.output_bytes = output.output.len() as u64;
-            record.output_path = Some(path.clone());
-            record.complete = true;
-            output.source = OutputSource::Retained(OutputReference {
-                invocation_id: record.id.clone(),
-                path,
-                bytes: record.output_bytes,
-                complete: true,
-            });
-        } else if let OutputSource::Retained(reference) = &output.source {
-            // A producer cannot manufacture an arbitrary path as a retention receipt.
+        if matches!(output.source, OutputSource::ReadPage(_)) {
             ensure!(
-                reference.invocation_id == record.id
-                    && actual.output_path.as_ref() == Some(&reference.path),
-                "Retained output does not belong to this invocation"
+                state.terminal(),
+                "Source-read receipt requires a terminal outcome"
             );
-            record.output_path = actual.output_path;
-            record.output_bytes = actual.output_bytes;
-            record.complete = actual.complete;
+            let actual = self.inspect(&record.id)?.context("Unknown invocation")?;
+            ensure!(
+                actual.owner == record.owner && actual.state == RunState::Running,
+                "Source read is not owned and running"
+            );
+            ensure!(
+                output.images.is_empty(),
+                "Atomic media requires a media-read receipt, not a text read point"
+            );
+            let directory = self.root().join("receipts");
+            crate::storage::ensure_dir(&directory)?;
+            let path = directory.join(format!("{}.json", record.id));
+            let manifest = Manifest {
+                schema: 1,
+                invocation_id: record.id.clone(),
+                title: output.title.clone(),
+                metadata: output.metadata.clone(),
+                images: Vec::new(),
+                source: output.source.clone(),
+                outcome: Some(state),
+                text_sha256: None,
+            };
+            crate::storage::write_json_secret(&path, &manifest)?;
+            record.result_path = Some(path);
+            record.state = state;
+            self.finish(&record)?;
+            return Ok(output);
         }
-        let manifest = Manifest {
-            schema: 1,
-            invocation_id: record.id.clone(),
-            title: output.title.clone(),
-            metadata: output.metadata.clone(),
-            images,
-            source: output.source.clone(),
-        };
-        let manifest_path = directory.join("manifest.json");
-        crate::storage::write_json_secret(&manifest_path, &manifest)?;
-        record.result_path = Some(manifest_path);
-        record.state = state;
-        self.finish(&record)?;
-        Ok(output)
+        let capture = super::Capture::create(
+            self.clone(),
+            record,
+            crate::config::config().output.storage.clone(),
+        )?;
+        capture.seal(output, state)
     }
 
     /// Read a prior terminal outcome. Never call the original producer here.
@@ -169,7 +226,9 @@ impl ExecutionStore {
                     "Retained output is offline or unavailable; no operation was repeated",
                 )?;
                 let mut buffer = Vec::new();
-                (&mut file).take(bytes as u64).read_to_end(&mut buffer)?;
+                (&mut file)
+                    .take((bytes as u64).min(reference.bytes))
+                    .read_to_end(&mut buffer)?;
                 // A bounded byte window can end in the middle of a scalar.
                 let text = match std::str::from_utf8(&buffer) {
                     Ok(text) => text,
@@ -210,20 +269,6 @@ fn retained_notice(reference: &OutputReference, delivered_bytes: u64) -> String 
         delivered_bytes,
         reference.invocation_id
     )
-}
-
-fn durable_file(path: &Path, bytes: &[u8]) -> Result<()> {
-    let directory = path.parent().context("Output path has no directory")?;
-    let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
-    jcode_core::fs::set_permissions_owner_only(temporary.path())?;
-    temporary.write_all(bytes)?;
-    temporary.as_file().sync_all()?;
-    temporary
-        .persist_noclobber(path)
-        .map_err(|error| error.error)?;
-    #[cfg(unix)]
-    File::open(directory)?.sync_all()?;
-    Ok(())
 }
 
 #[cfg(test)]

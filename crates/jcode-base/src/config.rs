@@ -562,6 +562,7 @@ pub struct Config {
 pub struct OutputConfig {
     pub default_size: Option<jcode_tool_types::presentation::OutputSize>,
     pub per_tool: BTreeMap<String, jcode_tool_types::presentation::OutputSize>,
+    pub storage: crate::execution::StorageConfig,
 }
 
 impl OutputConfig {
