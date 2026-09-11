@@ -5007,3 +5007,78 @@ async fn native_sdk_execution_requires_a_structural_exclusion_and_retains_reject
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn missing_managed_sdk_receipt_does_not_discard_later_received_results() -> Result<()> {
+    let _guard = crate::storage::lock_test_env();
+    for broken_storage in [false, true] {
+        let home = tempfile::tempdir()?;
+        let _home = AgentTestEnvRestore::set_path("JCODE_HOME", home.path());
+        let _runtime =
+            AgentTestEnvRestore::set_path("JCODE_RUNTIME_DIR", &home.path().join("runtime"));
+        crate::config::invalidate_config_cache();
+        let provider: Arc<dyn Provider> = Arc::new(ProjectedRequestProvider::new(1_000_000));
+        let mut agent = Agent::new(provider, Registry::empty());
+        let calls = ["missing", "received-one", "received-two"]
+            .into_iter()
+            .map(|id| ToolCall {
+                id: id.into(),
+                name: "external_result".into(),
+                input: serde_json::json!({}),
+                intent: None,
+                thought_signature: None,
+            })
+            .collect::<Vec<_>>();
+        let message = agent.add_message(
+            Role::Assistant,
+            calls
+                .iter()
+                .map(|call| ContentBlock::ToolUse {
+                    id: call.id.clone(),
+                    name: call.name.clone(),
+                    input: call.input.clone(),
+                    thought_signature: None,
+                })
+                .collect(),
+        );
+        agent.session.save()?;
+        if broken_storage {
+            std::fs::create_dir_all(home.path().join("execution"))?;
+            std::fs::write(
+                home.path().join("execution/index.sqlite"),
+                b"invalid isolated database",
+            )?;
+        }
+        let mut results = HashMap::from([
+            (
+                "received-one".into(),
+                ("first complete result".into(), false),
+            ),
+            (
+                "received-two".into(),
+                ("second complete result".into(), true),
+            ),
+        ]);
+        assert!(
+            agent
+                .retain_managed_sdk_results(&calls, &mut results, &message, None)
+                .await
+                .is_err()
+        );
+        assert!(results.is_empty());
+        let saved = Session::load(agent.session_id())?;
+        let bodies = saved
+            .messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .filter_map(|block| match block {
+                ContentBlock::ToolResult { content, .. } => Some(content.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(bodies.len(), 2);
+        assert!(bodies[0].contains("first complete result"));
+        assert!(bodies[1].contains("second complete result"));
+    }
+    Ok(())
+}

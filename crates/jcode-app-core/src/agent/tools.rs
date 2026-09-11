@@ -17,11 +17,15 @@ impl super::Agent {
         message_id: &str,
         events: Option<&tokio::sync::mpsc::UnboundedSender<crate::protocol::ServerEvent>>,
     ) -> anyhow::Result<()> {
+        let mut failures = Vec::new();
         for tool in calls {
             if self.provider_leaves_tool_to_host(&tool.name) {
                 continue;
             }
-            let (content,is_error)=results.get(&tool.id).cloned().ok_or_else(||anyhow::anyhow!("SDK-managed tool {} ({}) ended without a result. Its input remains in history; no local operation was executed to recreate unknown effects.",tool.name,tool.id))?;
+            let Some((content, is_error)) = results.get(&tool.id).cloned() else {
+                failures.push(format!("SDK-managed tool {} ({}) ended without a result; input retained, no local replay",tool.name,tool.id));
+                continue;
+            };
             let output = match self
                 .retain_sdk_result(tool, message_id, content.clone(), is_error)
                 .await
@@ -33,7 +37,9 @@ impl super::Agent {
                         content:format!("[SDK output retention failed; original received body follows. Do not repeat the operation.]\n{content}"),
                     }]);
                     self.session.save()?;
-                    return Err(error.context("Managed SDK result could not be archived; original body was preserved in history without repeating its effects"));
+                    results.remove(&tool.id);
+                    failures.push(format!("Managed SDK result {} could not be archived; original body preserved in history: {error:#}",tool.id));
+                    continue;
                 }
             };
             let presented = output.output.clone();
@@ -69,6 +75,11 @@ impl super::Agent {
                 });
             }
         }
+        anyhow::ensure!(
+            failures.is_empty(),
+            "SDK receipt processing failed after preserving available results. No operation was repeated. {}",
+            failures.join("\n")
+        );
         Ok(())
     }
 
