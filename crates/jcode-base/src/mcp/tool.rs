@@ -46,6 +46,10 @@ impl Tool for McpTool {
         self.tool_def.input_schema.clone()
     }
 
+    fn input_binding(&self) -> jcode_tool_core::input::InputBinding {
+        jcode_tool_core::input::InputBinding::for_external_schema(&self.tool_def.input_schema)
+    }
+
     async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
         let mut input = if input.is_null() {
             Value::Object(serde_json::Map::new())

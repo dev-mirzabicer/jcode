@@ -60,6 +60,7 @@ pub(crate) fn generic_batch_schema() -> Value {
 }
 
 fn ordered_batch_subcalls(
+    ctx: &ToolContext,
     subcalls: &[(usize, String, Value)],
     running: &HashMap<usize, ToolCall>,
     failures: &HashMap<usize, bool>,
@@ -68,7 +69,7 @@ fn ordered_batch_subcalls(
         .iter()
         .map(|(i, tool_name, parameters)| {
             let tool_call = running.get(i).cloned().unwrap_or_else(|| ToolCall {
-                id: format!("batch-{}-{}", i + 1, tool_name),
+                id: subcall_id(ctx, *i, tool_name),
                 name: tool_name.clone(),
                 input: parameters.clone(),
                 intent: ToolCall::intent_from_input(parameters),
@@ -93,6 +94,10 @@ fn ordered_batch_subcalls(
     ordered
 }
 
+fn subcall_id(ctx: &ToolContext, index: usize, name: &str) -> String {
+    crate::execution::invocation_id(&ctx.for_subcall(format!("batch-{}-{}", index + 1, name)))
+}
+
 pub struct BatchTool {
     registry: Registry,
 }
@@ -100,6 +105,64 @@ pub struct BatchTool {
 impl BatchTool {
     pub fn new(registry: Registry) -> Self {
         Self { registry }
+    }
+
+    async fn prepare_input(&self, mut input: Value) -> Result<Value> {
+        if let Some(calls) = input.get_mut("tool_calls").and_then(Value::as_array_mut) {
+            for call in calls {
+                let Some(object) = call.as_object_mut() else {
+                    continue;
+                };
+                let Some(name) = object
+                    .get("tool")
+                    .or_else(|| object.get("name"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                else {
+                    continue;
+                };
+                if self.registry.input_binding_for(&name).await
+                    == Some(jcode_tool_core::input::InputBinding::Wrapped)
+                    && !object.contains_key("parameters")
+                {
+                    let mut arguments = object.clone();
+                    if object.contains_key("tool") {
+                        arguments.remove("tool");
+                    } else {
+                        arguments.remove("name");
+                    }
+                    *call = json!({"tool":name,"parameters":arguments});
+                }
+                let object = call.as_object_mut().expect("batch object retained");
+                let size = object
+                    .get("output_size")
+                    .filter(|value| !value.is_null())
+                    .cloned();
+                if let Some(size) = size {
+                    // The published input, not producer-owned nested arguments,
+                    // determines where presentation options belong.
+                    let parameters = object.get_mut("parameters");
+                    if let Some(parameters) = parameters.and_then(Value::as_object_mut) {
+                        if let Some(inner) = parameters
+                            .get("output_size")
+                            .filter(|value| !value.is_null())
+                        {
+                            let outer: jcode_tool_types::presentation::OutputSize =
+                                serde_json::from_value(size.clone())?;
+                            let inner: jcode_tool_types::presentation::OutputSize =
+                                serde_json::from_value(inner.clone())?;
+                            anyhow::ensure!(
+                                outer.target() == inner.target(),
+                                "Conflicting batch member output_size requests"
+                            );
+                        } else {
+                            parameters.insert("output_size".into(), size);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(normalize_batch_input(input))
     }
 }
 
@@ -226,7 +289,7 @@ impl Tool for BatchTool {
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
-        let input = normalize_batch_input(input);
+        let input = self.prepare_input(input).await?;
         let params: BatchInput = serde_json::from_value(input)?;
 
         if params.tool_calls.is_empty() {
@@ -267,7 +330,7 @@ impl Tool for BatchTool {
                 (
                     *i,
                     ToolCall {
-                        id: format!("batch-{}-{}", i + 1, tool_name),
+                        id: subcall_id(&ctx, *i, tool_name),
                         name: tool_name.clone(),
                         input: parameters.clone(),
                         intent: ToolCall::intent_from_input(parameters),
@@ -285,7 +348,7 @@ impl Tool for BatchTool {
                 completed: 0,
                 last_completed: None,
                 running: running.values().cloned().collect(),
-                subcalls: ordered_batch_subcalls(&subcalls, &running, &HashMap::new()),
+                subcalls: ordered_batch_subcalls(&ctx, &subcalls, &running, &HashMap::new()),
             },
         ));
 
@@ -320,7 +383,7 @@ impl Tool for BatchTool {
                     completed: completed_count,
                     last_completed: Some(tool_name.clone()),
                     running: running.values().cloned().collect(),
-                    subcalls: ordered_batch_subcalls(&subcalls, &running, &failures),
+                    subcalls: ordered_batch_subcalls(&ctx, &subcalls, &running, &failures),
                 },
             ));
             results.push((i, tool_name, result));
@@ -333,25 +396,31 @@ impl Tool for BatchTool {
         let mut success_count = 0;
         let mut error_count = 0;
         let mut failed_tools = Vec::new();
+        let mut images = Vec::new();
+        let mut members = Vec::new();
 
         for (i, tool_name, result) in results {
             output.push_str(&format!("--- [{}] {} ---\n", i + 1, tool_name));
-            match result {
+            let rendered = match result {
                 Ok(out) => {
                     success_count += 1;
-                    let max_per_tool = 50_000 / num_tools.max(1);
-                    if out.output.len() > max_per_tool {
-                        output.push_str(crate::util::truncate_str(&out.output, max_per_tool));
-                        output.push_str("...\n(truncated)");
-                    } else {
-                        output.push_str(&out.output);
-                    }
+                    Some(out)
                 }
                 Err(e) => {
                     error_count += 1;
                     failed_tools.push(tool_name.clone());
-                    output.push_str(&format!("Error: {}", e));
+                    if let Some(error) = e.downcast_ref::<crate::execution::CapturedToolError>() {
+                        Some(error.output.clone())
+                    } else {
+                        output.push_str(&format!("Error: {}", e));
+                        None
+                    }
                 }
+            };
+            if let Some(out) = rendered {
+                output.push_str(&out.output);
+                members.push(json!({"index":i+1,"tool":tool_name,"run_id":subcall_id(&ctx,i,&tool_name),"source":out.source,"metadata":out.metadata,"withheld":out.withheld,"images":out.images.len()}));
+                images.extend(out.images);
             }
             output.push_str("\n\n");
         }
@@ -372,7 +441,11 @@ impl Tool for BatchTool {
             success_count, error_count
         ));
 
-        Ok(ToolOutput::new(output))
+        let mut output = ToolOutput::new(output).with_metadata(
+            json!({"members":members,"succeeded":success_count,"failed":error_count}),
+        );
+        output.images = images;
+        Ok(output)
     }
 }
 

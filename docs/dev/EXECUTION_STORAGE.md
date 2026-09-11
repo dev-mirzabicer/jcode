@@ -1,8 +1,28 @@
 # Execution storage internals
 
 This describes the shared storage/read owner in `jcode-base::execution`. The
-Phase 4 WP-02 rollout is still being integrated. The library is not evidence
-that every Registry, SDK, provider, or subprocess path already uses it.
+Phase 4 WP-02 rollout is still being integrated. The native Registry now uses
+this owner, including batch members and ordinary local/shared callers of
+that Registry. Producer-specific truncation, provider/SDK-supplied results and
+complete detached-command integration remain rollout work. Library and Registry
+tests do not establish those remaining paths.
+
+`jcode-app-core::execution` supervises actual tool tasks independently of the
+caller waiting for a reply. Scoped replay attaches to existing work or a retained
+terminal result without invoking another producer. Working directory participates
+in input-conflict checks. Cancelling the original foreground wait stops its work.
+Explicit promotion changes waiting ownership without changing invocation identity.
+The existing background manager delegates Stop to the actual supervised owner,
+not merely the delivery wrapper. Non-owning waits never cancel background work.
+
+The Registry freezes a matching tool definition, input mapping and producer for
+the session. Framework options use an unused flat field where safe. Colliding or
+open-ended external schemas preserve their original input under `arguments`.
+Legacy framework `accept_large_output=true` is rejected before effects. After
+retention, character presentation and context withholding are separate delivery
+steps. Withholding preserves saved references and does not advance source-read
+positions. Batch preserves each member's identity, metadata, media and retained
+reference without another per-member byte cap.
 
 ## Ownership
 

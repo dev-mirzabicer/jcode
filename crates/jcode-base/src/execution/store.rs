@@ -1,40 +1,15 @@
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-const SCHEMA: i64 = 3;
+const SCHEMA: i64 = 4;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RunState {
-    Prepared,
-    Running,
-    Completed,
-    Failed,
-    Cancelled,
-    Interrupted,
-}
+pub use jcode_tool_types::RunState;
 
-impl RunState {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Prepared => "prepared",
-            Self::Running => "running",
-            Self::Completed => "completed",
-            Self::Failed => "failed",
-            Self::Cancelled => "cancelled",
-            Self::Interrupted => "interrupted",
-        }
-    }
-    pub fn terminal(self) -> bool {
-        !matches!(self, Self::Prepared | Self::Running)
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Invocation {
     pub session_id: String,
     pub message_id: String,
@@ -42,13 +17,26 @@ pub struct Invocation {
     pub call_path: Vec<String>,
     pub tool: String,
     pub input: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<PathBuf>,
 }
 
 impl Invocation {
     pub fn id(&self) -> String {
+        Self::scope_id(&self.session_id, &self.message_id, &self.call_path)
+    }
+    pub fn parent_id(&self) -> Option<String> {
+        (self.call_path.len() > 1).then(|| {
+            Self::scope_id(
+                &self.session_id,
+                &self.message_id,
+                &self.call_path[..self.call_path.len() - 1],
+            )
+        })
+    }
+    fn scope_id(session: &str, message: &str, path: &[String]) -> String {
         // Tuple serialization preserves field boundaries and prevents delimiter aliases.
-        let scope = serde_json::to_vec(&(&self.session_id, &self.message_id, &self.call_path))
-            .expect("string tuples serialize");
+        let scope = serde_json::to_vec(&(session, message, path)).expect("string tuples serialize");
         format!("run-{:x}", Sha256::digest(scope))
     }
 }
@@ -66,6 +54,12 @@ pub struct RunRecord {
     pub output_path: Option<PathBuf>,
     pub output_bytes: u64,
     pub complete: bool,
+    #[serde(default)]
+    pub background: bool,
+    #[serde(default)]
+    pub stop_cause: Option<jcode_tool_types::StopCause>,
+    #[serde(default)]
+    pub parent_id: Option<String>,
 }
 
 pub enum PreparedInvocation {
@@ -142,6 +136,14 @@ impl ExecutionStore {
             PRAGMA user_version=3;",
             )?;
         }
+        if version < 4 {
+            transaction.execute_batch(
+                "ALTER TABLE runs ADD COLUMN background INTEGER NOT NULL DEFAULT 0;
+                ALTER TABLE runs ADD COLUMN stop_cause TEXT;
+                ALTER TABLE runs ADD COLUMN parent_id TEXT REFERENCES runs(id);
+                PRAGMA user_version=4;",
+            )?;
+        }
         transaction.commit()?;
         Ok(store)
     }
@@ -206,8 +208,8 @@ impl ExecutionStore {
         crate::storage::ensure_dir(&directory)?;
         let input_path = directory.join(format!("{id}.json"));
         crate::storage::write_json_secret(&input_path, invocation)?;
-        transaction.execute("INSERT INTO runs (id,session_id,message_id,tool,input_digest,state,owner,input_path) VALUES (?1,?2,?3,?4,?5,'prepared',?6,?7)",
-            params![id, invocation.session_id, invocation.message_id, invocation.tool, digest, owner, path_text(&input_path)?])?;
+        transaction.execute("INSERT INTO runs (id,session_id,message_id,tool,input_digest,state,owner,input_path,parent_id) VALUES (?1,?2,?3,?4,?5,'prepared',?6,?7,?8)",
+            params![id, invocation.session_id, invocation.message_id, invocation.tool, digest, owner, path_text(&input_path)?,invocation.parent_id()])?;
         let record = query_record(&transaction, &id)?.context("Missing prepared invocation")?;
         transaction.commit()?;
         Ok(PreparedInvocation::New(record))
@@ -224,6 +226,19 @@ impl ExecutionStore {
 
     pub fn inspect(&self, id: &str) -> Result<Option<RunRecord>> {
         query_record(&self.connection()?, id)
+    }
+
+    pub fn promote(&self, id: &str, owner: &str) -> Result<bool> {
+        Ok(self.connection()?.execute("UPDATE runs SET background=1,updated=unixepoch() WHERE id=?1 AND owner=?2 AND state IN ('prepared','running')",params![id,owner])?==1)
+    }
+
+    pub fn request_stop(
+        &self,
+        id: &str,
+        owner: &str,
+        cause: jcode_tool_types::StopCause,
+    ) -> Result<bool> {
+        Ok(self.connection()?.execute("UPDATE runs SET stop_cause=COALESCE(stop_cause,?3),updated=unixepoch() WHERE id=?1 AND owner=?2 AND state IN ('prepared','running')",params![id,owner,serde_json::to_string(&cause)?])?==1)
     }
 
     /// Finalization references only files already flushed by the output owner.
@@ -287,47 +302,65 @@ fn path_text(path: &Path) -> Result<&str> {
 }
 
 fn query_record(connection: &Connection, id: &str) -> Result<Option<RunRecord>> {
-    let row = connection.query_row("SELECT id,session_id,message_id,tool,state,owner,input_path,result_path,output_path,output_bytes,complete FROM runs WHERE id=?1", [id], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?, row.get::<_, String>(6)?, row.get::<_, Option<String>>(7)?, row.get::<_, Option<String>>(8)?, row.get::<_, i64>(9)?, row.get::<_, bool>(10)?))
-    }).optional()?;
-    let Some((
-        id,
-        session_id,
-        message_id,
-        tool,
-        state,
-        owner,
-        input,
-        result,
-        output,
-        bytes,
-        complete,
-    )) = row
-    else {
-        return Ok(None);
-    };
-    let state = match state.as_str() {
-        "prepared" => RunState::Prepared,
-        "running" => RunState::Running,
-        "completed" => RunState::Completed,
-        "failed" => RunState::Failed,
-        "cancelled" => RunState::Cancelled,
-        "interrupted" => RunState::Interrupted,
-        _ => bail!("Invalid persisted invocation state"),
-    };
-    Ok(Some(RunRecord {
-        id,
-        session_id,
-        message_id,
-        tool,
-        state,
-        owner,
-        input_path: input.into(),
-        result_path: result.map(Into::into),
-        output_path: output.map(Into::into),
-        output_bytes: u64::try_from(bytes)?,
-        complete,
-    }))
+    Ok(connection
+        .query_row("SELECT * FROM runs WHERE id=?1", [id], |row| {
+            let raw_state: String = row.get("state")?;
+            let state = match raw_state.as_str() {
+                "prepared" => RunState::Prepared,
+                "running" => RunState::Running,
+                "completed" => RunState::Completed,
+                "failed" => RunState::Failed,
+                "cancelled" => RunState::Cancelled,
+                "interrupted" => RunState::Interrupted,
+                _ => {
+                    return Err(rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(std::io::Error::other("Invalid persisted invocation state")),
+                    ));
+                }
+            };
+            let stop: Option<String> = row.get("stop_cause")?;
+            let stop_cause = stop
+                .map(|value| serde_json::from_str(&value))
+                .transpose()
+                .map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?;
+            let bytes: i64 = row.get("output_bytes")?;
+            let output_bytes = u64::try_from(bytes).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Integer,
+                    Box::new(error),
+                )
+            })?;
+            Ok(RunRecord {
+                id: row.get("id")?,
+                session_id: row.get("session_id")?,
+                message_id: row.get("message_id")?,
+                tool: row.get("tool")?,
+                state,
+                owner: row.get("owner")?,
+                input_path: PathBuf::from(row.get::<_, String>("input_path")?),
+                result_path: row
+                    .get::<_, Option<String>>("result_path")?
+                    .map(PathBuf::from),
+                output_path: row
+                    .get::<_, Option<String>>("output_path")?
+                    .map(PathBuf::from),
+                output_bytes,
+                complete: row.get("complete")?,
+                background: row.get("background")?,
+                stop_cause,
+                parent_id: row.get("parent_id")?,
+            })
+        })
+        .optional()?)
 }
 
 #[cfg(test)]
@@ -341,6 +374,7 @@ mod tests {
             call_path: vec!["call".into()],
             tool: "synthetic".into(),
             input: serde_json::json!({"value": 1}),
+            working_dir: None,
         }
     }
 

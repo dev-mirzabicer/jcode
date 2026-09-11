@@ -232,6 +232,8 @@ pub(super) struct RunningTask {
     pub(super) handle: Option<JoinHandle<Result<TaskResult>>>,
     pub(super) adopted_abort: Option<tokio::task::AbortHandle>,
     pub(super) stop_cause: std::sync::Arc<std::sync::Mutex<Option<jcode_tool_types::StopCause>>>,
+    pub(super) execution_control:
+        Option<std::sync::Arc<dyn jcode_tool_core::OwnedExecutionControl>>,
 }
 
 /// Result from a background task execution

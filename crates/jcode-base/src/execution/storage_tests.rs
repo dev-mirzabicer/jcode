@@ -71,6 +71,7 @@ impl Fixture {
             call_path: vec!["call".into()],
             tool: "fixture".into(),
             input: serde_json::json!({}),
+            working_dir: None,
         };
         let PreparedInvocation::New(record) = store.prepare(&call, "owner")? else {
             panic!()
@@ -444,6 +445,7 @@ fn native_archive_fixture_uses_verified_volume_and_stable_aliases() -> Result<()
             call_path: vec!["call".into()],
             tool: "fixture".into(),
             input: serde_json::json!({}),
+            working_dir: None,
         };
         let PreparedInvocation::New(second) = fixture.store.prepare(&second, "owner")? else {
             bail!("Unexpected duplicate fixture");

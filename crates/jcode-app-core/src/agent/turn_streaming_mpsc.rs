@@ -1361,6 +1361,7 @@ impl Agent {
                 }
                 let tool_start = Instant::now();
 
+                let execution_id = crate::execution::invocation_id(&ctx);
                 // Spawn tool in its own task so we can detach it to background on Alt+B
                 let registry_clone = self.registry.clone_with_shared_context_runtime();
                 let tool_name_for_spawn = tc.name.clone();
@@ -1379,7 +1380,7 @@ impl Agent {
                 let bg_signal = self.background_tool_signal.clone();
                 let shutdown_signal = self.graceful_shutdown.clone();
                 let allow_reload_handoff = tc.name == "bash";
-                let tool_result;
+                let mut tool_result;
                 let mut tool_handle = tool_handle;
                 tokio::select! {
                     biased;
@@ -1414,6 +1415,23 @@ impl Agent {
                     }
                 };
 
+                let mut ownership_backgrounded = false;
+                if tool_result.is_none() && !self.is_graceful_shutdown() {
+                    match crate::execution::promote(&execution_id).await {
+                        Ok(true) => {
+                            ownership_backgrounded = true;
+                        }
+                        result => {
+                            if result.is_err() {
+                                crate::bus::Bus::global().publish(crate::bus::BusEvent::UiActivity(crate::bus::UiActivity::background(
+                                    Some(self.session.id.clone()),"Background promotion could not be persisted. Continuing the foreground wait without repeating the tool.".to_string(),Some("Background promotion failed".to_string()))));
+                            }
+                            tool_result = Some((&mut tool_handle).await.unwrap_or_else(|error| {
+                                Err(anyhow::anyhow!("Tool task ended: {error}"))
+                            }));
+                        }
+                    }
+                }
                 self.unlock_tools_if_needed(&tc.name);
                 let tool_elapsed = tool_start.elapsed();
                 crate::session_metrics::record_activity(&self.session.id);
@@ -1486,7 +1504,7 @@ impl Agent {
                             tool_results_dirty = true;
                         }
                     }
-                } else if self.is_graceful_shutdown() {
+                } else if self.is_graceful_shutdown() && !ownership_backgrounded {
                     let cause = self
                         .graceful_shutdown
                         .stop_cause()
@@ -1568,9 +1586,19 @@ impl Agent {
                         tool_elapsed.as_secs_f64()
                     ));
 
-                    let bg_info = crate::background::global()
-                        .adopt(&tc.name, &self.session.id, tool_handle)
-                        .await;
+                    let bg_info = if let Some(control) =
+                        crate::execution::background_control(&execution_id)?
+                    {
+                        crate::background::global()
+                            .adopt_controlled(&tc.name, &self.session.id, tool_handle, control)
+                            .await
+                    } else {
+                        // Completion won the handoff race. There is no live
+                        // producer left for the compatibility wrapper to stop.
+                        crate::background::global()
+                            .adopt(&tc.name, &self.session.id, tool_handle)
+                            .await
+                    };
 
                     let bg_msg = format!(
                         "Tool '{}' was moved to background by the user (task_id: {}). \

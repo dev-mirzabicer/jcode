@@ -332,6 +332,7 @@ mod tests {
             call_path: vec!["c".into()],
             tool: "fixture".into(),
             input: serde_json::json!({}),
+            working_dir: None,
         };
         let PreparedInvocation::New(record) = store.prepare(&invocation, "owner")? else {
             panic!()

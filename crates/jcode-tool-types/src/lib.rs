@@ -4,6 +4,33 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum RunState {
+    Prepared,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+    Interrupted,
+}
+
+impl RunState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Prepared => "prepared",
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Interrupted => "interrupted",
+        }
+    }
+    pub fn terminal(self) -> bool {
+        !matches!(self, Self::Prepared | Self::Running)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StopCause {
     HumanCancellation,
     ParentForegroundCancellation,
@@ -32,6 +59,15 @@ pub struct ToolOutput {
     pub images: Vec<ToolImage>,
     #[serde(default)]
     pub source: OutputSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub withheld: Option<WithheldDelivery>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WithheldDelivery {
+    pub estimated_output_tokens: usize,
+    pub current_tokens: usize,
+    pub budget: usize,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -77,6 +113,7 @@ impl ToolOutput {
             metadata: None,
             images: Vec::new(),
             source: OutputSource::Inline,
+            withheld: None,
         }
     }
 

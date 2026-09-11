@@ -6,6 +6,7 @@ use jcode_tool_types::ToolOutput;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+pub mod input;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputStream {
@@ -21,6 +22,14 @@ pub trait OutputCapture: Send + Sync {
     fn reference(&self) -> Result<jcode_tool_types::OutputReference>;
 }
 
+/// A delivery wrapper delegates stop to the runtime that owns actual work.
+/// Waiting alone does not grant ownership or imply successful cancellation.
+#[async_trait]
+pub trait OwnedExecutionControl: Send + Sync {
+    fn request_stop(&self, cause: jcode_tool_types::StopCause) -> Result<bool>;
+    async fn wait(&self) -> Result<jcode_tool_types::RunState>;
+}
+
 #[derive(Clone, Default)]
 pub struct InvocationContext {
     pub ancestors: Vec<String>,
@@ -31,19 +40,9 @@ pub struct InvocationContext {
 pub const TOOL_INTENT_DESCRIPTION: &str =
     "Required short label shown in the UI: why this call is being made.";
 
-/// Input key a caller sets to accept the token cost of an oversized result.
-///
-/// The context guard withholds any tool result too large for the remaining
-/// context and states its token cost. Setting this repeats the call and spends
-/// that cost deliberately. Kept in sync with the registry constant of the same
-/// name, which reads the flag off raw tool input.
+/// Retired framework input retained only for explicit compatibility rejection.
+/// A producer-owned field with this name stays inside its published arguments.
 pub const ACCEPT_LARGE_OUTPUT_KEY: &str = "accept_large_output";
-
-/// Deliberately terse: this rides on every tool schema on every request, so
-/// each word is paid forever. The full explanation lives in the refusal
-/// message, which is only ever shown when it is actually relevant.
-pub const ACCEPT_LARGE_OUTPUT_DESCRIPTION: &str =
-    "Re-run accepting the stated token cost of a withheld result.";
 
 pub fn intent_schema_property() -> Value {
     serde_json::json!({
@@ -52,21 +51,8 @@ pub fn intent_schema_property() -> Value {
     })
 }
 
-pub fn accept_large_output_schema_property() -> Value {
-    serde_json::json!({
-        "type": "boolean",
-        "description": ACCEPT_LARGE_OUTPUT_DESCRIPTION,
-    })
-}
-
-/// Ensure a tool parameter schema declares the shared `intent` property and
-/// marks it required. Applied centrally when converting tools to provider
-/// definitions so every tool (including MCP proxies) asks the model for an
-/// intent without each tool wiring it manually.
-///
-/// The optional `accept_large_output` escape hatch is added the same way. Any
-/// tool can produce a result too large to return, so documenting it per tool
-/// would mean editing dozens of schemas and missing MCP proxies entirely.
+/// Add the common presentation option and required display intent. Producer
+/// collisions must first be wrapped through the tool's frozen InputBinding.
 pub fn ensure_intent_in_schema(mut schema: Value) -> Value {
     let Some(object) = schema.as_object_mut() else {
         return schema;
@@ -88,10 +74,10 @@ pub fn ensure_intent_in_schema(mut schema: Value) -> Value {
         properties
             .entry("intent")
             .or_insert_with(intent_schema_property);
-        // Optional, so it is deliberately not added to `required`.
+        // Presentation is optional and does not modify producer arguments.
         properties
-            .entry(ACCEPT_LARGE_OUTPUT_KEY)
-            .or_insert_with(accept_large_output_schema_property);
+            .entry("output_size")
+            .or_insert_with(jcode_tool_types::presentation::schema);
     } else {
         return schema;
     }
@@ -179,6 +165,10 @@ pub trait Tool: Send + Sync {
     /// JSON Schema for the input parameters.
     fn parameters_schema(&self) -> Value;
 
+    fn input_binding(&self) -> input::InputBinding {
+        input::InputBinding::for_schema(&self.parameters_schema())
+    }
+
     /// Execute the tool with the given input.
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput>;
 
@@ -187,7 +177,7 @@ pub trait Tool: Send + Sync {
         ToolDefinition {
             name: self.name().to_string(),
             description: self.description().to_string(),
-            input_schema: ensure_intent_in_schema(self.parameters_schema()),
+            input_schema: self.input_binding().schema(self.parameters_schema()),
         }
     }
 }
@@ -258,11 +248,11 @@ mod tests {
 }
 
 #[cfg(test)]
-mod escape_hatch_tests {
+mod presentation_schema_tests {
     use super::*;
 
     #[test]
-    fn injects_the_escape_hatch_into_any_object_schema() {
+    fn injects_optional_presentation_into_object_schema() {
         // MCP tools are built from remote definitions and never edit their own
         // schemas, so they can only advertise the flag if injection is central.
         // A schema shaped like an MCP proxy's proves the mechanism.
@@ -272,10 +262,8 @@ mod escape_hatch_tests {
             "properties": { "path": { "type": "string" } }
         });
         let out = ensure_intent_in_schema(mcp_shaped);
-        assert_eq!(
-            out["properties"][ACCEPT_LARGE_OUTPUT_KEY]["type"], "boolean",
-            "every object schema must advertise the escape hatch"
-        );
+        assert!(out["properties"]["output_size"].is_object());
+        assert!(out["properties"].get(ACCEPT_LARGE_OUTPUT_KEY).is_none());
         // Optional by design: requiring it would make the model answer a token
         // budget question on every call.
         let required: Vec<&str> = out["required"]
@@ -304,7 +292,7 @@ mod escape_hatch_tests {
     }
 
     #[test]
-    fn the_schema_key_matches_what_the_guard_reads() {
+    fn the_legacy_boundary_key_remains_explicit() {
         // The registry reads this exact constant off raw tool input. If the two
         // ever diverge, the flag would be advertised but never honored, which is
         // worse than not offering it at all.

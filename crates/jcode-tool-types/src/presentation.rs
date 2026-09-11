@@ -37,7 +37,7 @@ impl OutputSize {
 
 pub fn schema() -> serde_json::Value {
     serde_json::json!({
-        "description": "Presentation character target or size alias. Complete non-read results remain saved for read, without repeating the operation.",
+        "description": "Presentation character target or size alias. Read saved output for more.",
         "anyOf": [
             {"type": "integer", "minimum": 1},
             {"type": "string", "enum": ["very_small", "small", "medium", "large", "very_large"]}

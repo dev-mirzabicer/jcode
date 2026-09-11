@@ -107,6 +107,8 @@ async fn swarm_retirement_registry_direct_alias_batch_and_cached_definitions() {
         .await
         .unwrap();
     assert!(output.output.contains(crate::config::SWARM_UNAVAILABLE));
+    let mut ctx = ctx;
+    ctx.tool_call_id = "nested-batch-rejection".into();
     let nested = registry
         .execute(
             "batch",

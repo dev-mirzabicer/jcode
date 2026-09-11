@@ -112,32 +112,6 @@ fn session_tool_policy(session_id: &str) -> Option<SessionToolPolicy> {
         .cloned()
 }
 
-/// Whether a tool call opted in to receiving an oversized (truncated) result.
-///
-/// Read straight off the raw input rather than each tool's typed args, so every
-/// tool honors the flag without having to declare it. Tools deserialize their
-/// own args with `#[serde(default)]` fields and ignore unknown keys, so an extra
-/// key here is inert for the tool itself.
-///
-/// Only a real JSON `true` counts. A string `"true"` is also accepted because
-/// models routinely stringify booleans, but anything else (including `1`) is
-/// treated as absent: accidentally spending the remaining context window should
-/// take an unambiguous yes.
-#[cfg(test)]
-pub(crate) fn accept_large_output_schema_property_for_test() -> Value {
-    jcode_tool_core::accept_large_output_schema_property()
-}
-
-fn accepts_large_output(input: &Value) -> bool {
-    // Same key the schema advertises, so the documented flag and the honored
-    // flag cannot drift apart.
-    match input.get(jcode_tool_core::ACCEPT_LARGE_OUTPUT_KEY) {
-        Some(Value::Bool(accepted)) => *accepted,
-        Some(Value::String(raw)) => raw.trim().eq_ignore_ascii_case("true"),
-        _ => false,
-    }
-}
-
 /// Global availability overrides both session policy and previously cached registries.
 pub fn tool_is_globally_available(name: &str) -> bool {
     jcode_tool_types::resolve_tool_name(name) != "swarm" || crate::config::config().features.swarm
@@ -151,6 +125,14 @@ pub struct Registry {
     tools: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
     skills: Arc<RwLock<SkillRegistry>>,
     context_budget: Arc<RwLock<ContextBudgetTracker>>,
+    bindings: Arc<StdRwLock<HashMap<String, BoundTool>>>,
+}
+
+#[derive(Clone)]
+struct BoundTool {
+    tool: Arc<dyn Tool>,
+    definition: ToolDefinition,
+    input: jcode_tool_core::input::InputBinding,
 }
 
 impl Clone for Registry {
@@ -161,6 +143,7 @@ impl Clone for Registry {
             // Each clone gets fresh session-local accounting so parallel
             // subagents cannot corrupt one another.
             context_budget: Arc::new(RwLock::new(ContextBudgetTracker::new())),
+            bindings: Default::default(),
         }
     }
 }
@@ -178,11 +161,41 @@ impl Registry {
             tools: self.tools.clone(),
             skills: self.skills.clone(),
             context_budget: self.context_budget.clone(),
+            bindings: self.bindings.clone(),
         }
     }
 
     fn shared_skills_registry() -> Arc<RwLock<SkillRegistry>> {
         SkillRegistry::shared_registry()
+    }
+
+    fn bound_tool(&self, name: &str, tool: Arc<dyn Tool>) -> BoundTool {
+        let mut bindings = self.bindings.write().unwrap_or_else(|p| p.into_inner());
+        bindings
+            .entry(name.to_string())
+            .or_insert_with(|| {
+                let input = tool.input_binding();
+                let mut definition = tool.to_definition();
+                definition.name = name.to_string();
+                BoundTool {
+                    tool,
+                    definition,
+                    input,
+                }
+            })
+            .clone()
+    }
+
+    pub(super) async fn input_binding_for(
+        &self,
+        name: &str,
+    ) -> Option<jcode_tool_core::input::InputBinding> {
+        if !tool_is_globally_available(name) {
+            return None;
+        }
+        let name = Self::resolve_tool_name(name);
+        let tool = self.tools.read().await.get(name).cloned()?;
+        Some(self.bound_tool(name, tool).input)
     }
 
     fn insert_tool<T>(tools: &mut HashMap<String, Arc<dyn Tool>>, name: &str, tool: T)
@@ -212,6 +225,7 @@ impl Registry {
             tools: Arc::new(RwLock::new(HashMap::new())),
             skills: Arc::new(RwLock::new(SkillRegistry::default())),
             context_budget: Arc::new(RwLock::new(ContextBudgetTracker::new())),
+            bindings: Default::default(),
         }
     }
 
@@ -348,6 +362,7 @@ impl Registry {
             tools: Arc::new(RwLock::new(HashMap::new())),
             skills: skills.clone(),
             context_budget: context_budget.clone(),
+            bindings: Default::default(),
         };
         let registry_struct_ms = registry_struct_start.elapsed().as_millis();
 
@@ -409,16 +424,7 @@ impl Registry {
                     .map(|set| tool_name_is_allowed(set, name))
                     .unwrap_or(true)
             })
-            .map(|(name, tool)| {
-                let mut def = tool.to_definition();
-                // Use registry key as the tool name (important for MCP tools where
-                // the registry key is "mcp__server__tool" but Tool::name() returns
-                // just the raw tool name)
-                if def.name != *name {
-                    def.name = name.clone();
-                }
-                def
-            })
+            .map(|(name, tool)| self.bound_tool(name, Arc::clone(tool)).definition)
             .collect();
 
         // Sort by name for deterministic ordering - critical for prompt cache hits
@@ -445,13 +451,7 @@ impl Registry {
                     .map(|set| tool_name_is_allowed(set, name))
                     .unwrap_or(true)
             })
-            .map(|(name, tool)| {
-                let mut definition = tool.to_definition();
-                if definition.name != *name {
-                    definition.name = name.clone();
-                }
-                definition
-            })
+            .map(|(name, tool)| self.bound_tool(name, Arc::clone(tool)).definition)
             .collect::<Vec<_>>();
         definitions.sort_by(|left, right| left.name.cmp(&right.name));
         Ok(definitions)
@@ -677,43 +677,13 @@ impl Registry {
     /// small windows still get proportional protection.
     const SINGLE_OUTPUT_MAX_TOKENS: usize = 50_000;
 
-    /// Message returned instead of an oversized tool result.
-    ///
-    /// It has one job: make the price legible and the retry obvious. The caller
-    /// gets the exact cost, what would survive truncation, the cheap fixes, and
-    /// the exact flag to pass if they really want the whole thing.
-    fn oversized_output_refusal(
-        output_tokens: usize,
-        affordable_tokens: usize,
-        current_tokens: usize,
-        budget: usize,
-    ) -> String {
-        let percent_of_budget = if budget > 0 {
-            (output_tokens as f32 / budget as f32) * 100.0
-        } else {
-            0.0
-        };
-        format!(
-            "⚠️ OUTPUT WITHHELD: this result is ~{output}k tokens ({percent:.0}% of the \
-             {budget}k context budget, of which {used}k is already used), so it was not \
-             returned. Nothing was added to the context except this message.\n\n\
-             Narrow the request first: add or tighten `path`, `glob`, or `type`, set \
-             `max_files`/`max_regions`, use `paths_only` when you only need locations, or \
-             read a specific line range. A targeted query is almost always the better \
-             answer than a truncated dump.\n\n\
-             If you genuinely need this output and accept the token cost, repeat the same \
-             call with `\"accept_large_output\": true`. That returns the first ~{affordable}k \
-             tokens and permanently spends them from this session's context.",
-            output = output_tokens as f32 / 1000.0,
-            percent = percent_of_budget,
-            budget = budget / 1000,
-            used = current_tokens / 1000,
-            affordable = affordable_tokens as f32 / 1000.0,
-        )
-    }
-
     /// Execute a tool by name
-    pub async fn execute(&self, name: &str, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
+    pub async fn execute(
+        &self,
+        name: &str,
+        input: Value,
+        mut ctx: ToolContext,
+    ) -> Result<ToolOutput> {
         if !tool_is_globally_available(name) {
             anyhow::bail!(crate::config::SWARM_UNAVAILABLE);
         }
@@ -757,7 +727,56 @@ impl Registry {
 
         // Drop the lock before executing
         drop(tools);
+        let original_input = input.clone();
+        let bound = self.bound_tool(resolved_name, tool);
+        let (input, output_size) = bound.input.decode(input)?;
+        let tool = bound.tool;
+        let target = crate::config::config()
+            .output
+            .target(resolved_name, output_size);
+        ctx.invocation.output_target = Some(target);
 
+        let invocation = crate::execution::invocation(&ctx, resolved_name, original_input);
+        let registry = self.clone_with_shared_context_runtime();
+        let requested = name.to_string();
+        let canonical = resolved_name.to_string();
+        let result = crate::execution::execute(
+            invocation,
+            ctx.clone(),
+            target,
+            Box::new(move |ctx| {
+                Box::pin(async move {
+                    registry
+                        .execute_bound(&requested, &canonical, input, tool, ctx)
+                        .await
+                })
+            }),
+        )
+        .await;
+        let output = match result {
+            Ok(output) => self.guard_context_overflow(name, output).await,
+            Err(error) => {
+                if let Some(captured) = error.downcast_ref::<crate::execution::CapturedToolError>()
+                {
+                    let output = self
+                        .guard_context_overflow(name, captured.output.clone())
+                        .await;
+                    return Err(crate::execution::CapturedToolError { output }.into());
+                }
+                return Err(error);
+            }
+        };
+        Ok(output)
+    }
+
+    async fn execute_bound(
+        &self,
+        name: &str,
+        resolved_name: &str,
+        input: Value,
+        tool: Arc<dyn Tool>,
+        ctx: ToolContext,
+    ) -> Result<ToolOutput> {
         // User-configured pre_tool gate: external policy hook that can block
         // this call (exit 2). Skipped entirely when not configured.
         if crate::hooks::hook_configured("pre_tool") {
@@ -811,180 +830,60 @@ impl Registry {
         crate::telemetry::record_tool_execution(resolved_name, &input, result.is_ok(), latency_ms);
         Self::fire_post_tool_hook(resolved_name, &ctx, &result, latency_ms);
 
-        let mut output = match result {
+        let output = match result {
             Ok(output) => output,
             Err(error) => {
                 let mut fields =
                     Self::tool_lifecycle_fields("error", name, resolved_name, &input, &ctx);
                 fields.push(("elapsed_ms".to_string(), latency_ms.to_string()));
-                fields.push(("error".to_string(), crate::util::format_error_chain(&error)));
+                fields.push(("error_class".to_string(), "producer_failure".to_string()));
                 crate::logging::event_warn("TOOL_LIFECYCLE", fields);
                 return Err(error);
             }
         };
 
-        // Context overflow guard: check if this output would push us over the limit
-        output = self
-            .guard_context_overflow(name, output, accepts_large_output(&input))
-            .await;
-
-        let mut fields = Self::tool_lifecycle_fields("done", name, resolved_name, &input, &ctx);
-        fields.push(("elapsed_ms".to_string(), latency_ms.to_string()));
-        fields.push(("output_bytes".to_string(), output.output.len().to_string()));
-        fields.push((
-            "output_chars".to_string(),
-            output.output.chars().count().to_string(),
-        ));
-        fields.push(("image_count".to_string(), output.images.len().to_string()));
-        crate::logging::event_info("TOOL_LIFECYCLE", fields);
-
         Ok(output)
     }
 
-    /// Check if a tool output would overflow the context window and truncate if needed.
-    /// Returns the (possibly truncated) output.
-    ///
-    /// An oversized result is **refused** rather than truncated. Truncating by
-    /// default was the worse failure: the caller still paid the full remaining
-    /// context for a prefix that usually did not contain the answer, and the
-    /// damage was already done by the time they read the warning. Refusing costs
-    /// a few dozen tokens, states the price, and lets the caller either narrow
-    /// the query or knowingly pay by passing `accept_large_output`.
-    async fn guard_context_overflow(
-        &self,
-        tool_name: &str,
-        output: ToolOutput,
-        accept_large_output: bool,
-    ) -> ToolOutput {
-        let context_budget = self.context_budget.read().await;
-        let budget = context_budget.token_budget();
+    /// Guard only delivery. Complete non-read output has already been retained.
+    async fn guard_context_overflow(&self, tool_name: &str, mut output: ToolOutput) -> ToolOutput {
+        let context = self.context_budget.read().await;
+        let budget = context.token_budget();
         if budget == 0 {
             return output;
         }
-
-        let current_tokens = context_budget.effective_token_count();
-        let output_tokens = Self::estimate_tokens(&output.output);
-
-        // Check 1: Would adding this output push us over the safety threshold?
-        let projected = current_tokens.saturating_add(output_tokens);
-        let threshold_tokens = (budget as f32 * Self::CONTEXT_GUARD_THRESHOLD) as usize;
-
-        // Check 2: Is this single output unreasonably large? Proportional to the
-        // budget, but also absolutely capped, because 30% of a 1M-token window is
-        // 300k tokens and no single tool result is worth that.
-        let single_max_tokens = ((budget as f32 * Self::SINGLE_OUTPUT_MAX_FRACTION) as usize)
+        let current = context.effective_token_count();
+        let tokens = Self::estimate_tokens(&output.output);
+        let threshold = (budget as f32 * Self::CONTEXT_GUARD_THRESHOLD) as usize;
+        let single = ((budget as f32 * Self::SINGLE_OUTPUT_MAX_FRACTION) as usize)
             .min(Self::SINGLE_OUTPUT_MAX_TOKENS);
-
-        let needs_truncation = projected > threshold_tokens || output_tokens > single_max_tokens;
-
-        if !needs_truncation {
+        if current.saturating_add(tokens) <= threshold && tokens <= single {
             return output;
         }
-
-        // Past the safety threshold there is no room left to spend, so opting in
-        // cannot buy anything: returning a slice would push the conversation over
-        // the window instead of merely being expensive. Refuse outright, and say
-        // how to make room. This is checked before computing an affordable size
-        // so the outcome does not depend on budget arithmetic happening to land
-        // under a character floor.
-        if current_tokens >= threshold_tokens {
-            crate::logging::info(&format!(
-                "Context guard: refused {} output of ~{}k tokens, context exhausted \
-                 ({}k/{}k)",
-                tool_name,
-                output_tokens / 1000,
-                current_tokens / 1000,
-                budget / 1000,
-            ));
-            return ToolOutput {
-                output: format!(
-                    "⚠️ CONTEXT LIMIT REACHED: cannot return this tool output (~{:.0}k tokens) \
-                     because the context window is nearly full ({:.0}k/{}k tokens). \
-                     accept_large_output does not apply here: there is no room left to spend. \
-                     Use /compact to free space, then retry with a narrower query.",
-                    output_tokens as f32 / 1000.0,
-                    current_tokens as f32 / 1000.0,
-                    budget / 1000,
-                ),
-                title: output.title,
-                metadata: output.metadata,
-                images: output.images,
-                source: output.source,
-            };
-        }
-
-        // How much of this output the remaining context could absorb.
-        let max_tokens = (threshold_tokens - current_tokens).min(single_max_tokens);
-
-        // Convert token limit back to approximate character limit
-        let max_chars = max_tokens * 4;
-
-        if output.output.len() <= max_chars {
-            return output;
-        }
-
-        if !accept_large_output {
-            crate::logging::info(&format!(
-                "Context guard: refused {} output of ~{}k tokens \
-                 (context: {}k/{}k, {:.0}% used); caller may retry with accept_large_output",
-                tool_name,
-                output_tokens / 1000,
-                current_tokens / 1000,
-                budget / 1000,
-                (current_tokens as f32 / budget as f32) * 100.0,
-            ));
-            return ToolOutput {
-                output: Self::oversized_output_refusal(
-                    output_tokens,
-                    max_tokens,
-                    current_tokens,
-                    budget,
-                ),
-                title: output.title,
-                metadata: output.metadata,
-                images: output.images,
-                source: output.source,
-            };
-        }
-
-        crate::logging::info(&format!(
-            "Context guard: truncating {} output from ~{}k to ~{}k tokens \
-             (context: {}k/{}k, {:.0}% used)",
-            tool_name,
-            output_tokens / 1000,
-            max_tokens / 1000,
-            current_tokens / 1000,
-            budget / 1000,
-            (current_tokens as f32 / budget as f32) * 100.0,
-        ));
-
-        // Truncate the output, keeping the beginning (usually most relevant)
-        // Keep the beginning, which is usually the most relevant part, and leave
-        // headroom for the notice itself. `max_chars` is at least 800 here: the
-        // exhaustion check above already returned for anything tighter.
-        let kept = &output.output[..output
-            .output
-            .floor_char_boundary(max_chars.saturating_sub(150))];
-        let truncated = format!(
-            "{}\n\n⚠️ OUTPUT TRUNCATED: you passed accept_large_output, so this ~{:.0}k \
-             token result was returned truncated instead of withheld \
-             ({:.0}k/{}k tokens were already used). Only the first ~{:.0}k tokens are \
-             above, and they are now spent from this session's context. If the answer \
-             is not in them, narrow the query rather than repeating this call.",
-            kept,
-            output_tokens as f32 / 1000.0,
-            current_tokens as f32 / 1000.0,
-            budget / 1000,
-            max_tokens as f32 / 1000.0,
+        output.withheld = Some(jcode_tool_types::WithheldDelivery {
+            estimated_output_tokens: tokens,
+            current_tokens: current,
+            budget,
+        });
+        let reference=match &mut output.source {
+            jcode_tool_types::OutputSource::Retained(reference)=>format!("Complete captured output remains at {}. Read that file; do not repeat the original operation. Run: {}",reference.path.display(),reference.invocation_id),
+            jcode_tool_types::OutputSource::ReadPage(page)=>{
+                page.end_byte=page.start_byte;page.end_line=page.start_line;
+                page.next_point=Some(page.retry_point.clone());
+                format!("This read page was not delivered. Retry file_path=\"{}\" with read_point=\"{}\"; no source position was advanced.",page.path.display(),page.retry_point)
+            }
+            jcode_tool_types::OutputSource::Inline=>"No retained reference is available for this failure. Do not blindly repeat an operation with uncertain effects.".to_string(),
+        };
+        let pressure = if current >= threshold {
+            "CONTEXT LIMIT REACHED"
+        } else {
+            "OUTPUT WITHHELD"
+        };
+        output.output = format!(
+            "{pressure}: {tool_name} delivery would exceed the context guard (~{tokens} output tokens, {current}/{budget} already used). Ask the user to /compact when context is full, then retrieve a suitable page. {reference}"
         );
-
-        ToolOutput {
-            output: truncated,
-            title: output.title,
-            metadata: output.metadata,
-            images: output.images,
-            source: output.source,
-        }
+        output.images.clear();
+        output
     }
 
     /// Register a tool dynamically (for MCP tools, etc.)

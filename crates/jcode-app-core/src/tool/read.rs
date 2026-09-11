@@ -141,7 +141,6 @@ impl Tool for ReadTool {
                     "type": "string",
                     "description": "Exact continuation point from a previous read of this file. Replaces start_line/offset."
                 },
-                "output_size": jcode_tool_types::presentation::schema(),
                 "limit": {
                     "type": "integer",
                     "description": "Max text lines to read. Default 5000."
@@ -196,9 +195,11 @@ impl Tool for ReadTool {
             )));
         }
 
-        let target = crate::config::config()
-            .output
-            .target("read", params.output_size);
+        let target = ctx.invocation.output_target.unwrap_or_else(|| {
+            crate::config::config()
+                .output
+                .target("read", params.output_size)
+        });
         let end_line = if params.read_point.is_some() {
             params.end_line.map(|line| line as u64)
         } else {

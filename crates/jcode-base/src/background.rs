@@ -27,12 +27,25 @@ pub use model::{
     RunningBackgroundProgress, TaskResult, TaskStatusFile, format_progress_display,
     format_progress_summary, render_progress_bar,
 };
+
+/// One identity per process image, shared by execution and background owners.
+pub fn runtime_instance_id() -> &'static str {
+    model::process_instance_token()
+}
 use model::{
     EXIT_MARKER_PREFIX, RunningTask, normalize_delivery, progress_equivalent,
     progress_event_record, progress_wait_reason, push_task_event, task_dir, terminal_event_record,
 };
 
 struct AbortAdoptedOnDrop(tokio::task::AbortHandle);
+
+struct Adoption {
+    tool_name: String,
+    display_name: Option<String>,
+    session_id: String,
+    notify: bool,
+    wake: bool,
+}
 
 impl Drop for AbortAdoptedOnDrop {
     fn drop(&mut self) {
@@ -599,6 +612,7 @@ impl BackgroundTaskManager {
             handle: Some(handle),
             adopted_abort: None,
             stop_cause: Arc::new(std::sync::Mutex::new(None)),
+            execution_control: None,
         };
 
         self.tasks
@@ -641,6 +655,56 @@ impl BackgroundTaskManager {
         wake: bool,
         handle: JoinHandle<Result<jcode_tool_types::ToolOutput>>,
     ) -> BackgroundTaskInfo {
+        self.adopt_impl(
+            Adoption {
+                tool_name: tool_name.into(),
+                display_name,
+                session_id: session_id.into(),
+                notify,
+                wake,
+            },
+            handle,
+            None,
+        )
+        .await
+    }
+
+    pub async fn adopt_controlled(
+        &self,
+        tool_name: &str,
+        session_id: &str,
+        handle: JoinHandle<Result<jcode_tool_types::ToolOutput>>,
+        control: Arc<dyn jcode_tool_core::OwnedExecutionControl>,
+    ) -> BackgroundTaskInfo {
+        self.adopt_impl(
+            Adoption {
+                tool_name: tool_name.into(),
+                display_name: None,
+                session_id: session_id.into(),
+                notify: true,
+                wake: false,
+            },
+            handle,
+            Some(control),
+        )
+        .await
+    }
+
+    async fn adopt_impl(
+        &self,
+        options: Adoption,
+        handle: JoinHandle<Result<jcode_tool_types::ToolOutput>>,
+        execution_control: Option<Arc<dyn jcode_tool_core::OwnedExecutionControl>>,
+    ) -> BackgroundTaskInfo {
+        let Adoption {
+            tool_name,
+            display_name,
+            session_id,
+            notify,
+            wake,
+        } = options;
+        let tool_name = tool_name.as_str();
+        let session_id = session_id.as_str();
         let (notify, wake) = normalize_delivery(notify, wake);
         let task_id = Self::generate_task_id();
         let output_path = self.output_dir.join(format!("{}.output", task_id));
@@ -693,12 +757,13 @@ impl BackgroundTaskManager {
         let stop_cause = Arc::new(std::sync::Mutex::new(None::<jcode_tool_types::StopCause>));
         let wrapper_stop_cause = Arc::clone(&stop_cause);
         let abort_on_drop = AbortAdoptedOnDrop(adopted_abort.clone());
+        let wrapper_control = execution_control.clone();
         let wrapper_handle = tokio::spawn(async move {
             let _abort_on_drop = abort_on_drop;
             let tool_result = handle.await;
             let duration_secs = started_at.elapsed().as_secs_f64();
 
-            let (status, exit_code, error, output_text) = match tool_result {
+            let (mut status, exit_code, mut error, output_text) = match tool_result {
                 Ok(Ok(output)) => (
                     BackgroundTaskStatus::Completed,
                     Some(0),
@@ -730,6 +795,32 @@ impl BackgroundTaskManager {
                     format!("Task panicked: {}", e),
                 ),
             };
+
+            if let Some(control) = wrapper_control {
+                match control.wait().await {
+                    Ok(jcode_tool_types::RunState::Cancelled) => {
+                        status = BackgroundTaskStatus::Failed;
+                        let cause = wrapper_stop_cause
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .unwrap_or(jcode_tool_types::StopCause::HumanCancellation);
+                        error = Some(cause.description().to_string());
+                    }
+                    Ok(jcode_tool_types::RunState::Interrupted) => {
+                        status = BackgroundTaskStatus::Failed;
+                        error = Some(
+                            jcode_tool_types::StopCause::ReloadQuiescence
+                                .description()
+                                .to_string(),
+                        );
+                    }
+                    Err(failure) => {
+                        status = BackgroundTaskStatus::Failed;
+                        error = Some(format!("Execution outcome unavailable: {failure:#}"));
+                    }
+                    _ => {}
+                }
+            }
 
             if let Ok(mut file) = File::create(&output_path_clone).await {
                 let _ = file.write_all(output_text.as_bytes()).await;
@@ -817,6 +908,7 @@ impl BackgroundTaskManager {
             handle: Some(wrapper_handle),
             adopted_abort: Some(adopted_abort),
             stop_cause,
+            execution_control,
         };
 
         self.tasks
@@ -1143,7 +1235,7 @@ impl BackgroundTaskManager {
         task_id: &str,
         cause: jcode_tool_types::StopCause,
     ) -> Result<Option<bool>> {
-        let (mut handle, abort) = {
+        let (mut handle, abort, control) = {
             let mut tasks = self.tasks.write().await;
             let Some(task) = tasks.get_mut(task_id) else {
                 return Ok(None);
@@ -1160,7 +1252,7 @@ impl BackgroundTaskManager {
                 .adopted_abort
                 .clone()
                 .unwrap_or_else(|| handle.abort_handle());
-            (handle, abort)
+            (handle, abort, task.execution_control.clone())
         };
         let manager = Self {
             tasks: Arc::clone(&self.tasks),
@@ -1170,7 +1262,12 @@ impl BackgroundTaskManager {
         // Dropping a cancel/wait caller does not detach the real work from its
         // stop owner. This supervisor completes publication or restores the join.
         tokio::spawn(async move {
-            abort.abort();
+            if let Some(control)=&control {
+                if let Err(error)=control.request_stop(cause) {
+                    if let Some(task)=manager.tasks.write().await.get_mut(&id) {task.handle=Some(handle);}
+                    return Err(error);
+                }
+            } else {abort.abort();}
             let joined = match tokio::time::timeout(Duration::from_secs(2), &mut handle).await {
                 Ok(result) => result,
                 Err(_) => {

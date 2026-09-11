@@ -553,6 +553,7 @@ mod tests {
             tools: Arc::new(RwLock::new(tools)),
             skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
             context_budget: template_budget,
+            bindings: Default::default(),
         };
         let registry = template.clone();
         {
