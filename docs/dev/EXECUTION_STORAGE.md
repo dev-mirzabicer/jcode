@@ -116,6 +116,35 @@ identifies the beginning of a page that was withheld rather than delivered.
 Managed live-output/relocation points and derived PDF/media integration remain
 WP-02 integration work. Do not claim them from ordinary-source reader tests.
 
+## Runtime control
+
+Every executing runtime registers a private, versioned control endpoint. The
+metadata stores an instance identity, endpoint and kernel-held lease. Control
+credentials are not serializable as public runtime metadata and are excluded
+from debug formatting. Unix connections additionally verify the peer user.
+Binding is exclusive, including the named-pipe path, rather than joining an
+existing endpoint after an ownership conflict.
+
+Status and control RPCs transfer metadata only. Stop acknowledges a request,
+not actual quiescence. Wait returns a persisted terminal state. Dropping a wait
+releases that subscription without cancelling the work. Completion racing with
+runtime exit is recovered from the durable receipt. An unavailable or old owner
+fails explicitly, never by guessing and signalling a PID. Kernel lease liveness
+establishes endpoint ownership, not proof that arbitrary processes have ended.
+
+The existing `bg` tool accepts an explicit durable run ID for `status`, `wait`,
+`cancel`, `output` and `tail`. This makes individual foreground runs inspectable
+and stoppable without waiting for the task-monitor UI. Output reads use the
+committed prefix and preserve selected long lines and CRLF. Independent controls
+can be batched. Background delivery flags and process-specific grace controls
+still use their background delivery-task ID. User-facing background promotion
+continues through the existing parent handoff path; the low-level ownership
+primitive alone is not a claim that a parent turn has been resumed.
+
+The command-worker/reload integration and full caller reconciliation remain
+WP-02 work. Runtime tests use an ordinary native test process as an execution
+owner, not a model agent or delegated implementation worker.
+
 ## MCP result and transport boundaries
 
 MCP proxies retain complete received result objects, structured content, image

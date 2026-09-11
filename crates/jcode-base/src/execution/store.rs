@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-const SCHEMA: i64 = 4;
+const SCHEMA: i64 = 5;
 
 pub use jcode_tool_types::RunState;
 
@@ -143,6 +143,12 @@ impl ExecutionStore {
                 ALTER TABLE runs ADD COLUMN parent_id TEXT REFERENCES runs(id);
                 PRAGMA user_version=4;",
             )?;
+        }
+        if version < 5 {
+            transaction.execute_batch("CREATE TABLE runtimes (
+                id TEXT PRIMARY KEY, endpoint TEXT NOT NULL, auth_key TEXT NOT NULL,
+                lease_path TEXT NOT NULL, protocol_version INTEGER NOT NULL, process_id INTEGER NOT NULL
+            ); PRAGMA user_version=5;")?;
         }
         transaction.commit()?;
         Ok(store)

@@ -398,3 +398,64 @@ async fn compatibility_background_cancel_stops_the_actual_supervised_run() -> an
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn bg_controls_and_reads_a_foreground_run_by_durable_identity() -> anyhow::Result<()> {
+    let body = format!("first\r\n{}\r\nlast\r\n", "界".repeat(90_000));
+    let (registry, tool, started) = fixture(body, true, true).await;
+    let ctx = context();
+    let id = crate::execution::invocation_id(&ctx);
+    let owner = registry.clone_with_shared_context_runtime();
+    let call = tokio::spawn(async move {
+        owner
+            .execute("execution_fixture", serde_json::json!({}), ctx)
+            .await
+    });
+    started.await?;
+    let status = registry
+        .execute(
+            "bg",
+            serde_json::json!({"action":"status","task_id":id}),
+            context(),
+        )
+        .await?;
+    assert_eq!(status.metadata.unwrap()["state"], "running");
+    let output = registry
+        .execute(
+            "bg",
+            serde_json::json!({"action":"tail","task_id":id,"tail_lines":1}),
+            context(),
+        )
+        .await?;
+    assert!(output.output.starts_with("last\r\n"));
+    let wait = registry
+        .execute(
+            "bg",
+            serde_json::json!({"action":"wait","task_id":id,"max_wait_seconds":0}),
+            context(),
+        )
+        .await?;
+    assert_eq!(wait.metadata.unwrap()["reason"], "timeout");
+    registry
+        .execute(
+            "bg",
+            serde_json::json!({"action":"cancel","task_id":id}),
+            context(),
+        )
+        .await?;
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(5), call)
+            .await??
+            .is_err()
+    );
+    let wait = registry
+        .execute(
+            "bg",
+            serde_json::json!({"action":"wait","task_id":id,"include_output_preview":false}),
+            context(),
+        )
+        .await?;
+    assert_eq!(wait.metadata.unwrap()["run"]["state"], "cancelled");
+    assert_eq!(tool.count.load(Ordering::SeqCst), 1);
+    Ok(())
+}

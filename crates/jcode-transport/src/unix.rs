@@ -5,6 +5,10 @@ pub use tokio::net::unix::OwnedWriteHalf as WriteHalf;
 
 pub use std::os::unix::net::UnixStream as SyncStream;
 
+pub fn bind_exclusive(path: &std::path::Path) -> std::io::Result<Listener> {
+    Listener::bind(path)
+}
+
 pub fn is_socket_path(path: &std::path::Path) -> bool {
     path.exists()
 }
@@ -34,7 +38,11 @@ mod tests {
         let path = dir.join("round-trip.sock");
         remove_socket(&path);
 
-        let mut listener = Listener::bind(&path).expect("bind");
+        let listener = bind_exclusive(&path).expect("bind");
+        assert!(
+            bind_exclusive(&path).is_err(),
+            "exclusive binding must not join an existing endpoint"
+        );
         assert!(is_socket_path(&path), "a bound socket path should exist");
 
         let server = tokio::spawn(async move {

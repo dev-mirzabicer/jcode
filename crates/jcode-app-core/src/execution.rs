@@ -13,14 +13,32 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use tokio::sync::{mpsc, oneshot, watch};
+mod runtime;
+pub use runtime::{ControlOperation, ControlReply, control};
 
 type Producer = Box<dyn FnOnce(ToolContext) -> BoxFuture<'static, Result<ToolOutput>> + Send>;
 type Key = (PathBuf, String);
 static LIVE: LazyLock<Mutex<HashMap<Key, Arc<LiveRun>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+struct LiveRegistration(Key);
+impl Drop for LiveRegistration {
+    fn drop(&mut self) {
+        LIVE.lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&self.0);
+    }
+}
+struct AbortProducer(tokio::task::AbortHandle);
+impl Drop for AbortProducer {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 struct LiveRun {
     store: ExecutionStore,
+    runtime: Arc<runtime::RuntimeHandle>,
     invocation: Invocation,
     stop: InterruptSignal,
     background: AtomicBool,
@@ -86,6 +104,7 @@ pub(crate) async fn execute(
 ) -> Result<ToolOutput> {
     let root = crate::storage::jcode_dir()?;
     let store = tokio::task::spawn_blocking(move || ExecutionStore::open(&root)).await??;
+    let runtime = runtime::ensure_running(&store).await?;
     let key = (store.root().to_path_buf(), invocation.id());
     let (run, created) = {
         let mut live = LIVE.lock().unwrap_or_else(|p| p.into_inner());
@@ -100,6 +119,7 @@ pub(crate) async fn execute(
             let (result, subscription) = watch::channel(None);
             let run = Arc::new(LiveRun {
                 store: store.clone(),
+                runtime,
                 invocation,
                 stop: InterruptSignal::new(),
                 background: AtomicBool::new(false),
@@ -108,7 +128,9 @@ pub(crate) async fn execute(
             });
             live.insert(key.clone(), Arc::clone(&run));
             let owned = Arc::clone(&run);
+            let registration = LiveRegistration(key.clone());
             tokio::spawn(async move {
+                let _registration = registration;
                 let completion =
                     supervise(store, Arc::clone(&owned), receiver, ctx, target, producer).await;
                 let completion = match completion {
@@ -124,7 +146,6 @@ pub(crate) async fn execute(
                 // Metadata and captured files have their own durable truth even
                 // when the original caller has stopped waiting.
                 result.send_replace(Some(Arc::new(completion)));
-                LIVE.lock().unwrap_or_else(|p| p.into_inner()).remove(&key);
             });
             (run, true)
         }
@@ -161,7 +182,7 @@ async fn supervise(
     target: NonZeroUsize,
     producer: Producer,
 ) -> Result<Completion> {
-    let owner = crate::background::runtime_instance_id().to_string();
+    let owner = run.runtime.endpoint.id.clone();
     let preparation = {
         let store = store.clone();
         let input = run.invocation.clone();
@@ -230,6 +251,7 @@ async fn supervise(
         )
     } else {
         let mut task = tokio::spawn(producer(ctx));
+        let _owned_producer = AbortProducer(task.abort_handle());
         let mut stopping = None;
         let mut abort_at = None;
         loop {

@@ -13,6 +13,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
+mod execution;
 
 fn default_watch_notify() -> bool {
     true
@@ -492,7 +493,7 @@ impl Tool for BgTool {
                     "enum": ["list", "status", "output", "tail", "cancel", "cleanup", "watch", "delivery", "subscribe", "wait"],
                     "description": "Action. Prefer wait over polling; watch is an alias for delivery."
                 },
-                "task_id": { "type": "string", "description": "Task ID." },
+                "task_id": { "type": "string", "description": "Background task ID or durable run ID." },
                 "task_ids": { "type": "array", "items": {"type":"string"}, "description": "Task IDs for multi-task wait/status." },
                 "latest": { "type": "boolean", "description": "Use latest matching task when task_id is omitted." },
                 "session_only": { "type": "boolean", "description": "Restrict list/implicit selection to current session." },
@@ -520,6 +521,13 @@ impl Tool for BgTool {
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: BgInput = serde_json::from_value(input)?;
+        if params
+            .task_id
+            .as_deref()
+            .is_some_and(|id| id.starts_with("run-"))
+        {
+            return execution::execute(params, ctx).await;
+        }
         let action = resolve_action(&params).map_err(|error| {
             anyhow::anyhow!(
                 "{error} {}",

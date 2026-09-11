@@ -36,6 +36,20 @@ pub struct Listener {
     current_server: NamedPipeServer,
 }
 
+/// Control endpoints must never join an existing pipe instance after an
+/// ownership conflict. Keep the legacy bind policy separate from this contract.
+pub fn bind_exclusive(path: &Path) -> io::Result<Listener> {
+    let pipe_name = path_to_pipe_name(path);
+    let current_server = ServerOptions::new()
+        .first_pipe_instance(true)
+        .reject_remote_clients(true)
+        .create(&pipe_name)?;
+    Ok(Listener {
+        pipe_name,
+        current_server,
+    })
+}
+
 impl Listener {
     pub fn bind(path: &Path) -> io::Result<Self> {
         let pipe_name = path_to_pipe_name(path);
