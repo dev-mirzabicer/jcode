@@ -1244,7 +1244,7 @@ impl Agent {
                     Some(&event_tx),
                 )
                 .await?;
-                tool_calls.retain(|tc| JCODE_NATIVE_TOOLS.contains(&tc.name.as_str()));
+                tool_calls.retain(|tc| self.provider_leaves_tool_to_host(&tc.name));
                 if tool_calls.is_empty() {
                     // === INJECTION POINT D: After provider-handled tools, before next API call ===
                     let injected = self.inject_soft_interrupts();
@@ -1328,10 +1328,11 @@ impl Agent {
 
                 self.validate_tool_allowed(&tc.name)?;
 
-                let is_native_tool = JCODE_NATIVE_TOOLS.contains(&tc.name.as_str());
+                let is_native_tool = self.provider_leaves_tool_to_host(&tc.name);
+                let mut provider_rejection = None;
 
                 if let Some((sdk_content, sdk_is_error)) = sdk_tool_results.remove(&tc.id) {
-                    // For native tools, ignore SDK errors and execute locally
+                    // Only a code-declared SDK exclusion proves that host execution has not occurred.
                     if !(is_native_tool && sdk_is_error) {
                         let output = self
                             .retain_sdk_result(tc, &message_id, sdk_content, sdk_is_error)
@@ -1360,7 +1361,8 @@ impl Agent {
 
                         continue;
                     }
-                    // Fall through to local execution for native tools with SDK errors
+                    provider_rejection = Some(sdk_content);
+                    // The route structurally excludes this tool from SDK execution.
                 }
 
                 let ctx = ToolContext {
@@ -1371,7 +1373,10 @@ impl Agent {
                     stdin_request_tx: self.stdin_request_tx.clone(),
                     graceful_shutdown_signal: Some(self.graceful_shutdown.clone()),
                     execution_mode: ToolExecutionMode::AgentTurn,
-                    invocation: Default::default(),
+                    invocation: jcode_tool_core::InvocationContext {
+                        provider_rejection,
+                        ..Default::default()
+                    },
                 };
 
                 if trace {

@@ -327,6 +327,22 @@ store uses SQLite's NOFOLLOW open after resolving ancestor aliases, and hardens
 permissions before WAL/SHM creation. Real cross-process tests cover lock
 preservation in both WAL and rollback modes plus symlink/private-mode checks.
 
+## SDK host-native execution
+
+Host-native selection comes from the active provider's explicit tool exclusions,
+not a global two-name list or recognition of error prose. Claude CLI uses the
+same exclusions for its actual `--tools` selection and its host-native declaration.
+Provider wrappers forward that declaration without changing model policy.
+
+An SDK error permits host execution only when that SDK structurally excludes the
+tool. The complete rejection is retained as an auxiliary output part before host
+effects, and its digest participates in invocation replay identity. A conflicting
+rejection cannot cause a second execution. An opaque SDK error from any other
+route, or an already-reported successful result, is retained without executing
+the local producer. Both Agent loops and the CLI exclusion mechanism are tested.
+This is not a claim of complete raw provider-envelope ingress or correlation of
+results received without a matching tool use; those remain separate work.
+
 ## Provider request cancellation
 
 Attempt forwarders own their tasks through normal finish and cancellation.

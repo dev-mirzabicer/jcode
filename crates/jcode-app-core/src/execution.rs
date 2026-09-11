@@ -89,6 +89,7 @@ pub fn invocation_id(ctx: &ToolContext) -> String {
     invocation(ctx, "", serde_json::Value::Null).id()
 }
 pub fn invocation(ctx: &ToolContext, tool: &str, input: serde_json::Value) -> Invocation {
+    use sha2::Digest;
     let mut path = ctx.invocation.ancestors.clone();
     path.push(ctx.tool_call_id.clone());
     Invocation {
@@ -98,7 +99,11 @@ pub fn invocation(ctx: &ToolContext, tool: &str, input: serde_json::Value) -> In
         tool: tool.to_string(),
         input,
         working_dir: ctx.working_dir.clone(),
-        received_result_digest: None,
+        received_result_digest: ctx
+            .invocation
+            .provider_rejection
+            .as_ref()
+            .map(|text| format!("{:x}", sha2::Sha256::digest(text.as_bytes()))),
     }
 }
 
@@ -375,15 +380,27 @@ async fn supervise(
         let config = crate::config::config().output.storage.clone();
         let mode = ctx.invocation.policy.capture;
         let background = ctx.invocation.policy.background;
+        let provider_rejection = ctx.invocation.provider_rejection.clone();
         tokio::task::spawn_blocking(move || {
             store.start(&record.id, &record.owner)?;
             if background {
                 store.promote(&record.id, &record.owner)?;
             }
             if mode != jcode_tool_core::CaptureMode::Complete {
+                anyhow::ensure!(
+                    provider_rejection.is_none(),
+                    "SDK rejection requires an owned capture before native execution"
+                );
                 Ok(None)
             } else {
-                Capture::create(store, record, config).map(|capture| Some(Arc::new(capture)))
+                let capture = Capture::create(store, record, config)?;
+                if let Some(rejection) = provider_rejection {
+                    capture.append_part("provider-rejection", &[])?;
+                    for chunk in rejection.as_bytes().chunks(64 * 1024) {
+                        capture.append_part("provider-rejection", chunk)?;
+                    }
+                }
+                Ok(Some(Arc::new(capture)))
             }
         })
         .await?

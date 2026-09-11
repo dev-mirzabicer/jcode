@@ -1,5 +1,34 @@
 use super::*;
 
+#[tokio::test]
+async fn prior_provider_rejection_is_retained_and_bound_to_replay_identity() -> anyhow::Result<()> {
+    let (registry, tool, _started) = fixture("host result".into(), false, false).await;
+    let mut ctx = context();
+    ctx.invocation.provider_rejection = Some("complete SDK rejection".into());
+    let output = registry
+        .execute("execution_fixture", serde_json::json!({}), ctx.clone())
+        .await?;
+    let OutputSource::Retained(reference) = output.source else {
+        panic!()
+    };
+    assert_eq!(
+        std::fs::read_to_string(reference.path.with_file_name("part-provider-rejection.bin"))?,
+        "complete SDK rejection"
+    );
+    registry
+        .execute("execution_fixture", serde_json::json!({}), ctx.clone())
+        .await?;
+    ctx.invocation.provider_rejection = Some("different received rejection".into());
+    assert!(
+        registry
+            .execute("execution_fixture", serde_json::json!({}), ctx)
+            .await
+            .is_err()
+    );
+    assert_eq!(tool.count.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn replay_of_lost_owner_retains_interruption_without_reexecuting_producer()

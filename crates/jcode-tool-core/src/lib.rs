@@ -50,6 +50,9 @@ pub trait OwnedExecutionControl: Send + Sync {
 
 #[derive(Clone, Default)]
 pub struct InvocationContext {
+    /// Received SDK rejection for a tool structurally excluded by that SDK.
+    /// Retained as an auxiliary part before the host starts its own operation.
+    pub provider_rejection: Option<String>,
     pub ancestors: Vec<String>,
     pub output_target: Option<std::num::NonZeroUsize>,
     pub capture: Option<Arc<dyn OutputCapture>>,

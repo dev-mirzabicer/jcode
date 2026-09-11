@@ -4376,6 +4376,8 @@ struct SuppliedResultProvider {
     after_result: SdkAfterResult,
     managed: bool,
     result_error: bool,
+    tool_name: &'static str,
+    host_native: bool,
 }
 #[async_trait]
 impl Provider for SuppliedResultProvider {
@@ -4399,13 +4401,14 @@ impl Provider for SuppliedResultProvider {
         let body = self.body.clone();
         let after_result = self.after_result;
         let result_error = self.result_error;
+        let tool_name = self.tool_name;
         let (tx, rx) = tokio_mpsc::channel(8);
         tokio::spawn(async move {
             let events = if first {
                 vec![
                     StreamEvent::ToolUseStart {
                         id: "sdk-result".into(),
-                        name: "external_result".into(),
+                        name: tool_name.into(),
                     },
                     StreamEvent::ToolInputDelta("{}".into()),
                     StreamEvent::ToolUseEnd,
@@ -4455,6 +4458,9 @@ impl Provider for SuppliedResultProvider {
     fn handles_tools_internally(&self) -> bool {
         self.managed
     }
+    fn host_managed_tool(&self, name: &str) -> bool {
+        self.host_native && name == self.tool_name
+    }
     fn name(&self) -> &str {
         "supplied-result-fixture"
     }
@@ -4475,6 +4481,8 @@ async fn supplied_provider_results_are_retained_before_history_and_mpsc_delivery
             after_result: SdkAfterResult::Success,
             managed: false,
             result_error: false,
+            tool_name: "external_result",
+            host_native: false,
         };
         let calls = provider.calls.clone();
         let largest = provider.largest_result.clone();
@@ -4535,6 +4543,8 @@ async fn provider_failure_after_sdk_result_preserves_a_paired_retained_checkpoin
             after_result,
             managed: false,
             result_error: false,
+            tool_name: "external_result",
+            host_native: false,
         };
         let calls = provider.calls.clone();
         let provider: Arc<dyn Provider> = Arc::new(provider);
@@ -4773,6 +4783,8 @@ async fn managed_sdk_results_survive_local_tool_filtering_in_both_agent_loops() 
                 after_result: SdkAfterResult::Success,
                 managed: true,
                 result_error: is_error,
+                tool_name: "external_result",
+                host_native: false,
             };
             let calls = provider.calls.clone();
             let provider: Arc<dyn Provider> = Arc::new(provider);
@@ -4849,6 +4861,8 @@ async fn managed_sdk_retention_failure_preserves_received_body_without_replay() 
             after_result: SdkAfterResult::Success,
             managed: true,
             result_error: false,
+            tool_name: "external_result",
+            host_native: false,
         };
         let calls = provider.calls.clone();
         let mut agent = Agent::new(Arc::new(provider), Registry::empty());
@@ -4884,6 +4898,112 @@ async fn managed_sdk_retention_failure_preserves_received_body_without_replay() 
             .collect::<Vec<_>>();
         assert_eq!(results.len(), 1);
         assert!(results[0].ends_with(&body));
+    }
+    Ok(())
+}
+
+struct NativeSdkProbe {
+    count: Arc<std::sync::atomic::AtomicUsize>,
+    expected_rejection: String,
+}
+#[async_trait]
+impl crate::tool::Tool for NativeSdkProbe {
+    fn name(&self) -> &str {
+        "selfdev"
+    }
+    fn description(&self) -> &str {
+        "Synthetic native operation"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type":"object","properties":{}})
+    }
+    async fn execute(
+        &self,
+        _: serde_json::Value,
+        ctx: ToolContext,
+    ) -> Result<crate::tool::ToolOutput> {
+        use std::io::Read;
+        let capture = ctx.invocation.capture.unwrap();
+        let mut part = capture.read_part("provider-rejection")?;
+        let mut body = String::new();
+        part.reader.read_to_string(&mut body)?;
+        assert_eq!(
+            body, self.expected_rejection,
+            "SDK rejection must be retained before host effects"
+        );
+        self.count.fetch_add(1, Ordering::SeqCst);
+        Ok(crate::tool::ToolOutput::new("native fixture result"))
+    }
+}
+
+#[tokio::test]
+async fn native_sdk_execution_requires_a_structural_exclusion_and_retains_rejection() -> Result<()>
+{
+    let _guard = crate::storage::lock_test_env();
+    for streaming in [false, true] {
+        for (managed, host_native, is_error) in [
+            (false, false, true),
+            (true, true, true),
+            (true, true, false),
+        ] {
+            let home = tempfile::tempdir()?;
+            let _home = AgentTestEnvRestore::set_path("JCODE_HOME", home.path());
+            let _runtime =
+                AgentTestEnvRestore::set_path("JCODE_RUNTIME_DIR", &home.path().join("runtime"));
+            crate::config::invalidate_config_cache();
+            let body = format!("{}SDK_REJECTION_TAIL", "r".repeat(30_000));
+            let provider = SuppliedResultProvider {
+                calls: Default::default(),
+                largest_result: Default::default(),
+                body: body.clone(),
+                after_result: SdkAfterResult::Success,
+                managed,
+                result_error: is_error,
+                tool_name: "selfdev",
+                host_native,
+            };
+            let calls = provider.calls.clone();
+            let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let registry = Registry::empty();
+            registry
+                .register(
+                    "selfdev".into(),
+                    Arc::new(NativeSdkProbe {
+                        count: count.clone(),
+                        expected_rejection: body.clone(),
+                    }),
+                )
+                .await;
+            let mut agent = Agent::new(Arc::new(provider), registry);
+            if streaming {
+                let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+                agent
+                    .run_once_streaming_mpsc("synthetic task", Vec::new(), None, tx)
+                    .await?;
+            } else {
+                agent.run_once_capture("synthetic task").await?;
+            }
+            let should_execute = managed && host_native && is_error;
+            assert_eq!(count.load(Ordering::SeqCst), usize::from(should_execute));
+            assert_eq!(calls.load(Ordering::SeqCst), 2);
+            let store = crate::execution::ExecutionStore::open(home.path())?;
+            let records = store.list(agent.session_id(), None, 100)?;
+            let record = records
+                .iter()
+                .find(|record| record.tool == "selfdev")
+                .unwrap();
+            let output = record.output_path.as_ref().unwrap();
+            if should_execute {
+                assert_eq!(
+                    std::fs::read_to_string(output.with_file_name("part-provider-rejection.bin"))?,
+                    body
+                );
+            } else {
+                assert_eq!(std::fs::read_to_string(output)?, body);
+            }
+            let saved = Session::load(agent.session_id())?;
+            assert_eq!(saved.messages.iter().flat_map(|message|&message.content).filter(|block|matches!(block,ContentBlock::ToolResult{tool_use_id,..} if tool_use_id=="sdk-result")).count(),1);
+        }
     }
     Ok(())
 }

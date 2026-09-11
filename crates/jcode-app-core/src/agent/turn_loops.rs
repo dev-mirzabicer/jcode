@@ -939,7 +939,7 @@ impl Agent {
                     None,
                 )
                 .await?;
-                tool_calls.retain(|tc| JCODE_NATIVE_TOOLS.contains(&tc.name.as_str()));
+                tool_calls.retain(|tc| self.provider_leaves_tool_to_host(&tc.name));
                 if tool_calls.is_empty() {
                     if !generated_image_contexts.is_empty() {
                         for blocks in generated_image_contexts.drain(..) {
@@ -1002,12 +1002,14 @@ impl Agent {
 
                 self.validate_tool_allowed(&tc.name)?;
 
-                let is_native_tool = JCODE_NATIVE_TOOLS.contains(&tc.name.as_str());
+                let is_native_tool = self.provider_leaves_tool_to_host(&tc.name);
+                let mut provider_rejection = None;
 
                 // Check if SDK already executed this tool
                 if let Some((sdk_content, sdk_is_error)) = sdk_tool_results.remove(&tc.id) {
-                    // For native tools, ignore SDK errors and execute locally
+                    // Only a code-declared SDK exclusion proves that host execution has not occurred.
                     if is_native_tool && sdk_is_error {
+                        provider_rejection = Some(sdk_content);
                         if trace {
                             eprintln!(
                                 "[trace] sdk_error_for_native_tool name={} id={}, executing locally",
@@ -1078,7 +1080,10 @@ impl Agent {
                     stdin_request_tx: self.stdin_request_tx.clone(),
                     graceful_shutdown_signal: Some(self.graceful_shutdown.clone()),
                     execution_mode: ToolExecutionMode::AgentTurn,
-                    invocation: Default::default(),
+                    invocation: jcode_tool_core::InvocationContext {
+                        provider_rejection,
+                        ..Default::default()
+                    },
                 };
 
                 if trace {

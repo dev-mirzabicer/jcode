@@ -3,6 +3,13 @@ use crate::terminal_println as println;
 use crate::tool::ToolOutput;
 
 impl super::Agent {
+    pub(super) fn provider_leaves_tool_to_host(&self, name: &str) -> bool {
+        self.provider.handles_tools_internally()
+            && self
+                .provider
+                .host_managed_tool(crate::tool::Registry::resolve_tool_name(name))
+    }
+
     pub(super) async fn retain_managed_sdk_results(
         &mut self,
         calls: &[ToolCall],
@@ -10,10 +17,10 @@ impl super::Agent {
         message_id: &str,
         events: Option<&tokio::sync::mpsc::UnboundedSender<crate::protocol::ServerEvent>>,
     ) -> anyhow::Result<()> {
-        for tool in calls
-            .iter()
-            .filter(|tool| !super::JCODE_NATIVE_TOOLS.contains(&tool.name.as_str()))
-        {
+        for tool in calls {
+            if self.provider_leaves_tool_to_host(&tool.name) {
+                continue;
+            }
             let (content,is_error)=results.get(&tool.id).cloned().ok_or_else(||anyhow::anyhow!("SDK-managed tool {} ({}) ended without a result. Its input remains in history; no local operation was executed to recreate unknown effects.",tool.name,tool.id))?;
             let output = match self
                 .retain_sdk_result(tool, message_id, content.clone(), is_error)

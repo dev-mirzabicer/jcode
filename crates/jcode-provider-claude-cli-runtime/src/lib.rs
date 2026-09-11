@@ -902,6 +902,10 @@ impl Provider for ClaudeProvider {
         true
     }
 
+    fn host_managed_tool(&self, name: &str) -> bool {
+        NATIVE_TOOL_NAMES.contains(&name)
+    }
+
     fn name(&self) -> &'static str {
         "claude"
     }
@@ -1182,6 +1186,36 @@ fn to_internal_tool_name(name: &str) -> String {
 #[cfg(test)]
 mod context_validation_tests {
     use super::*;
+
+    #[test]
+    fn host_native_policy_matches_the_actual_cli_tool_exclusions() {
+        let provider = ClaudeProvider::new();
+        let definitions = [
+            "selfdev",
+            "communicate",
+            "memory",
+            "session_search",
+            "bg",
+            "read",
+            "bash",
+        ]
+        .into_iter()
+        .map(|name| ToolDefinition {
+            name: name.into(),
+            description: "synthetic".into(),
+            input_schema: serde_json::json!({"type":"object","properties":{}}),
+        })
+        .collect::<Vec<_>>();
+        let advertised = provider.tool_names_for_cli(&definitions);
+        for definition in definitions {
+            assert_eq!(
+                provider.host_managed_tool(&definition.name),
+                !advertised.contains(&to_claude_tool_name(&definition.name))
+            );
+        }
+        assert!(provider.host_managed_tool("bg"));
+        assert!(provider.host_managed_tool("session_search"));
+    }
     use jcode_provider_core::{
         ContextProjectionOperationKind, ContextProjectionValidationOperation,
     };

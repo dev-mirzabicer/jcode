@@ -441,6 +441,13 @@ pub trait Provider: Send + Sync {
         false
     }
 
+    /// True only when this SDK route explicitly excludes the named tool from
+    /// execution and leaves it to the Jcode host. This is code-owned policy,
+    /// not an inference from an error message or a model-supplied argument.
+    fn host_managed_tool(&self, _name: &str) -> bool {
+        false
+    }
+
     /// Invalidate any cached credentials.
     async fn invalidate_credentials(&self) {}
 

@@ -2377,6 +2377,37 @@ impl Provider for MultiProvider {
         }
     }
 
+    fn host_managed_tool(&self, name: &str) -> bool {
+        match self.active_provider() {
+            ActiveProvider::Claude => {
+                // Direct API does NOT handle tools internally - jcode executes them
+                if self.anthropic_provider().is_some() {
+                    false
+                } else {
+                    self.claude_provider()
+                        .map(|c| c.host_managed_tool(name))
+                        .unwrap_or(false)
+                }
+            }
+            ActiveProvider::OpenAI => self
+                .openai_provider()
+                .map(|o| o.host_managed_tool(name))
+                .unwrap_or(false),
+            ActiveProvider::Copilot => self
+                .copilot_provider()
+                .map(|o| o.host_managed_tool(name))
+                .unwrap_or(false),
+            ActiveProvider::Antigravity => false,
+            ActiveProvider::Gemini => false,
+            ActiveProvider::Cursor => self
+                .cursor_provider()
+                .map(|o| o.host_managed_tool(name))
+                .unwrap_or(false),
+            ActiveProvider::Bedrock => false, // jcode executes Bedrock tool calls
+            ActiveProvider::OpenRouter => false, // jcode executes tools
+        }
+    }
+
     fn reasoning_effort(&self) -> Option<String> {
         match self.active_provider() {
             ActiveProvider::Claude if !self.use_claude_cli => self

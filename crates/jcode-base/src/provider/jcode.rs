@@ -235,6 +235,10 @@ impl Provider for JcodeProvider {
         self.inner.handles_tools_internally()
     }
 
+    fn host_managed_tool(&self, name: &str) -> bool {
+        self.inner.host_managed_tool(name)
+    }
+
     async fn invalidate_credentials(&self) {
         self.inner.invalidate_credentials().await;
     }

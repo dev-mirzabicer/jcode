@@ -65,7 +65,6 @@ pub use startup_context::{
     StartupContextCaller, startup_file_issue_code, stored_startup_file_issue_code,
 };
 
-const JCODE_NATIVE_TOOLS: &[&str] = &["selfdev", "communicate"];
 static RECOVERED_TEXT_WRAPPED_TOOL_CALLS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 static JCODE_REPO_SOURCE_STATE: LazyLock<(Option<String>, Option<bool>)> = LazyLock::new(|| {
