@@ -352,7 +352,7 @@ async fn run_with_control(
             .await??;
     }
     let mut output=ToolOutput::new("").with_metadata(serde_json::json!({"exit_code":exit_code,"exit_signal":exit_signal,"timed_out":timed_out,"control_error":control_error,"requested_stop":cause}))
-        .with_error(timed_out || cause.is_some() || exit_signal.is_some() || control_error.is_some());
+        .with_error(!status.success() || timed_out || cause.is_some() || exit_signal.is_some() || control_error.is_some());
     output.source = OutputSource::Retained(capture.reference()?);
     Ok(CommandOutcome {
         output,

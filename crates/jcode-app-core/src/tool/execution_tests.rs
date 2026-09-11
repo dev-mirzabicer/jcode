@@ -1000,3 +1000,28 @@ async fn native_command_progress_and_checkpoint_keep_raw_bytes_and_wake_only_wai
     assert!(progress_seen);
     Ok(())
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn native_nonzero_command_exit_is_not_a_completed_success() -> anyhow::Result<()> {
+    let registry = Registry::new(Arc::new(MockProvider)).await;
+    let ctx = context();
+    let id = crate::execution::invocation_id(&ctx);
+    let error = registry
+        .execute(
+            "bash",
+            serde_json::json!({"command":"printf failed-command; exit 7"}),
+            ctx,
+        )
+        .await
+        .expect_err("Nonzero exit must fail");
+    assert!(
+        error
+            .downcast_ref::<crate::execution::CapturedToolError>()
+            .is_some()
+    );
+    let record = crate::execution::wait_for(&id).await?;
+    assert_eq!(record.state, crate::execution::RunState::Failed);
+    assert!(std::fs::read_to_string(record.output_path.unwrap())?.contains("failed-command"));
+    Ok(())
+}
