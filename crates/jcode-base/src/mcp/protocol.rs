@@ -44,7 +44,7 @@ impl JsonRpcNotification {
 }
 
 /// JSON-RPC response
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct JsonRpcResponse {
     pub jsonrpc: String,
     pub id: Option<u64>,
@@ -52,15 +52,19 @@ pub struct JsonRpcResponse {
     pub result: Option<Value>,
     #[serde(default)]
     pub error: Option<JsonRpcError>,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, Value>,
 }
 
 /// JSON-RPC error
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct JsonRpcError {
     pub code: i64,
     pub message: String,
     #[serde(default)]
     pub data: Option<Value>,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, Value>,
 }
 
 /// MCP Initialize params
@@ -155,9 +159,12 @@ pub struct ToolCallParams {
 /// tools/call result
 #[derive(Debug, Clone, Deserialize)]
 pub struct ToolCallResult {
+    #[serde(default)]
     pub content: Vec<ContentBlock>,
     #[serde(rename = "isError", default)]
     pub is_error: bool,
+    #[serde(skip)]
+    pub raw: Value,
 }
 
 /// Content block in tool result

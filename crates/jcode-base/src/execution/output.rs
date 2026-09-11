@@ -16,6 +16,8 @@ pub(super) struct ImagePart {
     pub(super) label: Option<String>,
     pub(super) file: String,
     pub(super) raw_base64: bool,
+    #[serde(default)]
+    pub(super) integrity: Option<PartIntegrity>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -25,11 +27,69 @@ pub(super) struct Manifest {
     pub(super) title: Option<String>,
     pub(super) metadata: Option<serde_json::Value>,
     pub(super) images: Vec<ImagePart>,
+    #[serde(default)]
+    pub(super) resources: Vec<ResourcePart>,
     pub(super) source: OutputSource,
     #[serde(default)]
     pub(super) outcome: Option<RunState>,
     #[serde(default)]
     pub(super) text_sha256: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(super) struct ResourcePart {
+    pub uri: String,
+    pub media_type: Option<String>,
+    pub file: String,
+    #[serde(default)]
+    pub integrity: Option<PartIntegrity>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(super) struct PartIntegrity {
+    bytes: u64,
+    sha256: String,
+}
+impl PartIntegrity {
+    pub(super) fn of(bytes: &[u8]) -> Self {
+        Self {
+            bytes: bytes.len() as u64,
+            sha256: format!("{:x}", Sha256::digest(bytes)),
+        }
+    }
+    fn verify(&self, bytes: &[u8]) -> Result<()> {
+        ensure!(
+            self.bytes == bytes.len() as u64
+                && self.sha256 == format!("{:x}", Sha256::digest(bytes)),
+            "Retained media/resource integrity mismatch"
+        );
+        Ok(())
+    }
+    fn verify_file(&self, path: &Path) -> Result<()> {
+        ensure!(
+            std::fs::symlink_metadata(path)?.is_file(),
+            "Retained part changed type"
+        );
+        let mut file = File::open(path)?;
+        ensure!(
+            file.metadata()?.len() == self.bytes,
+            "Retained part length changed"
+        );
+        let mut digest = Sha256::new();
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let n = file.read(&mut buffer)?;
+            if n == 0 {
+                break;
+            }
+            digest.update(&buffer[..n]);
+        }
+        ensure!(
+            self.sha256 == format!("{:x}", digest.finalize()),
+            "Retained part digest changed"
+        );
+        Ok(())
+    }
 }
 
 impl ExecutionStore {
@@ -95,9 +155,26 @@ impl ExecutionStore {
                         part.components().count() == 1 && !image.file.starts_with('.'),
                         "Invalid retained media path"
                     );
+                    if let Some(integrity) = &image.integrity {
+                        integrity.verify_file(&expected.parent().unwrap().join(part))?;
+                    }
                     ensure!(
                         std::fs::symlink_metadata(expected.parent().unwrap().join(part))?.is_file(),
                         "Sealed media is unavailable or changed type"
+                    );
+                }
+                for resource in &manifest.resources {
+                    let part = Path::new(&resource.file);
+                    ensure!(
+                        part.components().count() == 1 && !resource.file.starts_with('.'),
+                        "Invalid retained resource path"
+                    );
+                    if let Some(integrity) = &resource.integrity {
+                        integrity.verify_file(&expected.parent().unwrap().join(part))?;
+                    }
+                    ensure!(
+                        std::fs::symlink_metadata(expected.parent().unwrap().join(part))?.is_file(),
+                        "Sealed resource is unavailable or changed type"
                     );
                 }
             } else {
@@ -139,7 +216,7 @@ impl ExecutionStore {
                 "Source read is not owned and running"
             );
             ensure!(
-                output.images.is_empty(),
+                output.images.is_empty() && output.resources.is_empty(),
                 "Atomic media requires a media-read receipt, not a text read point"
             );
             let directory = self.root().join("receipts");
@@ -151,6 +228,7 @@ impl ExecutionStore {
                 title: output.title.clone(),
                 metadata: output.metadata.clone(),
                 images: Vec::new(),
+                resources: Vec::new(),
                 source: output.source.clone(),
                 outcome: Some(state),
                 text_sha256: None,
@@ -186,9 +264,29 @@ impl ExecutionStore {
             .parent()
             .context("Invalid output manifest path")?;
         let mut output = ToolOutput::new("");
+        output.is_error = record.state != RunState::Completed;
         output.title = manifest.title;
         output.metadata = manifest.metadata;
         output.source = manifest.source;
+        if let OutputSource::Retained(reference) = &mut output.source {
+            reference.manifest_path = record.result_path.clone();
+        }
+        for part in manifest.resources {
+            ensure!(
+                Path::new(&part.file).components().count() == 1 && !part.file.starts_with('.'),
+                "Invalid retained resource path"
+            );
+            let bytes = std::fs::read(directory.join(part.file))
+                .context("Retained resource is unavailable")?;
+            if let Some(integrity) = part.integrity {
+                integrity.verify(&bytes)?;
+            }
+            output.resources.push(jcode_tool_types::ToolResource {
+                uri: part.uri,
+                media_type: part.media_type,
+                data: String::from_utf8(bytes)?,
+            });
+        }
         for part in manifest.images {
             ensure!(
                 Path::new(&part.file).components().count() == 1 && !part.file.starts_with('.'),
@@ -196,6 +294,9 @@ impl ExecutionStore {
             );
             let bytes = std::fs::read(directory.join(part.file))
                 .context("Retained media is unavailable")?;
+            if let Some(integrity) = part.integrity {
+                integrity.verify(&bytes)?;
+            }
             let data = if part.raw_base64 {
                 String::from_utf8(bytes)?
             } else {
@@ -262,13 +363,20 @@ pub fn present(mut output: ToolOutput, target: NonZeroUsize) -> ToolOutput {
 }
 
 fn retained_notice(reference: &OutputReference, delivered_bytes: u64) -> String {
-    format!(
+    let mut notice = format!(
         "\n[Retained output: {} ({} bytes, {} bytes shown). Read this file for more; do not repeat the operation. Run: {}]",
         reference.path.display(),
         reference.bytes,
         delivered_bytes,
         reference.invocation_id
-    )
+    );
+    if let Some(path) = &reference.manifest_path {
+        notice.push_str(&format!(
+            "\n[Metadata and resource parts: {}]",
+            path.display()
+        ));
+    }
+    notice
 }
 
 #[cfg(test)]
@@ -309,6 +417,76 @@ mod tests {
         assert_eq!(
             restored.metadata.unwrap()["structured"],
             serde_json::json!([1, 2, 3])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn changed_image_or_resource_bytes_cannot_be_returned_as_the_original() -> Result<()> {
+        for part in ["image-0.base64", "resource-0.base64"] {
+            let dir = tempfile::tempdir()?;
+            let store = ExecutionStore::open(dir.path())?;
+            let input = Invocation {
+                session_id: "integrity".into(),
+                message_id: "message".into(),
+                call_path: vec!["call".into()],
+                tool: "fixture".into(),
+                input: serde_json::json!({}),
+                working_dir: None,
+            };
+            let PreparedInvocation::New(record) = store.prepare(&input, "owner")? else {
+                panic!()
+            };
+            store.start(&record.id, "owner")?;
+            let mut output = ToolOutput::new("body").with_image("image/png", "YWJj");
+            output.resources.push(jcode_tool_types::ToolResource {
+                uri: "fixture://part".into(),
+                media_type: None,
+                data: "ZGVm".into(),
+            });
+            store.retain(record.clone(), output, RunState::Completed)?;
+            let saved = store.inspect(&record.id)?.unwrap();
+            std::fs::write(
+                saved.output_path.as_ref().unwrap().with_file_name(part),
+                b"eHl6",
+            )?;
+            assert!(
+                store
+                    .result(&saved, NonZeroUsize::new(100).unwrap())
+                    .is_err(),
+                "{part}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn declared_error_result_is_not_published_as_completed() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = ExecutionStore::open(dir.path())?;
+        let input = Invocation {
+            session_id: "error".into(),
+            message_id: "message".into(),
+            call_path: vec!["call".into()],
+            tool: "fixture".into(),
+            input: serde_json::json!({}),
+            working_dir: None,
+        };
+        let PreparedInvocation::New(record) = store.prepare(&input, "owner")? else {
+            panic!()
+        };
+        store.start(&record.id, "owner")?;
+        store.retain(
+            record.clone(),
+            ToolOutput::new("producer error").with_error(true),
+            RunState::Completed,
+        )?;
+        let saved = store.inspect(&record.id)?.unwrap();
+        assert_eq!(saved.state, RunState::Failed);
+        assert!(
+            store
+                .result(&saved, NonZeroUsize::new(100).unwrap())?
+                .is_error
         );
         Ok(())
     }

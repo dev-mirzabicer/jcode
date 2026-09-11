@@ -271,7 +271,7 @@ async fn supervise(
             RunState::Cancelled
         }
         Some(StopCause::ReloadQuiescence | StopCause::OwnerCrash) => RunState::Interrupted,
-        None if result.is_err() => RunState::Failed,
+        None if !result.as_ref().is_ok_and(|output| !output.is_error) => RunState::Failed,
         None => RunState::Completed,
     };
     tokio::task::spawn_blocking(move || {

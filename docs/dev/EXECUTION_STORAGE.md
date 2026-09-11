@@ -116,6 +116,29 @@ identifies the beginning of a page that was withheld rather than delivered.
 Managed live-output/relocation points and derived PDF/media integration remain
 WP-02 integration work. Do not claim them from ordinary-source reader tests.
 
+## MCP result and transport boundaries
+
+MCP proxies retain complete received result objects, structured content, image
+payloads, binary resources, RPC error data and result-decoding failures. Media
+and resource parts have explicit file references and integrity metadata. A
+producer-declared error is a failed tool outcome, not an apparently successful
+text string beginning with an error label. Retained and withheld receipts link
+to the authoritative manifest so rich parts remain discoverable without rerunning
+the tool.
+
+An MCP request owns its pending-map entry. Consumer cancellation, failed send or
+protocol timeout removes that entry and attempts the standard request-scoped
+cancellation notification. It never kills the shared MCP server to cancel one
+call. Late replies cannot satisfy another request. Transport closure releases
+pending callers and rejects new requests. Unpublished failed connections retain
+ownership of their spawned process through normal child-drop cleanup.
+
+Initialization and protocol discovery retain their bounded request timeout.
+Tool execution does not inherit that fixed thirty-second handshake deadline:
+tool-owned timeout arguments remain producer arguments, and explicit execution
+control can stop waiting on the owned request. This is not a guarantee that an
+external service stops remote computation or acknowledges cancellation.
+
 ## Verification
 
 Run through coordinated self-development tests:

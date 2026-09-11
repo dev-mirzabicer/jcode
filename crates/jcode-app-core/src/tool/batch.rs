@@ -397,6 +397,7 @@ impl Tool for BatchTool {
         let mut error_count = 0;
         let mut failed_tools = Vec::new();
         let mut images = Vec::new();
+        let mut resources = Vec::new();
         let mut members = Vec::new();
 
         for (i, tool_name, result) in results {
@@ -421,6 +422,7 @@ impl Tool for BatchTool {
                 output.push_str(&out.output);
                 members.push(json!({"index":i+1,"tool":tool_name,"run_id":subcall_id(&ctx,i,&tool_name),"source":out.source,"metadata":out.metadata,"withheld":out.withheld,"images":out.images.len()}));
                 images.extend(out.images);
+                resources.extend(out.resources);
             }
             output.push_str("\n\n");
         }
@@ -445,6 +447,7 @@ impl Tool for BatchTool {
             json!({"members":members,"succeeded":success_count,"failed":error_count}),
         );
         output.images = images;
+        output.resources = resources;
         Ok(output)
     }
 }

@@ -28,7 +28,7 @@ impl Tool for FixtureTool {
     fn parameters_schema(&self) -> Value {
         serde_json::json!({"type":"object","properties":{}})
     }
-    async fn execute(&self, _: Value, ctx: ToolContext) -> anyhow::Result<ToolOutput> {
+    async fn execute(&self, input: Value, ctx: ToolContext) -> anyhow::Result<ToolOutput> {
         self.count.fetch_add(1, Ordering::SeqCst);
         let _marker = DropMarker(self.dropped.clone());
         if self.stream {
@@ -53,8 +53,31 @@ impl Tool for FixtureTool {
             output.source =
                 OutputSource::Retained(ctx.invocation.capture.as_ref().unwrap().reference()?);
         }
-        Ok(output)
+        Ok(output.with_error(input.get("fail").and_then(Value::as_bool).unwrap_or(false)))
     }
+}
+
+#[tokio::test]
+async fn producer_declared_error_is_retained_and_reported_as_failure() -> anyhow::Result<()> {
+    let (registry, tool, _) = fixture("declared failure body".into(), false, false).await;
+    let ctx = context();
+    let id = crate::execution::invocation_id(&ctx);
+    let error = registry
+        .execute("execution_fixture", serde_json::json!({"fail":true}), ctx)
+        .await
+        .unwrap_err();
+    let captured = error
+        .downcast_ref::<crate::execution::CapturedToolError>()
+        .unwrap();
+    assert!(captured.output.is_error);
+    let record = crate::execution::wait_for(&id).await?;
+    assert_eq!(record.state, crate::execution::RunState::Failed);
+    assert_eq!(
+        std::fs::read_to_string(record.output_path.unwrap())?,
+        "declared failure body"
+    );
+    assert_eq!(tool.count.load(Ordering::SeqCst), 1);
+    Ok(())
 }
 fn context() -> ToolContext {
     ToolContext {

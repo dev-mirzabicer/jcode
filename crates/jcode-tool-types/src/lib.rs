@@ -58,9 +58,13 @@ pub struct ToolOutput {
     pub metadata: Option<serde_json::Value>,
     pub images: Vec<ToolImage>,
     #[serde(default)]
+    pub resources: Vec<ToolResource>,
+    #[serde(default)]
     pub source: OutputSource,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub withheld: Option<WithheldDelivery>,
+    #[serde(default)]
+    pub is_error: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -85,6 +89,8 @@ pub struct OutputReference {
     pub path: std::path::PathBuf,
     pub bytes: u64,
     pub complete: bool,
+    #[serde(default)]
+    pub manifest_path: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,6 +111,13 @@ pub struct ToolImage {
     pub label: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolResource {
+    pub uri: String,
+    pub media_type: Option<String>,
+    pub data: String,
+}
+
 impl ToolOutput {
     pub fn new(output: impl Into<String>) -> Self {
         Self {
@@ -112,13 +125,20 @@ impl ToolOutput {
             title: None,
             metadata: None,
             images: Vec::new(),
+            resources: Vec::new(),
             source: OutputSource::Inline,
             withheld: None,
+            is_error: false,
         }
     }
 
     pub fn with_title(mut self, title: impl Into<String>) -> Self {
         self.title = Some(title.into());
+        self
+    }
+
+    pub fn with_error(mut self, is_error: bool) -> Self {
+        self.is_error = is_error;
         self
     }
 

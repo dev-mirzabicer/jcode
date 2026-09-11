@@ -644,7 +644,14 @@ impl Registry {
         let mut event = crate::hooks::HookEvent::new("post_tool")
             .session_id(ctx.session_id.clone())
             .field("TOOL_NAME", resolved_name)
-            .field("STATUS", if result.is_ok() { "ok" } else { "error" })
+            .field(
+                "STATUS",
+                if result.as_ref().is_ok_and(|output| !output.is_error) {
+                    "ok"
+                } else {
+                    "error"
+                },
+            )
             .field("DURATION_MS", latency_ms.to_string());
         if let Some(dir) = &ctx.working_dir {
             event = event.cwd(dir.display().to_string());
@@ -827,7 +834,12 @@ impl Registry {
         };
         let latency_ms = started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
 
-        crate::telemetry::record_tool_execution(resolved_name, &input, result.is_ok(), latency_ms);
+        crate::telemetry::record_tool_execution(
+            resolved_name,
+            &input,
+            result.as_ref().is_ok_and(|output| !output.is_error),
+            latency_ms,
+        );
         Self::fire_post_tool_hook(resolved_name, &ctx, &result, latency_ms);
 
         let output = match result {
@@ -883,6 +895,14 @@ impl Registry {
             "{pressure}: {tool_name} delivery would exceed the context guard (~{tokens} output tokens, {current}/{budget} already used). Ask the user to /compact when context is full, then retrieve a suitable page. {reference}"
         );
         output.images.clear();
+        output.resources.clear();
+        if let jcode_tool_types::OutputSource::Retained(reference) = &output.source
+            && let Some(path) = &reference.manifest_path
+        {
+            output
+                .output
+                .push_str(&format!(" Metadata and resource parts: {}", path.display()));
+        }
         output
     }
 

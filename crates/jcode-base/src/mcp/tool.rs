@@ -71,43 +71,62 @@ impl Tool for McpTool {
         let manager = self.manager.read().await;
         let result = manager
             .call_tool(&self.server_name, &self.tool_def.name, input)
-            .await?;
+            .await;
+        let title = format!("mcp:{}:{}", self.server_name, self.tool_def.name);
+        match result {
+            Ok(result) => Ok(render_result(result, title)),
+            Err(error) => {
+                if let Some(response) = error.downcast_ref::<super::client::McpResponseFailure>() {
+                    return Ok(ToolOutput::new(error.to_string())
+                        .with_title(title)
+                        .with_metadata(serde_json::json!({"mcp_response":response.raw}))
+                        .with_error(true));
+                }
+                Err(error)
+            }
+        }
+    }
+}
 
-        // Convert MCP content blocks to output string
-        let mut output_parts = Vec::new();
-        for block in result.content {
-            match block {
-                ContentBlock::Text { text } => {
-                    output_parts.push(text);
+fn render_result(result: super::protocol::ToolCallResult, title: String) -> ToolOutput {
+    let mut output = ToolOutput::new("")
+        .with_title(title)
+        .with_error(result.is_error);
+    let mut parts = Vec::new();
+    for block in result.content {
+        match block {
+            ContentBlock::Text { text } => parts.push(text),
+            ContentBlock::Image { data, mime_type } => {
+                parts.push(format!("[Image: {mime_type}; retained with this result]"));
+                output = output.with_image(mime_type, data);
+            }
+            ContentBlock::Resource { resource } => {
+                let has_text = resource.text.is_some();
+                if let Some(text) = resource.text {
+                    parts.push(text);
                 }
-                ContentBlock::Image { data, mime_type } => {
-                    output_parts.push(format!("[Image: {} ({} bytes)]", mime_type, data.len()));
-                }
-                ContentBlock::Resource { resource } => {
-                    if let Some(text) = resource.text {
-                        output_parts.push(text);
-                    } else if let Some(blob) = resource.blob {
-                        output_parts.push(format!(
-                            "[Resource: {} ({} bytes)]",
-                            resource.uri,
-                            blob.len()
-                        ));
-                    } else {
-                        output_parts.push(format!("[Resource: {}]", resource.uri));
-                    }
+                if let Some(data) = resource.blob {
+                    parts.push(format!(
+                        "[Binary resource: {}; retained with this result]",
+                        resource.uri
+                    ));
+                    output.resources.push(jcode_tool_types::ToolResource {
+                        uri: resource.uri,
+                        media_type: resource.mime_type,
+                        data,
+                    });
+                } else if !has_text {
+                    parts.push(format!("[Resource: {}]", resource.uri));
                 }
             }
         }
-
-        let output = output_parts.join("\n");
-        let title = format!("mcp:{}:{}", self.server_name, self.tool_def.name);
-
-        if result.is_error {
-            Ok(ToolOutput::new(format!("Error: {}", output)).with_title(title))
-        } else {
-            Ok(ToolOutput::new(output).with_title(title))
-        }
     }
+    if let Some(structured) = result.raw.get("structuredContent") {
+        parts.push(serde_json::to_string_pretty(structured).expect("JSON value serializes"));
+    }
+    output.output = parts.join("\n");
+    output.metadata = Some(serde_json::json!({"mcp_result":result.raw}));
+    output
 }
 
 /// Create tools from an MCP manager

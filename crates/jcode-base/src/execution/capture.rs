@@ -1,5 +1,5 @@
 //! One owned streaming sink for complete text, separate raw streams and receipts.
-use super::output::{ImagePart, Manifest};
+use super::output::{ImagePart, Manifest, PartIntegrity, ResourcePart};
 use super::storage::BundleStorage;
 use super::{ExecutionStore, RunRecord, RunState, StorageConfig};
 use anyhow::{Context, Result, ensure};
@@ -98,6 +98,11 @@ impl Capture {
     /// Seal available output and publish the terminal receipt after owned work
     /// actually stops. Capture failure overrides an otherwise successful exit.
     pub fn seal(&self, mut output: ToolOutput, outcome: RunState) -> Result<ToolOutput> {
+        let outcome = if output.is_error && outcome == RunState::Completed {
+            RunState::Failed
+        } else {
+            outcome
+        };
         ensure!(
             outcome.terminal(),
             "Capture sealing requires a terminal outcome"
@@ -138,9 +143,21 @@ impl Capture {
                             label: image.label.clone(),
                             file: format!("image-{index}.base64"),
                             raw_base64: true,
+                            integrity: Some(PartIntegrity::of(image.data.as_bytes())),
                         })
                         .collect(),
                     source: source.clone(),
+                    resources: output
+                        .resources
+                        .iter()
+                        .enumerate()
+                        .map(|(index, part)| ResourcePart {
+                            uri: part.uri.clone(),
+                            media_type: part.media_type.clone(),
+                            file: format!("resource-{index}.base64"),
+                            integrity: Some(PartIntegrity::of(part.data.as_bytes())),
+                        })
+                        .collect(),
                     outcome: Some(outcome),
                     text_sha256: Some(format!("{:x}", state.text_digest.clone().finalize())),
                 };
@@ -163,6 +180,7 @@ impl Capture {
                         serde_json::json!({"capture_error":error,"partial_bundle":state.storage.alias()}),
                     ),
                     images: Vec::new(),
+                    resources: Vec::new(),
                     source: OutputSource::Retained(state.reference(false)),
                     outcome: Some(RunState::Failed),
                     text_sha256: Some(format!("{:x}", state.text_digest.clone().finalize())),
@@ -208,6 +226,7 @@ impl CaptureState {
             path: self.storage.alias().join("output.txt"),
             bytes: self.committed,
             complete,
+            manifest_path: self.record.result_path.clone(),
         }
     }
 
@@ -271,6 +290,16 @@ impl CaptureState {
             if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&image.data) {
                 self.storage
                     .write_file(&format!("image-{index}.bin"), &bytes)?;
+            }
+        }
+        for (index, resource) in output.resources.iter().enumerate() {
+            self.storage.write_file(
+                &format!("resource-{index}.base64"),
+                resource.data.as_bytes(),
+            )?;
+            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&resource.data) {
+                self.storage
+                    .write_file(&format!("resource-{index}.bin"), &bytes)?;
             }
         }
         let streams = serde_json::json!({"ordering":"observed drain order, not producer-time order","text":{"raw":"text.bin","bytes":self.offsets[0],"lossy_rendering":self.decoders[0].lossy},"stdout":{"raw":"stdout.bin","bytes":self.offsets[1],"lossy_rendering":self.decoders[1].lossy},"stderr":{"raw":"stderr.bin","bytes":self.offsets[2],"lossy_rendering":self.decoders[2].lossy}});

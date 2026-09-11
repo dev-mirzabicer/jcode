@@ -5,11 +5,61 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::process::Stdio;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot};
+
+#[cfg(test)]
+#[path = "request_tests.rs"]
+mod request_tests;
+
+type PendingRequests = Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>>;
+
+#[derive(Debug)]
+pub(super) struct McpResponseFailure {
+    pub raw: Value,
+    pub message: String,
+}
+impl std::fmt::Display for McpResponseFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+impl std::error::Error for McpResponseFailure {}
+
+struct PendingRequest {
+    id: u64,
+    pending: PendingRequests,
+    writer: mpsc::Sender<String>,
+    sent: bool,
+}
+impl Drop for PendingRequest {
+    fn drop(&mut self) {
+        let pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&self.id)
+            .is_some();
+        if pending && self.sent {
+            let message=serde_json::json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":self.id,"reason":"Request cancelled by Jcode"}}).to_string()+"\n";
+            if let Err(mpsc::error::TrySendError::Full(message)) = self.writer.try_send(message) {
+                let writer = self.writer.clone();
+                if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                    runtime.spawn(async move {
+                        let _ = tokio::time::timeout(
+                            std::time::Duration::from_secs(5),
+                            writer.send(message),
+                        )
+                        .await;
+                    });
+                }
+            }
+        }
+    }
+}
 
 /// Shared communication handle for an MCP server.
 /// Multiple sessions can hold clones of this and send concurrent requests.
@@ -18,38 +68,75 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 pub struct McpHandle {
     pub(crate) name: String,
     request_id: Arc<AtomicU64>,
-    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>>,
+    pending: PendingRequests,
     writer_tx: mpsc::Sender<String>,
     server_info: Arc<std::sync::RwLock<Option<ServerInfo>>>,
     capabilities: Arc<std::sync::RwLock<ServerCapabilities>>,
     tools: Arc<std::sync::RwLock<Vec<McpToolDef>>>,
+    closed: Arc<AtomicBool>,
 }
 
 impl McpHandle {
     /// Send a request and wait for response
     pub async fn request(&self, method: &str, params: Option<Value>) -> Result<JsonRpcResponse> {
-        let id = self.request_id.fetch_add(1, Ordering::SeqCst);
+        self.request_with_timeout(method, params, Some(std::time::Duration::from_secs(30)))
+            .await
+    }
+
+    async fn request_with_timeout(
+        &self,
+        method: &str,
+        params: Option<Value>,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<JsonRpcResponse> {
+        anyhow::ensure!(
+            !self.closed.load(Ordering::SeqCst),
+            "MCP transport is closed; reconnect before making new requests"
+        );
+        let id = self
+            .request_id
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |id| id.checked_add(1))
+            .map_err(|_| anyhow::anyhow!("MCP request identity space exhausted"))?;
         let request = JsonRpcRequest::new(id, method, params);
 
         let (tx, rx) = oneshot::channel();
         {
-            let mut pending = self.pending.lock().await;
+            let mut pending = self.pending.lock().unwrap_or_else(|p| p.into_inner());
+            anyhow::ensure!(
+                !self.closed.load(Ordering::SeqCst),
+                "MCP transport closed before request registration"
+            );
             pending.insert(id, tx);
         }
+        let mut ownership = PendingRequest {
+            id,
+            pending: self.pending.clone(),
+            writer: self.writer_tx.clone(),
+            sent: false,
+        };
 
         let msg = serde_json::to_string(&request)? + "\n";
         self.writer_tx
             .send(msg)
             .await
             .context("Failed to send request")?;
+        ownership.sent = true;
 
-        let response = tokio::time::timeout(std::time::Duration::from_secs(30), rx)
-            .await
-            .context("Request timeout")?
-            .context("Channel closed")?;
+        let response = if let Some(timeout) = timeout {
+            tokio::time::timeout(timeout, rx)
+                .await
+                .context("Request timeout")?
+                .context("Channel closed")?
+        } else {
+            rx.await.context("Channel closed")?
+        };
 
         if let Some(err) = &response.error {
-            anyhow::bail!("MCP error {}: {}", err.code, err.message);
+            return Err(McpResponseFailure {
+                message: format!("MCP error {}: {}", err.code, err.message),
+                raw: serde_json::to_value(&response)?,
+            }
+            .into());
         }
 
         Ok(response)
@@ -68,11 +155,25 @@ impl McpHandle {
         };
 
         let response = self
-            .request("tools/call", Some(serde_json::to_value(params)?))
+            .request_with_timeout("tools/call", Some(serde_json::to_value(params)?), None)
             .await?;
 
-        let result = response.result.context("No result from tool call")?;
-        let tool_result: ToolCallResult = serde_json::from_value(result)?;
+        let result = match response.result.clone() {
+            Some(result) => result,
+            None => {
+                return Err(McpResponseFailure {
+                    raw: serde_json::to_value(&response)?,
+                    message: "MCP tool response contained no result".into(),
+                }
+                .into());
+            }
+        };
+        let mut tool_result: ToolCallResult =
+            serde_json::from_value(result.clone()).map_err(|error| McpResponseFailure {
+                raw: result.clone(),
+                message: format!("MCP result decoding failed: {error}"),
+            })?;
+        tool_result.raw = result;
 
         Ok(tool_result)
     }
@@ -139,8 +240,11 @@ impl McpClient {
     ) -> Result<Self> {
         let working_dir = working_dir.filter(|dir| dir.is_dir());
         crate::logging::info(&format!(
-            "MCP: Connecting to '{}' ({} {:?}) cwd={:?}",
-            name, config.command, config.args, working_dir
+            "MCP: Connecting to '{}' ({}; {} arguments) cwd={:?}",
+            name,
+            config.command,
+            config.args.len(),
+            working_dir
         ));
 
         // Credentials must be opted into an MCP server explicitly through its
@@ -152,6 +256,7 @@ impl McpClient {
 
         let mut command = Command::new(&config.command);
         command
+            .kill_on_drop(true)
             .args(&config.args)
             .envs(&env)
             .stdin(Stdio::piped())
@@ -195,15 +300,28 @@ impl McpClient {
         let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let (writer_tx, mut writer_rx) = mpsc::channel::<String>(32);
+        let closed = Arc::new(AtomicBool::new(false));
+        let writer_closed = closed.clone();
+        let writer_pending = pending.clone();
 
         // Spawn writer task
         let mut stdin = stdin;
         tokio::spawn(async move {
             while let Some(msg) = writer_rx.recv().await {
                 if stdin.write_all(msg.as_bytes()).await.is_err() {
+                    writer_closed.store(true, Ordering::SeqCst);
+                    writer_pending
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .clear();
                     break;
                 }
                 if stdin.flush().await.is_err() {
+                    writer_closed.store(true, Ordering::SeqCst);
+                    writer_pending
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .clear();
                     break;
                 }
             }
@@ -211,6 +329,7 @@ impl McpClient {
 
         // Spawn reader task
         let pending_clone = Arc::clone(&pending);
+        let reader_closed = closed.clone();
         let reader_name = name.clone();
         let mut reader = BufReader::new(stdout);
         tokio::spawn(async move {
@@ -225,7 +344,8 @@ impl McpClient {
                     Ok(_) => {
                         if let Ok(response) = serde_json::from_str::<JsonRpcResponse>(&line) {
                             if let Some(id) = response.id {
-                                let mut pending = pending_clone.lock().await;
+                                let mut pending =
+                                    pending_clone.lock().unwrap_or_else(|p| p.into_inner());
                                 if let Some(tx) = pending.remove(&id) {
                                     let _ = tx.send(response);
                                 }
@@ -246,6 +366,11 @@ impl McpClient {
                     }
                 }
             }
+            reader_closed.store(true, Ordering::SeqCst);
+            pending_clone
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clear();
         });
 
         let handle = McpHandle {
@@ -256,6 +381,7 @@ impl McpClient {
             server_info: Arc::new(std::sync::RwLock::new(None)),
             capabilities: Arc::new(std::sync::RwLock::new(ServerCapabilities::default())),
             tools: Arc::new(std::sync::RwLock::new(Vec::new())),
+            closed,
         };
 
         let mut client = Self { handle, child };
