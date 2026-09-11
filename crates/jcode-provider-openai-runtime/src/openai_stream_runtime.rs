@@ -394,6 +394,21 @@ pub(super) enum PersistentWsResult {
     Failed(String),
 }
 
+/// Only a fully completed response may remain cached if the request future
+/// is dropped. Cleanup happens while this exact connection's lock is owned,
+/// never through a later callback that could clear a different request.
+struct PersistentRequestLease<'a> {
+    state: tokio::sync::MutexGuard<'a, Option<PersistentWsState>>,
+    in_flight: bool,
+}
+impl Drop for PersistentRequestLease<'_> {
+    fn drop(&mut self) {
+        if self.in_flight {
+            *self.state = None;
+        }
+    }
+}
+
 /// Try to continue a conversation on an existing persistent WebSocket connection
 /// using `previous_response_id` to send only incremental input.
 pub(super) async fn try_persistent_ws_continuation(
@@ -404,7 +419,11 @@ pub(super) async fn try_persistent_ws_continuation(
     tx: &mpsc::Sender<Result<StreamEvent>>,
 ) -> PersistentWsResult {
     let request_model = openai_request_model(request);
-    let mut guard = persistent_ws.lock().await;
+    let mut lease = PersistentRequestLease {
+        state: persistent_ws.lock().await,
+        in_flight: false,
+    };
+    let (guard, in_flight) = (&mut lease.state, &mut lease.in_flight);
     let state = match guard.as_mut() {
         Some(s) => s,
         None => {
@@ -423,7 +442,7 @@ pub(super) async fn try_persistent_ws_continuation(
     // Check connection age - reconnect before the 60-min server limit
     if state.connected_at.elapsed() >= Duration::from_secs(WEBSOCKET_PERSISTENT_MAX_AGE_SECS) {
         jcode_base::logging::info("Persistent WS connection too old; forcing reconnect");
-        *guard = None;
+        **guard = None;
         log_openai_stream_lifecycle(
             jcode_base::logging::LogLevel::Info,
             "persistent_state_reset",
@@ -453,7 +472,7 @@ pub(super) async fn try_persistent_ws_continuation(
                 "Persistent WS healthcheck requested reconnect before reuse: {}",
                 detail
             ));
-            *guard = None;
+            **guard = None;
             log_openai_stream_lifecycle(
                 jcode_base::logging::LogLevel::Info,
                 "persistent_state_reset",
@@ -471,7 +490,7 @@ pub(super) async fn try_persistent_ws_continuation(
                 "Persistent WS healthcheck failed: {}; forcing reconnect",
                 err
             ));
-            *guard = None;
+            **guard = None;
             log_openai_stream_lifecycle(
                 jcode_base::logging::LogLevel::Warn,
                 "persistent_state_reset",
@@ -505,7 +524,7 @@ pub(super) async fn try_persistent_ws_continuation(
                 ("last_input_item_count", last_input_item_count.to_string()),
             ],
         );
-        *guard = None;
+        **guard = None;
         return PersistentWsResult::NotAvailable;
     }
 
@@ -528,7 +547,7 @@ pub(super) async fn try_persistent_ws_continuation(
     }
     if incremental_items.is_empty() {
         jcode_base::logging::info("No incremental items to send; need fresh request");
-        *guard = None;
+        **guard = None;
         log_openai_stream_lifecycle(
             jcode_base::logging::LogLevel::Info,
             "persistent_state_reset",
@@ -750,6 +769,7 @@ pub(super) async fn try_persistent_ws_continuation(
     // Send the continuation request on the existing WebSocket
     let send_started_at = Instant::now();
     emit_connection_phase(tx, jcode_message_types::ConnectionPhase::SendingRequest).await;
+    *in_flight = true;
     if let Err(e) = state.ws_stream.send(WsMessage::Text(request_text)).await {
         return PersistentWsResult::Failed(format!("send error: {}", e));
     }
@@ -961,7 +981,7 @@ pub(super) async fn try_persistent_ws_continuation(
                 ("consumer_dropped", consumer_dropped.to_string()),
             ],
         );
-        *guard = None;
+        **guard = None;
         return PersistentWsResult::Success;
     }
 
@@ -991,11 +1011,12 @@ pub(super) async fn try_persistent_ws_continuation(
                 ),
             ],
         );
+        *in_flight = false;
         PersistentWsResult::Success
     } else {
         // Got response but no response_id - can't chain further
         jcode_base::logging::warn("Persistent WS: no response_id in response; breaking chain");
-        *guard = None;
+        **guard = None;
         log_openai_stream_lifecycle(
             jcode_base::logging::LogLevel::Warn,
             "persistent_state_reset",

@@ -350,9 +350,12 @@ without another request. Existing frame/parser tests and strict lint pass.
 OpenAI quiet SSE and WebSocket reads observe receiver closure directly. For a
 persistent WebSocket, cancellation reaches the existing response-chain cleanup
 while its state lock is still held, rather than clearing a possibly unrelated
-later request from an out-of-band callback. Quiet and existing continuation tests
-pass. Initial connection establishment, remaining stateful adapters and CLI
-provider subprocess boundaries still require final reconciliation. These checks
+later request from an out-of-band callback. An in-flight response-chain lease
+also clears that exact state if its producer future is dropped during a send or
+read. Completed chains remain reusable. The whole OpenAI request producer is
+receiver-bound, including connection establishment and retry backoff. Quiet and
+abrupt-cancellation continuation tests pass. Remaining CLI/web subprocess and
+pre-dispatch caller boundaries still require final reconciliation. These checks
 do not prove that a hosted service acknowledges cancellation or stops remote
 compute, which remains outside the approved owned-work boundary.
 

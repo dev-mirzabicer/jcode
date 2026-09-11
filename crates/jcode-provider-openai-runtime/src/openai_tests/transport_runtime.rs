@@ -581,3 +581,26 @@ async fn quiet_persistent_ws_cancellation_closes_request_and_invalidates_only_it
     assert!(state.lock().await.is_none());
     tokio::time::timeout(Duration::from_secs(2),server).await.unwrap().unwrap();
 }
+
+
+#[tokio::test]
+async fn aborted_persistent_ws_request_drops_its_owned_connection_without_stale_reuse() {
+    let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let address=listener.local_addr().unwrap();
+    let (sent,received)=tokio::sync::oneshot::channel();
+    let server=tokio::spawn(async move {
+        let (stream,_)=listener.accept().await.unwrap();let mut ws=tokio_tungstenite::accept_async(stream).await.unwrap();
+        assert!(matches!(ws.next().await,Some(Ok(WsMessage::Text(_)))));sent.send(()).unwrap();
+        let _=ws.next().await;
+    });
+    let (ws,_)=connect_async(format!("ws://{address}")).await.unwrap();
+    let state=Arc::new(Mutex::new(Some(PersistentWsState{ws_stream:ws,last_response_id:"previous".into(),connected_at:Instant::now(),last_activity_at:Instant::now(),last_response_completed_at:Instant::now(),message_count:1,last_input_item_count:1})));
+    let (tx,rx)=mpsc::channel(10);let owned=state.clone();
+    let mut task=tokio::spawn(async move {try_persistent_ws_continuation(&owned,&serde_json::json!({"model":"gpt-5.6-sol"}),&[serde_json::json!({"type":"message","role":"user","content":"one"}),serde_json::json!({"type":"message","role":"user","content":"two"})],2,&tx).await});
+    received.await.unwrap();task.abort();
+    drop(rx);
+    let stopped=tokio::time::timeout(Duration::from_secs(2),&mut task).await;
+    if stopped.is_err(){task.abort();server.abort();}
+    assert!(matches!(stopped,Ok(Err(ref error)) if error.is_cancelled()),"Aborted request must join and drop its own response-chain lease");
+    assert!(state.lock().await.is_none());
+    tokio::time::timeout(Duration::from_secs(2),server).await.unwrap().unwrap();
+}
