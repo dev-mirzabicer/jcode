@@ -3,6 +3,68 @@ use crate::terminal_println as println;
 use crate::tool::ToolOutput;
 
 impl super::Agent {
+    pub(super) async fn retain_managed_sdk_results(
+        &mut self,
+        calls: &[ToolCall],
+        results: &mut std::collections::HashMap<String, (String, bool)>,
+        message_id: &str,
+        events: Option<&tokio::sync::mpsc::UnboundedSender<crate::protocol::ServerEvent>>,
+    ) -> anyhow::Result<()> {
+        for tool in calls
+            .iter()
+            .filter(|tool| !super::JCODE_NATIVE_TOOLS.contains(&tool.name.as_str()))
+        {
+            let (content,is_error)=results.get(&tool.id).cloned().ok_or_else(||anyhow::anyhow!("SDK-managed tool {} ({}) ended without a result. Its input remains in history; no local operation was executed to recreate unknown effects.",tool.name,tool.id))?;
+            let output = match self
+                .retain_sdk_result(tool, message_id, content.clone(), is_error)
+                .await
+            {
+                Ok(output) => output,
+                Err(error) => {
+                    self.add_message(crate::message::Role::User,vec![ContentBlock::ToolResult{
+                        tool_use_id:tool.id.clone(),is_error:Some(true),
+                        content:format!("[SDK output retention failed; original received body follows. Do not repeat the operation.]\n{content}"),
+                    }]);
+                    self.session.save()?;
+                    return Err(error.context("Managed SDK result could not be archived; original body was preserved in history without repeating its effects"));
+                }
+            };
+            let presented = output.output.clone();
+            let failed = output.is_error;
+            self.add_message(
+                crate::message::Role::User,
+                tool_output_to_content_blocks(tool.id.clone(), output),
+            );
+            self.session.save()?;
+            results.remove(&tool.id);
+            crate::bus::Bus::global().publish(crate::bus::BusEvent::ToolUpdated(
+                crate::bus::ToolEvent {
+                    session_id: self.session.id.clone(),
+                    message_id: message_id.into(),
+                    tool_call_id: tool.id.clone(),
+                    tool_name: tool.name.clone(),
+                    intent: tool.intent.clone(),
+                    title: None,
+                    status: if failed {
+                        crate::bus::ToolStatus::Error
+                    } else {
+                        crate::bus::ToolStatus::Completed
+                    },
+                },
+            ));
+            if let Some(events) = events {
+                let _ = events.send(crate::protocol::ServerEvent::ToolDone {
+                    id: tool.id.clone(),
+                    name: tool.name.clone(),
+                    output: presented,
+                    error: failed
+                        .then(|| "Provider tool failed; retained result is available".into()),
+                });
+            }
+        }
+        Ok(())
+    }
+
     pub(super) async fn retain_sdk_result(
         &self,
         tool: &ToolCall,

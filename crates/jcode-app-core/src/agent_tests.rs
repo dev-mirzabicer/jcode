@@ -4374,6 +4374,8 @@ struct SuppliedResultProvider {
     largest_result: Arc<std::sync::atomic::AtomicUsize>,
     body: String,
     after_result: SdkAfterResult,
+    managed: bool,
+    result_error: bool,
 }
 #[async_trait]
 impl Provider for SuppliedResultProvider {
@@ -4396,6 +4398,7 @@ impl Provider for SuppliedResultProvider {
         let first = self.calls.fetch_add(1, Ordering::SeqCst) == 0;
         let body = self.body.clone();
         let after_result = self.after_result;
+        let result_error = self.result_error;
         let (tx, rx) = tokio_mpsc::channel(8);
         tokio::spawn(async move {
             let events = if first {
@@ -4409,7 +4412,7 @@ impl Provider for SuppliedResultProvider {
                     StreamEvent::ToolResult {
                         tool_use_id: "sdk-result".into(),
                         content: body,
-                        is_error: false,
+                        is_error: result_error,
                     },
                     StreamEvent::MessageEnd {
                         stop_reason: Some("tool_use".into()),
@@ -4449,6 +4452,9 @@ impl Provider for SuppliedResultProvider {
         });
         Ok(Box::pin(ReceiverStream::new(rx)))
     }
+    fn handles_tools_internally(&self) -> bool {
+        self.managed
+    }
     fn name(&self) -> &str {
         "supplied-result-fixture"
     }
@@ -4467,6 +4473,8 @@ async fn supplied_provider_results_are_retained_before_history_and_mpsc_delivery
             largest_result: Default::default(),
             body: body.clone(),
             after_result: SdkAfterResult::Success,
+            managed: false,
+            result_error: false,
         };
         let calls = provider.calls.clone();
         let largest = provider.largest_result.clone();
@@ -4525,6 +4533,8 @@ async fn provider_failure_after_sdk_result_preserves_a_paired_retained_checkpoin
             largest_result: Default::default(),
             body: body.clone(),
             after_result,
+            managed: false,
+            result_error: false,
         };
         let calls = provider.calls.clone();
         let provider: Arc<dyn Provider> = Arc::new(provider);
@@ -4742,5 +4752,138 @@ async fn history_owner_loss_becomes_one_interruption_receipt_without_replaying_e
     let stored = Session::load(agent.session_id())?;
     assert_eq!(stored.messages.iter().flat_map(|message|&message.content).filter(|block|matches!(block,ContentBlock::ToolResult{tool_use_id,is_error:Some(true),..} if tool_use_id=="interrupted-tool")).count(),1);
     assert_eq!(store.list(agent.session_id(), None, 10)?.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn managed_sdk_results_survive_local_tool_filtering_in_both_agent_loops() -> Result<()> {
+    let _guard = crate::storage::lock_test_env();
+    for streaming in [false, true] {
+        for is_error in [false, true] {
+            let home = tempfile::tempdir()?;
+            let _home = AgentTestEnvRestore::set_path("JCODE_HOME", home.path());
+            let _runtime =
+                AgentTestEnvRestore::set_path("JCODE_RUNTIME_DIR", &home.path().join("runtime"));
+            crate::config::invalidate_config_cache();
+            let body = format!("{}MANAGED_SDK_TAIL", "λ".repeat(40_000));
+            let provider = SuppliedResultProvider {
+                calls: Default::default(),
+                largest_result: Default::default(),
+                body: body.clone(),
+                after_result: SdkAfterResult::Success,
+                managed: true,
+                result_error: is_error,
+            };
+            let calls = provider.calls.clone();
+            let provider: Arc<dyn Provider> = Arc::new(provider);
+            let mut agent = Agent::new(provider, Registry::empty());
+            if streaming {
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+                agent
+                    .run_once_streaming_mpsc("synthetic managed task", Vec::new(), None, tx)
+                    .await?;
+                let mut done = 0;
+                while let Ok(event) = rx.try_recv() {
+                    if let ServerEvent::ToolDone {
+                        id, output, error, ..
+                    } = event
+                        && id == "sdk-result"
+                    {
+                        done += 1;
+                        assert!(output.chars().count() < 30_000);
+                        assert!(!output.contains("MANAGED_SDK_TAIL"));
+                        assert_eq!(error.is_some(), is_error);
+                    }
+                }
+                assert_eq!(
+                    done, 1,
+                    "A managed SDK result must be delivered after retention"
+                );
+            } else {
+                agent.run_once_capture("synthetic managed task").await?;
+            }
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                1,
+                "The SDK already completed the work"
+            );
+            let store = crate::execution::ExecutionStore::open(home.path())?;
+            let records = store.list(agent.session_id(), None, 100)?;
+            let record = records
+                .iter()
+                .find(|record| record.tool == "external_result")
+                .expect("Managed SDK output must be retained before local-tool filtering");
+            assert_eq!(
+                std::fs::read_to_string(record.output_path.as_ref().unwrap())?,
+                body
+            );
+            assert_eq!(
+                record.state,
+                if is_error {
+                    crate::execution::RunState::Failed
+                } else {
+                    crate::execution::RunState::Completed
+                }
+            );
+            let saved = Session::load(agent.session_id())?;
+            assert_eq!(saved.messages.iter().flat_map(|message|&message.content).filter(|block|matches!(block,ContentBlock::ToolResult{tool_use_id,is_error:flag,..} if tool_use_id=="sdk-result" && flag.unwrap_or(false)==is_error)).count(),1);
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn managed_sdk_retention_failure_preserves_received_body_without_replay() -> Result<()> {
+    let _guard = crate::storage::lock_test_env();
+    for streaming in [false, true] {
+        let home = tempfile::tempdir()?;
+        let _home = AgentTestEnvRestore::set_path("JCODE_HOME", home.path());
+        let _runtime =
+            AgentTestEnvRestore::set_path("JCODE_RUNTIME_DIR", &home.path().join("runtime"));
+        crate::config::invalidate_config_cache();
+        let body = format!("{}UNARCHIVED_TAIL", "x".repeat(20_000));
+        let provider = SuppliedResultProvider {
+            calls: Default::default(),
+            largest_result: Default::default(),
+            body: body.clone(),
+            after_result: SdkAfterResult::Success,
+            managed: true,
+            result_error: false,
+        };
+        let calls = provider.calls.clone();
+        let mut agent = Agent::new(Arc::new(provider), Registry::empty());
+        std::fs::create_dir_all(home.path().join("execution"))?;
+        std::fs::write(
+            home.path().join("execution/index.sqlite"),
+            b"deliberately invalid isolated database",
+        )?;
+        let result = if streaming {
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            agent
+                .run_once_streaming_mpsc("synthetic task", Vec::new(), None, tx)
+                .await
+                .map(|_| ())
+        } else {
+            agent.run_once_capture("synthetic task").await.map(|_| ())
+        };
+        assert!(result.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let saved = Session::load(agent.session_id())?;
+        let results = saved
+            .messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .filter_map(|block| match block {
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error: Some(true),
+                } if tool_use_id == "sdk-result" => Some(content),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].ends_with(&body));
+    }
     Ok(())
 }

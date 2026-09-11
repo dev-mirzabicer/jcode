@@ -927,6 +927,18 @@ impl Agent {
 
             // If provider handles tools internally (like Claude Code CLI), only run native tools locally
             if self.provider.handles_tools_internally() {
+                let message_id = assistant_message_id.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Managed SDK tool results have no authoritative assistant message"
+                    )
+                })?;
+                self.retain_managed_sdk_results(
+                    &tool_calls,
+                    &mut sdk_tool_results,
+                    message_id,
+                    None,
+                )
+                .await?;
                 tool_calls.retain(|tc| JCODE_NATIVE_TOOLS.contains(&tc.name.as_str()));
                 if tool_calls.is_empty() {
                     if !generated_image_contexts.is_empty() {

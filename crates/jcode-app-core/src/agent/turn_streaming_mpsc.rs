@@ -1232,6 +1232,18 @@ impl Agent {
             ));
 
             if self.provider.handles_tools_internally() {
+                let message_id = assistant_message_id.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Managed SDK tool results have no authoritative assistant message"
+                    )
+                })?;
+                self.retain_managed_sdk_results(
+                    &tool_calls,
+                    &mut sdk_tool_results,
+                    message_id,
+                    Some(&event_tx),
+                )
+                .await?;
                 tool_calls.retain(|tc| JCODE_NATIVE_TOOLS.contains(&tc.name.as_str()));
                 if tool_calls.is_empty() {
                     // === INJECTION POINT D: After provider-handled tools, before next API call ===
