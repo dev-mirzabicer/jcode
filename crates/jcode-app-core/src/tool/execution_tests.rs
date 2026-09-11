@@ -650,3 +650,34 @@ async fn foreground_reload_returns_a_durable_background_receipt_without_stopping
     assert_eq!(std::fs::read(directory.path().join("effects"))?, b"x");
     Ok(())
 }
+
+#[tokio::test]
+async fn provider_supplied_result_is_retained_without_invoking_the_native_producer()
+-> anyhow::Result<()> {
+    let (registry, tool, _) = fixture("must not execute".into(), false, false).await;
+    let text = format!("{}SDK_TAIL", "λ".repeat(600_000));
+    let ctx = context();
+    let id = crate::execution::invocation_id(&ctx);
+    let output = registry
+        .retain_provider_result(
+            "execution_fixture",
+            serde_json::json!({}),
+            ctx.clone(),
+            ToolOutput::new(&text),
+        )
+        .await?;
+    assert_eq!(tool.count.load(Ordering::SeqCst), 0);
+    let record = crate::execution::wait_for(&id).await?;
+    assert_eq!(std::fs::read_to_string(record.output_path.unwrap())?, text);
+    let replay = registry
+        .retain_provider_result(
+            "execution_fixture",
+            serde_json::json!({}),
+            ctx,
+            ToolOutput::new(&text),
+        )
+        .await?;
+    assert_eq!(replay.output, output.output);
+    assert_eq!(tool.count.load(Ordering::SeqCst), 0);
+    Ok(())
+}

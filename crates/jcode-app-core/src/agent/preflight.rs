@@ -213,7 +213,7 @@ impl Agent {
         clippy::too_many_arguments,
         reason = "partial-output checkpoint mirrors the provider stream accumulators exactly"
     )]
-    pub(super) fn checkpoint_partial_provider_output(
+    pub(super) async fn checkpoint_partial_provider_output(
         &mut self,
         text: &str,
         reasoning: &str,
@@ -225,7 +225,7 @@ impl Agent {
         store_reasoning_content: bool,
         token_usage: Option<crate::session::StoredTokenUsage>,
     ) -> Result<()> {
-        if !self.provider_output_started() {
+        if !self.provider_output_started() && sdk_tool_results.is_empty() {
             return Ok(());
         }
 
@@ -247,7 +247,7 @@ impl Agent {
             assistant_blocks.extend(openai_reasoning_items.iter().cloned());
         }
 
-        let mut result_blocks = Vec::new();
+        let mut received_results = Vec::new();
         for tool_call in tool_calls {
             let Some((content, is_error)) = sdk_tool_results.get(&tool_call.id) else {
                 continue;
@@ -258,15 +258,11 @@ impl Agent {
                 input: tool_call.input.clone(),
                 thought_signature: tool_call.thought_signature.clone(),
             });
-            result_blocks.push(ContentBlock::ToolResult {
-                tool_use_id: tool_call.id.clone(),
-                content: content.clone(),
-                is_error: Some(*is_error),
-            });
+            received_results.push((tool_call, content, *is_error));
         }
 
         let checkpointed = !assistant_blocks.is_empty()
-            || !result_blocks.is_empty()
+            || !received_results.is_empty()
             || generated_image_contexts
                 .iter()
                 .any(|blocks| !blocks.is_empty());
@@ -277,9 +273,42 @@ impl Agent {
             return Ok(());
         }
 
-        if !assistant_blocks.is_empty() {
+        let assistant_id = if !assistant_blocks.is_empty() {
             crate::telemetry::record_assistant_response();
-            self.add_message_ext(Role::Assistant, assistant_blocks, None, token_usage);
+            Some(self.add_message_ext(Role::Assistant, assistant_blocks, None, token_usage))
+        } else {
+            None
+        };
+        let mut result_blocks = Vec::new();
+        if let Some(message_id) = assistant_id {
+            for (tool, content, is_error) in received_results {
+                let (content, is_error) = match self
+                    .retain_sdk_result(tool, &message_id, content.clone(), is_error)
+                    .await
+                {
+                    Ok(output) => (output.output, output.is_error),
+                    Err(error) => {
+                        // Preserve the already received body in the authoritative
+                        // checkpoint even when output storage itself has failed.
+                        // This is a failure receipt, never permission to reexecute.
+                        if let Some(context) = self.active_turn_context.as_mut() {
+                            context.partial_output_persistence_error =
+                                Some(format!("SDK output retention failed: {error:#}"));
+                        }
+                        (
+                            format!(
+                                "[SDK output retention failed; original received body follows. Do not repeat the operation.]\n{content}"
+                            ),
+                            true,
+                        )
+                    }
+                };
+                result_blocks.push(ContentBlock::ToolResult {
+                    tool_use_id: tool.id.clone(),
+                    content,
+                    is_error: Some(is_error),
+                });
+            }
         }
         if !result_blocks.is_empty() {
             self.add_message(Role::User, result_blocks);

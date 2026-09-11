@@ -15,6 +15,6 @@ pub use runtime::RuntimeEndpoint;
 mod capture;
 mod storage;
 mod store;
-pub use capture::Capture;
+pub use capture::{Capture, output_digest};
 pub use storage::{ArchiveConfig, StorageConfig};
 pub use store::{ExecutionStore, Invocation, PreparedInvocation, RunRecord, RunState};

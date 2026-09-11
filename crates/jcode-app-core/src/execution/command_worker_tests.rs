@@ -73,6 +73,7 @@ async fn prepare(
         tool: "bash".into(),
         input: serde_json::json!({"command":command}),
         working_dir: Some(working_dir.clone()),
+        received_result_digest: None,
     };
     let PreparedInvocation::New(record) = store.prepare(&input, &parent.endpoint.id)? else {
         panic!()

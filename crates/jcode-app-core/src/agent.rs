@@ -21,8 +21,7 @@ mod utils;
 
 use self::streaming::{send_stream_keepalive_mpsc, stream_keepalive_ticker};
 use self::tools::{
-    cap_sdk_tool_content_for_history, cap_tool_output_for_history, print_tool_summary,
-    tool_output_side_pane_images, tool_output_to_content_blocks,
+    print_tool_summary, tool_output_side_pane_images, tool_output_to_content_blocks,
 };
 use self::utils::trace_enabled;
 use crate::build;

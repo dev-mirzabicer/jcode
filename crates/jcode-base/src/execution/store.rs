@@ -19,6 +19,8 @@ pub struct Invocation {
     pub input: serde_json::Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_dir: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub received_result_digest: Option<String>,
 }
 
 impl Invocation {
@@ -432,6 +434,7 @@ mod tests {
             tool: "synthetic".into(),
             input: serde_json::json!({"value": 1}),
             working_dir: None,
+            received_result_digest: None,
         }
     }
 

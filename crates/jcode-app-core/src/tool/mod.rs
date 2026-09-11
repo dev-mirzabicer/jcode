@@ -149,6 +149,49 @@ impl Clone for Registry {
 }
 
 impl Registry {
+    /// The provider has already performed the operation. This boundary only
+    /// retains and presents received output; it never invokes a native tool.
+    pub async fn retain_provider_result(
+        &self,
+        name: &str,
+        input: Value,
+        mut ctx: ToolContext,
+        output: ToolOutput,
+    ) -> Result<ToolOutput> {
+        let target = crate::config::config()
+            .output
+            .target(Self::resolve_tool_name(name), None);
+        ctx.invocation.policy = Default::default();
+        ctx.invocation.output_target = Some(target);
+        ctx.graceful_shutdown_signal = None;
+        let mut invocation = crate::execution::invocation(&ctx, name, input);
+        invocation.received_result_digest = Some(
+            crate::execution::output_digest(&output)?
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
+        );
+        let result = crate::execution::execute(
+            invocation,
+            ctx,
+            target,
+            Box::new(move |_| Box::pin(async move { Ok(output) })),
+        )
+        .await;
+        match result {
+            Ok(output) => Ok(self.guard_context_overflow(name, output).await),
+            Err(error) => {
+                if let Some(captured) = error.downcast_ref::<crate::execution::CapturedToolError>()
+                {
+                    Ok(self
+                        .guard_context_overflow(name, captured.output.clone().with_error(true))
+                        .await)
+                } else {
+                    Err(error)
+                }
+            }
+        }
+    }
     /// Clone this registry for work that remains part of the same session.
     ///
     /// Ordinary [`Clone`] deliberately creates fresh context accounting and

@@ -97,6 +97,7 @@ pub fn invocation(ctx: &ToolContext, tool: &str, input: serde_json::Value) -> In
         tool: tool.to_string(),
         input,
         working_dir: ctx.working_dir.clone(),
+        received_result_digest: None,
     }
 }
 

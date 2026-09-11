@@ -286,6 +286,7 @@ async fn real_proxy_preserves_rich_resources_structured_errors_and_decode_failur
             tool: "mcp__fixture__inspect".into(),
             input: serde_json::json!({"mode":mode}),
             working_dir: None,
+            received_result_digest: None,
         };
         let PreparedInvocation::New(record) = store.prepare(&input, "owner")? else {
             panic!()

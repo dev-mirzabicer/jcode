@@ -230,6 +230,30 @@ HTML format conversion still selects prose, strips non-prose markup and renders
 links under its existing conversion rules. The original acquired bytes remain
 available independently, including invalid UTF-8 and omitted markup.
 
+## Provider-supplied results and history
+
+Results already produced by an SDK use a capture-only Registry operation. This
+operation never invokes the registered native tool. The received payload digest
+participates in replay conflict validation, while omitted native-input metadata
+keeps old serialized invocation inputs byte-compatible.
+
+Both Agent loops retain completed SDK text results before history presentation.
+The MPSC loop emits the presented result, not an unretained full body. History
+conversion no longer imposes a second 512-Ki-character cap and preserves the
+structural error flag.
+
+The existing partial-provider checkpoint now retains correlated SDK results
+before writing their paired history receipts. A provider failure after receiving
+SDK output preserves those effects and results even when the failure is not a
+context-size error. A retry-rollback arriving after received SDK results stops
+that automatic replay and checkpoints the results rather than discarding them.
+These changes reuse the existing checkpoint and context-error owners. They do
+not introduce a second transcript, automatic compaction or a new context policy.
+
+This does not yet establish complete raw provider-ingress capture, uncorrelated
+result recovery or native-SDK fallback semantics. Those boundaries remain in the
+producer reconciliation ledger and final WP-02 verification scope.
+
 ## Verification
 
 Run through coordinated self-development tests:

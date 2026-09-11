@@ -619,6 +619,7 @@ async fn managed_completion_is_pending_without_parent_and_notifies_once_after_at
             tool: "fixture".into(),
             input: serde_json::json!({}),
             working_dir: None,
+            received_result_digest: None,
         };
         let PreparedInvocation::New(mut record) = store.prepare(&input, "owner")? else {
             panic!()

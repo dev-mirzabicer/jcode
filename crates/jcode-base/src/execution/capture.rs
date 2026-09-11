@@ -409,7 +409,7 @@ fn part_filename(name: &str) -> Result<String> {
     Ok(format!("part-{name}.bin"))
 }
 
-fn output_digest(output: &ToolOutput) -> Result<[u8; 32]> {
+pub fn output_digest(output: &ToolOutput) -> Result<[u8; 32]> {
     struct HashWriter(Sha256);
     impl std::io::Write for HashWriter {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -480,6 +480,7 @@ mod tests {
             tool: "fixture".into(),
             input: serde_json::json!({}),
             working_dir: None,
+            received_result_digest: None,
         };
         let PreparedInvocation::New(record) = store.prepare(&invocation, "owner")? else {
             panic!()

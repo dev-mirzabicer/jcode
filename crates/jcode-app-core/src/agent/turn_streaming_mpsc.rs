@@ -365,8 +365,6 @@ impl Agent {
             // to clients as a keepalive; throttles issue #451 keepalives.
             let mut hidden_activity_last = Instant::now();
             let mut openai_reasoning_items: Vec<ContentBlock> = Vec::new();
-            let mut tool_id_to_name: std::collections::HashMap<String, String> =
-                std::collections::HashMap::new();
 
             let mut keepalive = stream_keepalive_ticker();
             loop {
@@ -421,9 +419,11 @@ impl Agent {
                     Err(e) => {
                         let err_str = e.to_string();
                         memory_pending.restore_now();
-                        if self.provider_output_started()
-                            && (jcode_provider_core::is_request_payload_too_large_error(&err_str)
-                                || Self::is_context_limit_error(&err_str))
+                        if !sdk_tool_results.is_empty()
+                            || self.provider_output_started()
+                                && (jcode_provider_core::is_request_payload_too_large_error(
+                                    &err_str,
+                                ) || Self::is_context_limit_error(&err_str))
                         {
                             let token_usage = (usage_input.is_some()
                                 || usage_output.is_some()
@@ -445,7 +445,8 @@ impl Agent {
                                 &generated_image_contexts,
                                 store_reasoning_content,
                                 token_usage,
-                            )?;
+                            )
+                            .await?;
                         }
                         match self
                             .try_unattended_emergency_provider_recovery(&err_str, Some(&event_tx))
@@ -593,7 +594,6 @@ impl Agent {
                             id: id.clone(),
                             name: name.clone(),
                         });
-                        tool_id_to_name.insert(id.clone(), name.clone());
                         current_tool = Some(ToolCall {
                             id,
                             name,
@@ -638,20 +638,6 @@ impl Agent {
                         content,
                         is_error,
                     } => {
-                        let tool_name = tool_id_to_name
-                            .get(&tool_use_id)
-                            .cloned()
-                            .unwrap_or_default();
-                        let _ = event_tx.send(ServerEvent::ToolDone {
-                            id: tool_use_id.clone(),
-                            name: tool_name,
-                            output: content.clone(),
-                            error: if is_error {
-                                Some("Tool error".to_string())
-                            } else {
-                                None
-                            },
-                        });
                         sdk_tool_results.insert(tool_use_id, (content, is_error));
                     }
                     StreamEvent::GeneratedImage {
@@ -742,6 +728,23 @@ impl Agent {
                         let _ = event_tx.send(ServerEvent::StatusDetail { detail });
                     }
                     StreamEvent::RetryRollback { attempt, max } => {
+                        if !sdk_tool_results.is_empty() {
+                            self.checkpoint_partial_provider_output(
+                                &text_content,
+                                &reasoning_content,
+                                &reasoning_signature,
+                                &openai_reasoning_items,
+                                &tool_calls,
+                                &sdk_tool_results,
+                                &generated_image_contexts,
+                                store_reasoning_content,
+                                None,
+                            )
+                            .await?;
+                            anyhow::bail!(
+                                "Provider attempted to replay after returning SDK tool results. Received results were checkpointed; automatic replay stopped to avoid duplicate effects."
+                            );
+                        }
                         // A transient transport fault hit mid-stream after partial
                         // output was already emitted; the provider is replaying the
                         // request from the top. Discard everything accumulated for
@@ -777,7 +780,6 @@ impl Agent {
                         tool_calls.clear();
                         current_tool = None;
                         current_tool_input.clear();
-                        tool_id_to_name.clear();
                         sdk_tool_results.clear();
                         generated_image_contexts.clear();
                         reasoning_content.clear();
@@ -878,9 +880,11 @@ impl Agent {
                         retry_after_secs,
                     } => {
                         memory_pending.restore_now();
-                        if self.provider_output_started()
-                            && (jcode_provider_core::is_request_payload_too_large_error(&message)
-                                || Self::is_context_limit_error(&message))
+                        if !sdk_tool_results.is_empty()
+                            || self.provider_output_started()
+                                && (jcode_provider_core::is_request_payload_too_large_error(
+                                    &message,
+                                ) || Self::is_context_limit_error(&message))
                         {
                             let token_usage = (usage_input.is_some()
                                 || usage_output.is_some()
@@ -902,7 +906,8 @@ impl Agent {
                                 &generated_image_contexts,
                                 store_reasoning_content,
                                 token_usage,
-                            )?;
+                            )
+                            .await?;
                         }
                         match self
                             .try_unattended_emergency_provider_recovery(&message, Some(&event_tx))
@@ -1058,7 +1063,6 @@ impl Agent {
                     id: tc.id.clone(),
                     name: tc.name.clone(),
                 });
-                tool_id_to_name.insert(tc.id.clone(), tc.name.clone());
                 let _ = event_tx.send(ServerEvent::ToolInput {
                     delta: tc.input.to_string(),
                 });
@@ -1317,7 +1321,19 @@ impl Agent {
                 if let Some((sdk_content, sdk_is_error)) = sdk_tool_results.remove(&tc.id) {
                     // For native tools, ignore SDK errors and execute locally
                     if !(is_native_tool && sdk_is_error) {
-                        let sdk_content = cap_sdk_tool_content_for_history(&tc.name, sdk_content);
+                        let output = self
+                            .retain_sdk_result(tc, &message_id, sdk_content, sdk_is_error)
+                            .await?;
+                        let sdk_content = output.output;
+                        let sdk_is_error = output.is_error;
+                        let _ = event_tx.send(ServerEvent::ToolDone {
+                            id: tc.id.clone(),
+                            name: tc.name.clone(),
+                            output: sdk_content.clone(),
+                            error: sdk_is_error.then(|| {
+                                "Provider tool failed; retained result is available".to_string()
+                            }),
+                        });
                         self.add_message(
                             Role::User,
                             vec![ContentBlock::ToolResult {
@@ -1452,7 +1468,6 @@ impl Agent {
 
                     match result {
                         Ok(output) => {
-                            let output = cap_tool_output_for_history(&tc.name, output);
                             let _ = event_tx.send(ServerEvent::ToolDone {
                                 id: tc.id.clone(),
                                 name: tc.name.clone(),

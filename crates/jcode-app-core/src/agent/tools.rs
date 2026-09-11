@@ -2,32 +2,35 @@ use crate::message::{ContentBlock, ToolCall};
 use crate::terminal_println as println;
 use crate::tool::ToolOutput;
 
-pub(super) const MAX_TOOL_OUTPUT_CHARS_FOR_HISTORY: usize = 512 * 1024;
-
-pub(super) fn cap_tool_output_for_history(tool_name: &str, mut output: ToolOutput) -> ToolOutput {
-    if output.output.chars().count() <= MAX_TOOL_OUTPUT_CHARS_FOR_HISTORY {
-        return output;
+impl super::Agent {
+    pub(super) async fn retain_sdk_result(
+        &self,
+        tool: &ToolCall,
+        message_id: &str,
+        content: String,
+        is_error: bool,
+    ) -> anyhow::Result<ToolOutput> {
+        let ctx = crate::tool::ToolContext {
+            session_id: self.session.id.clone(),
+            message_id: message_id.into(),
+            tool_call_id: tool.id.clone(),
+            working_dir: self.working_dir().map(std::path::PathBuf::from),
+            stdin_request_tx: None,
+            graceful_shutdown_signal: None,
+            execution_mode: crate::tool::ToolExecutionMode::AgentTurn,
+            invocation: Default::default(),
+        };
+        self.registry
+            .retain_provider_result(
+                &tool.name,
+                tool.input.clone(),
+                ctx,
+                ToolOutput::new(content)
+                    .with_error(is_error)
+                    .with_metadata(serde_json::json!({"provider_supplied":true})),
+            )
+            .await
     }
-
-    let original_chars = output.output.chars().count();
-    let kept = crate::util::truncate_str(&output.output, MAX_TOOL_OUTPUT_CHARS_FOR_HISTORY);
-    output.output = format!(
-        "{}\n\n[Tool output truncated by jcode: tool `{}` produced {} chars; kept first {} chars to protect the remote protocol, session history, and prompt cache. Redirect large logs to a file and read targeted sections.]",
-        kept, tool_name, original_chars, MAX_TOOL_OUTPUT_CHARS_FOR_HISTORY,
-    );
-    output
-}
-
-pub(super) fn cap_sdk_tool_content_for_history(tool_name: &str, content: String) -> String {
-    if content.chars().count() <= MAX_TOOL_OUTPUT_CHARS_FOR_HISTORY {
-        return content;
-    }
-    let original_chars = content.chars().count();
-    let kept = crate::util::truncate_str(&content, MAX_TOOL_OUTPUT_CHARS_FOR_HISTORY);
-    format!(
-        "{}\n\n[Tool output truncated by jcode: tool `{}` produced {} chars; kept first {} chars to protect the remote protocol, session history, and prompt cache. Redirect large logs to a file and read targeted sections.]",
-        kept, tool_name, original_chars, MAX_TOOL_OUTPUT_CHARS_FOR_HISTORY,
-    )
 }
 
 /// Build rendered side-pane images from a tool output's attached images.
@@ -81,7 +84,7 @@ pub(super) fn tool_output_to_content_blocks(
     let mut blocks = vec![ContentBlock::ToolResult {
         tool_use_id,
         content: output.output,
-        is_error: None,
+        is_error: output.is_error.then_some(true),
     }];
     for img in output.images {
         blocks.push(ContentBlock::Image {
@@ -138,31 +141,15 @@ pub(super) fn print_tool_summary(tool: &ToolCall) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
-    fn cap_tool_output_leaves_small_output_unchanged() {
-        let output = ToolOutput::new("short output");
-        let capped = cap_tool_output_for_history("bash", output.clone());
-        assert_eq!(capped.output, output.output);
-    }
-
-    #[test]
-    fn cap_tool_output_adds_visible_truncation_notice() {
-        let output = ToolOutput::new("x".repeat(MAX_TOOL_OUTPUT_CHARS_FOR_HISTORY + 10));
-        let capped = cap_tool_output_for_history("bash", output);
-        assert!(capped.output.len() < MAX_TOOL_OUTPUT_CHARS_FOR_HISTORY + 1_000);
-        assert!(capped.output.contains("Tool output truncated by jcode"));
-        assert!(capped.output.contains("tool `bash` produced"));
-        assert!(capped.output.contains("Redirect large logs to a file"));
-    }
-
-    #[test]
-    fn cap_sdk_tool_content_adds_same_notice() {
-        let capped = cap_sdk_tool_content_for_history(
-            "custom",
-            "y".repeat(MAX_TOOL_OUTPUT_CHARS_FOR_HISTORY + 10),
+    fn history_conversion_preserves_the_complete_delivered_body_and_error_flag() {
+        let text = format!("{}TAIL", "α".repeat(600_000));
+        let blocks = tool_output_to_content_blocks(
+            "tool-id".into(),
+            ToolOutput::new(&text).with_error(true),
         );
-        assert!(capped.contains("Tool output truncated by jcode"));
-        assert!(capped.contains("tool `custom` produced"));
+        assert!(
+            matches!(&blocks[0],ContentBlock::ToolResult{content,is_error:Some(true),..} if content==&text)
+        );
     }
 }

@@ -301,6 +301,7 @@ mod tests {
             tool: "fixture".into(),
             input: serde_json::json!({}),
             working_dir: None,
+            received_result_digest: None,
         };
         let PreparedInvocation::New(mut record) = store.prepare(&input, "owner")? else {
             panic!()

@@ -250,6 +250,7 @@ mod tests {
             tool: "command".into(),
             input: serde_json::json!({}),
             working_dir: None,
+            received_result_digest: None,
         };
         let PreparedInvocation::New(record) = store.prepare(&input, &parent.id)? else {
             panic!()

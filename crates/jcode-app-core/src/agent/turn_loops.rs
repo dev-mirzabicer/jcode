@@ -257,9 +257,11 @@ impl Agent {
                     Err(e) => {
                         let err_str = e.to_string();
                         memory_pending.restore_now();
-                        if self.provider_output_started()
-                            && (jcode_provider_core::is_request_payload_too_large_error(&err_str)
-                                || Self::is_context_limit_error(&err_str))
+                        if !sdk_tool_results.is_empty()
+                            || self.provider_output_started()
+                                && (jcode_provider_core::is_request_payload_too_large_error(
+                                    &err_str,
+                                ) || Self::is_context_limit_error(&err_str))
                         {
                             self.checkpoint_partial_provider_output(
                                 &text_content,
@@ -271,7 +273,8 @@ impl Agent {
                                 &generated_image_contexts,
                                 store_reasoning_content,
                                 None,
-                            )?;
+                            )
+                            .await?;
                         }
                         match self
                             .try_unattended_emergency_provider_recovery(&err_str, None)
@@ -532,6 +535,23 @@ impl Agent {
                         self.last_status_detail = Some(detail);
                     }
                     StreamEvent::RetryRollback { attempt, max } => {
+                        if !sdk_tool_results.is_empty() {
+                            self.checkpoint_partial_provider_output(
+                                &text_content,
+                                &reasoning_content,
+                                &reasoning_signature,
+                                &openai_reasoning_items,
+                                &tool_calls,
+                                &sdk_tool_results,
+                                &generated_image_contexts,
+                                store_reasoning_content,
+                                None,
+                            )
+                            .await?;
+                            anyhow::bail!(
+                                "Provider attempted to replay after returning SDK tool results. Received results were checkpointed; automatic replay stopped to avoid duplicate effects."
+                            );
+                        }
                         // Transient transport fault mid-stream; the provider is
                         // replaying the request. Discard this attempt's partial
                         // output so the replay doesn't duplicate it in history.
@@ -650,9 +670,11 @@ impl Agent {
                             eprintln!("[trace] stream_error {}", message);
                         }
                         memory_pending.restore_now();
-                        if self.provider_output_started()
-                            && (jcode_provider_core::is_request_payload_too_large_error(&message)
-                                || Self::is_context_limit_error(&message))
+                        if !sdk_tool_results.is_empty()
+                            || self.provider_output_started()
+                                && (jcode_provider_core::is_request_payload_too_large_error(
+                                    &message,
+                                ) || Self::is_context_limit_error(&message))
                         {
                             self.checkpoint_partial_provider_output(
                                 &text_content,
@@ -664,7 +686,8 @@ impl Agent {
                                 &generated_image_contexts,
                                 store_reasoning_content,
                                 None,
-                            )?;
+                            )
+                            .await?;
                         }
                         match self
                             .try_unattended_emergency_provider_recovery(&message, None)
@@ -981,6 +1004,11 @@ impl Agent {
                         }
                         // Fall through to local execution below
                     } else {
+                        let output = self
+                            .retain_sdk_result(&tc, &message_id, sdk_content, sdk_is_error)
+                            .await?;
+                        let sdk_content = output.output;
+                        let sdk_is_error = output.is_error;
                         if trace {
                             eprintln!(
                                 "[trace] using_sdk_result name={} id={} is_error={}",
@@ -1076,7 +1104,6 @@ impl Agent {
 
                 match result {
                     Ok(output) => {
-                        let output = cap_tool_output_for_history(&tc.name, output);
                         Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
                             session_id: self.session.id.clone(),
                             message_id: message_id.clone(),

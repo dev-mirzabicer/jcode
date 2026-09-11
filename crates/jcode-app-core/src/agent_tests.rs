@@ -2266,6 +2266,18 @@ async fn phase11_failed_retry_never_creates_a_second_emergency_transaction() {
 async fn phase11_retry_that_fails_after_output_is_audited_as_failed_not_succeeded() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().expect("temp dir");
+    struct RuntimeRoot(Option<std::ffi::OsString>);
+    impl Drop for RuntimeRoot {
+        fn drop(&mut self) {
+            if let Some(value) = self.0.take() {
+                crate::env::set_var("JCODE_RUNTIME_DIR", value);
+            } else {
+                crate::env::remove_var("JCODE_RUNTIME_DIR");
+            }
+        }
+    }
+    let _runtime_root = RuntimeRoot(std::env::var_os("JCODE_RUNTIME_DIR"));
+    crate::env::set_var("JCODE_RUNTIME_DIR", temp.path().join("runtime"));
     let prev_home = std::env::var_os("JCODE_HOME");
     crate::env::set_var("JCODE_HOME", temp.path());
 
@@ -2305,7 +2317,11 @@ async fn phase11_retry_that_fails_after_output_is_audited_as_failed_not_succeede
         .await
         .expect_err("retried stream fails after output starts");
     assert!(!format!("{error:#}").is_empty());
-    assert_eq!(provider_handle.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        provider_handle.calls.load(Ordering::SeqCst),
+        2,
+        "Unexpected recovery failure: {error:#}"
+    );
     assert_eq!(agent.context_view_state().transactions.len(), 1);
     assert!(matches!(
         agent.context_view_state().transactions[0]
@@ -4333,3 +4349,205 @@ async fn fable_guardrail_reconsideration_recovers_the_streaming_turn() {
 }
 
 include!("agent_tests/notification_queue.rs");
+
+#[derive(Clone, Copy)]
+enum SdkAfterResult {
+    Success,
+    Failure,
+    Rollback,
+}
+#[derive(Clone)]
+struct SuppliedResultProvider {
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+    largest_result: Arc<std::sync::atomic::AtomicUsize>,
+    body: String,
+    after_result: SdkAfterResult,
+}
+#[async_trait]
+impl Provider for SuppliedResultProvider {
+    async fn complete(
+        &self,
+        messages: &[Message],
+        _: &[ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<EventStream> {
+        use std::sync::atomic::Ordering;
+        for message in messages {
+            for block in &message.content {
+                if let ContentBlock::ToolResult { content, .. } = block {
+                    self.largest_result
+                        .fetch_max(content.len(), Ordering::SeqCst);
+                }
+            }
+        }
+        let first = self.calls.fetch_add(1, Ordering::SeqCst) == 0;
+        let body = self.body.clone();
+        let after_result = self.after_result;
+        let (tx, rx) = tokio_mpsc::channel(8);
+        tokio::spawn(async move {
+            let events = if first {
+                vec![
+                    StreamEvent::ToolUseStart {
+                        id: "sdk-result".into(),
+                        name: "external_result".into(),
+                    },
+                    StreamEvent::ToolInputDelta("{}".into()),
+                    StreamEvent::ToolUseEnd,
+                    StreamEvent::ToolResult {
+                        tool_use_id: "sdk-result".into(),
+                        content: body,
+                        is_error: false,
+                    },
+                    StreamEvent::MessageEnd {
+                        stop_reason: Some("tool_use".into()),
+                    },
+                ]
+            } else {
+                vec![
+                    StreamEvent::TextDelta("done".into()),
+                    StreamEvent::MessageEnd {
+                        stop_reason: Some("end_turn".into()),
+                    },
+                ]
+            };
+            for event in events {
+                if matches!(after_result, SdkAfterResult::Rollback)
+                    && matches!(event, StreamEvent::MessageEnd { .. })
+                {
+                    let _ = tx
+                        .send(Ok(StreamEvent::RetryRollback { attempt: 1, max: 2 }))
+                        .await;
+                    break;
+                }
+                if matches!(after_result, SdkAfterResult::Failure)
+                    && matches!(event, StreamEvent::MessageEnd { .. })
+                {
+                    let _ = tx
+                        .send(Err(anyhow::anyhow!(
+                            "synthetic provider failure after completed SDK work"
+                        )))
+                        .await;
+                    break;
+                }
+                if tx.send(Ok(event)).await.is_err() {
+                    break;
+                }
+            }
+        });
+        Ok(Box::pin(ReceiverStream::new(rx)))
+    }
+    fn name(&self) -> &str {
+        "supplied-result-fixture"
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+#[tokio::test]
+async fn supplied_provider_results_are_retained_before_history_and_mpsc_delivery() -> Result<()> {
+    let _guard = crate::storage::lock_test_env();
+    for streaming in [false, true] {
+        let body = format!("{}SDK_TAIL", "x".repeat(600_000));
+        let provider = SuppliedResultProvider {
+            calls: Default::default(),
+            largest_result: Default::default(),
+            body: body.clone(),
+            after_result: SdkAfterResult::Success,
+        };
+        let calls = provider.calls.clone();
+        let largest = provider.largest_result.clone();
+        let provider: Arc<dyn Provider> = Arc::new(provider);
+        let registry = Registry::new(provider.clone()).await;
+        let mut agent = Agent::new(provider, registry);
+        if streaming {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            agent
+                .run_once_streaming_mpsc("synthetic task", Vec::new(), None, tx)
+                .await?;
+            let mut results = 0;
+            while let Ok(event) = rx.try_recv() {
+                if let ServerEvent::ToolDone { id, output, .. } = event
+                    && id == "sdk-result"
+                {
+                    results += 1;
+                    assert!(
+                        output.len() < 40_000,
+                        "UI must not receive the unpresented SDK body"
+                    );
+                }
+            }
+            assert_eq!(results, 1);
+        } else {
+            agent.run_once_capture("synthetic task").await?;
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(largest.load(std::sync::atomic::Ordering::SeqCst) < 40_000);
+        let store = crate::execution::ExecutionStore::open(&crate::storage::jcode_dir()?)?;
+        let runs = store.list(agent.session_id(), None, 100)?;
+        let run = runs
+            .iter()
+            .find(|run| run.tool == "external_result")
+            .expect("Provider receipt must be durable");
+        assert_eq!(
+            std::fs::read_to_string(run.output_path.as_ref().unwrap())?,
+            body
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_failure_after_sdk_result_preserves_a_paired_retained_checkpoint() -> Result<()> {
+    let _guard = crate::storage::lock_test_env();
+    for (streaming, after_result) in [
+        (false, SdkAfterResult::Failure),
+        (true, SdkAfterResult::Failure),
+        (false, SdkAfterResult::Rollback),
+        (true, SdkAfterResult::Rollback),
+    ] {
+        let body = format!("{}PARTIAL_SDK_TAIL", "x".repeat(600_000));
+        let provider = SuppliedResultProvider {
+            calls: Default::default(),
+            largest_result: Default::default(),
+            body: body.clone(),
+            after_result,
+        };
+        let calls = provider.calls.clone();
+        let provider: Arc<dyn Provider> = Arc::new(provider);
+        let registry = Registry::new(provider.clone()).await;
+        let mut agent = Agent::new(provider, registry);
+        let result = if streaming {
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            agent
+                .run_once_streaming_mpsc("synthetic task", Vec::new(), None, tx)
+                .await
+                .map(|_| ())
+        } else {
+            agent.run_once_capture("synthetic task").await.map(|_| ())
+        };
+        assert!(result.is_err());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let store = crate::execution::ExecutionStore::open(&crate::storage::jcode_dir()?)?;
+        let runs = store.list(agent.session_id(), None, 100)?;
+        let record = runs
+            .iter()
+            .find(|run| run.tool == "external_result")
+            .expect("Received SDK body must survive provider failure");
+        assert_eq!(
+            std::fs::read_to_string(record.output_path.as_ref().unwrap())?,
+            body
+        );
+        let session = crate::session::Session::load(agent.session_id())?;
+        let uses = session
+            .messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .filter(|block| matches!(block,ContentBlock::ToolUse{id,..} if id=="sdk-result"))
+            .count();
+        let results=session.messages.iter().flat_map(|message|&message.content).filter(|block|matches!(block,ContentBlock::ToolResult{tool_use_id,..} if tool_use_id=="sdk-result")).count();
+        assert_eq!((uses, results), (1, 1));
+    }
+    Ok(())
+}
