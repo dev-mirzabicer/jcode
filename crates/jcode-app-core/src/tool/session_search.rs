@@ -1492,7 +1492,7 @@ fn build_external_context(
                 message_index: idx,
                 role: msg.role.clone(),
                 timestamp: msg.timestamp,
-                text: truncate_context_text(&msg.text),
+                text: msg.text.clone(),
             })
         })
         .collect()
@@ -1761,19 +1761,10 @@ fn build_jcode_context(
                 message_index: idx,
                 role: role_label(msg).to_string(),
                 timestamp: msg.timestamp,
-                text: truncate_context_text(&text),
+                text,
             })
         })
         .collect()
-}
-
-fn truncate_context_text(text: &str) -> String {
-    let trimmed = text.trim();
-    if trimmed.chars().count() <= 320 {
-        trimmed.to_string()
-    } else {
-        format!("{}...", trimmed.chars().take(320).collect::<String>())
-    }
 }
 
 fn searchable_message_text(msg: &StoredMessage, include_tools: bool) -> String {

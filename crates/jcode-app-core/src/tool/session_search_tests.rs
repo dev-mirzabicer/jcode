@@ -514,10 +514,11 @@ fn role_parser_accepts_all_as_default_all_roles_filter() {
 #[test]
 fn context_expansion_returns_neighboring_messages_without_matching_hit() {
     with_temp_home(|home| {
+        let before = format!("  context-before-line {} BEFORE_TAIL  ", "α".repeat(10_000));
         save_test_session(
             "context-session",
             vec![
-                (Role::User, vec![text("context-before-line")]),
+                (Role::User, vec![text(&before)]),
                 (Role::Assistant, vec![text("context-hit-needle")]),
                 (Role::User, vec![text("context-after-line")]),
             ],
@@ -532,6 +533,7 @@ fn context_expansion_returns_neighboring_messages_without_matching_hit() {
         assert_eq!(results[0].message_index, Some(1));
         assert_eq!(results[0].context.len(), 2);
         assert!(results[0].context[0].text.contains("context-before-line"));
+        assert_eq!(results[0].context[0].text, before);
         assert!(results[0].context[1].text.contains("context-after-line"));
     });
 }
@@ -539,6 +541,10 @@ fn context_expansion_returns_neighboring_messages_without_matching_hit() {
 #[test]
 fn external_codex_sessions_are_searchable_without_jcode_session_dir() {
     with_temp_home(|home| {
+        let before = format!(
+            "external before context {} EXTERNAL_TAIL",
+            "β".repeat(10_000)
+        );
         let codex_dir = home.join("external/.codex/sessions/2026/05/01");
         std::fs::create_dir_all(&codex_dir).expect("create codex dir");
         let lines = [
@@ -555,7 +561,7 @@ fn external_codex_sessions_are_searchable_without_jcode_session_dir() {
                 "id": "m1",
                 "role": "user",
                 "timestamp": "2026-05-01T00:01:00Z",
-                "content": [{"type": "input_text", "text": "external before context"}]
+                "content": [{"type": "input_text", "text": before}]
             }),
             json!({
                 "type": "message",
@@ -595,6 +601,7 @@ fn external_codex_sessions_are_searchable_without_jcode_session_dir() {
         assert_eq!(result.session_id, "codex:codex-test");
         assert_eq!(result.working_dir.as_deref(), Some("/tmp/external-project"));
         assert_eq!(result.message_id.as_deref(), Some("m2"));
+        assert!(result.context.iter().any(|line| line.text == before));
         assert!(
             result
                 .context

@@ -29,7 +29,6 @@ fn default_wait_return_on_progress() -> bool {
 
 const DEFAULT_TAIL_LINES: usize = 80;
 const DEFAULT_WAIT_PREVIEW_LINES: usize = 40;
-const MAX_OUTPUT_BYTES: usize = 50_000;
 
 pub struct BgTool;
 
@@ -301,36 +300,17 @@ fn tail_lines(output: &str, lines: usize) -> String {
     if lines == 0 {
         return String::new();
     }
-    let collected: Vec<&str> = output.lines().rev().take(lines).collect();
-    collected.into_iter().rev().collect::<Vec<_>>().join("\n")
+    let collected: Vec<&str> = output.split_inclusive('\n').rev().take(lines).collect();
+    collected.into_iter().rev().collect::<String>()
 }
 
-fn output_preview(
-    output: &str,
-    tail: Option<usize>,
-    working_dir: Option<&std::path::Path>,
-) -> (String, bool) {
+fn output_preview(output: &str, tail: Option<usize>) -> (String, bool) {
     if let Some(lines) = tail {
-        let tailed = tail_lines(output, lines);
-        let truncated = tailed.len() < output.len();
-        return (tailed, truncated);
+        let selected = tail_lines(output, lines);
+        let omitted = selected.len() < output.len();
+        return (selected, omitted);
     }
-
-    if output.len() > MAX_OUTPUT_BYTES {
-        let prose = super::background_notice::render(
-            Notification::BackgroundTaskOutputTruncated,
-            working_dir,
-        );
-        (
-            format!(
-                "{}...\n\n(Output truncated. {prose})",
-                crate::util::truncate_str(output, MAX_OUTPUT_BYTES)
-            ),
-            true,
-        )
-    } else {
-        (output.to_string(), false)
-    }
+    (output.to_string(), false)
 }
 
 fn wait_reason_label(reason: background::BackgroundTaskWaitReason) -> &'static str {
@@ -638,8 +618,7 @@ impl Tool for BgTool {
                         task_id
                     )
                 })?;
-                let (rendered, truncated) =
-                    output_preview(&output, tail, ctx.working_dir.as_deref());
+                let (rendered, truncated) = output_preview(&output, tail);
                 let status = manager.status(&task_id).await;
                 Ok(ToolOutput::new(rendered)
                     .with_title(format!("bg {} {}", action, task_id))
@@ -819,8 +798,7 @@ impl Tool for BgTool {
                                     .or(params.lines)
                                     .unwrap_or(DEFAULT_WAIT_PREVIEW_LINES),
                             );
-                            let (preview, truncated) =
-                                output_preview(&full_output, tail, ctx.working_dir.as_deref());
+                            let (preview, truncated) = output_preview(&full_output, tail);
                             if !preview.trim().is_empty() {
                                 output.push_str("\nOutput preview:\n```text\n");
                                 output.push_str(&preview);
@@ -872,19 +850,13 @@ mod tests {
     use anyhow::{Result, anyhow};
 
     #[test]
-    fn output_data_limit_does_not_clip_managed_guidance() {
-        let source = crate::tool::background_notice::TestHome::new();
-        let prose = "synthetic ".repeat(20_000);
-        source.write("background-task-output-truncated", &prose);
-        let (output, truncated) = output_preview(&"x".repeat(MAX_OUTPUT_BYTES + 1), None, None);
-        assert!(truncated);
-        assert!(output.contains(&prose));
-        source.write("background-task-output-truncated", "{{invalid}}");
-        let (output, truncated) = output_preview(&"x".repeat(MAX_OUTPUT_BYTES + 1), None, None);
-        assert!(truncated);
-        assert!(output.starts_with(&"x".repeat(MAX_OUTPUT_BYTES)));
-        assert!(output.contains("Background instruction rendering failed:"));
-        assert_eq!(output_preview("a\nb\nc", Some(2), None).0, "b\nc");
+    fn selected_background_output_is_complete_and_tail_keeps_exact_line_endings() {
+        let source = format!("{}TAIL\r\n", "x".repeat(100_000));
+        let (output, omitted) = output_preview(&source, None);
+        assert!(!omitted);
+        assert_eq!(output, source);
+        assert_eq!(output_preview("a\r\nb\r\nc\r\n", Some(2)).0, "b\r\nc\r\n");
+        assert_eq!(output_preview("a\nb\nc", Some(2)).0, "b\nc");
     }
 
     #[test]
