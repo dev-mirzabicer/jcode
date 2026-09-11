@@ -363,6 +363,15 @@ error or consumer drop cannot leave them detached. A deterministic test uses the
 actual Cursor HTTP/2 operation over a local duplex transport and verifies closure
 without another request. Existing frame/parser tests and strict lint pass.
 
+Claude CLI cancellation also covers serialized admission, retry backoff, input
+writes and a quiet process wait. Unix CLI processes own a private process group;
+Stop targets that group and waits for quiescence before reaping the leader.
+Request-local stderr tasks are not detached, and raw stderr is no longer copied
+into ordinary debug logs. Native tests use a local fake CLI with TERM-resistant
+descendants and verify that cancellation preserves earlier filesystem effects
+without allowing later effects. Full raw CLI ingress retention and non-Unix
+process-tree guarantees remain separate from these lifetime checks.
+
 OpenAI quiet SSE and WebSocket reads observe receiver closure directly. For a
 persistent WebSocket, cancellation reaches the existing response-chain cleanup
 while its state lock is still held, rather than clearing a possibly unrelated

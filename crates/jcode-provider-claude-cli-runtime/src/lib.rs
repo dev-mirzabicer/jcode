@@ -16,6 +16,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, LazyLock, RwLock};
+#[cfg(any(not(unix), test))]
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
@@ -26,6 +27,12 @@ use tokio_stream::wrappers::ReceiverStream;
 /// This prevents "ProcessTransport not ready for writing" errors
 /// that occur when multiple CLI instances run concurrently
 static CLAUDE_CLI_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+async fn acquire_cli_request(
+    tx: &mpsc::Sender<Result<StreamEvent>>,
+) -> Option<tokio::sync::MutexGuard<'static, ()>> {
+    tokio::select! {biased;_=tx.closed()=>None,guard=CLAUDE_CLI_LOCK.lock()=>Some(guard)}
+}
 
 const DEFAULT_MODEL: &str = "claude-opus-4-6";
 const DEFAULT_PERMISSION_MODE: &str = "bypassPermissions";
@@ -727,7 +734,7 @@ impl Provider for ClaudeProvider {
                         0
                     };
                     let delay = base_delay + std::time::Duration::from_millis(extra_delay);
-                    tokio::time::sleep(delay).await;
+                    tokio::select! {biased;_=tx.closed()=>return,_=tokio::time::sleep(delay)=>{}};
                     jcode_base::logging::info(&format!(
                         "Retrying Claude CLI request (attempt {}/{}, delay {}ms)",
                         attempt + 1,
@@ -738,7 +745,9 @@ impl Provider for ClaudeProvider {
 
                 // Acquire the global lock to serialize Claude CLI requests
                 // This prevents "ProcessTransport not ready for writing" errors
-                let _guard = CLAUDE_CLI_LOCK.lock().await;
+                let Some(_guard) = acquire_cli_request(&tx).await else {
+                    return;
+                };
 
                 match run_claude_cli(
                     config.clone(),
@@ -939,6 +948,9 @@ async fn run_claude_cli(
     tx: mpsc::Sender<Result<StreamEvent>>,
 ) -> Result<()> {
     let mut cmd = Command::new(&config.cli_path);
+    if tx.is_closed() {
+        return Ok(());
+    }
     cmd.arg("-p")
         .arg("--verbose")
         .arg("--output-format")
@@ -977,14 +989,19 @@ async fn run_claude_cli(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
+    #[cfg(unix)]
+    let mut child = jcode_base::execution::owned_child::OwnedChild::spawn(&mut cmd)
+        .with_context(|| format!("Failed to spawn owned Claude CLI using {}", config.cli_path))?;
+    #[cfg(not(unix))]
     let mut child = cmd
         .spawn()
         .with_context(|| format!("Failed to spawn Claude CLI using {}", config.cli_path))?;
 
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("Failed to capture Claude CLI stdin"))?;
+    #[cfg(unix)]
+    let stdin = child.stdin();
+    #[cfg(not(unix))]
+    let stdin = child.stdin.take();
+    let mut stdin = stdin.ok_or_else(|| anyhow::anyhow!("Failed to capture Claude CLI stdin"))?;
 
     let payload = serde_json::json!({
         "type": "user",
@@ -994,41 +1011,57 @@ async fn run_claude_cli(
         }
     });
 
-    async fn terminate_child(child: &mut tokio::process::Child) {
-        let _ = child.kill().await;
-        let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+    #[cfg(unix)]
+    async fn terminate_child(
+        child: &mut jcode_base::execution::owned_child::OwnedChild,
+    ) -> Result<()> {
+        child.stop().await?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    async fn terminate_child(child: &mut tokio::process::Child) -> Result<()> {
+        child.kill().await?;
+        tokio::time::timeout(Duration::from_secs(2), child.wait()).await??;
+        Ok(())
     }
 
-    if let Err(err) = async {
+    let input = async {
         stdin.write_all(payload.to_string().as_bytes()).await?;
         stdin.write_all(b"\n").await?;
         stdin.flush().await?;
         Ok::<(), std::io::Error>(())
-    }
-    .await
-    {
-        terminate_child(&mut child).await;
+    };
+    let written = tokio::select! {
+        _=tx.closed()=>Err(std::io::Error::new(std::io::ErrorKind::Interrupted,"CLI request cancelled before input was sent")),
+        result=input=>result,
+    };
+    if let Err(err) = written {
+        terminate_child(&mut child).await?;
         return Err(err.into());
     }
     drop(stdin);
 
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("Failed to capture Claude CLI stdout"))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("Failed to capture Claude CLI stderr"))?;
+    #[cfg(unix)]
+    let stdout = child.stdout();
+    #[cfg(not(unix))]
+    let stdout = child.stdout.take();
+    let stdout = stdout.ok_or_else(|| anyhow::anyhow!("Failed to capture Claude CLI stdout"))?;
+    #[cfg(unix)]
+    let stderr = child.stderr();
+    #[cfg(not(unix))]
+    let stderr = child.stderr.take();
+    let stderr = stderr.ok_or_else(|| anyhow::anyhow!("Failed to capture Claude CLI stderr"))?;
 
-    let tx_stderr = tx.clone();
-    tokio::spawn(async move {
-        let mut reader = BufReader::new(stderr).lines();
-        while let Ok(Some(line)) = reader.next_line().await {
-            jcode_base::logging::debug(&format!("[claude-cli] {}", line));
-        }
-        drop(tx_stderr);
-    });
+    let _stderr_task =
+        jcode_provider_core::request_lifetime::RequestSubtask::new(tokio::spawn(async move {
+            let mut reader = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                jcode_base::logging::debug(&format!(
+                    "[claude-cli] received {} stderr bytes",
+                    line.len()
+                ));
+            }
+        }));
 
     let mut reader = BufReader::new(stdout).lines();
     let mut parser = CliOutputParser::new();
@@ -1037,7 +1070,7 @@ async fn run_claude_cli(
     loop {
         tokio::select! {
             _ = tx.closed() => {
-                terminate_child(&mut child).await;
+                terminate_child(&mut child).await?;
                 return Ok(());
             }
             line = reader.next_line() => {
@@ -1055,7 +1088,7 @@ async fn run_claude_cli(
                             if let StreamEvent::Error { message, .. } = &event {
                                 let err_lower = message.to_lowercase();
                                 if !saw_output && is_retryable_error(&err_lower) {
-                                    terminate_child(&mut child).await;
+                                    terminate_child(&mut child).await?;
                                     return Err(anyhow::anyhow!(message.clone()));
                                 }
                             }
@@ -1077,7 +1110,7 @@ async fn run_claude_cli(
                             }
 
                             if tx.send(Ok(event)).await.is_err() {
-                                terminate_child(&mut child).await;
+                                terminate_child(&mut child).await?;
                                 return Ok(());
                             }
                         }
@@ -1088,7 +1121,7 @@ async fn run_claude_cli(
                             retry_after_secs: None,
                         };
                         if tx.send(Ok(event)).await.is_err() {
-                            terminate_child(&mut child).await;
+                            terminate_child(&mut child).await?;
                             return Ok(());
                         }
                     }
@@ -1097,7 +1130,10 @@ async fn run_claude_cli(
         }
     }
 
-    let status = child.wait().await?;
+    let status = tokio::select! {
+        status=child.wait()=>status?,
+        _=tx.closed()=>{terminate_child(&mut child).await?;return Ok(());},
+    };
     if !status.success() {
         let event = StreamEvent::Error {
             message: format!("Claude CLI exited with status {}", status),
@@ -1186,6 +1222,102 @@ fn to_internal_tool_name(name: &str) -> String {
 #[cfg(test)]
 mod context_validation_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cancelled_cli_admission_does_not_wait_for_the_current_request() {
+        let _current = CLAUDE_CLI_LOCK.lock().await;
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), acquire_cli_request(&tx))
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_cli_request_does_not_spawn_a_child() -> Result<()> {
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        run_claude_cli(
+            ClaudeCliConfig {
+                cli_path: "/nonexistent/never-spawn-this-cli".into(),
+                model: "fixture".into(),
+                permission_mode: None,
+                include_partial_messages: false,
+            },
+            "fixture".into(),
+            Vec::new(),
+            String::new(),
+            None,
+            "fixture".into(),
+            None,
+            tx,
+        )
+        .await
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cli_consumer_drop_stops_descendants_and_preserves_completed_effects() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = TestDir::new();
+        let script = directory.path().join("fixture-cli");
+        std::fs::write(
+            &script,
+            r##"#!/bin/sh
+read request
+echo $$ > leader
+printf before > completed
+trap '' TERM
+(trap '' TERM; sleep 30; printf escaped > escaped) &
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"fixture ready"}]}}'
+wait
+"##,
+        )?;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))?;
+        let config = ClaudeCliConfig {
+            cli_path: script.to_string_lossy().into_owned(),
+            model: "fixture".into(),
+            permission_mode: None,
+            include_partial_messages: false,
+        };
+        let (tx, mut rx) = mpsc::channel(16);
+        let cwd = directory.path().to_path_buf();
+        let task = jcode_provider_core::request_lifetime::RequestSubtask::new(tokio::spawn(
+            run_claude_cli(
+                config,
+                "fixture".into(),
+                Vec::new(),
+                "synthetic".into(),
+                None,
+                "fixture".into(),
+                Some(cwd),
+                tx,
+            ),
+        ));
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await?
+                .context("Fixture closed before output")??;
+            if matches!(event,StreamEvent::TextDelta(text) if text=="fixture ready") {
+                break;
+            }
+        }
+        let pid = std::fs::read_to_string(directory.path().join("leader"))?
+            .trim()
+            .parse::<u32>()?;
+        drop(rx);
+        tokio::time::timeout(Duration::from_secs(5), task.finish()).await???;
+        assert!(!jcode_base::platform::process_group_has_live_members(pid).await?);
+        assert_eq!(
+            std::fs::read(directory.path().join("completed"))?,
+            b"before"
+        );
+        assert!(!directory.path().join("escaped").exists());
+        Ok(())
+    }
 
     #[test]
     fn host_native_policy_matches_the_actual_cli_tool_exclusions() {

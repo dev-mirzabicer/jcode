@@ -10,6 +10,8 @@ pub mod control_transport;
 mod managed_read;
 mod output;
 #[cfg(unix)]
+pub mod owned_child;
+#[cfg(unix)]
 pub mod process;
 pub mod reader;
 mod recovery;
