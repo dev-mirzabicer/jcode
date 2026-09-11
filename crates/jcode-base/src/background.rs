@@ -19,6 +19,7 @@ use tokio::sync::{RwLock, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant as TokioInstant, MissedTickBehavior};
 
+mod managed;
 mod model;
 
 pub use model::{
@@ -57,6 +58,7 @@ impl Drop for AbortAdoptedOnDrop {
 pub struct BackgroundTaskManager {
     tasks: Arc<RwLock<HashMap<String, RunningTask>>>,
     output_dir: PathBuf,
+    managed: Arc<RwLock<HashMap<String, Arc<dyn jcode_tool_core::OwnedExecutionControl>>>>,
 }
 
 impl BackgroundTaskManager {
@@ -68,6 +70,7 @@ impl BackgroundTaskManager {
         Self {
             tasks: Arc::new(RwLock::new(HashMap::new())),
             output_dir,
+            managed: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -675,19 +678,37 @@ impl BackgroundTaskManager {
         session_id: &str,
         handle: JoinHandle<Result<jcode_tool_types::ToolOutput>>,
         control: Arc<dyn jcode_tool_core::OwnedExecutionControl>,
-    ) -> BackgroundTaskInfo {
-        self.adopt_impl(
-            Adoption {
-                tool_name: tool_name.into(),
-                display_name: None,
-                session_id: session_id.into(),
-                notify: true,
-                wake: false,
-            },
-            handle,
-            Some(control),
-        )
-        .await
+    ) -> Result<BackgroundTaskInfo> {
+        self.adopt_controlled_with_delivery(tool_name, session_id, handle, control, (true, false))
+            .await
+    }
+
+    pub async fn adopt_controlled_with_delivery(
+        &self,
+        tool_name: &str,
+        session_id: &str,
+        handle: JoinHandle<Result<jcode_tool_types::ToolOutput>>,
+        control: Arc<dyn jcode_tool_core::OwnedExecutionControl>,
+        delivery: (bool, bool),
+    ) -> Result<BackgroundTaskInfo> {
+        if let Some(id) = control.execution_id() {
+            return self
+                .register_managed(&id, tool_name, session_id, handle, control, delivery)
+                .await;
+        }
+        Ok(self
+            .adopt_impl(
+                Adoption {
+                    tool_name: tool_name.into(),
+                    display_name: None,
+                    session_id: session_id.into(),
+                    notify: delivery.0,
+                    wake: delivery.1,
+                },
+                handle,
+                Some(control),
+            )
+            .await)
     }
 
     async fn adopt_impl(
@@ -944,6 +965,12 @@ impl BackgroundTaskManager {
             }
         }
 
+        match self.managed_statuses().await {
+            Ok(managed) => results.extend(managed),
+            Err(error) => crate::logging::warn(&format!(
+                "Execution background metadata unavailable: {error}"
+            )),
+        }
         // Sort by task_id (which includes timestamp)
         results.sort_by(|a, b| b.task_id.cmp(&a.task_id));
         results
@@ -951,6 +978,9 @@ impl BackgroundTaskManager {
 
     /// Get status of a specific task
     pub async fn status(&self, task_id: &str) -> Option<TaskStatusFile> {
+        if task_id.starts_with("run-") {
+            return self.managed_status(task_id).await.ok().flatten();
+        }
         let status_path = self.status_path_for(task_id);
         let status = self.read_status_file(&status_path).await?;
         let status = self
@@ -964,6 +994,12 @@ impl BackgroundTaskManager {
 
     /// Best-effort synchronous check for whether a task is still live in this process.
     pub fn is_live_task(&self, task_id: &str) -> bool {
+        if task_id.starts_with("run-") {
+            return self
+                .managed
+                .try_read()
+                .is_ok_and(|tasks| tasks.contains_key(task_id));
+        }
         let Ok(tasks) = self.tasks.try_read() else {
             return false;
         };
@@ -972,6 +1008,23 @@ impl BackgroundTaskManager {
 
     /// Get full output of a task
     pub async fn output(&self, task_id: &str) -> Option<String> {
+        if task_id.starts_with("run-") {
+            let root = crate::storage::jcode_dir().ok()?;
+            let id = task_id.to_string();
+            return tokio::task::spawn_blocking(move || {
+                let record = crate::execution::ExecutionStore::open(&root)?
+                    .inspect(&id)?
+                    .ok_or_else(|| anyhow::anyhow!("Unknown execution"))?;
+                Ok::<_, anyhow::Error>(std::fs::read_to_string(
+                    record
+                        .output_path
+                        .ok_or_else(|| anyhow::anyhow!("Output not captured"))?,
+                )?)
+            })
+            .await
+            .ok()?
+            .ok();
+        }
         let output_path = self.output_path_for(task_id);
         fs::read_to_string(&output_path).await.ok()
     }
@@ -1198,6 +1251,16 @@ impl BackgroundTaskManager {
         notify: bool,
         wake: bool,
     ) -> Result<Option<TaskStatusFile>> {
+        if task_id.starts_with("run-") {
+            let id = task_id.to_string();
+            let root = crate::storage::jcode_dir()?;
+            tokio::task::spawn_blocking(move || {
+                crate::execution::ExecutionStore::open(&root)?
+                    .update_background_delivery(&id, notify, wake)
+            })
+            .await??;
+            return self.managed_status(task_id).await;
+        }
         let (notify, wake) = normalize_delivery(notify, wake);
         let status_path = self.status_path_for(task_id);
         let Some(mut status) = self.read_status_file(&status_path).await else {
@@ -1257,13 +1320,14 @@ impl BackgroundTaskManager {
         let manager = Self {
             tasks: Arc::clone(&self.tasks),
             output_dir: self.output_dir.clone(),
+            managed: self.managed.clone(),
         };
         let id = task_id.to_string();
         // Dropping a cancel/wait caller does not detach the real work from its
         // stop owner. This supervisor completes publication or restores the join.
         tokio::spawn(async move {
             if let Some(control)=&control {
-                if let Err(error)=control.request_stop(cause) {
+                if let Err(error)=control.request_stop(cause).await {
                     if let Some(task)=manager.tasks.write().await.get_mut(&id) {task.handle=Some(handle);}
                     return Err(error);
                 }
@@ -1316,6 +1380,9 @@ impl BackgroundTaskManager {
         task_id: &str,
         _graceful_timeout: std::time::Duration,
     ) -> Result<bool> {
+        if task_id.starts_with("run-") {
+            return self.cancel_managed(task_id).await;
+        }
         if let Some(stopped) = self
             .stop_live_task(task_id, jcode_tool_types::StopCause::HumanCancellation)
             .await?
@@ -1381,6 +1448,7 @@ impl BackgroundTaskManager {
     ///
     /// Returns the number of tasks finalized.
     pub async fn abort_live_tasks_for_reload(&self) -> Result<usize> {
+        self.quiesce_managed_for_reload().await?;
         let ids: Vec<String> = self.tasks.read().await.keys().cloned().collect();
         let mut stopped = 0;
         let mut failures = Vec::new();

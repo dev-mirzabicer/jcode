@@ -61,6 +61,7 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     // no paint at all, which drops the animation to whatever unrelated events
     // happen to trigger (~4fps in practice).
     let mut needs_redraw = crate::tui::periodic_redraw_required(app);
+    needs_redraw |= super::local_delivery::drain(app);
     needs_redraw |= app.dispatch_local_instruction_request();
     needs_redraw |= app.drain_local_context_events();
     needs_redraw |= app.dispatch_local_context_editor_actions();
@@ -152,6 +153,12 @@ pub(super) fn handle_bus_event(
 ) -> bool {
     match bus_event {
         Ok(BusEvent::BackgroundTaskCompleted(task)) => {
+            if task.task_id.starts_with("run-") {
+                if task.session_id == app.session.id {
+                    app.local_delivery.submit(task);
+                }
+                return true;
+            }
             handle_background_task_completed(app, task);
             true
         }

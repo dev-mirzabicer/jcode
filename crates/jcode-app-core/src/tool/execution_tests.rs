@@ -19,6 +19,25 @@ impl Drop for DropMarker {
 }
 #[async_trait]
 impl Tool for FixtureTool {
+    fn execution_policy(
+        &self,
+        input: &Value,
+        _: &ToolContext,
+    ) -> Result<jcode_tool_core::ExecutionPolicy> {
+        Ok(jcode_tool_core::ExecutionPolicy {
+            background: input
+                .get("background")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            foreground_timeout: input
+                .get("foreground_timeout")
+                .and_then(Value::as_u64)
+                .map(std::time::Duration::from_millis),
+            notify: false,
+            wake: false,
+            ..Default::default()
+        })
+    }
     fn name(&self) -> &str {
         "execution_fixture"
     }
@@ -55,6 +74,35 @@ impl Tool for FixtureTool {
         }
         Ok(output.with_error(input.get("fail").and_then(Value::as_bool).unwrap_or(false)))
     }
+}
+
+#[tokio::test]
+async fn explicit_background_and_foreground_deadline_return_one_retained_acceptance()
+-> anyhow::Result<()> {
+    for input in [
+        serde_json::json!({"background":true}),
+        serde_json::json!({"foreground_timeout":20}),
+    ] {
+        let (registry, tool, started) = fixture("full background result".into(), true, true).await;
+        let ctx = context();
+        let id = crate::execution::invocation_id(&ctx);
+        let output = registry
+            .execute("execution_fixture", input.clone(), ctx.clone())
+            .await?;
+        started.await?;
+        let OutputSource::Acceptance(reference) = &output.source else {
+            panic!("Expected acceptance receipt")
+        };
+        assert!(reference.path.exists());
+        assert_eq!(reference.invocation_id, id);
+        tool.release.as_ref().unwrap().notify_one();
+        let record = crate::execution::wait_for(&id).await?;
+        assert_eq!(record.state, crate::execution::RunState::Completed);
+        let replay = registry.execute("execution_fixture", input, ctx).await?;
+        assert_eq!(replay.output, output.output);
+        assert_eq!(tool.count.load(Ordering::SeqCst), 1);
+    }
+    Ok(())
 }
 
 #[tokio::test]
@@ -382,7 +430,7 @@ async fn compatibility_background_cancel_stops_the_actual_supervised_run() -> an
         crate::background::BackgroundTaskManager::with_output_dir(dir.path().to_path_buf());
     let task = manager
         .adopt_controlled("execution_fixture", &session, call, control)
-        .await;
+        .await?;
     assert!(manager.cancel(&task.task_id).await?);
     let record = crate::execution::wait_for(&id).await?;
     assert_eq!(record.state, crate::execution::RunState::Cancelled);
@@ -457,5 +505,148 @@ async fn bg_controls_and_reads_a_foreground_run_by_durable_identity() -> anyhow:
         .await?;
     assert_eq!(wait.metadata.unwrap()["run"]["state"], "cancelled");
     assert_eq!(tool.count.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn native_bash_retains_full_output_and_backgrounds_the_same_command() -> anyhow::Result<()> {
+    let registry = Registry::new(Arc::new(MockProvider)).await;
+    let directory = tempfile::tempdir()?;
+    for background in [true, false] {
+        let mut ctx = context();
+        ctx.working_dir = Some(directory.path().into());
+        let id = crate::execution::invocation_id(&ctx);
+        let marker = if background { "explicit" } else { "promoted" };
+        let input = serde_json::json!({"command":format!("printf x >> {marker}; python3 -c 'import sys; sys.stdout.write(\"z\"*160000+\"TAIL\"); sys.stderr.write(\"ERROR_TAIL\")'; sleep 1; printf FINISHED"),"run_in_background":background,"timeout":if background{None}else{Some(20)},"notify":false,"wake":false});
+        let output = registry.execute("bash", input.clone(), ctx.clone()).await?;
+        assert!(matches!(output.source, OutputSource::Acceptance(_)));
+        let completed = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            crate::execution::wait_for(&id),
+        )
+        .await??;
+        assert_eq!(completed.state, crate::execution::RunState::Completed);
+        let path = completed.output_path.unwrap();
+        let stdout = std::fs::read_to_string(path.with_file_name("stdout.bin"))?;
+        assert!(stdout.contains(&format!("{}TAIL", "z".repeat(160000))));
+        assert!(stdout.ends_with("FINISHED"));
+        assert_eq!(
+            std::fs::read(path.with_file_name("stderr.bin"))?,
+            b"ERROR_TAIL"
+        );
+        let replay = registry.execute("bash", input, ctx).await?;
+        assert_eq!(replay.output, output.output);
+        assert_eq!(std::fs::read(directory.path().join(marker))?, b"x");
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn captured_bash_keeps_the_existing_stdin_request_workflow() -> anyhow::Result<()> {
+    let registry = Registry::new(Arc::new(MockProvider)).await;
+    let (requests, mut input) = tokio::sync::mpsc::unbounded_channel();
+    let mut ctx = context();
+    ctx.stdin_request_tx = Some(requests);
+    let task = tokio::spawn(async move {
+        registry.execute("bash",serde_json::json!({"command":"read value; printf 'received:%s' \"$value\"","notify":false,"wake":false}),ctx).await
+    });
+    let request = match tokio::time::timeout(std::time::Duration::from_secs(10), input.recv()).await
+    {
+        Ok(Some(request)) => request,
+        _ => {
+            task.abort();
+            anyhow::bail!("Existing native stdin detector did not produce a request");
+        }
+    };
+    request.response_tx.send("synthetic input".into()).unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), task).await???;
+    assert!(result.output.contains("received:synthetic input"));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn native_background_status_survives_reload_quiescence_and_manager_recreation()
+-> anyhow::Result<()> {
+    let registry = Registry::new(Arc::new(MockProvider)).await;
+    let directory = tempfile::tempdir()?;
+    let mut ctx = context();
+    ctx.working_dir = Some(directory.path().into());
+    let id = crate::execution::invocation_id(&ctx);
+    registry.execute("bash",serde_json::json!({"command":"printf x >> effects; sleep 2; printf finished","run_in_background":true,"notify":false,"wake":false}),ctx).await?;
+    assert_eq!(
+        crate::background::global()
+            .abort_live_tasks_for_reload()
+            .await?,
+        0
+    );
+    let manager = crate::background::BackgroundTaskManager::with_output_dir(
+        directory.path().join("new-manager"),
+    );
+    let active = manager.status(&id).await.unwrap();
+    assert_eq!(active.status, crate::bus::BackgroundTaskStatus::Running);
+    assert!(!active.notify && !active.wake);
+    let completed = manager
+        .wait(&id, Some(std::time::Duration::from_secs(10)), false)
+        .await
+        .unwrap();
+    assert_eq!(
+        completed.task.status,
+        crate::bus::BackgroundTaskStatus::Completed
+    );
+    assert!(manager.output(&id).await.unwrap().ends_with("finished"));
+    assert_eq!(std::fs::read(directory.path().join("effects"))?, b"x");
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn foreground_reload_returns_a_durable_background_receipt_without_stopping_command()
+-> anyhow::Result<()> {
+    let registry = Registry::new(Arc::new(MockProvider)).await;
+    let directory = tempfile::tempdir()?;
+    let mut ctx = context();
+    ctx.working_dir = Some(directory.path().into());
+    let stop = jcode_agent_runtime::InterruptSignal::new();
+    ctx.graceful_shutdown_signal = Some(stop.clone());
+    let id = crate::execution::invocation_id(&ctx);
+    let task = tokio::spawn(async move {
+        registry.execute("bash",serde_json::json!({"command":"printf x >> effects; printf before; printf ready > ready; sleep 2; printf after","notify":false,"wake":false}),ctx).await
+    });
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !directory.path().join("ready").exists() {
+        if tokio::time::Instant::now() > deadline {
+            task.abort();
+            anyhow::bail!("Native command did not start");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    stop.fire_with_cause(StopCause::ReloadQuiescence);
+    let output = tokio::time::timeout(std::time::Duration::from_secs(5), task).await???;
+    assert!(matches!(output.source, OutputSource::Acceptance(_)));
+    assert_eq!(
+        crate::background::global()
+            .abort_live_tasks_for_reload()
+            .await?,
+        0
+    );
+    let completed = crate::background::global()
+        .wait(&id, Some(std::time::Duration::from_secs(10)), false)
+        .await
+        .unwrap();
+    assert_eq!(
+        completed.task.status,
+        crate::bus::BackgroundTaskStatus::Completed
+    );
+    assert!(
+        crate::background::global()
+            .output(&id)
+            .await
+            .unwrap()
+            .ends_with("after")
+    );
+    assert_eq!(std::fs::read(directory.path().join("effects"))?, b"x");
     Ok(())
 }

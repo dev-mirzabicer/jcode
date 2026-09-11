@@ -42,6 +42,18 @@ pub(super) async fn execute(params: BgInput, ctx: ToolContext) -> Result<ToolOut
         );
     }
     match action {
+        "watch" | "delivery" | "subscribe" => {
+            let status = background::global()
+                .update_delivery(
+                    id,
+                    params.notify.unwrap_or(true),
+                    params.wake.unwrap_or(true),
+                )
+                .await?
+                .context("Unknown background delivery")?;
+            Ok(ToolOutput::new(serde_json::to_string_pretty(&status)?)
+                .with_metadata(serde_json::to_value(status)?))
+        }
         "status" => Ok(ToolOutput::new(serde_json::to_string_pretty(&record)?)
             .with_metadata(serde_json::to_value(&record)?)),
         "cancel" => {

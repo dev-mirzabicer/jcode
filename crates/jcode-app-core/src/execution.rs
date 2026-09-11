@@ -13,6 +13,10 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use tokio::sync::{mpsc, oneshot, watch};
+#[cfg(unix)]
+pub mod command;
+#[cfg(unix)]
+pub mod command_worker;
 mod runtime;
 pub use runtime::{ControlOperation, ControlReply, control};
 
@@ -42,6 +46,8 @@ struct LiveRun {
     invocation: Invocation,
     stop: InterruptSignal,
     background: AtomicBool,
+    ready: jcode_tool_core::ExecutionReady,
+    delivery: tokio::sync::Mutex<()>,
     commands: mpsc::UnboundedSender<Command>,
     result: watch::Receiver<Option<Arc<Completion>>>,
 }
@@ -103,6 +109,7 @@ pub(crate) async fn execute(
     producer: Producer,
 ) -> Result<ToolOutput> {
     let root = crate::storage::jcode_dir()?;
+    let policy = ctx.invocation.policy.clone();
     let store = tokio::task::spawn_blocking(move || ExecutionStore::open(&root)).await??;
     let runtime = runtime::ensure_running(&store).await?;
     let key = (store.root().to_path_buf(), invocation.id());
@@ -122,7 +129,9 @@ pub(crate) async fn execute(
                 runtime,
                 invocation,
                 stop: InterruptSignal::new(),
-                background: AtomicBool::new(false),
+                background: AtomicBool::new(policy.background),
+                ready: Default::default(),
+                delivery: Default::default(),
                 commands,
                 result: subscription,
             });
@@ -155,10 +164,19 @@ pub(crate) async fn execute(
         armed: created,
     };
     let mut receiver = run.result.clone();
+    let mut deadline = policy.background.then(tokio::time::Instant::now);
     loop {
+        if deadline.is_none() && run.ready.is_ready() {
+            deadline = policy
+                .foreground_timeout
+                .map(|duration| tokio::time::Instant::now() + duration);
+        }
         let completed = receiver.borrow_and_update().clone();
         if let Some(completed) = completed {
             wait.armed = false;
+            if policy.background && run.ready.is_ready() && !completed.failed {
+                return background_receipt(run.clone(), &policy, target).await;
+            }
             if completed.failed {
                 return Err(CapturedToolError {
                     output: completed.output.clone(),
@@ -167,11 +185,108 @@ pub(crate) async fn execute(
             }
             return Ok(completed.output.clone());
         }
-        receiver
-            .changed()
-            .await
-            .context("Execution owner closed before a result was available")?;
+        tokio::select! {
+            _=run.ready.wait(),if !run.ready.is_ready()=>{}
+            changed=receiver.changed()=>{changed.context("Execution owner closed before a result was available")?;}
+            _=async {if let Some(at)=deadline{tokio::time::sleep_until(at).await}else{std::future::pending::<()>().await}}=>{
+                while !run.ready.is_ready() {
+                    if receiver.borrow_and_update().is_some(){break;}
+                    tokio::select!{_=run.ready.wait()=>{},changed=receiver.changed()=>{changed?;}}
+                }
+                if run.ready.is_ready(){
+                    let receipt=background_receipt(run.clone(),&policy,target).await?;
+                    wait.armed=false;
+                    return Ok(receipt);
+                }
+            }
+        }
     }
+}
+
+async fn background_receipt(
+    run: Arc<LiveRun>,
+    policy: &jcode_tool_core::ExecutionPolicy,
+    target: NonZeroUsize,
+) -> Result<ToolOutput> {
+    let _delivery = run.delivery.lock().await;
+    let id = run.invocation.id();
+    let existing = {
+        let store = run.store.clone();
+        let id = id.clone();
+        tokio::task::spawn_blocking(move || store.acceptance_result(&id)).await??
+    };
+    if let Some(output) = existing {
+        return Ok(output);
+    }
+    if !run.background.load(Ordering::SeqCst) && !promote(&id).await? {
+        let store = run.store.clone();
+        let id = id.clone();
+        let output = tokio::task::spawn_blocking(move || {
+            store.result(
+                &store
+                    .inspect(&id)?
+                    .context("Invocation disappeared during promotion")?,
+                target,
+            )
+        })
+        .await??;
+        if output.is_error {
+            return Err(CapturedToolError { output }.into());
+        }
+        return Ok(output);
+    }
+    let store = run.store.clone();
+    let requester = run.runtime.endpoint.id.clone();
+    let receipt_id = id.clone();
+    let control = Arc::new(BackgroundControl { run: run.clone() });
+    let completion = run.clone();
+    let handle = tokio::spawn(async move {
+        let mut receiver = completion.result.clone();
+        loop {
+            if let Some(completed) = receiver.borrow_and_update().clone() {
+                if completed.failed {
+                    return Err(CapturedToolError {
+                        output: completed.output.clone(),
+                    }
+                    .into());
+                }
+                return Ok(completed.output.clone());
+            }
+            receiver.changed().await?;
+        }
+    });
+    crate::background::global()
+        .adopt_controlled_with_delivery(
+            &run.invocation.tool,
+            &run.invocation.session_id,
+            handle,
+            control,
+            (policy.notify, policy.wake),
+        )
+        .await?;
+    let output =
+        tokio::task::spawn_blocking(move || store.background_acceptance(&receipt_id, &requester))
+            .await??;
+    Ok(output)
+}
+
+#[cfg(unix)]
+pub(crate) async fn background_handoff(ctx: &ToolContext) -> Result<ToolOutput> {
+    let root = crate::storage::jcode_dir()?.join("execution");
+    let run = LIVE
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(&(root, invocation_id(ctx)))
+        .cloned()
+        .context("Background handoff lost its live invocation")?;
+    background_receipt(
+        run,
+        &ctx.invocation.policy,
+        ctx.invocation
+            .output_target
+            .context("Missing presentation target")?,
+    )
+    .await
 }
 
 async fn supervise(
@@ -194,6 +309,8 @@ async fn supervise(
         PreparedInvocation::Existing(record) => {
             let store = store.clone();
             return tokio::task::spawn_blocking(move||{
+                if let Some(output)=store.acceptance_result(&record.id)? {return Ok(Completion{output,failed:false});}
+                if store.background_delivery(&record.id)?.is_some() {return Ok(Completion{output:store.background_acceptance(&record.id,&record.owner)?,failed:false});}
                 let record=if record.state.terminal(){record}else{store.recover_terminal_output(&record.id)
                     .context("Invocation already exists without a proven completed result; inspect its owner instead of reexecuting")?};
                 let failed=record.state!=RunState::Completed;
@@ -205,9 +322,14 @@ async fn supervise(
         let store = store.clone();
         let record = record.clone();
         let config = crate::config::config().output.storage.clone();
+        let mode = ctx.invocation.policy.capture;
+        let background = ctx.invocation.policy.background;
         tokio::task::spawn_blocking(move || {
             store.start(&record.id, &record.owner)?;
-            if record.tool == "read" {
+            if background {
+                store.promote(&record.id, &record.owner)?;
+            }
+            if mode != jcode_tool_core::CaptureMode::Complete {
                 Ok(None)
             } else {
                 Capture::create(store, record, config).map(|capture| Some(Arc::new(capture)))
@@ -235,12 +357,23 @@ async fn supervise(
         }
     };
     let parent = ctx.graceful_shutdown_signal.clone();
+    let native_command =
+        ctx.invocation.policy.capture == jcode_tool_core::CaptureMode::NativeCommand;
+    let cooperative_stop = ctx.invocation.policy.cooperative_stop;
+    ctx.invocation.identity = Some(jcode_tool_core::InvocationIdentity {
+        id: record.id.clone(),
+        owner: record.owner.clone(),
+    });
+    ctx.invocation.ready = Some(run.ready.clone());
     ctx.graceful_shutdown_signal = Some(run.stop.clone());
     ctx.invocation.capture = capture.clone().map(|value| value as Arc<dyn OutputCapture>);
-    let stop_before_start = run
-        .stop
-        .stop_cause()
-        .or_else(|| parent.as_ref().and_then(InterruptSignal::stop_cause));
+    let stop_before_start = run.stop.stop_cause().or_else(|| {
+        if run.background.load(Ordering::SeqCst) {
+            None
+        } else {
+            parent.as_ref().and_then(InterruptSignal::stop_cause)
+        }
+    });
     let (result, stopping) = if let Some(cause) = stop_before_start {
         (
             Err(anyhow::anyhow!(
@@ -262,9 +395,9 @@ async fn supervise(
                     let cause=run.stop.stop_cause().unwrap_or(StopCause::HumanCancellation);
                     stopping=Some(cause);
                     let store=store.clone();let id=record.id.clone();let owner=owner.clone();
-                    let persisted=tokio::task::spawn_blocking(move||store.request_stop(&id,&owner,cause)).await;
+                    let persisted=tokio::task::spawn_blocking(move||if native_command {Ok(true)}else{store.request_stop(&id,&owner,cause)}).await;
                     if !matches!(persisted,Ok(Ok(true))) {crate::logging::warn("Could not persist an owned tool stop request; terminal publication will recheck storage");}
-                    abort_at=Some(tokio::time::Instant::now()+std::time::Duration::from_millis(750));
+                    if !cooperative_stop {abort_at=Some(tokio::time::Instant::now()+std::time::Duration::from_millis(750));}
                 }
                 _=async {if let Some(parent)=&parent {parent.notified().await}else{std::future::pending::<()>().await}},if stopping.is_none() && !run.background.load(Ordering::SeqCst)=>{
                     run.stop.fire_with_cause(parent.as_ref().and_then(InterruptSignal::stop_cause).unwrap_or(StopCause::ParentForegroundCancellation));
@@ -297,6 +430,20 @@ async fn supervise(
         None => RunState::Completed,
     };
     tokio::task::spawn_blocking(move || {
+        #[cfg(unix)]
+        if native_command {
+            let actual=store.inspect(&record.id)?.context("Native command invocation disappeared")?;
+            if actual.owner!=record.owner {
+                ensure!(store.is_command_handoff(&record.id,&record.owner,&actual.owner)?,"Native command result belongs to an unverified owner");
+                if let Ok(output)=&result && matches!(output.source,OutputSource::Acceptance(_)) {
+                    let output=store.acceptance_result(&record.id)?.context("Native command acceptance was not persisted")?;
+                    return Ok(Completion{output,failed:false});
+                }
+                ensure!(actual.state.terminal(),"Native command remains owned and active; inspect run {} rather than repeating its effects",record.id);
+                let output=store.result(&actual,target)?;
+                return Ok(Completion{output,failed:actual.state!=RunState::Completed});
+            }
+        }
         if let Some(cause) = stopping {
             ensure!(
                 store.request_stop(&record.id, &record.owner, cause)?,
@@ -352,6 +499,26 @@ pub async fn promote(id: &str) -> Result<bool> {
     let Some(run) = run else {
         return Ok(false);
     };
+    let store = run.store.clone();
+    let run_id = id.to_string();
+    let current = tokio::task::spawn_blocking(move || {
+        store
+            .inspect(&run_id)?
+            .context("Missing invocation during promotion")
+    })
+    .await??;
+    if current.owner != run.runtime.endpoint.id {
+        let result =
+            runtime::control_in_store(&run.store, id, ControlOperation::Background).await?;
+        if matches!(result, ControlReply::Accepted { changed: true }) {
+            run.background.store(true, Ordering::SeqCst);
+            return Ok(true);
+        }
+        if let ControlReply::Unavailable { message } = result {
+            anyhow::bail!("{message}");
+        }
+        return Ok(false);
+    }
     ensure!(!run.stop.is_set(), "Invocation is already stopping");
     let (reply, response) = oneshot::channel();
     run.commands
@@ -384,12 +551,46 @@ struct BackgroundControl {
 }
 #[async_trait::async_trait]
 impl jcode_tool_core::OwnedExecutionControl for BackgroundControl {
-    fn request_stop(&self, cause: StopCause) -> Result<bool> {
-        if self.run.result.borrow().is_some() {
-            return Ok(false);
+    async fn request_stop(&self, cause: StopCause) -> Result<bool> {
+        match runtime::control_in_store(
+            &self.run.store,
+            &self.run.invocation.id(),
+            ControlOperation::Stop { cause },
+        )
+        .await?
+        {
+            ControlReply::Accepted { changed } => Ok(changed),
+            ControlReply::Snapshot { record } => Ok(!record.state.terminal()),
+            ControlReply::Unavailable { message } => Err(anyhow::anyhow!(message)),
+            ControlReply::OwnerChanged => Err(anyhow::anyhow!(
+                "Execution owner changed during cancellation"
+            )),
         }
-        self.run.stop.fire_with_cause(cause);
-        Ok(true)
+    }
+    fn execution_id(&self) -> Option<String> {
+        Some(self.run.invocation.id())
+    }
+    async fn survives_reload(&self) -> Result<bool> {
+        let store = self.run.store.clone();
+        let id = self.run.invocation.id();
+        let original = self.run.runtime.endpoint.id.clone();
+        tokio::task::spawn_blocking(move || {
+            let record = store
+                .inspect(&id)?
+                .context("Missing background invocation")?;
+            if record.owner == original || record.state.terminal() {
+                return Ok(false);
+            }
+            ensure!(
+                record.background,
+                "A foreign foreground execution cannot be silently preserved as background"
+            );
+            store
+                .runtime_endpoint(&record.owner)?
+                .context("Background runtime identity is unavailable")?
+                .has_live_lease()
+        })
+        .await?
     }
     async fn wait(&self) -> Result<RunState> {
         let mut receiver = self.run.result.clone();
@@ -402,19 +603,19 @@ impl jcode_tool_core::OwnedExecutionControl for BackgroundControl {
                 .await
                 .context("Execution owner ended without a completion receipt")?;
         }
-        let store = self.run.store.clone();
-        let id = self.run.invocation.id();
-        tokio::task::spawn_blocking(move || {
-            let record = store
-                .inspect(&id)?
-                .context("Missing invocation after execution")?;
-            ensure!(
-                record.state.terminal(),
-                "Execution stopped without a durable terminal receipt"
-            );
-            Ok(record.state)
-        })
+        match runtime::control_in_store(
+            &self.run.store,
+            &self.run.invocation.id(),
+            ControlOperation::Wait,
+        )
         .await?
+        {
+            ControlReply::Snapshot { record } => Ok(record.state),
+            ControlReply::Unavailable { message } => Err(anyhow::anyhow!(message)),
+            _ => Err(anyhow::anyhow!(
+                "Execution stopped without a durable terminal receipt"
+            )),
+        }
     }
 }
 

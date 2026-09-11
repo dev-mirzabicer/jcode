@@ -742,6 +742,13 @@ impl Registry {
             .output
             .target(resolved_name, output_size);
         ctx.invocation.output_target = Some(target);
+        ctx.invocation.policy = tool.execution_policy(&input, &ctx)?;
+        if let Some(timeout) = ctx.invocation.policy.foreground_timeout {
+            anyhow::ensure!(
+                tokio::time::Instant::now().checked_add(timeout).is_some(),
+                "Foreground timeout exceeds the platform clock range"
+            );
+        }
 
         let invocation = crate::execution::invocation(&ctx, resolved_name, original_input);
         let registry = self.clone_with_shared_context_runtime();
@@ -816,6 +823,11 @@ impl Registry {
         );
 
         let started_at = std::time::Instant::now();
+        if !ctx.invocation.policy.manual_ready
+            && let Some(ready) = &ctx.invocation.ready
+        {
+            ready.mark();
+        }
         // `batch` and `conversation_search` are registered as shared built-in
         // tools, while context accounting is deliberately session-local. Bind
         // their execution to this Registry rather than the template Registry
@@ -885,6 +897,7 @@ impl Registry {
                 format!("This read page was not delivered. Retry file_path=\"{}\" with read_point=\"{}\"; no source position was advanced.",page.path.display(),page.retry_point)
             }
             jcode_tool_types::OutputSource::Inline=>"No retained reference is available for this failure. Do not blindly repeat an operation with uncertain effects.".to_string(),
+            jcode_tool_types::OutputSource::Acceptance(reference)=>format!("Background work was accepted. Receipt: {}. Inspect run {}; do not repeat the original operation.",reference.path.display(),reference.invocation_id),
         };
         let pressure = if current >= threshold {
             "CONTEXT LIMIT REACHED"

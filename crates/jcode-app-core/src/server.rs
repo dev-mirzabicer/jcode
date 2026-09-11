@@ -1315,6 +1315,19 @@ impl Server {
         });
 
         // Spawn reload monitor (event-driven via in-process channel).
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                if let Err(error) = crate::background::global().retry_managed_delivery().await {
+                    crate::logging::warn(&format!(
+                        "Execution delivery reconciliation failed: {error}"
+                    ));
+                }
+            }
+        });
+
         // In the unified server design, self-dev sessions share the main server,
         // so the shared server must always listen for reload signals.
         let signal_sessions = Arc::clone(&self.sessions);

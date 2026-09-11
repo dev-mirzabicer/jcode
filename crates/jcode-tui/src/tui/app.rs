@@ -77,6 +77,7 @@ mod inline_interactive;
 mod input;
 mod input_help;
 mod local;
+mod local_delivery;
 mod misc_ui;
 mod model_context;
 mod navigation;
@@ -947,6 +948,7 @@ pub struct App {
     /// remote ServerEvent values.
     local_context_event_tx: tokio::sync::mpsc::UnboundedSender<crate::protocol::ServerEvent>,
     local_context_event_rx: tokio::sync::mpsc::UnboundedReceiver<crate::protocol::ServerEvent>,
+    local_delivery: local_delivery::LocalDeliveryState,
     /// Transport-neutral actions emitted by keyboard, mouse, paging, and
     /// lifecycle synchronization.
     context_editor_actions: VecDeque<super::context_editor::ContextEditorAction>,

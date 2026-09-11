@@ -15,6 +15,56 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use tokio::sync::{RwLock, broadcast};
 
+enum CompletionPermit {
+    Legacy,
+    Tracked(crate::execution::DeliveryAttempt),
+    Skip,
+}
+async fn completion_permit(
+    task: &crate::bus::BackgroundTaskCompleted,
+    channel: crate::execution::DeliveryChannel,
+) -> CompletionPermit {
+    if !task.task_id.starts_with("run-") {
+        return CompletionPermit::Legacy;
+    }
+    let id = task.task_id.clone();
+    let session = task.session_id.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let store = crate::execution::ExecutionStore::open(&crate::storage::jcode_dir()?)?;
+        let record = store
+            .inspect(&id)?
+            .ok_or_else(|| anyhow::anyhow!("Unknown completion invocation"))?;
+        anyhow::ensure!(
+            record.session_id == session,
+            "Completion recipient differs from the invocation owner"
+        );
+        store.begin_delivery(&id, channel)
+    })
+    .await;
+    match result {
+        Ok(Ok(Some(attempt))) => CompletionPermit::Tracked(attempt),
+        Ok(Ok(None)) => CompletionPermit::Skip,
+        _ => {
+            crate::logging::warn(
+                "Background completion delivery could not be claimed; the receipt remains pending or uncertain",
+            );
+            CompletionPermit::Skip
+        }
+    }
+}
+async fn finish_completion(permit: CompletionPermit, delivered: bool) {
+    if let CompletionPermit::Tracked(attempt) = permit
+        && !matches!(
+            tokio::task::spawn_blocking(move || attempt.finish(delivered)).await,
+            Ok(Ok(()))
+        )
+    {
+        crate::logging::warn(
+            "Background completion acknowledgement failed; no automatic duplicate wake is authorized",
+        );
+    }
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "background task completion needs session, interrupt, and swarm status state"
@@ -39,32 +89,35 @@ pub(super) async fn dispatch_background_task_completion(
         .and_then(|member| member.working_dir.clone());
     let notification = format_background_task_notification_markdown(task, working_dir.as_deref());
 
-    if task.notify
-        && fanout_session_event(
-            swarm_members,
-            &task.session_id,
-            ServerEvent::Notification {
-                from_session: "background_task".to_string(),
-                from_name: Some("background task".to_string()),
-                notification_type: NotificationType::Message {
-                    scope: Some("background_task".to_string()),
-                    channel: None,
-                    tldr: None,
+    if task.notify {
+        let permit = completion_permit(task, crate::execution::DeliveryChannel::Notify).await;
+        if !matches!(permit, CompletionPermit::Skip) {
+            let delivered = fanout_session_event(
+                swarm_members,
+                &task.session_id,
+                ServerEvent::Notification {
+                    from_session: "background_task".to_string(),
+                    from_name: Some("background task".to_string()),
+                    notification_type: NotificationType::Message {
+                        scope: Some("background_task".to_string()),
+                        channel: None,
+                        tldr: None,
+                    },
+                    message: notification.clone(),
                 },
-                message: notification.clone(),
-            },
-        )
-        .await
-            == 0
-    {
-        crate::logging::warn(&format!(
-            "Failed to notify attached clients for background task completion on session {}",
-            task.session_id
-        ));
+            )
+            .await
+                > 0;
+            finish_completion(permit, delivered).await;
+        }
     }
 
-    if task.wake
-        && !run_live_turn_if_idle(
+    if task.wake {
+        let permit = completion_permit(task, crate::execution::DeliveryChannel::Wake).await;
+        if matches!(permit, CompletionPermit::Skip) {
+            return;
+        }
+        let delivered = run_live_turn_if_idle(
             &task.session_id,
             &notification,
             Some(LiveTurnReminder::Managed(
@@ -80,20 +133,16 @@ pub(super) async fn dispatch_background_task_completion(
             ),
         )
         .await
-        && !queue_soft_interrupt_for_session(
-            &task.session_id,
-            notification.clone(),
-            false,
-            SoftInterruptSource::BackgroundTask,
-            soft_interrupt_queues,
-            sessions,
-        )
-        .await
-    {
-        crate::logging::warn(&format!(
-            "Failed to deliver background task completion to session {}",
-            task.session_id
-        ));
+            || queue_soft_interrupt_for_session(
+                &task.session_id,
+                notification.clone(),
+                false,
+                SoftInterruptSource::BackgroundTask,
+                soft_interrupt_queues,
+                sessions,
+            )
+            .await;
+        finish_completion(permit, delivered).await;
     }
 }
 

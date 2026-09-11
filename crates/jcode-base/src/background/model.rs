@@ -8,6 +8,9 @@ use tokio::task::JoinHandle;
 
 /// Directory for background task output files
 pub(super) fn task_dir() -> PathBuf {
+    if let Some(root) = std::env::var_os("JCODE_RUNTIME_DIR") {
+        return PathBuf::from(root).join("durable-state/background");
+    }
     std::env::temp_dir().join("jcode-bg-tasks")
 }
 

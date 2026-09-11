@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-const SCHEMA: i64 = 5;
+const SCHEMA: i64 = 8;
 
 pub use jcode_tool_types::RunState;
 
@@ -150,6 +150,32 @@ impl ExecutionStore {
                 lease_path TEXT NOT NULL, protocol_version INTEGER NOT NULL, process_id INTEGER NOT NULL
             ); PRAGMA user_version=5;")?;
         }
+        if version < 6 {
+            transaction.execute_batch("CREATE TABLE command_handoffs (
+                run_id TEXT PRIMARY KEY REFERENCES runs(id), parent_owner TEXT NOT NULL,
+                worker_owner TEXT REFERENCES runtimes(id), payload_digest TEXT NOT NULL,
+                state TEXT NOT NULL CHECK(state IN ('prepared','claimed','registered','executing','finished')),
+                process_identity TEXT, exec_authorized INTEGER NOT NULL DEFAULT 0
+            ); PRAGMA user_version=6;")?;
+        }
+        if version < 7 {
+            transaction.execute_batch(
+                "CREATE TABLE acceptance_receipts (
+                run_id TEXT PRIMARY KEY REFERENCES runs(id), receipt_path TEXT NOT NULL,
+                digest TEXT NOT NULL
+            ); PRAGMA user_version=7;",
+            )?;
+        }
+        if version < 8 {
+            transaction.execute_batch("CREATE TABLE background_deliveries (
+                run_id TEXT PRIMARY KEY REFERENCES runs(id), notify INTEGER NOT NULL,
+                wake INTEGER NOT NULL, started_at TEXT NOT NULL,
+                notify_state TEXT NOT NULL DEFAULT 'pending', wake_state TEXT NOT NULL DEFAULT 'pending',
+                notify_attempt TEXT, wake_attempt TEXT,
+                CHECK(notify_state IN ('pending','in_flight','delivered','uncertain')),
+                CHECK(wake_state IN ('pending','in_flight','delivered','uncertain'))
+            ); PRAGMA user_version=8;")?;
+        }
         transaction.commit()?;
         Ok(store)
     }
@@ -234,6 +260,30 @@ impl ExecutionStore {
         query_record(&self.connection()?, id)
     }
 
+    pub fn invocation_input(&self, id: &str) -> Result<Invocation> {
+        let record = self.inspect(id)?.context("Unknown invocation")?;
+        ensure!(
+            record.input_path.parent() == Some(self.root.join("inputs").as_path()),
+            "Invocation input is outside its owned store"
+        );
+        ensure!(
+            std::fs::symlink_metadata(&record.input_path)?.is_file(),
+            "Invocation input changed type"
+        );
+        let input: Invocation = crate::storage::read_json(&record.input_path)?;
+        let digest: String = self.connection()?.query_row(
+            "SELECT input_digest FROM runs WHERE id=?1",
+            [id],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            input.id() == id
+                && digest == format!("{:x}", Sha256::digest(serde_json::to_vec(&input)?)),
+            "Invocation input changed after submission"
+        );
+        Ok(input)
+    }
+
     pub fn promote(&self, id: &str, owner: &str) -> Result<bool> {
         Ok(self.connection()?.execute("UPDATE runs SET background=1,updated=unixepoch() WHERE id=?1 AND owner=?2 AND state IN ('prepared','running')",params![id,owner])?==1)
     }
@@ -276,6 +326,7 @@ impl ExecutionStore {
         transaction.execute("UPDATE runs SET state=?2,result_path=?3,output_path=?4,output_bytes=?5,complete=?6,updated=unixepoch() WHERE id=?1", params![
             record.id, record.state.as_str(), record.result_path.as_deref().map(path_text).transpose()?,
             record.output_path.as_deref().map(path_text).transpose()?, bytes, record.complete])?;
+        transaction.execute("UPDATE command_handoffs SET state='finished' WHERE run_id=?1 AND COALESCE(worker_owner,parent_owner)=?2",params![record.id,record.owner])?;
         transaction.commit()?;
         Ok(())
     }

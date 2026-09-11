@@ -81,6 +81,14 @@ pub enum OutputSource {
     Inline,
     Retained(OutputReference),
     ReadPage(ReadPageReference),
+    Acceptance(AcceptanceReference),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcceptanceReference {
+    pub invocation_id: String,
+    pub path: std::path::PathBuf,
+    pub live_output: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

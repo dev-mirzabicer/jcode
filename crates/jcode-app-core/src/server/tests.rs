@@ -600,6 +600,92 @@ async fn background_task_notify_without_wake_does_not_queue_soft_interrupt() {
 }
 
 #[tokio::test]
+async fn managed_completion_is_pending_without_parent_and_notifies_once_after_attach()
+-> anyhow::Result<()> {
+    use crate::execution::{
+        DeliveryState, ExecutionStore, Invocation, PreparedInvocation, RunState,
+    };
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir()?;
+    let previous = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", home.path());
+    let result = async {
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let store = ExecutionStore::open(home.path())?;
+        let input = Invocation {
+            session_id: session_id.clone(),
+            message_id: "message".into(),
+            call_path: vec!["call".into()],
+            tool: "fixture".into(),
+            input: serde_json::json!({}),
+            working_dir: None,
+        };
+        let PreparedInvocation::New(mut record) = store.prepare(&input, "owner")? else {
+            panic!()
+        };
+        store.start(&record.id, "owner")?;
+        store.promote(&record.id, "owner")?;
+        store.register_background_delivery(&record.id, true, false)?;
+        record.state = RunState::Completed;
+        store.finish(&record)?;
+        let sessions = Arc::new(RwLock::new(HashMap::new()));
+        let queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
+        let members = Arc::new(RwLock::new(HashMap::new()));
+        let task = BackgroundTaskCompleted {
+            task_id: record.id.clone(),
+            tool_name: "fixture".into(),
+            display_name: None,
+            session_id: session_id.clone(),
+            status: BackgroundTaskStatus::Completed,
+            exit_code: Some(0),
+            output_preview: "completed".into(),
+            output_file: home.path().join("output"),
+            duration_secs: 1.0,
+            notify: true,
+            wake: false,
+        };
+        let (swarms, history, counter, events) = empty_swarm_status_state();
+        dispatch_background_task_completion(
+            &task, &sessions, &queues, &members, &swarms, &history, &counter, &events,
+        )
+        .await;
+        assert_eq!(
+            store.background_delivery(&record.id)?.unwrap().notify_state,
+            DeliveryState::Pending
+        );
+        assert!(sessions.read().await.is_empty());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        members
+            .write()
+            .await
+            .insert(session_id.clone(), attached_swarm_member(&session_id, tx));
+        dispatch_background_task_completion(
+            &task, &sessions, &queues, &members, &swarms, &history, &counter, &events,
+        )
+        .await;
+        assert!(matches!(rx.try_recv()?, ServerEvent::Notification { .. }));
+        dispatch_background_task_completion(
+            &task, &sessions, &queues, &members, &swarms, &history, &counter, &events,
+        )
+        .await;
+        assert!(rx.try_recv().is_err());
+        assert_eq!(
+            store.background_delivery(&record.id)?.unwrap().notify_state,
+            DeliveryState::Delivered
+        );
+        assert!(sessions.read().await.is_empty());
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    if let Some(value) = previous {
+        crate::env::set_var("JCODE_HOME", value);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    result
+}
+
+#[tokio::test]
 async fn background_task_progress_notifies_attached_clients() {
     let provider: Arc<dyn Provider> = Arc::new(StreamingMockProvider::default());
     let agent = test_agent(provider).await;

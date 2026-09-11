@@ -1591,7 +1591,7 @@ impl Agent {
                     {
                         crate::background::global()
                             .adopt_controlled(&tc.name, &self.session.id, tool_handle, control)
-                            .await
+                            .await?
                     } else {
                         // Completion won the handoff race. There is no live
                         // producer left for the compatibility wrapper to stop.

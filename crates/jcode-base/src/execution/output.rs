@@ -345,7 +345,9 @@ impl ExecutionStore {
                     .output
                     .push_str(&retained_notice(reference, prefix.bytes as u64));
             }
-            OutputSource::Inline => anyhow::bail!("Invalid unretained result manifest"),
+            OutputSource::Inline | OutputSource::Acceptance(_) => {
+                anyhow::bail!("Invalid unretained result manifest")
+            }
         }
         Ok(output)
     }

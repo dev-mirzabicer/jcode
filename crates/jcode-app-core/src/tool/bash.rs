@@ -702,6 +702,42 @@ mod destructive_gate;
 use destructive_gate::destructive_command_refusal;
 #[async_trait]
 impl Tool for BashTool {
+    fn execution_policy(
+        &self,
+        input: &Value,
+        ctx: &ToolContext,
+    ) -> Result<jcode_tool_core::ExecutionPolicy> {
+        let params: BashInput = serde_json::from_value(input.clone())?;
+        if let Some(refusal) = destructive_command_refusal(
+            &params.command,
+            params.justification.as_deref(),
+            ctx.working_dir.clone(),
+        ) {
+            anyhow::bail!("{refusal}");
+        }
+        let background = params.run_in_background.unwrap_or(false);
+        #[cfg(unix)]
+        let native = ctx.stdin_request_tx.is_none() || background;
+        #[cfg(not(unix))]
+        let native = false;
+        Ok(jcode_tool_core::ExecutionPolicy {
+            capture: if native {
+                jcode_tool_core::CaptureMode::NativeCommand
+            } else {
+                jcode_tool_core::CaptureMode::Complete
+            },
+            background,
+            foreground_timeout: if background {
+                None
+            } else {
+                params.timeout.map(Duration::from_millis)
+            },
+            notify: params.notify,
+            wake: params.wake,
+            manual_ready: native,
+            cooperative_stop: cfg!(unix),
+        })
+    }
     fn name(&self) -> &str {
         "bash"
     }
@@ -737,7 +773,7 @@ impl Tool for BashTool {
             params.command = wrapped;
         }
 
-        if run_in_background {
+        if run_in_background && (ctx.invocation.identity.is_none() || !cfg!(unix)) {
             return self.execute_background(params, ctx).await;
         }
 
@@ -759,7 +795,61 @@ impl Tool for BashTool {
             }
         }
 
-        // Foreground execution with stdin detection
+        #[cfg(unix)]
+        if ctx.invocation.identity.is_some() {
+            let working_dir = ctx.working_dir.clone().unwrap_or(std::env::current_dir()?);
+            if ctx.invocation.policy.capture == jcode_tool_core::CaptureMode::NativeCommand {
+                return crate::execution::command_worker::launch(
+                    crate::execution::command_handoff::CommandRequest {
+                        command: params.command,
+                        working_dir,
+                        timeout_ms: if run_in_background {
+                            params.timeout
+                        } else {
+                            None
+                        },
+                        background: run_in_background,
+                        notify: params.notify,
+                        wake: params.wake,
+                        title: params.intent,
+                        storage: crate::config::config().output.storage.clone(),
+                    },
+                    ctx,
+                )
+                .await;
+            }
+            let capture = ctx
+                .invocation
+                .capture
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("Missing command capture owner"))?;
+            let stop = ctx.graceful_shutdown_signal.clone().unwrap_or_default();
+            let spec = crate::execution::command::CommandSpec {
+                command: params.command,
+                working_dir,
+                timeout: None,
+            };
+            let mut output = if let Some(requests) = ctx.stdin_request_tx.clone() {
+                crate::execution::command::run_with_input(
+                    spec,
+                    capture,
+                    stop,
+                    crate::execution::command::CommandInput {
+                        requests,
+                        call_id: ctx.tool_call_id.clone(),
+                    },
+                )
+                .await?
+                .output
+            } else {
+                crate::execution::command::run(spec, capture, stop)
+                    .await?
+                    .output
+            };
+            output.title = params.intent;
+            return Ok(output);
+        }
+        // Direct legacy callers are migrated separately from registered execution.
         self.execute_foreground(&params, &ctx).await
     }
 }

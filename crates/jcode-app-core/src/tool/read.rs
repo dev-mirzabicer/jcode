@@ -111,6 +111,16 @@ fn normalize_read_range(params: &ReadInput) -> Result<NormalizedReadRange> {
 
 #[async_trait]
 impl Tool for ReadTool {
+    fn execution_policy(
+        &self,
+        _: &Value,
+        _: &ToolContext,
+    ) -> Result<jcode_tool_core::ExecutionPolicy> {
+        Ok(jcode_tool_core::ExecutionPolicy {
+            capture: jcode_tool_core::CaptureMode::SourceRead,
+            ..Default::default()
+        })
+    }
     fn name(&self) -> &str {
         "read"
     }

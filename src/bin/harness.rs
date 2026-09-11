@@ -60,6 +60,29 @@ struct ToolCase {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    #[cfg(unix)]
+    {
+        jcode::execution::command_worker::register_current_executable()?;
+        if let Some(mode) = std::env::args().nth(1)
+            && matches!(
+                mode.as_str(),
+                jcode::execution::command_worker::WORKER_ARGUMENT
+                    | jcode::execution::command_worker::CHILD_ARGUMENT
+            )
+        {
+            let id = std::env::args()
+                .nth(2)
+                .ok_or_else(|| anyhow::anyhow!("Missing native command identity"))?;
+            anyhow::ensure!(
+                std::env::args().count() == 3,
+                "Invalid native command arguments"
+            );
+            if mode == jcode::execution::command_worker::CHILD_ARGUMENT {
+                return jcode::execution::command_worker::child_main(&id);
+            }
+            return jcode::execution::command_worker::worker_main(&id).await;
+        }
+    }
     let args = Args::parse();
 
     let workspace = if let Some(cwd) = args.cwd {

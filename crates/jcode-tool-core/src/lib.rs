@@ -26,8 +26,14 @@ pub trait OutputCapture: Send + Sync {
 /// Waiting alone does not grant ownership or imply successful cancellation.
 #[async_trait]
 pub trait OwnedExecutionControl: Send + Sync {
-    fn request_stop(&self, cause: jcode_tool_types::StopCause) -> Result<bool>;
+    async fn request_stop(&self, cause: jcode_tool_types::StopCause) -> Result<bool>;
     async fn wait(&self) -> Result<jcode_tool_types::RunState>;
+    fn execution_id(&self) -> Option<String> {
+        None
+    }
+    async fn survives_reload(&self) -> Result<bool> {
+        Ok(false)
+    }
 }
 
 #[derive(Clone, Default)]
@@ -35,6 +41,69 @@ pub struct InvocationContext {
     pub ancestors: Vec<String>,
     pub output_target: Option<std::num::NonZeroUsize>,
     pub capture: Option<Arc<dyn OutputCapture>>,
+    pub policy: ExecutionPolicy,
+    pub identity: Option<InvocationIdentity>,
+    pub ready: Option<ExecutionReady>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CaptureMode {
+    #[default]
+    Complete,
+    SourceRead,
+    NativeCommand,
+}
+
+#[derive(Clone)]
+pub struct InvocationIdentity {
+    pub id: String,
+    pub owner: String,
+}
+
+#[derive(Clone)]
+pub struct ExecutionPolicy {
+    pub capture: CaptureMode,
+    pub background: bool,
+    pub foreground_timeout: Option<std::time::Duration>,
+    pub notify: bool,
+    pub wake: bool,
+    pub manual_ready: bool,
+    pub cooperative_stop: bool,
+}
+impl Default for ExecutionPolicy {
+    fn default() -> Self {
+        Self {
+            capture: CaptureMode::Complete,
+            background: false,
+            foreground_timeout: None,
+            notify: true,
+            wake: false,
+            manual_ready: false,
+            cooperative_stop: false,
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct ExecutionReady {
+    flag: Arc<std::sync::atomic::AtomicBool>,
+    notify: Arc<tokio::sync::Notify>,
+}
+impl ExecutionReady {
+    pub fn mark(&self) {
+        self.flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+    pub fn is_ready(&self) -> bool {
+        self.flag.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    pub async fn wait(&self) {
+        let mut ready = std::pin::pin!(self.notify.notified());
+        ready.as_mut().enable();
+        if !self.is_ready() {
+            ready.await;
+        }
+    }
 }
 
 pub const TOOL_INTENT_DESCRIPTION: &str =
@@ -167,6 +236,10 @@ pub trait Tool: Send + Sync {
 
     fn input_binding(&self) -> input::InputBinding {
         input::InputBinding::for_schema(&self.parameters_schema())
+    }
+
+    fn execution_policy(&self, _input: &Value, _ctx: &ToolContext) -> Result<ExecutionPolicy> {
+        Ok(ExecutionPolicy::default())
     }
 
     /// Execute the tool with the given input.
