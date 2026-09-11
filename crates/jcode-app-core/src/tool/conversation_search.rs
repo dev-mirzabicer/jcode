@@ -272,25 +272,16 @@ impl Tool for ConversationSearchTool {
                     for block in &msg.content {
                         match block {
                             crate::message::ContentBlock::Text { text, .. } => {
-                                // Truncate very long messages
-                                if text.len() > 1000 {
-                                    output.push_str(crate::util::truncate_str(text, 1000));
-                                    output.push_str("... (truncated)\n");
-                                } else {
-                                    output.push_str(text);
-                                    output.push('\n');
-                                }
+                                output.push_str(text);
+                                output.push('\n');
                             }
                             crate::message::ContentBlock::ToolUse { name, .. } => {
                                 output.push_str(&format!("[Tool call: {}]\n", name));
                             }
                             crate::message::ContentBlock::ToolResult { content, .. } => {
-                                let preview = if content.len() > 200 {
-                                    format!("{}...", crate::util::truncate_str(content, 200))
-                                } else {
-                                    content.clone()
-                                };
-                                output.push_str(&format!("[Tool result: {}]\n", preview));
+                                output.push_str("[Tool result: ");
+                                output.push_str(content);
+                                output.push_str("]\n");
                             }
                             crate::message::ContentBlock::Reasoning { .. }
                             | crate::message::ContentBlock::ReasoningTrace { .. }
@@ -472,6 +463,24 @@ mod tests {
             crate::env::remove_var("JCODE_HOME");
         }
         let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn requested_turn_range_preserves_complete_selected_bodies() {
+        let _guard = env_lock();
+        let text = format!("{}MESSAGE_TAIL", "α".repeat(20_000));
+        let tool_text = format!("{}TOOL_TAIL", "β".repeat(10_000));
+        let (ctx, base, previous) = setup_session(vec![
+            Message::user(&text),
+            Message::tool_result("fixture", &tool_text, false),
+        ]);
+        let result = create_test_tool()
+            .execute(json!({"turns":{"start":0,"end":2}}), ctx)
+            .await;
+        restore_env(base, previous);
+        let output = result.unwrap().output;
+        assert!(output.contains(&text));
+        assert!(output.contains(&tool_text));
     }
 
     #[test]

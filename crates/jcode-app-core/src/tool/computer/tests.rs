@@ -89,12 +89,14 @@ async fn dry_run_ignored_for_readonly() {
     assert!(out.output.contains("find_element"));
 }
 
-#[test]
-fn cap_output_truncates() {
-    let big = "x".repeat(20_000);
-    let capped = super::cap_output(ToolOutput::new(big), 16_000);
-    assert!(capped.output.len() < 16_200);
-    assert!(capped.output.contains("truncated"));
+#[tokio::test]
+async fn pure_script_output_is_complete_before_shared_capture() {
+    let body = format!("{}TAIL", "x".repeat(25_000));
+    let output =
+        run_action(json!({"action":"run_applescript","script":format!(r#"return "{body}""#)}))
+            .await
+            .unwrap();
+    assert!(output.output.contains(&body));
 }
 
 #[test]
@@ -127,11 +129,7 @@ fn managed_permission_prose_is_complete_and_does_not_change_status_facts() {
     };
     let large = "synthetic ".repeat(20_000);
     write(&large);
-    let output = super::finish_result(
-        "check_permissions",
-        super::setup::permission_status(false, true, false, None),
-    )
-    .unwrap();
+    let output = super::setup::permission_status(false, true, false, None).unwrap();
     assert!(output.output.ends_with(&large));
     assert_eq!(
         output.metadata.unwrap(),

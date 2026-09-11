@@ -124,22 +124,6 @@ struct ComputerInput {
     dry_run: Option<bool>,
 }
 
-/// Cap a tool output's text so a huge AX tree / clipboard / OCR dump cannot
-/// blow up the context. Keeps the head and notes how much was dropped.
-#[cfg(target_os = "macos")]
-fn cap_output(mut out: ToolOutput, max_chars: usize) -> ToolOutput {
-    if out.output.len() > max_chars {
-        let mut cut = max_chars;
-        while cut > 0 && !out.output.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        let dropped = out.output.len() - cut;
-        let head = out.output[..cut].to_string();
-        out.output = format!("{head}\n… [truncated {dropped} chars]");
-    }
-    out
-}
-
 /// Actions that change desktop/app state. Used for dry_run gating.
 #[cfg(target_os = "macos")]
 fn is_mutating(action: &str) -> bool {
@@ -276,26 +260,12 @@ fn run(input: ComputerInput, working_dir: Option<std::path::PathBuf>) -> Result<
         )));
     }
 
-    let result = if action == "check_permissions" {
-        // Status fields are fixed-size facts. Managed instructions must remain
-        // complete rather than passing through the general data-output cap.
+    if action == "check_permissions" {
+        // Permission guidance uses the requesting session's source scope.
         setup::check_permissions(working_dir.as_deref())
     } else {
         dispatch(action, &input)
-    };
-    finish_result(action, result)
-}
-
-#[cfg(target_os = "macos")]
-fn finish_result(action: &str, result: Result<ToolOutput>) -> Result<ToolOutput> {
-    // Cap large textual outputs to protect context (images are unaffected).
-    result.map(|o| {
-        if action == "check_permissions" {
-            o
-        } else {
-            cap_output(o, 16_000)
-        }
-    })
+    }
 }
 
 #[cfg(target_os = "macos")]

@@ -10,7 +10,6 @@ include!(concat!(env!("OUT_DIR"), "/jcode_docs.rs"));
 
 const DEFAULT_LIMIT: usize = 5;
 const MAX_LIMIT: usize = 10;
-const MAX_SECTION_CHARS: usize = 4_000;
 
 pub struct JcodeDocsTool;
 
@@ -245,19 +244,19 @@ fn relevant_excerpt(body: &str, terms: &[String]) -> String {
         .copied()
         .unwrap_or(body)
         .trim();
-    if best.chars().count() <= MAX_SECTION_CHARS {
-        best.to_string()
-    } else {
-        format!(
-            "{}…",
-            best.chars().take(MAX_SECTION_CHARS).collect::<String>()
-        )
-    }
+    best.to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_paragraph_is_complete_without_changing_search_selection() {
+        let paragraph = format!("unique_query {} TAIL", "α".repeat(20_000));
+        let body = format!("Unrelated paragraph.\n\n{paragraph}\n\nAnother paragraph.");
+        assert_eq!(relevant_excerpt(&body, &["unique_query".into()]), paragraph);
+    }
 
     #[test]
     fn corpus_includes_current_docs_but_not_plans() {

@@ -5,7 +5,6 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::Path;
 
-const MAX_ENTRIES: usize = 100;
 const DEFAULT_IGNORE: &[&str] = &[
     "node_modules",
     "__pycache__",
@@ -37,14 +36,46 @@ struct LsInput {
     ignore: Option<Vec<String>>,
 }
 
-struct DirEntry {
-    name: String,
-    is_dir: bool,
-    depth: usize,
+struct Listing {
+    output: String,
+    capture: Option<std::sync::Arc<dyn jcode_tool_core::OutputCapture>>,
+    stop: Option<jcode_agent_runtime::InterruptSignal>,
+    files: usize,
+    directories: usize,
+}
+impl Listing {
+    fn emit(&mut self, text: &str) -> Result<()> {
+        anyhow::ensure!(
+            !self.stop.as_ref().is_some_and(|stop| stop.is_set()),
+            "Directory listing cancelled"
+        );
+        self.output.push_str(text);
+        if self.capture.is_some() && self.output.len() >= 64 * 1024 {
+            self.flush()?;
+        }
+        Ok(())
+    }
+    fn flush(&mut self) -> Result<()> {
+        if let Some(capture) = &self.capture {
+            capture.write(jcode_tool_core::OutputStream::Text, self.output.as_bytes())?;
+            self.output.clear();
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
 impl Tool for LsTool {
+    fn execution_policy(
+        &self,
+        _: &Value,
+        _: &ToolContext,
+    ) -> Result<jcode_tool_core::ExecutionPolicy> {
+        Ok(jcode_tool_core::ExecutionPolicy {
+            cooperative_stop: true,
+            ..Default::default()
+        })
+    }
     fn name(&self) -> &str {
         "ls"
     }
@@ -86,42 +117,39 @@ impl Tool for LsTool {
             return Err(anyhow::anyhow!("Not a directory: {}", base_path));
         }
 
-        let entries = tokio::task::spawn_blocking(move || {
-            let mut ignore_patterns: Vec<String> =
-                DEFAULT_IGNORE.iter().map(|s| s.to_string()).collect();
+        let capture = ctx.invocation.capture.clone();
+        let stop = ctx.graceful_shutdown_signal.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut ignore: Vec<String> =
+                DEFAULT_IGNORE.iter().map(|name| name.to_string()).collect();
             if let Some(extra) = ignore_extra {
-                ignore_patterns.extend(extra);
+                ignore.extend(extra);
             }
-
-            let mut entries: Vec<DirEntry> = Vec::new();
-            collect_entries(&base, 0, &ignore_patterns, &mut entries, MAX_ENTRIES)?;
-            Ok::<_, anyhow::Error>(entries)
+            let mut listing = Listing {
+                output: String::new(),
+                capture,
+                stop,
+                files: 0,
+                directories: 0,
+            };
+            listing.emit(&format!("{base_path}/\n"))?;
+            let collected = collect_entries(&base, 0, &ignore, &mut listing);
+            listing.flush()?;
+            collected?;
+            listing.emit(&format!(
+                "\n{} files, {} directories",
+                listing.files, listing.directories
+            ))?;
+            listing.flush()?;
+            let mut output = ToolOutput::new(listing.output).with_metadata(
+                json!({"files":listing.files,"directories":listing.directories,"max_depth":6}),
+            );
+            if let Some(capture) = listing.capture {
+                output.source = jcode_tool_types::OutputSource::Retained(capture.reference()?);
+            }
+            Ok::<_, anyhow::Error>(output)
         })
-        .await??;
-
-        let truncated = entries.len() >= MAX_ENTRIES;
-
-        let mut output = String::new();
-        output.push_str(&format!("{}/\n", base_path));
-
-        for entry in &entries {
-            let indent = "  ".repeat(entry.depth);
-            let suffix = if entry.is_dir { "/" } else { "" };
-            output.push_str(&format!("{}{}{}\n", indent, entry.name, suffix));
-        }
-
-        if truncated {
-            output.push_str(&format!("\n... truncated at {} entries", MAX_ENTRIES));
-        }
-
-        let file_count = entries.iter().filter(|e| !e.is_dir).count();
-        let dir_count = entries.iter().filter(|e| e.is_dir).count();
-        output.push_str(&format!(
-            "\n{} files, {} directories",
-            file_count, dir_count
-        ));
-
-        Ok(ToolOutput::new(output))
+        .await?
     }
 }
 
@@ -129,62 +157,80 @@ fn collect_entries(
     dir: &Path,
     depth: usize,
     ignore: &[String],
-    entries: &mut Vec<DirEntry>,
-    max: usize,
+    listing: &mut Listing,
 ) -> Result<()> {
-    if entries.len() >= max {
-        return Ok(());
+    anyhow::ensure!(
+        !listing.stop.as_ref().is_some_and(|stop| stop.is_set()),
+        "Directory listing cancelled"
+    );
+    let mut items = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        anyhow::ensure!(
+            !listing.stop.as_ref().is_some_and(|stop| stop.is_set()),
+            "Directory listing cancelled"
+        );
+        let entry = entry?;
+        let is_dir = entry.file_type()?.is_dir();
+        items.push((entry, is_dir));
     }
-
-    let mut items: Vec<_> = std::fs::read_dir(dir)?.filter_map(|e| e.ok()).collect();
-
-    // Cache file_type from DirEntry (uses cached readdir data, no extra stat on most platforms)
-    // Then sort using cached values instead of calling is_dir() in the comparator
-    let mut typed_items: Vec<(std::fs::DirEntry, bool)> = items
-        .drain(..)
-        .map(|e| {
-            let is_dir = e.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
-            (e, is_dir)
-        })
-        .collect();
-
-    typed_items.sort_by(|(a, a_dir), (b, b_dir)| match (*a_dir, *b_dir) {
+    items.sort_by(|(a, a_dir), (b, b_dir)| match (*a_dir, *b_dir) {
         (true, false) => std::cmp::Ordering::Less,
         (false, true) => std::cmp::Ordering::Greater,
         _ => a.file_name().cmp(&b.file_name()),
     });
-
-    for (item, is_dir) in typed_items {
-        if entries.len() >= max {
-            break;
-        }
-
+    for (item, is_dir) in items {
         let name = item.file_name().to_string_lossy().to_string();
-
-        if ignore.iter().any(|p| {
-            glob::Pattern::new(p)
-                .map(|pat| pat.matches(&name))
-                .unwrap_or(false)
-                || name == *p
-        }) {
+        if name.starts_with('.')
+            || ignore.iter().any(|pattern| {
+                glob::Pattern::new(pattern).is_ok_and(|pattern| pattern.matches(&name))
+                    || name == *pattern
+            })
+        {
             continue;
         }
-
-        if name.starts_with('.') && name != "." && name != ".." {
-            continue;
+        listing.emit(&format!(
+            "{}{}{}\n",
+            "  ".repeat(depth + 1),
+            name,
+            if is_dir { "/" } else { "" }
+        ))?;
+        if is_dir {
+            listing.directories += 1;
+        } else {
+            listing.files += 1;
         }
-
-        entries.push(DirEntry {
-            name: name.clone(),
-            is_dir,
-            depth: depth + 1,
-        });
-
         if is_dir && depth < 5 {
-            let path = item.path();
-            collect_entries(&path, depth + 1, ignore, entries, max)?;
+            collect_entries(&item.path(), depth + 1, ignore, listing)?;
         }
     }
-
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn listing_retains_every_selected_entry_and_preserves_ignore_policy() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        for index in 0..250 {
+            std::fs::write(directory.path().join(format!("entry-{index:03}")), b"")?;
+        }
+        std::fs::create_dir(directory.path().join("node_modules"))?;
+        std::fs::write(directory.path().join("node_modules/ignored"), b"")?;
+        let ctx = ToolContext {
+            session_id: "ls".into(),
+            message_id: "message".into(),
+            tool_call_id: "call".into(),
+            working_dir: Some(directory.path().into()),
+            stdin_request_tx: None,
+            graceful_shutdown_signal: None,
+            execution_mode: crate::tool::ToolExecutionMode::Direct,
+            invocation: Default::default(),
+        };
+        let output = LsTool::new().execute(json!({"path":"."}), ctx).await?;
+        assert!(output.output.contains("entry-249"));
+        assert!(!output.output.contains("ignored"));
+        assert_eq!(output.metadata.unwrap()["files"], 250);
+        Ok(())
+    }
 }
