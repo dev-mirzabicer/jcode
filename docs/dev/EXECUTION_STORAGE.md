@@ -340,6 +340,13 @@ request-lifetime owner. A quiet network read or retry backoff is cancelled by
 dropping only that request future. A real local HTTP provider test verifies the
 connection closes and the same provider remains usable for another request.
 
+Gemini and Antigravity use the same receiver-bound request lifetime. Their cached
+state is authentication/setup state, not an in-flight response chain. Cursor's
+HTTP/2 connection driver and paced sender are request-owned subtasks, so an
+error or consumer drop cannot leave them detached. A deterministic test uses the
+actual Cursor HTTP/2 operation over a local duplex transport and verifies closure
+without another request. Existing frame/parser tests and strict lint pass.
+
 OpenAI quiet SSE and WebSocket reads observe receiver closure directly. For a
 persistent WebSocket, cancellation reaches the existing response-chain cleanup
 while its state lock is still held, rather than clearing a possibly unrelated

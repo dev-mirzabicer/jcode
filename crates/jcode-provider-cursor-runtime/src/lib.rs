@@ -325,7 +325,7 @@ impl Provider for CursorCliProvider {
         let client = self.client.clone();
         let (tx, rx) = mpsc::channel::<Result<jcode_message_types::StreamEvent>>(100);
 
-        tokio::spawn(async move {
+        jcode_provider_core::request_lifetime::spawn_request(tx.clone(), async move {
             let result = run_native_text_command(client, tx.clone(), &prompt, &model).await;
 
             if let Err(err) = result {

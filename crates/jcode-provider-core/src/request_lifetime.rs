@@ -7,6 +7,27 @@ use std::future::Future;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+/// Request-local helper task. This must never wrap a process-wide shared
+/// connection driver: dropping it stops only work owned by this request.
+pub struct RequestSubtask<T>(JoinHandle<T>);
+impl<T> RequestSubtask<T> {
+    pub fn new(task: JoinHandle<T>) -> Self {
+        Self(task)
+    }
+    pub async fn finish(mut self) -> Result<T, tokio::task::JoinError> {
+        (&mut self.0).await
+    }
+    pub async fn stop(mut self) -> Result<T, tokio::task::JoinError> {
+        self.0.abort();
+        (&mut self.0).await
+    }
+}
+impl<T> Drop for RequestSubtask<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 pub fn spawn_request(
     consumer: mpsc::Sender<Result<StreamEvent>>,
     request: impl Future<Output = ()> + Send + 'static,
@@ -32,6 +53,36 @@ mod tests {
     impl Drop for Dropped {
         fn drop(&mut self) {
             self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_of_request_or_subtask_finish_does_not_leave_a_helper_running() {
+        for during_finish in [false, true] {
+            let dropped = Arc::new(AtomicBool::new(false));
+            let owned = Dropped(dropped.clone());
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let helper = RequestSubtask::new(tokio::spawn(async move {
+                let _owned = owned;
+                started_tx.send(()).unwrap();
+                std::future::pending::<()>().await;
+            }));
+            started_rx.await.unwrap();
+            if during_finish {
+                let wait = tokio::spawn(helper.finish());
+                tokio::task::yield_now().await;
+                wait.abort();
+                let _ = wait.await;
+            } else {
+                drop(helper);
+            }
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while !dropped.load(Ordering::SeqCst) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
         }
     }
 

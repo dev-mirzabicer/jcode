@@ -448,8 +448,6 @@ pub async fn run_agent_turn(
     model: &str,
     tx: mpsc::Sender<Result<StreamEvent>>,
 ) -> Result<()> {
-    use h2::client;
-    use http::{Method, Request};
     use tokio_rustls::TlsConnector;
 
     let host = agent_host();
@@ -477,13 +475,52 @@ pub async fn run_agent_turn(
         .await
         .context("TLS handshake with Cursor agent host failed")?;
 
-    let (h2, connection) = client::handshake(tls)
+    run_connected(
+        tls,
+        ConnectionRequest {
+            access_token,
+            prompt,
+            model,
+            host: &host,
+            cwd: &cwd,
+        },
+        tx,
+    )
+    .await
+}
+
+struct ConnectionRequest<'a> {
+    access_token: &'a str,
+    prompt: &'a str,
+    model: &'a str,
+    host: &'a str,
+    cwd: &'a str,
+}
+async fn run_connected<T>(
+    transport: T,
+    request: ConnectionRequest<'_>,
+    tx: mpsc::Sender<Result<StreamEvent>>,
+) -> Result<()>
+where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    use h2::client;
+    use http::{Method, Request};
+    let ConnectionRequest {
+        access_token,
+        prompt,
+        model,
+        host,
+        cwd,
+    } = request;
+    let (h2, connection) = client::handshake(transport)
         .await
         .context("HTTP/2 handshake with Cursor agent host failed")?;
     // Drive the connection in the background.
-    let conn_task = tokio::spawn(async move {
-        let _ = connection.await;
-    });
+    let conn_task =
+        jcode_provider_core::request_lifetime::RequestSubtask::new(tokio::spawn(async move {
+            let _ = connection.await;
+        }));
     let mut h2 = h2.ready().await.context("HTTP/2 connection not ready")?;
 
     let request_id = Uuid::new_v4().to_string();
@@ -514,35 +551,36 @@ pub async fn run_agent_turn(
     // heartbeat until the response completes. The pacing is load-bearing: the
     // server treats the marker frames as end-of-input and returns
     // `internal: No exec result` if they arrive before it has begun streaming.
-    let frames = build_run_frames(prompt, model, &cwd);
+    let frames = build_run_frames(prompt, model, cwd);
     let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
-    let sender = tokio::spawn(async move {
-        for (idx, frame) in frames.into_iter().enumerate() {
-            if send_stream.send_data(Bytes::from(frame), false).is_err() {
-                return;
+    let sender =
+        jcode_provider_core::request_lifetime::RequestSubtask::new(tokio::spawn(async move {
+            for (idx, frame) in frames.into_iter().enumerate() {
+                if send_stream.send_data(Bytes::from(frame), false).is_err() {
+                    return;
+                }
+                // frame 0 (RunRequest) and frame 1 (context) need the most settle
+                // time before the marker frames follow.
+                let pace = match idx {
+                    0 => Duration::from_millis(1500),
+                    1 => Duration::from_millis(800),
+                    _ => Duration::from_millis(400),
+                };
+                tokio::time::sleep(pace).await;
             }
-            // frame 0 (RunRequest) and frame 1 (context) need the most settle
-            // time before the marker frames follow.
-            let pace = match idx {
-                0 => Duration::from_millis(1500),
-                1 => Duration::from_millis(800),
-                _ => Duration::from_millis(400),
-            };
-            tokio::time::sleep(pace).await;
-        }
-        let mut ticker = interval_at(Instant::now() + HEARTBEAT_INTERVAL, HEARTBEAT_INTERVAL);
-        loop {
-            tokio::select! {
-                _ = &mut stop_rx => break,
-                _ = ticker.tick() => {
-                    if send_stream.send_data(Bytes::from(heartbeat_frame()), false).is_err() {
-                        return;
+            let mut ticker = interval_at(Instant::now() + HEARTBEAT_INTERVAL, HEARTBEAT_INTERVAL);
+            loop {
+                tokio::select! {
+                    _ = &mut stop_rx => break,
+                    _ = ticker.tick() => {
+                        if send_stream.send_data(Bytes::from(heartbeat_frame()), false).is_err() {
+                            return;
+                        }
                     }
                 }
             }
-        }
-        let _ = send_stream.send_data(Bytes::new(), true);
-    });
+            let _ = send_stream.send_data(Bytes::new(), true);
+        }));
 
     // Receiver: read response body frames and forward assistant text.
     let response = response
@@ -599,8 +637,8 @@ pub async fn run_agent_turn(
     }
 
     let _ = stop_tx.send(());
-    let _ = sender.await;
-    conn_task.abort();
+    let _ = sender.finish().await;
+    let _ = conn_task.stop().await;
 
     if let Some(err) = error_message {
         anyhow::bail!("Cursor agent stream error: {err}");
@@ -621,6 +659,56 @@ pub async fn run_agent_turn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cancelled_http2_request_closes_connection_and_paced_sender() {
+        let (client, server) = tokio::io::duplex(128 * 1024);
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let mut connection = h2::server::handshake(server).await.unwrap();
+            let (request, mut response) = connection.accept().await.unwrap().unwrap();
+            assert_eq!(request.uri().path(), AGENT_PATH);
+            let _response = response
+                .send_response(
+                    http::Response::builder().status(200).body(()).unwrap(),
+                    false,
+                )
+                .unwrap();
+            ready_tx.send(()).unwrap();
+            let closed = tokio::time::timeout(Duration::from_secs(2), connection.accept())
+                .await
+                .unwrap();
+            assert!(
+                !matches!(closed, Some(Ok(_))),
+                "Cancellation must not start a second request"
+            );
+        });
+        let (tx, rx) = mpsc::channel(10);
+        let task = jcode_provider_core::request_lifetime::spawn_request(tx.clone(), async move {
+            let _ = run_connected(
+                client,
+                ConnectionRequest {
+                    access_token: "synthetic",
+                    prompt: "fixture",
+                    model: "fixture",
+                    host: "fixture.invalid",
+                    cwd: "/fixture",
+                },
+                tx,
+            )
+            .await;
+        });
+        tokio::time::timeout(Duration::from_secs(2), ready_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(rx);
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+        server.await.unwrap();
+    }
 
     /// Regression test for issue #637: teams routed to a region reject the
     /// hardcoded `global` agent host, so a regional endpoint expressed as a full

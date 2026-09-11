@@ -674,7 +674,7 @@ impl Provider for GeminiProvider {
         let provider = self.clone();
         let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(100);
 
-        tokio::spawn(async move {
+        jcode_provider_core::request_lifetime::spawn_request(tx.clone(), async move {
             let _ = tx
                 .send(Ok(StreamEvent::ConnectionType {
                     connection: "https".to_string(),
