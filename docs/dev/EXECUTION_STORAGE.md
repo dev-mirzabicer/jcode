@@ -327,6 +327,30 @@ store uses SQLite's NOFOLLOW open after resolving ancestor aliases, and hardens
 permissions before WAL/SHM creation. Real cross-process tests cover lock
 preservation in both WAL and rollback modes plus symlink/private-mode checks.
 
+## SDK original records and rich results
+
+Decoded CLI tool-result events carry the original UTF-8 protocol record alongside
+the selected content. The record preserves surrounding record whitespace and
+unknown envelope/result fields; the line-delimiter framing is not part of it.
+One shared conversion retains that original in the private result manifest and
+extracts matching typed image/resource parts without interpreting unrelated tool
+results as attachments. Unknown content stays available in the original record.
+
+Both Agent loops carry the complete result through normal and partial-provider
+checkpoints, including errors and retry rollback. A shared history converter
+preserves attached images and error state. Storage-failure fallback includes the
+original record rather than only its normalized text. Native SDK rejections also
+keep the received record before any code-authorized host execution.
+
+Local TUI SDK handling now uses the same retention boundary before debug/display
+publication and persists the actual result instead of an empty Session placeholder.
+Local partial checkpoints retain complete results and media through this owner.
+These are real CLI, Agent and local-TUI mechanism checks, not a hosted vision or
+prompt-quality claim. Raw transport bytes rejected before decoding, uncorrelated
+result ingress and persistence before stream-finalization remain separate pending
+reconciliation. Local TUI historical recovery also still needs full alignment with
+the shared durable repair owner; its scoped liveness call now compiles correctly.
+
 ## SDK host-native execution
 
 Host-native selection comes from the active provider's explicit tool exclusions,

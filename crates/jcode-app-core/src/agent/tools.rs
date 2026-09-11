@@ -13,7 +13,7 @@ impl super::Agent {
     pub(super) async fn retain_managed_sdk_results(
         &mut self,
         calls: &[ToolCall],
-        results: &mut std::collections::HashMap<String, (String, bool)>,
+        results: &mut std::collections::HashMap<String, ToolOutput>,
         message_id: &str,
         events: Option<&tokio::sync::mpsc::UnboundedSender<crate::protocol::ServerEvent>>,
     ) -> anyhow::Result<()> {
@@ -22,14 +22,12 @@ impl super::Agent {
             if self.provider_leaves_tool_to_host(&tool.name) {
                 continue;
             }
-            let Some((content, is_error)) = results.get(&tool.id).cloned() else {
+            let Some(received) = results.get(&tool.id).cloned() else {
                 failures.push(format!("SDK-managed tool {} ({}) ended without a result; input retained, no local replay",tool.name,tool.id));
                 continue;
             };
-            let output = match self
-                .retain_sdk_result(tool, message_id, content.clone(), is_error)
-                .await
-            {
+            let content = crate::execution::sdk_failure_body(&received);
+            let output = match self.retain_sdk_output(tool, message_id, received).await {
                 Ok(output) => output,
                 Err(error) => {
                     self.add_message(crate::message::Role::User,vec![ContentBlock::ToolResult{
@@ -83,12 +81,26 @@ impl super::Agent {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(super) async fn retain_sdk_result(
         &self,
         tool: &ToolCall,
         message_id: &str,
         content: String,
         is_error: bool,
+    ) -> anyhow::Result<ToolOutput> {
+        self.retain_sdk_output(
+            tool,
+            message_id,
+            crate::execution::received_sdk_result(&tool.id, content, is_error, None),
+        )
+        .await
+    }
+    pub(super) async fn retain_sdk_output(
+        &self,
+        tool: &ToolCall,
+        message_id: &str,
+        output: ToolOutput,
     ) -> anyhow::Result<ToolOutput> {
         let ctx = crate::tool::ToolContext {
             session_id: self.session.id.clone(),
@@ -101,14 +113,7 @@ impl super::Agent {
             invocation: Default::default(),
         };
         self.registry
-            .retain_provider_result(
-                &tool.name,
-                tool.input.clone(),
-                ctx,
-                ToolOutput::new(content)
-                    .with_error(is_error)
-                    .with_metadata(serde_json::json!({"provider_supplied":true})),
-            )
+            .retain_provider_result(&tool.name, tool.input.clone(), ctx, output)
             .await
     }
 }
@@ -161,27 +166,7 @@ pub(super) fn tool_output_to_content_blocks(
     tool_use_id: String,
     output: ToolOutput,
 ) -> Vec<ContentBlock> {
-    let mut blocks = vec![ContentBlock::ToolResult {
-        tool_use_id,
-        content: output.output,
-        is_error: output.is_error.then_some(true),
-    }];
-    for img in output.images {
-        blocks.push(ContentBlock::Image {
-            media_type: img.media_type,
-            data: img.data,
-        });
-        if let Some(label) = img.label.filter(|label| !label.trim().is_empty()) {
-            blocks.push(ContentBlock::Text {
-                text: format!(
-                    "[Attached image associated with the preceding tool result: {}]",
-                    label
-                ),
-                cache_control: None,
-            });
-        }
-    }
-    blocks
+    crate::execution::tool_result_blocks(tool_use_id, output)
 }
 
 pub(super) fn print_tool_summary(tool: &ToolCall) {

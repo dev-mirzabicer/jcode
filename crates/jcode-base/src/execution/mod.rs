@@ -24,3 +24,6 @@ mod store;
 pub use capture::{Capture, output_digest};
 pub use storage::{ArchiveConfig, StorageConfig};
 pub use store::{ExecutionStore, Invocation, PreparedInvocation, RunRecord, RunState};
+
+mod provider_result;
+pub use provider_result::{received_sdk_result, sdk_failure_body, tool_result_blocks};

@@ -220,7 +220,7 @@ impl Agent {
         reasoning_signature: &str,
         openai_reasoning_items: &[ContentBlock],
         tool_calls: &[ToolCall],
-        sdk_tool_results: &std::collections::HashMap<String, (String, bool)>,
+        sdk_tool_results: &std::collections::HashMap<String, crate::tool::ToolOutput>,
         generated_image_contexts: &[Vec<ContentBlock>],
         store_reasoning_content: bool,
         token_usage: Option<crate::session::StoredTokenUsage>,
@@ -249,7 +249,7 @@ impl Agent {
 
         let mut received_results = Vec::new();
         for tool_call in tool_calls {
-            let Some((content, is_error)) = sdk_tool_results.get(&tool_call.id) else {
+            let Some(output) = sdk_tool_results.get(&tool_call.id) else {
                 continue;
             };
             assistant_blocks.push(ContentBlock::ToolUse {
@@ -258,7 +258,7 @@ impl Agent {
                 input: tool_call.input.clone(),
                 thought_signature: tool_call.thought_signature.clone(),
             });
-            received_results.push((tool_call, content, *is_error));
+            received_results.push((tool_call, output));
         }
 
         let checkpointed = !assistant_blocks.is_empty()
@@ -281,33 +281,24 @@ impl Agent {
         };
         let mut result_blocks = Vec::new();
         if let Some(message_id) = assistant_id {
-            for (tool, content, is_error) in received_results {
-                let (content, is_error) = match self
-                    .retain_sdk_result(tool, &message_id, content.clone(), is_error)
+            for (tool, received) in received_results {
+                let output = match self
+                    .retain_sdk_output(tool, &message_id, received.clone())
                     .await
                 {
-                    Ok(output) => (output.output, output.is_error),
+                    Ok(output) => output,
                     Err(error) => {
-                        // Preserve the already received body in the authoritative
-                        // checkpoint even when output storage itself has failed.
-                        // This is a failure receipt, never permission to reexecute.
                         if let Some(context) = self.active_turn_context.as_mut() {
                             context.partial_output_persistence_error =
                                 Some(format!("SDK output retention failed: {error:#}"));
                         }
-                        (
-                            format!(
-                                "[SDK output retention failed; original received body follows. Do not repeat the operation.]\n{content}"
-                            ),
-                            true,
-                        )
+                        crate::tool::ToolOutput::new(format!("[SDK output retention failed; original received body follows. Do not repeat the operation.]\n{}",crate::execution::sdk_failure_body(received))).with_error(true)
                     }
                 };
-                result_blocks.push(ContentBlock::ToolResult {
-                    tool_use_id: tool.id.clone(),
-                    content,
-                    is_error: Some(is_error),
-                });
+                result_blocks.extend(crate::execution::tool_result_blocks(
+                    tool.id.clone(),
+                    output,
+                ));
             }
         }
         if !result_blocks.is_empty() {

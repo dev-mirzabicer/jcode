@@ -248,7 +248,7 @@ impl Agent {
             let mut reasoning_signature = String::new();
             let mut openai_reasoning_items: Vec<ContentBlock> = Vec::new();
             // Track tool results from provider (already executed by Claude Code CLI)
-            let mut sdk_tool_results: std::collections::HashMap<String, (String, bool)> =
+            let mut sdk_tool_results: std::collections::HashMap<String, crate::tool::ToolOutput> =
                 std::collections::HashMap::new();
 
             while let Some(event) = stream.next().await {
@@ -418,6 +418,7 @@ impl Agent {
                         tool_use_id,
                         content,
                         is_error,
+                        original,
                     } => {
                         // SDK already executed this tool, store the result
                         if trace {
@@ -428,7 +429,13 @@ impl Agent {
                                 content.len()
                             );
                         }
-                        sdk_tool_results.insert(tool_use_id, (content, is_error));
+                        let output = crate::execution::received_sdk_result(
+                            &tool_use_id,
+                            content,
+                            is_error,
+                            original,
+                        );
+                        sdk_tool_results.insert(tool_use_id, output);
                     }
                     StreamEvent::GeneratedImage {
                         id,
@@ -1006,10 +1013,11 @@ impl Agent {
                 let mut provider_rejection = None;
 
                 // Check if SDK already executed this tool
-                if let Some((sdk_content, sdk_is_error)) = sdk_tool_results.remove(&tc.id) {
+                if let Some(sdk_output) = sdk_tool_results.remove(&tc.id) {
+                    let sdk_is_error = sdk_output.is_error;
                     // Only a code-declared SDK exclusion proves that host execution has not occurred.
                     if is_native_tool && sdk_is_error {
-                        provider_rejection = Some(sdk_content);
+                        provider_rejection = Some(crate::execution::sdk_failure_body(&sdk_output));
                         if trace {
                             eprintln!(
                                 "[trace] sdk_error_for_native_tool name={} id={}, executing locally",
@@ -1018,10 +1026,8 @@ impl Agent {
                         }
                         // Fall through to local execution below
                     } else {
-                        let output = self
-                            .retain_sdk_result(&tc, &message_id, sdk_content, sdk_is_error)
-                            .await?;
-                        let sdk_content = output.output;
+                        let output = self.retain_sdk_output(&tc, &message_id, sdk_output).await?;
+                        let sdk_content = output.output.clone();
                         let sdk_is_error = output.is_error;
                         if trace {
                             eprintln!(
@@ -1055,11 +1061,7 @@ impl Agent {
 
                         self.add_message(
                             Role::User,
-                            vec![ContentBlock::ToolResult {
-                                tool_use_id: tc.id,
-                                content: sdk_content,
-                                is_error: if sdk_is_error { Some(true) } else { None },
-                            }],
+                            tool_output_to_content_blocks(tc.id.clone(), output),
                         );
                         tool_results_dirty = true;
                         continue;

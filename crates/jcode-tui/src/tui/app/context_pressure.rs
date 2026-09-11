@@ -595,14 +595,14 @@ impl App {
         clippy::too_many_arguments,
         reason = "partial-output checkpoint mirrors local stream accumulators"
     )]
-    pub(super) fn checkpoint_partial_local_provider_output(
+    pub(super) async fn checkpoint_partial_local_provider_output(
         &mut self,
         text: &str,
         reasoning: &str,
         reasoning_signature: &str,
         openai_reasoning_items: &[ContentBlock],
         tool_calls: &[ToolCall],
-        sdk_tool_results: &std::collections::HashMap<String, (String, bool)>,
+        sdk_tool_results: &std::collections::HashMap<String, crate::tool::ToolOutput>,
         generated_image_contexts: &[Vec<ContentBlock>],
         store_reasoning_content: bool,
     ) -> anyhow::Result<()> {
@@ -610,6 +610,7 @@ impl App {
             .pending_composer_input
             .as_ref()
             .is_some_and(|pending| pending.output_started)
+            && sdk_tool_results.is_empty()
         {
             return Ok(());
         }
@@ -632,9 +633,9 @@ impl App {
             assistant_blocks.extend(openai_reasoning_items.iter().cloned());
         }
 
-        let mut result_blocks = Vec::new();
+        let mut received_results = Vec::new();
         for tool_call in tool_calls {
-            let Some((content, is_error)) = sdk_tool_results.get(&tool_call.id) else {
+            let Some(output) = sdk_tool_results.get(&tool_call.id) else {
                 continue;
             };
             assistant_blocks.push(ContentBlock::ToolUse {
@@ -643,15 +644,11 @@ impl App {
                 input: tool_call.input.clone(),
                 thought_signature: tool_call.thought_signature.clone(),
             });
-            result_blocks.push(ContentBlock::ToolResult {
-                tool_use_id: tool_call.id.clone(),
-                content: content.clone(),
-                is_error: Some(*is_error),
-            });
+            received_results.push((tool_call, output));
         }
 
         let checkpointed = !assistant_blocks.is_empty()
-            || !result_blocks.is_empty()
+            || !received_results.is_empty()
             || generated_image_contexts
                 .iter()
                 .any(|blocks| !blocks.is_empty());
@@ -660,6 +657,7 @@ impl App {
             return Ok(());
         }
 
+        let mut assistant_id = None;
         if !assistant_blocks.is_empty() {
             crate::telemetry::record_assistant_response();
             self.add_provider_message(Message {
@@ -668,16 +666,18 @@ impl App {
                 timestamp: Some(chrono::Utc::now()),
                 tool_duration_ms: None,
             });
-            self.session.add_message(Role::Assistant, assistant_blocks);
+            assistant_id = Some(self.session.add_message(Role::Assistant, assistant_blocks));
         }
-        if !result_blocks.is_empty() {
-            self.add_provider_message(Message {
-                role: Role::User,
-                content: result_blocks.clone(),
-                timestamp: Some(chrono::Utc::now()),
-                tool_duration_ms: None,
-            });
-            self.session.add_message(Role::User, result_blocks);
+        if let Some(message_id) = assistant_id {
+            for (tool, received) in received_results {
+                if let Err(error) = self
+                    .record_local_sdk_result(tool, &message_id, received.clone())
+                    .await
+                {
+                    self.partial_output_persistence_error =
+                        Some(format!("SDK result checkpoint failed: {error:#}"));
+                }
+            }
         }
         for blocks in generated_image_contexts {
             self.add_provider_message(Message {

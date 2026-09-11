@@ -544,6 +544,7 @@ impl CliOutputParser {
                                 tool_use_id,
                                 content: content_str,
                                 is_error: is_error.unwrap_or(false),
+                                original: None,
                             });
                         }
                         _ => {}
@@ -580,6 +581,7 @@ impl CliOutputParser {
                             tool_use_id,
                             content: content_str,
                             is_error: is_error.unwrap_or(false),
+                            original: None,
                         });
                     }
                 }
@@ -1078,13 +1080,17 @@ async fn run_claude_cli(
                     Some(line) => line,
                     None => break,
                 };
-                let line = line.trim();
+                let original_line=line;
+                let line = original_line.trim();
                 if line.is_empty() {
                     continue;
                 }
                 match serde_json::from_str::<CliOutput>(line) {
                     Ok(output) => {
-                        for event in parser.handle_output(output) {
+                        for mut event in parser.handle_output(output) {
+                            if let StreamEvent::ToolResult{original,..}=&mut event {
+                                *original=Some(original_line.clone());
+                            }
                             if let StreamEvent::Error { message, .. } = &event {
                                 let err_lower = message.to_lowercase();
                                 if !saw_output && is_retryable_error(&err_lower) {
@@ -1222,6 +1228,56 @@ fn to_internal_tool_name(name: &str) -> String {
 #[cfg(test)]
 mod context_validation_tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cli_result_preserves_the_original_rich_protocol_record() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = TestDir::new();
+        let script = directory.path().join("rich-cli");
+        let record = format!(
+            "  {}  ",
+            json!({"type":"user","vendor":{"extra":"preserved"},"message":{"content":[{"type":"tool_result","tool_use_id":"rich","is_error":true,"vendor_result":17,"content":[{"type":"text","text":format!("{}TAIL","λ".repeat(25_000))},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"eA=="}},{"type":"resource","resource":{"uri":"fixture:resource","mimeType":"application/octet-stream","blob":"eQ=="}}]}]}})
+        );
+        std::fs::write(directory.path().join("record"), format!("{record}\n"))?;
+        std::fs::write(&script, "#!/bin/sh\nread request\ncat record\n")?;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))?;
+        let (tx, mut rx) = mpsc::channel(10);
+        run_claude_cli(
+            ClaudeCliConfig {
+                cli_path: script.to_string_lossy().into(),
+                model: "fixture".into(),
+                permission_mode: None,
+                include_partial_messages: false,
+            },
+            "fixture".into(),
+            Vec::new(),
+            String::new(),
+            None,
+            "fixture".into(),
+            Some(directory.path().into()),
+            tx,
+        )
+        .await?;
+        let StreamEvent::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+            original,
+        } = rx.recv().await.context("Missing SDK result")??
+        else {
+            anyhow::bail!("Expected result");
+        };
+        assert_eq!(original.as_deref(), Some(record.as_str()));
+        assert!(content.contains("TAIL"));
+        let output =
+            jcode_base::execution::received_sdk_result(&tool_use_id, content, is_error, original);
+        assert_eq!(output.images[0].data, "eA==");
+        assert_eq!(output.resources[0].data, "eQ==");
+        assert!(output.is_error);
+        assert_eq!(output.metadata.unwrap()["provider_original"], record);
+        Ok(())
+    }
 
     #[tokio::test]
     async fn cancelled_cli_admission_does_not_wait_for_the_current_request() {

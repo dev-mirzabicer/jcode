@@ -444,7 +444,26 @@ impl App {
                 // Still-executing tools will deliver their own result; a
                 // placeholder here becomes a duplicate tool_result that
                 // Anthropic rejects. See `jcode_app_core::tool::inflight`.
-                if crate::tool::inflight::is_tool_in_flight(&id) {
+                let in_flight = if self.is_remote {
+                    false
+                } else {
+                    let context = crate::tool::ToolContext {
+                        session_id: self.session.id.clone(),
+                        message_id: self.session.messages[index].id.clone(),
+                        tool_call_id: id.clone(),
+                        working_dir: None,
+                        stdin_request_tx: None,
+                        graceful_shutdown_signal: None,
+                        execution_mode: crate::tool::ToolExecutionMode::Direct,
+                        invocation: Default::default(),
+                    };
+                    crate::tool::inflight::is_tool_in_flight(&crate::execution::invocation(
+                        &context,
+                        "",
+                        serde_json::Value::Null,
+                    ))
+                };
+                if in_flight {
                     crate::logging::info(&format!(
                         "Skipping missing tool-output repair for {id}: tool is still executing"
                     ));

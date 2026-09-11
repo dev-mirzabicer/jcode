@@ -2852,6 +2852,7 @@ mod tests {
                 tool_use_id: "call".to_string(),
                 content: "result".to_string(),
                 is_error: false,
+                original: None,
             },
             StreamEvent::GeneratedImage {
                 id: "image".to_string(),

@@ -4378,6 +4378,7 @@ struct SuppliedResultProvider {
     result_error: bool,
     tool_name: &'static str,
     host_native: bool,
+    original: Option<String>,
 }
 #[async_trait]
 impl Provider for SuppliedResultProvider {
@@ -4401,6 +4402,7 @@ impl Provider for SuppliedResultProvider {
         let body = self.body.clone();
         let after_result = self.after_result;
         let result_error = self.result_error;
+        let original = self.original.clone();
         let tool_name = self.tool_name;
         let (tx, rx) = tokio_mpsc::channel(8);
         tokio::spawn(async move {
@@ -4416,6 +4418,7 @@ impl Provider for SuppliedResultProvider {
                         tool_use_id: "sdk-result".into(),
                         content: body,
                         is_error: result_error,
+                        original,
                     },
                     StreamEvent::MessageEnd {
                         stop_reason: Some("tool_use".into()),
@@ -4483,6 +4486,7 @@ async fn supplied_provider_results_are_retained_before_history_and_mpsc_delivery
             result_error: false,
             tool_name: "external_result",
             host_native: false,
+            original: None,
         };
         let calls = provider.calls.clone();
         let largest = provider.largest_result.clone();
@@ -4545,6 +4549,7 @@ async fn provider_failure_after_sdk_result_preserves_a_paired_retained_checkpoin
             result_error: false,
             tool_name: "external_result",
             host_native: false,
+            original: None,
         };
         let calls = provider.calls.clone();
         let provider: Arc<dyn Provider> = Arc::new(provider);
@@ -4785,6 +4790,7 @@ async fn managed_sdk_results_survive_local_tool_filtering_in_both_agent_loops() 
                 result_error: is_error,
                 tool_name: "external_result",
                 host_native: false,
+                original: None,
             };
             let calls = provider.calls.clone();
             let provider: Arc<dyn Provider> = Arc::new(provider);
@@ -4863,6 +4869,7 @@ async fn managed_sdk_retention_failure_preserves_received_body_without_replay() 
             result_error: false,
             tool_name: "external_result",
             host_native: false,
+            original: None,
         };
         let calls = provider.calls.clone();
         let mut agent = Agent::new(Arc::new(provider), Registry::empty());
@@ -4961,6 +4968,7 @@ async fn native_sdk_execution_requires_a_structural_exclusion_and_retains_reject
                 result_error: is_error,
                 tool_name: "selfdev",
                 host_native,
+                original: None,
             };
             let calls = provider.calls.clone();
             let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -5052,11 +5060,21 @@ async fn missing_managed_sdk_receipt_does_not_discard_later_received_results() -
         let mut results = HashMap::from([
             (
                 "received-one".into(),
-                ("first complete result".into(), false),
+                crate::execution::received_sdk_result(
+                    "received-one",
+                    "first complete result".into(),
+                    false,
+                    None,
+                ),
             ),
             (
                 "received-two".into(),
-                ("second complete result".into(), true),
+                crate::execution::received_sdk_result(
+                    "received-two",
+                    "second complete result".into(),
+                    true,
+                    None,
+                ),
             ),
         ]);
         assert!(
@@ -5079,6 +5097,76 @@ async fn missing_managed_sdk_receipt_does_not_discard_later_received_results() -
         assert_eq!(bodies.len(), 2);
         assert!(bodies[0].contains("first complete result"));
         assert!(bodies[1].contains("second complete result"));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn complete_sdk_original_and_rich_parts_survive_agent_history_and_retention() -> Result<()> {
+    let _guard = crate::storage::lock_test_env();
+    for streaming in [false, true] {
+        for (managed, after_result) in [false, true].into_iter().flat_map(|managed| {
+            [
+                SdkAfterResult::Success,
+                SdkAfterResult::Failure,
+                SdkAfterResult::Rollback,
+            ]
+            .map(|after| (managed, after))
+        }) {
+            let home = tempfile::tempdir()?;
+            let _home = AgentTestEnvRestore::set_path("JCODE_HOME", home.path());
+            let _runtime =
+                AgentTestEnvRestore::set_path("JCODE_RUNTIME_DIR", &home.path().join("runtime"));
+            crate::config::invalidate_config_cache();
+            let original = format!(
+                "  {}  ",
+                serde_json::json!({"type":"user","vendor":"retain whole record","message":{"content":[{"type":"tool_result","tool_use_id":"sdk-result","extra":17,"content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"eA=="}},{"type":"resource","resource":{"uri":"fixture:resource","blob":"eQ=="}}]}]}})
+            );
+            let provider = SuppliedResultProvider {
+                calls: Default::default(),
+                largest_result: Default::default(),
+                body: "selected result".into(),
+                after_result,
+                managed,
+                result_error: false,
+                tool_name: "external_result",
+                host_native: false,
+                original: Some(original.clone()),
+            };
+            let mut agent = Agent::new(Arc::new(provider), Registry::empty());
+            let outcome = if streaming {
+                let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+                agent
+                    .run_once_streaming_mpsc("synthetic", Vec::new(), None, tx)
+                    .await
+                    .map(|_| ())
+            } else {
+                agent.run_once_capture("synthetic").await.map(|_| ())
+            };
+            assert_eq!(
+                outcome.is_err(),
+                !matches!(after_result, SdkAfterResult::Success),
+                "Unexpected SDK outcome: {outcome:?}"
+            );
+            let store = crate::execution::ExecutionStore::open(home.path())?;
+            let records = store.list(agent.session_id(), None, 100)?;
+            let record = records
+                .iter()
+                .find(|record| record.tool == "external_result")
+                .unwrap();
+            let result = store.result(record, std::num::NonZeroUsize::new(100).unwrap())?;
+            assert_eq!(result.metadata.unwrap()["provider_original"], original);
+            assert_eq!(result.images[0].data, "eA==");
+            assert_eq!(result.resources[0].data, "eQ==");
+            let saved = Session::load(agent.session_id())?;
+            assert!(
+                saved
+                    .messages
+                    .iter()
+                    .flat_map(|message| &message.content)
+                    .any(|block| matches!(block,ContentBlock::Image{data,..} if data=="eA=="))
+            );
+        }
     }
     Ok(())
 }

@@ -421,7 +421,7 @@ impl App {
             let mut call_output_tokens_seen: u64 = 0;
             let mut interleaved = false; // Track if we interleaved a message mid-stream
             // Track tool results from provider (already executed by Claude Code CLI)
-            let mut sdk_tool_results: std::collections::HashMap<String, (String, bool)> =
+            let mut sdk_tool_results: std::collections::HashMap<String, crate::tool::ToolOutput> =
                 std::collections::HashMap::new();
             let provider_name = self.provider.name().to_string();
             let store_reasoning_content =
@@ -978,7 +978,7 @@ impl App {
                                                 &sdk_tool_results,
                                                 &generated_image_contexts,
                                                 store_reasoning_content,
-                                            )?;
+                                            ).await?;
                                         }
                                         memory_pending.restore_now();
                                         return Err(anyhow::anyhow!("Stream error: {}", message));
@@ -1071,38 +1071,9 @@ impl App {
                                         // Store the upstream provider (e.g., Fireworks, Together)
                                         self.upstream_provider = Some(provider);
                                     }
-                                    StreamEvent::ToolResult { tool_use_id, content, is_error } => {
-                                        // SDK already executed this tool
-                                        self.tool_result_ids.insert(tool_use_id.clone());
-                                        // Find the tool name from our tracking
-                                        let tool_name = self.streaming_tool_calls
-                                            .iter()
-                                            .find(|tc| tc.id == tool_use_id)
-                                            .map(|tc| tc.name.clone())
-                                            .unwrap_or_default();
-
-                                        self.broadcast_debug(crate::tui::backend::DebugEvent::ToolDone {
-                                            id: tool_use_id.clone(),
-                                            name: tool_name.clone(),
-                                            output: content.clone(),
-                                            is_error,
-                                        });
-
-                                        // Update the tool's DisplayMessage with the output (if it exists)
-                                        if let Some(dm) = self.display_messages.iter_mut().rev().find(|dm| {
-                                            dm.tool_data.as_ref().map(|td| &td.id) == Some(&tool_use_id)
-                                        }) {
-                                            dm.content = content.clone();
-                                            self.bump_display_messages_version();
-                                        }
-
-                                        // Clear this tool from streaming_tool_calls
-                                        self.streaming_tool_calls.retain(|tc| tc.id != tool_use_id);
-
-                                        // Reset status back to Streaming
-                                        self.status = ProcessingStatus::Streaming;
-
-                                        sdk_tool_results.insert(tool_use_id, (content, is_error));
+                                    StreamEvent::ToolResult {tool_use_id,content,is_error,original}=>{
+                                        let output=crate::execution::received_sdk_result(&tool_use_id,content,is_error,original);
+                                        sdk_tool_results.insert(tool_use_id,output);
                                     }
                                     StreamEvent::GeneratedImage {
                                         id,
@@ -1243,7 +1214,7 @@ impl App {
                                         &sdk_tool_results,
                                         &generated_image_contexts,
                                         store_reasoning_content,
-                                    )?;
+                                    ).await?;
                                 }
                                 memory_pending.restore_now();
                                 return Err(e);
@@ -1421,7 +1392,18 @@ impl App {
                     .unwrap_or_else(|| self.session.id.clone());
 
                 // Check if SDK already executed this tool
-                if let Some((sdk_content, sdk_is_error)) = sdk_tool_results.remove(&tc.id) {
+                if let Some(received) = sdk_tool_results.remove(&tc.id) {
+                    let output = self
+                        .record_local_sdk_result(&tc, &message_id, received)
+                        .await?;
+                    let sdk_content = output.output.clone();
+                    let sdk_is_error = output.is_error;
+                    self.broadcast_debug(crate::tui::backend::DebugEvent::ToolDone {
+                        id: tc.id.clone(),
+                        name: tc.name.clone(),
+                        output: sdk_content.clone(),
+                        is_error: sdk_is_error,
+                    });
                     // Use SDK result
                     Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
                         session_id: self.session.id.clone(),
@@ -1452,25 +1434,6 @@ impl App {
                     self.observe_tool_result(&tc, &sdk_content, sdk_is_error, None);
                     self.note_tool_completed(&tc, sdk_is_error);
 
-                    self.add_provider_message(Message {
-                        role: Role::User,
-                        content: vec![ContentBlock::ToolResult {
-                            tool_use_id: tc.id.clone(),
-                            content: sdk_content,
-                            is_error: if sdk_is_error { Some(true) } else { None },
-                        }],
-                        timestamp: Some(chrono::Utc::now()),
-                        tool_duration_ms: None,
-                    });
-                    self.session.add_message(
-                        Role::User,
-                        vec![ContentBlock::ToolResult {
-                            tool_use_id: tc.id.clone(),
-                            content: String::new(), // Already added to messages above
-                            is_error: if sdk_is_error { Some(true) } else { None },
-                        }],
-                    );
-                    self.session.save()?;
                     continue;
                 }
 

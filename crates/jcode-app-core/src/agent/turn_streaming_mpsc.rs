@@ -349,7 +349,7 @@ impl Agent {
             let mut usage_cache_creation: Option<u64> = None;
             let mut saw_message_end = false;
             let mut stop_reason: Option<String> = None;
-            let mut sdk_tool_results: std::collections::HashMap<String, (String, bool)> =
+            let mut sdk_tool_results: std::collections::HashMap<String, crate::tool::ToolOutput> =
                 std::collections::HashMap::new();
             let provider_name = self.provider.name().to_string();
             let store_reasoning_content =
@@ -637,8 +637,15 @@ impl Agent {
                         tool_use_id,
                         content,
                         is_error,
+                        original,
                     } => {
-                        sdk_tool_results.insert(tool_use_id, (content, is_error));
+                        let output = crate::execution::received_sdk_result(
+                            &tool_use_id,
+                            content,
+                            is_error,
+                            original,
+                        );
+                        sdk_tool_results.insert(tool_use_id, output);
                     }
                     StreamEvent::GeneratedImage {
                         id,
@@ -1331,13 +1338,12 @@ impl Agent {
                 let is_native_tool = self.provider_leaves_tool_to_host(&tc.name);
                 let mut provider_rejection = None;
 
-                if let Some((sdk_content, sdk_is_error)) = sdk_tool_results.remove(&tc.id) {
+                if let Some(sdk_output) = sdk_tool_results.remove(&tc.id) {
+                    let sdk_is_error = sdk_output.is_error;
                     // Only a code-declared SDK exclusion proves that host execution has not occurred.
                     if !(is_native_tool && sdk_is_error) {
-                        let output = self
-                            .retain_sdk_result(tc, &message_id, sdk_content, sdk_is_error)
-                            .await?;
-                        let sdk_content = output.output;
+                        let output = self.retain_sdk_output(tc, &message_id, sdk_output).await?;
+                        let sdk_content = output.output.clone();
                         let sdk_is_error = output.is_error;
                         let _ = event_tx.send(ServerEvent::ToolDone {
                             id: tc.id.clone(),
@@ -1349,11 +1355,7 @@ impl Agent {
                         });
                         self.add_message(
                             Role::User,
-                            vec![ContentBlock::ToolResult {
-                                tool_use_id: tc.id.clone(),
-                                content: sdk_content,
-                                is_error: if sdk_is_error { Some(true) } else { None },
-                            }],
+                            tool_output_to_content_blocks(tc.id.clone(), output),
                         );
                         tool_results_dirty = true;
 
@@ -1361,7 +1363,7 @@ impl Agent {
 
                         continue;
                     }
-                    provider_rejection = Some(sdk_content);
+                    provider_rejection = Some(crate::execution::sdk_failure_body(&sdk_output));
                     // The route structurally excludes this tool from SDK execution.
                 }
 
