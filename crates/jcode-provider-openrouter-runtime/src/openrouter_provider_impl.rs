@@ -343,7 +343,7 @@ impl Provider for OpenRouterProvider {
         let model_for_stream = model.clone();
         let provider_pin = Arc::clone(&self.provider_pin);
 
-        tokio::spawn(async move {
+        jcode_provider_core::request_lifetime::spawn_request(tx.clone(), async move {
             if tx
                 .send(Ok(StreamEvent::ConnectionType {
                     connection: "https/sse".to_string(),

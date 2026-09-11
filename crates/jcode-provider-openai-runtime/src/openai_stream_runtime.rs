@@ -254,7 +254,12 @@ pub(super) async fn stream_response(
     // (issue #434).
     use futures::StreamExt;
     loop {
-        let result = match tokio::time::timeout(idle_timeout, stream.next()).await {
+        let next = tokio::select! {
+            biased;
+            _=tx.closed()=>return Ok(()),
+            result=tokio::time::timeout(idle_timeout,stream.next())=>result,
+        };
+        let result = match next {
             Ok(Some(result)) => result,
             Ok(None) => break, // stream ended normally
             Err(_) => {
@@ -795,19 +800,21 @@ pub(super) async fn try_persistent_ws_continuation(
                 ));
             }
         };
-        let next_item =
-            match tokio::time::timeout(Duration::from_secs(timeout_secs), state.ws_stream.next())
-                .await
-            {
-                Ok(item) => item,
-                Err(_) => {
-                    return PersistentWsResult::Failed(format!(
-                        "timed out waiting for {} websocket activity on persistent WS ({}s)",
-                        websocket_activity_timeout_kind(saw_api_activity),
-                        timeout_secs
-                    ));
-                }
-            };
+        let next = tokio::select! {
+            biased;
+            _=tx.closed()=>{consumer_dropped=true;break;},
+            result=tokio::time::timeout(Duration::from_secs(timeout_secs),state.ws_stream.next())=>result,
+        };
+        let next_item = match next {
+            Ok(item) => item,
+            Err(_) => {
+                return PersistentWsResult::Failed(format!(
+                    "timed out waiting for {} websocket activity on persistent WS ({}s)",
+                    websocket_activity_timeout_kind(saw_api_activity),
+                    timeout_secs
+                ));
+            }
+        };
 
         let Some(result) = next_item else {
             if saw_response_completed {
@@ -1225,15 +1232,18 @@ pub(super) async fn stream_response_websocket_persistent(
                 }
             ))
         })?;
-        let next_item = tokio::time::timeout(Duration::from_secs(timeout_secs), ws_stream.next())
-            .await
-            .map_err(|_| {
-                OpenAIStreamFailure::FallbackToHttps(anyhow::anyhow!(
-                    "WebSocket stream timed out waiting for {} websocket activity ({}s)",
-                    websocket_activity_timeout_kind(saw_api_activity),
-                    timeout_secs
-                ))
-            })?;
+        let next = tokio::select! {
+            biased;
+            _=tx.closed()=>{if saw_response_completed{break;}else{return Ok(());}},
+            result=tokio::time::timeout(Duration::from_secs(timeout_secs),ws_stream.next())=>result,
+        };
+        let next_item = next.map_err(|_| {
+            OpenAIStreamFailure::FallbackToHttps(anyhow::anyhow!(
+                "WebSocket stream timed out waiting for {} websocket activity ({}s)",
+                websocket_activity_timeout_kind(saw_api_activity),
+                timeout_secs
+            ))
+        })?;
 
         let Some(result) = next_item else {
             if saw_response_completed {

@@ -68,9 +68,15 @@ impl AttemptGuard {
     /// Wait for all events the attempt buffered to be forwarded to the outer
     /// sender (preserving ordering relative to any subsequent rollback event),
     /// then report whether any replay-visible output was emitted.
-    pub async fn finish(self) -> bool {
-        let _ = self.forwarder.await;
+    pub async fn finish(mut self) -> bool {
+        let _ = (&mut self.forwarder).await;
         self.saw_output.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for AttemptGuard {
+    fn drop(&mut self) {
+        self.forwarder.abort();
     }
 }
 
@@ -89,7 +95,12 @@ pub fn track_attempt_output(
     let saw_output = Arc::new(AtomicBool::new(false));
     let saw_output_writer = Arc::clone(&saw_output);
     let forwarder = tokio::spawn(async move {
-        while let Some(item) = attempt_rx.recv().await {
+        loop {
+            let item = tokio::select! {
+                biased;
+                _=outer.closed()=>break,
+                item=attempt_rx.recv()=>match item{Some(item)=>item,None=>break},
+            };
             if let Ok(event) = &item
                 && stream_event_is_replay_visible(event)
             {
@@ -127,6 +138,41 @@ pub fn retry_backoff_delay(attempt: u32, base_ms: u64) -> std::time::Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn idle_attempt_observes_consumer_drop_without_waiting_for_another_event() {
+        let (outer, receiver) = mpsc::channel(8);
+        let (attempt, guard) = track_attempt_output(outer);
+        drop(receiver);
+        tokio::time::timeout(std::time::Duration::from_secs(1), attempt.closed())
+            .await
+            .expect("Idle attempt must observe consumer closure");
+        drop(attempt);
+        assert!(!guard.finish().await);
+    }
+
+    #[tokio::test]
+    async fn dropping_attempt_guard_stops_its_owned_forwarder() {
+        let (outer, _receiver) = mpsc::channel(8);
+        let (attempt, guard) = track_attempt_output(outer);
+        drop(guard);
+        tokio::time::timeout(std::time::Duration::from_secs(1), attempt.closed())
+            .await
+            .expect("Dropped attempt must not leave its forwarder detached");
+    }
+
+    #[tokio::test]
+    async fn cancelled_finish_does_not_detach_the_forwarder() {
+        let (outer, _receiver) = mpsc::channel(8);
+        let (attempt, guard) = track_attempt_output(outer);
+        let finish = tokio::spawn(guard.finish());
+        tokio::task::yield_now().await;
+        finish.abort();
+        let _ = finish.await;
+        tokio::time::timeout(std::time::Duration::from_secs(1), attempt.closed())
+            .await
+            .expect("Cancelling finish must still stop its forwarder");
+    }
 
     #[test]
     fn text_and_tool_events_are_replay_visible() {

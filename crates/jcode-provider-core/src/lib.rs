@@ -12,6 +12,7 @@ pub mod openai_schema;
 pub mod pricing;
 pub mod qualified_model;
 pub mod reasoning;
+pub mod request_lifetime;
 pub mod retry_after;
 pub mod selection;
 pub mod transport;

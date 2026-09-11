@@ -327,6 +327,28 @@ store uses SQLite's NOFOLLOW open after resolving ancestor aliases, and hardens
 permissions before WAL/SHM creation. Real cross-process tests cover lock
 preservation in both WAL and rollback modes plus symlink/private-mode checks.
 
+## Provider request cancellation
+
+Attempt forwarders own their tasks through normal finish and cancellation.
+Closing an idle consumer closes the attempt channel immediately, without waiting
+for another provider event. Dropping or cancelling the finish future does not
+detach the forwarder.
+
+Anthropic Messages (including split requests), OpenRouter-compatible HTTP,
+Copilot and Bedrock request tasks now observe receiver closure through a shared
+request-lifetime owner. A quiet network read or retry backoff is cancelled by
+dropping only that request future. A real local HTTP provider test verifies the
+connection closes and the same provider remains usable for another request.
+
+OpenAI quiet SSE and WebSocket reads observe receiver closure directly. For a
+persistent WebSocket, cancellation reaches the existing response-chain cleanup
+while its state lock is still held, rather than clearing a possibly unrelated
+later request from an out-of-band callback. Quiet and existing continuation tests
+pass. Initial connection establishment, remaining stateful adapters and CLI
+provider subprocess boundaries still require final reconciliation. These checks
+do not prove that a hosted service acknowledges cancellation or stops remote
+compute, which remains outside the approved owned-work boundary.
+
 ## Verification
 
 Run through coordinated self-development tests:

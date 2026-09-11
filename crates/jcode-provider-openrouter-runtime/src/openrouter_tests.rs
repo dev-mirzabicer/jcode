@@ -3292,3 +3292,45 @@ fn named_openai_compatible_provider_keeps_stable_name_and_profile_display_name()
     assert_eq!(provider.runtime_display_name(), "example-compat");
     assert_eq!(Provider::display_name(&provider), "example-compat");
 }
+
+#[test]
+fn consumer_drop_closes_a_quiet_request_and_does_not_disable_the_provider() {
+    let _lock = ENV_LOCK.lock();
+    let home = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set("JCODE_HOME", home.path().to_str().unwrap());
+    let runtime_path = home.path().join("runtime");
+    let _runtime = EnvVarGuard::set("JCODE_RUNTIME_DIR", runtime_path.to_str().unwrap());
+    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+        use tokio::io::{AsyncReadExt,AsyncWriteExt};
+        async fn request(stream:&mut tokio::net::TcpStream)->String {
+            let mut bytes=Vec::new();
+            while !bytes.ends_with(b"\r\n\r\n") {let mut byte=[0];stream.read_exact(&mut byte).await.unwrap();bytes.push(byte[0]);assert!(bytes.len()<16*1024);}
+            let header=String::from_utf8(bytes).unwrap();
+            let length=header.lines().find_map(|line|line.to_ascii_lowercase().strip_prefix("content-length:").and_then(|value|value.trim().parse::<usize>().ok())).unwrap();
+            assert!(length<1024*1024);let mut body=vec![0;length];stream.read_exact(&mut body).await.unwrap();String::from_utf8(body).unwrap()
+        }
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address=listener.local_addr().unwrap();
+        let (ready_tx,ready_rx)=tokio::sync::oneshot::channel();
+        let server=tokio::spawn(async move {
+            let (mut first,_)=listener.accept().await.unwrap();let body=request(&mut first).await;assert!(body.contains("first task"));
+            first.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").await.unwrap();
+            ready_tx.send(()).unwrap();
+            let mut byte=[0];let closed=tokio::time::timeout(Duration::from_secs(2),first.read(&mut byte)).await.unwrap();
+            assert!(matches!(closed,Ok(0)) || closed.is_err_and(|error|error.kind()==std::io::ErrorKind::ConnectionReset));
+            let (mut second,_)=tokio::time::timeout(Duration::from_secs(2),listener.accept()).await.unwrap().unwrap();
+            assert!(request(&mut second).await.contains("second task"));
+            let body="data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"second reply\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+            second.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+        });
+        let profile=jcode_base::config::NamedProviderConfig{base_url:format!("http://{address}/v1"),auth:jcode_base::config::NamedProviderAuth::None,default_model:Some("local-model".into()),model_catalog:false,..Default::default()};
+        let provider=OpenRouterProvider::new_named_openai_compatible("cancel-fixture",&profile).unwrap();
+        let first=provider.complete(&[Message::user("first task")],&[],"synthetic system",None).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2),ready_rx).await.unwrap().unwrap();drop(first);
+        let mut second=provider.complete(&[Message::user("second task")],&[],"synthetic system",None).await.unwrap();
+        let mut reply=String::new();
+        while let Some(event)=tokio::time::timeout(Duration::from_secs(3),second.next()).await.unwrap(){if let StreamEvent::TextDelta(text)=event.unwrap(){reply.push_str(&text);}}
+        assert_eq!(reply,"second reply");server.await.unwrap();
+    });
+}

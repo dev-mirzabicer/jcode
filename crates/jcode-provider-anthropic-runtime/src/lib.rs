@@ -1125,7 +1125,7 @@ impl Provider for AnthropicProvider {
 
         // Spawn task to handle streaming with retry logic.
         // This includes forced OAuth refresh on auth failures.
-        tokio::spawn(async move {
+        jcode_provider_core::request_lifetime::spawn_request(tx.clone(), async move {
             if tx
                 .send(Ok(StreamEvent::ConnectionType {
                     connection: "https/sse".to_string(),
@@ -1554,7 +1554,7 @@ impl Provider for AnthropicProvider {
         let model_state = Arc::clone(&self.model);
 
         // Spawn task to handle streaming with retry logic
-        tokio::spawn(async move {
+        jcode_provider_core::request_lifetime::spawn_request(tx.clone(), async move {
             if tx
                 .send(Ok(StreamEvent::ConnectionType {
                     connection: "https/sse".to_string(),

@@ -955,7 +955,7 @@ impl Provider for CopilotApiProvider {
             created_at: self.created_at,
         };
 
-        tokio::spawn(async move {
+        jcode_provider_core::request_lifetime::spawn_request(tx.clone(), async move {
             provider
                 .stream_request(built_messages, built_tools, is_user_initiated, tx)
                 .await;

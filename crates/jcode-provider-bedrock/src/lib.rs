@@ -1337,7 +1337,7 @@ impl Provider for BedrockProvider {
             ],
         );
         let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(64);
-        tokio::spawn(async move {
+        jcode_provider_core::request_lifetime::spawn_request(tx.clone(), async move {
             let client = Self::runtime_client().await;
             let mut req = client
                 .converse_stream()
