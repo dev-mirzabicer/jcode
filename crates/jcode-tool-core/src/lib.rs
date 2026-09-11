@@ -20,6 +20,13 @@ pub enum OutputStream {
 pub trait OutputCapture: Send + Sync {
     fn write(&self, stream: OutputStream, bytes: &[u8]) -> Result<()>;
     fn reference(&self) -> Result<jcode_tool_types::OutputReference>;
+    fn append_part(&self, name: &str, bytes: &[u8]) -> Result<()>;
+    fn read_part(&self, name: &str) -> Result<CapturedPart>;
+}
+
+pub struct CapturedPart {
+    pub path: PathBuf,
+    pub reader: std::fs::File,
 }
 
 /// A delivery wrapper delegates stop to the runtime that owns actual work.

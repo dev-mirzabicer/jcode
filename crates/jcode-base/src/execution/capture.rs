@@ -1,5 +1,5 @@
 //! One owned streaming sink for complete text, separate raw streams and receipts.
-use super::output::{ImagePart, Manifest, PartIntegrity, ResourcePart};
+use super::output::{ImagePart, Manifest, PartIntegrity, ResourcePart, StoredPart};
 use super::storage::BundleStorage;
 use super::{ExecutionStore, RunRecord, RunState, StorageConfig};
 use anyhow::{Context, Result, ensure};
@@ -64,6 +64,7 @@ struct CaptureState {
     seal_intent: Option<([u8; 32], RunState)>,
     pending_output: Option<ToolOutput>,
     text_digest: Sha256,
+    parts: std::collections::BTreeSet<String>,
 }
 
 /// Callers share the sink, not writer handles. Publication and relocation share
@@ -91,6 +92,7 @@ impl Capture {
                 seal_intent: None,
                 pending_output: None,
                 text_digest: Sha256::new(),
+                parts: Default::default(),
             }),
         }
     }
@@ -125,11 +127,33 @@ impl Capture {
                     state.failed = Some(format!("{error:#}"));
                 }
             }
+            let parts = if state.failed.is_none() {
+                match state
+                    .parts
+                    .iter()
+                    .map(|file| {
+                        Ok(StoredPart {
+                            file: file.clone(),
+                            integrity: PartIntegrity::read(state.storage.read_part(file)?)?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()
+                {
+                    Ok(parts) => parts,
+                    Err(error) => {
+                        state.failed = Some(format!("{error:#}"));
+                        Vec::new()
+                    }
+                }
+            } else {
+                Vec::new()
+            };
             let complete = state.failed.is_none();
             let source = OutputSource::Retained(state.reference(complete));
             let manifest_path;
             if complete {
                 let manifest = Manifest {
+                    parts,
                     schema: 1,
                     invocation_id: state.record.id.clone(),
                     title: output.title.clone(),
@@ -181,6 +205,7 @@ impl Capture {
                     ),
                     images: Vec::new(),
                     resources: Vec::new(),
+                    parts: Vec::new(),
                     source: OutputSource::Retained(state.reference(false)),
                     outcome: Some(RunState::Failed),
                     text_sha256: Some(format!("{:x}", state.text_digest.clone().finalize())),
@@ -309,6 +334,44 @@ impl CaptureState {
 }
 
 impl OutputCapture for Capture {
+    fn append_part(&self, name: &str, bytes: &[u8]) -> Result<()> {
+        let file = part_filename(name)?;
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        ensure!(
+            !state.sealed && state.seal_intent.is_none() && state.failed.is_none(),
+            "Capture is no longer writable"
+        );
+        if bytes.is_empty() && state.parts.contains(&file) {
+            return Ok(());
+        }
+        state.parts.insert(file.clone());
+        let result = (|| {
+            let owned: bool = state.storage.store.connection()?.query_row(
+                "SELECT EXISTS(SELECT 1 FROM runs WHERE id=?1 AND owner=?2 AND state='running')",
+                params![state.record.id, state.record.owner],
+                |row| row.get(0),
+            )?;
+            ensure!(owned, "Raw capture part lost invocation ownership");
+            if bytes.is_empty() {
+                state.storage.write_file(&file, bytes)
+            } else {
+                state.storage.append(&file, bytes)
+            }
+        })();
+        if let Err(error) = &result {
+            state.failed = Some(format!("{error:#}"));
+        }
+        result
+    }
+    fn read_part(&self, name: &str) -> Result<jcode_tool_core::CapturedPart> {
+        let file = part_filename(name)?;
+        let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        ensure!(state.parts.contains(&file), "Unknown captured part");
+        Ok(jcode_tool_core::CapturedPart {
+            path: state.storage.alias().join(&file),
+            reader: state.storage.read_part(&file)?,
+        })
+    }
     fn write(&self, stream: OutputStream, bytes: &[u8]) -> Result<()> {
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         ensure!(!state.sealed, "Cannot append to a sealed output");
@@ -334,6 +397,18 @@ impl OutputCapture for Capture {
     }
 }
 
+fn part_filename(name: &str) -> Result<String> {
+    ensure!(
+        !name.is_empty()
+            && name.len() <= 100
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'),
+        "Invalid captured part name"
+    );
+    Ok(format!("part-{name}.bin"))
+}
+
 fn output_digest(output: &ToolOutput) -> Result<[u8; 32]> {
     struct HashWriter(Sha256);
     impl std::io::Write for HashWriter {
@@ -354,6 +429,49 @@ fn output_digest(output: &ToolOutput) -> Result<[u8; 32]> {
 mod tests {
     use super::*;
     use crate::execution::{Invocation, PreparedInvocation};
+
+    #[test]
+    fn raw_parts_preserve_chunks_and_empty_appends_without_aliasing_canonical_files() -> Result<()>
+    {
+        use std::io::Read;
+        let directory = tempfile::tempdir()?;
+        let store = ExecutionStore::open(directory.path())?;
+        let record = prepared(&store)?;
+        let capture = Capture::create(store.clone(), record.clone(), StorageConfig::default())?;
+        capture.append_part("response", b"abc")?;
+        capture.append_part("response", b"")?;
+        capture.append_part("response", b"\xffdef")?;
+        assert!(capture.append_part("../output.txt", b"overwrite").is_err());
+        let mut part = capture.read_part("response")?;
+        let mut bytes = Vec::new();
+        part.reader.read_to_end(&mut bytes)?;
+        assert_eq!(bytes, b"abc\xffdef");
+        capture.seal(ToolOutput::new("selected rendering"), RunState::Completed)?;
+        assert_eq!(
+            std::fs::read_to_string(store.inspect(&record.id)?.unwrap().output_path.unwrap())?,
+            "selected rendering"
+        );
+        assert!(capture.append_part("response", b"late").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn raw_part_requires_current_invocation_ownership() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let store = ExecutionStore::open(directory.path())?;
+        let record = prepared(&store)?;
+        let capture = Capture::create(store.clone(), record.clone(), StorageConfig::default())?;
+        store.connection()?.execute(
+            "UPDATE runs SET owner='another-owner' WHERE id=?1",
+            [&record.id],
+        )?;
+        assert!(
+            capture
+                .append_part("response", b"not acknowledged")
+                .is_err()
+        );
+        Ok(())
+    }
     fn prepared(store: &ExecutionStore) -> Result<RunRecord> {
         let invocation = Invocation {
             session_id: "s".into(),

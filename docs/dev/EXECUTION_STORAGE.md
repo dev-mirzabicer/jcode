@@ -210,6 +210,26 @@ tool-owned timeout arguments remain producer arguments, and explicit execution
 control can stop waiting on the owned request. This is not a guarantee that an
 external service stops remote computation or acknowledges cancellation.
 
+## HTTP acquisition and converted output
+
+`webfetch` retains received body chunks in an owned raw-response part before
+format conversion. The selected HTML/text/Markdown rendering has no independent
+40,000-character cap. Only the common presentation layer selects its returned
+prefix. Raw parts use the same storage placement, backpressure and relocation
+owner as command streams, with part identity and integrity in the manifest.
+
+The existing five-MiB acquisition bound is separate from presentation. A larger
+declared body is rejected before acquisition. If a streamed response exceeds the
+bound, every chunk already delivered to Jcode is retained and the operation
+reports incomplete acquisition instead of truncated success. Transport failure
+similarly preserves the received prefix. HTTP error bodies are retained, not
+replaced solely by their status code. Metadata reports acquired bytes and
+completeness; unreceived upstream bytes are never invented.
+
+HTML format conversion still selects prose, strips non-prose markup and renders
+links under its existing conversion rules. The original acquired bytes remain
+available independently, including invalid UTF-8 and omitted markup.
+
 ## Verification
 
 Run through coordinated self-development tests:

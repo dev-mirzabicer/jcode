@@ -1,15 +1,14 @@
 use super::{Tool, ToolContext, ToolOutput};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
+use base64::Engine;
 use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::io::Read;
 use std::time::Duration;
 
 const MAX_SIZE: usize = 5 * 1024 * 1024; // 5MB
-/// Cap on the text handed back to the model. Full pages routinely exceed 150 KB
-/// (~40k tokens) which is rarely worth the context budget.
-const MAX_OUTPUT_CHARS: usize = 40_000;
 /// Links whose target exceeds this length are rendered as their anchor text
 /// only. Long URLs are typically encoded payloads (pre-filled editors, tracking
 /// parameters, data URIs) whose cost far exceeds their navigational value.
@@ -71,7 +70,7 @@ impl Tool for WebFetchTool {
         })
     }
 
-    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
+    async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: WebFetchInput = serde_json::from_value(input)?;
 
         // Validate URL
@@ -94,105 +93,95 @@ impl Tool for WebFetchTool {
             .await?;
 
         let status = response.status();
-        if !status.is_success() {
-            return Err(anyhow::anyhow!("HTTP error: {}", status));
-        }
-
-        // Check content length
-        if let Some(len) = response.content_length()
-            && len as usize > MAX_SIZE
-        {
-            return Err(anyhow::anyhow!(
-                "Response too large: {} bytes (max {} bytes)",
-                len,
-                MAX_SIZE
-            ));
-        }
-
         let content_type = response
             .headers()
             .get("content-type")
-            .and_then(|v| v.to_str().ok())
+            .and_then(|value| value.to_str().ok())
             .unwrap_or("")
             .to_string();
-
-        let mut body_bytes = Vec::new();
-        let mut truncated = false;
+        let declared_length = response.content_length();
+        if declared_length.is_some_and(|length| length > MAX_SIZE as u64) {
+            return Ok(ToolOutput::new(format!("HTTP response acquisition rejected: declared body exceeds the {}-byte acquisition limit. No body was acquired.",MAX_SIZE))
+                .with_error(true).with_metadata(json!({"url":params.url,"http_status":status.as_u16(),"content_type":content_type,"declared_bytes":declared_length,"acquisition_complete":false,"acquired_bytes":0})));
+        }
+        let capture = ctx.invocation.capture.clone();
+        if let Some(capture) = &capture {
+            let writer = capture.clone();
+            tokio::task::spawn_blocking(move || writer.append_part("http-response", &[])).await??;
+        }
+        let mut fallback = Vec::new();
+        let mut received = 0usize;
+        let mut acquisition_error = None;
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            let remaining = MAX_SIZE.saturating_sub(body_bytes.len());
-            if chunk.len() > remaining {
-                body_bytes.extend_from_slice(&chunk[..remaining]);
-                truncated = true;
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(error) => {
+                    acquisition_error = Some(error.to_string());
+                    break;
+                }
+            };
+            received = received
+                .checked_add(chunk.len())
+                .context("HTTP acquisition size overflow")?;
+            if let Some(capture) = &capture {
+                let writer = capture.clone();
+                tokio::task::spawn_blocking(move || writer.append_part("http-response", &chunk))
+                    .await??;
+            } else {
+                fallback.extend_from_slice(&chunk);
+            }
+            if received > MAX_SIZE {
+                acquisition_error = Some(format!(
+                    "Response exceeded the {}-byte acquisition limit. Every received chunk is retained; the remainder was not acquired.",
+                    MAX_SIZE
+                ));
                 break;
             }
-            body_bytes.extend_from_slice(&chunk);
         }
-
-        let mut body = String::from_utf8_lossy(&body_bytes).into_owned();
-        if truncated {
-            body.push_str(&format!(
-                "...\n\n(truncated, showing first {} bytes)",
-                MAX_SIZE
-            ));
-        }
-
-        // Format output
-        let output = match format {
+        let (body_bytes, raw_path) = if let Some(capture) = &capture {
+            let capture = capture.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut part = capture.read_part("http-response")?;
+                let mut bytes = Vec::new();
+                part.reader.read_to_end(&mut bytes)?;
+                Ok::<_, anyhow::Error>((bytes, Some(part.path)))
+            })
+            .await??
+        } else {
+            (fallback, None)
+        };
+        let body = String::from_utf8_lossy(&body_bytes).into_owned();
+        let content_type_for_render = content_type.clone();
+        let selected = format.to_string();
+        let rendered = tokio::task::spawn_blocking(move || match selected.as_str() {
             "html" => body,
             "text" => html_to_text(&body),
-            "markdown" => {
-                if content_type.contains("text/html") {
-                    html_to_markdown(&body)
-                } else {
-                    body
-                }
-            }
-            _ => {
-                if content_type.contains("text/html") {
-                    html_to_markdown(&body)
-                } else {
-                    body
-                }
-            }
-        };
-
-        let full_len = output.len();
-        let (output, output_truncated) = truncate_output(output);
-
-        let note = if output_truncated {
-            format!(
-                "\n\n(output truncated to {MAX_OUTPUT_CHARS} of {full_len} chars; \
-                 fetch a more specific URL or anchor for the rest)"
-            )
+            _ if content_type_for_render.contains("text/html") => html_to_markdown(&body),
+            _ => body,
+        })
+        .await?;
+        let mut output=ToolOutput::new(format!("Fetched {} ({} acquired bytes, HTTP {})\n\n{}",params.url,received,status.as_u16(),rendered))
+            .with_error(!status.is_success() || acquisition_error.is_some())
+            .with_metadata(json!({"url":params.url,"http_status":status.as_u16(),"content_type":content_type,"acquired_bytes":received,"acquisition_complete":acquisition_error.is_none(),"acquisition_error":acquisition_error,"raw_response":raw_path}));
+        if let Some(error) = &acquisition_error {
+            output
+                .output
+                .push_str(&format!("\n\n[Incomplete acquisition: {error}]"));
+        }
+        if let Some(path) = raw_path {
+            output
+                .output
+                .push_str(&format!("\n[Raw acquired response: {}]", path.display()));
         } else {
-            String::new()
-        };
-
-        Ok(ToolOutput::new(format!(
-            "Fetched {} ({} bytes)\n\n{}{}",
-            params.url, full_len, output, note
-        )))
+            output.resources.push(jcode_tool_types::ToolResource {
+                uri: params.url,
+                media_type: Some(content_type),
+                data: base64::engine::general_purpose::STANDARD.encode(body_bytes),
+            });
+        }
+        Ok(output)
     }
-}
-
-/// Truncate at a char boundary, preferring to cut at the last newline so the tail
-/// is not a half-formed line.
-fn truncate_output(output: String) -> (String, bool) {
-    if output.len() <= MAX_OUTPUT_CHARS {
-        return (output, false);
-    }
-    let mut cut = MAX_OUTPUT_CHARS;
-    while cut > 0 && !output.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    let slice = &output[..cut];
-    let cut = match slice.rfind('\n') {
-        Some(nl) if nl > MAX_OUTPUT_CHARS / 2 => nl,
-        _ => cut,
-    };
-    (output[..cut].to_string(), true)
 }
 
 mod html_regex {
@@ -458,6 +447,118 @@ mod corpus_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn response(body: Vec<u8>, status: &str, declared: Option<usize>) -> Result<String> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let status = status.to_string();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut input = [0u8; 4096];
+            let _ = stream.read(&mut input).await;
+            let length = declared
+                .map(|length| format!("Content-Length: {length}\r\n"))
+                .unwrap_or_default();
+            let header = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: text/html\r\n{length}Connection: close\r\n\r\n"
+            );
+            if stream.write_all(header.as_bytes()).await.is_ok() {
+                let _ = stream.write_all(&body).await;
+            }
+        });
+        Ok(format!("http://{address}/fixture"))
+    }
+    fn context() -> ToolContext {
+        ToolContext {
+            session_id: "web-capture".into(),
+            message_id: "message".into(),
+            tool_call_id: uuid::Uuid::new_v4().to_string(),
+            working_dir: None,
+            stdin_request_tx: None,
+            graceful_shutdown_signal: None,
+            execution_mode: crate::tool::ToolExecutionMode::Direct,
+            invocation: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn full_selected_conversion_and_raw_bytes_survive_common_presentation() -> Result<()> {
+        let body = format!("<article><p>{}TAIL</p></article>", "é".repeat(50_000)).into_bytes();
+        let url = response(body.clone(), "200 OK", Some(body.len())).await?;
+        let directory = tempfile::tempdir()?;
+        let store = crate::execution::ExecutionStore::open(directory.path())?;
+        let mut ctx = context();
+        let input = crate::execution::invocation(&ctx, "webfetch", json!({"url":url}));
+        let crate::execution::PreparedInvocation::New(record) = store.prepare(&input, "owner")?
+        else {
+            panic!()
+        };
+        store.start(&record.id, "owner")?;
+        let capture = std::sync::Arc::new(crate::execution::Capture::create(
+            store.clone(),
+            record.clone(),
+            crate::execution::StorageConfig::default(),
+        )?);
+        ctx.invocation.capture = Some(capture.clone());
+        let output = WebFetchTool::new()
+            .execute(json!({"url":url,"format":"markdown"}), ctx)
+            .await?;
+        assert!(
+            output
+                .output
+                .contains(&format!("{}TAIL", "é".repeat(50_000)))
+        );
+        assert!(!output.is_error);
+        capture.seal(output, crate::execution::RunState::Completed)?;
+        let saved = store.inspect(&record.id)?.unwrap();
+        assert_eq!(
+            std::fs::read(
+                saved
+                    .output_path
+                    .as_ref()
+                    .unwrap()
+                    .with_file_name("part-http-response.bin")
+            )?,
+            body
+        );
+        assert!(
+            !store
+                .result(&saved, std::num::NonZeroUsize::new(100).unwrap())?
+                .output
+                .contains("TAIL")
+        );
+        assert!(std::fs::read_to_string(saved.output_path.unwrap())?.contains("TAIL"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn response_errors_and_acquisition_bounds_preserve_received_content_truthfully()
+    -> Result<()> {
+        for (body, status, declared, complete) in [
+            (b"<p>ERROR_BODY</p>".to_vec(), "500 Failure", None, true),
+            (b"PARTIAL_BODY".to_vec(), "200 OK", Some(100), false),
+            (vec![b'x'; MAX_SIZE + 1], "200 OK", None, false),
+        ] {
+            let url = response(body.clone(), status, declared).await?;
+            let output = WebFetchTool::new()
+                .execute(json!({"url":url,"format":"html"}), context())
+                .await?;
+            assert!(output.is_error);
+            assert_eq!(
+                output.metadata.as_ref().unwrap()["acquisition_complete"],
+                complete
+            );
+            let acquired =
+                base64::engine::general_purpose::STANDARD.decode(&output.resources[0].data)?;
+            assert!(body.starts_with(&acquired));
+            assert!(!acquired.is_empty());
+            if complete {
+                assert_eq!(acquired, body);
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn strips_non_prose_elements() {
@@ -511,29 +612,5 @@ mod tests {
         let html = r#"<span data-mw='{"wt":"[[a]] > [[b]]"}'>Visible</span>"#;
         let text = html_to_text(html);
         assert_eq!(text, "Visible");
-    }
-
-    #[test]
-    fn caps_output_length() {
-        let long = "line of text\n".repeat(MAX_OUTPUT_CHARS);
-        let (out, truncated) = truncate_output(long);
-        assert!(truncated);
-        assert!(out.len() <= MAX_OUTPUT_CHARS);
-    }
-
-    #[test]
-    fn keeps_short_output_intact() {
-        let (out, truncated) = truncate_output("hello".to_string());
-        assert!(!truncated);
-        assert_eq!(out, "hello");
-    }
-
-    #[test]
-    fn truncation_respects_char_boundaries() {
-        // Multi-byte chars straddling the cut must not panic or corrupt output.
-        let long = "é".repeat(MAX_OUTPUT_CHARS);
-        let (out, truncated) = truncate_output(long);
-        assert!(truncated);
-        assert!(out.chars().all(|c| c == 'é'));
     }
 }

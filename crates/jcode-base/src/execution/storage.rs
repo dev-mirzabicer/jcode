@@ -544,6 +544,10 @@ impl BundleStorage {
         self.store.root().join("outputs").join(&self.id)
     }
 
+    pub fn read_part(&self, name: &str) -> Result<File> {
+        self.binding.read_part(name)
+    }
+
     fn ensure_capacity(&mut self, bytes: u64) -> Result<()> {
         self.binding.verify()?;
         let reserve = if self.archived {

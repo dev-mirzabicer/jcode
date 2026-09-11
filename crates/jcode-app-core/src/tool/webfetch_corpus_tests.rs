@@ -335,8 +335,13 @@ fn dump_outputs() {
         } else {
             page.html.clone()
         };
-        let (capped, _) = super::truncate_output(md.clone());
+        let target = jcode_tool_types::presentation::OutputSize::Alias(
+            jcode_tool_types::presentation::OutputSizeAlias::Small,
+        )
+        .target();
+        let prefix = jcode_tool_types::presentation::select_prefix(&md, target, true);
+        let capped = &md[..prefix.bytes];
         std::fs::write(format!("{out_dir}/{}.uncapped", page.name), &md).unwrap();
-        std::fs::write(format!("{out_dir}/{}.capped", page.name), &capped).unwrap();
+        std::fs::write(format!("{out_dir}/{}.capped", page.name), capped).unwrap();
     }
 }

@@ -29,11 +29,19 @@ pub(super) struct Manifest {
     pub(super) images: Vec<ImagePart>,
     #[serde(default)]
     pub(super) resources: Vec<ResourcePart>,
+    #[serde(default)]
+    pub(super) parts: Vec<StoredPart>,
     pub(super) source: OutputSource,
     #[serde(default)]
     pub(super) outcome: Option<RunState>,
     #[serde(default)]
     pub(super) text_sha256: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(super) struct StoredPart {
+    pub file: String,
+    pub integrity: PartIntegrity,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -51,6 +59,23 @@ pub(super) struct PartIntegrity {
     sha256: String,
 }
 impl PartIntegrity {
+    pub(super) fn read(mut reader: impl Read) -> Result<Self> {
+        let mut bytes = 0u64;
+        let mut digest = Sha256::new();
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let n = reader.read(&mut buffer)?;
+            if n == 0 {
+                break;
+            }
+            bytes = bytes.checked_add(n as u64).context("Part size overflow")?;
+            digest.update(&buffer[..n]);
+        }
+        Ok(Self {
+            bytes,
+            sha256: format!("{:x}", digest.finalize()),
+        })
+    }
     pub(super) fn of(bytes: &[u8]) -> Self {
         Self {
             bytes: bytes.len() as u64,
@@ -177,6 +202,15 @@ impl ExecutionStore {
                         "Sealed resource is unavailable or changed type"
                     );
                 }
+                for part in &manifest.parts {
+                    ensure!(
+                        Path::new(&part.file).components().count() == 1
+                            && !part.file.starts_with('.'),
+                        "Invalid retained part name"
+                    );
+                    part.integrity
+                        .verify_file(&expected.parent().unwrap().join(&part.file))?;
+                }
             } else {
                 ensure!(
                     outcome != RunState::Completed,
@@ -229,6 +263,7 @@ impl ExecutionStore {
                 metadata: output.metadata.clone(),
                 images: Vec::new(),
                 resources: Vec::new(),
+                parts: Vec::new(),
                 source: output.source.clone(),
                 outcome: Some(state),
                 text_sha256: None,
