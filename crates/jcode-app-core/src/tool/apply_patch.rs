@@ -1,10 +1,10 @@
+use super::mutation_diff::whole_file as generate_diff_summary;
 use super::{Tool, ToolContext, ToolOutput};
 use crate::bus::{Bus, BusEvent, FileOp, FileTouch};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use similar::{ChangeTag, TextDiff};
 use std::path::Path;
 
 const FILE_TOUCH_PREVIEW_MAX_LINES: usize = 6;
@@ -320,54 +320,6 @@ async fn apply_update_chunks(path: &Path, chunks: &[UpdateFileChunk]) -> Result<
         new_lines.push(String::new());
     }
     Ok((original_contents, new_lines.join("\n")))
-}
-
-/// Generate a compact diff with line numbers (max 30 lines).
-fn generate_diff_summary(old: &str, new: &str) -> String {
-    let diff = TextDiff::from_lines(old, new);
-    let mut output = String::new();
-    let mut line_count = 0;
-    const MAX_LINES: usize = 30;
-
-    let mut old_line = 1usize;
-    let mut new_line = 1usize;
-
-    for change in diff.iter_all_changes() {
-        if line_count >= MAX_LINES {
-            output.push_str("... (diff truncated)\n");
-            break;
-        }
-
-        let content = change.value().trim_end_matches('\n');
-        let (prefix, line_num) = match change.tag() {
-            ChangeTag::Delete => {
-                let num = old_line;
-                old_line += 1;
-                if content.trim().is_empty() {
-                    continue;
-                }
-                ("-", num)
-            }
-            ChangeTag::Insert => {
-                let num = new_line;
-                new_line += 1;
-                if content.trim().is_empty() {
-                    continue;
-                }
-                ("+", num)
-            }
-            ChangeTag::Equal => {
-                old_line += 1;
-                new_line += 1;
-                continue;
-            }
-        };
-
-        output.push_str(&format!("{}{} {}\n", line_num, prefix, content));
-        line_count += 1;
-    }
-
-    output.trim_end().to_string()
 }
 
 fn compute_replacements(

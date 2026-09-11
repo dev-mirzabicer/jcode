@@ -1,10 +1,10 @@
+use super::mutation_diff::whole_file as generate_diff_summary;
 use super::{Tool, ToolContext, ToolOutput};
 use crate::bus::{Bus, BusEvent, FileOp, FileTouch};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use similar::{ChangeTag, TextDiff};
 use std::path::Path;
 
 const FILE_TOUCH_PREVIEW_MAX_LINES: usize = 6;
@@ -135,55 +135,6 @@ impl Tool for WriteTool {
     }
 }
 
-/// Generate a compact diff: "42- old" / "42+ new" (max 20 lines)
-fn generate_diff_summary(old: &str, new: &str) -> String {
-    let diff = TextDiff::from_lines(old, new);
-    let mut output = String::new();
-    let mut lines_shown = 0;
-    const MAX_LINES: usize = 20;
-
-    let mut old_line = 1usize;
-    let mut new_line = 1usize;
-
-    for change in diff.iter_all_changes() {
-        match change.tag() {
-            ChangeTag::Equal => {
-                old_line += 1;
-                new_line += 1;
-                continue;
-            }
-            ChangeTag::Delete => {
-                let content = change.value().trim();
-                old_line += 1;
-                if content.is_empty() {
-                    continue;
-                }
-                if lines_shown >= MAX_LINES {
-                    output.push_str("...\n");
-                    break;
-                }
-                output.push_str(&format!("{}- {}\n", old_line - 1, content));
-                lines_shown += 1;
-            }
-            ChangeTag::Insert => {
-                let content = change.value().trim();
-                new_line += 1;
-                if content.is_empty() {
-                    continue;
-                }
-                if lines_shown >= MAX_LINES {
-                    output.push_str("...\n");
-                    break;
-                }
-                output.push_str(&format!("{}+ {}\n", new_line - 1, content));
-                lines_shown += 1;
-            }
-        }
-    }
-
-    output.trim_end().to_string()
-}
-
 fn build_file_touch_preview(diff: &str) -> Option<String> {
     let trimmed = diff.trim();
     if trimmed.is_empty() {
@@ -254,7 +205,7 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_diff_summary_truncation() {
+    fn test_generate_diff_summary_preserves_complete_changes() {
         // Create old and new with more than 20 changed lines
         let old = (1..=25)
             .map(|i| format!("old line {}", i))
@@ -266,7 +217,11 @@ mod tests {
             .join("\n");
         let diff = generate_diff_summary(&old, &new);
 
-        assert!(diff.contains("..."), "Should truncate after 20 lines");
+        assert!(
+            diff.contains("25+ new line 25"),
+            "All selected changes must remain available: {diff}"
+        );
+        assert_eq!(diff.lines().count(), 52); // 50 changed lines and two EOF markers.
     }
 
     #[test]

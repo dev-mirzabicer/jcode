@@ -838,3 +838,60 @@ async fn atomic_image_read_retains_exact_pixels_and_reports_oversized_source_wit
     assert_eq!(std::fs::metadata(&large)?.len(), 20 * 1024 * 1024 + 1);
     Ok(())
 }
+
+#[tokio::test]
+async fn mutation_receipts_retain_all_changed_lines_and_whitespace_before_presentation()
+-> anyhow::Result<()> {
+    let registry = Registry::new(Arc::new(MockProvider)).await;
+    let directory = tempfile::tempdir()?;
+    let body = (0..100)
+        .map(|index| format!("  CHANGED_{index:03}  \n"))
+        .collect::<String>();
+    for tool in ["write", "edit", "multiedit", "patch", "apply_patch"] {
+        let name = format!("{tool}.txt");
+        let path = directory.path().join(&name);
+        if matches!(tool, "edit" | "multiedit") {
+            std::fs::write(&path, "old\n")?;
+        }
+        let input = match tool {
+            "write" => serde_json::json!({"file_path":name,"content":body,"output_size":100}),
+            "edit" => {
+                serde_json::json!({"file_path":name,"old_string":"old\n","new_string":body,"output_size":100})
+            }
+            "multiedit" => {
+                serde_json::json!({"file_path":name,"edits":[{"old_string":"old\n","new_string":body}],"output_size":100})
+            }
+            "patch" => {
+                serde_json::json!({"patch_text":format!("--- /dev/null\n+++ b/{name}\n@@ -0,0 +1,100 @@\n{}",body.lines().map(|line|format!("+{line}\n")).collect::<String>()),"output_size":100})
+            }
+            _ => {
+                serde_json::json!({"patch_text":format!("*** Begin Patch\n*** Add File: {name}\n{}*** End Patch\n",body.lines().map(|line|format!("+{line}\n")).collect::<String>()),"output_size":100})
+            }
+        };
+        let mut ctx = context();
+        ctx.working_dir = Some(directory.path().into());
+        let output = registry.execute(tool, input, ctx).await?;
+        let OutputSource::Retained(reference) = output.source else {
+            panic!()
+        };
+        let receipt = std::fs::read_to_string(reference.path)?;
+        assert!(
+            receipt.contains("100+   CHANGED_099  \n"),
+            "{tool}: final changed line missing"
+        );
+        assert_eq!(std::fs::read_to_string(&path)?, body, "{tool}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn unified_patch_receipt_uses_actual_whole_file_line_numbers() -> anyhow::Result<()> {
+    let registry = Registry::new(Arc::new(MockProvider)).await;
+    let directory = tempfile::tempdir()?;
+    std::fs::write(directory.path().join("source"), "first\nsecond\nthird\n")?;
+    let mut ctx = context();
+    ctx.working_dir = Some(directory.path().into());
+    let output=registry.execute("patch",serde_json::json!({"patch_text":"--- a/source\n+++ b/source\n@@ -3,1 +3,1 @@\n-third\n+changed\n"}),ctx).await?;
+    assert!(output.output.contains("3- third\n3+ changed\n"));
+    Ok(())
+}

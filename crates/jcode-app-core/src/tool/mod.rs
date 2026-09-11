@@ -25,6 +25,7 @@ mod ls;
 pub mod mcp;
 mod memory;
 mod multiedit;
+mod mutation_diff;
 mod open;
 mod patch;
 mod read;

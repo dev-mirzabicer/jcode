@@ -1,10 +1,10 @@
+use super::mutation_diff::changes as generate_diff;
 use super::{Tool, ToolContext, ToolOutput};
 use crate::bus::{Bus, BusEvent, FileOp, FileTouch};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use similar::{ChangeTag, TextDiff};
 use std::path::Path;
 
 const FILE_TOUCH_PREVIEW_MAX_LINES: usize = 6;
@@ -162,51 +162,6 @@ fn find_line_number(content: &str, substring: &str) -> usize {
         content[..pos].lines().count() + 1
     } else {
         1
-    }
-}
-
-/// Generate a compact diff: "42- old" / "42+ new"
-fn generate_diff(old: &str, new: &str, start_line: usize) -> String {
-    let diff = TextDiff::from_lines(old, new);
-    let mut output = String::new();
-
-    let mut old_line = start_line;
-    let mut new_line = start_line;
-
-    for change in diff.iter_all_changes() {
-        let content = change.value().trim();
-        let (prefix, line_num) = match change.tag() {
-            ChangeTag::Delete => {
-                let num = old_line;
-                old_line += 1;
-                if content.is_empty() {
-                    continue;
-                }
-                ("-", num)
-            }
-            ChangeTag::Insert => {
-                let num = new_line;
-                new_line += 1;
-                if content.is_empty() {
-                    continue;
-                }
-                ("+", num)
-            }
-            ChangeTag::Equal => {
-                old_line += 1;
-                new_line += 1;
-                continue;
-            }
-        };
-
-        // Compact format: "42- content" (no spaces)
-        output.push_str(&format!("{}{} {}\n", line_num, prefix, content));
-    }
-
-    if output.is_empty() {
-        String::new()
-    } else {
-        output.trim_end().to_string()
     }
 }
 
