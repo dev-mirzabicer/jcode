@@ -2608,7 +2608,13 @@ async fn context_budget_rewind_undo_and_repair_reseed_exactly_and_clear_observat
     agent.update_context_usage_from_stream(9_900, None, None);
     agent.provider_session_id = Some("repair-agent-session".to_string());
     agent.session.provider_session_id = Some("repair-stored-session".to_string());
-    assert_eq!(agent.repair_missing_tool_outputs(), 1);
+    assert_eq!(
+        agent
+            .repair_missing_tool_outputs()
+            .await
+            .expect("Historical repair"),
+        1
+    );
 
     assert_eq!(provider.invalidation_count(), 3);
     assert!(agent.provider_session_id.is_none());
@@ -2864,7 +2870,13 @@ async fn missing_tool_repair_invalidates_summary_that_is_no_longer_structurally_
         "Historical tool work before its repair",
     )]);
 
-    assert_eq!(agent.repair_missing_tool_outputs(), 1);
+    assert_eq!(
+        agent
+            .repair_missing_tool_outputs()
+            .await
+            .expect("Historical repair"),
+        1
+    );
 
     assert_eq!(agent.session.messages.len(), 2);
     assert_eq!(agent.session.context_view.revision, 2);
@@ -4549,5 +4561,111 @@ async fn provider_failure_after_sdk_result_preserves_a_paired_retained_checkpoin
         let results=session.messages.iter().flat_map(|message|&message.content).filter(|block|matches!(block,ContentBlock::ToolResult{tool_use_id,..} if tool_use_id=="sdk-result")).count();
         assert_eq!((uses, results), (1, 1));
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn scoped_tool_history_repair_recovers_retained_results_and_repeated_provider_ids()
+-> Result<()> {
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir()?;
+    let _home = AgentTestEnvRestore::set_path("JCODE_HOME", home.path());
+    let _runtime = AgentTestEnvRestore::set_path("JCODE_RUNTIME_DIR", &home.path().join("runtime"));
+    let provider: Arc<dyn Provider> = Arc::new(ProjectedRequestProvider::new(1_000_000));
+    let mut agent = Agent::new(provider, Registry::empty());
+    let tool = ToolCall {
+        id: "same-provider-id".into(),
+        name: "external_result".into(),
+        input: serde_json::json!({}),
+        intent: None,
+        thought_signature: None,
+    };
+    let block = || ContentBlock::ToolUse {
+        id: tool.id.clone(),
+        name: tool.name.clone(),
+        input: tool.input.clone(),
+        thought_signature: None,
+    };
+    let message = agent.add_message(Role::Assistant, vec![block()]);
+    agent
+        .retain_sdk_result(&tool, &message, "retained completed result".into(), false)
+        .await?;
+    let index = agent
+        .session
+        .messages
+        .iter()
+        .position(|entry| entry.id == message)
+        .unwrap();
+    if let ContentBlock::ToolUse { input, .. } = &mut agent.session.messages[index].content[0] {
+        *input = serde_json::json!({"different":"input"});
+    }
+    let changed = serde_json::to_vec(&agent.session.messages)?;
+    assert!(agent.repair_missing_tool_outputs().await.is_err());
+    assert_eq!(serde_json::to_vec(&agent.session.messages)?, changed);
+    if let ContentBlock::ToolUse { input, .. } = &mut agent.session.messages[index].content[0] {
+        *input = tool.input.clone();
+    }
+    assert_eq!(agent.repair_missing_tool_outputs().await?, 1);
+    assert_eq!(agent.repair_missing_tool_outputs().await?, 0);
+    let content = agent
+        .session
+        .messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .find_map(|block| match block {
+            ContentBlock::ToolResult { content, .. } => Some(content),
+            _ => None,
+        })
+        .unwrap();
+    assert!(content.contains("retained completed result"));
+    assert!(!content.contains(TOOL_OUTPUT_MISSING_TEXT));
+    agent.add_message(Role::Assistant, vec![block()]);
+    assert_eq!(
+        agent.repair_missing_tool_outputs().await?,
+        1,
+        "An older equal raw ID cannot satisfy the new message's tool use"
+    );
+    let persisted = Session::load(agent.session_id())?;
+    assert_eq!(persisted.messages.iter().flat_map(|message|&message.content).filter(|block|matches!(block,ContentBlock::ToolResult{tool_use_id,..} if tool_use_id==&tool.id)).count(),2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn scoped_tool_history_repair_blocks_live_work_without_advancing_past_it() -> Result<()> {
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir()?;
+    let _home = AgentTestEnvRestore::set_path("JCODE_HOME", home.path());
+    let _runtime = AgentTestEnvRestore::set_path("JCODE_RUNTIME_DIR", &home.path().join("runtime"));
+    let provider: Arc<dyn Provider> = Arc::new(ProjectedRequestProvider::new(1_000_000));
+    let mut agent = Agent::new(provider, Registry::empty());
+    let message = agent.add_message(
+        Role::Assistant,
+        vec![ContentBlock::ToolUse {
+            id: "call".into(),
+            name: "read".into(),
+            input: serde_json::json!({"file_path":"fixture"}),
+            thought_signature: None,
+        }],
+    );
+    let ctx = ToolContext {
+        session_id: agent.session.id.clone(),
+        message_id: message,
+        tool_call_id: "call".into(),
+        working_dir: None,
+        stdin_request_tx: None,
+        graceful_shutdown_signal: None,
+        execution_mode: ToolExecutionMode::Direct,
+        invocation: Default::default(),
+    };
+    let invocation = crate::execution::invocation(&ctx, "read", serde_json::Value::Null);
+    let live = crate::tool::inflight::mark_tool_in_flight(&invocation).unwrap();
+    let before = serde_json::to_vec(&agent.session.messages)?;
+    assert!(agent.repair_missing_tool_outputs().await.is_err());
+    assert_eq!(serde_json::to_vec(&agent.session.messages)?, before);
+    drop(live);
+    let mut unrelated = invocation;
+    unrelated.session_id = "unrelated".into();
+    let _unrelated = crate::tool::inflight::mark_tool_in_flight(&unrelated).unwrap();
+    assert_eq!(agent.repair_missing_tool_outputs().await?, 1);
     Ok(())
 }

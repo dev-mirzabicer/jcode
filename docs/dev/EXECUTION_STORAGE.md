@@ -359,6 +359,23 @@ pre-dispatch caller boundaries still require final reconciliation. These checks
 do not prove that a hosted service acknowledges cancellation or stops remote
 compute, which remains outside the approved owned-work boundary.
 
+## Scoped historical tool-result recovery
+
+Missing-result repair pairs tool uses and results in transcript order, scoped by
+session and assistant-message identity rather than a process-global raw tool ID.
+A completed retained result or background acceptance is retrieved from its exact
+invocation and checked against the historical input before it is inserted. This
+never calls the original producer. An earlier equal provider ID cannot satisfy
+a later message, and an unrelated session's running call cannot suppress repair.
+
+The Registry dispatch and its surviving execution supervisor retain scoped
+in-flight guards. Active or unresolved owned work blocks a new provider request
+rather than receiving a fabricated result. The repair does not advance past
+unresolved work. Existing Session persistence and context reconciliation still
+own history mutation, rollback and deliberate cache invalidation. Legacy calls
+without retained records keep their historical missing-output disposition;
+owner-crash and unavailable-output reconciliation remain explicitly tracked.
+
 ## Verification
 
 Run through coordinated self-development tests:

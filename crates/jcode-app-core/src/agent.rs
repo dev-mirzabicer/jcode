@@ -1045,87 +1045,112 @@ impl Agent {
         }
     }
 
-    fn repair_missing_tool_outputs(&mut self) -> usize {
+    async fn repair_missing_tool_outputs(&mut self) -> Result<usize> {
+        // Pair in transcript order. A prior result with the same provider ID
+        // must not satisfy a different assistant message's later invocation.
+        let mut pending: HashMap<String, (usize, usize, ToolCall)> = HashMap::new();
+        let mut calls = HashSet::new();
+        let mut results = HashSet::new();
+        for (index, message) in self.session.messages.iter().enumerate() {
+            for (ordinal, block) in message.content.iter().enumerate() {
+                match (&message.role, block) {
+                    (
+                        Role::Assistant,
+                        ContentBlock::ToolUse {
+                            id,
+                            name,
+                            input,
+                            thought_signature,
+                        },
+                    ) => {
+                        anyhow::ensure!(
+                            !pending.contains_key(id),
+                            "Ambiguous historical tool ID {id}: multiple unresolved uses. No replacement result was invented."
+                        );
+                        pending.insert(
+                            id.clone(),
+                            (
+                                index,
+                                ordinal,
+                                ToolCall {
+                                    id: id.clone(),
+                                    name: name.clone(),
+                                    input: input.clone(),
+                                    intent: ToolCall::intent_from_input(input),
+                                    thought_signature: thought_signature.clone(),
+                                },
+                            ),
+                        );
+                        calls.insert(id.clone());
+                    }
+                    (Role::User, ContentBlock::ToolResult { tool_use_id, .. }) => {
+                        pending.remove(tool_use_id);
+                        results.insert(tool_use_id.clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let mut pending = pending.into_values().collect::<Vec<_>>();
+        pending.sort_by_key(|(index, ordinal, _)| (*index, *ordinal));
+        let mut missing_repairs: Vec<(usize, Vec<(String, crate::tool::ToolOutput)>)> = Vec::new();
+        for (index, _, tool) in pending {
+            let ctx = ToolContext {
+                session_id: self.session.id.clone(),
+                message_id: self.session.messages[index].id.clone(),
+                tool_call_id: tool.id.clone(),
+                working_dir: self.working_dir().map(PathBuf::from),
+                stdin_request_tx: None,
+                graceful_shutdown_signal: None,
+                execution_mode: ToolExecutionMode::Direct,
+                invocation: Default::default(),
+            };
+            let invocation =
+                crate::execution::invocation(&ctx, &tool.name, serde_json::Value::Null);
+            let output = if let Some(output) = self
+                .registry
+                .retained_history_result(&tool.name, ctx, tool.input.clone())
+                .await?
+            {
+                output
+            } else {
+                anyhow::ensure!(
+                    !crate::tool::inflight::is_tool_in_flight(&invocation),
+                    "Execution {} is still in flight. Its result was not replaced or repeated.",
+                    invocation.id()
+                );
+                crate::tool::ToolOutput::new(TOOL_OUTPUT_MISSING_TEXT).with_error(true)
+            };
+            if let Some((last, repairs)) = missing_repairs.last_mut()
+                && *last == index
+            {
+                repairs.push((tool.id, output));
+            } else {
+                missing_repairs.push((index, vec![(tool.id, output)]));
+            }
+        }
+        if missing_repairs.is_empty() {
+            self.tool_call_ids = calls;
+            self.tool_result_ids = results;
+            self.tool_output_scan_index = self.session.messages.len();
+            return Ok(0);
+        }
         let session_before = self.session.clone();
         let tool_call_ids_before = self.tool_call_ids.clone();
         let tool_result_ids_before = self.tool_result_ids.clone();
         let scan_index_before = self.tool_output_scan_index;
-        if self.tool_output_scan_index > self.session.messages.len() {
-            self.reset_tool_output_tracking();
-        }
-
-        let scan_start = self.tool_output_scan_index;
-        let mut new_result_ids = Vec::new();
-        let mut assistant_tool_uses: Vec<(usize, Vec<String>)> = Vec::new();
-
-        for (index, msg) in self.session.messages.iter().enumerate().skip(scan_start) {
-            match msg.role {
-                Role::User => {
-                    for block in &msg.content {
-                        if let ContentBlock::ToolResult { tool_use_id, .. } = block {
-                            new_result_ids.push(tool_use_id.clone());
-                        }
-                    }
-                }
-                Role::Assistant => {
-                    let tool_uses = msg
-                        .content
-                        .iter()
-                        .filter_map(|block| match block {
-                            ContentBlock::ToolUse { id, .. } => Some(id.clone()),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>();
-                    if !tool_uses.is_empty() {
-                        assistant_tool_uses.push((index, tool_uses));
-                    }
-                }
-            }
-        }
-
-        self.tool_result_ids.extend(new_result_ids);
-
-        let mut missing_repairs: Vec<(usize, Vec<String>)> = Vec::new();
-        for (index, tool_uses) in assistant_tool_uses {
-            let mut missing_for_message = Vec::new();
-            for id in tool_uses {
-                self.tool_call_ids.insert(id.clone());
-                if self.tool_result_ids.contains(&id) {
-                    continue;
-                }
-                // A tool that is still executing is not an interrupted tool:
-                // its real result is on the way, and synthesizing a
-                // placeholder now produces a duplicate tool_result that
-                // Anthropic rejects outright. See `tool::inflight`.
-                if crate::tool::inflight::is_tool_in_flight(&id) {
-                    logging::info(&format!(
-                        "Skipping missing tool-output repair for {id}: tool is still executing"
-                    ));
-                    continue;
-                }
-                missing_for_message.push(id);
-            }
-            if !missing_for_message.is_empty() {
-                missing_repairs.push((index, missing_for_message));
-            }
-        }
-
-        self.tool_output_scan_index = self.session.messages.len();
-
+        self.tool_call_ids = calls;
+        self.tool_result_ids = results;
         let mut repaired = 0usize;
         let mut inserted = 0usize;
         for (index, missing_for_message) in missing_repairs {
-            for (offset, id) in missing_for_message.iter().enumerate() {
-                let tool_block = ContentBlock::ToolResult {
-                    tool_use_id: id.clone(),
-                    content: TOOL_OUTPUT_MISSING_TEXT.to_string(),
-                    is_error: Some(true),
-                };
+            for (offset, (id, output)) in missing_for_message.iter().enumerate() {
+                let blocks = tools::tool_output_to_content_blocks(id.clone(), output.clone());
                 let stored_message = StoredMessage {
                     origin: None,
                     id: id::new_id("message"),
                     role: Role::User,
-                    content: vec![tool_block],
+                    content: blocks,
                     display_role: None,
                     timestamp: Some(chrono::Utc::now()),
                     tool_duration_ms: None,
@@ -1157,7 +1182,9 @@ impl Agent {
                     logging::error(
                         "Missing tool-output repair failed safely during context reconciliation",
                     );
-                    return 0;
+                    anyhow::bail!(
+                        "Historical tool repair could not be published; authoritative history was restored and no provider request was started"
+                    );
                 }
             };
             self.session.context_view = reconciliation.state;
@@ -1170,7 +1197,9 @@ impl Agent {
                 logging::error(
                     "Missing tool-output repair failed safely during session persistence",
                 );
-                return 0;
+                anyhow::bail!(
+                    "Historical tool repair could not be published; authoritative history was restored and no provider request was started"
+                );
             }
             if let Err(error) = self.after_provider_context_changed(
                 "historical tool repair",
@@ -1184,7 +1213,7 @@ impl Agent {
             }
         }
 
-        repaired
+        Ok(repaired)
     }
 
     fn reset_tool_output_tracking(&mut self) {

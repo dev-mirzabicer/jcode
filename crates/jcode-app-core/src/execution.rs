@@ -298,6 +298,7 @@ async fn supervise(
     target: NonZeroUsize,
     producer: Producer,
 ) -> Result<Completion> {
+    let _in_flight = crate::tool::inflight::mark_tool_in_flight(&run.invocation);
     let owner = run.runtime.endpoint.id.clone();
     let preparation = {
         let store = store.clone();

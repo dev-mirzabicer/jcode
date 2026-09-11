@@ -1,30 +1,11 @@
-//! Process-global registry of tool calls that are currently executing.
-//!
-//! Why this exists: the "missing tool output" repair paths treat an assistant
-//! `tool_use` with no matching `tool_result` as evidence of an interrupted
-//! turn and insert a synthetic placeholder result. That inference is wrong
-//! while the tool is *still running*. A confirmed production wedge
-//! (session_clover_1785560899476): a 106s `bash` call was mid-flight when a
-//! scheduled-task wakeup drove another turn on the same session. Repair
-//! injected a placeholder result, the real output landed 28s later as a second
-//! `tool_result` for the same `tool_use_id`, and Anthropic then rejected every
-//! subsequent request with:
-//!
-//! ```text
-//! unexpected `tool_use_id` found in `tool_result` blocks: <id>
-//! ```
-//!
-//! leaving the session permanently unsendable. Repair must therefore skip any
-//! tool call that is still executing; its real result is on the way.
-//!
-//! `Registry::execute` registers each call here for the duration of its
-//! execution via an RAII guard, so entries can never leak past a panic,
-//! cancellation, or early return.
+//! Scoped in-process execution liveness. Both a Registry dispatch and its
+//! surviving execution supervisor hold guards. Keys are durable invocation IDs,
+//! never raw provider tool IDs shared by unrelated sessions/messages.
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 
-/// Reference counts per tool_call_id. A count (rather than a set) keeps the
+/// Reference counts per invocation_id. A count (rather than a set) keeps the
 /// registry correct if the same id is somehow executed concurrently, e.g. a
 /// retry racing the original.
 static IN_FLIGHT: LazyLock<Mutex<HashMap<String, usize>>> =
@@ -32,7 +13,7 @@ static IN_FLIGHT: LazyLock<Mutex<HashMap<String, usize>>> =
 
 /// RAII registration for one executing tool call.
 pub struct InFlightToolGuard {
-    tool_call_id: String,
+    invocation_id: String,
 }
 
 impl Drop for InFlightToolGuard {
@@ -40,33 +21,39 @@ impl Drop for InFlightToolGuard {
         let Ok(mut map) = IN_FLIGHT.lock() else {
             return;
         };
-        if let Some(count) = map.get_mut(&self.tool_call_id) {
+        if let Some(count) = map.get_mut(&self.invocation_id) {
             *count = count.saturating_sub(1);
             if *count == 0 {
-                map.remove(&self.tool_call_id);
+                map.remove(&self.invocation_id);
             }
         }
     }
 }
 
-/// Mark `tool_call_id` as executing until the returned guard is dropped.
+/// Mark `invocation_id` as executing until the returned guard is dropped.
 /// Empty ids are not tracked (nothing can match them during repair).
-pub fn mark_tool_in_flight(tool_call_id: &str) -> Option<InFlightToolGuard> {
-    if tool_call_id.is_empty() {
+pub fn mark_tool_in_flight(invocation: &crate::execution::Invocation) -> Option<InFlightToolGuard> {
+    if invocation.session_id.is_empty()
+        || invocation.message_id.is_empty()
+        || invocation.call_path.is_empty()
+        || invocation.call_path.iter().any(String::is_empty)
+    {
         return None;
     }
+    let invocation_id = invocation.id();
     let mut map = IN_FLIGHT.lock().ok()?;
-    *map.entry(tool_call_id.to_string()).or_insert(0) += 1;
+    *map.entry(invocation_id.to_string()).or_insert(0) += 1;
     Some(InFlightToolGuard {
-        tool_call_id: tool_call_id.to_string(),
+        invocation_id: invocation_id.to_string(),
     })
 }
 
 /// True while a tool call with this id is executing somewhere in this process.
-pub fn is_tool_in_flight(tool_call_id: &str) -> bool {
+pub fn is_tool_in_flight(invocation: &crate::execution::Invocation) -> bool {
+    let invocation_id = invocation.id();
     IN_FLIGHT
         .lock()
-        .map(|map| map.contains_key(tool_call_id))
+        .map(|map| map.contains_key(&invocation_id))
         .unwrap_or(false)
 }
 
@@ -78,10 +65,21 @@ pub fn in_flight_tool_count() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn invocation(id: &str) -> crate::execution::Invocation {
+        crate::execution::Invocation {
+            session_id: "session".into(),
+            message_id: "message".into(),
+            call_path: vec![id.into()],
+            tool: "fixture".into(),
+            input: serde_json::Value::Null,
+            working_dir: None,
+            received_result_digest: None,
+        }
+    }
 
     #[test]
     fn guard_tracks_and_releases() {
-        let id = "toolu_inflight_test_basic";
+        let id = &invocation("toolu_inflight_test_basic");
         assert!(!is_tool_in_flight(id));
         {
             let _guard = mark_tool_in_flight(id).expect("guard");
@@ -92,7 +90,7 @@ mod tests {
 
     #[test]
     fn nested_guards_release_only_after_the_last_one() {
-        let id = "toolu_inflight_test_nested";
+        let id = &invocation("toolu_inflight_test_nested");
         let outer = mark_tool_in_flight(id).expect("guard");
         let inner = mark_tool_in_flight(id).expect("guard");
         assert!(is_tool_in_flight(id));
@@ -104,7 +102,23 @@ mod tests {
 
     #[test]
     fn empty_ids_are_not_tracked() {
-        assert!(mark_tool_in_flight("").is_none());
-        assert!(!is_tool_in_flight(""));
+        assert!(mark_tool_in_flight(&invocation("")).is_none());
+        assert!(!is_tool_in_flight(&invocation("")));
+    }
+
+    #[test]
+    fn identical_provider_ids_in_other_scopes_do_not_share_liveness() {
+        let original = invocation("same");
+        let _guard = mark_tool_in_flight(&original).unwrap();
+        let mut other = original.clone();
+        other.session_id = "other".into();
+        assert!(!is_tool_in_flight(&other));
+        let mut other = original.clone();
+        other.message_id = "other".into();
+        assert!(!is_tool_in_flight(&other));
+        let mut other = original.clone();
+        other.call_path.insert(0, "parent".into());
+        assert!(!is_tool_in_flight(&other));
+        assert!(is_tool_in_flight(&original));
     }
 }

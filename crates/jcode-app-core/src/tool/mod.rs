@@ -154,6 +154,32 @@ impl Clone for Registry {
 }
 
 impl Registry {
+    pub(crate) async fn retained_history_result(
+        &self,
+        name: &str,
+        ctx: ToolContext,
+        input: Value,
+    ) -> Result<Option<ToolOutput>> {
+        let id = crate::execution::invocation_id(&ctx);
+        let root = crate::storage::jcode_dir()?;
+        let name = Self::resolve_tool_name(name).to_string();
+        let target = crate::config::config().output.target(&name, None);
+        let lookup_name = name.clone();
+        let result=tokio::task::spawn_blocking(move||->Result<Option<ToolOutput>> {
+            if !root.join("execution/index.sqlite").exists(){return Ok(None);}
+            let store=crate::execution::ExecutionStore::open(&root)?;
+            let Some(record)=store.inspect(&id)? else{return Ok(None);};
+            anyhow::ensure!(record.session_id==ctx.session_id && record.message_id==ctx.message_id && Self::resolve_tool_name(&record.tool)==lookup_name,"Retained execution does not match this historical tool use");
+            anyhow::ensure!(store.invocation_input(&id)?.input==input,"Retained execution input differs from the historical tool use; no result was substituted");
+            if let Some(accepted)=store.acceptance_result(&id)? {return Ok(Some(accepted));}
+            anyhow::ensure!(record.state.terminal(),"Execution {id} is still active or awaiting recovery. No replacement tool result or repeated operation was created. Inspect or stop that run before continuing.");
+            Ok(Some(store.result(&record,target)?))
+        }).await??;
+        match result {
+            Some(output) => Ok(Some(self.guard_context_overflow(&name, output).await)),
+            None => Ok(None),
+        }
+    }
     /// The provider has already performed the operation. This boundary only
     /// retains and presents received output; it never invokes a native tool.
     pub async fn retain_provider_result(
@@ -746,7 +772,8 @@ impl Registry {
         // tool-output repair paths do not mistake a slow tool for an
         // interrupted one and inject a duplicate synthetic result. See
         // `tool::inflight`.
-        let _in_flight = inflight::mark_tool_in_flight(&ctx.tool_call_id);
+        let _in_flight =
+            inflight::mark_tool_in_flight(&crate::execution::invocation(&ctx, name, Value::Null));
         let tools = self.tools.read().await;
         let resolved_name = Self::resolve_tool_name(name);
         if let Some(policy) = session_tool_policy(&ctx.session_id) {

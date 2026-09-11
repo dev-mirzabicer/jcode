@@ -53,7 +53,7 @@ impl Agent {
                 logging::info("Cancel observed at turn-loop head - not starting another request");
                 break;
             }
-            let repaired = self.repair_missing_tool_outputs();
+            let repaired = self.repair_missing_tool_outputs().await?;
             if repaired > 0 {
                 logging::warn(&format!(
                     "Recovered {} missing tool output(s) before API call",
