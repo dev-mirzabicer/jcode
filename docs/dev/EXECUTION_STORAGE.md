@@ -183,7 +183,8 @@ owner, not a model agent or delegated implementation worker.
 
 ## Native command ownership and completion delivery
 
-Registered Unix Bash calls use the shared capture owner. Noninteractive calls
+Unix Bash calls, including direct Tool callers, use the same Registry execution
+and capture owner. Noninteractive calls
 run in a native Jcode command worker, not an agent, and keep their invocation
 identity when ownership transfers. Foreground calls with the existing stdin
 request channel use the captured in-process command driver. Explicit background
@@ -197,6 +198,14 @@ with the canonical readable rendering and observed ordering retained by Capture.
 Stop keeps the group leader unreaped through TERM/KILL and actual quiescence.
 Denied stop signals do not become successful cancellation. Completed filesystem
 effects are not rolled back.
+
+The old Unix temporary-output/reload implementation is removed. Direct callers
+receive the same retained-result or acceptance references as ordinary Registry
+calls. Exit code, termination signal and timeout are stored as typed run facts
+and sealed into recovery receipts. Background status can report them without
+loading full output or parsing an error string; the conventional timeout shell
+code is 124 while the actual process code/signal remain distinct. Scratch-directory
+settings are applied by the shared command owner.
 
 A background worker can survive the original runtime's reload. Foreground parent
 loss interrupts the command. Compatibility background state is derived from the
@@ -223,7 +232,7 @@ while busy, and rechecks the recipient before changing session history. It does
 not inject an old session's completion into a newly selected session.
 
 These mechanisms still require the complete final WP-02 caller, recovery,
-producer and activation matrix. Direct legacy Bash, other-platform command
+producer and activation matrix. Other-platform command
 paths, provider/SDK-supplied output, command progress and remaining clipped
 producers must be reconciled before package acceptance. No claim of complete
 WP-02 rollout or activated behavior follows from these library tests.

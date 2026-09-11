@@ -1,9 +1,11 @@
 //! Guidance attached to existing background results or blocked validation.
 //! A prose failure must not discard an already-created task's receipt or data.
 
+#[cfg(any(not(unix), test))]
 use crate::background::BackgroundTaskInfo;
 use crate::instruction::notification::Notification;
 use std::path::Path;
+#[cfg(any(not(unix), test))]
 use std::time::Duration;
 
 #[cfg(test)]
@@ -56,6 +58,7 @@ pub(super) fn render(notice: Notification<'_>, working_dir: Option<&Path>) -> St
         .unwrap_or_else(|error| format!("Background instruction rendering failed: {error}"))
 }
 
+#[cfg(any(not(unix), test))]
 pub(super) fn promoted(
     info: &BackgroundTaskInfo,
     name: &str,
@@ -89,21 +92,7 @@ pub(super) fn promoted(
     )
 }
 
-pub(super) fn reloaded(info: &BackgroundTaskInfo, working_dir: Option<&Path>) -> String {
-    let prose = render(
-        Notification::BashReloadBackground {
-            task_id: &info.task_id,
-        },
-        working_dir,
-    );
-    format!(
-        "Command continued in background due to reload.\n\nTask ID: {}\nOutput file: {}\nStatus file: {}\n\n{prose}",
-        info.task_id,
-        info.output_file.display(),
-        info.status_file.display()
-    )
-}
-
+#[cfg(not(unix))]
 pub(super) fn started(
     info: &BackgroundTaskInfo,
     name: &str,

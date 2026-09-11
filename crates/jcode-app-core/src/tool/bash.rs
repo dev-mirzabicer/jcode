@@ -1,30 +1,37 @@
-use super::{StdinInputRequest, Tool, ToolContext, ToolOutput};
+#[cfg(not(unix))]
+use super::StdinInputRequest;
+use super::{Tool, ToolContext, ToolOutput};
+#[cfg(not(unix))]
 use crate::background::TaskResult;
 use crate::bus::{
     BackgroundTaskProgress, BackgroundTaskProgressKind, BackgroundTaskProgressSource,
 };
+#[cfg(not(unix))]
 use crate::stdin_detect::{self, StdinState};
+#[cfg(not(unix))]
 use crate::util::truncate_str;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
 use serde::Deserialize;
-use serde_json::{Value, json};
-#[cfg(unix)]
-use std::fs::OpenOptions;
+use serde_json::Value;
+#[cfg(not(unix))]
+use serde_json::json;
 use std::path::Path;
-#[cfg(unix)]
-use std::process::Command as StdCommand;
+#[cfg(any(not(unix), test))]
 use std::process::Stdio;
 use std::sync::LazyLock;
 use std::time::Duration;
-#[cfg(unix)]
-use std::time::Instant;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+#[cfg(any(not(unix), test))]
+use tokio::io::{AsyncBufReadExt, BufReader};
+#[cfg(not(unix))]
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+#[cfg(any(not(unix), test))]
 use tokio::process::Command as TokioCommand;
 
-const MAX_OUTPUT_LEN: usize = 30000;
+#[cfg(not(unix))]
 const STDIN_POLL_INTERVAL_MS: u64 = 500;
+#[cfg(not(unix))]
 const STDIN_INITIAL_DELAY_MS: u64 = 300;
 const PROGRESS_MARKER_PREFIX: &str = "JCODE_PROGRESS ";
 const CHECKPOINT_MARKER_PREFIX: &str = "JCODE_CHECKPOINT ";
@@ -69,6 +76,7 @@ export -f cargo
 /// 1000s when it is 1s). Spell out the seconds equivalent and, for suspiciously
 /// short timeouts, hint that the unit is milliseconds so the next attempt uses a
 /// sane value instead of repeating the same mistake.
+#[cfg(not(unix))]
 fn timeout_message(timeout_ms: u64, working_dir: Option<&Path>) -> String {
     let secs = timeout_ms as f64 / 1000.0;
     let mut msg = format!("Command timed out after {}ms ({:.1}s)", timeout_ms, secs);
@@ -143,6 +151,7 @@ struct ProgressMarker {
     checkpoint: Option<bool>,
 }
 
+#[cfg(not(unix))]
 fn task_id_from_output_path(path: &Path) -> Option<&str> {
     path.file_stem()?.to_str()
 }
@@ -154,6 +163,7 @@ fn parse_progress_kind(kind: Option<&str>) -> BackgroundTaskProgressKind {
     }
 }
 
+#[cfg(not(unix))]
 fn summarize_background_command(description: Option<&str>, command: &str) -> String {
     if let Some(description) = description
         .map(str::trim)
@@ -438,6 +448,7 @@ pub(super) fn parse_heuristic_progress(line: &str) -> Result<Option<BackgroundTa
     Ok(None)
 }
 
+#[cfg(not(unix))]
 async fn handle_background_output_line(
     output_path: &Path,
     file: &mut tokio::fs::File,
@@ -492,7 +503,7 @@ async fn handle_background_output_line(
 }
 
 #[cfg(not(windows))]
-fn tool_scratch_dir() -> Option<std::path::PathBuf> {
+pub(crate) fn tool_scratch_dir() -> Option<std::path::PathBuf> {
     let dir = std::env::var_os("JCODE_SCRATCH_DIR")
         .filter(|value| !value.is_empty())
         .map(std::path::PathBuf::from)
@@ -505,30 +516,26 @@ fn tool_scratch_dir() -> Option<std::path::PathBuf> {
     Some(dir)
 }
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), test))]
 fn configure_tool_scratch(command: &mut TokioCommand) {
     if let Some(dir) = tool_scratch_dir() {
         command.env("TMPDIR", &dir).env("JCODE_SCRATCH_DIR", dir);
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 struct ProcessGroupKillGuard {
     pid: Option<u32>,
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 impl ProcessGroupKillGuard {
     fn new(pid: Option<u32>) -> Self {
         Self { pid }
     }
-
-    fn disarm(&mut self) {
-        self.pid = None;
-    }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 impl Drop for ProcessGroupKillGuard {
     fn drop(&mut self) {
         if let Some(pid) = self.pid {
@@ -537,6 +544,7 @@ impl Drop for ProcessGroupKillGuard {
     }
 }
 
+#[cfg(any(not(unix), test))]
 fn build_shell_command(cmd_str: &str) -> TokioCommand {
     #[cfg(windows)]
     {
@@ -564,26 +572,8 @@ fn build_shell_command(cmd_str: &str) -> TokioCommand {
     }
 }
 
-#[cfg(unix)]
-fn build_detached_shell_wrapper(command: &str) -> StdCommand {
-    let mut cmd = StdCommand::new("bash");
-    cmd.arg("-lc")
-        .arg(
-            r#"eval "$JCODE_RELOAD_DETACH_COMMAND"; status=$?; printf '\n--- Command finished with exit code: %s ---\n' "$status"; exit "$status""#,
-        )
-        .env("JCODE_RELOAD_DETACH_COMMAND", command);
-    if let Some(dir) = tool_scratch_dir() {
-        cmd.env("TMPDIR", &dir).env("JCODE_SCRATCH_DIR", dir);
-    }
-    cmd
-}
-
+#[cfg(any(not(unix), test))]
 fn format_command_output(mut output: String, exit_code: Option<i32>) -> String {
-    if output.len() > MAX_OUTPUT_LEN {
-        output = truncate_str(&output, MAX_OUTPUT_LEN).to_string();
-        output.push_str("\n... (output truncated)");
-    }
-
     if let Some(code) = exit_code.filter(|code| *code != 0) {
         output.push_str(&format!("\n\nExit code: {}", code));
     }
@@ -602,11 +592,10 @@ mod utf8_truncation_tests {
     use super::format_command_output;
 
     #[test]
-    fn format_command_output_truncates_on_utf8_boundary() {
+    fn format_command_output_preserves_complete_utf8() {
         let input = format!("{}é", "a".repeat(29_999));
-        let output = format_command_output(input, None);
-        assert!(output.ends_with("\n... (output truncated)"));
-        assert!(output.starts_with(&"a".repeat(29_999)));
+        let output = format_command_output(input.clone(), None);
+        assert_eq!(output, input);
     }
 
     #[cfg(windows)]
@@ -765,6 +754,14 @@ impl Tool for BashTool {
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
+        #[cfg(unix)]
+        if ctx.invocation.identity.is_none() {
+            let registry = super::Registry::empty();
+            registry
+                .register("bash".into(), std::sync::Arc::new(BashTool::new()))
+                .await;
+            return Box::pin(registry.execute("bash", input, ctx)).await;
+        }
         let mut params: BashInput = serde_json::from_value(input)?;
         let run_in_background = params.run_in_background.unwrap_or(false);
 
@@ -783,7 +780,8 @@ impl Tool for BashTool {
             params.command = wrapped;
         }
 
-        if run_in_background && (ctx.invocation.identity.is_none() || !cfg!(unix)) {
+        #[cfg(not(unix))]
+        if run_in_background {
             return self.execute_background(params, ctx).await;
         }
 
@@ -806,7 +804,7 @@ impl Tool for BashTool {
         }
 
         #[cfg(unix)]
-        if ctx.invocation.identity.is_some() {
+        {
             let working_dir = ctx.working_dir.clone().unwrap_or(std::env::current_dir()?);
             if ctx.invocation.policy.capture == jcode_tool_core::CaptureMode::NativeCommand {
                 return crate::execution::command_worker::launch(
@@ -859,24 +857,18 @@ impl Tool for BashTool {
             output.title = params.intent;
             return Ok(output);
         }
-        // Direct legacy callers are migrated separately from registered execution.
+        #[cfg(not(unix))]
         self.execute_foreground(&params, &ctx).await
     }
 }
 
+#[cfg(not(unix))]
 impl BashTool {
     async fn execute_foreground(
         &self,
         params: &BashInput,
         ctx: &ToolContext,
     ) -> Result<ToolOutput> {
-        #[cfg(unix)]
-        if self.supports_reload_persistence(ctx) {
-            return self
-                .execute_reload_persistable_foreground(params, ctx)
-                .await;
-        }
-
         let has_stdin_channel = ctx.stdin_request_tx.is_some();
 
         let mut command = build_shell_command(&params.command);
@@ -1067,187 +1059,6 @@ impl BashTool {
                         "foreground_timeout_ms": timeout_ms,
                     })))
             }
-        }
-    }
-
-    #[cfg(unix)]
-    fn supports_reload_persistence(&self, ctx: &ToolContext) -> bool {
-        matches!(
-            ctx.execution_mode,
-            crate::tool::ToolExecutionMode::AgentTurn
-        ) && ctx.stdin_request_tx.is_none()
-            && ctx.graceful_shutdown_signal.is_some()
-    }
-
-    #[cfg(unix)]
-    async fn execute_reload_persistable_foreground(
-        &self,
-        params: &BashInput,
-        ctx: &ToolContext,
-    ) -> Result<ToolOutput> {
-        let timeout_duration = params.timeout.map(Duration::from_millis);
-        let started_at = Utc::now().to_rfc3339();
-        let started = Instant::now();
-        let manager = crate::background::global();
-        let info = manager.reserve_task_info();
-        let display_name = summarize_background_command(params.intent.as_deref(), &params.command);
-
-        let mut cmd = build_detached_shell_wrapper(&params.command);
-        let stdout = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&info.output_file)?;
-        let stderr = stdout.try_clone()?;
-        cmd.stdin(Stdio::null()).stdout(stdout).stderr(stderr);
-        if let Some(ref dir) = ctx.working_dir {
-            cmd.current_dir(dir);
-        }
-
-        let mut child = crate::platform::spawn_detached(&mut cmd)?;
-        let pid = child.id();
-        let mut kill_guard = ProcessGroupKillGuard::new(Some(pid));
-        let shutdown_signal = ctx.graceful_shutdown_signal.clone();
-
-        loop {
-            if let Some(status) = child.try_wait()? {
-                kill_guard.disarm();
-                let output = tokio::fs::read_to_string(&info.output_file)
-                    .await
-                    .unwrap_or_default();
-                let _ = tokio::fs::remove_file(&info.output_file).await;
-                let _ = tokio::fs::remove_file(&info.status_file).await;
-                return Ok(
-                    ToolOutput::new(format_command_output(output, status.code())).with_title(
-                        params
-                            .intent
-                            .clone()
-                            .unwrap_or_else(|| params.command.clone()),
-                    ),
-                );
-            }
-
-            if timeout_duration
-                .map(|timeout| started.elapsed() >= timeout)
-                .unwrap_or(false)
-            {
-                let timeout_ms = params
-                    .timeout
-                    .expect("timeout duration exists only when timeout was provided");
-                let elapsed = started.elapsed();
-                manager
-                    .register_detached_task(
-                        &info,
-                        "bash",
-                        Some(display_name.clone()),
-                        &ctx.session_id,
-                        pid,
-                        &started_at,
-                        params.notify,
-                        params.wake,
-                    )
-                    .await;
-
-                kill_guard.disarm();
-                let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
-                let output = super::background_notice::promoted(
-                    &info,
-                    &display_name,
-                    timeout_ms,
-                    Some(elapsed),
-                    ctx.working_dir.as_deref(),
-                );
-                return Ok(ToolOutput::new(output)
-                    .with_title(
-                        params
-                            .intent
-                            .clone()
-                            .unwrap_or_else(|| params.command.clone()),
-                    )
-                    .with_metadata(json!({
-                        "background": true,
-                        "task_id": info.task_id,
-                        "output_file": info.output_file.to_string_lossy(),
-                        "status_file": info.status_file.to_string_lossy(),
-                        "timeout_promoted": true,
-                        "foreground_timeout_ms": timeout_ms,
-                        "foreground_elapsed_ms": elapsed_ms,
-                        "pid": pid,
-                    })));
-            }
-
-            if shutdown_signal
-                .as_ref()
-                .map(|signal| signal.is_set())
-                .unwrap_or(false)
-            {
-                let cause = shutdown_signal
-                    .as_ref()
-                    .and_then(|signal| signal.stop_cause())
-                    .unwrap_or(jcode_tool_types::StopCause::HumanCancellation);
-                if cause != jcode_tool_types::StopCause::ReloadQuiescence {
-                    // Keep the leader unreaped until the final group signal. Its
-                    // PID cannot be recycled while this child handle owns it.
-                    crate::platform::signal_detached_process_group(pid, libc::SIGTERM)?;
-                    tokio::time::sleep(Duration::from_millis(400)).await;
-                    if let Err(error) =
-                        crate::platform::signal_detached_process_group(pid, libc::SIGKILL)
-                        && error.raw_os_error() != Some(libc::ESRCH)
-                        && (error.raw_os_error() != Some(libc::EPERM)
-                            || crate::platform::process_group_has_live_members(pid).await?)
-                    {
-                        return Err(error.into());
-                    }
-                    let deadline = Instant::now() + Duration::from_secs(2);
-                    loop {
-                        if child.try_wait()?.is_some() {
-                            break;
-                        }
-                        anyhow::ensure!(
-                            Instant::now() < deadline,
-                            "Stop requested but command has not exited. Partial output: {}",
-                            info.output_file.display()
-                        );
-                        tokio::time::sleep(Duration::from_millis(10)).await;
-                    }
-                    kill_guard.disarm();
-                    return Err(anyhow::anyhow!(
-                        "{}. Partial output retained at {}",
-                        cause.description(),
-                        info.output_file.display()
-                    ));
-                }
-                manager
-                    .register_detached_task(
-                        &info,
-                        "bash",
-                        Some(display_name.clone()),
-                        &ctx.session_id,
-                        pid,
-                        &started_at,
-                        params.notify,
-                        params.wake,
-                    )
-                    .await;
-                kill_guard.disarm();
-                let output = super::background_notice::reloaded(&info, ctx.working_dir.as_deref());
-                return Ok(ToolOutput::new(output)
-                    .with_title(
-                        params
-                            .intent
-                            .clone()
-                            .unwrap_or_else(|| params.command.clone()),
-                    )
-                    .with_metadata(json!({
-                        "background": true,
-                        "task_id": info.task_id,
-                        "output_file": info.output_file.to_string_lossy(),
-                        "status_file": info.status_file.to_string_lossy(),
-                        "reload_persisted": true,
-                        "pid": pid,
-                    })));
-            }
-
-            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
 

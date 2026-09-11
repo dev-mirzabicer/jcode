@@ -31,6 +31,14 @@ fn projected(store: &ExecutionStore, id: &str) -> Result<Option<TaskStatusFile>>
                 .unwrap_or("Execution interrupted")
                 .to_string(),
         ),
+        RunState::Failed
+            if record
+                .process_exit
+                .as_ref()
+                .is_some_and(|exit| exit.timed_out) =>
+        {
+            Some("Command timed out; inspect retained output".into())
+        }
         RunState::Failed => Some("Execution failed; inspect the retained output".to_string()),
         _ => None,
     };
@@ -40,7 +48,10 @@ fn projected(store: &ExecutionStore, id: &str) -> Result<Option<TaskStatusFile>>
         display_name: None,
         session_id: record.session_id,
         status,
-        exit_code: None,
+        exit_code: record
+            .process_exit
+            .as_ref()
+            .and_then(|exit| exit.shell_code()),
         error,
         started_at,
         completed_at,

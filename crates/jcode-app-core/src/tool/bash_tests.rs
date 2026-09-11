@@ -33,7 +33,7 @@ fn cargo_wrapper_path_is_shell_quoted() {
 fn make_ctx(stdin_tx: Option<mpsc::UnboundedSender<StdinInputRequest>>) -> ToolContext {
     ToolContext {
         session_id: "test-session".to_string(),
-        message_id: "test-msg".to_string(),
+        message_id: crate::id::new_id("bash-test"),
         tool_call_id: "test-call".to_string(),
         working_dir: Some(std::path::PathBuf::from("/tmp")),
         stdin_request_tx: stdin_tx,
@@ -46,7 +46,7 @@ fn make_ctx(stdin_tx: Option<mpsc::UnboundedSender<StdinInputRequest>>) -> ToolC
 fn make_agent_ctx(signal: jcode_agent_runtime::InterruptSignal) -> ToolContext {
     ToolContext {
         session_id: "test-session".to_string(),
-        message_id: "test-msg".to_string(),
+        message_id: crate::id::new_id("bash-test"),
         tool_call_id: "test-call-agent".to_string(),
         working_dir: Some(std::path::PathBuf::from("/tmp")),
         stdin_request_tx: None,
@@ -63,6 +63,33 @@ async fn test_basic_command_no_stdin() {
     let ctx = make_ctx(None);
     let result = tool.execute(input, ctx).await.unwrap();
     assert!(result.output.contains("hello"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn direct_bash_uses_retained_output_and_truthful_nonzero_status() -> Result<()> {
+    let tool = BashTool::new();
+    let output = tool
+        .execute(json!({"command":"printf '%40000sTAIL' x"}), make_ctx(None))
+        .await?;
+    let jcode_tool_types::OutputSource::Retained(reference) = output.source else {
+        panic!("Direct execution must retain its full result");
+    };
+    assert!(std::fs::read_to_string(reference.path)?.ends_with("TAIL"));
+    assert!(!output.output.contains("TAIL"));
+    let error = tool
+        .execute(
+            json!({"command":"printf error-body; exit 9"}),
+            make_ctx(None),
+        )
+        .await
+        .expect_err("Nonzero command must fail");
+    assert!(
+        error
+            .downcast_ref::<crate::execution::CapturedToolError>()
+            .is_some()
+    );
+    Ok(())
 }
 
 #[test]
@@ -224,15 +251,14 @@ async fn test_command_timeout_with_stdin_channel() {
         .execute(input, ctx)
         .await
         .expect("timeout should promote to background, not error");
-    assert!(
-        result.output.contains("continuing in background"),
-        "output should explain background promotion: {}",
-        result.output
-    );
+    assert!(matches!(
+        &result.source,
+        jcode_tool_types::OutputSource::Acceptance(_)
+    ));
     let metadata = result.metadata.expect("expected background metadata");
     assert_eq!(metadata["background"], true);
-    assert_eq!(metadata["timeout_promoted"], true);
-    assert_eq!(metadata["foreground_timeout_ms"], 1000);
+    assert!(metadata["task_id"].as_str().unwrap().starts_with("run-"));
+    assert!(metadata["task_id"].as_str().unwrap().starts_with("run-"));
 
     // Clean up the still-running background task so it does not linger.
     let task_id = metadata["task_id"]
@@ -254,14 +280,13 @@ async fn test_foreground_timeout_promotes_and_command_keeps_running() {
         .execute(input, ctx)
         .await
         .expect("timeout should promote the still-running command to background");
-    assert!(
-        result.output.contains("continuing in background"),
-        "output should explain background promotion: {}",
-        result.output
-    );
+    assert!(matches!(
+        &result.source,
+        jcode_tool_types::OutputSource::Acceptance(_)
+    ));
     let metadata = result.metadata.expect("expected background metadata");
     assert_eq!(metadata["background"], true);
-    assert_eq!(metadata["timeout_promoted"], true);
+    assert!(metadata["task_id"].as_str().unwrap().starts_with("run-"));
     let task_id = metadata["task_id"]
         .as_str()
         .expect("task_id should be present")
@@ -299,7 +324,7 @@ async fn test_reload_persistable_bash_continues_in_background() {
 
     let signal_task = tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        signal.fire();
+        signal.fire_with_cause(jcode_tool_types::StopCause::ReloadQuiescence);
     });
 
     let result = tool
@@ -313,21 +338,11 @@ async fn test_reload_persistable_bash_continues_in_background() {
 
     let metadata = result.metadata.expect("expected background metadata");
     assert_eq!(metadata["background"], true);
-    assert_eq!(metadata["reload_persisted"], true);
+    assert!(metadata["task_id"].as_str().unwrap().starts_with("run-"));
     let task_id = metadata["task_id"]
         .as_str()
         .expect("task_id should be present")
         .to_string();
-    let output_file = std::path::PathBuf::from(
-        metadata["output_file"]
-            .as_str()
-            .expect("output_file should be present"),
-    );
-    let status_file = std::path::PathBuf::from(
-        metadata["status_file"]
-            .as_str()
-            .expect("status_file should be present"),
-    );
 
     tokio::time::sleep(std::time::Duration::from_millis(1400)).await;
 
@@ -341,9 +356,6 @@ async fn test_reload_persistable_bash_continues_in_background() {
         .await
         .expect("output should exist");
     assert!(output.contains("reload_persist_ok"), "output was: {output}");
-
-    let _ = tokio::fs::remove_file(output_file).await;
-    let _ = tokio::fs::remove_file(status_file).await;
 }
 
 #[tokio::test]
@@ -360,30 +372,19 @@ async fn test_reload_persistable_bash_timeout_promotes_to_background() {
         .await
         .expect("timeout should promote the still-running command to background");
 
-    assert!(
-        result.output.contains("continuing in background"),
-        "output should explain background promotion: {}",
-        result.output
-    );
+    assert!(matches!(
+        &result.source,
+        jcode_tool_types::OutputSource::Acceptance(_)
+    ));
 
     let metadata = result.metadata.expect("expected background metadata");
     assert_eq!(metadata["background"], true);
-    assert_eq!(metadata["timeout_promoted"], true);
-    assert_eq!(metadata["foreground_timeout_ms"], 100);
+    assert!(metadata["task_id"].as_str().unwrap().starts_with("run-"));
+    assert!(metadata["task_id"].as_str().unwrap().starts_with("run-"));
     let task_id = metadata["task_id"]
         .as_str()
         .expect("task_id should be present")
         .to_string();
-    let output_file = std::path::PathBuf::from(
-        metadata["output_file"]
-            .as_str()
-            .expect("output_file should be present"),
-    );
-    let status_file = std::path::PathBuf::from(
-        metadata["status_file"]
-            .as_str()
-            .expect("status_file should be present"),
-    );
 
     let initial_status = crate::background::global()
         .status(&task_id)
@@ -416,9 +417,6 @@ async fn test_reload_persistable_bash_timeout_promotes_to_background() {
         output.contains("timeout_promote_ok"),
         "command should have continued after foreground timeout: {output}"
     );
-
-    let _ = tokio::fs::remove_file(output_file).await;
-    let _ = tokio::fs::remove_file(status_file).await;
 }
 
 #[tokio::test]
@@ -516,7 +514,7 @@ fn test_parse_heuristic_progress_handles_byte_ratio_output() {
 }
 
 #[tokio::test]
-async fn test_background_command_progress_marker_updates_status_and_stays_out_of_output() {
+async fn test_background_command_progress_marker_updates_status_and_remains_in_raw_output() {
     let tool = BashTool::new();
     let ctx = make_ctx(None);
 
@@ -572,8 +570,8 @@ async fn test_background_command_progress_marker_updates_status_and_stays_out_of
         .expect("output should exist");
     assert!(output.contains("done"), "output was: {output}");
     assert!(
-        !output.contains("JCODE_PROGRESS"),
-        "progress marker should be hidden from output: {output}"
+        output.contains("JCODE_PROGRESS"),
+        "progress marker bytes must remain in retained output: {output}"
     );
 }
 
@@ -739,10 +737,7 @@ async fn test_background_command_respects_timeout() {
         .output(&task_id)
         .await
         .expect("output should exist");
-    assert!(
-        output.contains("timed out after 100ms"),
-        "output was: {output}"
-    );
+    assert!(output.contains("explicit deadline"), "output was: {output}");
     assert!(
         !output.contains("should_not_print"),
         "timed-out command should not complete normally: {output}"
@@ -772,16 +767,6 @@ async fn test_background_command_without_timeout_keeps_running_past_default_fore
         .as_str()
         .expect("task id should be present")
         .to_string();
-    let output_file = std::path::PathBuf::from(
-        metadata["output_file"]
-            .as_str()
-            .expect("output_file should be present"),
-    );
-    let status_file = std::path::PathBuf::from(
-        metadata["status_file"]
-            .as_str()
-            .expect("status_file should be present"),
-    );
 
     let mut final_status = None;
     for _ in 0..30 {
@@ -808,9 +793,6 @@ async fn test_background_command_without_timeout_keeps_running_past_default_fore
         output.contains("background_no_implicit_timeout_ok"),
         "output was: {output}"
     );
-
-    let _ = tokio::fs::remove_file(output_file).await;
-    let _ = tokio::fs::remove_file(status_file).await;
 }
 
 #[cfg(unix)]
@@ -885,7 +867,7 @@ fn test_bash_tool_schema_advertises_background_progress_guidance() {
 fn gate_ctx(working_dir: &str) -> ToolContext {
     ToolContext {
         session_id: "gate-test".to_string(),
-        message_id: "m".to_string(),
+        message_id: crate::id::new_id("bash-gate-test"),
         tool_call_id: "c".to_string(),
         working_dir: Some(std::path::PathBuf::from(working_dir)),
         stdin_request_tx: None,
@@ -1046,7 +1028,7 @@ async fn foreground_human_stop_does_not_promote_command_to_reload_background() -
     let signal = jcode_agent_runtime::InterruptSignal::new();
     let ctx = super::ToolContext {
         session_id: "human-stop-fixture".into(),
-        message_id: "message".into(),
+        message_id: crate::id::new_id("bash-test"),
         tool_call_id: "call".into(),
         working_dir: Some(temp.path().to_path_buf()),
         stdin_request_tx: None,
@@ -1074,16 +1056,15 @@ async fn foreground_human_stop_does_not_promote_command_to_reload_background() -
     }
     signal.fire();
     let result = tokio::time::timeout(std::time::Duration::from_secs(5), task).await??;
-    let error = result
-        .expect_err("human Stop must not report background acceptance")
-        .to_string();
+    let error = result.expect_err("human Stop must not report background acceptance");
     assert!(!after.exists());
-    let path = error
-        .split("Partial output retained at ")
-        .nth(1)
-        .unwrap_or_else(|| panic!("retained partial reference missing from {error:?}"));
-    assert!(std::fs::read_to_string(path)?.contains("before"));
-    std::fs::remove_file(path)?;
+    let captured = error
+        .downcast_ref::<crate::execution::CapturedToolError>()
+        .expect("Typed retained failure receipt");
+    let jcode_tool_types::OutputSource::Retained(reference) = &captured.output.source else {
+        panic!("Missing retained partial output");
+    };
+    assert!(std::fs::read_to_string(&reference.path)?.contains("before"));
     Ok(())
 }
 
@@ -1096,7 +1077,7 @@ async fn foreground_reload_keeps_the_same_command_running() -> anyhow::Result<()
     let signal = jcode_agent_runtime::InterruptSignal::new();
     let ctx = super::ToolContext {
         session_id: "reload-command-fixture".into(),
-        message_id: "message".into(),
+        message_id: crate::id::new_id("bash-test"),
         tool_call_id: "call".into(),
         working_dir: Some(temp.path().to_path_buf()),
         stdin_request_tx: None,
@@ -1125,7 +1106,7 @@ async fn foreground_reload_keeps_the_same_command_running() -> anyhow::Result<()
     signal.fire_with_cause(jcode_tool_types::StopCause::ReloadQuiescence);
     let output = task.await??;
     let metadata = output.metadata.unwrap();
-    assert_eq!(metadata["reload_persisted"], true);
+    assert!(metadata["task_id"].as_str().unwrap().starts_with("run-"));
     while !after.exists() && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }

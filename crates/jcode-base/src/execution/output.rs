@@ -22,6 +22,8 @@ pub(super) struct ImagePart {
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct Manifest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_exit: Option<jcode_tool_types::ProcessExit>,
     pub(super) schema: u32,
     pub(super) invocation_id: String,
     pub(super) title: Option<String>,
@@ -226,6 +228,7 @@ impl ExecutionStore {
             );
         }
         record.state = outcome;
+        record.process_exit = manifest.process_exit;
         record.result_path = Some(manifest_path);
         self.finish(&record)?;
         Ok(record)
@@ -257,6 +260,7 @@ impl ExecutionStore {
             crate::storage::ensure_dir(&directory)?;
             let path = directory.join(format!("{}.json", record.id));
             let manifest = Manifest {
+                process_exit: output.process_exit.clone(),
                 schema: 1,
                 invocation_id: record.id.clone(),
                 title: output.title.clone(),
@@ -299,6 +303,7 @@ impl ExecutionStore {
             .parent()
             .context("Invalid output manifest path")?;
         let mut output = ToolOutput::new("");
+        output.process_exit = record.process_exit.clone();
         output.is_error = record.state != RunState::Completed;
         output.title = manifest.title;
         output.metadata = manifest.metadata;

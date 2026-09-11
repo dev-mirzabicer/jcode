@@ -4,6 +4,8 @@ mod apply_patch;
 mod background_notice;
 mod bash;
 pub(crate) use bash::parse_command_progress;
+#[cfg(unix)]
+pub(crate) use bash::tool_scratch_dir;
 mod batch;
 mod bg;
 mod browser;

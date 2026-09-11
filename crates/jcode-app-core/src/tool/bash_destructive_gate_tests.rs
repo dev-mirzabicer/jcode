@@ -29,6 +29,7 @@ fn managed_refusal_never_changes_command_enforcement() {
     let _guard = crate::storage::lock_test_env();
     let home = tempfile::tempdir().unwrap();
     let _home = EnvGuard::set("JCODE_HOME", home.path());
+    let _runtime = EnvGuard::set("JCODE_RUNTIME_DIR", &home.path().join("runtime"));
     crate::instruction::SystemPromptComposer::new()
         .ensure_global_store()
         .unwrap();

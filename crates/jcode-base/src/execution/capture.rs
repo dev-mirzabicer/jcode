@@ -153,6 +153,7 @@ impl Capture {
             let manifest_path;
             if complete {
                 let manifest = Manifest {
+                    process_exit: output.process_exit.clone(),
                     parts,
                     schema: 1,
                     invocation_id: state.record.id.clone(),
@@ -197,6 +198,7 @@ impl Capture {
                 crate::storage::ensure_dir(&directory)?;
                 manifest_path = directory.join(format!("{}.json", state.record.id));
                 let manifest = Manifest {
+                    process_exit: output.process_exit.clone(),
                     schema: 1,
                     invocation_id: state.record.id.clone(),
                     title: output.title.clone(),
@@ -220,6 +222,7 @@ impl Capture {
             } else {
                 outcome
             };
+            state.record.process_exit = output.process_exit.clone();
             state.record.output_path = Some(state.storage.alias().join("output.txt"));
             state.record.output_bytes = state.committed;
             state.record.complete = state.failed.is_none();
@@ -469,6 +472,33 @@ pub fn output_digest(output: &ToolOutput) -> Result<[u8; 32]> {
 mod tests {
     use super::*;
     use crate::execution::{Invocation, PreparedInvocation};
+
+    #[test]
+    fn process_exit_recovers_with_terminal_receipt_and_metadata_only_status() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let store = ExecutionStore::open(directory.path())?;
+        let record = prepared(&store)?;
+        let capture = Capture::create(store.clone(), record.clone(), StorageConfig::default())?;
+        let exit = jcode_tool_types::ProcessExit {
+            code: Some(7),
+            signal: None,
+            timed_out: false,
+        };
+        let mut output = ToolOutput::new("failed body").with_error(true);
+        output.process_exit = Some(exit.clone());
+        store.connection()?.execute_batch("CREATE TRIGGER block_terminal BEFORE UPDATE OF state ON runs WHEN NEW.state='failed' BEGIN SELECT RAISE(FAIL,'injected terminal failure'); END;")?;
+        assert!(capture.seal(output, RunState::Failed).is_err());
+        drop(capture);
+        store
+            .connection()?
+            .execute_batch("DROP TRIGGER block_terminal;")?;
+        let recovered = store.recover_terminal_output(&record.id)?;
+        assert_eq!(recovered.process_exit, Some(exit.clone()));
+        let manifest = recovered.result_path.unwrap();
+        std::fs::rename(&manifest, manifest.with_extension("saved"))?;
+        assert_eq!(store.inspect(&record.id)?.unwrap().process_exit, Some(exit));
+        Ok(())
+    }
 
     #[test]
     fn raw_parts_preserve_chunks_and_empty_appends_without_aliasing_canonical_files() -> Result<()>

@@ -53,6 +53,8 @@ impl StopCause {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolOutput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_exit: Option<ProcessExit>,
     pub output: String,
     pub title: Option<String>,
     pub metadata: Option<serde_json::Value>,
@@ -65,6 +67,18 @@ pub struct ToolOutput {
     pub withheld: Option<WithheldDelivery>,
     #[serde(default)]
     pub is_error: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProcessExit {
+    pub code: Option<i32>,
+    pub signal: Option<i32>,
+    pub timed_out: bool,
+}
+impl ProcessExit {
+    pub fn shell_code(&self) -> Option<i32> {
+        if self.timed_out { Some(124) } else { self.code }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -132,6 +146,7 @@ impl ToolOutput {
     pub fn new(output: impl Into<String>) -> Self {
         Self {
             output: output.into(),
+            process_exit: None,
             title: None,
             metadata: None,
             images: Vec::new(),

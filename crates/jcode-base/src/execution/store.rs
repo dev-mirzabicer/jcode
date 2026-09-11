@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-const SCHEMA: i64 = 10;
+const SCHEMA: i64 = 11;
 
 pub use jcode_tool_types::RunState;
 
@@ -45,6 +45,8 @@ impl Invocation {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_exit: Option<jcode_tool_types::ProcessExit>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progress: Option<super::ExecutionProgress>,
     pub id: String,
@@ -197,6 +199,11 @@ impl ExecutionStore {
                 "ALTER TABLE runs ADD COLUMN progress TEXT; PRAGMA user_version=10;",
             )?;
         }
+        if version < 11 {
+            transaction.execute_batch(
+                "ALTER TABLE runs ADD COLUMN process_exit TEXT; PRAGMA user_version=11;",
+            )?;
+        }
         transaction.commit()?;
         Ok(store)
     }
@@ -334,16 +341,17 @@ impl ExecutionStore {
                     && previous.result_path == record.result_path
                     && previous.output_path == record.output_path
                     && previous.output_bytes == record.output_bytes
-                    && previous.complete == record.complete,
+                    && previous.complete == record.complete
+                    && previous.process_exit == record.process_exit,
                 "Conflicting terminal invocation receipt"
             );
             return Ok(());
         }
         let bytes = i64::try_from(record.output_bytes)
             .context("Output size exceeds metadata representation")?;
-        transaction.execute("UPDATE runs SET state=?2,result_path=?3,output_path=?4,output_bytes=?5,complete=?6,updated=unixepoch() WHERE id=?1", params![
+        transaction.execute("UPDATE runs SET state=?2,result_path=?3,output_path=?4,output_bytes=?5,complete=?6,process_exit=?7,updated=unixepoch() WHERE id=?1", params![
             record.id, record.state.as_str(), record.result_path.as_deref().map(path_text).transpose()?,
-            record.output_path.as_deref().map(path_text).transpose()?, bytes, record.complete])?;
+            record.output_path.as_deref().map(path_text).transpose()?, bytes, record.complete,record.process_exit.as_ref().map(serde_json::to_string).transpose()?])?;
         transaction.execute("UPDATE command_handoffs SET state='finished' WHERE run_id=?1 AND COALESCE(worker_owner,parent_owner)=?2",params![record.id,record.owner])?;
         transaction.commit()?;
         Ok(())
@@ -415,6 +423,17 @@ fn query_record(connection: &Connection, id: &str) -> Result<Option<RunRecord>> 
                 )
             })?;
             Ok(RunRecord {
+                process_exit: row
+                    .get::<_, Option<String>>("process_exit")?
+                    .map(|value| serde_json::from_str(&value))
+                    .transpose()
+                    .map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?,
                 progress: row
                     .get::<_, Option<String>>("progress")?
                     .map(|value| serde_json::from_str(&value))

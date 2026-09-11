@@ -248,6 +248,11 @@ async fn run_with_control(
         command.arg("-c").arg(&spec.command);
         (command, None)
     };
+    if let Some(directory) = crate::tool::tool_scratch_dir() {
+        command
+            .env("TMPDIR", &directory)
+            .env("JCODE_SCRATCH_DIR", directory);
+    }
     command
         .current_dir(&spec.working_dir)
         .stdin(if input.is_some() {
@@ -380,6 +385,11 @@ async fn run_with_control(
     let mut output=ToolOutput::new("").with_metadata(serde_json::json!({"exit_code":exit_code,"exit_signal":exit_signal,"timed_out":timed_out,"control_error":control_error,"requested_stop":cause}))
         .with_error(!status.success() || timed_out || cause.is_some() || exit_signal.is_some() || control_error.is_some());
     output.source = OutputSource::Retained(capture.reference()?);
+    output.process_exit = Some(jcode_tool_types::ProcessExit {
+        code: exit_code,
+        signal: exit_signal,
+        timed_out,
+    });
     Ok(CommandOutcome {
         status,
         output,
