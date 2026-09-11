@@ -113,8 +113,24 @@ a shorter-prefix tie break. Tiny targets fail rather than produce zero-progress
 cursor loops. A changed ordinary source rejects its old point. A retry point
 identifies the beginning of a page that was withheld rather than delivered.
 
-Managed live-output/relocation points and derived PDF/media integration remain
-WP-02 integration work. Do not claim them from ordinary-source reader tests.
+Managed text outputs now use a bounded, hash-verified committed-prefix reader.
+Canonical chunk hashes and committed length publish in one metadata transaction
+after durable file writes. Reads validate only the bounded chunks they need,
+not a complete duplicate of the source. Managed points use logical invocation
+identity and remain valid after append or verified relocation. Ordinary file
+points retain their strict filesystem-version checks.
+
+Retained presentation exposes an exact structural continuation point when it
+clips the body. Repeated retrieval uses stable coordinates. Withholding clears
+a post-body continuation, and a withheld read page keeps its original retry
+position. Cancelled source reads do not advance a delivered position.
+
+Archive reads validate the original recorded volume identity without creating
+archive directories or moving data back. The native owned-fixture test exercises
+continuation before and after real relocation and rejects offline reads without
+creating a fake mount. Outputs from older capture schemas without a chunk index
+still require explicit legacy-import reconciliation. Derived PDF/media behavior
+remains WP-02 work and is not established by these text-reader tests.
 
 ## Runtime control
 

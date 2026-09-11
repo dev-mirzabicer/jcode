@@ -55,6 +55,10 @@ impl StorageEnvironment for NativeEnvironment {
 }
 
 fn verified_archive(config: &ArchiveConfig) -> Result<DirectoryBinding> {
+    resolve_archive(config, true)
+}
+
+fn resolve_archive(config: &ArchiveConfig, create: bool) -> Result<DirectoryBinding> {
     ensure!(
         !config.directory.as_os_str().is_empty()
             && config
@@ -128,12 +132,15 @@ fn verified_archive(config: &ArchiveConfig) -> Result<DirectoryBinding> {
     bail!("Verified archive-volume placement is unsupported on this platform");
     binding.verify()?;
     for component in config.directory.components() {
-        binding = binding.create_child(
-            component
-                .as_os_str()
-                .to_str()
-                .context("Archive directory must be UTF-8")?,
-        )?;
+        let name = component
+            .as_os_str()
+            .to_str()
+            .context("Archive directory must be UTF-8")?;
+        binding = if create {
+            binding.create_child(name)?
+        } else {
+            DirectoryBinding::open(&binding.path.join(name))?
+        };
     }
     Ok(binding)
 }
@@ -524,7 +531,7 @@ impl BundleStorage {
             |row| row.get(0),
         )?;
         ensure!(owned, "Invocation is not owned and running");
-        tx.execute("INSERT INTO output_allocations (id,physical,archived,owner,stage) VALUES (?1,?2,?3,?4,'prepared')",params![record.id,physical.to_str().context("Non-UTF-8 output path")?,archived,record.owner])?;
+        tx.execute("INSERT INTO output_allocations (id,physical,archived,owner,stage,archive_spec) VALUES (?1,?2,?3,?4,'prepared',?5)",params![record.id,physical.to_str().context("Non-UTF-8 output path")?,archived,record.owner,config.archive.as_ref().map(serde_json::to_string).transpose()?])?;
         tx.commit()?;
         complete_allocation(&store, record, &parent, archived, environment.as_ref())?;
         let binding = DirectoryBinding::open(&physical)?;
@@ -665,7 +672,8 @@ impl BundleStorage {
         let destination = root
             .path
             .join(format!("{}-{}", self.id, uuid::Uuid::new_v4().simple()));
-        let manifest = MoveManifest::capture(&self.id, &self.physical, &destination)?;
+        let mut manifest = MoveManifest::capture(&self.id, &self.physical, &destination)?;
+        manifest.archive_spec = self.config.archive.clone();
         let required = manifest.files.iter().try_fold(0u64, |total, part| {
             total
                 .checked_add(part.bytes)
@@ -774,7 +782,7 @@ fn complete_allocation(
         );
     } else {
         tx.execute(
-            "INSERT INTO output_locations (id,physical,archived) VALUES (?1,?2,?3)",
+            "INSERT INTO output_locations (id,physical,archived,archive_spec) SELECT ?1,?2,?3,archive_spec FROM output_allocations WHERE id=?1",
             params![record.id, physical.to_str(), archived],
         )?;
     }
@@ -827,6 +835,8 @@ struct MoveManifest {
     source_identity: DirectoryIdentity,
     destination_parent_identity: DirectoryIdentity,
     files: Vec<Part>,
+    #[serde(default)]
+    archive_spec: Option<ArchiveConfig>,
 }
 impl MoveManifest {
     fn capture(id: &str, source: &Path, destination: &Path) -> Result<Self> {
@@ -860,6 +870,7 @@ impl MoveManifest {
             source_identity,
             destination_parent_identity,
             files,
+            archive_spec: None,
         })
     }
 }
@@ -1010,7 +1021,7 @@ fn complete_move(
         "Output location changed during relocation"
     );
     if Path::new(&current) == manifest.source {
-        ensure!(tx.execute("UPDATE output_locations SET physical=?2,archived=1,generation=generation+1 WHERE id=?1 AND physical=?3",params![manifest.id,manifest.destination.to_str(),manifest.source.to_str()])? == 1,"Relocation lost location ownership");
+        ensure!(tx.execute("UPDATE output_locations SET physical=?2,archived=1,generation=generation+1,archive_spec=?4 WHERE id=?1 AND physical=?3",params![manifest.id,manifest.destination.to_str(),manifest.source.to_str(),manifest.archive_spec.as_ref().map(serde_json::to_string).transpose()?])? == 1,"Relocation lost location ownership");
     }
     ensure!(
         tx.execute(
@@ -1060,6 +1071,55 @@ fn complete_move(
 }
 
 impl ExecutionStore {
+    pub(super) fn open_output_file(&self, id: &str) -> Result<File> {
+        for _ in 0..2 {
+            let (physical,archived,spec,generation):(String,bool,Option<String>,i64)=self.connection()?.query_row("SELECT physical,archived,archive_spec,generation FROM output_locations WHERE id=?1",[id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)))?;
+            let physical = PathBuf::from(physical);
+            let opened = (|| {
+                if archived {
+                    let spec: ArchiveConfig = serde_json::from_str(
+                        spec.as_deref()
+                            .context("Archived output has no recorded volume identity")?,
+                    )?;
+                    let root = resolve_archive(&spec, false)?;
+                    ensure!(
+                        physical.starts_with(&root.path),
+                        "Archived output is outside its recorded archive root"
+                    );
+                } else {
+                    ensure!(
+                        physical == self.root().join("data").join(id),
+                        "Local output location is outside its owned bundle"
+                    );
+                }
+                let binding = DirectoryBinding::open(&physical)?;
+                let identity: serde_json::Value =
+                    serde_json::from_reader(binding.read_part("identity.json")?.take(16 * 1024))?;
+                ensure!(
+                    identity["schema"] == 1 && identity["invocation_id"] == id,
+                    "Managed output identity changed"
+                );
+                let alias = self.root().join("outputs").join(id);
+                ensure!(
+                    std::fs::read_link(&alias)? == physical,
+                    "Managed output alias and location disagree"
+                );
+                binding.read_part("output.txt")
+            })();
+            if opened.is_ok() {
+                return opened;
+            }
+            let current: i64 = self.connection()?.query_row(
+                "SELECT generation FROM output_locations WHERE id=?1",
+                [id],
+                |row| row.get(0),
+            )?;
+            if current == generation {
+                return opened;
+            }
+        }
+        bail!("Output location changed while opening it; retry the read, not its producer")
+    }
     /// Converge recorded publication/move operations without running a producer.
     pub fn recover_output_storage(&self, config: &StorageConfig) -> Result<usize> {
         self.recover_output_storage_with_environment(config, &NativeEnvironment)

@@ -118,6 +118,7 @@ impl Tool for ReadTool {
     ) -> Result<jcode_tool_core::ExecutionPolicy> {
         Ok(jcode_tool_core::ExecutionPolicy {
             capture: jcode_tool_core::CaptureMode::SourceRead,
+            cooperative_stop: true,
             ..Default::default()
         })
     }
@@ -171,9 +172,11 @@ impl Tool for ReadTool {
         let range = normalize_read_range(&params)?;
 
         let path = ctx.resolve_path(Path::new(&params.file_path));
+        let root = crate::storage::jcode_dir()?;
+        let managed = crate::execution::reader::SourceReader::is_managed_path(&root, &path);
 
         // Check if file exists
-        if !path.exists() {
+        if !managed && !path.exists() {
             // Try to find similar files
             let suggestions = find_similar_files(&path);
             if suggestions.is_empty() {
@@ -198,7 +201,7 @@ impl Tool for ReadTool {
         }
 
         // Check for binary files
-        if is_binary_file(&path) {
+        if !managed && is_binary_file(&path) {
             return Ok(ToolOutput::new(format!(
                 "Binary file detected: {}\nUse appropriate tools to handle binary files.",
                 params.file_path
@@ -228,8 +231,8 @@ impl Tool for ReadTool {
             start_line: range.offset as u64 + 1,
             end_line,
             target,
+            stop: ctx.graceful_shutdown_signal.clone(),
         };
-        let root = crate::storage::jcode_dir()?;
         let mut output = tokio::task::spawn_blocking(move || {
             crate::execution::reader::SourceReader::new(&root).read(request)
         })

@@ -5,6 +5,7 @@ pub use delivery::{BackgroundDelivery, DeliveryAttempt, DeliveryChannel, Deliver
 #[cfg(unix)]
 pub mod command_handoff;
 pub mod control_transport;
+mod managed_read;
 mod output;
 #[cfg(unix)]
 pub mod process;

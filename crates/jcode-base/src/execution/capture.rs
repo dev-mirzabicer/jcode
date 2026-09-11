@@ -251,6 +251,7 @@ impl CaptureState {
             path: self.storage.alias().join("output.txt"),
             bytes: self.committed,
             complete,
+            continuation: None,
             manifest_path: self.record.result_path.clone(),
         }
     }
@@ -268,15 +269,35 @@ impl CaptureState {
         let mut event = serde_json::to_vec(&event)?;
         event.push(b'\n');
         self.storage.append("events.jsonl", &event)?;
-        let next = self
-            .committed
-            .checked_add(decoded.len() as u64)
-            .context("Output byte count overflow")?;
-        ensure!(self.storage.store.connection()?.execute("UPDATE runs SET output_bytes=?3,updated=unixepoch() WHERE id=?1 AND owner=?2 AND state='running'",params![self.record.id,self.record.owner,i64::try_from(next)?])?==1,"Output capture lost invocation ownership");
-        self.committed = next;
-        self.text_digest.update(decoded.as_bytes());
+        self.commit_rendered(decoded.as_bytes())?;
         self.offsets[index] += bytes.len() as u64;
         self.sequence += 1;
+        Ok(())
+    }
+
+    fn commit_rendered(&mut self, bytes: &[u8]) -> Result<()> {
+        let next = self
+            .committed
+            .checked_add(bytes.len() as u64)
+            .context("Output byte count overflow")?;
+        let mut connection = self.storage.store.connection()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        ensure!(transaction.execute("UPDATE runs SET output_bytes=?3,updated=unixepoch() WHERE id=?1 AND owner=?2 AND state='running' AND output_bytes=?4",params![self.record.id,self.record.owner,i64::try_from(next)?,i64::try_from(self.committed)?])?==1,"Output capture lost invocation ownership or committed prefix");
+        if !bytes.is_empty() {
+            transaction.execute(
+                "INSERT INTO output_chunks(run_id,start_byte,end_byte,sha256) VALUES (?1,?2,?3,?4)",
+                params![
+                    self.record.id,
+                    i64::try_from(self.committed)?,
+                    i64::try_from(next)?,
+                    format!("{:x}", Sha256::digest(bytes))
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        self.committed = next;
+        self.text_digest.update(bytes);
         Ok(())
     }
 
@@ -302,11 +323,10 @@ impl CaptureState {
                 anyhow::bail!("A source-read page must not enter the output capture sink")
             }
         }
-        for decoder in &mut self.decoders {
-            let suffix = decoder.decode(&[], true);
+        for index in 0..self.decoders.len() {
+            let suffix = self.decoders[index].decode(&[], true);
             self.storage.append("output.txt", suffix.as_bytes())?;
-            self.committed += suffix.len() as u64;
-            self.text_digest.update(suffix.as_bytes());
+            self.commit_rendered(suffix.as_bytes())?;
         }
         for (index, image) in output.images.iter().enumerate() {
             // Preserve exactly what arrived, including undecodable media.

@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-const SCHEMA: i64 = 8;
+const SCHEMA: i64 = 9;
 
 pub use jcode_tool_types::RunState;
 
@@ -177,6 +177,18 @@ impl ExecutionStore {
                 CHECK(notify_state IN ('pending','in_flight','delivered','uncertain')),
                 CHECK(wake_state IN ('pending','in_flight','delivered','uncertain'))
             ); PRAGMA user_version=8;")?;
+        }
+        if version < 9 {
+            transaction.execute_batch(
+                "CREATE TABLE output_chunks (
+                run_id TEXT NOT NULL REFERENCES runs(id), start_byte INTEGER NOT NULL,
+                end_byte INTEGER NOT NULL, sha256 TEXT NOT NULL,
+                PRIMARY KEY(run_id,start_byte), CHECK(end_byte>start_byte)
+            );
+            ALTER TABLE output_locations ADD COLUMN archive_spec TEXT;
+            ALTER TABLE output_allocations ADD COLUMN archive_spec TEXT;
+            PRAGMA user_version=9;",
+            )?;
         }
         transaction.commit()?;
         Ok(store)

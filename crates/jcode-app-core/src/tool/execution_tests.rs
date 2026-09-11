@@ -681,3 +681,39 @@ async fn provider_supplied_result_is_retained_without_invoking_the_native_produc
     assert_eq!(tool.count.load(Ordering::SeqCst), 0);
     Ok(())
 }
+
+#[tokio::test]
+async fn read_tool_resumes_the_retained_presentation_point_without_a_source_copy()
+-> anyhow::Result<()> {
+    let (registry, _, _) = fixture(format!("{}TAIL", "α".repeat(2000)), false, false).await;
+    let ctx = context();
+    let session = ctx.session_id.clone();
+    let output = registry
+        .execute(
+            "execution_fixture",
+            serde_json::json!({"output_size":100}),
+            ctx.clone(),
+        )
+        .await?;
+    let OutputSource::Retained(reference) = output.source else {
+        panic!()
+    };
+    let mut read_ctx = ctx;
+    read_ctx.tool_call_id = "read-remainder".into();
+    let page=registry.execute("read",serde_json::json!({"file_path":reference.path,"read_point":reference.continuation,"output_size":10_000}),read_ctx).await?;
+    let OutputSource::ReadPage(page_ref) = page.source else {
+        panic!()
+    };
+    assert_eq!(page_ref.start_byte, 200);
+    assert!(page.output.contains("TAIL"));
+    let store = crate::execution::ExecutionStore::open(&crate::storage::jcode_dir()?)?;
+    let records = store.list(&session, None, 100)?;
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record.output_path.is_some())
+            .count(),
+        1
+    );
+    Ok(())
+}

@@ -343,6 +343,7 @@ impl ExecutionStore {
                 label: part.label,
             });
         }
+        let mut continuation = None;
         match &output.source {
             OutputSource::ReadPage(page) => {
                 output.output = format!(
@@ -358,9 +359,14 @@ impl ExecutionStore {
                 );
                 let window = jcode_tool_types::presentation::scan_characters(target);
                 let bytes = window.saturating_add(1).saturating_mul(4);
-                let mut file = File::open(&reference.path).context(
-                    "Retained output is offline or unavailable; no operation was repeated",
-                )?;
+                let state_root = self
+                    .root()
+                    .parent()
+                    .context("Missing execution state root")?;
+                let mut file = super::managed_read::ManagedRead::open(state_root, &reference.path)?
+                    .context(
+                        "Retained output is offline or unavailable; no operation was repeated",
+                    )?;
                 let mut buffer = Vec::new();
                 (&mut file)
                     .take((bytes as u64).min(reference.bytes))
@@ -376,13 +382,30 @@ impl ExecutionStore {
                 let complete = buffer.len() as u64 == reference.bytes;
                 let prefix = select_prefix(text, target, complete);
                 output.output = text[..prefix.bytes].to_string();
+                let point = if (prefix.bytes as u64) < reference.bytes {
+                    Some(
+                        super::reader::SourceReader::new(state_root)
+                            .output_continuation(&reference.path, &output.output)?,
+                    )
+                } else {
+                    None
+                };
                 output
                     .output
                     .push_str(&retained_notice(reference, prefix.bytes as u64));
+                if let Some(point) = &point {
+                    output.output.push_str(&format!(
+                        "\n[Continue exactly: read the same file_path with read_point=\"{point}\".]"
+                    ));
+                }
+                continuation = point;
             }
             OutputSource::Inline | OutputSource::Acceptance(_) => {
                 anyhow::bail!("Invalid unretained result manifest")
             }
+        }
+        if let OutputSource::Retained(reference) = &mut output.source {
+            reference.continuation = continuation;
         }
         Ok(output)
     }

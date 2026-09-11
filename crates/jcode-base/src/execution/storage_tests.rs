@@ -464,6 +464,98 @@ fn native_archive_fixture_uses_verified_volume_and_stable_aliases() -> Result<()
             std::fs::read(second.alias().join("output.txt"))? == b"initial-placement",
             "Initial archive bytes changed"
         );
+        use jcode_tool_core::{OutputCapture, OutputStream};
+        use jcode_tool_types::{OutputSource, ToolOutput};
+        let input = Invocation {
+            session_id: "native-managed-read".into(),
+            message_id: "message".into(),
+            call_path: vec!["call".into()],
+            tool: "fixture".into(),
+            input: serde_json::json!({}),
+            working_dir: None,
+            received_result_digest: None,
+        };
+        let PreparedInvocation::New(record) = fixture.store.prepare(&input, "owner")? else {
+            bail!("Duplicate read fixture");
+        };
+        fixture.store.start(&record.id, "owner")?;
+        let capture = crate::execution::Capture::create(
+            fixture.store.clone(),
+            record.clone(),
+            StorageConfig {
+                local_reserve_bytes: 0,
+                archive: Some(archive.clone()),
+                ..Default::default()
+            },
+        )?;
+        capture.write(
+            OutputStream::Text,
+            format!("{}TAIL", "α".repeat(500)).as_bytes(),
+        )?;
+        let alias = capture.reference()?.path;
+        let mut output = ToolOutput::new("");
+        output.source = OutputSource::Retained(capture.reference()?);
+        capture.seal(output, crate::execution::RunState::Completed)?;
+        drop(capture);
+        let state_root = fixture
+            .store
+            .root()
+            .parent()
+            .context("Missing fixture state root")?;
+        let reader = crate::execution::reader::SourceReader::new(state_root);
+        let request = |point| crate::execution::reader::ReadRequest {
+            path: alias.clone(),
+            point,
+            start_line: 1,
+            end_line: None,
+            target: std::num::NonZeroUsize::new(100).unwrap(),
+            stop: None,
+        };
+        let first = reader.read(request(None))?;
+        let OutputSource::ReadPage(page) = first.source else {
+            bail!("Expected managed read page");
+        };
+        let source = fixture.store.output_location(&record.id)?.unwrap().0;
+        let destination = root.path.join(format!("managed-read-{}", record.id));
+        let mut manifest = MoveManifest::capture(&record.id, &source, &destination)?;
+        manifest.archive_spec = Some(archive.clone());
+        let journal = fixture
+            .store
+            .root()
+            .join("moves")
+            .join(format!("{}-read.json", record.id));
+        crate::storage::write_json_secret(&journal, &manifest)?;
+        fixture.store.connection()?.execute("INSERT INTO relocations(id,source,destination,stage,manifest_path) VALUES (?1,?2,?3,'copying',?4)",params![record.id,source.to_str(),destination.to_str(),journal.to_str()])?;
+        let lease = output_lease(&fixture.store, &record.id)?;
+        complete_move(&fixture.store, &manifest, &NativeEnvironment)?;
+        drop(lease);
+        let mut next = request(page.next_point.clone());
+        next.target = std::num::NonZeroUsize::new(10_000).unwrap();
+        let continued = reader.read(next)?;
+        let OutputSource::ReadPage(continued_page) = continued.source else {
+            bail!("Expected continued page");
+        };
+        ensure!(
+            continued_page.start_byte == page.end_byte && continued.output.contains("TAIL"),
+            "Relocation retargeted the read point"
+        );
+        ensure!(
+            !source.exists()
+                && fixture.store.output_location(&record.id)?.unwrap().0 == destination,
+            "Read moved archived output back"
+        );
+        let offline = ArchiveConfig {
+            mount: fixture.store.root().join("not-mounted"),
+            ..archive.clone()
+        };
+        fixture.store.connection()?.execute(
+            "UPDATE output_locations SET archive_spec=?2 WHERE id=?1",
+            params![record.id, serde_json::to_string(&offline)?],
+        )?;
+        ensure!(
+            reader.read(request(page.next_point)).is_err() && !offline.mount.exists(),
+            "Offline read created a substitute mount"
+        );
         Ok(())
     })();
     // Only this newly-created fixture tree is removed. The verified handle

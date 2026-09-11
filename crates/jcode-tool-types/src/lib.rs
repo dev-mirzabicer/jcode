@@ -97,6 +97,8 @@ pub struct OutputReference {
     pub path: std::path::PathBuf,
     pub bytes: u64,
     pub complete: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<String>,
     #[serde(default)]
     pub manifest_path: Option<std::path::PathBuf>,
 }

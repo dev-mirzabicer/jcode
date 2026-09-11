@@ -933,7 +933,7 @@ impl Registry {
             budget,
         });
         let reference=match &mut output.source {
-            jcode_tool_types::OutputSource::Retained(reference)=>format!("Complete captured output remains at {}. Read that file; do not repeat the original operation. Run: {}",reference.path.display(),reference.invocation_id),
+            jcode_tool_types::OutputSource::Retained(reference)=>{reference.continuation=None;format!("Complete captured output remains at {}. Read that file; do not repeat the original operation. Run: {}",reference.path.display(),reference.invocation_id)},
             jcode_tool_types::OutputSource::ReadPage(page)=>{
                 page.end_byte=page.start_byte;page.end_line=page.start_line;
                 page.next_point=Some(page.retry_point.clone());
