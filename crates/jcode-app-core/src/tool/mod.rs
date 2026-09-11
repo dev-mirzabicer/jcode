@@ -26,6 +26,7 @@ pub mod mcp;
 mod memory;
 mod multiedit;
 mod mutation_diff;
+mod mutation_output;
 mod open;
 mod patch;
 mod read;

@@ -1,7 +1,7 @@
 use super::mutation_diff::whole_file as generate_diff_summary;
 use super::{Tool, ToolContext, ToolOutput};
 use crate::bus::{Bus, BusEvent, FileOp, FileTouch};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -55,6 +55,17 @@ enum PatchHunk {
 
 #[async_trait]
 impl Tool for ApplyPatchTool {
+    fn execution_policy(
+        &self,
+        _: &Value,
+        _: &ToolContext,
+    ) -> Result<jcode_tool_core::ExecutionPolicy> {
+        Ok(jcode_tool_core::ExecutionPolicy {
+            cooperative_stop: true,
+            ..Default::default()
+        })
+    }
+
     fn name(&self) -> &str {
         "apply_patch"
     }
@@ -78,6 +89,7 @@ impl Tool for ApplyPatchTool {
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
+        super::mutation_output::check_stop(&ctx)?;
         let params: ApplyPatchInput = serde_json::from_value(input)?;
         let hunks = parse_apply_patch(&params.patch_text)?;
 
@@ -88,15 +100,31 @@ impl Tool for ApplyPatchTool {
             super::config_edit_notice::ConfigEditWatch::begin(ctx.working_dir.clone());
 
         let mut results = Vec::new();
+        let mut receipts = super::mutation_output::MutationOutput::new(&ctx);
+        let mut failed = false;
+        let mut completed_hunks = 0usize;
         let mut touched_paths = Vec::new();
 
         for hunk in &hunks {
+            if let Err(error) = super::mutation_output::check_stop(&ctx) {
+                failed = true;
+                receipts.append(format!("[Stopped] {error}\n")).await?;
+                break;
+            }
+            let current_path = match hunk {
+                PatchHunk::AddFile { path, .. }
+                | PatchHunk::DeleteFile { path }
+                | PatchHunk::UpdateFile { path, .. } => path,
+            };
+            let step:Result<()>=async {
             match hunk {
                 PatchHunk::AddFile { path, contents } => {
                     let resolved = ctx.resolve_path(Path::new(path));
                     if let Some(parent) = resolved.parent() {
+                        super::mutation_output::check_stop(&ctx)?;
                         tokio::fs::create_dir_all(parent).await?;
                     }
+                    super::mutation_output::check_stop(&ctx)?;
                     tokio::fs::write(&resolved, contents).await?;
                     let diff = generate_diff_summary("", contents);
                     publish_file_touch(
@@ -124,17 +152,21 @@ impl Tool for ApplyPatchTool {
                     let risk_ctx =
                         jcode_command_risk::RiskContext::from_env(ctx.working_dir.clone());
                     if jcode_command_risk::is_catastrophic_target(&resolved, &risk_ctx) {
+                        failed=true;
                         results.push(format!(
                             "✗ {}: refused, this path is protected and must never \
                              be deleted by an agent",
                             path
                         ));
-                        continue;
+                        return Ok(());
                     }
                     let old_contents = tokio::fs::read_to_string(&resolved)
                         .await
                         .unwrap_or_default();
-                    if tokio::fs::remove_file(&resolved).await.is_ok() {
+                    super::mutation_output::check_stop(&ctx)?;
+                    let removal=tokio::fs::remove_file(&resolved).await;
+                    match removal {
+                    Ok(())=>{
                         let diff = generate_diff_summary(&old_contents, "");
                         publish_file_touch(
                             &ctx,
@@ -150,8 +182,11 @@ impl Tool for ApplyPatchTool {
                         } else {
                             results.push(format!("✓ {}: deleted\n{}", path, diff));
                         }
-                    } else {
-                        results.push(format!("✗ {}: failed to delete", path));
+                    }
+                    Err(error)=>{
+                        failed=true;
+                        results.push(format!("✗ {path}: failed to delete: {error}"));
+                    }
                     }
                 }
                 PatchHunk::UpdateFile {
@@ -166,10 +201,18 @@ impl Tool for ApplyPatchTool {
                             if let Some(dest) = move_to {
                                 let dest_resolved = ctx.resolve_path(Path::new(dest));
                                 if let Some(parent) = dest_resolved.parent() {
+                                    super::mutation_output::check_stop(&ctx)?;
                                     tokio::fs::create_dir_all(parent).await?;
                                 }
+                                super::mutation_output::check_stop(&ctx)?;
                                 tokio::fs::write(&dest_resolved, &new_contents).await?;
-                                let _ = tokio::fs::remove_file(&resolved).await;
+                                touched_paths.push(dest.clone());
+                                results.push(format!("Destination written: {dest}"));
+                                let same_target=tokio::fs::canonicalize(&dest_resolved).await?==tokio::fs::canonicalize(&resolved).await?;
+                                if !same_target {
+                                    super::mutation_output::check_stop(&ctx)?;
+                                    tokio::fs::remove_file(&resolved).await.with_context(||format!("Partial move: destination {dest} was written but source {path} could not be removed"))?;
+                                }
                                 publish_file_touch(
                                     &ctx,
                                     &resolved,
@@ -186,8 +229,7 @@ impl Tool for ApplyPatchTool {
                                     &diff,
                                     params.intent.as_deref(),
                                 );
-                                touched_paths.push(path.clone());
-                                touched_paths.push(dest.clone());
+                                if !same_target {touched_paths.push(path.clone());}
                                 if diff.is_empty() {
                                     results.push(format!(
                                         "✓ {}: modified ({} hunks), moved to {}",
@@ -205,6 +247,7 @@ impl Tool for ApplyPatchTool {
                                     ));
                                 }
                             } else {
+                                super::mutation_output::check_stop(&ctx)?;
                                 tokio::fs::write(&resolved, &new_contents).await?;
                                 publish_file_touch(
                                     &ctx,
@@ -232,25 +275,43 @@ impl Tool for ApplyPatchTool {
                             }
                         }
                         Err(e) => {
+                            failed=true;
                             results.push(format!("✗ {}: {}", path, e));
                         }
                     }
                 }
             }
-        }
-
-        if results.is_empty() {
-            Ok(ToolOutput::new("No changes applied"))
-        } else {
-            let mut body = results.join("\n");
-            config_watch.finish(&mut body);
-            let output = ToolOutput::new(body);
-            if touched_paths.len() == 1 {
-                Ok(output.with_title(touched_paths[0].clone()))
-            } else {
-                Ok(output.with_title(format!("{} files", touched_paths.len())))
+            Ok(())
+            }.await;
+            let stop_after_error = step.is_err();
+            if let Err(error) = step {
+                failed = true;
+                results.push(format!("✗ {current_path}: {error:#}"));
+            }
+            if !results.is_empty() {
+                receipts.append(format!("{}\n", results.join("\n"))).await?;
+                results.clear();
+            }
+            completed_hunks += 1;
+            if stop_after_error {
+                break;
             }
         }
+
+        if completed_hunks == 0 && !failed {
+            receipts.append("No changes applied\n".into()).await?;
+        }
+        let mut notice = String::new();
+        config_watch.finish(&mut notice);
+        if !notice.is_empty() {
+            receipts.append(notice).await?;
+        }
+        let title = if touched_paths.len() == 1 {
+            touched_paths[0].clone()
+        } else {
+            format!("{} file effects", touched_paths.len())
+        };
+        Ok(receipts.finish(failed)?.with_title(title).with_metadata(json!({"touched_paths":touched_paths,"processed_hunks":completed_hunks,"requested_hunks":hunks.len(),"partial_failure":failed})))
     }
 }
 

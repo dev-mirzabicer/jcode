@@ -31,6 +31,17 @@ struct EditInput {
 
 #[async_trait]
 impl Tool for EditTool {
+    fn execution_policy(
+        &self,
+        _: &Value,
+        _: &ToolContext,
+    ) -> Result<jcode_tool_core::ExecutionPolicy> {
+        Ok(jcode_tool_core::ExecutionPolicy {
+            cooperative_stop: true,
+            ..Default::default()
+        })
+    }
+
     fn name(&self) -> &str {
         "edit"
     }
@@ -66,6 +77,7 @@ impl Tool for EditTool {
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
+        super::mutation_output::check_stop(&ctx)?;
         let params: EditInput = serde_json::from_value(input)?;
 
         if params.old_string == params.new_string {
@@ -110,6 +122,7 @@ impl Tool for EditTool {
         let start_line = find_line_number(&content, &params.old_string);
 
         // Write back
+        super::mutation_output::check_stop(&ctx)?;
         tokio::fs::write(&path, &new_content).await?;
 
         // Generate a diff with line numbers

@@ -330,3 +330,73 @@ async fn apply_patch_still_deletes_ordinary_files() {
 
     assert!(!target.exists(), "an ordinary file should still be deleted");
 }
+
+struct StopAfterReceipt {
+    capture: std::sync::Arc<crate::execution::Capture>,
+    stop: jcode_agent_runtime::InterruptSignal,
+}
+impl jcode_tool_core::OutputCapture for StopAfterReceipt {
+    fn write(&self, stream: jcode_tool_core::OutputStream, bytes: &[u8]) -> Result<()> {
+        jcode_tool_core::OutputCapture::write(self.capture.as_ref(), stream, bytes)?;
+        self.stop.fire();
+        Ok(())
+    }
+    fn reference(&self) -> Result<jcode_tool_types::OutputReference> {
+        jcode_tool_core::OutputCapture::reference(self.capture.as_ref())
+    }
+    fn append_part(&self, name: &str, bytes: &[u8]) -> Result<()> {
+        jcode_tool_core::OutputCapture::append_part(self.capture.as_ref(), name, bytes)
+    }
+    fn read_part(&self, name: &str) -> Result<jcode_tool_core::CapturedPart> {
+        jcode_tool_core::OutputCapture::read_part(self.capture.as_ref(), name)
+    }
+}
+
+#[tokio::test]
+async fn stop_between_patch_actions_preserves_completed_receipt_and_skips_remaining_files()
+-> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let store = crate::execution::ExecutionStore::open(directory.path())?;
+    let mut ctx = ToolContext {
+        session_id: "stop-patch".into(),
+        message_id: "message".into(),
+        tool_call_id: "call".into(),
+        working_dir: Some(directory.path().into()),
+        stdin_request_tx: None,
+        graceful_shutdown_signal: None,
+        execution_mode: crate::tool::ToolExecutionMode::Direct,
+        invocation: Default::default(),
+    };
+    let input = json!({"patch_text":"*** Begin Patch\n*** Add File: first\n+completed\n*** Add File: second\n+unstarted\n*** End Patch\n"});
+    let invocation = crate::execution::invocation(&ctx, "apply_patch", input.clone());
+    let crate::execution::PreparedInvocation::New(record) = store.prepare(&invocation, "owner")?
+    else {
+        panic!()
+    };
+    store.start(&record.id, "owner")?;
+    let capture = std::sync::Arc::new(crate::execution::Capture::create(
+        store.clone(),
+        record.clone(),
+        crate::execution::StorageConfig::default(),
+    )?);
+    let stop = jcode_agent_runtime::InterruptSignal::new();
+    ctx.graceful_shutdown_signal = Some(stop.clone());
+    ctx.invocation.capture = Some(std::sync::Arc::new(StopAfterReceipt {
+        capture: capture.clone(),
+        stop,
+    }));
+    let output = ApplyPatchTool::new().execute(input, ctx).await?;
+    assert!(output.is_error);
+    capture.seal(output, crate::execution::RunState::Cancelled)?;
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("first"))?,
+        "completed\n"
+    );
+    assert!(!directory.path().join("second").exists());
+    let receipt =
+        std::fs::read_to_string(store.inspect(&record.id)?.unwrap().output_path.unwrap())?;
+    assert!(
+        receipt.contains("first") && receipt.contains("completed") && receipt.contains("Stopped")
+    );
+    Ok(())
+}

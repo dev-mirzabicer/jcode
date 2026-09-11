@@ -28,6 +28,17 @@ struct WriteInput {
 
 #[async_trait]
 impl Tool for WriteTool {
+    fn execution_policy(
+        &self,
+        _: &Value,
+        _: &ToolContext,
+    ) -> Result<jcode_tool_core::ExecutionPolicy> {
+        Ok(jcode_tool_core::ExecutionPolicy {
+            cooperative_stop: true,
+            ..Default::default()
+        })
+    }
+
     fn name(&self) -> &str {
         "write"
     }
@@ -55,6 +66,7 @@ impl Tool for WriteTool {
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
+        super::mutation_output::check_stop(&ctx)?;
         let params: WriteInput = serde_json::from_value(input)?;
 
         let path = ctx.resolve_path(Path::new(&params.file_path));
@@ -63,6 +75,7 @@ impl Tool for WriteTool {
         if let Some(parent) = path.parent()
             && !parent.exists()
         {
+            super::mutation_output::check_stop(&ctx)?;
             tokio::fs::create_dir_all(parent).await?;
         }
 
@@ -75,6 +88,7 @@ impl Tool for WriteTool {
         };
 
         // Write the file
+        super::mutation_output::check_stop(&ctx)?;
         tokio::fs::write(&path, &params.content).await?;
 
         let _new_len = params.content.len();

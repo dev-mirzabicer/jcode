@@ -30,6 +30,17 @@ struct EditOperation {
 
 #[async_trait]
 impl Tool for MultiEditTool {
+    fn execution_policy(
+        &self,
+        _: &Value,
+        _: &ToolContext,
+    ) -> Result<jcode_tool_core::ExecutionPolicy> {
+        Ok(jcode_tool_core::ExecutionPolicy {
+            cooperative_stop: true,
+            ..Default::default()
+        })
+    }
+
     fn name(&self) -> &str {
         "multiedit"
     }
@@ -76,6 +87,7 @@ impl Tool for MultiEditTool {
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
+        super::mutation_output::check_stop(&ctx)?;
         let params: MultiEditInput = serde_json::from_value(input)?;
 
         let path = ctx.resolve_path(Path::new(&params.file_path));
@@ -90,6 +102,7 @@ impl Tool for MultiEditTool {
         let mut failed = Vec::new();
 
         for (i, edit) in params.edits.iter().enumerate() {
+            super::mutation_output::check_stop(&ctx)?;
             if edit.old_string == edit.new_string {
                 failed.push(format!("Edit {}: old_string equals new_string", i + 1));
                 continue;
@@ -125,7 +138,8 @@ impl Tool for MultiEditTool {
             }
         }
 
-        // Write the result
+        // No edit reaches disk after a stop observed before the write.
+        super::mutation_output::check_stop(&ctx)?;
         tokio::fs::write(&path, &content).await?;
 
         // Format output
@@ -165,7 +179,10 @@ impl Tool for MultiEditTool {
             ctx.working_dir.as_deref(),
         );
 
-        Ok(ToolOutput::new(output).with_title(params.file_path.clone()))
+        Ok(ToolOutput::new(output)
+            .with_title(params.file_path.clone())
+            .with_error(!failed.is_empty())
+            .with_metadata(json!({"applied":applied.len(),"failed":failed.len()})))
     }
 }
 

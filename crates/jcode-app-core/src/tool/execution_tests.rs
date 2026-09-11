@@ -895,3 +895,67 @@ async fn unified_patch_receipt_uses_actual_whole_file_line_numbers() -> anyhow::
     assert!(output.output.contains("3- third\n3+ changed\n"));
     Ok(())
 }
+
+#[tokio::test]
+async fn partial_mutation_failure_retains_prior_receipts_and_does_not_rollback_effects()
+-> anyhow::Result<()> {
+    let registry = Registry::new(Arc::new(MockProvider)).await;
+    let directory = tempfile::tempdir()?;
+    std::fs::write(directory.path().join("blocker"), "not a directory")?;
+    let mut ctx = context();
+    ctx.working_dir = Some(directory.path().into());
+    let id = crate::execution::invocation_id(&ctx);
+    let error=registry.execute("apply_patch",serde_json::json!({"patch_text":"*** Begin Patch\n*** Add File: first.txt\n+completed-first\n*** Add File: blocker/child\n+cannot-write\n*** Add File: unstarted.txt\n+must-not-start\n*** End Patch\n"}),ctx).await.expect_err("Second write must fail");
+    let record = crate::execution::wait_for(&id).await?;
+    assert_eq!(record.state, crate::execution::RunState::Failed);
+    let receipt = std::fs::read_to_string(record.output_path.unwrap())?;
+    assert!(
+        receipt.contains("first.txt") && receipt.contains("completed-first"),
+        "Earlier successful receipt was lost: {error}"
+    );
+    assert!(receipt.contains("blocker/child"));
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("first.txt"))?,
+        "completed-first\n"
+    );
+    assert!(!directory.path().join("unstarted.txt").exists());
+    Ok(())
+}
+
+#[tokio::test]
+async fn multi_edit_and_unified_patch_report_partial_failure_structurally() -> anyhow::Result<()> {
+    let registry = Registry::new(Arc::new(MockProvider)).await;
+    let directory = tempfile::tempdir()?;
+    std::fs::write(directory.path().join("source"), "original\n")?;
+    let mut ctx = context();
+    ctx.working_dir = Some(directory.path().into());
+    let result=registry.execute("multiedit",serde_json::json!({"file_path":"source","edits":[{"old_string":"original","new_string":"changed"},{"old_string":"missing","new_string":"unused"}]}),ctx).await;
+    assert!(
+        result.is_err(),
+        "Partial edit must not be a completed success"
+    );
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("source"))?,
+        "changed\n"
+    );
+    let mut ctx = context();
+    ctx.working_dir = Some(directory.path().into());
+    assert!(registry.execute("patch",serde_json::json!({"patch_text":"--- a/missing\n+++ b/missing\n@@ -1,1 +1,1 @@\n-old\n+new\n"}),ctx).await.is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn same_target_patch_move_does_not_delete_the_written_source() -> anyhow::Result<()> {
+    let registry = Registry::new(Arc::new(MockProvider)).await;
+    let directory = tempfile::tempdir()?;
+    std::fs::create_dir(directory.path().join("nested"))?;
+    std::fs::write(directory.path().join("source"), "old\n")?;
+    let mut ctx = context();
+    ctx.working_dir = Some(directory.path().into());
+    registry.execute("apply_patch",serde_json::json!({"patch_text":"*** Begin Patch\n*** Update File: source\n*** Move to: nested/../source\n@@\n-old\n+new\n*** End Patch\n"}),ctx).await?;
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("source"))?,
+        "new\n"
+    );
+    Ok(())
+}

@@ -36,6 +36,17 @@ struct Hunk {
 
 #[async_trait]
 impl Tool for PatchTool {
+    fn execution_policy(
+        &self,
+        _: &Value,
+        _: &ToolContext,
+    ) -> Result<jcode_tool_core::ExecutionPolicy> {
+        Ok(jcode_tool_core::ExecutionPolicy {
+            cooperative_stop: true,
+            ..Default::default()
+        })
+    }
+
     fn name(&self) -> &str {
         "patch"
     }
@@ -59,6 +70,7 @@ impl Tool for PatchTool {
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
+        super::mutation_output::check_stop(&ctx)?;
         let params: PatchInput = serde_json::from_value(input)?;
 
         let patches = parse_patch(&params.patch_text)?;
@@ -71,9 +83,16 @@ impl Tool for PatchTool {
         // on it is reported regardless of which patch produced it.
         let config_watch =
             super::config_edit_notice::ConfigEditWatch::begin(ctx.working_dir.clone());
-        let mut results = Vec::new();
+        let mut receipts = super::mutation_output::MutationOutput::new(&ctx);
+        let mut failed = false;
 
         for patch in patches {
+            if let Err(error) = super::mutation_output::check_stop(&ctx) {
+                failed = true;
+                receipts.append(format!("[Stopped] {error}\n")).await?;
+                break;
+            }
+            let mut results = Vec::new();
             let resolved_path = ctx.resolve_path(Path::new(&patch.path));
             let result = apply_patch_with_diff(&patch, &resolved_path).await;
             match result {
@@ -84,13 +103,20 @@ impl Tool for PatchTool {
                         results.push(format!("✓ {}: {}\n{}", patch.path, msg, diff));
                     }
                 }
-                Err(e) => results.push(format!("✗ {}: {}", patch.path, e)),
+                Err(e) => {
+                    failed = true;
+                    results.push(format!("✗ {}: {}", patch.path, e));
+                }
             }
+            receipts
+                .append(format!("{}\n\n", results.join("\n")))
+                .await?;
         }
 
-        let mut body = results.join("\n\n");
+        let mut body = String::new();
         config_watch.finish(&mut body);
-        Ok(ToolOutput::new(body))
+        receipts.append(body).await?;
+        receipts.finish(failed)
     }
 }
 
