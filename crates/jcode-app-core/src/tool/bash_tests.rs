@@ -1036,3 +1036,105 @@ async fn indirect_dispatch_paths_cannot_bypass_the_gate() {
     );
     assert!(canary.exists(), "the file must survive a backgrounded call");
 }
+#[cfg(unix)]
+#[tokio::test]
+async fn foreground_human_stop_does_not_promote_command_to_reload_background() -> anyhow::Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    let ready = temp.path().join("ready");
+    let after = temp.path().join("after");
+    let signal = jcode_agent_runtime::InterruptSignal::new();
+    let ctx = super::ToolContext {
+        session_id: "human-stop-fixture".into(),
+        message_id: "message".into(),
+        tool_call_id: "call".into(),
+        working_dir: Some(temp.path().to_path_buf()),
+        stdin_request_tx: None,
+        graceful_shutdown_signal: Some(signal.clone()),
+        execution_mode: crate::tool::ToolExecutionMode::AgentTurn,
+        invocation: Default::default(),
+    };
+    let command = format!(
+        "printf before; printf ready > '{}'; sleep 10; printf after > '{}'",
+        ready.display(),
+        after.display()
+    );
+    let task = tokio::spawn(async move {
+        super::BashTool::new()
+            .execute(serde_json::json!({"command":command}), ctx)
+            .await
+    });
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !ready.exists() {
+        if tokio::time::Instant::now() >= deadline {
+            task.abort();
+            anyhow::bail!("fixture command did not start");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    signal.fire();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), task).await??;
+    let error = result
+        .expect_err("human Stop must not report background acceptance")
+        .to_string();
+    assert!(!after.exists());
+    let path = error
+        .split("Partial output retained at ")
+        .nth(1)
+        .unwrap_or_else(|| panic!("retained partial reference missing from {error:?}"));
+    assert!(std::fs::read_to_string(path)?.contains("before"));
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn foreground_reload_keeps_the_same_command_running() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let ready = temp.path().join("ready");
+    let after = temp.path().join("after");
+    let signal = jcode_agent_runtime::InterruptSignal::new();
+    let ctx = super::ToolContext {
+        session_id: "reload-command-fixture".into(),
+        message_id: "message".into(),
+        tool_call_id: "call".into(),
+        working_dir: Some(temp.path().to_path_buf()),
+        stdin_request_tx: None,
+        graceful_shutdown_signal: Some(signal.clone()),
+        execution_mode: crate::tool::ToolExecutionMode::AgentTurn,
+        invocation: Default::default(),
+    };
+    let command = format!(
+        "printf ready > '{}'; sleep 0.5; printf after > '{}'",
+        ready.display(),
+        after.display()
+    );
+    let task = tokio::spawn(async move {
+        super::BashTool::new()
+            .execute(serde_json::json!({"command":command, "notify":false}), ctx)
+            .await
+    });
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !ready.exists() {
+        if tokio::time::Instant::now() >= deadline {
+            task.abort();
+            anyhow::bail!("fixture command did not start");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    signal.fire_with_cause(jcode_tool_types::StopCause::ReloadQuiescence);
+    let output = task.await??;
+    let metadata = output.metadata.unwrap();
+    assert_eq!(metadata["reload_persisted"], true);
+    while !after.exists() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let completed = after.exists();
+    if !completed {
+        crate::background::global()
+            .cancel(metadata["task_id"].as_str().unwrap())
+            .await?;
+    }
+    assert!(completed, "reload must preserve the same execution");
+    Ok(())
+}

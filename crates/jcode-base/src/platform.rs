@@ -337,6 +337,39 @@ pub fn signal_detached_process_group(pid: u32, signal: i32) -> std::io::Result<(
     }
 }
 
+/// Verify whether an owned Unix group still contains executing processes.
+/// macOS can return EPERM rather than ESRCH when a group contains only zombies.
+/// Do not interpret that error as success while any live member remains.
+#[cfg(unix)]
+pub async fn process_group_has_live_members(group: u32) -> std::io::Result<bool> {
+    let output = tokio::process::Command::new("/bin/ps")
+        .args(["-axo", "pgid=,stat="])
+        .kill_on_drop(true)
+        .output()
+        .await?;
+    if !output.status.success() {
+        return Err(std::io::Error::other(
+            "Could not verify owned process-group state",
+        ));
+    }
+    let text = std::str::from_utf8(&output.stdout)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        let mut fields = line.split_whitespace();
+        let id = fields
+            .next()
+            .and_then(|value| value.parse::<u32>().ok())
+            .ok_or_else(|| std::io::Error::other("Invalid process-group state response"))?;
+        let state = fields
+            .next()
+            .ok_or_else(|| std::io::Error::other("Missing process state"))?;
+        if id == group && !state.starts_with('Z') {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Best-effort non-blocking reap for a child process owned by the current process.
 ///
 /// Returns:

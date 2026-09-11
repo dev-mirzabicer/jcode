@@ -3395,6 +3395,7 @@ name = "jcode-agent-runtime"
 version = "0.1.0"
 dependencies = [
  "jcode-session-types",
+ "jcode-tool-types",
  "thiserror 1.0.69",
  "tokio",
 ]

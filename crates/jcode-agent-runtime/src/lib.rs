@@ -38,6 +38,7 @@ pub struct InterruptSignal {
     /// of erasing a cancel the target has not observed yet (issue #428).
     epoch: Arc<std::sync::atomic::AtomicU64>,
     notify: Arc<tokio::sync::Notify>,
+    cause: Arc<std::sync::Mutex<Option<jcode_tool_types::StopCause>>>,
 }
 
 impl InterruptSignal {
@@ -46,13 +47,27 @@ impl InterruptSignal {
             flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             notify: Arc::new(tokio::sync::Notify::new()),
+            cause: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
     pub fn fire(&self) {
+        self.fire_with_cause(jcode_tool_types::StopCause::HumanCancellation);
+    }
+
+    pub fn fire_with_cause(&self, cause: jcode_tool_types::StopCause) {
+        let mut current = self.cause.lock().unwrap_or_else(|p| p.into_inner());
+        current.get_or_insert(cause);
         self.epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        drop(current);
         self.notify.notify_waiters();
+    }
+
+    pub fn stop_cause(&self) -> Option<jcode_tool_types::StopCause> {
+        let cause = self.cause.lock().unwrap_or_else(|p| p.into_inner());
+        self.is_set()
+            .then(|| cause.unwrap_or(jcode_tool_types::StopCause::HumanCancellation))
     }
 
     pub fn is_set(&self) -> bool {
@@ -60,7 +75,9 @@ impl InterruptSignal {
     }
 
     pub fn reset(&self) {
+        let mut cause = self.cause.lock().unwrap_or_else(|p| p.into_inner());
         self.flag.store(false, std::sync::atomic::Ordering::SeqCst);
+        *cause = None;
     }
 
     /// Current fire epoch. Capture this right after a [`fire`](Self::fire) to
@@ -73,20 +90,15 @@ impl InterruptSignal {
     /// Reset the signal only if no newer [`fire`](Self::fire) happened since
     /// `epoch` was captured. Returns `true` when the reset was applied.
     ///
-    /// If a racing fire lands between the epoch check and the reset, the
-    /// fire is restored (flag re-set and waiters re-notified) so no cancel
-    /// is ever silently erased.
+    /// Fire/reset share the cause lock, so epoch and cause reset together and
+    /// a racing newer fire cannot be erased.
     pub fn reset_if_epoch(&self, epoch: u64) -> bool {
+        let mut cause = self.cause.lock().unwrap_or_else(|p| p.into_inner());
         if self.epoch.load(std::sync::atomic::Ordering::SeqCst) != epoch {
             return false;
         }
         self.flag.store(false, std::sync::atomic::Ordering::SeqCst);
-        if self.epoch.load(std::sync::atomic::Ordering::SeqCst) != epoch {
-            // A newer fire raced with the reset; restore it.
-            self.flag.store(true, std::sync::atomic::Ordering::SeqCst);
-            self.notify.notify_waiters();
-            return false;
-        }
+        *cause = None;
         true
     }
 
@@ -144,6 +156,21 @@ impl StreamError {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn typed_stop_cause_survives_fanout_and_resets_with_its_epoch() {
+        use jcode_tool_types::StopCause;
+        let signal = InterruptSignal::new();
+        signal.fire_with_cause(StopCause::HumanCancellation);
+        let old = signal.epoch();
+        signal.fire_with_cause(StopCause::ReloadQuiescence);
+        assert_eq!(signal.stop_cause(), Some(StopCause::HumanCancellation));
+        assert!(!signal.reset_if_epoch(old));
+        assert!(signal.reset_if_epoch(signal.epoch()));
+        assert_eq!(signal.stop_cause(), None);
+        signal.fire_with_cause(StopCause::ReloadQuiescence);
+        assert_eq!(signal.stop_cause(), Some(StopCause::ReloadQuiescence));
+    }
 
     /// Documents the tokio semantics `InterruptSignal::notified()` relies on:
     /// current tokio guarantees a `notified()` future receives wakeups from

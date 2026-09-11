@@ -157,9 +157,29 @@ pub(super) async fn await_reload_signal(
         // Running until the next process's orphan sweep. Aborting here kills
         // the children and persists a deterministic Failed(interrupted by
         // reload) status the agent sees immediately after reload.
-        let aborted = crate::background::global()
+        let aborted = match crate::background::global()
             .abort_live_tasks_for_reload()
-            .await;
+            .await
+        {
+            Ok(count) => count,
+            Err(error) => {
+                crate::server::write_reload_state(
+                    &signal.request_id,
+                    &signal.hash,
+                    crate::server::ReloadPhase::Failed,
+                    signal.triggering_session.clone(),
+                );
+                crate::logging::error(&format!("Reload stopped before exec: {error:#}"));
+                crate::bus::Bus::global().publish(crate::bus::BusEvent::UiActivity(
+                    crate::bus::UiActivity::background(
+                        signal.triggering_session.clone(),
+                        format!("Reload did not replace the server because owned work could not be safely stopped: {error:#}"),
+                        Some("Reload blocked by incomplete task stop".to_string()),
+                    ),
+                ));
+                continue;
+            }
+        };
         if aborted > 0 {
             crate::logging::info(&format!(
                 "Server: finalized {} in-process background task(s) before reload exec",
@@ -443,7 +463,7 @@ async fn graceful_shutdown_sessions_with_timeout(
                 ));
                 continue;
             };
-            signal.fire();
+            signal.fire_with_cause(jcode_tool_types::StopCause::ReloadQuiescence);
             super::reload_trace::record_value(
                 reload_id,
                 "shutdown_signal_sent",

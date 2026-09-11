@@ -32,6 +32,14 @@ use model::{
     progress_event_record, progress_wait_reason, push_task_event, task_dir, terminal_event_record,
 };
 
+struct AbortAdoptedOnDrop(tokio::task::AbortHandle);
+
+impl Drop for AbortAdoptedOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// Manages background task execution
 pub struct BackgroundTaskManager {
     tasks: Arc<RwLock<HashMap<String, RunningTask>>>,
@@ -586,12 +594,11 @@ impl BackgroundTaskManager {
             task_id: task_id.clone(),
             tool_name: tool_name.to_string(),
             display_name,
-            session_id: session_id.to_string(),
             status_path: status_path.clone(),
-            started_at,
-            started_at_rfc3339,
             delivery_flags: delivery_flags_tx,
-            handle,
+            handle: Some(handle),
+            adopted_abort: None,
+            stop_cause: Arc::new(std::sync::Mutex::new(None)),
         };
 
         self.tasks
@@ -682,7 +689,12 @@ impl BackgroundTaskManager {
         let tasks_for_prune = Arc::clone(&self.tasks);
         let (registered_tx, registered_rx) = tokio::sync::oneshot::channel::<()>();
 
+        let adopted_abort = handle.abort_handle();
+        let stop_cause = Arc::new(std::sync::Mutex::new(None::<jcode_tool_types::StopCause>));
+        let wrapper_stop_cause = Arc::clone(&stop_cause);
+        let abort_on_drop = AbortAdoptedOnDrop(adopted_abort.clone());
         let wrapper_handle = tokio::spawn(async move {
+            let _abort_on_drop = abort_on_drop;
             let tool_result = handle.await;
             let duration_secs = started_at.elapsed().as_secs_f64();
 
@@ -699,6 +711,18 @@ impl BackgroundTaskManager {
                     Some(e.to_string()),
                     e.to_string(),
                 ),
+                Err(e) if e.is_cancelled() => {
+                    let cause = wrapper_stop_cause
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .unwrap_or(jcode_tool_types::StopCause::OwnerCrash);
+                    (
+                        BackgroundTaskStatus::Failed,
+                        None,
+                        Some(cause.description().to_string()),
+                        cause.description().to_string(),
+                    )
+                }
                 Err(e) => (
                     BackgroundTaskStatus::Failed,
                     None,
@@ -788,12 +812,11 @@ impl BackgroundTaskManager {
             task_id: task_id.clone(),
             tool_name: tool_name.to_string(),
             display_name: None,
-            session_id: session_id.to_string(),
             status_path: status_path.clone(),
-            started_at,
-            started_at_rfc3339: initial_status.started_at.clone(),
             delivery_flags: delivery_flags_tx,
-            handle: wrapper_handle,
+            handle: Some(wrapper_handle),
+            adopted_abort: Some(adopted_abort),
+            stop_cause,
         };
 
         self.tasks
@@ -1113,6 +1136,76 @@ impl BackgroundTaskManager {
         Ok(Some(status))
     }
 
+    /// A stop operation owns the join independently of its caller's wait.
+    /// The live entry remains present while work is quiescing or cannot stop.
+    async fn stop_live_task(
+        &self,
+        task_id: &str,
+        cause: jcode_tool_types::StopCause,
+    ) -> Result<Option<bool>> {
+        let (mut handle, abort) = {
+            let mut tasks = self.tasks.write().await;
+            let Some(task) = tasks.get_mut(task_id) else {
+                return Ok(None);
+            };
+            let handle = task
+                .handle
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("Stop is already in progress for {task_id}"))?;
+            task.stop_cause
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .get_or_insert(cause);
+            let abort = task
+                .adopted_abort
+                .clone()
+                .unwrap_or_else(|| handle.abort_handle());
+            (handle, abort)
+        };
+        let manager = Self {
+            tasks: Arc::clone(&self.tasks),
+            output_dir: self.output_dir.clone(),
+        };
+        let id = task_id.to_string();
+        // Dropping a cancel/wait caller does not detach the real work from its
+        // stop owner. This supervisor completes publication or restores the join.
+        tokio::spawn(async move {
+            abort.abort();
+            let joined = match tokio::time::timeout(Duration::from_secs(2), &mut handle).await {
+                Ok(result) => result,
+                Err(_) => {
+                    if let Some(task) = manager.tasks.write().await.get_mut(&id) {
+                        task.handle = Some(handle);
+                    }
+                    anyhow::bail!("Stop requested for {id}, but owned work has not quiesced; it remains active");
+                }
+            };
+            let path = manager.status_path_for(&id);
+            let mut status = manager.read_status_file(&path).await
+                .ok_or_else(|| anyhow::anyhow!("Owned work stopped, but its status receipt is unavailable: {id}"))?;
+            if status.status == BackgroundTaskStatus::Running {
+                let (state, exit_code, error) = match joined {
+                    Ok(Ok(result)) => (result.status.unwrap_or_else(|| if result.error.is_some() { BackgroundTaskStatus::Failed } else { BackgroundTaskStatus::Completed }), result.exit_code, result.error),
+                    Ok(Err(error)) => (BackgroundTaskStatus::Failed, None, Some(error.to_string())),
+                    Err(error) if error.is_cancelled() => (BackgroundTaskStatus::Failed, None, Some(cause.description().to_string())),
+                    Err(error) => (BackgroundTaskStatus::Failed, None, Some(format!("Task panicked: {error}"))),
+                };
+                status.status = state;
+                status.exit_code = exit_code;
+                status.error = error;
+                let completed = Utc::now();
+                status.completed_at = Some(completed.to_rfc3339());
+                status.duration_secs = Self::status_duration_secs(&status.started_at, completed);
+                let event = terminal_event_record(status.status.clone(), status.exit_code, status.error.as_deref());
+                push_task_event(&mut status, event);
+            }
+            tokio::task::spawn_blocking(move || crate::storage::write_json_secret(&path, &status)).await?
+                .map_err(|error| anyhow::anyhow!("Owned work stopped, but terminal receipt persistence failed: {error:#}"))?;
+            manager.tasks.write().await.remove(&id);
+            Ok(Some(true))
+        }).await?
+    }
+
     /// Cancel a running task
     pub async fn cancel(&self, task_id: &str) -> Result<bool> {
         self.cancel_with_grace(task_id, std::time::Duration::from_millis(400))
@@ -1126,47 +1219,12 @@ impl BackgroundTaskManager {
         task_id: &str,
         _graceful_timeout: std::time::Duration,
     ) -> Result<bool> {
-        let mut tasks = self.tasks.write().await;
-        if let Some(task) = tasks.remove(task_id) {
-            task.handle.abort();
-
-            // Update status file
-            let (notify_flag, wake_flag) = *task.delivery_flags.borrow();
-            let mut final_status = TaskStatusFile {
-                task_id: task.task_id,
-                tool_name: task.tool_name,
-                display_name: task.display_name,
-                session_id: task.session_id,
-                status: BackgroundTaskStatus::Failed,
-                exit_code: None,
-                error: Some("Cancelled by user".to_string()),
-                started_at: task.started_at_rfc3339,
-                completed_at: Some(chrono::Utc::now().to_rfc3339()),
-                duration_secs: Some(task.started_at.elapsed().as_secs_f64()),
-                pid: None,
-                owner_pid: Some(std::process::id()),
-                owner_instance: Some(model::process_instance_token().to_string()),
-                detached: false,
-                notify: notify_flag,
-                wake: wake_flag,
-                progress: None,
-                event_history: Vec::new(),
-            };
-            let event_status = final_status.status.clone();
-            let event_exit_code = final_status.exit_code;
-            let event_error = final_status.error.clone();
-            push_task_event(
-                &mut final_status,
-                terminal_event_record(event_status, event_exit_code, event_error.as_deref()),
-            );
-            if let Ok(json) = serde_json::to_string_pretty(&final_status) {
-                let _ = fs::write(&task.status_path, json).await;
-            }
-
-            Ok(true)
+        if let Some(stopped) = self
+            .stop_live_task(task_id, jcode_tool_types::StopCause::HumanCancellation)
+            .await?
+        {
+            Ok(stopped)
         } else {
-            drop(tasks);
-
             let status_path = self.status_path_for(task_id);
             let Some(mut status) = self.read_status_file(&status_path).await else {
                 return Ok(false);
@@ -1225,67 +1283,26 @@ impl BackgroundTaskManager {
     /// visible to `bg wait`/`bg status` and self-dev queue reconciliation.
     ///
     /// Returns the number of tasks finalized.
-    pub async fn abort_live_tasks_for_reload(&self) -> usize {
-        let tasks: Vec<RunningTask> = {
-            let mut map = self.tasks.write().await;
-            map.drain().map(|(_, task)| task).collect()
-        };
-        let mut finalized = 0;
-
-        for task in tasks {
-            task.handle.abort();
-            // Wait (bounded) for the aborted future to actually drop, so
-            // kill_on_drop children are killed before the upcoming exec.
-            let _ = tokio::time::timeout(Duration::from_secs(2), task.handle).await;
-
-            let (notify_flag, wake_flag) = *task.delivery_flags.borrow();
-            let prior_status = self.read_status_file(&task.status_path).await;
-            // If the task won the race and finished naturally, keep its real
-            // terminal status instead of stamping it as interrupted.
-            if prior_status
-                .as_ref()
-                .is_some_and(|status| status.status != BackgroundTaskStatus::Running)
+    pub async fn abort_live_tasks_for_reload(&self) -> Result<usize> {
+        let ids: Vec<String> = self.tasks.read().await.keys().cloned().collect();
+        let mut stopped = 0;
+        let mut failures = Vec::new();
+        for id in ids {
+            match self
+                .stop_live_task(&id, jcode_tool_types::StopCause::ReloadQuiescence)
+                .await
             {
-                continue;
+                Ok(Some(true)) => stopped += 1,
+                Ok(_) => {}
+                Err(error) => failures.push(format!("{id}: {error:#}")),
             }
-            let error = "Interrupted by server reload: the owning server process was replaced before the task finished".to_string();
-            let mut final_status = TaskStatusFile {
-                task_id: task.task_id,
-                tool_name: task.tool_name,
-                display_name: prior_status
-                    .as_ref()
-                    .and_then(|status| status.display_name.clone())
-                    .or(task.display_name),
-                session_id: task.session_id,
-                status: BackgroundTaskStatus::Failed,
-                exit_code: None,
-                error: Some(error.clone()),
-                started_at: task.started_at_rfc3339,
-                completed_at: Some(chrono::Utc::now().to_rfc3339()),
-                duration_secs: Some(task.started_at.elapsed().as_secs_f64()),
-                pid: None,
-                owner_pid: Some(std::process::id()),
-                owner_instance: Some(model::process_instance_token().to_string()),
-                detached: false,
-                notify: notify_flag,
-                wake: wake_flag,
-                progress: prior_status
-                    .as_ref()
-                    .and_then(|status| status.progress.clone()),
-                event_history: prior_status
-                    .map(|status| status.event_history)
-                    .unwrap_or_default(),
-            };
-            push_task_event(
-                &mut final_status,
-                terminal_event_record(BackgroundTaskStatus::Failed, None, Some(&error)),
-            );
-            self.write_status_file(&task.status_path, &final_status)
-                .await;
-            finalized += 1;
         }
-
-        finalized
+        anyhow::ensure!(
+            failures.is_empty(),
+            "Reload cannot replace the runtime while owned work is not quiescent: {}",
+            failures.join("; ")
+        );
+        Ok(stopped)
     }
 
     /// Clean up old task files (older than specified hours)

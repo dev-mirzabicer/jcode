@@ -2,6 +2,28 @@ pub mod presentation;
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StopCause {
+    HumanCancellation,
+    ParentForegroundCancellation,
+    ReloadQuiescence,
+    OwnerCrash,
+}
+
+impl StopCause {
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::HumanCancellation => "Cancelled by user",
+            Self::ParentForegroundCancellation => "Cancelled with parent foreground work",
+            Self::ReloadQuiescence => {
+                "Interrupted by server reload: owned work did not survive quiescence"
+            }
+            Self::OwnerCrash => "Interrupted by owner crash",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolOutput {
     pub output: String,

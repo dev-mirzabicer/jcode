@@ -4,6 +4,105 @@ use anyhow::anyhow;
 use tempfile::tempdir;
 use tokio::time::{Duration, sleep};
 
+struct DroppedSignal(Option<tokio::sync::oneshot::Sender<()>>);
+
+impl Drop for DroppedSignal {
+    fn drop(&mut self) {
+        if let Some(sender) = self.0.take() {
+            let _ = sender.send(());
+        }
+    }
+}
+
+async fn adopted_inner_fixture(reload: bool) -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (dropped_tx, mut dropped_rx) = tokio::sync::oneshot::channel();
+    let handle = tokio::spawn(async move {
+        let _lifetime = DroppedSignal(Some(dropped_tx));
+        let _ = started_tx.send(());
+        std::future::pending::<()>().await;
+        Ok(jcode_tool_types::ToolOutput::new("unreachable"))
+    });
+    let cleanup = handle.abort_handle();
+    started_rx.await?;
+    let info = manager
+        .adopt_with_options("synthetic", None, "adoption", false, false, handle)
+        .await;
+    if reload {
+        manager.abort_live_tasks_for_reload().await?;
+    } else {
+        manager.cancel(&info.task_id).await?;
+    }
+    let actually_stopped = dropped_rx.try_recv().is_ok();
+    // Even the red regression leaves no detached fixture behind.
+    cleanup.abort();
+    assert!(
+        actually_stopped,
+        "terminal cancellation must wait until the adopted inner future is dropped"
+    );
+    assert!(!manager.is_live_task(&info.task_id));
+    Ok(())
+}
+
+#[tokio::test]
+async fn adopted_inner_cancel_waits_for_actual_work_to_stop() -> Result<()> {
+    for _ in 0..3 {
+        adopted_inner_fixture(false).await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn adopted_inner_reload_waits_for_actual_work_to_stop() -> Result<()> {
+    for _ in 0..3 {
+        adopted_inner_fixture(true).await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn adopted_uninterruptible_work_remains_owned_after_stop_timeout() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let handle = tokio::task::spawn_blocking(move || {
+        let _ = ready_tx.send(());
+        let _ = release_rx.recv();
+        Ok(jcode_tool_types::ToolOutput::new(
+            "finished after explicit release",
+        ))
+    });
+    ready_rx.await?;
+    let info = manager
+        .adopt_with_options("synthetic", None, "uninterruptible", false, false, handle)
+        .await;
+    let result = manager.cancel(&info.task_id).await;
+    let still_owned = manager.is_live_task(&info.task_id);
+    let status = manager.status(&info.task_id).await;
+    // Release before assertions so even a failing test cannot strand a worker.
+    release_tx.send(())?;
+    assert!(
+        result.is_err(),
+        "stop acknowledgement is not proof of quiescence"
+    );
+    assert!(still_owned);
+    assert_eq!(status.unwrap().status, BackgroundTaskStatus::Running);
+    for _ in 0..200 {
+        if !manager.is_live_task(&info.task_id) {
+            break;
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        manager.status(&info.task_id).await.unwrap().status,
+        BackgroundTaskStatus::Completed
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn spawn_with_notify_emits_started_ui_activity() -> Result<()> {
     let tmp = tempdir()?;
@@ -493,7 +592,7 @@ async fn abort_live_tasks_for_reload_finalizes_running_tasks() -> Result<()> {
         .await;
     assert!(manager.is_live_task(&info.task_id));
 
-    let aborted = manager.abort_live_tasks_for_reload().await;
+    let aborted = manager.abort_live_tasks_for_reload().await?;
     assert_eq!(aborted, 1);
     assert!(
         !manager.is_live_task(&info.task_id),
@@ -513,7 +612,7 @@ async fn abort_live_tasks_for_reload_finalizes_running_tasks() -> Result<()> {
     assert!(status.completed_at.is_some());
 
     // Idempotent: a second sweep finds nothing.
-    assert_eq!(manager.abort_live_tasks_for_reload().await, 0);
+    assert_eq!(manager.abort_live_tasks_for_reload().await?, 0);
     Ok(())
 }
 
@@ -546,7 +645,7 @@ async fn abort_live_tasks_for_reload_keeps_naturally_finished_status() -> Result
     }
 
     assert_eq!(
-        manager.abort_live_tasks_for_reload().await,
+        manager.abort_live_tasks_for_reload().await?,
         0,
         "a naturally completed task should not be counted as finalized"
     );

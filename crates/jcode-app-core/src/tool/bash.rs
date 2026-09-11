@@ -1005,10 +1005,12 @@ impl BashTool {
 
         let mut child = crate::platform::spawn_detached(&mut cmd)?;
         let pid = child.id();
+        let mut kill_guard = ProcessGroupKillGuard::new(Some(pid));
         let shutdown_signal = ctx.graceful_shutdown_signal.clone();
 
         loop {
             if let Some(status) = child.try_wait()? {
+                kill_guard.disarm();
                 let output = tokio::fs::read_to_string(&info.output_file)
                     .await
                     .unwrap_or_default();
@@ -1045,6 +1047,7 @@ impl BashTool {
                     )
                     .await;
 
+                kill_guard.disarm();
                 let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
                 let output = super::background_notice::promoted(
                     &info,
@@ -1077,6 +1080,42 @@ impl BashTool {
                 .map(|signal| signal.is_set())
                 .unwrap_or(false)
             {
+                let cause = shutdown_signal
+                    .as_ref()
+                    .and_then(|signal| signal.stop_cause())
+                    .unwrap_or(jcode_tool_types::StopCause::HumanCancellation);
+                if cause != jcode_tool_types::StopCause::ReloadQuiescence {
+                    // Keep the leader unreaped until the final group signal. Its
+                    // PID cannot be recycled while this child handle owns it.
+                    crate::platform::signal_detached_process_group(pid, libc::SIGTERM)?;
+                    tokio::time::sleep(Duration::from_millis(400)).await;
+                    if let Err(error) =
+                        crate::platform::signal_detached_process_group(pid, libc::SIGKILL)
+                        && error.raw_os_error() != Some(libc::ESRCH)
+                        && (error.raw_os_error() != Some(libc::EPERM)
+                            || crate::platform::process_group_has_live_members(pid).await?)
+                    {
+                        return Err(error.into());
+                    }
+                    let deadline = Instant::now() + Duration::from_secs(2);
+                    loop {
+                        if child.try_wait()?.is_some() {
+                            break;
+                        }
+                        anyhow::ensure!(
+                            Instant::now() < deadline,
+                            "Stop requested but command has not exited. Partial output: {}",
+                            info.output_file.display()
+                        );
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    kill_guard.disarm();
+                    return Err(anyhow::anyhow!(
+                        "{}. Partial output retained at {}",
+                        cause.description(),
+                        info.output_file.display()
+                    ));
+                }
                 manager
                     .register_detached_task(
                         &info,
@@ -1089,6 +1128,7 @@ impl BashTool {
                         params.wake,
                     )
                     .await;
+                kill_guard.disarm();
                 let output = super::background_notice::reloaded(&info, ctx.working_dir.as_deref());
                 return Ok(ToolOutput::new(output)
                     .with_title(

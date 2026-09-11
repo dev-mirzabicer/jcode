@@ -1487,32 +1487,50 @@ impl Agent {
                         }
                     }
                 } else if self.is_graceful_shutdown() {
-                    // Server reload - abort tool and save interrupted result
+                    let cause = self
+                        .graceful_shutdown
+                        .stop_cause()
+                        .unwrap_or(jcode_tool_types::StopCause::HumanCancellation);
                     logging::info(&format!(
-                        "Tool '{}' interrupted by server reload after {:.1}s",
+                        "Tool '{}' stopped ({:?}) after {:.1}s",
                         tc.name,
+                        cause,
                         tool_elapsed.as_secs_f64()
                     ));
                     tool_handle.abort();
+                    let _ = (&mut tool_handle).await;
 
                     // For selfdev reload and wait-like tools, the interruption is expected:
                     // selfdev initiated the restart, while wait-like tools should be resumed
                     // after reload rather than treated as failed work.
-                    let (interrupted_msg, is_error) = reload_interrupted_tool_result(
-                        tc,
-                        tool_elapsed.as_secs_f64(),
-                        self.session
-                            .working_dir
-                            .as_deref()
-                            .map(std::path::Path::new),
-                    );
+                    let (interrupted_msg, is_error) = if cause
+                        == jcode_tool_types::StopCause::ReloadQuiescence
+                    {
+                        reload_interrupted_tool_result(
+                            tc,
+                            tool_elapsed.as_secs_f64(),
+                            self.session
+                                .working_dir
+                                .as_deref()
+                                .map(std::path::Path::new),
+                        )
+                    } else {
+                        (
+                            format!(
+                                "[Tool '{}' stopped: {}. Completed effects were not rolled back.]",
+                                tc.name,
+                                cause.description()
+                            ),
+                            true,
+                        )
+                    };
 
                     let _ = event_tx.send(ServerEvent::ToolDone {
                         id: tc.id.clone(),
                         name: tc.name.clone(),
                         output: interrupted_msg.clone(),
                         error: if is_error {
-                            Some("interrupted by reload".to_string())
+                            Some(cause.description().to_string())
                         } else {
                             None
                         },
@@ -1535,7 +1553,7 @@ impl Agent {
                             Role::User,
                             vec![ContentBlock::ToolResult {
                                 tool_use_id: remaining_tc.id.clone(),
-                                content: "[Skipped - server reloading]".to_string(),
+                                content: format!("[Skipped: {}]", cause.description()),
                                 is_error: Some(true),
                             }],
                         );

@@ -3,7 +3,6 @@ use anyhow::Result;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::time::Instant;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
@@ -226,12 +225,13 @@ pub(super) struct RunningTask {
     pub(super) task_id: String,
     pub(super) tool_name: String,
     pub(super) display_name: Option<String>,
-    pub(super) session_id: String,
     pub(super) status_path: PathBuf,
-    pub(super) started_at: Instant,
-    pub(super) started_at_rfc3339: String,
     pub(super) delivery_flags: watch::Sender<(bool, bool)>,
-    pub(super) handle: JoinHandle<Result<TaskResult>>,
+    /// Taken only while a Stop operation owns the join. The live-map entry
+    /// remains present until actual quiescence and terminal publication.
+    pub(super) handle: Option<JoinHandle<Result<TaskResult>>>,
+    pub(super) adopted_abort: Option<tokio::task::AbortHandle>,
+    pub(super) stop_cause: std::sync::Arc<std::sync::Mutex<Option<jcode_tool_types::StopCause>>>,
 }
 
 /// Result from a background task execution
