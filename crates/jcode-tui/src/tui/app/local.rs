@@ -62,6 +62,7 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     // happen to trigger (~4fps in practice).
     let mut needs_redraw = crate::tui::periodic_redraw_required(app);
     needs_redraw |= super::local_delivery::drain(app);
+    needs_redraw |= super::history_repair::drain(app);
     needs_redraw |= app.dispatch_local_instruction_request();
     needs_redraw |= app.drain_local_context_events();
     needs_redraw |= app.dispatch_local_context_editor_actions();

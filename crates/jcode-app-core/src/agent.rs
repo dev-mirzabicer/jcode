@@ -1,5 +1,8 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
+#[cfg(test)]
+use crate::message::TOOL_OUTPUT_MISSING_TEXT;
+
 mod context_usage;
 mod emergency;
 mod environment;
@@ -29,9 +32,7 @@ use crate::bus::{Bus, BusEvent, SubagentStatus, ToolEvent, ToolStatus};
 use crate::cache_tracker::CacheTracker;
 use crate::id;
 use crate::logging;
-use crate::message::{
-    ContentBlock, Message, Role, StreamEvent, TOOL_OUTPUT_MISSING_TEXT, ToolCall, ToolDefinition,
-};
+use crate::message::{ContentBlock, Message, Role, StreamEvent, ToolCall, ToolDefinition};
 use crate::protocol::{
     ContextPendingInputMetadata, ContextPreflightReport, HistoryMessage, ServerEvent,
 };
@@ -1045,174 +1046,22 @@ impl Agent {
     }
 
     async fn repair_missing_tool_outputs(&mut self) -> Result<usize> {
-        // Pair in transcript order. A prior result with the same provider ID
-        // must not satisfy a different assistant message's later invocation.
-        let mut pending: HashMap<String, (usize, usize, ToolCall)> = HashMap::new();
-        let mut calls = HashSet::new();
-        let mut results = HashSet::new();
-        for (index, message) in self.session.messages.iter().enumerate() {
-            for (ordinal, block) in message.content.iter().enumerate() {
-                match (&message.role, block) {
-                    (
-                        Role::Assistant,
-                        ContentBlock::ToolUse {
-                            id,
-                            name,
-                            input,
-                            thought_signature,
-                        },
-                    ) => {
-                        anyhow::ensure!(
-                            !pending.contains_key(id),
-                            "Ambiguous historical tool ID {id}: multiple unresolved uses. No replacement result was invented."
-                        );
-                        pending.insert(
-                            id.clone(),
-                            (
-                                index,
-                                ordinal,
-                                ToolCall {
-                                    id: id.clone(),
-                                    name: name.clone(),
-                                    input: input.clone(),
-                                    intent: ToolCall::intent_from_input(input),
-                                    thought_signature: thought_signature.clone(),
-                                },
-                            ),
-                        );
-                        calls.insert(id.clone());
-                    }
-                    (Role::User, ContentBlock::ToolResult { tool_use_id, .. }) => {
-                        pending.remove(tool_use_id);
-                        results.insert(tool_use_id.clone());
-                    }
-                    _ => {}
-                }
-            }
-        }
-        let mut pending = pending.into_values().collect::<Vec<_>>();
-        pending.sort_by_key(|(index, ordinal, _)| (*index, *ordinal));
-        let mut missing_repairs: Vec<(usize, Vec<(String, crate::tool::ToolOutput)>)> = Vec::new();
-        for (index, _, tool) in pending {
-            let ctx = ToolContext {
-                session_id: self.session.id.clone(),
-                message_id: self.session.messages[index].id.clone(),
-                tool_call_id: tool.id.clone(),
-                working_dir: self.working_dir().map(PathBuf::from),
-                stdin_request_tx: None,
-                graceful_shutdown_signal: None,
-                execution_mode: ToolExecutionMode::Direct,
-                invocation: Default::default(),
-            };
-            let invocation =
-                crate::execution::invocation(&ctx, &tool.name, serde_json::Value::Null);
-            let output = if let Some(output) = self
-                .registry
-                .retained_history_result(&tool.name, ctx, tool.input.clone())
-                .await?
-            {
-                output
-            } else {
-                anyhow::ensure!(
-                    !crate::tool::inflight::is_tool_in_flight(&invocation),
-                    "Execution {} is still in flight. Its result was not replaced or repeated.",
-                    invocation.id()
-                );
-                crate::tool::ToolOutput::new(TOOL_OUTPUT_MISSING_TEXT).with_error(true)
-            };
-            if let Some((last, repairs)) = missing_repairs.last_mut()
-                && *last == index
-            {
-                repairs.push((tool.id, output));
-            } else {
-                missing_repairs.push((index, vec![(tool.id, output)]));
-            }
-        }
-        if missing_repairs.is_empty() {
-            self.tool_call_ids = calls;
-            self.tool_result_ids = results;
-            self.tool_output_scan_index = self.session.messages.len();
-            return Ok(0);
-        }
-        let session_before = self.session.clone();
-        let tool_call_ids_before = self.tool_call_ids.clone();
-        let tool_result_ids_before = self.tool_result_ids.clone();
-        let scan_index_before = self.tool_output_scan_index;
-        self.tool_call_ids = calls;
-        self.tool_result_ids = results;
-        let mut repaired = 0usize;
-        let mut inserted = 0usize;
-        for (index, missing_for_message) in missing_repairs {
-            for (offset, (id, output)) in missing_for_message.iter().enumerate() {
-                let blocks = tools::tool_output_to_content_blocks(id.clone(), output.clone());
-                let stored_message = StoredMessage {
-                    origin: None,
-                    id: id::new_id("message"),
-                    role: Role::User,
-                    content: blocks,
-                    display_role: None,
-                    timestamp: Some(chrono::Utc::now()),
-                    tool_duration_ms: None,
-                    token_usage: None,
-                };
-                self.session
-                    .insert_message(index + 1 + inserted + offset, stored_message);
-                self.tool_result_ids.insert(id.clone());
-                repaired += 1;
-            }
-            inserted += missing_for_message.len();
-        }
-
+        let prepared = crate::execution::history::prepare(&self.session, &self.registry).await?;
+        let outcome = prepared.commit(&mut self.session)?;
+        self.tool_call_ids = outcome.calls;
+        self.tool_result_ids = outcome.results;
         self.tool_output_scan_index = self.session.messages.len();
-
-        if repaired > 0 {
-            let reconciliation = match jcode_context_core::reconcile_context_after_transcript_edit(
-                &self.session.messages,
-                &self.session.context_view,
-                chrono::Utc::now(),
-                "historical tool-output repair inserted exact provider structure",
-            ) {
-                Ok(reconciliation) => reconciliation,
-                Err(_) => {
-                    self.session = session_before;
-                    self.tool_call_ids = tool_call_ids_before;
-                    self.tool_result_ids = tool_result_ids_before;
-                    self.tool_output_scan_index = scan_index_before;
-                    logging::error(
-                        "Missing tool-output repair failed safely during context reconciliation",
-                    );
-                    anyhow::bail!(
-                        "Historical tool repair could not be published; authoritative history was restored and no provider request was started"
-                    );
-                }
-            };
-            self.session.context_view = reconciliation.state;
-            self.session.provider_session_id = None;
-            if self.session.save().is_err() {
-                self.session = session_before;
-                self.tool_call_ids = tool_call_ids_before;
-                self.tool_result_ids = tool_result_ids_before;
-                self.tool_output_scan_index = scan_index_before;
-                logging::error(
-                    "Missing tool-output repair failed safely during session persistence",
-                );
-                anyhow::bail!(
-                    "Historical tool repair could not be published; authoritative history was restored and no provider request was started"
-                );
-            }
-            if let Err(error) = self.after_provider_context_changed(
+        if outcome.repaired > 0 {
+            self.after_provider_context_changed(
                 "historical tool repair",
-                format!("inserted {repaired} missing tool output(s) into prior provider history"),
+                format!(
+                    "inserted {} missing tool output(s) into prior provider history",
+                    outcome.repaired
+                ),
                 true,
-            ) {
-                logging::error(&format!(
-                    "Missing tool-output repair left an invalid provider projection: {}",
-                    error
-                ));
-            }
+            )?;
         }
-
-        Ok(repaired)
+        Ok(outcome.repaired)
     }
 
     fn reset_tool_output_tracking(&mut self) {

@@ -6,11 +6,10 @@ use super::markdown::IncrementalMarkdownRenderer;
 use super::stream_buffer::StreamBuffer;
 use crate::bus::{Bus, BusEvent, LoginCompleted, ToolEvent, ToolStatus};
 use crate::config::config;
+#[cfg(test)]
 use crate::id;
 use crate::mcp::McpManager;
-use crate::message::{
-    ContentBlock, Message, Role, StreamEvent, TOOL_OUTPUT_MISSING_TEXT, ToolCall, ToolDefinition,
-};
+use crate::message::{ContentBlock, Message, Role, StreamEvent, ToolCall, ToolDefinition};
 use crate::provider::Provider;
 use crate::runtime_memory_log::RuntimeMemoryLogController;
 use crate::session::{Session, StoredMessage};
@@ -70,6 +69,7 @@ mod dictation;
 mod event_wrappers;
 mod handterm_native_scroll;
 pub(crate) mod helpers;
+mod history_repair;
 mod hotkey_feedback;
 pub(crate) mod idle_animation_repaint;
 mod idle_heap_release;
@@ -950,6 +950,7 @@ pub struct App {
     local_context_event_tx: tokio::sync::mpsc::UnboundedSender<crate::protocol::ServerEvent>,
     local_context_event_rx: tokio::sync::mpsc::UnboundedReceiver<crate::protocol::ServerEvent>,
     local_delivery: local_delivery::LocalDeliveryState,
+    history_repair: Option<history_repair::PendingRepair>,
     /// Transport-neutral actions emitted by keyboard, mouse, paging, and
     /// lifecycle synchronization.
     context_editor_actions: VecDeque<super::context_editor::ContextEditorAction>,

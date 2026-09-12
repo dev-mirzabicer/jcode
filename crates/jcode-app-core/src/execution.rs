@@ -17,6 +17,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 pub mod command;
 #[cfg(unix)]
 pub mod command_worker;
+pub mod history;
 mod runtime;
 pub use runtime::{ControlOperation, ControlReply, control};
 

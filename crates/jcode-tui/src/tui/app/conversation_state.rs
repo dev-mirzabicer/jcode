@@ -44,14 +44,6 @@ impl App {
             })
     }
 
-    pub(super) fn local_transcript_message_count(&self) -> usize {
-        if self.is_remote {
-            self.messages.len()
-        } else {
-            self.session.messages.len()
-        }
-    }
-
     pub(super) fn add_provider_message(&mut self, message: Message) {
         if self.is_remote {
             self.ensure_provider_messages_hydrated();
@@ -369,123 +361,30 @@ impl App {
         false
     }
 
-    fn collect_missing_tool_outputs_since_last_scan(&mut self) -> Vec<(usize, Vec<String>)> {
-        let message_len = self.local_transcript_message_count();
-        if self.tool_output_scan_index > message_len {
-            self.reset_tool_output_tracking();
-        }
-
-        let scan_start = self.tool_output_scan_index;
-        let mut new_result_ids = Vec::new();
-        let mut assistant_tool_uses: Vec<(usize, Vec<String>)> = Vec::new();
-
-        if self.is_remote {
-            for (index, msg) in self.messages.iter().enumerate().skip(scan_start) {
-                match msg.role {
-                    Role::User => {
-                        for block in &msg.content {
-                            if let ContentBlock::ToolResult { tool_use_id, .. } = block {
-                                new_result_ids.push(tool_use_id.clone());
-                            }
-                        }
-                    }
-                    Role::Assistant => {
-                        let tool_uses = msg
-                            .content
-                            .iter()
-                            .filter_map(|block| match block {
-                                ContentBlock::ToolUse { id, .. } => Some(id.clone()),
-                                _ => None,
-                            })
-                            .collect::<Vec<_>>();
-                        if !tool_uses.is_empty() {
-                            assistant_tool_uses.push((index, tool_uses));
-                        }
-                    }
-                }
-            }
-        } else {
-            for (index, msg) in self.session.messages.iter().enumerate().skip(scan_start) {
-                match msg.role {
-                    Role::User => {
-                        for block in &msg.content {
-                            if let ContentBlock::ToolResult { tool_use_id, .. } = block {
-                                new_result_ids.push(tool_use_id.clone());
-                            }
-                        }
-                    }
-                    Role::Assistant => {
-                        let tool_uses = msg
-                            .content
-                            .iter()
-                            .filter_map(|block| match block {
-                                ContentBlock::ToolUse { id, .. } => Some(id.clone()),
-                                _ => None,
-                            })
-                            .collect::<Vec<_>>();
-                        if !tool_uses.is_empty() {
-                            assistant_tool_uses.push((index, tool_uses));
-                        }
-                    }
-                }
-            }
-        }
-
-        self.tool_result_ids.extend(new_result_ids);
-
-        let mut missing_repairs = Vec::new();
-        for (index, tool_uses) in assistant_tool_uses {
-            let mut missing_for_message = Vec::new();
-            for id in tool_uses {
-                self.tool_call_ids.insert(id.clone());
-                if self.tool_result_ids.contains(&id) {
-                    continue;
-                }
-                // Still-executing tools will deliver their own result; a
-                // placeholder here becomes a duplicate tool_result that
-                // Anthropic rejects. See `jcode_app_core::tool::inflight`.
-                let in_flight = if self.is_remote {
-                    false
-                } else {
-                    let context = crate::tool::ToolContext {
-                        session_id: self.session.id.clone(),
-                        message_id: self.session.messages[index].id.clone(),
-                        tool_call_id: id.clone(),
-                        working_dir: None,
-                        stdin_request_tx: None,
-                        graceful_shutdown_signal: None,
-                        execution_mode: crate::tool::ToolExecutionMode::Direct,
-                        invocation: Default::default(),
-                    };
-                    crate::tool::inflight::is_tool_in_flight(&crate::execution::invocation(
-                        &context,
-                        "",
-                        serde_json::Value::Null,
-                    ))
-                };
-                if in_flight {
-                    crate::logging::info(&format!(
-                        "Skipping missing tool-output repair for {id}: tool is still executing"
-                    ));
-                    continue;
-                }
-                missing_for_message.push(id);
-            }
-            if !missing_for_message.is_empty() {
-                missing_repairs.push((index, missing_for_message));
-            }
-        }
-
-        self.tool_output_scan_index = message_len;
-        missing_repairs
-    }
-
     pub(super) fn missing_tool_result_ids(&mut self) -> Vec<String> {
-        self.collect_missing_tool_outputs_since_last_scan();
-        self.tool_call_ids
-            .difference(&self.tool_result_ids)
-            .cloned()
-            .collect::<Vec<_>>()
+        let scanned = if self.is_remote {
+            crate::execution::history::scan(
+                self.messages
+                    .iter()
+                    .map(|message| (&message.role, message.content.as_slice())),
+            )
+        } else {
+            crate::execution::history::scan(
+                self.session
+                    .messages
+                    .iter()
+                    .map(|message| (&message.role, message.content.as_slice())),
+            )
+        };
+        match scanned {
+            Ok(scan) => {
+                let missing = scan.missing_ids();
+                self.tool_call_ids = scan.calls;
+                self.tool_result_ids = scan.results;
+                missing
+            }
+            Err(error) => vec![format!("ambiguous history: {error}")],
+        }
     }
 
     pub(super) fn summarize_tool_results_missing(&mut self) -> Option<String> {
@@ -507,99 +406,42 @@ impl App {
         ))
     }
 
-    pub(super) fn repair_missing_tool_outputs(&mut self) -> usize {
-        let session_before = self.session.clone();
-        let provider_messages_before = self.messages.clone();
-        let tool_call_ids_before = self.tool_call_ids.clone();
-        let tool_result_ids_before = self.tool_result_ids.clone();
-        let scan_index_before = self.tool_output_scan_index;
-        let missing_repairs = self.collect_missing_tool_outputs_since_last_scan();
-        let mut repaired = 0usize;
-        let mut inserted = 0usize;
-        for (index, missing_for_message) in missing_repairs {
-            for (offset, id) in missing_for_message.iter().enumerate() {
-                let tool_block = ContentBlock::ToolResult {
-                    tool_use_id: id.clone(),
-                    content: TOOL_OUTPUT_MISSING_TEXT.to_string(),
-                    is_error: Some(true),
-                };
-                let inserted_message = Message {
-                    role: Role::User,
-                    content: vec![tool_block.clone()],
-                    timestamp: None,
-                    tool_duration_ms: None,
-                };
-                let stored_message = crate::session::StoredMessage {
-                    origin: None,
-                    id: id::new_id("message"),
-                    role: Role::User,
-                    content: vec![tool_block],
-                    display_role: None,
-                    timestamp: Some(chrono::Utc::now()),
-                    tool_duration_ms: None,
-                    token_usage: None,
-                };
-                if self.is_remote || !self.messages.is_empty() {
-                    self.messages
-                        .insert(index + 1 + inserted + offset, inserted_message);
-                }
-                self.session
-                    .insert_message(index + 1 + inserted + offset, stored_message);
-                self.tool_result_ids.insert(id.clone());
-                repaired += 1;
-            }
-            inserted += missing_for_message.len();
-        }
+    pub(super) async fn repair_missing_tool_outputs(&mut self) -> anyhow::Result<usize> {
+        anyhow::ensure!(
+            !self.is_remote,
+            "Remote history repair belongs to the server; the client projection was not persisted"
+        );
+        let prepared = crate::execution::history::prepare(&self.session, &self.registry).await?;
+        self.apply_history_repair(prepared)
+    }
 
-        self.tool_output_scan_index = self.local_transcript_message_count();
-
-        if repaired > 0 {
-            let reconciliation = match jcode_context_core::reconcile_context_after_transcript_edit(
-                &self.session.messages,
-                &self.session.context_view,
-                chrono::Utc::now(),
-                "historical tool-output repair inserted exact provider structure",
-            ) {
-                Ok(reconciliation) => reconciliation,
-                Err(_) => {
-                    self.session = session_before;
-                    self.messages = provider_messages_before;
-                    self.tool_call_ids = tool_call_ids_before;
-                    self.tool_result_ids = tool_result_ids_before;
-                    self.tool_output_scan_index = scan_index_before;
-                    crate::logging::error(
-                        "Missing tool-output repair failed safely during context reconciliation",
-                    );
-                    return 0;
-                }
-            };
-            self.session.context_view = reconciliation.state;
-            self.session.provider_session_id = None;
-            if self.session.save().is_err() {
-                self.session = session_before;
-                self.messages = provider_messages_before;
-                self.tool_call_ids = tool_call_ids_before;
-                self.tool_result_ids = tool_result_ids_before;
-                self.tool_output_scan_index = scan_index_before;
-                crate::logging::error(
-                    "Missing tool-output repair failed safely during session persistence",
-                );
-                return 0;
-            }
-            if let Err(error) = self.after_local_provider_context_changed(
+    pub(super) fn apply_history_repair(
+        &mut self,
+        prepared: crate::execution::history::PreparedRepair,
+    ) -> anyhow::Result<usize> {
+        anyhow::ensure!(
+            !self.is_remote,
+            "Remote history repair belongs to the server"
+        );
+        let outcome = prepared.commit(&mut self.session)?;
+        self.tool_call_ids = outcome.calls;
+        self.tool_result_ids = outcome.results;
+        self.tool_output_scan_index = self.session.messages.len();
+        if outcome.repaired > 0 {
+            self.after_local_provider_context_changed(
                 "historical tool repair",
-                &format!("inserted {repaired} missing tool output(s) into prior provider history"),
-            ) {
-                crate::logging::error(&format!(
-                    "Persisted tool-output repair could not rebuild provider context: {error}"
-                ));
-            }
+                &format!(
+                    "inserted {} missing tool output(s) into prior provider history",
+                    outcome.repaired
+                ),
+            )
+            .map_err(anyhow::Error::msg)?;
         }
-
-        repaired
+        Ok(outcome.repaired)
     }
 
     /// Rebuild current session into a new one without tool calls
+    #[cfg(test)]
     pub(super) fn recover_session_without_tools(&mut self) {
         let old_session = self.session.clone();
         let old_messages = old_session.messages.clone();

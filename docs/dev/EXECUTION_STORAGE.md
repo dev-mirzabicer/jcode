@@ -348,8 +348,30 @@ Local partial checkpoints retain complete results and media through this owner.
 These are real CLI, Agent and local-TUI mechanism checks, not a hosted vision or
 prompt-quality claim. Raw transport bytes rejected before decoding, uncorrelated
 result ingress and persistence before stream-finalization remain separate pending
-reconciliation. Local TUI historical recovery also still needs full alignment with
-the shared durable repair owner; its scoped liveness call now compiles correctly.
+reconciliation.
+
+## Local history repair and /fix
+
+Agent turns and local TUI turns now use one scoped history scan and repair
+transaction. Preparation resolves retained receipts asynchronously without writing
+Session history. Publication checks the complete source Session fingerprint,
+uses existing context reconciliation, persists the candidate, and only then
+replaces live authority. A stale result cannot overwrite newer history, context,
+metadata or a different session. Active or ambiguous tool work remains blocked
+rather than receiving an invented completion.
+
+Local `/fix` prepares on the runtime and applies at an idle local tick. User drafts
+remain untouched. Busy work, a switched session, a newer error and a stale source
+cannot be overwritten. `/fix` no longer invokes the text-only replacement-session
+fallback when tool history is unresolved. Explicit context reduction still belongs
+to the existing Context Editor. A remote client never saves its partial Session to
+perform repair; server-side Agent repair remains authoritative, and this local
+command refuses that unsupported client-side action clearly.
+
+Tests exercise actual submit/tick handling, complete retained results, live work,
+newer metadata, switched sessions, remote shadows, resume reset and protected
+context-budget/reconciliation behavior. The old text-only recovery helper remains
+only in historical mechanism tests, not an active `/fix` branch.
 
 ## SDK host-native execution
 

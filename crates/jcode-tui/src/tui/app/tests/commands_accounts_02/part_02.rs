@@ -233,8 +233,15 @@ fn test_fix_resets_provider_session() {
     app.session.provider_session_id = Some("provider-session".to_string());
     app.last_stream_error = Some("Stream error: context window exceeded".to_string());
 
-    app.input = "/fix".to_string();
-    app.submit_input();
+    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+        app.input="/fix".to_string();app.submit_input();
+        let deadline=tokio::time::Instant::now()+std::time::Duration::from_secs(5);
+        while app.history_repair.is_some(){
+            crate::tui::app::history_repair::drain(&mut app);
+            assert!(tokio::time::Instant::now()<deadline,"/fix did not reach its terminal state");
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    });
 
     assert!(app.provider_session_id.is_none());
     assert!(app.session.provider_session_id.is_none());
@@ -245,7 +252,7 @@ fn test_fix_resets_provider_session() {
         .expect("missing /fix response");
     assert_eq!(msg.role, "system");
     assert!(msg.content.contains("Fix Results"));
-    assert!(msg.content.contains("Reset provider session resume state"));
+    assert!(msg.content.contains("Provider resume state was reset"));
 }
 
 #[test]

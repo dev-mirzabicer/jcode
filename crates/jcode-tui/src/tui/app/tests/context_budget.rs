@@ -987,7 +987,7 @@ fn context_budget_rewind_undo_and_repair_reseed_exactly() {
     );
     app.replace_provider_messages(app.session.raw_messages_for_provider_uncached());
     set_app_context_observation(&app, 9_500);
-    assert_eq!(app.repair_missing_tool_outputs(), 1);
+    assert_eq!(tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(app.repair_missing_tool_outputs()).unwrap(), 1);
 
     let repaired = app.materialized_provider_messages();
     let repaired_stats = context_budget_stats_for_app(&app);

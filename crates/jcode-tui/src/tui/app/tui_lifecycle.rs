@@ -474,6 +474,7 @@ impl App {
             local_context_event_tx,
             local_context_event_rx,
             local_delivery: Default::default(),
+            history_repair: None,
             context_editor_actions: VecDeque::new(),
             next_local_context_request_id: 1,
             #[cfg(test)]
@@ -936,6 +937,7 @@ impl App {
             local_context_event_tx,
             local_context_event_rx,
             local_delivery: Default::default(),
+            history_repair: None,
             context_editor_actions: VecDeque::new(),
             next_local_context_request_id: 1,
             #[cfg(test)]

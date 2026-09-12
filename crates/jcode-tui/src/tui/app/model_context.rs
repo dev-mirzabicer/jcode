@@ -1096,58 +1096,7 @@ impl App {
     }
 
     pub(super) fn run_fix_command(&mut self) {
-        let mut actions: Vec<String> = Vec::new();
-        let mut notes: Vec<String> = Vec::new();
-        let last_error = self.last_stream_error.clone();
-        let context_error = last_error
-            .as_deref()
-            .map(is_context_limit_error)
-            .unwrap_or(false);
-
-        let repaired = self.repair_missing_tool_outputs();
-        if repaired > 0 {
-            actions.push(format!("Recovered {} missing tool output(s).", repaired));
-        }
-
-        if self.summarize_tool_results_missing().is_some() {
-            self.recover_session_without_tools();
-            actions.push("Created a recovery session with text-only history.".to_string());
-        }
-
-        if self.provider_session_id.is_some() || self.session.provider_session_id.is_some() {
-            self.provider_session_id = None;
-            self.session.provider_session_id = None;
-            actions.push("Reset provider session resume state.".to_string());
-        }
-
-        if context_error {
-            notes.push(
-                "Context was preserved without automatic reduction. Use /compact or /context edit to review and explicitly apply a reversible context transaction."
-                    .to_string(),
-            );
-        }
-
-        self.last_stream_error = None;
-        self.set_status_notice("Fix applied");
-
-        let mut content = String::from("Fix Results:\n");
-        if actions.is_empty() {
-            content.push_str("• No structural issues detected.\n");
-        } else {
-            for action in &actions {
-                content.push_str(&format!("• {}\n", action));
-            }
-        }
-        for note in &notes {
-            content.push_str(&format!("• {}\n", note));
-        }
-        if let Some(last_error) = &last_error {
-            content.push_str(&format!(
-                "\nLast error: {}",
-                crate::util::truncate_str(last_error, 200)
-            ));
-        }
-        self.push_display_message(DisplayMessage::system(content));
+        self.start_history_repair();
     }
 }
 

@@ -218,7 +218,7 @@ impl App {
             super::run_shell::reset_status_spinner_interval(&mut status_spinner_interval, self);
             self.flush_pending_session_save();
 
-            let repaired = self.repair_missing_tool_outputs();
+            let repaired = self.repair_missing_tool_outputs().await?;
             if repaired > 0 {
                 let message = format!(
                     "Recovered {} missing tool output(s) from an interrupted turn.",
@@ -229,7 +229,7 @@ impl App {
             }
             if let Some(summary) = self.summarize_tool_results_missing() {
                 let message = format!(
-                    "Tool outputs are missing for this turn. {}\n\nRun /fix to recover into a new session with context copied.",
+                    "Tool outputs are missing for this turn. {}\n\nRun /fix to inspect retained results without replacing this session.",
                     summary
                 );
                 self.push_display_message(DisplayMessage::error(message));
