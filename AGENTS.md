@@ -19,19 +19,26 @@
 
 ## Verifying a change at runtime
 
-`cargo build` alone proves nothing about behavior. `jcode run` and interactive
-sessions are served by the long-lived daemon at
-`~/.jcode/builds/shared-server/jcode`, which is a symlink into
-`~/.jcode/builds/versions/<version>/`. Until that symlink is repointed and the
-daemon restarted (`jcode self-dev --build`), a freshly built binary is inert and
-every runtime check silently measures the old code.
+`cargo build` alone does not validate a running shared session. Interactive shared
+sessions use the long-lived daemon at `~/.jcode/builds/shared-server/jcode`, which
+points into `~/.jcode/builds/versions/<version>/`. Until coordinated reload restarts
+that daemon, shared-session checks still exercise its old binary.
 
-To test a change without disturbing the shared daemon or the caller's session,
-run your build against its own socket:
+Standalone `jcode run` is different: it constructs a local Agent and executes
+ordinary tools in that command's process/runtime. Its `--json` and `--ndjson`
+outputs follow that same local route. The global `--socket` argument does not move
+this Run command onto the daemon. Use the stable Harness API or an attached TUI
+for daemon-backed workflows, and verify the actual execution owner's identity.
+
+For isolated daemon testing, use a private `JCODE_HOME` and runtime directory,
+start the candidate with an explicit socket, then attach a TUI or Harness client
+to that socket. Standalone smoke tests instead invoke the candidate directly:
 
 ```bash
-cargo build --profile selfdev
-./target/selfdev/jcode run --no-update --socket /run/user/1000/jcode-mytest.sock '<prompt>'
+# After a coordinated selfdev build, with isolated fixture state configured:
+./target/selfdev/jcode --no-update --socket /path/to/private/test.sock serve
+# Separate standalone route, not served by the daemon above:
+./target/selfdev/jcode --no-update run '<prompt>'
 ```
 
 Two things that waste time otherwise:
