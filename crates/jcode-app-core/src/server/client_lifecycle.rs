@@ -3481,6 +3481,30 @@ pub(super) async fn handle_client_with_instruction_repositories(
                 let _ = client_event_tx.send(ServerEvent::Done { id });
             }
 
+            Request::Execution { id, request } => {
+                let result = match crate::storage::jcode_dir() {
+                    Ok(root) => {
+                        crate::execution::inspection::inspect(&root, &client_session_id, request)
+                            .await
+                    }
+                    Err(error) => Err(error),
+                };
+                match result {
+                    Ok(response) => {
+                        let _ =
+                            client_event_tx.send(ServerEvent::ExecutionResponse { id, response });
+                        let _ = client_event_tx.send(ServerEvent::Done { id });
+                    }
+                    Err(error) => {
+                        let _ = client_event_tx.send(ServerEvent::Error {
+                            id,
+                            message: format!("Execution inspection/control failed: {error:#}"),
+                            retry_after_secs: None,
+                        });
+                    }
+                }
+            }
+
             Request::Split { id } => {
                 handle_split(
                     id,

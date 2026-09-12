@@ -1,15 +1,8 @@
 use super::ExecutionStore;
 use anyhow::{Context, Result, ensure};
 use jcode_background_types::BackgroundTaskProgress;
+pub use jcode_tool_types::execution::ExecutionProgress;
 use rusqlite::{TransactionBehavior, params};
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExecutionProgress {
-    pub value: BackgroundTaskProgress,
-    pub checkpoint: bool,
-    pub sequence: u64,
-}
 
 impl ExecutionStore {
     pub(super) fn record_progress(

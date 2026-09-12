@@ -602,6 +602,7 @@ impl Request {
             Request::ActivateSkill { id, .. } => *id,
             Request::SetAgent { id, .. } => *id,
             Request::GetAgentCatalog { id }
+            | Request::Execution { id, .. }
             | Request::GetAgentStatus { id, .. }
             | Request::RenderWorkflowPrompt { id, .. }
             | Request::InspectInstructions { id, .. }

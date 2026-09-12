@@ -240,6 +240,31 @@ Agent profile controls require the advertised `agent_profile_controls` capabilit
 Structured-output calls require `workflow_prompt_rendering`. Both SDKs render current instructions on the connected server in the attached session's project scope. `renderWorkflowPrompt(id, request)` (`render_workflow_prompt` in Rust) exposes this read-only operation without starting a turn. Schema validation and retry policy remain SDK-owned. A missing capability or invalid managed source fails before the affected model attempt. No client-side embedded-prose fallback is used. See [workflow instructions](../../docs/WORKFLOW_INSTRUCTIONS.md) for source paths and recovery.
 
 
+## Retained executions
+
+`execution(sessionId, request)` (also `execution` in the Rust SDK) requires the
+advertised `shared_execution_v1` capability and a completed session attachment.
+It supports `list`, `inspect`, `stop`, `background`, and `read` operations without
+starting a model or repeating a tool. List defaults to the attached session;
+`all_sessions: true` is explicit. Use the returned `next` cursor as `after`.
+
+```ts
+const result = await client.execution(sessionId, {
+  action: "read",
+  run_id: runId,
+  content: "output",
+  output_size: "small",
+});
+if (result.kind === "content") console.log(result.page.output);
+```
+
+Input/output text is paged by the server through exact read points. Returned
+storage paths are not assumed to exist on the client. Stop/background acceptance
+is not terminal completion; inspect the run afterward. Both SDKs reject missing
+capabilities before sending and verify response-session identity. See
+[execution storage and control](../../docs/dev/EXECUTION_STORAGE.md#client-and-harness-execution-api)
+for the complete request shapes, defaults, recovery and evidence boundaries.
+
 ## Models
 
 A client that cannot enumerate models cannot offer a picker, so the catalog is

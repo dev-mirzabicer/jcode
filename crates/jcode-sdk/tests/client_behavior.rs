@@ -21,6 +21,85 @@ use std::time::Duration;
 /// path a real connection uses.
 struct PairTransport(UnixStream);
 
+#[test]
+fn execution_control_requires_capability_and_returns_typed_correlated_replies() {
+    use jcode_harness_api::{ExecutionRequest, ExecutionResponse};
+    let old = fake_harness_with_capabilities(vec!["sessions".into()], |_, _| {
+        panic!("Unsupported execution request reached transport")
+    });
+    let request = ExecutionRequest::List {
+        all_sessions: false,
+        after: None,
+        limit: Some(10),
+    };
+    assert_eq!(
+        old.execution("s1", request.clone()).unwrap_err().kind,
+        ErrorKind::UnsupportedCapability
+    );
+    let client = fake_harness_with_capabilities(
+        vec![jcode_harness_api::EXECUTION_CAPABILITY.into()],
+        |frame, writer| {
+            let ApiRequest::Execution {
+                session_id,
+                request,
+            } = &frame.request
+            else {
+                panic!("Unexpected request")
+            };
+            assert_eq!(session_id, "s1");
+            assert!(matches!(
+                request,
+                ExecutionRequest::List {
+                    limit: Some(10),
+                    ..
+                }
+            ));
+            reply(
+                frame,
+                ApiEvent::Execution {
+                    session_id: session_id.clone(),
+                    response: ExecutionResponse::List {
+                        runs: Vec::new(),
+                        next: None,
+                    },
+                },
+                writer,
+            );
+        },
+    );
+    assert!(
+        matches!(client.execution("s1",request).unwrap(),ExecutionResponse::List{runs,next:None} if runs.is_empty())
+    );
+    let wrong = fake_harness_with_capabilities(
+        vec![jcode_harness_api::EXECUTION_CAPABILITY.into()],
+        |frame, writer| {
+            reply(
+                frame,
+                ApiEvent::Execution {
+                    session_id: "different".into(),
+                    response: ExecutionResponse::List {
+                        runs: Vec::new(),
+                        next: None,
+                    },
+                },
+                writer,
+            );
+        },
+    );
+    assert!(
+        wrong
+            .execution(
+                "s1",
+                ExecutionRequest::List {
+                    all_sessions: false,
+                    after: None,
+                    limit: None
+                }
+            )
+            .is_err()
+    );
+}
+
 impl Transport for PairTransport {
     fn split(
         self: Box<Self>,

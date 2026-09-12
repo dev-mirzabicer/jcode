@@ -1,3 +1,4 @@
+pub mod execution;
 pub mod presentation;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -59,7 +60,7 @@ impl StopCause {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolOutput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_receipt: Option<ProviderReceiptReference>,
@@ -98,7 +99,7 @@ pub struct WithheldDelivery {
     pub budget: usize,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OutputSource {
     #[default]
@@ -109,21 +110,21 @@ pub enum OutputSource {
     Unavailable(UnavailableReference),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UnavailableReference {
     pub invocation_id: String,
     pub receipt_path: std::path::PathBuf,
     pub partial_output: Option<OutputReference>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AcceptanceReference {
     pub invocation_id: String,
     pub path: std::path::PathBuf,
     pub live_output: Option<std::path::PathBuf>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OutputReference {
     pub invocation_id: String,
     pub path: std::path::PathBuf,
@@ -135,7 +136,7 @@ pub struct OutputReference {
     pub manifest_path: Option<std::path::PathBuf>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReadPageReference {
     pub path: std::path::PathBuf,
     pub start_byte: u64,
@@ -146,14 +147,14 @@ pub struct ReadPageReference {
     pub next_point: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolImage {
     pub media_type: String,
     pub data: String,
     pub label: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolResource {
     pub uri: String,
     pub media_type: Option<String>,

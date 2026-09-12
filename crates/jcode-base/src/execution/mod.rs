@@ -7,6 +7,7 @@ pub use progress::ExecutionProgress;
 #[cfg(unix)]
 pub mod command_handoff;
 pub mod control_transport;
+pub mod inspection;
 mod managed_read;
 mod output;
 #[cfg(unix)]

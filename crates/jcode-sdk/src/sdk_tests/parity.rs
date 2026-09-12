@@ -39,6 +39,7 @@ const CAPABILITIES: &[Capability] = &[
     cap("cancel", "cancel"),
     cap("soft_interrupt", "softInterrupt"),
     cap("get_history", "getHistory"),
+    cap("execution", "execution"),
     cap("list_agents", "listAgents"),
     cap("set_agent", "setAgent"),
     cap("inspect_agent", "inspectAgent"),

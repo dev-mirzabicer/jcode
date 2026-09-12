@@ -6,6 +6,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "ev", rename_all = "snake_case")]
 pub enum ApiEvent {
+    Execution {
+        session_id: String,
+        response: jcode_tool_types::execution::ExecutionResponse,
+    },
     /// Handshake accepted. Sent in reply to `Hello`.
     HelloOk {
         version: u32,

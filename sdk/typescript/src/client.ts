@@ -24,6 +24,8 @@ import {
   type AgentInfo,
   type ApiEvent,
   type ApiRequest,
+  type ExecutionRequest,
+  type ExecutionResponse,
   type WorkflowPromptRequest,
   type HistoryMessage,
   type ImageAttachment,
@@ -610,6 +612,14 @@ export class JcodeClient extends EventEmitter {
       "agents",
     );
     return frame.agents ?? [];
+  }
+
+  /** Inspect/control retained executions. Control acceptance is not completion. */
+  async execution(sessionId: string, request: ExecutionRequest): Promise<ExecutionResponse> {
+    this.requireCapability("shared_execution_v1");
+    const frame = await this.expectReply({req: "execution", session_id: sessionId, request}, "execution");
+    if (frame.session_id !== sessionId) throw new HarnessError("unexpected_reply", "Execution reply belongs to a different session");
+    return frame.response;
   }
 
   async setAgent(sessionId: string, agent: string, replace = false): Promise<AgentStatus> {

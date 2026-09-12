@@ -8,7 +8,34 @@
  */
 
 export const API_VERSION_MAJOR = 1;
-export const API_VERSION_MINOR = 1;
+export const API_VERSION_MINOR = 2;
+
+export type ExecutionState = "prepared" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
+export type OutputSize = number | "very_small" | "small" | "medium" | "large" | "very_large";
+export interface ExecutionRun {
+  id: string; session_id: string; message_id: string; tool: string;
+  state: ExecutionState; owner: string; input_path: string;
+  result_path: string | null; output_path: string | null; output_bytes: number;
+  complete: boolean; background: boolean; parent_id: string | null;
+  stop_cause: "human_cancellation" | "parent_foreground_cancellation" | "reload_quiescence" | "owner_crash" | null;
+  process_exit?: {code: number | null; signal: number | null; timed_out: boolean};
+  progress?: {value: Record<string, unknown>; checkpoint: boolean; sequence: number};
+}
+export interface ExecutionPage {
+  output: string; title: string | null; metadata: unknown;
+  images: {media_type: string; data: string; label: string | null}[];
+  resources: {uri: string; media_type: string | null; data: string}[];
+  source: {kind: string; [key: string]: unknown}; is_error: boolean;
+}
+export type ExecutionRequest =
+  | {action: "list"; all_sessions?: boolean; after?: string | null; limit?: number | null}
+  | {action: "inspect" | "stop" | "background"; run_id: string}
+  | {action: "read"; run_id: string; content: "input" | "output"; read_point?: string | null; output_size?: OutputSize | null};
+export type ExecutionResponse =
+  | {kind: "list"; runs: ExecutionRun[]; next: string | null}
+  | {kind: "status"; run: ExecutionRun}
+  | {kind: "control"; run_id: string; accepted: boolean; state: ExecutionState}
+  | {kind: "content"; run_id: string; page: ExecutionPage};
 
 export type PermissionDecision = "allow" | "allow_always" | "deny";
 
@@ -99,6 +126,7 @@ export type WorkflowPromptRequest =
   | { kind: "structured_correction"; schema: string; error_lines: string; previous_response: string };
 
 export type ApiRequest =
+  | {req: "execution"; session_id: string; request: ExecutionRequest}
   | { req: "hello"; min_version: number; max_version: number; client: string }
   | { req: "list_sessions"; include_archived?: boolean }
   | { req: "archive_session"; session_id: string }
@@ -151,6 +179,7 @@ export type ApiRequest =
   | { req: "ping" };
 
 export type ApiEvent =
+  | {ev: "execution"; session_id: string; response: ExecutionResponse}
   | { ev: "workflow_prompt_rendered"; session_id: string; content: string }
   | { ev: "hello_ok"; version: number; server: string; capabilities?: string[] }
   | { ev: "ok" }
@@ -289,6 +318,7 @@ export type ServerFrame = { v: number; reply_to?: number } & UnknownApiEvent;
 
 /** Every event tag the SDK knows about, for drift checks and routing. */
 export const KNOWN_EVENT_KINDS = [
+  "execution",
   "hello_ok",
   "ok",
   "error",
@@ -327,6 +357,7 @@ export const KNOWN_EVENT_KINDS = [
 
 /** Every request tag the SDK can send. */
 export const KNOWN_REQUEST_KINDS = [
+  "execution",
   "hello",
   "list_sessions",
   "archive_session",

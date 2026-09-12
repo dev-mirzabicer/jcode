@@ -25,6 +25,9 @@ mod diagnostics;
 mod errors;
 mod launch;
 mod structured;
+pub use jcode_harness_api::{
+    ExecutionContent, ExecutionProgress, ExecutionRequest, ExecutionResponse, RunRecord,
+};
 
 #[cfg(test)]
 #[path = "sdk_tests/parity.rs"]

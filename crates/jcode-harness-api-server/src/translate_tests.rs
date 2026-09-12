@@ -1,5 +1,54 @@
 use super::*;
 
+#[test]
+fn execution_control_preserves_attachment_and_exact_response_correlation() {
+    let request = json!({"req":"execution","id":500,"session_id":"s1","request":{"action":"list","limit":10}});
+    let mut empty = BridgeState::default();
+    assert!(matches!(
+        only_reply_event(empty.api_request_to_legacy(&request)),
+        ApiEvent::Error {
+            code: ErrorCode::UnknownSession,
+            ..
+        }
+    ));
+    let mut state = state_with_session();
+    let mut wrong = request.clone();
+    wrong["session_id"] = json!("another");
+    assert!(matches!(
+        only_reply_event(state.api_request_to_legacy(&wrong)),
+        ApiEvent::Error {
+            code: ErrorCode::UnknownSession,
+            ..
+        }
+    ));
+    let outbound = state.api_request_to_legacy(&request);
+    let Outbound::Legacy(legacy) = &outbound[0] else {
+        panic!()
+    };
+    assert_eq!(legacy["type"], "execution");
+    state.session_id = Some("s2".into());
+    let event = json!({"type":"execution_response","id":legacy["id"],"response":{"kind":"list","runs":[],"next":null}});
+    let replies = state.legacy_event_to_api(&event);
+    assert_eq!(replies.len(), 1);
+    assert_eq!(replies[0].reply_to, Some(500));
+    assert!(
+        matches!(&replies[0].event,ApiEvent::Execution{session_id,response:jcode_harness_api::ExecutionResponse::List{runs,..}} if session_id=="s1" && runs.is_empty())
+    );
+    assert!(
+        state.legacy_event_to_api(&event).is_empty(),
+        "Duplicate replies cannot satisfy another request"
+    );
+    let invalid = json!({"req":"execution","id":501,"session_id":"s1","request":{"action":"stop","run_id":"test","force":true}});
+    state.session_id = Some("s1".into());
+    assert!(matches!(
+        only_reply_event(state.api_request_to_legacy(&invalid)),
+        ApiEvent::Error {
+            code: ErrorCode::InvalidRequest,
+            ..
+        }
+    ));
+}
+
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};

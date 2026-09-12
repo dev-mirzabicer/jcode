@@ -3693,6 +3693,7 @@ name = "jcode-harness-api"
 version = "0.1.0"
 dependencies = [
  "jcode-task-types",
+ "jcode-tool-types",
  "serde",
  "serde_json",
 ]
@@ -3839,6 +3840,7 @@ dependencies = [
  "jcode-session-types",
  "jcode-side-panel-types",
  "jcode-task-types",
+ "jcode-tool-types",
  "rand 0.9.3",
  "serde",
  "serde_json",
@@ -4355,6 +4357,7 @@ dependencies = [
 name = "jcode-tool-types"
 version = "0.1.0"
 dependencies = [
+ "jcode-background-types",
  "serde",
  "serde_json",
 ]

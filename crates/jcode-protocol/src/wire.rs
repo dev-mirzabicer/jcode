@@ -150,6 +150,13 @@ pub enum Request {
     #[serde(rename = "get_agent_catalog")]
     GetAgentCatalog { id: u64 },
 
+    /// Shared execution metadata/control, independent of the busy Agent lock.
+    #[serde(rename = "execution")]
+    Execution {
+        id: u64,
+        request: jcode_tool_types::execution::ExecutionRequest,
+    },
+
     /// Inspect exact current profile state. Complete prompt and skill text are
     /// returned only on this explicit request, not in ordinary History.
     #[serde(rename = "get_agent_status")]
@@ -1113,6 +1120,12 @@ pub enum ServerEvent {
     /// Tool call ended, now executing
     #[serde(rename = "tool_exec")]
     ToolExec { id: String, name: String },
+
+    #[serde(rename = "execution_response")]
+    ExecutionResponse {
+        id: u64,
+        response: jcode_tool_types::execution::ExecutionResponse,
+    },
 
     /// Tool execution completed
     #[serde(rename = "tool_done")]

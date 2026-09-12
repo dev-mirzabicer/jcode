@@ -43,30 +43,7 @@ impl Invocation {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RunRecord {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub process_exit: Option<jcode_tool_types::ProcessExit>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub progress: Option<super::ExecutionProgress>,
-    pub id: String,
-    pub session_id: String,
-    pub message_id: String,
-    pub tool: String,
-    pub state: RunState,
-    pub owner: String,
-    pub input_path: PathBuf,
-    pub result_path: Option<PathBuf>,
-    pub output_path: Option<PathBuf>,
-    pub output_bytes: u64,
-    pub complete: bool,
-    #[serde(default)]
-    pub background: bool,
-    #[serde(default)]
-    pub stop_cause: Option<jcode_tool_types::StopCause>,
-    #[serde(default)]
-    pub parent_id: Option<String>,
-}
+pub use jcode_tool_types::execution::RunRecord;
 
 pub enum PreparedInvocation {
     New(RunRecord),
@@ -294,6 +271,27 @@ impl ExecutionStore {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    pub fn list_all(&self, after: Option<&str>, limit: u32) -> Result<Vec<RunRecord>> {
+        ensure!(
+            (1..=1000).contains(&limit),
+            "Metadata page limit must be 1 through 1000"
+        );
+        let connection = self.connection()?;
+        let mut statement =
+            connection.prepare("SELECT id FROM runs WHERE id>?1 ORDER BY id LIMIT ?2")?;
+        let ids = statement
+            .query_map(params![after.unwrap_or(""), limit], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        ids.into_iter()
+            .map(|id| {
+                query_record(&connection, &id)?
+                    .context("Invocation disappeared during metadata read")
+            })
+            .collect()
     }
 
     pub fn prepare(&self, invocation: &Invocation, owner: &str) -> Result<PreparedInvocation> {

@@ -1235,6 +1235,107 @@ async fn repeated_harness_creation_is_fresh_and_failure_preserves_the_attached_s
         })
         .unwrap();
     let first_before = Session::load(&first_id).unwrap();
+    {
+        use jcode_tool_core::OutputStream;
+        struct InspectionWaiter(std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>);
+        #[async_trait]
+        impl crate::tool::Tool for InspectionWaiter {
+            fn name(&self) -> &str {
+                "inspection_waiter"
+            }
+            fn description(&self) -> &str {
+                "Synthetic execution inspection fixture"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type":"object","properties":{}})
+            }
+            async fn execute(
+                &self,
+                _: serde_json::Value,
+                ctx: crate::tool::ToolContext,
+            ) -> anyhow::Result<crate::tool::ToolOutput> {
+                ctx.invocation
+                    .capture
+                    .as_ref()
+                    .unwrap()
+                    .write(OutputStream::Stdout, b"LIVE_PREFIX")?;
+                if let Some(sender) = self.0.lock().unwrap().take() {
+                    let _ = sender.send(());
+                }
+                std::future::pending::<()>().await;
+                unreachable!()
+            }
+        }
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let registry = Registry::empty();
+        registry
+            .register(
+                "inspection_waiter".into(),
+                Arc::new(InspectionWaiter(std::sync::Mutex::new(Some(started_tx)))),
+            )
+            .await;
+        let ctx = crate::tool::ToolContext {
+            session_id: first_id.clone(),
+            message_id: crate::id::new_id("inspection"),
+            tool_call_id: "call".into(),
+            working_dir: Some(first_project.path().into()),
+            stdin_request_tx: None,
+            graceful_shutdown_signal: None,
+            execution_mode: crate::tool::ToolExecutionMode::Direct,
+            invocation: Default::default(),
+        };
+        let run_id = crate::execution::invocation_id(&ctx);
+        let work =
+            jcode_provider_core::request_lifetime::RequestSubtask::new(tokio::spawn(async move {
+                registry
+                    .execute("inspection_waiter", serde_json::json!({}), ctx)
+                    .await
+            }));
+        started_rx.await.unwrap();
+        let attached = sessions.read().await.get(&first_id).unwrap().clone();
+        let busy = attached.lock().await;
+        for (id, request) in [
+            (700, serde_json::json!({"action":"inspect","run_id":run_id})),
+            (
+                701,
+                serde_json::json!({"action":"read","run_id":run_id,"content":"output"}),
+            ),
+            (702, serde_json::json!({"action":"stop","run_id":run_id})),
+        ] {
+            let events = tokio::time::timeout(
+                Duration::from_secs(3),
+                exchange(
+                    &mut read,
+                    &mut write,
+                    serde_json::json!({"type":"execution","id":id,"request":request}),
+                ),
+            )
+            .await
+            .expect("Execution control must not wait for the busy Agent");
+            assert!(events.iter().any(|event|matches!(event,ServerEvent::ExecutionResponse{id:response_id,..} if *response_id==id)),"Missing execution reply: {events:?}");
+            if id == 701 {
+                assert!(events.iter().any(|event|matches!(event,ServerEvent::ExecutionResponse{response:jcode_tool_types::execution::ExecutionResponse::Content{page,..},..} if page.output.contains("LIVE_PREFIX"))));
+            }
+        }
+        drop(busy);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(3), work.finish())
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+        let store =
+            crate::execution::ExecutionStore::open(&crate::storage::jcode_dir().unwrap()).unwrap();
+        assert_eq!(
+            store.inspect(&run_id).unwrap().unwrap().state,
+            crate::execution::RunState::Cancelled
+        );
+        assert_eq!(
+            serde_json::to_value(Session::load(&first_id).unwrap().messages).unwrap(),
+            serde_json::to_value(&first_before.messages).unwrap()
+        );
+    }
     let global = crate::instruction::InstructionRepositoryService::new()
         .global_repository()
         .unwrap();

@@ -11,6 +11,32 @@ import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
 
+test("execution controls require capability before sending and preserve typed replies", async () => {
+  let sent = 0;
+  const old = await startMockHarness({ onRequest() { sent += 1; } });
+  const oldClient = await JcodeClient.connect({ socketPath: old.socketPath });
+  try {
+    await assert.rejects(() => oldClient.execution("s1", { action: "list" }), (error: unknown) => {
+      assert.ok(error instanceof HarnessError);
+      assert.equal(error.code, "unsupported_capability");
+      return true;
+    });
+    assert.equal(sent, 0);
+  } finally { oldClient.close(); await old.close(); }
+  const server = await startMockHarness({
+    capabilities: ["sessions", "shared_execution_v1"],
+    onRequest(request, send) {
+      assert.equal(request.req, "execution");
+      assert.equal(request.session_id, "s1");
+      assert.deepEqual(request.request, { action: "list", limit: 10 });
+      send({ v: 1, reply_to: request.id, ev: "execution", session_id: "s1", response: { kind: "list", runs: [], next: null } });
+    },
+  });
+  const client = await JcodeClient.connect({ socketPath: server.socketPath });
+  try { assert.deepEqual(await client.execution("s1", { action: "list", limit: 10 }), { kind: "list", runs: [], next: null }); }
+  finally { client.close(); await server.close(); }
+});
+
 async function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {

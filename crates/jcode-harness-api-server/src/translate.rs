@@ -21,6 +21,7 @@ const PEEK_LIMIT: u64 = 12;
 /// `peek_session` and `list_sessions` are deliberately absent: they are served
 /// from stored records precisely so a client can look around before attaching.
 const REQUIRES_ATTACH: &[&str] = &[
+    "execution",
     "send_message",
     "cancel",
     "soft_interrupt",
@@ -150,6 +151,9 @@ enum SimpleKind {
     Agents,
     AgentStatus,
     WorkflowPrompt,
+    Execution {
+        session_id: String,
+    },
     Credential {
         provider: String,
         configured: bool,
@@ -540,6 +544,33 @@ impl BridgeState {
                     "id": id,
                     "include_instructions": request["include_instructions"].as_bool().unwrap_or(false),
                 }))]
+            }
+            "execution" => {
+                let Some(session_id) = self.session_id.clone() else {
+                    return Self::error_reply(
+                        api_id,
+                        ErrorCode::UnknownSession,
+                        "Execution inspection requires a completed attachment",
+                    );
+                };
+                let request = match serde_json::from_value::<jcode_harness_api::ExecutionRequest>(
+                    request["request"].clone(),
+                ) {
+                    Ok(request) => request,
+                    Err(error) => {
+                        return Self::error_reply(
+                            api_id,
+                            ErrorCode::InvalidRequest,
+                            &format!("Invalid execution request: {error}"),
+                        );
+                    }
+                };
+                let id = self.legacy_id();
+                self.pending_simple
+                    .push((id, api_id, SimpleKind::Execution { session_id }));
+                vec![Outbound::Legacy(
+                    json!({"type":"execution","id":id,"request":request}),
+                )]
             }
             // Answered from the stored record rather than the daemon: the
             // legacy protocol can only speak about the attached session, and
@@ -1255,6 +1286,36 @@ impl BridgeState {
                         active_skill: event["active_skill"].as_str().map(str::to_string),
                     },
                 )]
+            }
+            "execution_response" => {
+                let id = event["id"].as_u64().unwrap_or(0);
+                let Some(index) = self.pending_simple.iter().position(|(legacy, _, kind)| {
+                    *legacy == id && matches!(kind, SimpleKind::Execution { .. })
+                }) else {
+                    return vec![];
+                };
+                let (_, api_id, kind) = self.pending_simple.remove(index);
+                let SimpleKind::Execution { session_id } = kind else {
+                    unreachable!()
+                };
+                match serde_json::from_value::<jcode_harness_api::ExecutionResponse>(
+                    event["response"].clone(),
+                ) {
+                    Ok(response) => vec![ServerFrame::reply(
+                        api_id,
+                        ApiEvent::Execution {
+                            session_id,
+                            response,
+                        },
+                    )],
+                    Err(error) => vec![ServerFrame::reply(
+                        api_id,
+                        ApiEvent::Error {
+                            code: ErrorCode::Internal,
+                            message: format!("Invalid execution response: {error}"),
+                        },
+                    )],
+                }
             }
             "reasoning_effort_changed" => {
                 let id = event["id"].as_u64().unwrap_or(0);

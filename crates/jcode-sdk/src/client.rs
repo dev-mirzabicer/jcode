@@ -779,6 +779,27 @@ impl JcodeClient {
         }
     }
 
+    pub fn execution(
+        &self,
+        session_id: &str,
+        request: jcode_harness_api::ExecutionRequest,
+    ) -> Result<jcode_harness_api::ExecutionResponse> {
+        self.require_capability(jcode_harness_api::EXECUTION_CAPABILITY)?;
+        match self
+            .request_ok(ApiRequest::Execution {
+                session_id: session_id.into(),
+                request,
+            })?
+            .event
+        {
+            ApiEvent::Execution {
+                session_id: received,
+                response,
+            } if received == session_id => Ok(response),
+            other => Err(unexpected("execution", &other)),
+        }
+    }
+
     pub fn set_agent(&self, session_id: &str, agent: &str, replace: bool) -> Result<AgentStatus> {
         self.require_capability("agent_profile_controls")?;
         match self

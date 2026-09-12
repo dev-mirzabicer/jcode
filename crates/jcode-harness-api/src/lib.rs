@@ -25,6 +25,10 @@ pub use events::*;
 pub use jcode_task_types::{
     CommandWorkflow, ReviewWorkflowKind, WorkflowLoopMode, WorkflowPromptRequest, WorkflowTodo,
 };
+pub use jcode_tool_types::execution::{
+    CAPABILITY as EXECUTION_CAPABILITY, ExecutionContent, ExecutionProgress, ExecutionRequest,
+    ExecutionResponse, RunRecord,
+};
 pub use requests::*;
 pub use sockets::{api_socket_path, legacy_socket_path, runtime_dir};
 
@@ -39,7 +43,7 @@ mod capability_coverage_tests;
 /// Protocol major version. Breaking changes only.
 pub const API_VERSION_MAJOR: u32 = 1;
 /// Protocol minor version. Additive changes.
-pub const API_VERSION_MINOR: u32 = 1;
+pub const API_VERSION_MINOR: u32 = 2;
 
 /// Envelope wrapping every client-to-server frame.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -81,6 +81,12 @@ pub enum ApiRequest {
     /// Fetch conversation history.
     GetHistory { session_id: String },
 
+    /// Requires shared_execution_v1. Paths in replies are server-owned.
+    Execution {
+        session_id: String,
+        request: jcode_tool_types::execution::ExecutionRequest,
+    },
+
     /// List valid primary agents for the attached session's project.
     ListAgents { session_id: String },
 

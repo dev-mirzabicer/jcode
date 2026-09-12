@@ -200,6 +200,45 @@ still fails explicitly rather than claiming a retained receipt exists.
 Tests verify exact rejected input, retained failure output, zero producer effects,
 and continued global Swarm retirement, including aliases and batch members.
 
+## Client and Harness execution API
+
+Harness protocol v1.2 advertises `shared_execution_v1`. Rust SDK
+`client.execution(session_id, request)` and TypeScript
+`client.execution(sessionId, request)` require that capability before sending.
+The internal daemon request is `execution { id, request }`; its correlated reply
+is `execution_response { id, response }`. The bridge retains the original request
+session even if the connection attaches elsewhere before the reply arrives.
+
+Supported request actions:
+
+- `list`: current-session metadata by default, or explicit `all_sessions: true`.
+  `limit` defaults to 50 and accepts 1–200. `next` is passed as `after` to fetch the
+  next stable ID-ordered page. Listing never loads input/output bodies.
+- `inspect { run_id }`: the canonical metadata snapshot, including current state,
+  progress, stop cause, ownership and available output facts.
+- `stop { run_id }` and `background { run_id }`: route to the verified live owner.
+  `accepted` is an acknowledgement, not proof of terminal quiescence. Inspect the
+  state afterward. A control never starts or repeats the producer.
+- `read { run_id, content: input|output, read_point?, output_size? }`: validates the
+  owned input or output source and pages text using the common reader. Input
+  inspection validates the complete original invocation before paging. Output
+  reads use committed/hash-verified managed prefixes. Use the page's exact next
+  point to continue. Missing-source and stale-point failures remain explicit.
+
+Paths returned in metadata describe server-owned storage. Remote clients retrieve
+text through the read operation rather than assuming those paths exist locally.
+This API does not install a monitor UI, create another execution owner, or expose
+raw runtime control credentials. It requires a completed authenticated session
+attachment. Unknown operation fields reject rather than silently enable unsupported
+force-stop or other semantics.
+
+Tests exercise metadata paging with unavailable bodies, input/output retrieval,
+SDK rejection before transport on old capability sets, duplicate/cross-session
+reply correlation, and the actual daemon inspecting, reading and stopping a live
+run while its attached Agent mutex is held. TypeScript schema/client tests and
+strict affected Rust library/test lint pass. This is not a claim of native
+Windows process-control parity or final WP-02 activation.
+
 ## Runtime control
 
 Every executing runtime registers a private, versioned control endpoint. The
