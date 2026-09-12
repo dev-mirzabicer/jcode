@@ -622,6 +622,64 @@ mod output_config_tests {
     use jcode_tool_types::presentation::{OutputSize, OutputSizeAlias};
 
     #[test]
+    #[ignore = "requires explicit private before/candidate configuration files"]
+    fn prepared_output_cutover_preserves_other_configuration() -> anyhow::Result<()> {
+        let directory =
+            std::path::PathBuf::from(std::env::var_os("JCODE_OUTPUT_CONFIG_FIXTURE").ok_or_else(
+                || anyhow::anyhow!("Provide the private configuration fixture directory"),
+            )?);
+        let before = std::fs::read_to_string(directory.join("before.toml"))?;
+        let candidate = std::fs::read_to_string(directory.join("candidate.toml"))?;
+        // Do not format parse errors or whole values: these files can contain secrets.
+        let old: Config = toml::from_str(&before).map_err(|_| {
+            anyhow::anyhow!("Baseline Config parsing failed; inspect the private fixture")
+        })?;
+        let new: Config = toml::from_str(&candidate).map_err(|_| {
+            anyhow::anyhow!("Candidate Config parsing failed; inspect the private fixture")
+        })?;
+        let mut old_value = serde_json::to_value(&old)?;
+        let mut new_value = serde_json::to_value(&new)?;
+        old_value.as_object_mut().unwrap().remove("output");
+        new_value.as_object_mut().unwrap().remove("output");
+        anyhow::ensure!(
+            old_value == new_value,
+            "Cutover changes unrelated parsed configuration"
+        );
+        anyhow::ensure!(
+            !new.features.memory && !new.features.swarm,
+            "Protected feature availability changed"
+        );
+        anyhow::ensure!(
+            new.output.target("read", None).get() == 40_000
+                && new.output.target("bash", None).get() == 20_000
+                && new.output.target("other", None).get() == 20_000,
+            "Cutover presentation defaults differ"
+        );
+        let archive = new
+            .output
+            .storage
+            .archive
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Missing configured archive"))?;
+        anyhow::ensure!(
+            archive.mount.is_absolute()
+                && !archive.volume_uuid.is_empty()
+                && !archive.directory.as_os_str().is_empty()
+                && archive
+                    .directory
+                    .components()
+                    .all(|part| matches!(part, std::path::Component::Normal(_))),
+            "Invalid archive identity or directory"
+        );
+        anyhow::ensure!(
+            new.output.storage.local_reserve_bytes == 1_073_741_824
+                && new.output.storage.archive_reserve_bytes == 1_073_741_824,
+            "Unexpected receipt reserve"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn output_configuration_normalizes_tool_aliases_and_rejects_conflicts() {
         let config: OutputConfig = serde_json::from_value(
             serde_json::json!({"per_tool":{"functions.Read":"small","shell_exec":1234}}),
