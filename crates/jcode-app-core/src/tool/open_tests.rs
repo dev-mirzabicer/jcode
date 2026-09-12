@@ -13,6 +13,23 @@ fn make_ctx() -> ToolContext {
     }
 }
 
+#[tokio::test]
+async fn pre_cancelled_opener_does_not_dispatch_a_user_application() {
+    let mut ctx = make_ctx();
+    let stop = jcode_agent_runtime::InterruptSignal::new();
+    stop.fire();
+    ctx.graceful_shutdown_signal = Some(stop);
+    let tool = OpenTool::new();
+    let input = json!({"action":"open","target":"https://example.invalid/owned-fixture"});
+    assert!(
+        tool.execution_policy(&input, &ctx)
+            .unwrap()
+            .cooperative_stop
+    );
+    let error = tool.execute(input, ctx).await.unwrap_err();
+    assert!(error.to_string().contains("stopped before launch"));
+}
+
 #[test]
 fn parse_target_accepts_supported_schemes() {
     let parsed = parse_target("https://example.com/docs").unwrap();

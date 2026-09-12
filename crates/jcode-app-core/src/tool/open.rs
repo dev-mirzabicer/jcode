@@ -92,6 +92,18 @@ struct OpenOutcome {
 
 #[async_trait]
 impl Tool for OpenTool {
+    fn execution_policy(
+        &self,
+        _: &Value,
+        _: &ToolContext,
+    ) -> Result<jcode_tool_core::ExecutionPolicy> {
+        // Launching the user's viewer is the operation, not an owned long-lived
+        // command. Keep its bounded acknowledgement, never roll back the app.
+        Ok(jcode_tool_core::ExecutionPolicy {
+            cooperative_stop: true,
+            ..Default::default()
+        })
+    }
     fn name(&self) -> &str {
         "open"
     }
@@ -120,6 +132,12 @@ impl Tool for OpenTool {
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
+        anyhow::ensure!(
+            !ctx.graceful_shutdown_signal
+                .as_ref()
+                .is_some_and(|stop| stop.is_set()),
+            "Open stopped before launch; no user application was started"
+        );
         if input.get("mode").is_some() {
             anyhow::bail!("open.mode was removed. Use action='open' or action='reveal'.");
         }
@@ -140,6 +158,12 @@ impl Tool for OpenTool {
             }
         };
 
+        anyhow::ensure!(
+            !ctx.graceful_shutdown_signal
+                .as_ref()
+                .is_some_and(|stop| stop.is_set()),
+            "Open stopped before launch; no user application was started"
+        );
         let outcome = match action {
             OpenAction::Open => perform_open(&target).await,
             OpenAction::Reveal => perform_reveal(&target).await,
