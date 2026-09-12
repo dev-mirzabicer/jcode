@@ -152,6 +152,26 @@ same captured bytes rather than rereading a possibly changed file. Redirected
 stdout does not emit terminal image escapes. Hosted-provider vision budgets and
 unsupported formats remain explicit provider-boundary verification work.
 
+## Output configuration
+
+The existing configuration owner accepts `[output]` with optional `default_size`,
+`[output.per_tool]` entries, and `[output.storage]` placement settings. Presentation
+uses per-call `output_size`, then a per-tool entry, then `default_size`, then the
+shipped read/general targets (40,000/20,000 Unicode scalar characters). Size aliases
+are `very_small`, `small`, `medium`, `large`, and `very_large`; a positive integer
+is also valid. These are presentation targets, not acquisition or retention caps.
+
+Per-tool configuration keys normalize through the same canonical tool aliases as
+execution. Multiple keys resolving to one tool are rejected rather than resolved
+by map order, even if one uses a provider namespace or alias. Empty or whitespace-
+padded keys fail decoding. Dynamic tool names remain possible without requiring
+that an external tool be connected when configuration is loaded.
+
+Storage reserves remain configurable byte values. Archive selection is explicit
+and bound to a mount plus volume identity and dedicated relative directory. Source
+defaults do not imply that Mirza's live serialized settings have been changed;
+configuration cutover and activated-runtime evidence are separate acceptance steps.
+
 ## Remote materialization of retained parts
 
 Harness v1.3 adds `shared_execution_parts_v1`. Rust and TypeScript SDKs require

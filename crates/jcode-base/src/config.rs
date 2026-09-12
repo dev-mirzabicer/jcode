@@ -561,8 +561,34 @@ pub struct Config {
 #[serde(default, deny_unknown_fields)]
 pub struct OutputConfig {
     pub default_size: Option<jcode_tool_types::presentation::OutputSize>,
+    #[serde(deserialize_with = "deserialize_output_tool_sizes")]
     pub per_tool: BTreeMap<String, jcode_tool_types::presentation::OutputSize>,
     pub storage: crate::execution::StorageConfig,
+}
+
+fn deserialize_output_tool_sizes<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<String, jcode_tool_types::presentation::OutputSize>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let supplied =
+        BTreeMap::<String, jcode_tool_types::presentation::OutputSize>::deserialize(deserializer)?;
+    let mut normalized = BTreeMap::new();
+    for (name, size) in supplied {
+        if name.is_empty() || name.trim() != name {
+            return Err(serde::de::Error::custom(
+                "Output tool names must be nonempty and have no surrounding whitespace",
+            ));
+        }
+        let canonical = jcode_tool_types::resolve_tool_name(&name).to_string();
+        if normalized.insert(canonical.clone(), size).is_some() {
+            return Err(serde::de::Error::custom(format!(
+                "Multiple output settings refer to tool {canonical}; use one canonical entry"
+            )));
+        }
+    }
+    Ok(normalized)
 }
 
 impl OutputConfig {
@@ -594,6 +620,30 @@ impl OutputConfig {
 mod output_config_tests {
     use super::*;
     use jcode_tool_types::presentation::{OutputSize, OutputSizeAlias};
+
+    #[test]
+    fn output_configuration_normalizes_tool_aliases_and_rejects_conflicts() {
+        let config: OutputConfig = serde_json::from_value(
+            serde_json::json!({"per_tool":{"functions.Read":"small","shell_exec":1234}}),
+        )
+        .unwrap();
+        assert_eq!(config.target("read", None).get(), 20_000);
+        assert_eq!(config.target("bash", None).get(), 1234);
+        assert!(
+            serde_json::from_value::<OutputConfig>(
+                serde_json::json!({"per_tool":{"Read":"small","read":"large"}})
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<OutputConfig>(
+                serde_json::json!({"per_tool":{" read":"small"}})
+            )
+            .is_err()
+        );
+        let empty: OutputConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(empty.target("read", None).get(), 40_000);
+    }
 
     #[test]
     fn shared_presentation_precedence_and_aliases() {
