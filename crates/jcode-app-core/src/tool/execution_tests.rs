@@ -1,6 +1,40 @@
 use super::*;
 
 #[tokio::test]
+async fn rejected_tool_admission_retains_scoped_input_and_failure_without_producer_effects()
+-> anyhow::Result<()> {
+    let (registry, tool, _started) = fixture("must not execute".into(), false, false).await;
+    for (name, input) in [
+        (
+            "execution_fixture",
+            serde_json::json!({"output_size":"invalid-size","intent":"fixture"}),
+        ),
+        (
+            "unknown_receipt_fixture",
+            serde_json::json!({"intent":"fixture","value":"retained input"}),
+        ),
+        (
+            "swarm",
+            serde_json::json!({"action":"spawn","intent":"must stay unavailable"}),
+        ),
+    ] {
+        let ctx = context();
+        let id = crate::execution::invocation_id(&ctx);
+        let result = registry.execute(name, input.clone(), ctx).await;
+        assert!(result.is_err());
+        let store = crate::execution::ExecutionStore::open(&crate::storage::jcode_dir()?)?;
+        let record = store
+            .inspect(&id)?
+            .expect("Rejected admission still needs a durable invocation receipt");
+        assert_eq!(record.state, crate::execution::RunState::Failed);
+        assert_eq!(store.invocation_input(&id)?.input, input);
+        assert!(!std::fs::read_to_string(record.output_path.unwrap())?.is_empty());
+        assert_eq!(tool.count.load(Ordering::SeqCst), 0);
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn prior_provider_rejection_is_retained_and_bound_to_replay_identity() -> anyhow::Result<()> {
     let (registry, tool, _started) = fixture("host result".into(), false, false).await;
     let mut ctx = context();

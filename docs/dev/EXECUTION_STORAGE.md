@@ -152,6 +152,19 @@ same captured bytes rather than rereading a possibly changed file. Redirected
 stdout does not emit terminal image escapes. Hosted-provider vision budgets and
 unsupported formats remain explicit provider-boundary verification work.
 
+## Rejected tool admission
+
+Registry availability, session-policy, unknown-tool, input-binding and execution-
+policy failures are retained as scoped foreground failure receipts. They use the
+same input/output store and context delivery guard as other outcomes, but do not
+run the rejected producer, its hooks, a source read or a background launch. Replays
+retain the original invocation identity rather than executing a newly permitted
+operation under an old receipt. Missing invocation identity or unusable storage
+still fails explicitly rather than claiming a retained receipt exists.
+
+Tests verify exact rejected input, retained failure output, zero producer effects,
+and continued global Swarm retirement, including aliases and batch members.
+
 ## Runtime control
 
 Every executing runtime registers a private, versioned control endpoint. The

@@ -88,13 +88,24 @@ async fn swarm_retirement_registry_direct_alias_batch_and_cached_definitions() {
             )
             .await
             .unwrap_err();
-        assert_eq!(error.to_string(), crate::config::SWARM_UNAVAILABLE);
+        let captured = error
+            .downcast_ref::<crate::execution::CapturedToolError>()
+            .expect("Registry rejection must be retained");
+        let jcode_tool_types::OutputSource::Retained(reference) = &captured.output.source else {
+            panic!("Retained rejection reference");
+        };
+        assert_eq!(
+            std::fs::read_to_string(&reference.path).unwrap(),
+            format!("\n[Execution error]\n{}", crate::config::SWARM_UNAVAILABLE)
+        );
     }
     let error = communicate::CommunicateTool::new()
         .execute(serde_json::json!({"action":"run_plan"}), ctx.clone())
         .await
         .unwrap_err();
     assert_eq!(error.to_string(), crate::config::SWARM_UNAVAILABLE);
+    let mut ctx = ctx;
+    ctx.tool_call_id = "batch-rejection".into();
     let output = registry
         .execute(
             "batch",

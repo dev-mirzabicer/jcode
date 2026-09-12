@@ -784,65 +784,81 @@ impl Registry {
         input: Value,
         mut ctx: ToolContext,
     ) -> Result<ToolOutput> {
-        if !tool_is_globally_available(name) {
-            anyhow::bail!(crate::config::SWARM_UNAVAILABLE);
-        }
+        let resolved_name = Self::resolve_tool_name(name);
+        let original_input = input.clone();
         // Mark this call in-flight for the whole execution so the missing
         // tool-output repair paths do not mistake a slow tool for an
         // interrupted one and inject a duplicate synthetic result. See
         // `tool::inflight`.
         let _in_flight =
             inflight::mark_tool_in_flight(&crate::execution::invocation(&ctx, name, Value::Null));
-        let tools = self.tools.read().await;
-        let resolved_name = Self::resolve_tool_name(name);
-        if let Some(policy) = session_tool_policy(&ctx.session_id) {
-            if let Some(allowed) = policy.allowed_tools.as_ref()
-                && !tool_name_is_allowed(allowed, resolved_name)
-            {
-                return Err(anyhow::anyhow!("Tool '{}' is not allowed", resolved_name));
+        let prepared: Result<_> = async {
+            if !tool_is_globally_available(name) {
+                anyhow::bail!(crate::config::SWARM_UNAVAILABLE);
             }
-            if tool_name_is_disabled(&policy.disabled_tools, resolved_name) {
-                return Err(anyhow::anyhow!("Tool '{}' is disabled", resolved_name));
-            }
-        }
-        let tool = match tools.get(resolved_name) {
-            Some(tool) => tool.clone(),
-            None => {
-                // List available tools so the model can recover instead of
-                // spiraling through hallucinated names like "ToolSearch" (#104).
-                let mut available: Vec<&str> = tools
-                    .keys()
-                    .map(|k| k.as_str())
-                    .filter(|name| tool_is_globally_available(name))
-                    .collect();
-                available.sort_unstable();
-                let suggestions = Self::closest_tool_names(name, &available);
-                let mut msg = format!("Unknown tool: {name}.");
-                if !suggestions.is_empty() {
-                    msg.push_str(&format!(" Did you mean: {}?", suggestions.join(", ")));
+            let tools = self.tools.read().await;
+            if let Some(policy) = session_tool_policy(&ctx.session_id) {
+                if let Some(allowed) = policy.allowed_tools.as_ref()
+                    && !tool_name_is_allowed(allowed, resolved_name)
+                {
+                    return Err(anyhow::anyhow!("Tool '{}' is not allowed", resolved_name));
                 }
-                msg.push_str(&format!(" Available tools: {}.", available.join(", ")));
-                return Err(anyhow::anyhow!(msg));
+                if tool_name_is_disabled(&policy.disabled_tools, resolved_name) {
+                    return Err(anyhow::anyhow!("Tool '{}' is disabled", resolved_name));
+                }
+            }
+            let tool = match tools.get(resolved_name) {
+                Some(tool) => tool.clone(),
+                None => {
+                    // List available tools so the model can recover instead of
+                    // spiraling through hallucinated names like "ToolSearch" (#104).
+                    let mut available: Vec<&str> = tools
+                        .keys()
+                        .map(|k| k.as_str())
+                        .filter(|name| tool_is_globally_available(name))
+                        .collect();
+                    available.sort_unstable();
+                    let suggestions = Self::closest_tool_names(name, &available);
+                    let mut msg = format!("Unknown tool: {name}.");
+                    if !suggestions.is_empty() {
+                        msg.push_str(&format!(" Did you mean: {}?", suggestions.join(", ")));
+                    }
+                    msg.push_str(&format!(" Available tools: {}.", available.join(", ")));
+                    return Err(anyhow::anyhow!(msg));
+                }
+            };
+
+            // Drop the lock before executing
+            drop(tools);
+            let bound = self.bound_tool(resolved_name, tool);
+            let (input, output_size) = bound.input.decode(input)?;
+            let tool = bound.tool;
+            let target = crate::config::config()
+                .output
+                .target(resolved_name, output_size);
+            ctx.invocation.output_target = Some(target);
+            ctx.invocation.policy = tool.execution_policy(&input, &ctx)?;
+            if let Some(timeout) = ctx.invocation.policy.foreground_timeout {
+                anyhow::ensure!(
+                    tokio::time::Instant::now().checked_add(timeout).is_some(),
+                    "Foreground timeout exceeds the platform clock range"
+                );
+            }
+
+            Ok((input, tool, target))
+        }
+        .await;
+        let (target, action) = match prepared {
+            Ok((input, tool, target)) => (target, Ok((input, tool))),
+            Err(error) => {
+                // Rejection is a foreground failure receipt, not a tool launch,
+                // source-file read, background acceptance or hook execution.
+                ctx.invocation.policy = Default::default();
+                let target = crate::config::config().output.target(resolved_name, None);
+                ctx.invocation.output_target = Some(target);
+                (target, Err(error))
             }
         };
-
-        // Drop the lock before executing
-        drop(tools);
-        let original_input = input.clone();
-        let bound = self.bound_tool(resolved_name, tool);
-        let (input, output_size) = bound.input.decode(input)?;
-        let tool = bound.tool;
-        let target = crate::config::config()
-            .output
-            .target(resolved_name, output_size);
-        ctx.invocation.output_target = Some(target);
-        ctx.invocation.policy = tool.execution_policy(&input, &ctx)?;
-        if let Some(timeout) = ctx.invocation.policy.foreground_timeout {
-            anyhow::ensure!(
-                tokio::time::Instant::now().checked_add(timeout).is_some(),
-                "Foreground timeout exceeds the platform clock range"
-            );
-        }
 
         let invocation = crate::execution::invocation(&ctx, resolved_name, original_input);
         let registry = self.clone_with_shared_context_runtime();
@@ -854,6 +870,7 @@ impl Registry {
             target,
             Box::new(move |ctx| {
                 Box::pin(async move {
+                    let (input, tool) = action?;
                     registry
                         .execute_bound(&requested, &canonical, input, tool, ctx)
                         .await
