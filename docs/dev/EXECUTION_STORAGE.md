@@ -152,6 +152,28 @@ same captured bytes rather than rereading a possibly changed file. Redirected
 stdout does not emit terminal image escapes. Hosted-provider vision budgets and
 unsupported formats remain explicit provider-boundary verification work.
 
+## Background summary and reload views
+
+The local TUI collects legacy in-process and durable managed background metadata
+in an off-render worker with at most one refresh in flight. Rendering reads a
+cached projection, not SQLite or output/status files. Replies are bound to the
+state-root namespace; stale replies cannot replace another namespace's view.
+Refresh failures retain explicitly last-known metadata and produce a human status
+notice. Metadata collection does not fetch output bodies or count as agent work.
+
+Reload recovery notes include managed execution IDs after manager recreation,
+including jobs with notifications disabled. The note describes unfinished
+records rather than pretending that a saved PID proves a live process. Actual
+status/control and owner-loss recovery retain their existing proof boundaries.
+Unreadable execution metadata produces explicit retrieval guidance rather than
+an invitation to repeat previously accepted work.
+
+Tests cover recreated managers with unavailable output bodies, exact session
+filtering, terminal removal, local asynchronous cache updates, stale-root reply
+rejection, failure visibility, and existing reload-directive behavior. Strict
+base/app-core/TUI lint passes. Final activated TUI frame verification remains part
+of the WP-02 integrated acceptance, not a claim made by these mechanism tests.
+
 ## Generic native helper process provenance
 
 Nongated native commands reserve a process launch receipt through their existing
@@ -216,8 +238,8 @@ failure, superseded state and terminal-receipt recovery. Forty selfdev tests and
 59 execution-store tests pass (one explicit native archive fixture is not run in
 that matrix), as do strict affected lint, both host checks and 48 TypeScript tests.
 These tests run synthetic commands, not a real source publication. Generic helper
-process-loss proof is covered above. Compact background summary/reload views and final native
-activation remain WP-02 reconciliation work. Unsupported non-Unix build-command
+process-loss proof and local summary/reload views are covered above. Final native
+activation remains WP-02 reconciliation work. Unsupported non-Unix build-command
 ownership fails explicitly before launching a process rather than using the old
 unmanaged command path; native platform parity is not claimed.
 

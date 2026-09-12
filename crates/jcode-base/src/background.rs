@@ -25,8 +25,8 @@ mod model;
 pub use model::{
     BackgroundCleanupResult, BackgroundTaskEventKind, BackgroundTaskEventRecord,
     BackgroundTaskInfo, BackgroundTaskWaitReason, BackgroundTaskWaitResult,
-    RunningBackgroundProgress, TaskResult, TaskStatusFile, format_progress_display,
-    format_progress_summary, render_progress_bar,
+    RunningBackgroundProgress, RunningBackgroundSnapshot, TaskResult, TaskStatusFile,
+    format_progress_display, format_progress_summary, render_progress_bar,
 };
 
 /// One identity per process image, shared by execution and background owners.
@@ -1621,22 +1621,65 @@ impl BackgroundTaskManager {
         )
     }
 
-    /// Best-effort synchronous lookup of detached tasks that are still running
-    /// for a specific session.
+    /// Blocking metadata collection for an off-render worker. Legacy in-process
+    /// tasks and durable managed work retain their original state owners.
+    pub fn running_snapshot_including_managed(
+        &self,
+        root: &std::path::Path,
+    ) -> Result<RunningBackgroundSnapshot> {
+        let (mut count, mut labels, mut progress) = self.running_snapshot();
+        if !root.join("execution/index.sqlite").exists() {
+            return Ok(RunningBackgroundSnapshot {
+                count,
+                labels,
+                progress,
+            });
+        }
+        let store = crate::execution::ExecutionStore::open(root)?;
+        for id in store.unfinished_background_deliveries()? {
+            let Some(record) = store.inspect(&id)? else {
+                continue;
+            };
+            if record.state.terminal() {
+                continue;
+            }
+            count += 1;
+            labels.push(record.tool.clone());
+            if let Some(value) = record.progress {
+                progress = Some(RunningBackgroundProgress {
+                    task_id: record.id,
+                    tool_name: record.tool.clone(),
+                    label: record.tool,
+                    detail: Some(format_progress_display(&value.value, 10)),
+                });
+            }
+        }
+        Ok(RunningBackgroundSnapshot {
+            count,
+            labels,
+            progress,
+        })
+    }
+
+    /// Synchronous metadata lookup of unfinished legacy/managed background
+    /// records for a session. This does not infer liveness from a reusable PID.
     ///
     /// This is primarily used during self-dev reload recovery, where the new
     /// process needs to remind the agent that a previous `bash` command was
     /// persisted into the background instead of being interrupted.
-    pub fn persisted_detached_running_tasks_for_session(
+    pub fn persisted_background_tasks_for_session(
         &self,
         session_id: &str,
-    ) -> Vec<TaskStatusFile> {
+    ) -> Result<Vec<TaskStatusFile>> {
         let mut matches = Vec::new();
-        let Ok(entries) = std::fs::read_dir(&self.output_dir) else {
-            return matches;
+        let entries = match std::fs::read_dir(&self.output_dir) {
+            Ok(entries) => Some(entries),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
         };
 
-        for entry in entries.flatten() {
+        for entry in entries.into_iter().flatten() {
+            let entry = entry?;
             let path = entry.path();
             if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
                 continue;
@@ -1656,17 +1699,26 @@ impl BackgroundTaskManager {
                 continue;
             }
 
-            let Some(pid) = status.pid else {
-                continue;
-            };
+            // This is an unfinished receipt, not proof from a reusable PID that
+            // an old process is live. Status/control owners verify liveness.
+            matches.push(status);
+        }
 
-            if crate::platform::is_process_running(pid) {
-                matches.push(status);
+        let root = crate::storage::jcode_dir()?;
+        if root.join("execution/index.sqlite").exists() {
+            let store = crate::execution::ExecutionStore::open(&root)?;
+            for id in store.unfinished_background_deliveries()? {
+                if let Some(status) = managed::projected(&store, &id)?
+                    && status.session_id == session_id
+                    && status.status == BackgroundTaskStatus::Running
+                {
+                    matches.push(status);
+                }
             }
         }
 
         matches.sort_by(|a, b| a.task_id.cmp(&b.task_id));
-        matches
+        Ok(matches)
     }
 }
 

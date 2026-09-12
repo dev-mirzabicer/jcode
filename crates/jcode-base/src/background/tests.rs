@@ -4,6 +4,76 @@ use anyhow::anyhow;
 use tempfile::tempdir;
 use tokio::time::{Duration, sleep};
 
+#[test]
+fn managed_snapshot_and_reload_records_survive_manager_recreation_without_body_reads() -> Result<()>
+{
+    use crate::execution::{Capture, ExecutionStore, Invocation, PreparedInvocation, RunState};
+    use jcode_tool_core::{OutputCapture, OutputStream};
+    let _lock = crate::storage::lock_test_env();
+    let root = tempdir()?;
+    struct Restore(Option<std::ffi::OsString>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            if let Some(old) = self.0.take() {
+                crate::env::set_var("JCODE_HOME", old)
+            } else {
+                crate::env::remove_var("JCODE_HOME")
+            }
+        }
+    }
+    let _restore = Restore(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", root.path());
+    let store = ExecutionStore::open(root.path())?;
+    let invocation = Invocation {
+        session_id: "snapshot-session".into(),
+        message_id: "message".into(),
+        call_path: vec!["call".into()],
+        tool: "snapshot-fixture".into(),
+        input: serde_json::json!({}),
+        working_dir: None,
+        received_result_digest: None,
+    };
+    let PreparedInvocation::New(record) = store.prepare(&invocation, "fixture")? else {
+        panic!()
+    };
+    store.start(&record.id, "fixture")?;
+    store.promote(&record.id, "fixture")?;
+    store.register_background_delivery(&record.id, false, false)?;
+    let capture = Capture::create(store.clone(), record.clone(), Default::default())?;
+    capture.write(OutputStream::Text, b"retained source")?;
+    let path = capture.reference()?.path;
+    let moved = path.with_extension("offline");
+    std::fs::rename(&path, &moved)?;
+    let manager = BackgroundTaskManager::with_output_dir(root.path().join("empty-legacy"));
+    let summary = manager.running_snapshot_including_managed(root.path())?;
+    assert_eq!(summary.count, 1);
+    assert_eq!(summary.labels, ["snapshot-fixture"]);
+    let records = manager.persisted_background_tasks_for_session("snapshot-session")?;
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].task_id, record.id);
+    assert!(
+        manager
+            .persisted_background_tasks_for_session("other")?
+            .is_empty()
+    );
+    std::fs::rename(&moved, &path)?;
+    let mut output = jcode_tool_types::ToolOutput::new("");
+    output.source = jcode_tool_types::OutputSource::Retained(capture.reference()?);
+    capture.seal(output, RunState::Completed)?;
+    assert_eq!(
+        manager
+            .running_snapshot_including_managed(root.path())?
+            .count,
+        0
+    );
+    assert!(
+        manager
+            .persisted_background_tasks_for_session("snapshot-session")?
+            .is_empty()
+    );
+    Ok(())
+}
+
 struct DroppedSignal(Option<tokio::sync::oneshot::Sender<()>>);
 
 impl Drop for DroppedSignal {

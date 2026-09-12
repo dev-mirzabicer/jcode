@@ -40,6 +40,11 @@ impl Drop for Prepared {
         acknowledge(self.wake.take(), false);
     }
 }
+struct SummaryResult {
+    root: std::path::PathBuf,
+    result: anyhow::Result<crate::background::RunningBackgroundSnapshot>,
+}
+
 pub(super) struct LocalDeliveryState {
     pending: HashSet<String>,
     ready: VecDeque<Prepared>,
@@ -47,6 +52,12 @@ pub(super) struct LocalDeliveryState {
     receiver: tokio::sync::mpsc::UnboundedReceiver<(String, anyhow::Result<Prepared>)>,
     next_scan: Instant,
     scanning: Arc<AtomicBool>,
+    summary: crate::background::RunningBackgroundSnapshot,
+    summary_root: Option<std::path::PathBuf>,
+    summary_receiver: Option<tokio::sync::oneshot::Receiver<SummaryResult>>,
+    next_summary: Instant,
+    summary_error: Option<String>,
+    summary_notice: Option<String>,
 }
 impl Default for LocalDeliveryState {
     fn default() -> Self {
@@ -58,10 +69,82 @@ impl Default for LocalDeliveryState {
             receiver,
             next_scan: Instant::now(),
             scanning: Arc::new(AtomicBool::new(false)),
+            summary: Default::default(),
+            summary_root: None,
+            summary_receiver: None,
+            next_summary: Instant::now(),
+            summary_error: None,
+            summary_notice: None,
         }
     }
 }
 impl LocalDeliveryState {
+    pub(super) fn background_snapshot(&self) -> crate::background::RunningBackgroundSnapshot {
+        if crate::storage::jcode_dir().ok().as_ref() != self.summary_root.as_ref() {
+            return Default::default();
+        }
+        let mut summary = self.summary.clone();
+        if let Some(error) = &self.summary_error {
+            summary.progress = Some(crate::background::RunningBackgroundProgress {
+                task_id: String::new(),
+                tool_name: "background".into(),
+                label: "Last known background activity".into(),
+                detail: Some(error.clone()),
+            });
+        }
+        summary
+    }
+
+    fn refresh_summary(&mut self) -> bool {
+        let mut changed = false;
+        if let Some(receiver) = &mut self.summary_receiver {
+            match receiver.try_recv() {
+                Ok(SummaryResult { root, result }) => {
+                    self.summary_receiver = None;
+                    if crate::storage::jcode_dir().ok().as_ref() == Some(&root) {
+                        match result {
+                            Ok(summary) => {
+                                self.summary = summary;
+                                self.summary_root = Some(root);
+                                self.summary_error = None;
+                                changed = true;
+                            }
+                            Err(error) => {
+                                let message = format!(
+                                    "Background summary unavailable; retaining last known metadata: {error:#}"
+                                );
+                                if self.summary_error.as_ref() != Some(&message) {
+                                    self.summary_notice = Some(message.clone());
+                                }
+                                self.summary_error = Some(message);
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    self.summary_receiver = None;
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
+            }
+        }
+        if self.summary_receiver.is_none() && Instant::now() >= self.next_summary {
+            self.next_summary = Instant::now() + Duration::from_millis(500);
+            if let (Ok(root), Ok(runtime)) = (
+                crate::storage::jcode_dir(),
+                tokio::runtime::Handle::try_current(),
+            ) {
+                let (sender, receiver) = tokio::sync::oneshot::channel();
+                self.summary_receiver = Some(receiver);
+                runtime.spawn_blocking(move || {
+                    let result =
+                        crate::background::global().running_snapshot_including_managed(&root);
+                    let _ = sender.send(SummaryResult { root, result });
+                });
+            }
+        }
+        changed
+    }
     pub(super) fn submit(&mut self, task: BackgroundTaskCompleted) {
         if !self.pending.insert(task.task_id.clone()) {
             return;
@@ -98,6 +181,10 @@ impl LocalDeliveryState {
 }
 
 pub(super) fn drain(app: &mut App) -> bool {
+    let summary_changed = app.local_delivery.refresh_summary();
+    if let Some(notice) = app.local_delivery.summary_notice.take() {
+        app.set_status_notice(notice);
+    }
     if Instant::now() >= app.local_delivery.next_scan
         && !app.local_delivery.scanning.swap(true, Ordering::SeqCst)
     {
@@ -122,7 +209,7 @@ pub(super) fn drain(app: &mut App) -> bool {
             }
         }
     }
-    let mut redraw = false;
+    let mut redraw = summary_changed;
     let count = app.local_delivery.ready.len();
     for _ in 0..count {
         let mut prepared = app.local_delivery.ready.pop_front().unwrap();
@@ -188,6 +275,109 @@ pub(super) fn drain(app: &mut App) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_background_summary_refreshes_managed_metadata_without_render_io() -> anyhow::Result<()>
+    {
+        let _guard = crate::storage::lock_test_env();
+        let root = tempfile::tempdir()?;
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                if let Some(old) = self.0.take() {
+                    crate::env::set_var("JCODE_HOME", old)
+                } else {
+                    crate::env::remove_var("JCODE_HOME")
+                }
+            }
+        }
+        let _restore = Restore(std::env::var_os("JCODE_HOME"));
+        crate::env::set_var("JCODE_HOME", root.path());
+        let store = ExecutionStore::open(root.path())?;
+        let invocation = crate::execution::Invocation {
+            session_id: "summary-session".into(),
+            message_id: "message".into(),
+            call_path: vec!["call".into()],
+            tool: "summary-fixture".into(),
+            input: serde_json::json!({}),
+            working_dir: None,
+            received_result_digest: None,
+        };
+        let crate::execution::PreparedInvocation::New(mut record) =
+            store.prepare(&invocation, "fixture")?
+        else {
+            panic!()
+        };
+        store.start(&record.id, "fixture")?;
+        store.promote(&record.id, "fixture")?;
+        store.register_background_delivery(&record.id, false, false)?;
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()?
+            .block_on(async {
+                let mut state = LocalDeliveryState::default();
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    while !state.refresh_summary() {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await?;
+                let snapshot = state.background_snapshot();
+                assert_eq!(snapshot.count, 1);
+                assert_eq!(snapshot.labels, ["summary-fixture"]);
+                state.next_summary = Instant::now() + Duration::from_secs(60);
+                let (sender, receiver) = tokio::sync::oneshot::channel();
+                state.summary_receiver = Some(receiver);
+                sender
+                    .send(SummaryResult {
+                        root: root.path().join("other"),
+                        result: Ok(crate::background::RunningBackgroundSnapshot {
+                            count: 99,
+                            labels: Vec::new(),
+                            progress: None,
+                        }),
+                    })
+                    .ok();
+                state.refresh_summary();
+                assert_eq!(
+                    state.background_snapshot().count,
+                    1,
+                    "A stale namespace reply cannot replace the cached view"
+                );
+                let (sender, receiver) = tokio::sync::oneshot::channel();
+                state.summary_receiver = Some(receiver);
+                sender
+                    .send(SummaryResult {
+                        root: root.path().into(),
+                        result: Err(anyhow::anyhow!("fixture unavailable")),
+                    })
+                    .ok();
+                state.refresh_summary();
+                assert!(state.summary_notice.is_some());
+                assert_eq!(state.background_snapshot().count, 1);
+                assert!(
+                    state
+                        .background_snapshot()
+                        .progress
+                        .unwrap()
+                        .label
+                        .contains("Last known")
+                );
+                record.state = crate::execution::RunState::Completed;
+                store.finish(&record)?;
+                state.next_summary = Instant::now();
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    while !state.refresh_summary() {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await?;
+                assert_eq!(state.background_snapshot().count, 0);
+                assert!(state.summary_error.is_none());
+                Ok(())
+            })
+    }
     use crate::execution::{DeliveryState, Invocation, PreparedInvocation, RunState};
     fn completion(app: &App, store: &ExecutionStore) -> anyhow::Result<BackgroundTaskCompleted> {
         let input = Invocation {

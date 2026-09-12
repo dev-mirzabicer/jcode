@@ -173,8 +173,17 @@ impl ReloadContext {
 pub fn persisted_background_tasks_note(session_id: &str) -> String {
     let mut notes = String::new();
 
-    let tasks =
-        crate::background::global().persisted_detached_running_tasks_for_session(session_id);
+    let tasks = match crate::background::global().persisted_background_tasks_for_session(session_id)
+    {
+        Ok(tasks) => tasks,
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "Persisted background inspection failed: {error:#}"
+            ));
+            notes.push_str("\nPersisted background execution records could not be inspected. Do not repeat previously accepted work to recover its output; inspect its execution receipt first.");
+            Vec::new()
+        }
+    };
     if !tasks.is_empty() {
         let task_list = tasks
             .iter()
@@ -183,7 +192,7 @@ pub fn persisted_background_tasks_note(session_id: &str) -> String {
             .join(", ");
 
         notes.push_str(&format!(
-            "\nPersisted background task(s) for this session are still running: {}. Do not rerun those commands. Check them first with the `bg` tool (`bg action=\"list\"`, `bg action=\"status\" task_id=...`, or `bg action=\"output\" task_id=...`).",
+            "\nBackground execution records for this session remain unfinished: {}. Do not rerun those commands. Check them first with the `bg` tool (`bg action=\"list\"`, `bg action=\"status\" task_id=...`, or `bg action=\"output\" task_id=...`).",
             task_list
         ));
     }

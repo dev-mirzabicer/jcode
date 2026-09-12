@@ -180,6 +180,13 @@ pub struct RunningBackgroundProgress {
     pub detail: Option<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct RunningBackgroundSnapshot {
+    pub count: usize,
+    pub labels: Vec<String>,
+    pub progress: Option<RunningBackgroundProgress>,
+}
+
 /// Information returned when a background task is started
 #[derive(Debug, Clone, Serialize)]
 pub struct BackgroundTaskInfo {

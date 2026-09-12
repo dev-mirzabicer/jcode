@@ -8,7 +8,7 @@ fn store() -> Result<ExecutionStore> {
     ExecutionStore::open(&crate::storage::jcode_dir()?)
 }
 
-fn projected(store: &ExecutionStore, id: &str) -> Result<Option<TaskStatusFile>> {
+pub(super) fn projected(store: &ExecutionStore, id: &str) -> Result<Option<TaskStatusFile>> {
     let Some(delivery) = store.background_delivery(id)? else {
         return Ok(None);
     };

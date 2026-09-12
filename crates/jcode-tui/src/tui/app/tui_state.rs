@@ -1510,8 +1510,11 @@ impl crate::tui::TuiState for App {
         // Gather background task info
         let background_info = {
             // Get running background tasks count
-            let bg_manager = crate::background::global();
-            let (running_count, running_tasks, progress) = bg_manager.running_snapshot();
+            let crate::background::RunningBackgroundSnapshot {
+                count: running_count,
+                labels: running_tasks,
+                progress,
+            } = self.local_delivery.background_snapshot();
 
             if running_count > 0 {
                 Some(crate::tui::info_widget::BackgroundInfo {
