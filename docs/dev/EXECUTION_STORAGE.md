@@ -465,6 +465,21 @@ the local producer. Both Agent loops and the CLI exclusion mechanism are tested.
 This is not a claim of complete raw provider-envelope ingress or correlation of
 results received without a matching tool use; those remain separate work.
 
+## Optional ChatGPT web route
+
+The web route now observes consumer closure while waiting for per-provider
+admission, browser readiness and the active response operation. Existing owned-tab
+cleanup still runs after active-operation cancellation. An in-flight tab allocation
+is allowed to finish so its actual identity can be cleaned up, rather than dropping
+a remote creation call and guessing which tab exists. Existing bridge process
+kill-on-drop and bounded cleanup behavior remain unchanged.
+
+This is a focused correction, not a browser transport redesign. Deterministic tests
+cover cancelled admission and active-wait drop/cleanup reachability; existing web
+parser tests and strict provider lint also pass. No live ChatGPT account, browser
+page lifecycle, hosted computation termination or broader web reliability was
+validated by these checks.
+
 ## Provider request cancellation
 
 Attempt forwarders own their tasks through normal finish and cancellation.

@@ -96,8 +96,9 @@ impl ChatGptWebState {
             anyhow::bail!("ChatGPT web response consumer was closed before browser setup");
         }
 
-        let status = jcode_base::browser::ensure_browser_ready_noninteractive()
-            .await
+        let _turn_guard = cancellable_wait(tx, self.turn_lock.lock()).await?;
+        let status = cancellable_wait(tx, jcode_base::browser::ensure_browser_ready_noninteractive())
+            .await?
             .context(
                 "ChatGPT web transport needs the Firefox Browser Agent Bridge. Run `jcode browser status`, start Firefox, and log in at chatgpt.com",
             )?;
@@ -107,9 +108,10 @@ impl ChatGptWebState {
             );
         }
 
-        let _turn_guard = self.turn_lock.lock().await;
+        // Finish allocation before cancellation cleanup: abandoning a fork RPC
+        // can lose the identity of a tab that was already created remotely.
         let (tab_id, fork_name) = open_chatgpt_tab().await?;
-        let result = async {
+        let result = cancellable_wait(tx, async {
             send_phase(tx, jcode_message_types::ConnectionPhase::Authenticating).await?;
 
             wait_for_editor(tab_id).await?;
@@ -134,8 +136,9 @@ impl ChatGptWebState {
             send_phase(tx, jcode_message_types::ConnectionPhase::WaitingForResponse).await?;
 
             poll_for_response(tab_id, tx).await
-        }
-        .await;
+        })
+        .await
+        .and_then(std::convert::identity);
         let cleanup = close_chatgpt_tab(tab_id, &fork_name).await;
         match (result, cleanup) {
             (Ok(response), Ok(())) => Ok(response),
@@ -147,6 +150,18 @@ impl ChatGptWebState {
                 Err(err.context(format!("Browser tab cleanup also failed: {cleanup_err:#}")))
             }
         }
+    }
+}
+
+/// Cancel only the request-local wait. The caller still owns tab cleanup.
+async fn cancellable_wait<T>(
+    tx: &mpsc::Sender<Result<StreamEvent>>,
+    work: impl std::future::Future<Output = T>,
+) -> Result<T> {
+    tokio::select! {
+        biased;
+        _=tx.closed()=>anyhow::bail!("ChatGPT web response consumer closed; request stopped"),
+        result=work=>Ok(result),
     }
 }
 
@@ -787,6 +802,57 @@ async fn bridge_command(action: &str, params: Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cancelled_admission_does_not_wait_for_another_web_turn() {
+        let state = ChatGptWebState::new();
+        let _busy = state.turn_lock.lock().await;
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            cancellable_wait(&tx, state.turn_lock.lock()),
+        )
+        .await;
+        assert!(
+            result
+                .expect("Cancelled admission must finish promptly")
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_active_wait_drops_work_and_leaves_cleanup_reachable() {
+        struct Dropped(Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let owned = Dropped(dropped.clone());
+        let (tx, rx) = mpsc::channel(1);
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let operation = tokio::spawn(async move {
+            let result = cancellable_wait(&tx, async move {
+                let _owned = owned;
+                let _ = ready_tx.send(());
+                std::future::pending::<()>().await;
+            })
+            .await;
+            // run_turn performs its existing owned-tab cleanup at this point.
+            result.is_err()
+        });
+        ready_rx.await.unwrap();
+        drop(rx);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), operation)
+                .await
+                .unwrap()
+                .unwrap()
+        );
+        assert!(dropped.load(Ordering::SeqCst));
+    }
 
     #[test]
     fn tool_call_parser_accepts_valid_exact_envelope() {
