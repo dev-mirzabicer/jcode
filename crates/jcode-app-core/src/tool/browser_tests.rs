@@ -1,5 +1,124 @@
 use super::*;
 
+#[cfg(unix)]
+#[test]
+fn browser_helpers_retain_distinct_raw_responses_and_stop_without_killing_shared_work() -> Result<()>
+{
+    use std::os::unix::fs::PermissionsExt;
+    let _lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir()?;
+    struct Restore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            for (key, value) in self.0.drain(..) {
+                if let Some(value) = value {
+                    crate::env::set_var(key, value)
+                } else {
+                    crate::env::remove_var(key)
+                }
+            }
+            crate::config::invalidate_config_cache();
+        }
+    }
+    let _restore = Restore(
+        ["JCODE_HOME", "JCODE_RUNTIME_DIR", "BROWSER_SESSION"]
+            .into_iter()
+            .map(|key| (key, std::env::var_os(key)))
+            .collect(),
+    );
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::env::set_var("JCODE_RUNTIME_DIR", home.path().join("runtime"));
+    crate::env::set_var("BROWSER_SESSION", "isolated-test-session");
+    crate::config::invalidate_config_cache();
+    let binary = crate::browser::browser_binary_path();
+    std::fs::create_dir_all(binary.parent().unwrap())?;
+    std::fs::write(
+        &binary,
+        "#!/usr/bin/python3\nimport os, sys, json, time\nos.write(2,b'RAW_STDERR')\nif sys.argv[1]=='hold':\n os.write(1,b'PARTIAL'); open('ready','w').write('ready'); time.sleep(30); open('escaped','w').write('bad')\nelif sys.argv[1]=='bad': os.write(1,b'\\xff')\nelse: print(json.dumps({'content':'x'*80000+'TAIL'}))\n",
+    )?;
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700))?;
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()?
+        .block_on(async {
+            use jcode_tool_core::OutputCapture;
+            let stop = jcode_agent_runtime::InterruptSignal::new();
+            let mut ctx = ToolContext {
+                session_id: "browser-helper-fixture".into(),
+                message_id: crate::id::new_id("message"),
+                tool_call_id: "call".into(),
+                working_dir: Some(home.path().into()),
+                stdin_request_tx: None,
+                graceful_shutdown_signal: Some(stop.clone()),
+                execution_mode: jcode_tool_core::ToolExecutionMode::Direct,
+                invocation: Default::default(),
+            };
+            let store = crate::execution::ExecutionStore::open(home.path())?;
+            let invocation =
+                crate::execution::invocation(&ctx, "browser", json!({"action":"fixture"}));
+            let crate::execution::PreparedInvocation::New(record) =
+                store.prepare(&invocation, "fixture")?
+            else {
+                panic!()
+            };
+            store.start(&record.id, "fixture")?;
+            let capture = std::sync::Arc::new(crate::execution::Capture::create(
+                store.clone(),
+                record.clone(),
+                Default::default(),
+            )?);
+            ctx.invocation.capture = Some(capture.clone());
+            for _ in 0..2 {
+                assert_eq!(
+                    firefox_run_bridge_command("snapshot", json!({}), &ctx).await?["content"],
+                    format!("{}TAIL", "x".repeat(80000))
+                );
+            }
+            assert!(
+                firefox_run_bridge_command("bad", json!({}), &ctx)
+                    .await
+                    .is_err()
+            );
+            let task =
+                tokio::spawn(
+                    async move { firefox_run_bridge_command("hold", json!({}), &ctx).await },
+                );
+            let started = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while !home.path().join("ready").exists() {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await;
+            stop.fire();
+            let result = tokio::time::timeout(std::time::Duration::from_secs(5), task).await??;
+            started?;
+            assert!(result.is_err());
+            assert!(!home.path().join("escaped").exists());
+            let path = capture.reference()?.path;
+            capture.seal(
+                ToolOutput::new("Stopped fixture"),
+                crate::execution::RunState::Cancelled,
+            )?;
+            let streams = std::fs::read_dir(path.parent().unwrap())?
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry.file_name().to_string_lossy().ends_with("-stdout.bin"))
+                .map(|entry| std::fs::read(entry.path()))
+                .collect::<std::io::Result<Vec<_>>>()?;
+            assert_eq!(streams.len(), 4);
+            assert!(streams.iter().any(|bytes| bytes == b"PARTIAL"));
+            assert!(streams.iter().any(|bytes| bytes == b"\xff"));
+            assert_eq!(
+                streams
+                    .iter()
+                    .filter(|bytes| bytes.windows(4).any(|part| part == b"TAIL"))
+                    .count(),
+                2
+            );
+            Ok(())
+        })
+}
+
 #[test]
 fn managed_browser_readiness_preserves_state_and_uses_current_prose() {
     let _lock = crate::storage::lock_test_env();

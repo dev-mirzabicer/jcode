@@ -163,6 +163,19 @@ impl BrowserProvider for FirefoxBridgeProvider {
 
 #[async_trait]
 impl Tool for BrowserTool {
+    fn execution_policy(
+        &self,
+        input: &Value,
+        _: &ToolContext,
+    ) -> Result<jcode_tool_core::ExecutionPolicy> {
+        Ok(jcode_tool_core::ExecutionPolicy {
+            cooperative_stop: !matches!(
+                input.get("action").and_then(Value::as_str),
+                Some("status" | "setup")
+            ),
+            ..Default::default()
+        })
+    }
     fn name(&self) -> &str {
         "browser"
     }
@@ -280,6 +293,14 @@ impl Tool for BrowserTool {
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
+        #[cfg(unix)]
+        if ctx.invocation.identity.is_none() {
+            let registry = super::Registry::empty();
+            registry
+                .register("browser".into(), std::sync::Arc::new(Self::new()))
+                .await;
+            return registry.execute("browser", input, ctx).await;
+        }
         let params: BrowserInput = serde_json::from_value(input)?;
         let provider = resolve_provider(params.browser.as_deref())?;
 
@@ -288,6 +309,12 @@ impl Tool for BrowserTool {
             "setup" => provider.setup().await,
             other => {
                 let setup_message = provider.ensure_ready(&ctx).await?;
+                anyhow::ensure!(
+                    !ctx.graceful_shutdown_signal
+                        .as_ref()
+                        .is_some_and(|stop| stop.is_set()),
+                    "Browser action stopped before dispatch; no action was repeated"
+                );
                 let output = provider.execute(other, &params, &ctx).await?;
                 Ok(match setup_message {
                     Some(message) if !message.is_empty() => prepend_setup_message(output, &message),
@@ -781,20 +808,42 @@ async fn firefox_run_bridge_command(
     command.stdout(std::process::Stdio::piped());
     command.stderr(std::process::Stdio::piped());
 
-    #[cfg(not(windows))]
-    if std::env::var("BROWSER_SESSION").is_err()
-        && let Some(session_name) = crate::browser::ensure_browser_session(&_ctx.session_id)
-    {
-        command.env("BROWSER_SESSION", session_name);
-    }
-
+    #[cfg(unix)]
+    let output = {
+        let host = crate::execution::helper::HelperHost::new(
+            _ctx,
+            &format!("browser-{}", uuid::Uuid::new_v4().simple()),
+        )?;
+        let session_id = _ctx.session_id.clone();
+        tokio::task::spawn_blocking(move || {
+            host.check_stop()?;
+            // Session setup owns a persistent shared bridge; finish its bounded
+            // registration before Stop rather than guessing and killing it.
+            if std::env::var("BROWSER_SESSION").is_err()
+                && let Some(session_name) = crate::browser::ensure_browser_session(&session_id)
+            {
+                command.env("BROWSER_SESSION", session_name);
+            }
+            host.check_stop()?;
+            host.program(command, None, None)
+        })
+        .await??
+    };
+    #[cfg(not(unix))]
     let output = command
+        .kill_on_drop(true)
         .output()
         .await
         .with_context(|| format!("Failed to run browser bridge action '{}'.", action))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = std::str::from_utf8(&output.stdout)
+        .context("Browser bridge stdout contained invalid UTF-8")?
+        .trim()
+        .to_string();
+    let stderr = std::str::from_utf8(&output.stderr)
+        .context("Browser bridge stderr contained invalid UTF-8")?
+        .trim()
+        .to_string();
 
     if !output.status.success() {
         let details = if stderr.is_empty() {

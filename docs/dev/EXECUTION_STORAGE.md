@@ -176,6 +176,17 @@ existing search-helper cancellation. Thirty computer tests and 34 Agentgrep test
 pass with strict app-core lint. Eighteen live GUI/permission tests remain explicitly
 ignored; no desktop interaction was performed for this verification.
 
+Firefox browser action helpers also use this owner on Unix, including direct Tool
+callers. Each helper receives a distinct output-part namespace, so sequential
+bridge responses cannot be concatenated accidentally. Raw streams are retained
+before text/JSON conversion; invalid UTF-8 is an explicit decode failure. Shared
+browser-session registration finishes its existing bounded startup before action
+cancellation is observed, rather than killing a persistent shared bridge by guess.
+Status/setup retain their separate existing readiness and installation owners.
+A local fake bridge verifies full large responses, malformed raw bytes and actual
+helper cancellation with no later filesystem effect. No real browser interaction
+is performed by that test.
+
 ## Rejected tool admission
 
 Registry availability, session-policy, unknown-tool, input-binding and execution-
