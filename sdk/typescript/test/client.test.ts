@@ -45,6 +45,24 @@ async function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<voi
   }
 }
 
+test("execution part pages require a separate capability and retain byte-page metadata", async () => {
+  let sent = 0;
+  const old = await startMockHarness({capabilities: ["shared_execution_v1"], onRequest() { sent += 1; }});
+  const oldClient = await JcodeClient.connect({socketPath: old.socketPath});
+  try {
+    await assert.rejects(() => oldClient.execution("s1", {action: "read_part", run_id: "run-fixture", part: "manifest.json"}), (error: unknown) => error instanceof HarnessError && error.code === "unsupported_capability");
+    assert.equal(sent, 0);
+  } finally { oldClient.close(); await old.close(); }
+  const page = {part: "manifest.json", offset: 0, total_bytes: 2, sha256: "hash-fixture", data_base64: "e30=", next_offset: null};
+  const server = await startMockHarness({capabilities: ["shared_execution_v1", "shared_execution_parts_v1"], onRequest(request, send) {
+    assert.deepEqual(request.request, {action: "read_part", run_id: "run-fixture", part: "manifest.json"});
+    send({v: 1, reply_to: request.id, ev: "execution", session_id: "s1", response: {kind: "part", run_id: "run-fixture", page}});
+  }});
+  const client = await JcodeClient.connect({socketPath: server.socketPath});
+  try { assert.deepEqual(await client.execution("s1", {action: "read_part", run_id: "run-fixture", part: "manifest.json"}), {kind: "part", run_id: "run-fixture", page}); }
+  finally { client.close(); await server.close(); }
+});
+
 test("ndjson decoder reassembles frames split across chunks", () => {
   const decoder = new NdjsonDecoder();
   assert.deepEqual(decoder.push('{"v":1,"ev":"p'), []);

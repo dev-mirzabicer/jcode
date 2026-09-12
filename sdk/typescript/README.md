@@ -265,6 +265,30 @@ capabilities before sending and verify response-session identity. See
 [execution storage and control](../../docs/dev/EXECUTION_STORAGE.md#client-and-harness-execution-api)
 for the complete request shapes, defaults, recovery and evidence boundaries.
 
+## Retained binary parts
+
+With `shared_execution_parts_v1`, `execution` also supports `read_part` for sealed
+output bundles. Start with `part: "manifest.json"` to discover named media and raw
+parts. Responses are bounded base64 byte pages, not text conversions or pixel
+slices sent to a model. The caller chooses whether and where to write them locally.
+
+```ts
+const result = await client.execution(sessionId, {
+  action: "read_part", run_id: runId, part: "resource-0.bin", limit: 65536,
+});
+if (result.kind === "part") {
+  const bytes = Buffer.from(result.page.data_base64, "base64");
+  // Consume/write these bytes. To continue, use next_offset and the same sha256.
+  console.log(bytes.length, result.page.next_offset, result.page.sha256);
+}
+```
+
+For the next request supply `offset: next_offset` and
+`expected_sha256: sha256`. A changed part, undeclared name, missing integrity,
+offline archive or unsupported server fails rather than silently retargeting the
+read. Default pages are 64 KiB; caller limits range from one byte to one MiB.
+The server validates complete part integrity using bounded buffers on each page.
+
 ## Models
 
 A client that cannot enumerate models cannot offer a picker, so the catalog is

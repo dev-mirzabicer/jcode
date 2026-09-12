@@ -528,6 +528,11 @@ fn native_archive_fixture_uses_verified_volume_and_stable_aliases() -> Result<()
         let original_image = fixture
             .store
             .retained_image(&image_alias, 20 * 1024 * 1024)?;
+        let image_record = fixture.store.inspect(&record.id)?.unwrap();
+        let first_image_page =
+            fixture
+                .store
+                .read_part_page(&image_record, "image-0.bin", 0, 32, None)?;
         let state_root = fixture
             .store
             .root()
@@ -575,6 +580,21 @@ fn native_archive_fixture_uses_verified_volume_and_stable_aliases() -> Result<()
                 .retained_image(&image_alias, 20 * 1024 * 1024)?
                 == original_image,
             "Archived image identity or bytes changed"
+        );
+        let rest = fixture.store.read_part_page(
+            &image_record,
+            "image-0.bin",
+            first_image_page.next_offset.unwrap(),
+            1024,
+            Some(&first_image_page.sha256),
+        )?;
+        use base64::Engine;
+        let mut reassembled =
+            base64::engine::general_purpose::STANDARD.decode(&first_image_page.data_base64)?;
+        reassembled.extend(base64::engine::general_purpose::STANDARD.decode(&rest.data_base64)?);
+        ensure!(
+            reassembled == original_image.0,
+            "Binary part continuation changed after relocation"
         );
         let mut next = request(page.next_point.clone());
         next.target = std::num::NonZeroUsize::new(10_000).unwrap();

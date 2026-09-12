@@ -46,6 +46,26 @@ pub async fn inspect(
     let store = tokio::task::spawn_blocking(move || ExecutionStore::open(&root)).await??;
     let is_stop = matches!(&request, ExecutionRequest::Stop { .. });
     match request {
+        ExecutionRequest::ReadPart {
+            run_id,
+            part,
+            offset,
+            limit,
+            expected_sha256,
+        } => {
+            let current = record(&store, &run_id).await?;
+            let page = tokio::task::spawn_blocking(move || {
+                store.read_part_page(
+                    &current,
+                    &part,
+                    offset.unwrap_or(0),
+                    limit.unwrap_or(64 * 1024),
+                    expected_sha256.as_deref(),
+                )
+            })
+            .await??;
+            Ok(ExecutionResponse::Part { run_id, page })
+        }
         ExecutionRequest::List {
             all_sessions,
             after,

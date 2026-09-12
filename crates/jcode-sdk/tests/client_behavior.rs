@@ -100,6 +100,58 @@ fn execution_control_requires_capability_and_returns_typed_correlated_replies() 
     );
 }
 
+#[test]
+fn execution_parts_require_their_own_capability_before_transport() {
+    use jcode_harness_api::{ExecutionPartPage, ExecutionRequest, ExecutionResponse};
+    let request = ExecutionRequest::ReadPart {
+        run_id: "run-fixture".into(),
+        part: "manifest.json".into(),
+        offset: None,
+        limit: Some(1024),
+        expected_sha256: None,
+    };
+    let old = fake_harness_with_capabilities(
+        vec![jcode_harness_api::EXECUTION_CAPABILITY.into()],
+        |_, _| panic!("Part request sent to a server without part capability"),
+    );
+    assert_eq!(
+        old.execution("s1", request.clone()).unwrap_err().kind,
+        ErrorKind::UnsupportedCapability
+    );
+    let client = fake_harness_with_capabilities(
+        vec![
+            jcode_harness_api::EXECUTION_CAPABILITY.into(),
+            jcode_harness_api::EXECUTION_PARTS_CAPABILITY.into(),
+        ],
+        |frame, writer| {
+            assert!(
+                matches!(&frame.request,ApiRequest::Execution{request:ExecutionRequest::ReadPart{part,..},..} if part=="manifest.json")
+            );
+            reply(
+                frame,
+                ApiEvent::Execution {
+                    session_id: "s1".into(),
+                    response: ExecutionResponse::Part {
+                        run_id: "run-fixture".into(),
+                        page: ExecutionPartPage {
+                            part: "manifest.json".into(),
+                            offset: 0,
+                            total_bytes: 2,
+                            sha256: "hash-fixture".into(),
+                            data_base64: "e30=".into(),
+                            next_offset: None,
+                        },
+                    },
+                },
+                writer,
+            );
+        },
+    );
+    assert!(
+        matches!(client.execution("s1",request).unwrap(),ExecutionResponse::Part{page,..} if page.data_base64=="e30=" && page.next_offset.is_none())
+    );
+}
+
 impl Transport for PairTransport {
     fn split(
         self: Box<Self>,

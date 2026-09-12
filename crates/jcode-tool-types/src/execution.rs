@@ -4,6 +4,17 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 pub const CAPABILITY: &str = "shared_execution_v1";
+pub const PARTS_CAPABILITY: &str = "shared_execution_parts_v1";
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExecutionPartPage {
+    pub part: String,
+    pub offset: u64,
+    pub total_bytes: u64,
+    pub sha256: String,
+    pub data_base64: String,
+    pub next_offset: Option<u64>,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExecutionProgress {
@@ -50,6 +61,16 @@ pub enum ExecutionContent {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ExecutionRequest {
+    ReadPart {
+        run_id: String,
+        part: String,
+        #[serde(default)]
+        offset: Option<u64>,
+        #[serde(default)]
+        limit: Option<u32>,
+        #[serde(default)]
+        expected_sha256: Option<String>,
+    },
     List {
         #[serde(default)]
         all_sessions: bool,
@@ -80,6 +101,10 @@ pub enum ExecutionRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ExecutionResponse {
+    Part {
+        run_id: String,
+        page: ExecutionPartPage,
+    },
     List {
         runs: Vec<RunRecord>,
         next: Option<String>,

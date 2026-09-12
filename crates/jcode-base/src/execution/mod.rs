@@ -13,6 +13,7 @@ mod native_process;
 mod output;
 #[cfg(unix)]
 pub mod owned_child;
+mod part_read;
 #[cfg(unix)]
 pub mod process;
 pub mod reader;

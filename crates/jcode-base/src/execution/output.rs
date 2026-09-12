@@ -63,10 +63,10 @@ pub(super) struct ResourcePart {
     pub integrity: Option<PartIntegrity>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct PartIntegrity {
-    bytes: u64,
-    sha256: String,
+    pub(super) bytes: u64,
+    pub(super) sha256: String,
 }
 impl PartIntegrity {
     pub(super) fn read(mut reader: impl Read) -> Result<Self> {

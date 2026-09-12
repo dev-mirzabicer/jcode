@@ -26,7 +26,8 @@ mod errors;
 mod launch;
 mod structured;
 pub use jcode_harness_api::{
-    ExecutionContent, ExecutionProgress, ExecutionRequest, ExecutionResponse, RunRecord,
+    ExecutionContent, ExecutionPartPage, ExecutionProgress, ExecutionRequest, ExecutionResponse,
+    RunRecord,
 };
 
 #[cfg(test)]

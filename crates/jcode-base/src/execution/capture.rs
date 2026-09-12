@@ -131,6 +131,29 @@ impl Capture {
                     state.failed = Some(format!("{error:#}"));
                 }
             }
+            if state.failed.is_none() {
+                for name in [
+                    "text.bin",
+                    "stdout.bin",
+                    "stderr.bin",
+                    "events.jsonl",
+                    "streams.json",
+                ] {
+                    match state.storage.read_part(name) {
+                        Ok(_) => {
+                            state.parts.insert(name.into());
+                        }
+                        Err(error)
+                            if error.downcast_ref::<std::io::Error>().is_some_and(|error| {
+                                error.kind() == std::io::ErrorKind::NotFound
+                            }) => {}
+                        Err(error) => {
+                            state.failed = Some(format!("{error:#}"));
+                            break;
+                        }
+                    }
+                }
+            }
             let parts = if state.failed.is_none() {
                 match state
                     .parts

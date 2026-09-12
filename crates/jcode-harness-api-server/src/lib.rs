@@ -54,6 +54,7 @@ const BRIDGE_CAPABILITIES: &[&str] = &[
     "agent_profile_controls",
     "workflow_prompt_rendering",
     "shared_execution_v1",
+    "shared_execution_parts_v1",
 ];
 
 /// Read one newline-delimited frame, refusing to buffer more than

@@ -8,7 +8,7 @@
  */
 
 export const API_VERSION_MAJOR = 1;
-export const API_VERSION_MINOR = 2;
+export const API_VERSION_MINOR = 3;
 
 export type ExecutionState = "prepared" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
 export type OutputSize = number | "very_small" | "small" | "medium" | "large" | "very_large";
@@ -29,11 +29,17 @@ export interface ExecutionPage {
   resources: {uri: string; media_type: string | null; data: string}[];
   source: {kind: string; [key: string]: unknown}; is_error: boolean;
 }
+export interface ExecutionPartPage {
+  part: string; offset: number; total_bytes: number; sha256: string;
+  data_base64: string; next_offset: number | null;
+}
 export type ExecutionRequest =
+  | { action: "read_part"; run_id: string; part: string; offset?: number | null; limit?: number | null; expected_sha256?: string | null }
   | {action: "list"; all_sessions?: boolean; after?: string | null; limit?: number | null}
   | {action: "inspect" | "stop" | "background"; run_id: string}
   | {action: "read"; run_id: string; content: "input" | "output"; read_point?: string | null; output_size?: OutputSize | null};
 export type ExecutionResponse =
+  | { kind: "part"; run_id: string; page: ExecutionPartPage }
   | {kind: "list"; runs: ExecutionRun[]; next: string | null}
   | {kind: "status"; run: ExecutionRun}
   | {kind: "control"; run_id: string; accepted: boolean; state: ExecutionState}

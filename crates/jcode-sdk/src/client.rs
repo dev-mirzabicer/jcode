@@ -785,6 +785,12 @@ impl JcodeClient {
         request: jcode_harness_api::ExecutionRequest,
     ) -> Result<jcode_harness_api::ExecutionResponse> {
         self.require_capability(jcode_harness_api::EXECUTION_CAPABILITY)?;
+        if matches!(
+            &request,
+            jcode_harness_api::ExecutionRequest::ReadPart { .. }
+        ) {
+            self.require_capability(jcode_harness_api::EXECUTION_PARTS_CAPABILITY)?;
+        }
         match self
             .request_ok(ApiRequest::Execution {
                 session_id: session_id.into(),

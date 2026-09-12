@@ -152,6 +152,37 @@ same captured bytes rather than rereading a possibly changed file. Redirected
 stdout does not emit terminal image escapes. Hosted-provider vision budgets and
 unsupported formats remain explicit provider-boundary verification work.
 
+## Remote materialization of retained parts
+
+Harness v1.3 adds `shared_execution_parts_v1`. Rust and TypeScript SDKs require
+that capability, in addition to `shared_execution_v1`, before sending an execution
+`read_part` request. Older servers therefore reject locally without receiving a
+request they cannot implement. Existing execution request/reply session correlation
+and same-user attachment authorization remain unchanged.
+
+Select a sealed run and a part name, never an arbitrary server filesystem path.
+Read `manifest.json` to discover image/resource decoded filenames and declared
+raw parts. New captures include integrity for raw stream/event/control parts.
+Other names must be declared in the manifest with original integrity evidence.
+Decoded resources/images are checked against their original encoded part before
+returning bytes. Legacy parts without that evidence fail explicitly.
+
+Responses carry base64 bytes, offset, total length, SHA-256 and optional next
+offset. The default is 64 KiB per page, with an explicit 1-byte to 1-MiB range.
+Continuation requires the preceding SHA-256. Reads verify the selected part before
+returning a bounded page and reject corruption or changed continuation versions.
+The reader hashes through bounded buffers, retaining only the requested page;
+it currently verifies the whole selected part on each page, rather than claiming
+constant-time random access. Ordinary execution lists/status/control remain
+metadata-only and canonical live output keeps its indexed text reader.
+
+Verified storage opening preserves alias/archive identity and reads archived parts
+in place. Tests reconstruct non-UTF-8 stdout and resource bytes, reject traversal,
+undeclared parts, missing/stale hashes and corruption, and continue a binary image
+page after a real owned archive relocation. The full Harness/Rust SDK suites,
+49 TypeScript tests, and strict affected lint pass. No producer is rerun and the
+SDK does not write a client file without caller-directed materialization.
+
 ## Reading retained image parts
 
 Canonical `execution/outputs/<run-id>/image-<index>.bin` references are recognized
@@ -174,9 +205,8 @@ and now checks exact pixels, media type, encoded and decoded corruption, and the
 atomic size bound. The isolated native Active fixture verifies identical image
 retrieval after relocation and rejection of an offline recorded archive. Store
 regressions and strict base/app-core lint pass. No original producer is repeated.
-SDK binary-part materialization and retained-manifest paging remain separate
-caller reconciliation work; these checks do not claim that text-only SDK paging
-already provides them.
+SDK binary-part materialization and retained-manifest paging use the separate
+capability-gated byte-page path documented above, not the text-only output reader.
 
 ## Background summary and reload views
 
