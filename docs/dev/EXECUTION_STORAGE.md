@@ -176,6 +176,16 @@ it currently verifies the whole selected part on each page, rather than claiming
 constant-time random access. Ordinary execution lists/status/control remain
 metadata-only and canonical live output keeps its indexed text reader.
 
+Ordinary `read` also recognizes declared sealed bundle parts, including the
+manifest and base64/text parts, as logical managed sources. Their read points bind
+to both the part path and content digest, so relocation preserves continuation
+while changed metadata/bytes reject an old point. Canonical live output retains
+its separate append-safe indexed behavior. Part verification and decoding observe
+Stop without creating a zero-progress retry loop. Manifest projections ignore
+unrequested large metadata and use buffered input; image retrieval shares that
+projection. Withheld read metadata sets `advanced=false` consistently with the
+unadvanced retry position. Existing ordinary-source version checks remain intact.
+
 Verified storage opening preserves alias/archive identity and reads archived parts
 in place. Tests reconstruct non-UTF-8 stdout and resource bytes, reject traversal,
 undeclared parts, missing/stale hashes and corruption, and continue a binary image

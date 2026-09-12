@@ -548,6 +548,13 @@ fn native_archive_fixture_uses_verified_volume_and_stable_aliases() -> Result<()
             stop: None,
         };
         let first = reader.read(request(None))?;
+        let metadata_path = alias.with_file_name("manifest.json");
+        let mut metadata_request = request(None);
+        metadata_request.path = metadata_path.clone();
+        let first_metadata = reader.read(metadata_request)?;
+        let OutputSource::ReadPage(metadata_page) = first_metadata.source else {
+            bail!("Missing metadata read point");
+        };
         let OutputSource::ReadPage(page) = first.source else {
             bail!("Expected managed read page");
         };
@@ -599,6 +606,18 @@ fn native_archive_fixture_uses_verified_volume_and_stable_aliases() -> Result<()
         let mut next = request(page.next_point.clone());
         next.target = std::num::NonZeroUsize::new(10_000).unwrap();
         let continued = reader.read(next)?;
+        let mut metadata_request = request(metadata_page.next_point.clone());
+        metadata_request.path = metadata_path;
+        metadata_request.target = std::num::NonZeroUsize::new(100_000).unwrap();
+        let continued_metadata = reader.read(metadata_request)?;
+        let OutputSource::ReadPage(continued_metadata_page) = continued_metadata.source else {
+            bail!("Missing continued metadata point");
+        };
+        ensure!(
+            continued_metadata_page.start_byte == metadata_page.end_byte
+                && continued_metadata.output.contains("image-0.base64"),
+            "Metadata read point changed after relocation"
+        );
         let OutputSource::ReadPage(continued_page) = continued.source else {
             bail!("Expected continued page");
         };

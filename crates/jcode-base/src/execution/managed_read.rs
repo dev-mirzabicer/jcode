@@ -1,5 +1,6 @@
 use super::{ExecutionStore, RunRecord};
 use anyhow::{Context, Result, ensure};
+use base64::Engine;
 use rusqlite::params;
 use sha2::{Digest, Sha256};
 use std::fs::{File, Metadata};
@@ -10,6 +11,9 @@ pub(super) struct ManagedRead {
     pub id: String,
     pub length: u64,
     pub running: bool,
+    pub digest: Option<String>,
+    part: Option<(RunRecord, String)>,
+    stop: Option<jcode_agent_runtime::InterruptSignal>,
     file: File,
     store: ExecutionStore,
     position: u64,
@@ -18,10 +22,14 @@ pub(super) struct ManagedRead {
 }
 impl ManagedRead {
     pub fn is_path(root: &Path, path: &Path) -> bool {
-        path.strip_prefix(root.join("execution/outputs")).is_ok_and(|relative| {
-            let parts:Vec<_>=relative.components().collect();
-            matches!(parts.as_slice(),[Component::Normal(_),Component::Normal(file)] if *file==std::ffi::OsStr::new("output.txt"))
-        })
+        path.strip_prefix(root.join("execution/outputs"))
+            .is_ok_and(|relative| {
+                let parts: Vec<_> = relative.components().collect();
+                matches!(
+                    parts.as_slice(),
+                    [Component::Normal(_), Component::Normal(_)]
+                )
+            })
     }
     pub fn open(root: &Path, path: &Path) -> Result<Option<Self>> {
         Self::open_with_stop(root, path, None)
@@ -43,9 +51,10 @@ impl ManagedRead {
         let [Component::Normal(id), Component::Normal(file)] = components.as_slice() else {
             return Ok(None);
         };
-        if *file != std::ffi::OsStr::new("output.txt") {
-            return Ok(None);
-        }
+        let name = file
+            .to_str()
+            .context("Invalid managed part name")?
+            .to_string();
         let id = id
             .to_str()
             .context("Invalid managed output identity")?
@@ -60,6 +69,23 @@ impl ManagedRead {
         let record = store
             .inspect(&id)?
             .context("Managed output is unavailable")?;
+        if name != "output.txt" {
+            let page = store.read_part_page_with_stop(&record, &name, 0, 256 * 1024, None, stop)?;
+            let file = store.open_output_part(&id, &name)?;
+            return Ok(Some(Self {
+                id,
+                length: page.total_bytes,
+                running: false,
+                digest: Some(page.sha256),
+                part: Some((record, name)),
+                stop: stop.cloned(),
+                file,
+                store,
+                position: 0,
+                chunk_start: 0,
+                chunk: base64::engine::general_purpose::STANDARD.decode(page.data_base64)?,
+            }));
+        }
         ensure!(
             record.output_path.as_deref() == Some(path),
             "Managed source does not match its recorded output path"
@@ -74,6 +100,9 @@ impl ManagedRead {
             id,
             length: record.output_bytes,
             running: !record.state.terminal(),
+            digest: None,
+            part: None,
+            stop: stop.cloned(),
             file,
             store,
             position: 0,
@@ -85,6 +114,19 @@ impl ManagedRead {
         self.file.metadata()
     }
     fn load_chunk(&mut self) -> Result<()> {
+        if let Some((record, name)) = &self.part {
+            let page = self.store.read_part_page_with_stop(
+                record,
+                name,
+                self.position,
+                256 * 1024,
+                self.digest.as_deref(),
+                self.stop.as_ref(),
+            )?;
+            self.chunk_start = self.position;
+            self.chunk = base64::engine::general_purpose::STANDARD.decode(page.data_base64)?;
+            return Ok(());
+        }
         let (start,end,digest):(i64,i64,String)=self.store.connection()?.query_row("SELECT start_byte,end_byte,sha256 FROM output_chunks WHERE run_id=?1 AND start_byte<=?2 ORDER BY start_byte DESC LIMIT 1",params![self.id,i64::try_from(self.position)?],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)))
             .context("Managed output has no verified chunk at this position; legacy acquisition must be imported explicitly")?;
         let start = u64::try_from(start)?;

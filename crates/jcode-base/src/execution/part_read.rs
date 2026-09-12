@@ -1,27 +1,25 @@
 //! Bounded client materialization of sealed, manifest-declared output parts.
 use super::{
     ExecutionStore, RunRecord,
-    output::{ImagePart, PartIntegrity, ResourcePart, StoredPart},
+    output::{PartIndex, PartIntegrity},
 };
 use anyhow::{Context, Result, bail, ensure};
 use base64::Engine;
-use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Component, Path};
 
-// Ignore unbounded result metadata while locating declared parts. It remains
-// retrievable as exact bytes in manifest.json, not allocated by this index view.
-#[derive(Deserialize)]
-struct PartIndex {
-    schema: u32,
-    invocation_id: String,
-    #[serde(default)]
-    images: Vec<ImagePart>,
-    #[serde(default)]
-    resources: Vec<ResourcePart>,
-    #[serde(default)]
-    parts: Vec<StoredPart>,
+struct Stoppable<'a, R> {
+    inner: R,
+    stop: Option<&'a jcode_agent_runtime::InterruptSignal>,
+}
+impl<R: Read> Read for Stoppable<'_, R> {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        if self.stop.is_some_and(|signal| signal.is_set()) {
+            return Err(std::io::Error::other("Retained part read cancelled"));
+        }
+        self.inner.read(bytes)
+    }
 }
 
 impl ExecutionStore {
@@ -33,6 +31,22 @@ impl ExecutionStore {
         limit: u32,
         expected_sha256: Option<&str>,
     ) -> Result<jcode_tool_types::execution::ExecutionPartPage> {
+        self.read_part_page_with_stop(record, name, offset, limit, expected_sha256, None)
+    }
+
+    pub(super) fn read_part_page_with_stop(
+        &self,
+        record: &RunRecord,
+        name: &str,
+        offset: u64,
+        limit: u32,
+        expected_sha256: Option<&str>,
+        stop: Option<&jcode_agent_runtime::InterruptSignal>,
+    ) -> Result<jcode_tool_types::execution::ExecutionPartPage> {
+        ensure!(
+            !stop.is_some_and(|signal| signal.is_set()),
+            "Retained part read cancelled"
+        );
         ensure!(
             record.id.len() == 68
                 && record.id.starts_with("run-")
@@ -82,7 +96,10 @@ impl ExecutionStore {
         );
         let mut manifest_file = self.open_output_part(&record.id, "manifest.json")?;
         let manifest_version = manifest_file.metadata()?;
-        let index: PartIndex = serde_json::from_reader(&mut manifest_file)?;
+        let index: PartIndex = serde_json::from_reader(Stoppable {
+            inner: std::io::BufReader::new(&mut manifest_file),
+            stop,
+        })?;
         ensure!(
             index.schema == 1 && index.invocation_id == record.id,
             "Retained manifest identity changed"
@@ -90,7 +107,7 @@ impl ExecutionStore {
         let expected = if name == "manifest.json" {
             None
         } else {
-            Some(self.part_integrity(&record.id, name, &index)?)
+            Some(self.part_integrity(&record.id, name, &index, stop)?)
         };
         let (mut file, before) = if name == "manifest.json" {
             manifest_file.seek(SeekFrom::Start(0))?;
@@ -110,6 +127,10 @@ impl ExecutionStore {
         let mut position = 0u64;
         let mut buffer = [0u8; 64 * 1024];
         loop {
+            ensure!(
+                !stop.is_some_and(|signal| signal.is_set()),
+                "Retained part read cancelled"
+            );
             let count = file.read(&mut buffer)?;
             if count == 0 {
                 break;
@@ -154,7 +175,13 @@ impl ExecutionStore {
         })
     }
 
-    fn part_integrity(&self, id: &str, name: &str, index: &PartIndex) -> Result<PartIntegrity> {
+    fn part_integrity(
+        &self,
+        id: &str,
+        name: &str,
+        index: &PartIndex,
+        stop: Option<&jcode_agent_runtime::InterruptSignal>,
+    ) -> Result<PartIntegrity> {
         if let Some(part) = index.parts.iter().find(|part| part.file == name) {
             return Ok(part.integrity.clone());
         }
@@ -171,7 +198,7 @@ impl ExecutionStore {
                         && part.decoded_file.as_deref().is_none_or(|file| file == name),
                     "Image descriptor changed"
                 );
-                return self.decoded_part_integrity(id, &part.file, part.integrity.as_ref());
+                return self.decoded_part_integrity(id, &part.file, part.integrity.as_ref(), stop);
             }
         }
         for (ordinal, part) in index.resources.iter().enumerate() {
@@ -187,7 +214,7 @@ impl ExecutionStore {
                         && part.decoded_file.as_deref().is_none_or(|file| file == name),
                     "Resource descriptor changed"
                 );
-                return self.decoded_part_integrity(id, &part.file, part.integrity.as_ref());
+                return self.decoded_part_integrity(id, &part.file, part.integrity.as_ref(), stop);
             }
         }
         bail!("Part is not declared in the retained manifest; no arbitrary server path was read")
@@ -198,17 +225,24 @@ impl ExecutionStore {
         id: &str,
         name: &str,
         expected: Option<&PartIntegrity>,
+        stop: Option<&jcode_agent_runtime::InterruptSignal>,
     ) -> Result<PartIntegrity> {
         let mut source = self.open_output_part(id, name)?;
         let before = source.metadata()?;
-        let original = PartIntegrity::read(&mut source)?;
+        let original = PartIntegrity::read(Stoppable {
+            inner: &mut source,
+            stop,
+        })?;
         ensure!(
             expected == Some(&original),
             "Encoded part differs from its original integrity receipt"
         );
         source.seek(SeekFrom::Start(0))?;
         let decoded = PartIntegrity::read(base64::read::DecoderReader::new(
-            &mut source,
+            Stoppable {
+                inner: &mut source,
+                stop,
+            },
             &base64::engine::general_purpose::STANDARD,
         ))?;
         let after = source.metadata()?;
@@ -292,6 +326,45 @@ mod tests {
             assert_eq!(all, bytes);
         }
         let manifest = store.read_part_page(&record, "manifest.json", 0, 32, None)?;
+        let stop = jcode_agent_runtime::InterruptSignal::new();
+        stop.fire();
+        assert!(
+            store
+                .read_part_page_with_stop(&record, "manifest.json", 0, 32, None, Some(&stop))
+                .is_err()
+        );
+        let reader = crate::execution::reader::SourceReader::new(root.path());
+        let request = crate::execution::reader::ReadRequest {
+            path: record.result_path.clone().unwrap(),
+            point: None,
+            start_line: 1,
+            end_line: None,
+            target: std::num::NonZeroUsize::new(80).unwrap(),
+            stop: None,
+        };
+        let first = reader.read(request)?;
+        let jcode_tool_types::OutputSource::ReadPage(point) = first.source else {
+            panic!()
+        };
+        let manifest_path = record.result_path.as_ref().unwrap();
+        let mut changed: serde_json::Value = crate::storage::read_json(manifest_path)?;
+        changed["metadata"] = serde_json::json!({"changed":true});
+        let original_manifest = std::fs::read(manifest_path)?;
+        std::fs::write(manifest_path, serde_json::to_vec(&changed)?)?;
+        assert!(
+            reader
+                .read(crate::execution::reader::ReadRequest {
+                    path: manifest_path.clone(),
+                    point: point.next_point,
+                    start_line: 1,
+                    end_line: None,
+                    target: std::num::NonZeroUsize::new(80).unwrap(),
+                    stop: None
+                })
+                .is_err(),
+            "A changed retained manifest must not accept an old read point"
+        );
+        std::fs::write(manifest_path, original_manifest)?;
         assert!(
             store
                 .read_part_page(&record, "manifest.json", 32, 32, None)

@@ -1005,6 +1005,8 @@ impl Registry {
             jcode_tool_types::OutputSource::ReadPage(page)=>{
                 page.end_byte=page.start_byte;page.end_line=page.start_line;
                 page.next_point=Some(page.retry_point.clone());
+                if let Some(metadata)=output.metadata.as_mut().and_then(serde_json::Value::as_object_mut)
+                    && metadata.contains_key("advanced") {metadata.insert("advanced".into(),serde_json::Value::Bool(false));}
                 format!("This read page was not delivered. Retry file_path=\"{}\" with read_point=\"{}\"; no source position was advanced.",page.path.display(),page.retry_point)
             }
             jcode_tool_types::OutputSource::Inline=>"No retained reference is available for this failure. Do not blindly repeat an operation with uncertain effects.".to_string(),

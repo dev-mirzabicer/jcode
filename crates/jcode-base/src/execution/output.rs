@@ -46,6 +46,20 @@ pub(super) struct Manifest {
     pub(super) text_sha256: Option<String>,
 }
 
+// Ignore unbounded result metadata while locating declared parts. It remains
+// retrievable as exact bytes in manifest.json, not allocated by this index view.
+#[derive(Deserialize)]
+pub(super) struct PartIndex {
+    pub schema: u32,
+    pub invocation_id: String,
+    #[serde(default)]
+    pub images: Vec<ImagePart>,
+    #[serde(default)]
+    pub resources: Vec<ResourcePart>,
+    #[serde(default)]
+    pub parts: Vec<StoredPart>,
+}
+
 #[derive(Serialize, Deserialize)]
 pub(super) struct StoredPart {
     pub file: String,
@@ -179,8 +193,9 @@ impl ExecutionStore {
             record.result_path.as_ref() == Some(&expected.join("manifest.json")),
             "Retained image has no canonical bundle manifest"
         );
-        let manifest: Manifest =
-            serde_json::from_reader(self.open_output_part(&id, "manifest.json")?)?;
+        let manifest: PartIndex = serde_json::from_reader(std::io::BufReader::new(
+            self.open_output_part(&id, "manifest.json")?,
+        ))?;
         ensure!(
             manifest.schema == 1 && manifest.invocation_id == id,
             "Retained image manifest identity changed"

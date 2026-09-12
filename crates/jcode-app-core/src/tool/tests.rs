@@ -988,6 +988,7 @@ async fn test_context_guard_withholds_huge_single_output_by_default() {
 async fn test_context_guard_preserves_retry_position_for_undelivered_read() {
     let registry = registry_with_context_budget(1000);
     let mut output = ToolOutput::new("x".repeat(8000));
+    output.metadata = Some(serde_json::json!({"advanced":true,"running":true}));
     output.source = jcode_tool_types::OutputSource::ReadPage(jcode_tool_types::ReadPageReference {
         path: "fixture".into(),
         start_byte: 5,
@@ -999,6 +1000,8 @@ async fn test_context_guard_preserves_retry_position_for_undelivered_read() {
     });
     let output = registry.guard_context_overflow("read", output).await;
     assert!(output.withheld.is_some());
+    assert_eq!(output.metadata.as_ref().unwrap()["advanced"], false);
+    assert_eq!(output.metadata.as_ref().unwrap()["running"], true);
     let jcode_tool_types::OutputSource::ReadPage(page) = output.source else {
         panic!()
     };

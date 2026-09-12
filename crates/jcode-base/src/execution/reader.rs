@@ -55,6 +55,8 @@ struct Point {
     column: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     managed_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    managed_digest: Option<String>,
 }
 
 /// Line bounds are inclusive and one-based. A point replaces only the start.
@@ -164,6 +166,7 @@ impl SourceReader {
                 .chars()
                 .count() as u64,
             managed_id: Some(managed.id),
+            managed_digest: managed.digest,
         };
         self.save(&point)
     }
@@ -186,7 +189,7 @@ impl SourceReader {
     /// Blocking filesystem work. Async callers run this outside their event loop.
     pub fn read(&self, request: ReadRequest) -> Result<ToolOutput> {
         ensure!(request.start_line > 0, "start_line must be positive");
-        let (source, file, managed_id, running, length) = if let Some(managed) =
+        let (source, file, managed_id, managed_digest, running, length) = if let Some(managed) =
             super::managed_read::ManagedRead::open_with_stop(
                 &self.root,
                 &request.path,
@@ -195,10 +198,12 @@ impl SourceReader {
             let id = managed.id.clone();
             let running = managed.running;
             let length = managed.length;
+            let digest = managed.digest.clone();
             (
                 request.path.clone(),
                 ReadSource::Managed(Box::new(managed)),
                 Some(id),
+                digest,
                 running,
                 Some(length),
             )
@@ -208,7 +213,7 @@ impl SourceReader {
                 .canonicalize()
                 .context("Read source is unavailable")?;
             let file = File::open(&source)?;
-            (source, ReadSource::File(file), None, false, None)
+            (source, ReadSource::File(file), None, None, false, None)
         };
         let metadata = file.metadata()?;
         ensure!(metadata.is_file(), "Read source must be a regular file");
@@ -226,6 +231,10 @@ impl SourceReader {
             ensure!(
                 point.managed_id == managed_id,
                 "Read point belongs to a different managed source"
+            );
+            ensure!(
+                point.managed_digest == managed_digest,
+                "Read point belongs to a changed retained part"
             );
             if managed_id.is_none() {
                 ensure!(
@@ -248,6 +257,7 @@ impl SourceReader {
                 line: 1,
                 column: 0,
                 managed_id: managed_id.clone(),
+                managed_digest: managed_digest.clone(),
             }
         };
         if request.point.is_none() {
