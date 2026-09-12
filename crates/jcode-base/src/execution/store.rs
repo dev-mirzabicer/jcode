@@ -90,8 +90,39 @@ impl ExecutionStore {
         );
         jcode_core::fs::set_directory_permissions_owner_only(&root)?;
         let store = Self { root };
-        let mut connection = store.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // WAL-mode transitions are not ordinary transactions and competing
+        // first opens can fail immediately rather than honoring busy_timeout.
+        // This separate lease serializes initialization across processes while
+        // never opening/closing a raw descriptor for the SQLite database itself.
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).truncate(false).read(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        let initialization = options.open(store.root.join("initialization.lock"))?;
+        ensure!(
+            initialization.metadata()?.is_file(),
+            "Execution initialization lease is not a regular file"
+        );
+        initialization
+            .lock()
+            .context("Acquire execution initialization lease")?;
+        let mut connection = store.connection().context("Connect execution store")?;
+        let current: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .context("Read execution schema")?;
+        if current == SCHEMA {
+            return Ok(store);
+        }
+        // Only migrations need a writer. Re-read under the transaction because
+        // another process may have completed migration after this observation.
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .context("Acquire execution schema migration transaction")?;
         let version: i64 =
             transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
         ensure!(
@@ -231,7 +262,14 @@ impl ExecutionStore {
         jcode_core::fs::set_permissions_owner_only(&path)?;
         connection.busy_timeout(Duration::from_secs(10))?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
-        connection.pragma_update(None, "journal_mode", "WAL")?;
+        let journal: String = connection
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .context("Read execution journal mode")?;
+        if !journal.eq_ignore_ascii_case("wal") {
+            connection
+                .pragma_update(None, "journal_mode", "WAL")
+                .context("Initialize execution WAL mode")?;
+        }
         connection.pragma_update(None, "synchronous", "FULL")?;
         Ok(connection)
     }
@@ -476,6 +514,60 @@ fn query_record(connection: &Connection, id: &str) -> Result<Option<RunRecord>> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_first_opens_publish_one_valid_schema() -> Result<()> {
+        for _ in 0..3 {
+            let root = tempfile::tempdir()?;
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+            let workers = (0..8)
+                .map(|_| {
+                    let path = root.path().to_path_buf();
+                    let barrier = barrier.clone();
+                    std::thread::spawn(move || -> Result<i64> {
+                        barrier.wait();
+                        let store = ExecutionStore::open(&path)?;
+                        Ok(store
+                            .connection()?
+                            .pragma_query_value(None, "user_version", |row| row.get(0))?)
+                    })
+                })
+                .collect::<Vec<_>>();
+            for worker in workers {
+                assert_eq!(
+                    worker.join().expect("Initialization worker panicked")?,
+                    SCHEMA
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn opening_current_schema_is_read_only_while_another_writer_is_active() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let store = ExecutionStore::open(root.path())?;
+        let mut connection = store.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let path = root.path().to_path_buf();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let result = ExecutionStore::open(&path);
+            let _ = done_tx.send(result.is_ok());
+            result
+        });
+        started_rx.recv()?;
+        let opened = done_rx.recv_timeout(Duration::from_secs(1));
+        drop(transaction);
+        thread.join().expect("Reader thread panicked")?;
+        ensure!(
+            opened == Ok(true),
+            "Opening the current schema must not acquire a writer lock"
+        );
+        Ok(())
+    }
 
     fn invocation() -> Invocation {
         Invocation {

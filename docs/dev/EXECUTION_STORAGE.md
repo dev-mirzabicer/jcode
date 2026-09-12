@@ -326,6 +326,12 @@ POSIX close semantics can release another connection's locks. The execution
 store uses SQLite's NOFOLLOW open after resolving ancestor aliases, and hardens
 permissions before WAL/SHM creation. Real cross-process tests cover lock
 preservation in both WAL and rollback modes plus symlink/private-mode checks.
+Opening an already-current schema does not request a SQLite writer transaction.
+First-time WAL/schema initialization is serialized by a separate private kernel
+lease, since concurrent WAL-mode transitions can fail before ordinary busy
+waiting applies. Connections leave an already-selected WAL mode unchanged.
+Regression tests cover fresh concurrent opens, metadata opens while a writer is
+active, and real SDK acquisition observed during an unfinished provider stream.
 
 ## SDK original records and rich results
 
