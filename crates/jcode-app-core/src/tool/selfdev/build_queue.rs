@@ -20,16 +20,14 @@ export -f cargo
         )
     }
 
-    async fn append_output_line(file: &mut tokio::fs::File, line: impl AsRef<str>) {
-        let _ = file.write_all(line.as_ref().as_bytes()).await;
-        let _ = file.write_all(b"\n").await;
-        let _ = file.flush().await;
+    async fn append_output_line(output: &BuildOutput, line: impl AsRef<str>) -> Result<()> {
+        output.line(line).await
     }
 
     async fn wait_for_turn(
         request_id: &str,
         worktree_scope: &str,
-        file: &mut tokio::fs::File,
+        file: &BuildOutput,
     ) -> Result<BuildLockGuard> {
         let mut last_note: Option<String> = None;
         // Tolerate transient lookup misses: a concurrent save() of this (or
@@ -38,6 +36,7 @@ export -f cargo
         // the request was actually pruned/cancelled.
         let mut missing_streak = 0u32;
         loop {
+            file.check_stop()?;
             let pending = BuildRequest::pending_requests_for_scope(worktree_scope)?;
             let my_index = match pending
                 .iter()
@@ -76,7 +75,7 @@ export -f cargo
             };
             if note.as_ref() != last_note.as_ref() {
                 if let Some(note) = note.as_ref() {
-                    Self::append_output_line(file, note).await;
+                    Self::append_output_line(file, note).await?;
                 }
                 last_note = note;
             }
@@ -88,139 +87,98 @@ export -f cargo
     async fn stream_build_command(
         repo_dir: PathBuf,
         command: SelfDevBuildCommand,
-        output_path: PathBuf,
+        output: &mut BuildOutput,
     ) -> Result<TaskResult> {
-        let mut cmd = tokio::process::Command::new(&command.program);
-        cmd.args(&command.args)
-            .current_dir(&repo_dir)
-            .env(
+        output.check_stop()?;
+        Self::append_output_line(output, format!("Starting build with {}", command.display))
+            .await?;
+        #[cfg(unix)]
+        {
+            let mut cmd = tokio::process::Command::new(&command.program);
+            cmd.args(&command.args).current_dir(&repo_dir).env(
                 "JCODE_DEV_CARGO_SCRIPT",
-                repo_dir.join("scripts").join("dev_cargo.sh"),
+                repo_dir.join("scripts/dev_cargo.sh"),
+            );
+            let outcome = crate::execution::command::run_program(
+                cmd,
+                repo_dir,
+                output.capture.clone(),
+                output.stop.clone(),
+                None,
+                None,
             )
-            .kill_on_drop(true)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| anyhow::anyhow!("Failed to spawn build command: {}", e))?;
-
-        let mut file = tokio::fs::File::create(&output_path)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to create output file: {}", e))?;
-        Self::append_output_line(
-            &mut file,
-            format!("Starting build with {}", command.display),
-        )
-        .await;
-
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
-        let mut stdout_lines = stdout.map(|s| BufReader::new(s).lines());
-        let mut stderr_lines = stderr.map(|s| BufReader::new(s).lines());
-        let mut stdout_done = stdout_lines.is_none();
-        let mut stderr_done = stderr_lines.is_none();
-
-        while !stdout_done || !stderr_done {
-            tokio::select! {
-                line = async {
-                    match stdout_lines.as_mut() {
-                        Some(r) => r.next_line().await,
-                        None => std::future::pending().await,
-                    }
-                }, if !stdout_done => {
-                    match line {
-                        Ok(Some(line)) => Self::append_output_line(&mut file, line).await,
-                        _ => stdout_done = true,
-                    }
-                }
-                line = async {
-                    match stderr_lines.as_mut() {
-                        Some(r) => r.next_line().await,
-                        None => std::future::pending().await,
-                    }
-                }, if !stderr_done => {
-                    match line {
-                        Ok(Some(line)) => Self::append_output_line(&mut file, format!("[stderr] {}", line)).await,
-                        _ => stderr_done = true,
-                    }
-                }
+            .await?;
+            output.process_exit = outcome.output.process_exit;
+            output.check_stop()?;
+            let exit_code = outcome.status.code();
+            Self::append_output_line(
+                output,
+                format!(
+                    "--- Command finished with exit code: {} ---",
+                    exit_code.unwrap_or(-1)
+                ),
+            )
+            .await?;
+            if outcome.output.is_error {
+                Ok(TaskResult::failed(
+                    exit_code,
+                    format!(
+                        "Build command failed with exit code {}; inspect retained output",
+                        exit_code.unwrap_or(-1)
+                    ),
+                ))
+            } else {
+                Ok(TaskResult::completed(exit_code))
             }
         }
-
-        let status = child.wait().await?;
-        let exit_code = status.code();
-        Self::append_output_line(
-            &mut file,
-            format!(
-                "--- Command finished with exit code: {} ---",
-                exit_code.unwrap_or(-1)
-            ),
-        )
-        .await;
-
-        if status.success() {
-            Ok(TaskResult::completed(exit_code))
-        } else {
-            Ok(TaskResult::failed(
-                exit_code,
-                format!("Command exited with code {}", exit_code.unwrap_or(-1)),
-            ))
+        #[cfg(not(unix))]
+        {
+            let _ = repo_dir;
+            anyhow::bail!(
+                "Owned self-development command execution is unavailable on this platform; no command was launched"
+            )
         }
     }
 
-    async fn run_test_build(output_path: PathBuf, reason: &str) -> Result<TaskResult> {
-        let mut file = tokio::fs::File::create(&output_path)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to create output file: {}", e))?;
+    async fn run_test_build(output: &mut BuildOutput, reason: &str) -> Result<TaskResult> {
         Self::append_output_line(
-            &mut file,
+            output,
             format!("[test mode] Simulated selfdev build for reason: {}", reason),
         )
-        .await;
+        .await?;
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        Self::append_output_line(&mut file, "--- Command finished with exit code: 0 ---").await;
+        Self::append_output_line(output, "--- Command finished with exit code: 0 ---").await?;
         Ok(TaskResult::completed(Some(0)))
     }
 
-    async fn run_test_request(
+    pub(super) async fn run_test_request(
         request_id: String,
         repo_dir: PathBuf,
         command: SelfDevBuildCommand,
         reason: String,
-        output_path: PathBuf,
+        output: &mut BuildOutput,
     ) -> Result<TaskResult> {
         let mut request = BuildRequest::load(&request_id)?
             .ok_or_else(|| anyhow::anyhow!("Missing queued test request {}", request_id))?;
-        let mut queue_file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&output_path)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to open output file: {}", e))?;
 
         let worktree_scope = request.worktree_scope.clone();
-        let _lock = Self::wait_for_turn(&request_id, &worktree_scope, &mut queue_file).await?;
+        let _lock = Self::wait_for_turn(&request_id, &worktree_scope, output).await?;
         request.state = BuildRequestState::Building;
         request.started_at = Some(Utc::now().to_rfc3339());
         request.last_progress = Some("testing".to_string());
         request.save()?;
-        Self::append_output_line(&mut queue_file, format!("Test starting now: {}", reason)).await;
-        drop(queue_file);
+        Self::append_output_line(output, format!("Test starting now: {}", reason)).await?;
 
         let result = if Self::is_test_session() {
-            let mut file = tokio::fs::File::create(&output_path)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to create output file: {}", e))?;
             Self::append_output_line(
-                &mut file,
+                output,
                 format!("[test mode] Simulated selfdev test: {}", command.display),
             )
-            .await;
-            Self::append_output_line(&mut file, "--- Command finished with exit code: 0 ---").await;
+            .await?;
+            Self::append_output_line(output, "--- Command finished with exit code: 0 ---").await?;
             TaskResult::completed(Some(0))
         } else {
-            Self::stream_build_command(repo_dir, command, output_path.clone()).await?
+            Self::stream_build_command(repo_dir, command, output).await?
         };
 
         let mut request = BuildRequest::load(&request_id)?
@@ -250,24 +208,22 @@ export -f cargo
         Ok(result)
     }
 
-    async fn follow_existing_build(
+    pub(super) async fn follow_existing_build(
         request_id: String,
         original_request_id: String,
-        output_path: PathBuf,
+        output: &mut BuildOutput,
     ) -> Result<TaskResult> {
-        let mut file = tokio::fs::File::create(&output_path)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to create output file: {}", e))?;
         Self::append_output_line(
-            &mut file,
+            output,
             format!(
                 "Attached to existing selfdev build request {} instead of spawning a duplicate build.",
                 original_request_id
             ),
         )
-        .await;
+        .await?;
 
         loop {
+            output.check_stop()?;
             let Some(original) = BuildRequest::load(&original_request_id)? else {
                 anyhow::bail!("Original build request {} disappeared", original_request_id);
             };
@@ -284,13 +240,13 @@ export -f cargo
                     request.error = None;
                     request.save()?;
                     Self::append_output_line(
-                        &mut file,
+                        output,
                         format!(
                             "Original build {} completed successfully.",
                             original_request_id
                         ),
                     )
-                    .await;
+                    .await?;
                     return Ok(TaskResult::completed(Some(0)));
                 }
                 BuildRequestState::Superseded => {
@@ -307,7 +263,7 @@ export -f cargo
                             original_request_id
                         )
                     });
-                    Self::append_output_line(&mut file, &detail).await;
+                    Self::append_output_line(output, &detail).await?;
                     return Ok(TaskResult::superseded(Some(0), detail));
                 }
                 BuildRequestState::Failed | BuildRequestState::Cancelled => {
@@ -321,7 +277,7 @@ export -f cargo
                     let error = original.error.clone().unwrap_or_else(|| {
                         format!("Original build {} did not complete", original_request_id)
                     });
-                    Self::append_output_line(&mut file, &error).await;
+                    Self::append_output_line(output, &error).await?;
                     return Ok(TaskResult::failed(None, error));
                 }
                 BuildRequestState::Attached => {
@@ -334,24 +290,18 @@ export -f cargo
         }
     }
 
-    async fn run_build_request(
+    pub(super) async fn run_build_request(
         request_id: String,
         repo_dir: PathBuf,
         command: SelfDevBuildCommand,
         reason: String,
-        output_path: PathBuf,
+        output: &mut BuildOutput,
     ) -> Result<TaskResult> {
         let mut request = BuildRequest::load(&request_id)?
             .ok_or_else(|| anyhow::anyhow!("Missing queued build request {}", request_id))?;
-        let mut queue_file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&output_path)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to open output file: {}", e))?;
 
         let worktree_scope = request.worktree_scope.clone();
-        let _lock = Self::wait_for_turn(&request_id, &worktree_scope, &mut queue_file).await?;
+        let _lock = Self::wait_for_turn(&request_id, &worktree_scope, output).await?;
         let expected_source = request
             .requested_source
             .clone()
@@ -367,18 +317,18 @@ export -f cargo
         request.built_source = Some(actual_source.clone());
         request.last_progress = Some("building".to_string());
         request.save()?;
-        Self::append_output_line(&mut queue_file, format!("Build starting now: {}", reason)).await;
-        drop(queue_file);
+        Self::append_output_line(output, format!("Build starting now: {}", reason)).await?;
 
         let result = if Self::is_test_session() {
-            Self::run_test_build(output_path.clone(), &reason).await?
+            Self::run_test_build(output, &reason).await?
         } else {
             let result =
-                Self::stream_build_command(repo_dir.clone(), command.clone(), output_path.clone())
-                    .await?;
+                Self::stream_build_command(repo_dir.clone(), command.clone(), output).await?;
+            output.check_stop()?;
             if result.error.is_none() {
                 match build::ensure_source_state_matches(&repo_dir, &expected_source) {
                     Ok(source_after_build) => {
+                        output.check_stop()?;
                         build::write_current_dev_binary_source_metadata(
                             &repo_dir,
                             &source_after_build,
@@ -393,6 +343,7 @@ export -f cargo
                             )?;
                             None
                         } else {
+                            output.check_stop()?;
                             let published = build::publish_local_current_build_for_source(
                                 &repo_dir,
                                 &source_after_build,
@@ -402,6 +353,7 @@ export -f cargo
                             Some(published)
                         };
                         let desktop_instances = if builds_desktop2 {
+                            output.check_stop()?;
                             Self::activate_desktop2_selfdev_binary(&repo_dir, &source_after_build)?
                         } else {
                             0
@@ -431,12 +383,7 @@ export -f cargo
                             "Build completed successfully, but the source changed before activation. Marking this result as superseded instead of failed. {}",
                             err
                         );
-                        let mut file = tokio::fs::OpenOptions::new()
-                            .append(true)
-                            .open(&output_path)
-                            .await
-                            .map_err(|e| anyhow::anyhow!("Failed to append output note: {}", e))?;
-                        Self::append_output_line(&mut file, &detail).await;
+                        Self::append_output_line(output, &detail).await?;
                         TaskResult::superseded(result.exit_code.or(Some(0)), detail)
                     }
                 }
@@ -705,7 +652,7 @@ export -f cargo
         let notify = notify.unwrap_or(true) || wake;
 
         if let Some(existing) = duplicate {
-            let mut request = BuildRequest {
+            let request = BuildRequest {
                 request_id: request_id.clone(),
                 background_task_id: None,
                 session_id: ctx.session_id.clone(),
@@ -734,30 +681,16 @@ export -f cargo
             };
             request.save()?;
 
-            let request_id_for_task = request_id.clone();
-            let existing_request_id = existing.request_id.clone();
-            let info = background::global()
-                .spawn_with_notify(
-                    "selfdev-build-watch",
-                    Some("build watch".to_string()),
-                    &ctx.session_id,
-                    notify,
-                    wake,
-                    move |output_path| async move {
-                        SelfDevTool::follow_existing_build(
-                            request_id_for_task,
-                            existing_request_id,
-                            output_path,
-                        )
-                        .await
-                    },
-                )
-                .await;
-
-            request.background_task_id = Some(info.task_id.clone());
-            request.output_file = Some(info.output_file.display().to_string());
-            request.status_file = Some(info.status_file.display().to_string());
-            request.save()?;
+            let info = Self::spawn_build_job(
+                request_id.clone(),
+                BuildJob::Watch {
+                    original: existing.request_id.clone(),
+                },
+                ctx,
+                notify,
+                wake,
+            )
+            .await?;
 
             let delivery = if wake {
                 "The requesting agent will be woken when the existing build finishes."
@@ -801,7 +734,7 @@ export -f cargo
             })));
         }
 
-        let mut request = BuildRequest {
+        let request = BuildRequest {
             request_id: request_id.clone(),
             background_task_id: None,
             session_id: ctx.session_id.clone(),
@@ -834,34 +767,18 @@ export -f cargo
             SelfDevTool::current_queue_position(&request_id, &requested_source.worktree_scope)?
                 .unwrap_or(1);
 
-        let request_id_for_task = request_id.clone();
-        let repo_dir_for_task = repo_dir.clone();
-        let command_for_task = command.clone();
-        let reason_for_task = reason.clone();
-        let info = background::global()
-            .spawn_with_notify(
-                "selfdev-build",
-                Some("selfdev build".to_string()),
-                &ctx.session_id,
-                notify,
-                wake,
-                move |output_path| async move {
-                    SelfDevTool::run_build_request(
-                        request_id_for_task,
-                        repo_dir_for_task,
-                        command_for_task,
-                        reason_for_task,
-                        output_path,
-                    )
-                    .await
-                },
-            )
-            .await;
-
-        request.background_task_id = Some(info.task_id.clone());
-        request.output_file = Some(info.output_file.display().to_string());
-        request.status_file = Some(info.status_file.display().to_string());
-        request.save()?;
+        let info = Self::spawn_build_job(
+            request_id.clone(),
+            BuildJob::Build {
+                repo: repo_dir.clone(),
+                command: command.clone(),
+                reason: reason.clone(),
+            },
+            ctx,
+            notify,
+            wake,
+        )
+        .await?;
         let delivery = if wake {
             "The requesting agent will be woken when the build completes."
         } else if notify {
@@ -1143,7 +1060,7 @@ export -f cargo
         let wake = wake.unwrap_or(true);
         let notify = notify.unwrap_or(true) || wake;
 
-        let mut request = BuildRequest {
+        let request = BuildRequest {
             request_id: request_id.clone(),
             background_task_id: None,
             session_id: ctx.session_id.clone(),
@@ -1175,34 +1092,18 @@ export -f cargo
             SelfDevTool::current_queue_position(&request_id, &requested_source.worktree_scope)?
                 .unwrap_or(1);
 
-        let request_id_for_task = request_id.clone();
-        let repo_dir_for_task = repo_dir.clone();
-        let command_for_task = shell_command.clone();
-        let reason_for_task = reason.clone();
-        let info = background::global()
-            .spawn_with_notify(
-                "selfdev-test",
-                Some("selfdev test".to_string()),
-                &ctx.session_id,
-                notify,
-                wake,
-                move |output_path| async move {
-                    SelfDevTool::run_test_request(
-                        request_id_for_task,
-                        repo_dir_for_task,
-                        command_for_task,
-                        reason_for_task,
-                        output_path,
-                    )
-                    .await
-                },
-            )
-            .await;
-
-        request.background_task_id = Some(info.task_id.clone());
-        request.output_file = Some(info.output_file.display().to_string());
-        request.status_file = Some(info.status_file.display().to_string());
-        request.save()?;
+        let info = Self::spawn_build_job(
+            request_id.clone(),
+            BuildJob::Test {
+                repo: repo_dir.clone(),
+                command: shell_command.clone(),
+                reason: reason.clone(),
+            },
+            ctx,
+            notify,
+            wake,
+        )
+        .await?;
         let delivery = if wake {
             "The requesting agent will be woken when the test completes."
         } else if notify {
@@ -1268,7 +1169,10 @@ export -f cargo
 
         if matches!(
             request.state,
-            BuildRequestState::Completed | BuildRequestState::Failed | BuildRequestState::Cancelled
+            BuildRequestState::Completed
+                | BuildRequestState::Failed
+                | BuildRequestState::Cancelled
+                | BuildRequestState::Superseded
         ) {
             return Ok(ToolOutput::new(format!(
                 "Build request `{}` is already in terminal state `{}`.",
@@ -1277,6 +1181,7 @@ export -f cargo
                     BuildRequestState::Completed => "completed",
                     BuildRequestState::Failed => "failed",
                     BuildRequestState::Cancelled => "cancelled",
+                    BuildRequestState::Superseded => "superseded",
                     _ => unreachable!(),
                 }
             )));
@@ -1287,6 +1192,14 @@ export -f cargo
         } else {
             false
         };
+
+        // Reload after the awaited Stop. A natural completion must not be
+        // overwritten by the stale pre-control request snapshot.
+        request = BuildRequest::load(&request.request_id)?
+            .ok_or_else(|| anyhow::anyhow!("Build request disappeared during cancellation"))?;
+        if !cancelled_task && request.background_task_id.is_some() {
+            return Ok(ToolOutput::new(format!("No task cancellation was performed; build request `{}` remains in its recorded state.",request.request_id)).with_metadata(json!({"request_id":request.request_id,"task_id":request.background_task_id,"cancelled":false})));
+        }
 
         request.state = BuildRequestState::Cancelled;
         request.completed_at = Some(Utc::now().to_rfc3339());
@@ -1306,6 +1219,78 @@ export -f cargo
             "cancelled": true,
             "cancelled_task": cancelled_task,
         })))
+    }
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn build_output_preserves_queue_history_and_received_command_bytes() -> Result<()> {
+        use jcode_tool_core::OutputCapture;
+        let directory = tempfile::tempdir()?;
+        let store = crate::execution::ExecutionStore::open(directory.path())?;
+        let invocation = crate::execution::Invocation {
+            session_id: "build-output".into(),
+            message_id: "message".into(),
+            call_path: vec!["command".into()],
+            tool: "selfdev-test".into(),
+            input: json!({}),
+            working_dir: Some(directory.path().into()),
+            received_result_digest: None,
+        };
+        let crate::execution::PreparedInvocation::New(record) =
+            store.prepare(&invocation, "fixture")?
+        else {
+            panic!()
+        };
+        store.start(&record.id, "fixture")?;
+        let capture = std::sync::Arc::new(crate::execution::Capture::create(
+            store,
+            record,
+            Default::default(),
+        )?);
+        let path = capture.reference()?.path;
+        let mut captured = BuildOutput {
+            capture: capture.clone(),
+            stop: jcode_agent_runtime::InterruptSignal::new(),
+            process_exit: None,
+        };
+        captured.line("QUEUED_NOTE").await?;
+        let result = SelfDevTool::stream_build_command(
+            directory.path().into(),
+            SelfDevBuildCommand {
+                program: "/usr/bin/python3".into(),
+                args: vec![
+                    "-c".into(),
+                    "import os; os.write(1,b'BEFORE\\xffAFTER'); os.write(2,b'ERROR_TAIL')".into(),
+                ],
+                display: "isolated fixture".into(),
+            },
+            &mut captured,
+        )
+        .await?;
+        let mut receipt = ToolOutput::new("");
+        receipt.source = jcode_tool_types::OutputSource::Retained(capture.reference()?);
+        receipt.process_exit = captured.process_exit;
+        capture.seal(receipt, crate::execution::RunState::Completed)?;
+        assert_eq!(
+            std::fs::read(path.with_file_name("stdout.bin"))?,
+            b"BEFORE\xffAFTER"
+        );
+        let output = std::fs::read_to_string(path)?;
+        assert!(
+            output.contains("QUEUED_NOTE"),
+            "Starting a command must not truncate its queued receipt"
+        );
+        assert!(
+            output.contains("BEFORE") && output.contains("AFTER"),
+            "Invalid UTF-8 must not discard received output"
+        );
+        assert!(output.contains("ERROR_TAIL"));
+        assert_eq!(result.exit_code, Some(0));
+        Ok(())
     }
 }
 

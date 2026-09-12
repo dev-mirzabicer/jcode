@@ -103,6 +103,230 @@ fn request_fixture(
     }
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn owned_selfdev_jobs_preserve_watch_isolation_raw_output_and_actual_stop() -> Result<()> {
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir()?;
+    let _home = EnvVarGuard::set("JCODE_HOME", home.path());
+    let _runtime = EnvVarGuard::set("JCODE_RUNTIME_DIR", home.path().join("runtime"));
+    let _test = EnvVarGuard::remove("JCODE_TEST_SESSION");
+    crate::config::invalidate_config_cache();
+    let repo = tempfile::tempdir()?;
+    let make_request = |state| {
+        let mut request = request_fixture(
+            &crate::id::new_id("build-request"),
+            state,
+            Utc::now().to_rfc3339(),
+        );
+        request.repo_dir = repo.path().display().to_string();
+        request.worktree_scope = "owned-selfdev-fixture".into();
+        request
+    };
+    let original = make_request(BuildRequestState::Queued);
+    original.save()?;
+    let ctx = create_test_context(&original.session_id, Some(repo.path().into()));
+    let command=SelfDevBuildCommand{program:"/usr/bin/python3".into(),args:vec!["-c".into(),"import os,time; open('ready','w').write('ready'); print('START',flush=True)\nfor _ in range(100):\n if os.path.exists('release'): break\n time.sleep(.05)\nos.write(1,b'DONE\\xffTAIL')".into()],display:"owned selfdev fixture".into()};
+    let info = SelfDevTool::spawn_build_job(
+        original.request_id.clone(),
+        BuildJob::Test {
+            repo: repo.path().into(),
+            command,
+            reason: "test raw output".into(),
+        },
+        &ctx,
+        false,
+        false,
+    )
+    .await?;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !repo.path().join("ready").exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+    let mut watch = make_request(BuildRequestState::Attached);
+    watch.attached_to_request_id = Some(original.request_id.clone());
+    watch.save()?;
+    let watcher = SelfDevTool::spawn_build_job(
+        watch.request_id.clone(),
+        BuildJob::Watch {
+            original: original.request_id.clone(),
+        },
+        &ctx,
+        false,
+        false,
+    )
+    .await?;
+    assert!(background::global().cancel(&watcher.task_id).await?);
+    let running = background::global().status(&info.task_id).await.unwrap();
+    std::fs::write(repo.path().join("release"), b"release")?;
+    assert_eq!(
+        running.status,
+        BackgroundTaskStatus::Running,
+        "Stopping a watcher cannot stop its build"
+    );
+    assert_eq!(
+        wait_for_task_completion(&info.task_id).await.status,
+        BackgroundTaskStatus::Completed
+    );
+    let projected: crate::background::TaskStatusFile =
+        crate::storage::read_json(&info.status_file)?;
+    assert_eq!(projected.status, BackgroundTaskStatus::Completed);
+    assert_eq!(
+        std::fs::read(info.output_file.with_file_name("stdout.bin"))?,
+        b"START\nDONE\xffTAIL"
+    );
+    assert!(std::fs::read_to_string(&info.output_file)?.contains("Test starting now"));
+
+    let stopped = make_request(BuildRequestState::Queued);
+    stopped.save()?;
+    let command=SelfDevBuildCommand{program:"bash".into(),args:vec!["-c".into(),"printf before > effect; (trap '' TERM; sleep 30; printf late > escaped) & touch stop-ready; wait".into()],display:"owned stop fixture".into()};
+    let task = SelfDevTool::spawn_build_job(
+        stopped.request_id.clone(),
+        BuildJob::Test {
+            repo: repo.path().into(),
+            command,
+            reason: "stop fixture".into(),
+        },
+        &ctx,
+        false,
+        false,
+    )
+    .await?;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !repo.path().join("stop-ready").exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+    let outcome = SelfDevTool::new()
+        .do_cancel_build(Some(stopped.request_id.clone()), None, &ctx)
+        .await?;
+    assert_eq!(outcome.metadata.unwrap()["cancelled"], true);
+    assert_eq!(
+        BuildRequest::load(&stopped.request_id)?.unwrap().state,
+        BuildRequestState::Cancelled
+    );
+    assert_eq!(std::fs::read(repo.path().join("effect"))?, b"before");
+    assert!(!repo.path().join("escaped").exists());
+    let store = crate::execution::ExecutionStore::open(home.path())?;
+    assert_eq!(
+        store.inspect(&task.task_id)?.unwrap().state,
+        crate::execution::RunState::Cancelled
+    );
+    assert!(
+        SelfDevTool::try_acquire_build_lock("owned-selfdev-fixture")?.is_some(),
+        "Stopped work releases its compiler lease only after quiescence"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn owned_selfdev_capture_failure_does_not_leave_a_queued_request_or_run_effects() -> Result<()>
+{
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir()?;
+    let _home = EnvVarGuard::set("JCODE_HOME", home.path());
+    let _runtime = EnvVarGuard::set("JCODE_RUNTIME_DIR", home.path().join("runtime"));
+    let _test = EnvVarGuard::remove("JCODE_TEST_SESSION");
+    crate::config::invalidate_config_cache();
+    let store = crate::execution::ExecutionStore::open(home.path())?;
+    std::fs::write(store.root().join("data"), b"preserve blocker")?;
+    let request = request_fixture(
+        "unstarted-selfdev",
+        BuildRequestState::Queued,
+        Utc::now().to_rfc3339(),
+    );
+    request.save()?;
+    let ctx = create_test_context(&request.session_id, Some(home.path().into()));
+    let command = SelfDevBuildCommand {
+        program: "/nonexistent/must-not-run".into(),
+        args: Vec::new(),
+        display: "must not run".into(),
+    };
+    assert!(
+        SelfDevTool::spawn_build_job(
+            request.request_id.clone(),
+            BuildJob::Test {
+                repo: home.path().into(),
+                command,
+                reason: "allocation failure".into()
+            },
+            &ctx,
+            false,
+            false
+        )
+        .await
+        .is_err()
+    );
+    let request = BuildRequest::load(&request.request_id)?.unwrap();
+    assert_eq!(request.state, BuildRequestState::Failed);
+    assert_eq!(
+        store
+            .inspect(request.background_task_id.as_deref().unwrap())?
+            .unwrap()
+            .state,
+        crate::execution::RunState::Failed
+    );
+    assert_eq!(
+        std::fs::read(store.root().join("data"))?,
+        b"preserve blocker"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn owned_selfdev_watcher_preserves_superseded_outcome_in_metadata() -> Result<()> {
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir()?;
+    let _home = EnvVarGuard::set("JCODE_HOME", home.path());
+    let _runtime = EnvVarGuard::set("JCODE_RUNTIME_DIR", home.path().join("runtime"));
+    crate::config::invalidate_config_cache();
+    let mut original = request_fixture(
+        "superseded-original",
+        BuildRequestState::Superseded,
+        Utc::now().to_rfc3339(),
+    );
+    original.error = Some("new source replaced the build".into());
+    original.save()?;
+    let mut watcher = request_fixture(
+        "superseded-watcher",
+        BuildRequestState::Attached,
+        Utc::now().to_rfc3339(),
+    );
+    watcher.attached_to_request_id = Some(original.request_id.clone());
+    watcher.save()?;
+    let ctx = create_test_context(&watcher.session_id, Some(home.path().into()));
+    let task = SelfDevTool::spawn_build_job(
+        watcher.request_id.clone(),
+        BuildJob::Watch {
+            original: original.request_id,
+        },
+        &ctx,
+        false,
+        false,
+    )
+    .await?;
+    assert_eq!(
+        wait_for_task_completion(&task.task_id).await.status,
+        BackgroundTaskStatus::Superseded
+    );
+    let store = crate::execution::ExecutionStore::open(home.path())?;
+    let record = store.inspect(&task.task_id)?.unwrap();
+    assert_eq!(record.state, crate::execution::RunState::Completed);
+    assert!(record.superseded);
+    let reply = SelfDevTool::new()
+        .do_cancel_build(Some(watcher.request_id.clone()), None, &ctx)
+        .await?;
+    assert!(reply.output.contains("superseded"));
+    assert_eq!(
+        BuildRequest::load(&watcher.request_id)?.unwrap().state,
+        BuildRequestState::Superseded
+    );
+    Ok(())
+}
+
 #[test]
 fn build_lock_is_removed_on_drop_and_can_be_reacquired() {
     let _env_lock = crate::storage::lock_test_env();
@@ -990,6 +1214,15 @@ async fn cancel_build_marks_request_cancelled_and_removes_it_from_queue() {
     let _home_guard = EnvVarGuard::set("JCODE_HOME", temp_home.path());
     let _test_guard = EnvVarGuard::set("JCODE_TEST_SESSION", "1");
     let repo = create_repo_fixture();
+    // Keep the original build queued independently of scheduler timing while
+    // its attached watcher cooperatively stops.
+    let queue_barrier = SelfDevTool::try_acquire_build_lock(
+        &SelfDevTool::requested_source_state(repo.path())
+            .unwrap()
+            .worktree_scope,
+    )
+    .unwrap()
+    .unwrap();
 
     let mut session_one = session::Session::create(None, Some("Build A".to_string()));
     session_one.short_name = Some("alpha".to_string());
@@ -1042,6 +1275,7 @@ async fn cancel_build_marks_request_cancelled_and_removes_it_from_queue() {
     assert!(!status_output.output.contains("cancel me"));
 
     let first_meta = first.metadata.expect("first metadata");
+    drop(queue_barrier);
     let first_status = wait_for_task_completion(first_meta["task_id"].as_str().unwrap()).await;
     assert_eq!(first_status.status, BackgroundTaskStatus::Completed);
 }

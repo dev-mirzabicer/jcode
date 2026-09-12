@@ -62,6 +62,8 @@ impl StopCause {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolOutput {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub superseded: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_receipt: Option<ProviderReceiptReference>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -164,6 +166,7 @@ pub struct ToolResource {
 impl ToolOutput {
     pub fn new(output: impl Into<String>) -> Self {
         Self {
+            superseded: false,
             provider_receipt: None,
             output: output.into(),
             process_exit: None,

@@ -13,6 +13,7 @@ export const API_VERSION_MINOR = 2;
 export type ExecutionState = "prepared" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
 export type OutputSize = number | "very_small" | "small" | "medium" | "large" | "very_large";
 export interface ExecutionRun {
+  superseded?: boolean;
   id: string; session_id: string; message_id: string; tool: string;
   state: ExecutionState; owner: string; input_path: string;
   result_path: string | null; output_path: string | null; output_bytes: number;
@@ -22,6 +23,7 @@ export interface ExecutionRun {
   progress?: {value: Record<string, unknown>; checkpoint: boolean; sequence: number};
 }
 export interface ExecutionPage {
+  superseded?: boolean;
   output: string; title: string | null; metadata: unknown;
   images: {media_type: string; data: string; label: string | null}[];
   resources: {uri: string; media_type: string | null; data: string}[];

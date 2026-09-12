@@ -17,10 +17,10 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 mod build_queue;
+mod job;
+use job::{BuildJob, BuildOutput};
 mod launch;
 mod reload;
 mod setup;

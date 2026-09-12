@@ -17,6 +17,8 @@ fn projected(store: &ExecutionStore, id: &str) -> Result<Option<TaskStatusFile>>
         .context("Delivery points to a missing execution")?;
     let status = if !record.state.terminal() {
         BackgroundTaskStatus::Running
+    } else if record.state == RunState::Completed && record.superseded {
+        BackgroundTaskStatus::Superseded
     } else if record.state == RunState::Completed {
         BackgroundTaskStatus::Completed
     } else {
@@ -24,6 +26,9 @@ fn projected(store: &ExecutionStore, id: &str) -> Result<Option<TaskStatusFile>>
     };
     let (started_at, completed_at, duration_secs) = store.execution_times(id)?;
     let error = match record.state {
+        RunState::Completed if record.superseded => Some(
+            "Execution completed but its result was superseded; inspect retained output".into(),
+        ),
         RunState::Cancelled | RunState::Interrupted => Some(
             record
                 .stop_cause
@@ -89,6 +94,29 @@ fn projected(store: &ExecutionStore, id: &str) -> Result<Option<TaskStatusFile>>
 }
 
 impl BackgroundTaskManager {
+    pub async fn managed_task_info(&self, id: &str) -> Result<Option<BackgroundTaskInfo>> {
+        let id = id.to_string();
+        tokio::task::spawn_blocking(move || {
+            let store = store()?;
+            let Some(record) = store.inspect(&id)? else {
+                return Ok(None);
+            };
+            if store.background_delivery(&id)?.is_none() {
+                return Ok(None);
+            }
+            Ok(Some(BackgroundTaskInfo {
+                task_id: id.clone(),
+                output_file: record
+                    .output_path
+                    .unwrap_or_else(|| store.root().join("outputs").join(&id).join("output.txt")),
+                status_file: store
+                    .root()
+                    .join("background")
+                    .join(format!("{id}.status.json")),
+            }))
+        })
+        .await?
+    }
     pub(super) async fn register_managed(
         &self,
         id: &str,
@@ -174,7 +202,15 @@ impl BackgroundTaskManager {
 
     pub(super) async fn managed_status(&self, id: &str) -> Result<Option<TaskStatusFile>> {
         let id = id.to_string();
-        tokio::task::spawn_blocking(move || projected(&store()?, &id)).await?
+        tokio::task::spawn_blocking(move || {
+            let store = store()?;
+            let status = projected(&store, &id)?;
+            if let Some(status) = &status {
+                persist_projection(&store, status)?;
+            }
+            Ok(status)
+        })
+        .await?
     }
     pub(super) async fn managed_statuses(&self) -> Result<Vec<TaskStatusFile>> {
         tokio::task::spawn_blocking(move || {
@@ -203,6 +239,7 @@ impl BackgroundTaskManager {
             if status.status == BackgroundTaskStatus::Running {
                 return Ok(None);
             }
+            persist_projection(&store, &status)?;
             let notify = delivery.notify && delivery.notify_state == DeliveryState::Pending;
             let wake = delivery.wake && delivery.wake_state == DeliveryState::Pending;
             if !notify && !wake {
@@ -348,4 +385,17 @@ impl BackgroundTaskManager {
             ),
         }
     }
+}
+
+fn persist_projection(store: &ExecutionStore, status: &TaskStatusFile) -> Result<()> {
+    let directory = store.root().join("background");
+    crate::storage::ensure_dir(&directory)?;
+    ensure!(
+        std::fs::symlink_metadata(&directory)?.is_dir(),
+        "Background projection directory changed type"
+    );
+    crate::storage::write_json_secret(
+        &directory.join(format!("{}.status.json", status.task_id)),
+        status,
+    )
 }

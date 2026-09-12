@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-const SCHEMA: i64 = 14;
+const SCHEMA: i64 = 15;
 
 pub use jcode_tool_types::RunState;
 
@@ -235,6 +235,9 @@ impl ExecutionStore {
             )?;
             transaction.pragma_update(None, "user_version", 14)?;
         }
+        if version < 15 {
+            transaction.execute_batch("ALTER TABLE runs ADD COLUMN superseded INTEGER NOT NULL DEFAULT 0; PRAGMA user_version=15;")?;
+        }
         transaction.commit()?;
         Ok(store)
     }
@@ -401,16 +404,17 @@ impl ExecutionStore {
                     && previous.output_path == record.output_path
                     && previous.output_bytes == record.output_bytes
                     && previous.complete == record.complete
-                    && previous.process_exit == record.process_exit,
+                    && previous.process_exit == record.process_exit
+                    && previous.superseded == record.superseded,
                 "Conflicting terminal invocation receipt"
             );
             return Ok(());
         }
         let bytes = i64::try_from(record.output_bytes)
             .context("Output size exceeds metadata representation")?;
-        transaction.execute("UPDATE runs SET state=?2,result_path=?3,output_path=?4,output_bytes=?5,complete=?6,process_exit=?7,updated=unixepoch() WHERE id=?1", params![
+        transaction.execute("UPDATE runs SET state=?2,result_path=?3,output_path=?4,output_bytes=?5,complete=?6,process_exit=?7,superseded=?8,updated=unixepoch() WHERE id=?1", params![
             record.id, record.state.as_str(), record.result_path.as_deref().map(path_text).transpose()?,
-            record.output_path.as_deref().map(path_text).transpose()?, bytes, record.complete,record.process_exit.as_ref().map(serde_json::to_string).transpose()?])?;
+            record.output_path.as_deref().map(path_text).transpose()?, bytes, record.complete,record.process_exit.as_ref().map(serde_json::to_string).transpose()?,record.superseded])?;
         transaction.execute("UPDATE command_handoffs SET state='finished' WHERE run_id=?1 AND COALESCE(worker_owner,parent_owner)=?2",params![record.id,record.owner])?;
         transaction.commit()?;
         Ok(())
@@ -482,6 +486,7 @@ fn query_record(connection: &Connection, id: &str) -> Result<Option<RunRecord>> 
                 )
             })?;
             Ok(RunRecord {
+                superseded: row.get("superseded")?,
                 process_exit: row
                     .get::<_, Option<String>>("process_exit")?
                     .map(|value| serde_json::from_str(&value))

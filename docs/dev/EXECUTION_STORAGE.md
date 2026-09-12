@@ -152,6 +152,42 @@ same captured bytes rather than rereading a possibly changed file. Redirected
 stdout does not emit terminal image escapes. Hosted-provider vision budgets and
 unsupported formats remain explicit provider-boundary verification work.
 
+## Self-development build and test jobs
+
+Build-producing, test and attached-watcher requests use the common execution owner
+with durable run IDs, capture, completion delivery and explicit background
+acceptance. The existing worktree queue, source fingerprint validation, build lock,
+deduplication and publication checks remain with the self-development coordinator.
+The job records its complete command arguments and original request identity.
+Delivery and request linkage are durable before the caller receives readiness.
+
+Queue messages and native output share one append-only capture; command startup
+cannot truncate an earlier queue receipt. Unix subprocesses use the existing
+process-group supervisor, concurrently retain raw stdout/stderr and keep the build
+lock until actual quiescence. Output write/acquisition errors propagate rather than
+being treated as EOF or success. Stop is observed while queued and before later
+publication actions. Completed effects are not rolled back. Watchers only observe
+the original build: cancelling one watcher does not stop that build.
+
+A capture-allocation failure leaves a failed request rather than an orphan queued
+entry. Cancellation reloads request state after awaiting control, so a natural
+completion is not overwritten by a stale cancellation snapshot. Superseded builds
+retain a separate durable `superseded` facet while execution state remains
+`completed`; manifests/recovery and metadata-only background status preserve it.
+Compatibility status files are refreshed from the authoritative record, including
+terminal work with notifications disabled.
+
+Tests cover preserved queue text and invalid UTF-8 bytes, actual TERM-resistant
+child stopping, released compiler leases, watcher isolation, startup allocation
+failure, superseded state and terminal-receipt recovery. Forty selfdev tests and
+59 execution-store tests pass (one explicit native archive fixture is not run in
+that matrix), as do strict affected lint, both host checks and 48 TypeScript tests.
+These tests run synthetic commands, not a real source publication. Generic helper
+process-loss proof, compact background summary/reload views and final native
+activation remain WP-02 reconciliation work. Unsupported non-Unix build-command
+ownership fails explicitly before launching a process rather than using the old
+unmanaged command path; native platform parity is not claimed.
+
 ## Native helper commands
 
 Computer-use and Agentgrep helper commands share the native command supervisor

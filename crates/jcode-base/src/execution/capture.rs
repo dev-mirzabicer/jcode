@@ -154,6 +154,7 @@ impl Capture {
             if complete {
                 let manifest = Manifest {
                     process_exit: output.process_exit.clone(),
+                    superseded: output.superseded,
                     provider_receipt: output.provider_receipt.clone(),
                     parts,
                     schema: 1,
@@ -200,6 +201,7 @@ impl Capture {
                 manifest_path = directory.join(format!("{}.json", state.record.id));
                 let manifest = Manifest {
                     process_exit: output.process_exit.clone(),
+                    superseded: output.superseded,
                     provider_receipt: output.provider_receipt.clone(),
                     schema: 1,
                     invocation_id: state.record.id.clone(),
@@ -225,6 +227,7 @@ impl Capture {
                 outcome
             };
             state.record.process_exit = output.process_exit.clone();
+            state.record.superseded = output.superseded;
             state.record.output_path = Some(state.storage.alias().join("output.txt"));
             state.record.output_bytes = state.committed;
             state.record.complete = state.failed.is_none();
@@ -501,6 +504,34 @@ mod tests {
         let manifest = recovered.result_path.unwrap();
         std::fs::rename(&manifest, manifest.with_extension("saved"))?;
         assert_eq!(store.inspect(&record.id)?.unwrap().process_exit, Some(exit));
+        Ok(())
+    }
+
+    #[test]
+    fn superseded_facet_recovers_without_reclassifying_completed_work_as_failure() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let store = ExecutionStore::open(directory.path())?;
+        let record = prepared(&store)?;
+        let capture = Capture::create(store.clone(), record.clone(), StorageConfig::default())?;
+        let mut output = ToolOutput::new("Completed result was superseded");
+        output.superseded = true;
+        store.connection()?.execute_batch("CREATE TRIGGER block_terminal BEFORE UPDATE OF state ON runs WHEN NEW.state='completed' BEGIN SELECT RAISE(FAIL,'injected terminal failure'); END;")?;
+        assert!(capture.seal(output, RunState::Completed).is_err());
+        drop(capture);
+        store
+            .connection()?
+            .execute_batch("DROP TRIGGER block_terminal;")?;
+        let recovered = store.recover_terminal_output(&record.id)?;
+        assert_eq!(recovered.state, RunState::Completed);
+        assert!(recovered.superseded);
+        assert!(
+            store
+                .result(&recovered, std::num::NonZeroUsize::new(1000).unwrap())?
+                .superseded
+        );
+        let manifest = recovered.result_path.unwrap();
+        std::fs::rename(&manifest, manifest.with_extension("saved"))?;
+        assert!(store.inspect(&record.id)?.unwrap().superseded);
         Ok(())
     }
 

@@ -285,7 +285,6 @@ async fn background_receipt(
     Ok(output)
 }
 
-#[cfg(unix)]
 pub(crate) async fn background_handoff(ctx: &ToolContext) -> Result<ToolOutput> {
     let root = crate::storage::jcode_dir()?.join("execution");
     let run = LIVE
