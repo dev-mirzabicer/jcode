@@ -97,7 +97,7 @@ impl Tool for GmailTool {
         })
     }
 
-    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
+    async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: GmailInput = serde_json::from_value(input)?;
         let max = params.max_results.unwrap_or(10).min(50);
 
@@ -156,10 +156,13 @@ impl Tool for GmailTool {
                 };
 
                 let list = self.client.list_messages(query, labels, max).await?;
+                retain_received(&ctx, "list_messages", &list).await?;
+                let mut received = json!({"list":list,"messages":[]});
                 let msgs = list.messages.unwrap_or_default();
 
                 if msgs.is_empty() {
-                    return Ok(ToolOutput::new("No messages found."));
+                    return Ok(ToolOutput::new("No messages found.")
+                        .with_metadata(json!({"gmail_result":received})));
                 }
 
                 let mut results = Vec::new();
@@ -170,6 +173,11 @@ impl Tool for GmailTool {
                         .await
                     {
                         Ok(msg) => {
+                            retain_received(&ctx, "message_metadata", &msg).await?;
+                            received["messages"]
+                                .as_array_mut()
+                                .unwrap()
+                                .push(serde_json::to_value(&msg)?);
                             results.push(format!(
                                 "{}. {}\n   From: {}\n   Date: {}\n   ID: {}",
                                 i + 1,
@@ -196,11 +204,10 @@ impl Tool for GmailTool {
                     format!("Recent messages ({} shown):", results.len())
                 };
 
-                Ok(ToolOutput::new(format!(
-                    "{}\n\n{}",
-                    header,
-                    results.join("\n\n")
-                )))
+                Ok(
+                    ToolOutput::new(format!("{}\n\n{}", header, results.join("\n\n")))
+                        .with_metadata(json!({"gmail_result":received})),
+                )
             }
 
             "read" => {
@@ -210,16 +217,21 @@ impl Tool for GmailTool {
                     .ok_or_else(|| anyhow::anyhow!("message_id is required for read action"))?;
 
                 let msg = self.client.get_message(id, MessageFormat::Full).await?;
-                Ok(ToolOutput::new(gmail::format_message_full(&msg)))
+                retain_received(&ctx, "message_full", &msg).await?;
+                Ok(ToolOutput::new(gmail::format_message_full(&msg))
+                    .with_metadata(json!({"gmail_result":msg})))
             }
 
             "threads" => {
                 let query = params.query.as_deref();
                 let list = self.client.list_threads(query, max).await?;
+                retain_received(&ctx, "list_threads", &list).await?;
+                let received = serde_json::to_value(&list)?;
                 let threads = list.threads.unwrap_or_default();
 
                 if threads.is_empty() {
-                    return Ok(ToolOutput::new("No threads found."));
+                    return Ok(ToolOutput::new("No threads found.")
+                        .with_metadata(json!({"gmail_result":received})));
                 }
 
                 let mut results = Vec::new();
@@ -236,7 +248,8 @@ impl Tool for GmailTool {
                     "Threads ({}):\n\n{}",
                     threads.len(),
                     results.join("\n\n")
-                )))
+                ))
+                .with_metadata(json!({"gmail_result":received})))
             }
 
             "thread" => {
@@ -259,45 +272,13 @@ impl Tool for GmailTool {
                         }
                     }
                 };
-                let thread_id = thread.id.clone();
-                let messages = thread.messages.unwrap_or_default();
-
-                if messages.is_empty() {
-                    return Ok(ToolOutput::new("Thread has no messages."));
-                }
-
-                let mut results = Vec::new();
-                for (i, msg) in messages.iter().enumerate() {
-                    let mut entry = format!(
-                        "--- Message {} ---\nID: {}\nFrom: {}\nDate: {}\nSubject: {}\nSnippet: {}",
-                        i + 1,
-                        msg.id,
-                        msg.from().unwrap_or("(unknown)"),
-                        msg.date().unwrap_or(""),
-                        msg.subject().unwrap_or("(no subject)"),
-                        msg.snippet.as_deref().unwrap_or(""),
-                    );
-                    let attachments = msg.attachments();
-                    if !attachments.is_empty() {
-                        entry.push_str(&format!(
-                            "\nAttachments ({}):\n{}",
-                            attachments.len(),
-                            gmail::format_attachment_lines(&attachments)
-                        ));
-                    }
-                    results.push(entry);
-                }
-
-                Ok(ToolOutput::new(format!(
-                    "Thread {} ({} messages):\n\n{}",
-                    thread_id,
-                    messages.len(),
-                    results.join("\n\n")
-                )))
+                retain_received(&ctx, "thread_full", &thread).await?;
+                format_thread_result(thread)
             }
 
             "labels" => {
                 let labels = self.client.list_labels().await?;
+                retain_received(&ctx, "labels", &labels).await?;
                 let mut results = Vec::new();
                 for label in &labels {
                     let unread = label
@@ -313,7 +294,8 @@ impl Tool for GmailTool {
                         label.name, label.id, unread, total
                     ));
                 }
-                Ok(ToolOutput::new(format!("Labels:\n{}", results.join("\n"))))
+                Ok(ToolOutput::new(format!("Labels:\n{}", results.join("\n")))
+                    .with_metadata(json!({"gmail_result":labels})))
             }
 
             "draft" => {
@@ -352,6 +334,7 @@ impl Tool for GmailTool {
                     )
                     .await?;
 
+                retain_received(&ctx, "created_draft", &draft).await?;
                 let attach_line = if attachments.is_empty() {
                     String::new()
                 } else {
@@ -368,7 +351,7 @@ impl Tool for GmailTool {
                 Ok(ToolOutput::new(format!(
                     "Draft created successfully.\nDraft ID: {}\nTo: {}\nSubject: {}\n{}\nTo send this draft, use action 'send_draft' with draft_id '{}' and confirmed: true.",
                     draft.id, to, subject, attach_line, draft.id
-                )))
+                )).with_metadata(json!({"gmail_result":draft})))
             }
 
             "send" => {
@@ -439,13 +422,14 @@ impl Tool for GmailTool {
                     )
                     .await?;
 
+                retain_received(&ctx, "sent_message", &msg).await?;
                 Ok(ToolOutput::new(format!(
                     "Email sent successfully.\nMessage ID: {}\nTo: {}\nSubject: {}\nAttachments: {}",
                     msg.id,
                     to,
                     subject,
                     attachments.len()
-                )))
+                )).with_metadata(json!({"gmail_result":msg})))
             }
 
             "send_draft" => {
@@ -470,10 +454,11 @@ impl Tool for GmailTool {
                 }
 
                 let msg = self.client.send_draft(draft_id).await?;
-                Ok(ToolOutput::new(format!(
-                    "Draft sent successfully.\nMessage ID: {}",
-                    msg.id
-                )))
+                retain_received(&ctx, "sent_draft", &msg).await?;
+                Ok(
+                    ToolOutput::new(format!("Draft sent successfully.\nMessage ID: {}", msg.id))
+                        .with_metadata(json!({"gmail_result":msg})),
+                )
             }
 
             "trash" => {
@@ -530,5 +515,143 @@ impl Tool for GmailTool {
                 other
             ))),
         }
+    }
+}
+
+fn format_thread_result(thread: gmail::Thread) -> Result<ToolOutput> {
+    let received = serde_json::to_value(&thread)?;
+    let thread_id = thread.id.clone();
+    let messages = thread.messages.unwrap_or_default();
+
+    if messages.is_empty() {
+        return Ok(ToolOutput::new("Thread has no messages.")
+            .with_metadata(json!({"gmail_result":received})));
+    }
+
+    let mut results = Vec::new();
+    for (i, msg) in messages.iter().enumerate() {
+        let mut entry = format!(
+            "--- Message {} ---\nID: {}\nFrom: {}\nDate: {}\nSubject: {}\nSnippet: {}",
+            i + 1,
+            msg.id,
+            msg.from().unwrap_or("(unknown)"),
+            msg.date().unwrap_or(""),
+            msg.subject().unwrap_or("(no subject)"),
+            msg.snippet.as_deref().unwrap_or(""),
+        );
+        let attachments = msg.attachments();
+        if !attachments.is_empty() {
+            entry.push_str(&format!(
+                "\nAttachments ({}):\n{}",
+                attachments.len(),
+                gmail::format_attachment_lines(&attachments)
+            ));
+        }
+        results.push(entry);
+    }
+
+    Ok(ToolOutput::new(format!(
+        "Thread {} ({} messages):\n\n{}",
+        thread_id,
+        messages.len(),
+        results.join("\n\n")
+    ))
+    .with_metadata(json!({"gmail_result":received})))
+}
+
+async fn retain_received(
+    ctx: &ToolContext,
+    operation: &str,
+    response: &impl serde::Serialize,
+) -> Result<()> {
+    if let Some(capture) = ctx.invocation.capture.clone() {
+        let mut bytes = serde_json::to_vec(&json!({"operation":operation,"response":response}))?;
+        bytes.push(b'\n');
+        tokio::task::spawn_blocking(move || {
+            for chunk in bytes.chunks(64 * 1024) {
+                capture.append_part("gmail-responses", chunk)?;
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .await??;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::execution::{Capture, ExecutionStore, Invocation, PreparedInvocation, RunState};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn full_received_thread_and_prior_acquisitions_survive_summary_rendering() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let store = ExecutionStore::open(root.path())?;
+        let input = Invocation {
+            session_id: "gmail-fixture".into(),
+            message_id: "m".into(),
+            call_path: vec!["call".into()],
+            tool: "gmail".into(),
+            input: json!({"action":"thread"}),
+            working_dir: None,
+            received_result_digest: None,
+        };
+        let PreparedInvocation::New(record) = store.prepare(&input, "owner")? else {
+            panic!()
+        };
+        store.start(&record.id, "owner")?;
+        let capture = Arc::new(Capture::create(
+            store.clone(),
+            record.clone(),
+            Default::default(),
+        )?);
+        let ctx = ToolContext {
+            session_id: input.session_id,
+            message_id: input.message_id,
+            tool_call_id: "call".into(),
+            working_dir: None,
+            stdin_request_tx: None,
+            graceful_shutdown_signal: None,
+            execution_mode: crate::tool::ToolExecutionMode::Direct,
+            invocation: jcode_tool_core::InvocationContext {
+                capture: Some(capture.clone()),
+                ..Default::default()
+            },
+        };
+        let long = "Z".repeat(80_000) + "BODY_TAIL";
+        let thread: gmail::Thread = serde_json::from_value(
+            json!({"id":"t","messages":[{"id":"m","snippet":"selected summary","payload":{"mimeType":"text/plain","headers":[{"name":"X-Complete","value":long}],"body":{"data":long,"size":long.len()}}}]}),
+        )?;
+        retain_received(&ctx, "thread_full", &thread).await?;
+        let output = format_thread_result(thread)?;
+        assert!(output.output.contains("selected summary"));
+        assert!(!output.output.contains("BODY_TAIL"));
+        assert_eq!(
+            output.metadata.as_ref().unwrap()["gmail_result"]["messages"][0]["payload"]["body"]["data"],
+            long
+        );
+        // Emulate a later request failing. Previously acquired structures still exist.
+        let mut failure = ToolOutput::new("later metadata request failed").with_error(true);
+        failure.metadata = output.metadata;
+        capture.seal(failure, RunState::Failed)?;
+        let record = store.inspect(&record.id)?.unwrap();
+        let body = record
+            .output_path
+            .as_ref()
+            .unwrap()
+            .with_file_name("part-gmail-responses.bin");
+        let acquired: serde_json::Value = serde_json::from_slice(&std::fs::read(body)?)?;
+        assert_eq!(
+            acquired["response"]["messages"][0]["payload"]["body"]["data"],
+            long
+        );
+        let restored = store.result(&record, std::num::NonZeroUsize::new(100).unwrap())?;
+        assert!(restored.is_error);
+        assert_eq!(
+            restored.metadata.unwrap()["gmail_result"]["messages"][0]["payload"]["headers"][0]["value"],
+            long
+        );
+        Ok(())
     }
 }
