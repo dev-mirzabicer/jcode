@@ -10,6 +10,7 @@
 //! these paths; the action verbs accept them.
 
 use super::osa;
+use crate::execution::helper::HelperHost;
 use anyhow::{Result, bail};
 use jcode_tool_types::ToolOutput;
 use serde::Deserialize;
@@ -52,7 +53,7 @@ fn tell(app: &str, body: &str) -> String {
 }
 
 /// Dump the AX tree of an app (or the frontmost app) to a given depth.
-pub fn ui_tree(app: Option<&str>, depth: u32) -> Result<ToolOutput> {
+pub fn ui_tree(host: &HelperHost, app: Option<&str>, depth: u32) -> Result<ToolOutput> {
     let target = match app {
         Some(a) => format!(
             "first application process whose name is {}",
@@ -137,7 +138,7 @@ end tell
         target = target,
         depth = depth
     );
-    let tree = osa::run_applescript(&script)?;
+    let tree = osa::run_applescript(host, &script)?;
     let tree = if tree.trim().is_empty() {
         "(empty Accessibility tree)".to_string()
     } else {
@@ -148,6 +149,7 @@ end tell
 
 /// Find elements matching role/title/value within an app, returning their paths.
 pub fn find_element(
+    host: &HelperHost,
     app: &str,
     role: Option<&str>,
     title: Option<&str>,
@@ -228,7 +230,7 @@ end tell
         title_m = title_m,
         value_m = value_m,
     );
-    let res = osa::run_applescript(&script)?;
+    let res = osa::run_applescript(host, &script)?;
     Ok(ToolOutput::new(format!(
         "Matches in {app} (path  role  title  @pos). Use the path with press/set_value/get_value:\n{res}",
     ))
@@ -236,12 +238,12 @@ end tell
 }
 
 /// Perform AXPress on an element (background click).
-pub fn press(handle: &ElementHandle) -> Result<ToolOutput> {
+pub fn press(host: &HelperHost, handle: &ElementHandle) -> Result<ToolOutput> {
     let body = format!(
         "perform action \"AXPress\" of ({})",
         handle.resolve_script()
     );
-    osa::run_applescript_timeout(&tell(&handle.app, &body), Duration::from_secs(10))?;
+    osa::run_applescript_timeout(host, &tell(&handle.app, &body), Duration::from_secs(10))?;
     Ok(ToolOutput::new(format!(
         "pressed element {:?} in {} (no cursor movement)",
         handle.path, handle.app
@@ -249,13 +251,17 @@ pub fn press(handle: &ElementHandle) -> Result<ToolOutput> {
 }
 
 /// Perform an arbitrary AX action on an element.
-pub fn perform_action(handle: &ElementHandle, ax_action: &str) -> Result<ToolOutput> {
+pub fn perform_action(
+    host: &HelperHost,
+    handle: &ElementHandle,
+    ax_action: &str,
+) -> Result<ToolOutput> {
     let body = format!(
         "perform action {} of ({})",
         osa::as_quote(ax_action),
         handle.resolve_script()
     );
-    osa::run_applescript_timeout(&tell(&handle.app, &body), Duration::from_secs(10))?;
+    osa::run_applescript_timeout(host, &tell(&handle.app, &body), Duration::from_secs(10))?;
     Ok(ToolOutput::new(format!(
         "performed {ax_action} on element {:?} in {}",
         handle.path, handle.app
@@ -263,13 +269,13 @@ pub fn perform_action(handle: &ElementHandle, ax_action: &str) -> Result<ToolOut
 }
 
 /// Set the value of an element (background typing into a field).
-pub fn set_value(handle: &ElementHandle, value: &str) -> Result<ToolOutput> {
+pub fn set_value(host: &HelperHost, handle: &ElementHandle, value: &str) -> Result<ToolOutput> {
     let body = format!(
         "set value of ({}) to {}",
         handle.resolve_script(),
         osa::as_quote(value)
     );
-    osa::run_applescript_timeout(&tell(&handle.app, &body), Duration::from_secs(10))?;
+    osa::run_applescript_timeout(host, &tell(&handle.app, &body), Duration::from_secs(10))?;
     Ok(ToolOutput::new(format!(
         "set value of element {:?} in {} to {} chars",
         handle.path,
@@ -279,14 +285,14 @@ pub fn set_value(handle: &ElementHandle, value: &str) -> Result<ToolOutput> {
 }
 
 /// Read the value of an element.
-pub fn get_value(handle: &ElementHandle) -> Result<ToolOutput> {
+pub fn get_value(host: &HelperHost, handle: &ElementHandle) -> Result<ToolOutput> {
     let body = format!("return value of ({}) as text", handle.resolve_script());
-    let v = osa::run_applescript_timeout(&tell(&handle.app, &body), Duration::from_secs(10))?;
+    let v = osa::run_applescript_timeout(host, &tell(&handle.app, &body), Duration::from_secs(10))?;
     Ok(ToolOutput::new(v).with_title("get_value"))
 }
 
 /// Select a menu-bar item by path, e.g. ["File", "Export…"].
-pub fn select_menu(app: &str, path: &[String]) -> Result<ToolOutput> {
+pub fn select_menu(host: &HelperHost, app: &str, path: &[String]) -> Result<ToolOutput> {
     if path.len() < 2 {
         bail!("select_menu needs at least a top menu and one item, e.g. [\"File\",\"Save\"]");
     }
@@ -309,7 +315,7 @@ pub fn select_menu(app: &str, path: &[String]) -> Result<ToolOutput> {
          delay 0.2\n\
          click ({expr})"
     );
-    osa::run_applescript_timeout(&tell(app, &body), Duration::from_secs(10))?;
+    osa::run_applescript_timeout(host, &tell(app, &body), Duration::from_secs(10))?;
     Ok(ToolOutput::new(format!(
         "selected menu {} in {app}",
         path.join(" > ")
@@ -317,7 +323,7 @@ pub fn select_menu(app: &str, path: &[String]) -> Result<ToolOutput> {
 }
 
 /// Return the element at a screen point (role/title), useful to confirm targets.
-pub fn element_at(app: &str, x: f64, y: f64) -> Result<ToolOutput> {
+pub fn element_at(host: &HelperHost, app: &str, x: f64, y: f64) -> Result<ToolOutput> {
     // Hit-test by walking the AX tree, but PRUNE: only descend into a subtree
     // whose own frame contains the point. A child's frame is contained in its
     // parent's, so a parent that doesn't contain the point can't have a matching
@@ -394,7 +400,7 @@ end tell
         x = x,
         y = y
     );
-    let res = osa::run_applescript_timeout(&script, Duration::from_secs(12))?;
+    let res = osa::run_applescript_timeout(host, &script, Duration::from_secs(12))?;
     Ok(ToolOutput::new(format!(
         "Deepest element at ({x:.0},{y:.0}) in {app}:\n{res}"
     ))

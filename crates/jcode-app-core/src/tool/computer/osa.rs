@@ -10,32 +10,40 @@
 //! must never freeze the agent. AppleScript also gets an internal
 //! `with timeout` guard so System Events stops waiting on an unresponsive app.
 
+use crate::execution::helper::HelperHost;
 use anyhow::{Result, bail};
-use std::io::Read;
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Default wall-clock limit for a scripting call.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Run an AppleScript and return stdout (trimmed). Maps the common macOS
 /// permission / automation errors to actionable messages.
-pub fn run_applescript(script: &str) -> Result<String> {
-    run(&["-e", script], "AppleScript", DEFAULT_TIMEOUT)
+pub fn run_applescript(host: &HelperHost, script: &str) -> Result<String> {
+    run(host, &["-e", script], "AppleScript", DEFAULT_TIMEOUT)
 }
 
 /// Run AppleScript with an explicit timeout.
-pub fn run_applescript_timeout(script: &str, timeout: Duration) -> Result<String> {
-    run(&["-e", script], "AppleScript", timeout)
+pub fn run_applescript_timeout(
+    host: &HelperHost,
+    script: &str,
+    timeout: Duration,
+) -> Result<String> {
+    run(host, &["-e", script], "AppleScript", timeout)
 }
 
 /// Run a JavaScript-for-Automation (JXA) script.
-pub fn run_jxa(script: &str) -> Result<String> {
-    run(&["-l", "JavaScript", "-e", script], "JXA", DEFAULT_TIMEOUT)
+pub fn run_jxa(host: &HelperHost, script: &str) -> Result<String> {
+    run(
+        host,
+        &["-l", "JavaScript", "-e", script],
+        "JXA",
+        DEFAULT_TIMEOUT,
+    )
 }
 
-fn run(args: &[&str], lang: &str, timeout: Duration) -> Result<String> {
-    let (status, stdout, stderr) = run_command_timed("/usr/bin/osascript", args, timeout)?;
+fn run(host: &HelperHost, args: &[&str], lang: &str, timeout: Duration) -> Result<String> {
+    let (status, stdout, stderr) = run_command_timed(host, "/usr/bin/osascript", args, timeout)?;
 
     if status {
         return Ok(stdout.trim_end().to_string());
@@ -90,46 +98,23 @@ fn classify_osa_error(trimmed: &str, lang: &str) -> String {
 /// Run a command with a wall-clock timeout. Returns (success, stdout, stderr).
 /// On timeout the child is killed and an error is returned.
 pub fn run_command_timed(
+    host: &HelperHost,
     program: &str,
     args: &[&str],
     timeout: Duration,
 ) -> Result<(bool, String, String)> {
-    let mut child = Command::new(program)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| anyhow::anyhow!("failed to spawn {program}: {e}"))?;
-
-    let deadline = Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let mut out = String::new();
-                let mut err = String::new();
-                if let Some(mut s) = child.stdout.take() {
-                    let _ = s.read_to_string(&mut out);
-                }
-                if let Some(mut s) = child.stderr.take() {
-                    let _ = s.read_to_string(&mut err);
-                }
-                return Ok((status.success(), out, err));
-            }
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    bail!(
-                        "command timed out after {}s (a target app may be unresponsive): {program}",
-                        timeout.as_secs()
-                    );
-                }
-                std::thread::sleep(Duration::from_millis(25));
-            }
-            Err(e) => bail!("error waiting on {program}: {e}"),
-        }
-    }
+    let output = host.command(program, args, Some(timeout))?;
+    let stdout = String::from_utf8(output.stdout).map_err(|_| {
+        anyhow::anyhow!(
+            "Helper stdout is not UTF-8; exact bytes remain in the retained helper parts"
+        )
+    })?;
+    let stderr = String::from_utf8(output.stderr).map_err(|_| {
+        anyhow::anyhow!(
+            "Helper stderr is not UTF-8; exact bytes remain in the retained helper parts"
+        )
+    })?;
+    Ok((output.status.success(), stdout, stderr))
 }
 
 /// Quote a string as an AppleScript string literal (wraps in quotes, escapes
@@ -153,6 +138,40 @@ pub fn as_quote(s: &str) -> String {
 mod tests {
     use super::*;
 
+    fn fixture() -> (tempfile::TempDir, tokio::runtime::Runtime, HelperHost) {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let entered = runtime.enter();
+        let mut context = super::super::ToolContext {
+            session_id: "osa-test".into(),
+            message_id: crate::id::new_id("osa"),
+            tool_call_id: "command".into(),
+            working_dir: Some(directory.path().into()),
+            stdin_request_tx: None,
+            graceful_shutdown_signal: Some(jcode_agent_runtime::InterruptSignal::new()),
+            execution_mode: jcode_tool_core::ToolExecutionMode::Direct,
+            invocation: Default::default(),
+        };
+        let store = crate::execution::ExecutionStore::open(directory.path()).unwrap();
+        let invocation = crate::execution::invocation(&context, "osa-test", serde_json::json!({}));
+        let crate::execution::PreparedInvocation::New(record) =
+            store.prepare(&invocation, "test-owner").unwrap()
+        else {
+            panic!()
+        };
+        store.start(&record.id, "test-owner").unwrap();
+        context.invocation.capture = Some(std::sync::Arc::new(
+            crate::execution::Capture::create(store, record, Default::default()).unwrap(),
+        ));
+        let host = HelperHost::new(&context, "osa").unwrap();
+        drop(entered);
+        (directory, runtime, host)
+    }
+
     #[test]
     fn quotes_and_escapes() {
         assert_eq!(as_quote("hi"), "\"hi\"");
@@ -162,17 +181,54 @@ mod tests {
 
     #[test]
     fn timed_command_succeeds_fast() {
-        let (ok, out, _) = run_command_timed("/bin/echo", &["hi"], Duration::from_secs(5)).unwrap();
+        let (_directory, _runtime, host) = fixture();
+        let (ok, out, _) =
+            run_command_timed(&host, "/bin/echo", &["hi"], Duration::from_secs(5)).unwrap();
         assert!(ok);
         assert_eq!(out.trim(), "hi");
     }
 
     #[test]
+    fn timed_command_drains_both_pipes_before_waiting_for_exit() {
+        let (_directory, _runtime, host) = fixture();
+        let (success,stdout,stderr)=run_command_timed(&host,
+            "/usr/bin/python3",
+            &["-c","import os; os.write(1, b'x' * 200000 + b'OUT_TAIL'); os.write(2, b'y' * 200000 + b'ERR_TAIL')"],
+            Duration::from_secs(3),
+        ).expect("A full pipe must not turn a completed-output command into a timeout");
+        assert!(success);
+        assert_eq!(stdout, format!("{}OUT_TAIL", "x".repeat(200000)));
+        assert_eq!(stderr, format!("{}ERR_TAIL", "y".repeat(200000)));
+    }
+
+    #[test]
     fn timed_command_times_out() {
-        let err = run_command_timed("/bin/sleep", &["5"], Duration::from_millis(200))
+        let (_directory, _runtime, host) = fixture();
+        let err = run_command_timed(&host, "/bin/sleep", &["5"], Duration::from_millis(200))
             .unwrap_err()
             .to_string();
         assert!(err.contains("timed out"), "got: {err}");
+    }
+
+    #[test]
+    fn helper_stdin_is_retained_and_read_without_a_pipe_writer_deadlock() {
+        let (directory, _runtime, host) = fixture();
+        let bytes = vec![b'x'; 300000];
+        let mut command = tokio::process::Command::new("/usr/bin/python3");
+        command.args(["-c","import sys; data=sys.stdin.buffer.read(); sys.stdout.buffer.write(data); sys.stderr.write('INPUT_DONE')"]);
+        let output = host
+            .program(command, Some(&bytes), Some(Duration::from_secs(3)))
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, bytes);
+        assert_eq!(output.stderr, b"INPUT_DONE");
+        let store = crate::execution::ExecutionStore::open(directory.path()).unwrap();
+        let record = store.list("osa-test", None, 10).unwrap().pop().unwrap();
+        let path = record
+            .output_path
+            .unwrap()
+            .with_file_name("part-osa-0-stdin.bin");
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
     }
 
     #[test]

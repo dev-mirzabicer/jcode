@@ -42,19 +42,21 @@ pub(crate) async fn run_program(
     working_dir: PathBuf,
     capture: Arc<dyn OutputCapture>,
     stop: InterruptSignal,
+    timeout: Option<Duration>,
+    stdin: Option<std::fs::File>,
 ) -> Result<CommandOutcome> {
     run_with_control(
         CommandSpec {
             command: String::new(),
             working_dir,
-            timeout: None,
+            timeout,
         },
         capture,
         stop,
         &NativeControl,
         None,
         None,
-        Some(program),
+        Some((program, stdin)),
     )
     .await
 }
@@ -236,17 +238,21 @@ async fn run_with_control(
     control: &dyn ProcessControl,
     gate: Option<CommandGate>,
     input: Option<CommandInput>,
-    program: Option<tokio::process::Command>,
+    program: Option<(tokio::process::Command, Option<std::fs::File>)>,
 ) -> Result<CommandOutcome> {
     ensure!(!stop.is_set(), "Command was stopped before launch");
-    let (mut command, registration) = if let Some(gate) = gate {
-        (gate.program, Some((gate.store, gate.run_id, gate.owner)))
-    } else if let Some(program) = program {
-        (program, None)
+    let (mut command, registration, stdin) = if let Some(gate) = gate {
+        (
+            gate.program,
+            Some((gate.store, gate.run_id, gate.owner)),
+            None,
+        )
+    } else if let Some((program, stdin)) = program {
+        (program, None, stdin)
     } else {
         let mut command = tokio::process::Command::new("bash");
         command.arg("-c").arg(&spec.command);
-        (command, None)
+        (command, None, None)
     };
     if let Some(directory) = crate::tool::tool_scratch_dir() {
         command
@@ -255,7 +261,9 @@ async fn run_with_control(
     }
     command
         .current_dir(&spec.working_dir)
-        .stdin(if input.is_some() {
+        .stdin(if let Some(file) = stdin {
+            Stdio::from(file)
+        } else if input.is_some() {
             Stdio::piped()
         } else {
             Stdio::null()

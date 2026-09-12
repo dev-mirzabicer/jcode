@@ -152,6 +152,30 @@ same captured bytes rather than rereading a possibly changed file. Redirected
 stdout does not emit terminal image escapes. Hosted-provider vision budgets and
 unsupported formats remain explicit provider-boundary verification work.
 
+## Native helper commands
+
+Computer-use and Agentgrep helper commands share the native command supervisor
+through an explicit invocation-owned `HelperHost`. The context carries capture,
+cancellation and working-directory state without thread-local or global policy.
+Computer Tool callers enter Registry ownership even on direct invocation. Blocking
+computer work remains joined while Stop reaches its actual helper process group.
+
+Stdout and stderr are drained concurrently before waiting for process completion.
+Raw helper streams remain named output-bundle parts, independent of formatted
+AppleScript/AX/search results. Clipboard input and Swift OCR source are retained
+as owned stdin parts and passed by file descriptor, avoiding a pipe writer that
+can deadlock before the output drains start. Previously timed calls preserve their
+deadlines; untimed helper calls do not acquire an implicit deadline. Permission
+and wait polling observe Stop between operations. Atomic CoreGraphics input
+semantics are unchanged.
+
+A red regression reproduced a 200 KB dual-pipe timeout in the former OSA helper.
+The repaired owner passes that test, a 300 KB stdin round trip, large script-output
+retention, actual script Stop with preserved earlier filesystem effects, and
+existing search-helper cancellation. Thirty computer tests and 34 Agentgrep tests
+pass with strict app-core lint. Eighteen live GUI/permission tests remain explicitly
+ignored; no desktop interaction was performed for this verification.
+
 ## Rejected tool admission
 
 Registry availability, session-policy, unknown-tool, input-binding and execution-

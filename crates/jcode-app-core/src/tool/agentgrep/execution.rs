@@ -2,29 +2,24 @@
 //! the same command driver used by Bash, not an independent process supervisor.
 use super::*;
 use agentgrep::execution::{ExecutionControl, ExecutionHost};
-#[cfg(unix)]
-use jcode_tool_core::{CapturedPart, OutputCapture, OutputStream};
-#[cfg(unix)]
-use std::io::Read;
+#[cfg(all(test, unix))]
+use jcode_tool_core::OutputCapture;
 use std::sync::Arc;
-#[cfg(unix)]
-use std::sync::atomic::{AtomicUsize, Ordering};
 
-pub(super) fn control(ctx: &ToolContext) -> ExecutionControl {
+pub(super) fn control(ctx: &ToolContext) -> Result<ExecutionControl> {
     #[cfg(unix)]
-    if let (Some(capture), Some(stop)) = (&ctx.invocation.capture, &ctx.graceful_shutdown_signal) {
-        return ExecutionControl::new(Arc::new(SearchHost {
-            capture: capture.clone(),
-            stop: stop.clone(),
-            runtime: tokio::runtime::Handle::current(),
-            next: AtomicUsize::new(0),
-        }));
+    if ctx.invocation.capture.is_some() && ctx.graceful_shutdown_signal.is_some() {
+        return Ok(ExecutionControl::new(Arc::new(SearchHost {
+            host: crate::execution::helper::HelperHost::new(ctx, "search")?,
+        })));
     }
     #[cfg(not(unix))]
     if let Some(stop) = &ctx.graceful_shutdown_signal {
-        return ExecutionControl::new(Arc::new(NativeSearchOnly { stop: stop.clone() }));
+        return Ok(ExecutionControl::new(Arc::new(NativeSearchOnly {
+            stop: stop.clone(),
+        })));
     }
-    ExecutionControl::default()
+    Ok(ExecutionControl::default())
 }
 
 #[cfg(not(unix))]
@@ -46,106 +41,27 @@ impl ExecutionHost for NativeSearchOnly {
 
 #[cfg(unix)]
 struct SearchHost {
-    capture: Arc<dyn OutputCapture>,
-    stop: jcode_agent_runtime::InterruptSignal,
-    runtime: tokio::runtime::Handle,
-    next: AtomicUsize,
+    host: crate::execution::helper::HelperHost,
 }
 #[cfg(unix)]
 impl ExecutionHost for SearchHost {
     fn cancelled(&self) -> bool {
-        self.stop.is_set()
+        self.host.cancelled()
     }
     fn command(&self, command: std::process::Command) -> std::io::Result<std::process::Output> {
-        let run = self.next.fetch_add(1, Ordering::SeqCst);
-        let parts = Arc::new(SearchParts {
-            capture: self.capture.clone(),
-            prefix: format!("search-{run}"),
-        });
-        parts
-            .capture
-            .append_part(&format!("{}-stdout", parts.prefix), &[])
-            .map_err(std::io::Error::other)?;
-        parts
-            .capture
-            .append_part(&format!("{}-stderr", parts.prefix), &[])
-            .map_err(std::io::Error::other)?;
-        let cwd = command
-            .get_current_dir()
-            .map(Path::to_path_buf)
-            .ok_or_else(|| {
-                std::io::Error::other("Search helper requires an explicit working directory")
-            })?;
-        let outcome = self
-            .runtime
-            .block_on(crate::execution::command::run_program(
-                command.into(),
-                cwd,
-                parts.clone(),
-                self.stop.clone(),
-            ))
+        self.host
+            .program(command.into(), None, None)
             .map_err(|error| {
-                let kind = error
-                    .downcast_ref::<std::io::Error>()
-                    .map(|error| error.kind())
-                    .unwrap_or(std::io::ErrorKind::Other);
+                let kind = if self.host.cancelled() {
+                    std::io::ErrorKind::Interrupted
+                } else {
+                    error
+                        .downcast_ref::<std::io::Error>()
+                        .map(|error| error.kind())
+                        .unwrap_or(std::io::ErrorKind::Other)
+                };
                 std::io::Error::new(kind, error)
-            })?;
-        let read = |stream: &str| -> std::io::Result<Vec<u8>> {
-            let mut part = parts
-                .capture
-                .read_part(&format!("{}-{stream}", parts.prefix))
-                .map_err(std::io::Error::other)?;
-            let mut bytes = Vec::new();
-            part.reader.read_to_end(&mut bytes)?;
-            Ok(bytes)
-        };
-        if self.stop.is_set() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Interrupted,
-                "Search stopped; acquired helper bytes remain retained",
-            ));
-        }
-        Ok(std::process::Output {
-            status: outcome.status,
-            stdout: read("stdout")?,
-            stderr: read("stderr")?,
-        })
-    }
-}
-#[cfg(unix)]
-struct SearchParts {
-    capture: Arc<dyn OutputCapture>,
-    prefix: String,
-}
-#[cfg(unix)]
-impl OutputCapture for SearchParts {
-    fn write(&self, stream: OutputStream, bytes: &[u8]) -> Result<()> {
-        let stream = match stream {
-            OutputStream::Stdout => "stdout",
-            OutputStream::Stderr => "stderr",
-            OutputStream::Text => "control",
-        };
-        self.capture
-            .append_part(&format!("{}-{stream}", self.prefix), bytes)
-    }
-    fn reference(&self) -> Result<jcode_tool_types::OutputReference> {
-        self.capture.reference()
-    }
-    fn append_part(&self, name: &str, bytes: &[u8]) -> Result<()> {
-        self.capture
-            .append_part(&format!("{}-{name}", self.prefix), bytes)
-    }
-    fn read_part(&self, name: &str) -> Result<CapturedPart> {
-        self.capture.read_part(&format!("{}-{name}", self.prefix))
-    }
-    fn report_progress(
-        &self,
-        _progress: crate::bus::BackgroundTaskProgress,
-        _checkpoint: bool,
-    ) -> Result<()> {
-        // Search results are source material, not the helper's progress protocol.
-        Ok(())
+            })
     }
 }
 
@@ -180,11 +96,11 @@ mod tests {
             crate::execution::StorageConfig::default(),
         )?);
         let stop = jcode_agent_runtime::InterruptSignal::new();
+        let mut ctx = ctx;
+        ctx.invocation.capture = Some(capture.clone());
+        ctx.graceful_shutdown_signal = Some(stop.clone());
         let host = SearchHost {
-            capture: capture.clone(),
-            stop: stop.clone(),
-            runtime: tokio::runtime::Handle::current(),
-            next: AtomicUsize::new(0),
+            host: crate::execution::helper::HelperHost::new(&ctx, "search")?,
         };
         let mut command = std::process::Command::new("bash");
         command.current_dir(directory.path()).args([

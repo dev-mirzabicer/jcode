@@ -2,27 +2,33 @@
 //! needed for desktop control.
 
 use super::osa;
+use crate::execution::helper::HelperHost;
 use anyhow::Result;
 use jcode_tool_types::ToolOutput;
 use serde_json::json;
-use std::process::Command;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-fn accessibility_ok() -> bool {
+fn accessibility_ok(host: &HelperHost) -> bool {
     // System Events reports whether assistive access is enabled for us.
-    osa::run_applescript("tell application \"System Events\" to return UI elements enabled")
-        .map(|s| s.trim() == "true")
-        .unwrap_or(false)
+    osa::run_applescript(
+        host,
+        "tell application \"System Events\" to return UI elements enabled",
+    )
+    .map(|s| s.trim() == "true")
+    .unwrap_or(false)
 }
 
-fn screen_recording_ok() -> bool {
-    let tmp = std::env::temp_dir().join(format!("jcode_setup_{}.png", std::process::id()));
-    let ok = Command::new("/usr/sbin/screencapture")
-        .arg("-x")
-        .arg(&tmp)
-        .status()
-        .map(|s| s.success())
+fn screen_recording_ok(host: &HelperHost) -> bool {
+    let tmp =
+        std::env::temp_dir().join(format!("jcode_setup_{}.png", crate::id::new_id("capture")));
+    let ok = host
+        .command(
+            "/usr/sbin/screencapture",
+            &["-x", &tmp.to_string_lossy()],
+            None,
+        )
+        .map(|output| output.status.success())
         .unwrap_or(false)
         && std::fs::metadata(&tmp)
             .map(|m| m.len() > 0)
@@ -36,16 +42,19 @@ fn yes_no(b: bool) -> &'static str {
 }
 
 /// Report status only.
-pub fn check_permissions(working_dir: Option<&std::path::Path>) -> Result<ToolOutput> {
-    let ax = accessibility_ok();
-    let screen = screen_recording_ok();
+pub fn check_permissions(
+    host: &HelperHost,
+    working_dir: Option<&std::path::Path>,
+) -> Result<ToolOutput> {
+    let ax = accessibility_ok(host);
+    let screen = screen_recording_ok(host);
     let swift = std::path::Path::new("/usr/bin/swift").exists()
-        || Command::new("/usr/bin/which")
-            .arg("swift")
-            .status()
-            .map(|s| s.success())
+        || host
+            .command("/usr/bin/which", &["swift"], None)
+            .map(|output| output.status.success())
             .unwrap_or(false);
 
+    host.check_stop()?;
     permission_status(ax, screen, swift, working_dir)
 }
 
@@ -75,11 +84,11 @@ pub(super) fn permission_status(
 }
 
 /// Request permissions: prompt, deep-link, and poll Accessibility until granted.
-pub fn setup() -> Result<ToolOutput> {
+pub fn setup(host: &HelperHost) -> Result<ToolOutput> {
     let mut log = Vec::new();
 
-    let ax0 = accessibility_ok();
-    let screen0 = screen_recording_ok();
+    let ax0 = accessibility_ok(host);
+    let screen0 = screen_recording_ok(host);
     log.push(format!(
         "Initial: accessibility={}, screen_recording={}",
         ax0, screen0
@@ -91,18 +100,22 @@ pub fn setup() -> Result<ToolOutput> {
     // first time it calls an AX API.
     if !ax0 {
         // Deep-link to the exact Accessibility pane.
-        let _ = Command::new("/usr/bin/open")
-            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
-            .status();
+        let _ = host.command(
+            "/usr/bin/open",
+            &["x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"],
+            None,
+        );
         log.push(
             "Opened Privacy & Security > Accessibility. Add and enable your terminal/jcode there."
                 .into(),
         );
     }
     if !screen0 {
-        let _ = Command::new("/usr/bin/open")
-            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
-            .status();
+        let _ = host.command(
+            "/usr/bin/open",
+            &["x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"],
+            None,
+        );
         log.push(
             "Opened Privacy & Security > Screen Recording. Add and enable your terminal/jcode there."
                 .into(),
@@ -114,7 +127,8 @@ pub fn setup() -> Result<ToolOutput> {
         let deadline = Instant::now() + Duration::from_secs(30);
         let mut granted = false;
         while Instant::now() < deadline {
-            if accessibility_ok() {
+            host.check_stop()?;
+            if accessibility_ok(host) {
                 granted = true;
                 break;
             }
@@ -130,8 +144,8 @@ pub fn setup() -> Result<ToolOutput> {
         ));
     }
 
-    let ax = accessibility_ok();
-    let screen = screen_recording_ok();
+    let ax = accessibility_ok(host);
+    let screen = screen_recording_ok(host);
     log.push(format!(
         "Final: accessibility={}, screen_recording={}",
         ax, screen

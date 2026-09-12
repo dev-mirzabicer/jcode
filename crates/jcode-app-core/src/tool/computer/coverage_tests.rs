@@ -12,7 +12,7 @@ use jcode_tool_core::{ToolContext, ToolExecutionMode};
 fn ctx() -> ToolContext {
     ToolContext {
         session_id: "cov".into(),
-        message_id: "cov".into(),
+        message_id: crate::id::new_id("computer-test"),
         tool_call_id: "cov".into(),
         working_dir: None,
         stdin_request_tx: None,

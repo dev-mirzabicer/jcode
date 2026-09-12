@@ -329,7 +329,7 @@ fn execute_linked_agentgrep(
     context_json_path: Option<&Path>,
 ) -> Result<ToolOutput> {
     let exact_file = exact_search_file_path(ctx, params.path.as_deref());
-    let control = execution::control(ctx);
+    let control = execution::control(ctx)?;
     match params.mode.as_str() {
         "grep" => {
             let args = build_grep_args(params, ctx)?;

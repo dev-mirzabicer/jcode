@@ -161,6 +161,16 @@ fn is_mutating(action: &str) -> bool {
 
 #[async_trait]
 impl Tool for ComputerTool {
+    fn execution_policy(
+        &self,
+        _: &Value,
+        _: &ToolContext,
+    ) -> Result<jcode_tool_core::ExecutionPolicy> {
+        Ok(jcode_tool_core::ExecutionPolicy {
+            cooperative_stop: true,
+            ..Default::default()
+        })
+    }
     fn name(&self) -> &str {
         "macos_computer_use"
     }
@@ -235,11 +245,25 @@ impl Tool for ComputerTool {
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
+        if ctx.invocation.identity.is_none() {
+            let registry = super::Registry::empty();
+            registry
+                .register(
+                    "macos_computer_use".into(),
+                    std::sync::Arc::new(Self::new()),
+                )
+                .await;
+            return registry.execute("macos_computer_use", input, ctx).await;
+        }
         let parsed: ComputerInput =
             serde_json::from_value(input).context("invalid `macos_computer_use` tool input")?;
-        tokio::task::spawn_blocking(move || run(parsed, ctx.working_dir))
-            .await
-            .context("macos_computer_use tool task panicked")?
+        let host = crate::execution::helper::HelperHost::new(&ctx, "computer")?;
+        tokio::task::spawn_blocking(move || {
+            host.check_stop()?;
+            run(parsed, ctx.working_dir, &host)
+        })
+        .await
+        .context("macos_computer_use tool task panicked")?
     }
 }
 
@@ -249,7 +273,11 @@ fn run(_input: ComputerInput, _working_dir: Option<std::path::PathBuf>) -> Resul
 }
 
 #[cfg(target_os = "macos")]
-fn run(input: ComputerInput, working_dir: Option<std::path::PathBuf>) -> Result<ToolOutput> {
+fn run(
+    input: ComputerInput,
+    working_dir: Option<std::path::PathBuf>,
+    host: &crate::execution::helper::HelperHost,
+) -> Result<ToolOutput> {
     let action = input.action.as_str();
 
     // dry_run: for mutating actions, report the intended target and stop.
@@ -262,29 +290,34 @@ fn run(input: ComputerInput, working_dir: Option<std::path::PathBuf>) -> Result<
 
     if action == "check_permissions" {
         // Permission guidance uses the requesting session's source scope.
-        setup::check_permissions(working_dir.as_deref())
+        setup::check_permissions(host, working_dir.as_deref())
     } else {
-        dispatch(action, &input)
+        dispatch(action, &input, host)
     }
 }
 
 #[cfg(target_os = "macos")]
-fn dispatch(action: &str, input: &ComputerInput) -> Result<ToolOutput> {
+fn dispatch(
+    action: &str,
+    input: &ComputerInput,
+    host: &crate::execution::helper::HelperHost,
+) -> Result<ToolOutput> {
+    host.check_stop()?;
     match action {
         // ---- discovery & setup ----
         "discover" => discover::discover(input.category.as_deref()),
-        "setup" => setup::setup(),
+        "setup" => setup::setup(host),
 
         // ---- observe ----
-        "screenshot" => screen::screenshot(),
-        "ocr" => screen::ocr(input.region),
+        "screenshot" => screen::screenshot(host),
+        "ocr" => screen::ocr(host, input.region),
         "window_screenshot" => {
             let id = input
                 .window_id
                 .context("window_screenshot requires `window_id`")?;
-            screen::window_screenshot(id)
+            screen::window_screenshot(host, id)
         }
-        "ui" => ax::ui_tree(input.app.as_deref(), input.depth.unwrap_or(12)),
+        "ui" => ax::ui_tree(host, input.app.as_deref(), input.depth.unwrap_or(12)),
         "cursor" => {
             let p = input::current_cursor()?;
             Ok(
@@ -379,6 +412,7 @@ fn dispatch(action: &str, input: &ComputerInput) -> Result<ToolOutput> {
                 .as_deref()
                 .context("find_element requires `app`")?;
             ax::find_element(
+                host,
                 app,
                 input.role.as_deref(),
                 input.title.as_deref(),
@@ -389,23 +423,23 @@ fn dispatch(action: &str, input: &ComputerInput) -> Result<ToolOutput> {
         "element_at" => {
             let app = input.app.as_deref().context("element_at requires `app`")?;
             let (x, y) = require_xy(input)?;
-            ax::element_at(app, x, y)
+            ax::element_at(host, app, x, y)
         }
-        "press" => ax::press(&parse_element(input)?),
-        "get_value" => ax::get_value(&parse_element(input)?),
+        "press" => ax::press(host, &parse_element(input)?),
+        "get_value" => ax::get_value(host, &parse_element(input)?),
         "set_value" => {
             let v = input
                 .value
                 .as_deref()
                 .context("set_value requires `value`")?;
-            ax::set_value(&parse_element(input)?, v)
+            ax::set_value(host, &parse_element(input)?, v)
         }
         "perform_action" => {
             let a = input
                 .ax_action
                 .as_deref()
                 .context("perform_action requires `ax_action`")?;
-            ax::perform_action(&parse_element(input)?, a)
+            ax::perform_action(host, &parse_element(input)?, a)
         }
         "select_menu" => {
             let app = input.app.as_deref().context("select_menu requires `app`")?;
@@ -413,50 +447,50 @@ fn dispatch(action: &str, input: &ComputerInput) -> Result<ToolOutput> {
                 .menu_path
                 .as_ref()
                 .context("select_menu requires `menu_path`")?;
-            ax::select_menu(app, path)
+            ax::select_menu(host, app, path)
         }
 
         // ---- windows / apps (Tier 2) ----
-        "list_apps" => win::list_apps(),
-        "list_windows" => win::list_windows(),
-        "activate_app" => win::activate_app(req_app(input)?),
-        "hide_app" => win::hide_app(req_app(input)?),
-        "quit_app" => win::quit_app(req_app(input)?),
-        "focus_window" => win::focus_window(req_app(input)?),
+        "list_apps" => win::list_apps(host),
+        "list_windows" => win::list_windows(host),
+        "activate_app" => win::activate_app(host, req_app(input)?),
+        "hide_app" => win::hide_app(host, req_app(input)?),
+        "quit_app" => win::quit_app(host, req_app(input)?),
+        "focus_window" => win::focus_window(host, req_app(input)?),
         "move_window" => {
             let (x, y) = require_xy(input)?;
-            win::move_window(req_app(input)?, x, y)
+            win::move_window(host, req_app(input)?, x, y)
         }
         "resize_window" => {
             let w = input.w.context("resize_window requires `w`")?;
             let h = input.h.context("resize_window requires `h`")?;
-            win::resize_window(req_app(input)?, w, h)
+            win::resize_window(host, req_app(input)?, w, h)
         }
-        "minimize_window" => win::minimize_window(req_app(input)?),
-        "close_window" => win::close_window(req_app(input)?),
+        "minimize_window" => win::minimize_window(host, req_app(input)?),
+        "close_window" => win::close_window(host, req_app(input)?),
 
         // ---- clipboard / scripting / system (Tier 3/4) ----
-        "get_clipboard" => sys::get_clipboard(),
+        "get_clipboard" => sys::get_clipboard(host),
         "set_clipboard" => {
             let t = input
                 .text
                 .as_deref()
                 .context("set_clipboard requires `text`")?;
-            sys::set_clipboard(t)
+            sys::set_clipboard(host, t)
         }
         "run_applescript" => {
             let s = input
                 .script
                 .as_deref()
                 .context("run_applescript requires `script`")?;
-            sys::run_applescript(s)
+            sys::run_applescript(host, s)
         }
         "run_jxa" => {
             let s = input
                 .script
                 .as_deref()
                 .context("run_jxa requires `script`")?;
-            sys::run_jxa(s)
+            sys::run_jxa(host, s)
         }
         "wait_for" => {
             let app = input.app.as_deref().context("wait_for requires `app`")?;
@@ -464,18 +498,18 @@ fn dispatch(action: &str, input: &ComputerInput) -> Result<ToolOutput> {
                 .contains
                 .as_deref()
                 .context("wait_for requires `contains`")?;
-            sys::wait_for(app, c, input.timeout_ms.unwrap_or(10_000))
+            sys::wait_for(host, app, c, input.timeout_ms.unwrap_or(10_000))
         }
         "notify" => {
             let t = input.text.as_deref().context("notify requires `text`")?;
-            sys::notify(t, input.title.as_deref())
+            sys::notify(host, t, input.title.as_deref())
         }
-        "system_state" => sys::system_state(),
+        "system_state" => sys::system_state(host),
         "set_brightness" => {
             let l = input
                 .level
                 .context("set_brightness requires `level` (0..1)")?;
-            sys::set_brightness(l)
+            sys::set_brightness(host, l)
         }
 
         other => bail!(

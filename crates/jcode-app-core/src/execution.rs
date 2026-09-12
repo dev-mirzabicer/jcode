@@ -17,6 +17,8 @@ use tokio::sync::{mpsc, oneshot, watch};
 pub mod command;
 #[cfg(unix)]
 pub mod command_worker;
+#[cfg(unix)]
+pub(crate) mod helper;
 pub mod history;
 mod provider_ingress;
 pub use provider_ingress::ProviderIngress;

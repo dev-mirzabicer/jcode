@@ -1,13 +1,14 @@
 //! Screen observation: full-screen + per-window screenshots and OCR.
 
 use super::osa;
+use crate::execution::helper::HelperHost;
 use anyhow::{Context, Result, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use core_graphics::display::CGDisplay;
 use jcode_tool_types::ToolOutput;
 use serde_json::json;
-use std::process::Command;
 use std::time::Duration;
+use tokio::process::Command;
 
 /// Read width/height from a PNG IHDR chunk. Returns None if not a PNG.
 pub fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
@@ -20,7 +21,7 @@ pub fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     Some((w, h))
 }
 
-fn capture_to_temp(extra_args: &[&str]) -> Result<Vec<u8>> {
+fn capture_to_temp(host: &HelperHost, extra_args: &[&str]) -> Result<Vec<u8>> {
     let tmp = std::env::temp_dir().join(format!(
         "jcode_computer_{}_{}.png",
         std::process::id(),
@@ -33,8 +34,12 @@ fn capture_to_temp(extra_args: &[&str]) -> Result<Vec<u8>> {
     let mut args: Vec<&str> = vec!["-x"];
     args.extend_from_slice(extra_args);
     args.push(&tmp_str);
-    let (ok, _out, err) =
-        osa::run_command_timed("/usr/sbin/screencapture", &args, Duration::from_secs(15))?;
+    let (ok, _out, err) = osa::run_command_timed(
+        host,
+        "/usr/sbin/screencapture",
+        &args,
+        Duration::from_secs(15),
+    )?;
     if !ok {
         let _ = std::fs::remove_file(&tmp);
         bail!("screencapture failed: {}", err.trim());
@@ -50,8 +55,8 @@ fn capture_to_temp(extra_args: &[&str]) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-pub fn screenshot() -> Result<ToolOutput> {
-    let bytes = capture_to_temp(&[])?;
+pub fn screenshot(host: &HelperHost) -> Result<ToolOutput> {
+    let bytes = capture_to_temp(host, &[])?;
     let bounds = CGDisplay::main().bounds();
     let point_w = bounds.size.width;
     let point_h = bounds.size.height;
@@ -76,8 +81,8 @@ pub fn screenshot() -> Result<ToolOutput> {
 }
 
 /// Screenshot a single window by its CoreGraphics window id, even if occluded.
-pub fn window_screenshot(window_id: i64) -> Result<ToolOutput> {
-    let bytes = capture_to_temp(&["-o", "-l", &window_id.to_string()])?;
+pub fn window_screenshot(host: &HelperHost, window_id: i64) -> Result<ToolOutput> {
+    let bytes = capture_to_temp(host, &["-o", "-l", &window_id.to_string()])?;
     let (pixel_w, pixel_h) = png_dimensions(&bytes).unwrap_or((0, 0));
     Ok(ToolOutput::new(format!(
         "Captured window {window_id}: {pixel_w}x{pixel_h} pixels."
@@ -97,10 +102,10 @@ pub fn window_screenshot(window_id: i64) -> Result<ToolOutput> {
 /// `screencapture -R`, which is broken on macOS 26.x (it fails with
 /// "could not create image from rect"). We always capture the full screen and
 /// crop the resulting image, converting the caller's point rect to pixels.
-pub fn ocr(region: Option<[f64; 4]>) -> Result<ToolOutput> {
+pub fn ocr(host: &HelperHost, region: Option<[f64; 4]>) -> Result<ToolOutput> {
     // Always capture the full screen (region capture via `-R` is unreliable on
     // recent macOS), then crop in the Vision helper.
-    let bytes = capture_to_temp(&[])?;
+    let bytes = capture_to_temp(host, &[])?;
 
     // Figure out the pixel<->point scale so we can convert the requested region
     // (in points) into pixel coordinates for cropping.
@@ -134,7 +139,7 @@ pub fn ocr(region: Option<[f64; 4]>) -> Result<ToolOutput> {
         Some([px, py, pw, ph])
     });
 
-    let result = run_vision_ocr(&img_path, crop);
+    let result = run_vision_ocr(host, &img_path, crop);
     let _ = std::fs::remove_file(&tmp);
     let text = result?;
     let summary = if text.trim().is_empty() {
@@ -159,7 +164,7 @@ pub fn ocr(region: Option<[f64; 4]>) -> Result<ToolOutput> {
 /// `crop` is an optional pixel rect `[x, y, w, h]` (origin top-left) to crop the
 /// loaded image before OCR. Cropping in CoreGraphics avoids the broken
 /// `screencapture -R` path.
-fn run_vision_ocr(image_path: &str, crop: Option<[f64; 4]>) -> Result<String> {
+fn run_vision_ocr(host: &HelperHost, image_path: &str, crop: Option<[f64; 4]>) -> Result<String> {
     // Swift literal for the optional crop rect (origin top-left, in pixels).
     let crop_literal = match crop {
         Some([x, y, w, h]) => format!(
@@ -207,7 +212,7 @@ try? handler.perform([req])
         crop = crop_literal,
     );
 
-    let swift = which_swift();
+    let swift = which_swift(host);
     let Some(swift) = swift else {
         bail!(
             "OCR needs the Swift toolchain (Vision framework has no scripting bridge). \
@@ -215,21 +220,13 @@ try? handler.perform([req])
         );
     };
 
-    let out = Command::new(&swift)
+    let mut command = Command::new(&swift);
+    command
         .arg("-")
         .arg(image_path)
-        .env("JCODE_OCR_IMG", image_path)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .and_then(|mut child| {
-            use std::io::Write;
-            if let Some(mut stdin) = child.stdin.take() {
-                stdin.write_all(swift_src.as_bytes())?;
-            }
-            child.wait_with_output()
-        })
+        .env("JCODE_OCR_IMG", image_path);
+    let out = host
+        .program(command, Some(swift_src.as_bytes()), None)
         .context("failed to run swift for OCR")?;
 
     if !out.status.success() {
@@ -261,14 +258,14 @@ try? handler.perform([req])
     Ok(lines.join("\n"))
 }
 
-fn which_swift() -> Option<String> {
+fn which_swift(host: &HelperHost) -> Option<String> {
     for p in ["/usr/bin/swift", "/usr/local/bin/swift"] {
         if std::path::Path::new(p).exists() {
             return Some(p.to_string());
         }
     }
     // try PATH
-    let out = Command::new("/usr/bin/which").arg("swift").output().ok()?;
+    let out = host.command("/usr/bin/which", &["swift"], None).ok()?;
     if out.status.success() {
         let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if !s.is_empty() {
@@ -280,8 +277,9 @@ fn which_swift() -> Option<String> {
 
 /// Used by `osa`-based callers that just need a quick AX-free description.
 #[allow(dead_code)]
-pub fn frontmost_app() -> Result<String> {
+pub fn frontmost_app(host: &HelperHost) -> Result<String> {
     osa::run_applescript(
+        host,
         "tell application \"System Events\" to get name of first application process whose frontmost is true",
     )
 }

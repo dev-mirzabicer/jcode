@@ -7,7 +7,7 @@ use jcode_tool_core::{ToolContext, ToolExecutionMode};
 fn ctx() -> ToolContext {
     ToolContext {
         session_id: "test".into(),
-        message_id: "test".into(),
+        message_id: crate::id::new_id("computer-test"),
         tool_call_id: "test".into(),
         working_dir: None,
         stdin_request_tx: None,
@@ -90,13 +90,68 @@ async fn dry_run_ignored_for_readonly() {
 }
 
 #[tokio::test]
-async fn pure_script_output_is_complete_before_shared_capture() {
-    let body = format!("{}TAIL", "x".repeat(25_000));
+async fn pure_script_output_is_complete_in_shared_capture() {
+    let body = format!("{}TAIL", "x".repeat(50_000));
     let output =
         run_action(json!({"action":"run_applescript","script":format!(r#"return "{body}""#)}))
             .await
             .unwrap();
-    assert!(output.output.contains(&body));
+    let jcode_tool_types::OutputSource::Retained(reference) = output.source else {
+        panic!("Direct computer calls require retained output");
+    };
+    assert!(
+        std::fs::read_to_string(reference.path)
+            .unwrap()
+            .contains(&body)
+    );
+    assert!(
+        !output.output.contains(&body),
+        "Common presentation still bounds delivered text"
+    );
+}
+
+#[tokio::test]
+async fn computer_script_stop_joins_owned_work_without_later_filesystem_effects() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let ready = directory.path().join("ready");
+    let late = directory.path().join("late");
+    let script = format!(
+        "do shell script {}\ndelay 30\ndo shell script {}",
+        osa::as_quote(&format!("printf ready > '{}'", ready.display())),
+        osa::as_quote(&format!("printf late > '{}'", late.display()))
+    );
+    let stop = jcode_agent_runtime::InterruptSignal::new();
+    let mut context = ctx();
+    context.working_dir = Some(directory.path().into());
+    context.graceful_shutdown_signal = Some(stop.clone());
+    let id = crate::execution::invocation_id(&context);
+    let task = tokio::spawn(async move {
+        ComputerTool::new()
+            .execute(json!({"action":"run_applescript","script":script}), context)
+            .await
+    });
+    let started = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !ready.exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    stop.fire();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), task).await??;
+    started.context("Script fixture did not reach its first effect")?;
+    assert!(
+        result
+            .unwrap_err()
+            .is::<crate::execution::CapturedToolError>()
+    );
+    assert_eq!(std::fs::read(ready)?, b"ready");
+    assert!(!late.exists());
+    let store = crate::execution::ExecutionStore::open(&crate::storage::jcode_dir()?)?;
+    assert_eq!(
+        store.inspect(&id)?.unwrap().state,
+        crate::execution::RunState::Cancelled
+    );
+    Ok(())
 }
 
 #[test]
