@@ -59,6 +59,24 @@ state, or owner-identity assertions. Fixture attempts and original scripts remai
 in the private WP-02 evidence directory, including `native-candidate-b5fe80d99-extended.json`
 with exact roots, script hashes, result records and released-lease checks.
 
+## Native TUI keyboard and frames
+
+Candidate PTY testers at 80×24 and 60×24 both passed actual Escape input routing.
+Each ran the owned command once, retained its prefix and earlier effect, then
+reached durable `Cancelled` without another provider request. Frame capture was
+enabled before dispatch; distinct frames showed `RunningTool("bash")` followed by
+`Idle`, with empty composer input and no reported layout anomalies at either width.
+The narrow terminal's terminal frame also showed the retained cancellation receipt.
+These checks use the native tester key-event router, not a live desktop keystroke.
+Tester registrations were cleared and all fixture runtime leases were released.
+
+Failed setup attempts are retained: the first used the main socket instead of its
+dedicated debug sibling; the second submitted before attachment/onboarding had
+finished; an intermediate pass proved cancellation but sampled a stale frame.
+Final fixtures use the dedicated endpoint, dismiss only their own onboarding,
+wait for the actual server version, and require a later non-processing frame.
+No live user configuration or desktop input was changed.
+
 ## Platform verification boundary
 
 Rust standard libraries for `aarch64-unknown-linux-gnu` and
@@ -78,5 +96,5 @@ platform-reconciliation item.
 This file is not the whole requirement matrix. Final configuration cutover,
 combined producer/caller/permission/capability review, remaining platform and
 force-stop semantics, prerequisite regressions, shared-runtime build-reload and
-canary, native TUI input/frames, final diff review, Mirza's candidate approval,
+canary, post-activation TUI frames, final diff review, Mirza's candidate approval,
 and durable publication/closeout remain separate completion conditions.
