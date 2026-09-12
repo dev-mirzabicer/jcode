@@ -155,6 +155,15 @@ struct HelperParts {
     prefix: String,
 }
 impl OutputCapture for HelperParts {
+    fn begin_process(&self) -> Result<String> {
+        self.capture.begin_process()
+    }
+    fn register_process(&self, ticket: &str, pid: u32) -> Result<()> {
+        self.capture.register_process(ticket, pid)
+    }
+    fn finish_process(&self, ticket: &str) -> Result<()> {
+        self.capture.finish_process(ticket)
+    }
     fn write(&self, stream: OutputStream, bytes: &[u8]) -> Result<()> {
         let stream = match stream {
             OutputStream::Stdout => "stdout",

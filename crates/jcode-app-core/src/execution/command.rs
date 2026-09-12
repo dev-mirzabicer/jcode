@@ -241,6 +241,14 @@ async fn run_with_control(
     program: Option<(tokio::process::Command, Option<std::fs::File>)>,
 ) -> Result<CommandOutcome> {
     ensure!(!stop.is_set(), "Command was stopped before launch");
+    let deadline = spec
+        .timeout
+        .map(|duration| {
+            tokio::time::Instant::now()
+                .checked_add(duration)
+                .context("Command deadline exceeds the platform clock range")
+        })
+        .transpose()?;
     let (mut command, registration, stdin) = if let Some(gate) = gate {
         (
             gate.program,
@@ -272,11 +280,49 @@ async fn run_with_control(
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .process_group(0);
-    let mut child = command.spawn().context("Start owned command")?;
+    let process_ticket = if registration.is_none() {
+        let writer = capture.clone();
+        Some(tokio::task::spawn_blocking(move || writer.begin_process()).await??)
+    } else {
+        None
+    };
+    if stop.is_set() {
+        if let Some(ticket) = process_ticket {
+            let writer = capture.clone();
+            tokio::task::spawn_blocking(move || writer.finish_process(&ticket)).await??;
+        }
+        anyhow::bail!("Command was stopped before launch");
+    }
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            if let Some(ticket) = process_ticket {
+                let writer = capture.clone();
+                tokio::task::spawn_blocking(move || writer.finish_process(&ticket)).await??;
+            }
+            return Err(error).context("Start owned command");
+        }
+    };
     let pid = child
         .id()
         .context("Owned command has no process identity")?;
     let mut group = GroupGuard(Some(pid));
+    let mut failure = if let Some((store, id, owner)) = registration {
+        tokio::task::spawn_blocking(move || {
+            let identity = crate::execution::process::ProcessIdentity::capture(pid)?;
+            store.register_command_process(&id, &owner, &identity)
+        })
+        .await?
+        .err()
+    } else {
+        let writer = capture.clone();
+        let ticket = process_ticket
+            .clone()
+            .expect("Nongated process has a reserved launch");
+        tokio::task::spawn_blocking(move || writer.register_process(&ticket, pid))
+            .await?
+            .err()
+    };
     let stdin_task = if let Some(input) = input {
         let pipe = child.stdin.take().context("Missing command stdin")?;
         Some(tokio::spawn(serve_input(pid, pipe, input)))
@@ -300,23 +346,11 @@ async fn run_with_control(
     let _drains = DrainGuard(handles);
     let mut stdout_done = false;
     let mut stderr_done = false;
-    let mut failure = if let Some((store, id, owner)) = registration {
-        tokio::task::spawn_blocking(move || {
-            let identity = crate::execution::process::ProcessIdentity::capture(pid)?;
-            store.register_command_process(&id, &owner, &identity)
-        })
-        .await?
-        .err()
-    } else {
-        None
-    };
     let mut cause = None;
     let mut control_error: Option<String> = None;
     let mut timed_out = false;
     let mut killing = false;
-    let deadline = spec
-        .timeout
-        .map(|duration| tokio::time::Instant::now() + duration);
+    let mut quiescent = false;
     let mut force_at = None;
     let status = loop {
         if (cause.is_some() || timed_out || failure.is_some()) && force_at.is_none() && !killing {
@@ -335,7 +369,14 @@ async fn run_with_control(
                 stderr_done=true;
                 if let Err(error)=result.unwrap_or_else(|error|Err(error.into())) {failure.get_or_insert(error);}
             }
-            status=child.wait(),if stdout_done && stderr_done && (cause.is_none() && !timed_out && failure.is_none() || killing)=>{
+            _=tokio::time::sleep(Duration::from_millis(25)),if stdout_done && stderr_done && !quiescent && !killing && force_at.is_none()=>{
+                match control.live(pid).await {
+                    Ok(false)=>quiescent=true,
+                    Ok(true)=>{},
+                    Err(error)=>{control_error.get_or_insert(error.to_string());},
+                }
+            }
+            status=child.wait(),if stdout_done && stderr_done && (quiescent || killing)=>{
                 let status=status?;
                 // No await may intervene between reaping and disarming: after
                 // reaping, an empty group's numeric PID can eventually be reused.
@@ -364,6 +405,10 @@ async fn run_with_control(
             }
         }
     };
+    if let Some(ticket) = process_ticket {
+        let writer = capture.clone();
+        tokio::task::spawn_blocking(move || writer.finish_process(&ticket)).await??;
+    }
     if let Some(error) = failure {
         return Err(error.context("Command output capture failed; owned command was stopped"));
     }
@@ -408,6 +453,158 @@ async fn run_with_control(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn helper_owner_crash_fixture() -> Result<()> {
+        let Some(root) = std::env::var_os("JCODE_HELPER_OWNER_CRASH") else {
+            return Ok(());
+        };
+        let root = PathBuf::from(root);
+        crate::env::set_var("JCODE_HOME", &root);
+        crate::env::set_var("JCODE_RUNTIME_DIR", root.join("runtime"));
+        let store = crate::execution::ExecutionStore::open(&root)?;
+        let owner = crate::execution::runtime::ensure_running(&store).await?;
+        let invocation = crate::execution::Invocation {
+            session_id: "helper-loss".into(),
+            message_id: "message".into(),
+            call_path: vec!["helper".into()],
+            tool: "selfdev-test".into(),
+            input: serde_json::json!({}),
+            working_dir: Some(root.clone()),
+            received_result_digest: None,
+        };
+        let crate::execution::PreparedInvocation::New(record) =
+            store.prepare(&invocation, &owner.endpoint.id)?
+        else {
+            panic!()
+        };
+        store.start(&record.id, &record.owner)?;
+        crate::storage::write_text_secret(&root.join("run-id"), &record.id)?;
+        let capture = Arc::new(crate::execution::Capture::create(
+            store,
+            record,
+            Default::default(),
+        )?);
+        let mut command = tokio::process::Command::new("/usr/bin/python3");
+        command.args(["-c","import os,time; open('helper-pid','w').write(str(os.getpid())); os.write(1,b'PREFIX'); time.sleep(15)"]);
+        let retained = capture.clone();
+        let cwd = root.clone();
+        tokio::spawn(async move {
+            run_program(command, cwd, retained, InterruptSignal::new(), None, None).await
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while capture
+                .reference()
+                .is_ok_and(|reference| reference.bytes < 6)
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+        // Simulate process loss, not orderly task cancellation or destructor cleanup.
+        std::process::exit(0);
+    }
+
+    #[tokio::test]
+    async fn lost_helper_owner_cannot_be_retired_while_its_command_still_runs() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let mut owner = tokio::process::Command::new(std::env::current_exe()?);
+        owner
+            .args([
+                "--exact",
+                "execution::command::tests::helper_owner_crash_fixture",
+                "--nocapture",
+            ])
+            .env("JCODE_HELPER_OWNER_CRASH", directory.path())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .kill_on_drop(true);
+        let mut owner = owner.spawn()?;
+        let status = tokio::time::timeout(Duration::from_secs(10), owner.wait()).await??;
+        ensure!(status.success(), "Owner crash fixture failed");
+        let pid: u32 = std::fs::read_to_string(directory.path().join("helper-pid"))?.parse()?;
+        let identity = crate::execution::process::ProcessIdentity::capture(pid)?;
+        struct Cleanup(crate::execution::process::ProcessIdentity);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = self.0.signal_group(libc::SIGKILL);
+            }
+        }
+        let cleanup = Cleanup(identity);
+        let store = crate::execution::ExecutionStore::open(directory.path())?;
+        let id = std::fs::read_to_string(directory.path().join("run-id"))?;
+        let recovery = store.recover_lost_owner(&id).await;
+        let prior = store.inspect(&id)?.unwrap().state;
+        // Always terminate and observe the owned fixture group before assertions.
+        cleanup.0.signal_group(libc::SIGKILL)?;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while crate::platform::process_group_has_live_members(pid).await? {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .await??;
+        assert!(
+            !matches!(recovery, Ok(Some(_))),
+            "A lost runtime does not prove its unrecorded helper has stopped"
+        );
+        assert_eq!(prior, crate::execution::RunState::Running);
+        let recovered = store
+            .recover_lost_owner(&id)
+            .await?
+            .context("Quiescent helper owner should now recover")?;
+        assert_eq!(recovered.state, crate::execution::RunState::Interrupted);
+        assert_eq!(std::fs::read(recovered.output_path.unwrap())?, b"PREFIX");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn normal_completion_waits_for_quiet_descendants_and_failed_spawn_releases_intent()
+    -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let (store, record, capture) = capture(directory.path())?;
+        let mut command = tokio::process::Command::new("/usr/bin/python3");
+        command.args(["-c","import subprocess,sys; subprocess.Popen([sys.executable,'-c',\"import time; time.sleep(.3); open('descendant-done','w').write('done')\"],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)"]);
+        let outcome = run_program(
+            command,
+            directory.path().into(),
+            capture.clone(),
+            InterruptSignal::new(),
+            None,
+            None,
+        )
+        .await?;
+        assert!(
+            directory.path().join("descendant-done").exists(),
+            "Pipe EOF and leader exit do not prove the owned descendants have stopped"
+        );
+        capture.seal(outcome.output, RunState::Completed)?;
+        assert_eq!(
+            store.inspect(&record.id)?.unwrap().state,
+            RunState::Completed
+        );
+
+        let other = tempfile::tempdir()?;
+        let (_, _, capture) = self::capture(other.path())?;
+        let command = tokio::process::Command::new("/nonexistent/native-helper-fixture");
+        assert!(
+            run_program(
+                command,
+                other.path().into(),
+                capture.clone(),
+                InterruptSignal::new(),
+                None,
+                None
+            )
+            .await
+            .is_err()
+        );
+        capture.seal(
+            ToolOutput::new("spawn failed").with_error(true),
+            RunState::Failed,
+        )?;
+        Ok(())
+    }
     use crate::execution::{
         Capture, ExecutionStore, Invocation, PreparedInvocation, RunRecord, RunState, StorageConfig,
     };
@@ -538,6 +735,28 @@ mod tests {
         assert_eq!(outcome.output.metadata.as_ref().unwrap()["timed_out"], true);
         assert!(outcome.output.is_error);
         capture.seal(outcome.output, RunState::Failed)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn impossible_deadline_rejects_before_native_launch() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let (_, _, capture) = capture(directory.path())?;
+        let spec = CommandSpec {
+            command: "touch must-not-start".into(),
+            working_dir: directory.path().into(),
+            timeout: Some(Duration::MAX),
+        };
+        assert!(
+            run(spec, capture.clone(), InterruptSignal::new())
+                .await
+                .is_err()
+        );
+        assert!(!directory.path().join("must-not-start").exists());
+        capture.seal(
+            ToolOutput::new("Rejected deadline").with_error(true),
+            RunState::Failed,
+        )?;
         Ok(())
     }
 }

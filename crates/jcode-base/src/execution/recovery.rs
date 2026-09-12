@@ -132,6 +132,7 @@ impl ExecutionStore {
         record: RunRecord,
         lease: OutputLease,
     ) -> Result<Option<RunRecord>> {
+        self.verify_lost_native_processes(&record.id).await?;
         #[cfg(unix)]
         {
             let source = self.clone();

@@ -18,6 +18,12 @@ pub enum OutputStream {
 /// Implemented by the output owner. A successful write acknowledges retention,
 /// not merely placement in an untracked in-memory preview buffer.
 pub trait OutputCapture: Send + Sync {
+    /// Reserve before spawning so a crash in the launch/registration gap is
+    /// explicitly unproven, not mistaken for an execution without children.
+    fn begin_process(&self) -> Result<String>;
+    fn register_process(&self, ticket: &str, pid: u32) -> Result<()>;
+    /// Only after failed spawn or observed whole-group quiescence and reaping.
+    fn finish_process(&self, ticket: &str) -> Result<()>;
     fn report_progress(
         &self,
         progress: jcode_background_types::BackgroundTaskProgress,

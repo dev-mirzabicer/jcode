@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-const SCHEMA: i64 = 15;
+const SCHEMA: i64 = 17;
 
 pub use jcode_tool_types::RunState;
 
@@ -238,6 +238,21 @@ impl ExecutionStore {
         if version < 15 {
             transaction.execute_batch("ALTER TABLE runs ADD COLUMN superseded INTEGER NOT NULL DEFAULT 0; PRAGMA user_version=15;")?;
         }
+        if version < 16 {
+            transaction.execute_batch(
+                "CREATE TABLE native_processes (
+                ticket TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id),
+                owner TEXT NOT NULL, pid INTEGER, identity TEXT, identity_error TEXT,
+                finished INTEGER NOT NULL DEFAULT 0
+            ); CREATE INDEX native_processes_run ON native_processes(run_id,finished);
+            PRAGMA user_version=16;",
+            )?;
+        }
+        if version < 17 {
+            transaction.execute_batch(
+                "ALTER TABLE runs ADD COLUMN native_tracking INTEGER; PRAGMA user_version=17;",
+            )?;
+        }
         transaction.commit()?;
         Ok(store)
     }
@@ -327,7 +342,7 @@ impl ExecutionStore {
         crate::storage::ensure_dir(&directory)?;
         let input_path = directory.join(format!("{id}.json"));
         crate::storage::write_json_secret(&input_path, invocation)?;
-        transaction.execute("INSERT INTO runs (id,session_id,message_id,tool,input_digest,state,owner,input_path,parent_id) VALUES (?1,?2,?3,?4,?5,'prepared',?6,?7,?8)",
+        transaction.execute("INSERT INTO runs (id,session_id,message_id,tool,input_digest,state,owner,input_path,parent_id,native_tracking) VALUES (?1,?2,?3,?4,?5,'prepared',?6,?7,?8,1)",
             params![id, invocation.session_id, invocation.message_id, invocation.tool, digest, owner, path_text(&input_path)?,invocation.parent_id()])?;
         let record = query_record(&transaction, &id)?.context("Missing prepared invocation")?;
         transaction.commit()?;

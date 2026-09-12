@@ -111,6 +111,10 @@ impl Capture {
         );
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         ensure!(!state.sealed, "Capture is already sealed");
+        state
+            .storage
+            .store
+            .ensure_native_processes_finished(&state.record.id)?;
         let digest = output_digest(&output)?;
         if let Some((previous, previous_outcome)) = state.seal_intent {
             ensure!(
@@ -364,6 +368,41 @@ impl CaptureState {
 }
 
 impl OutputCapture for Capture {
+    fn begin_process(&self) -> Result<String> {
+        let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        ensure!(
+            !state.sealed && state.seal_intent.is_none() && state.failed.is_none(),
+            "Cannot launch a helper after capture failure or sealing"
+        );
+        state
+            .storage
+            .store
+            .begin_native_process(&state.record.id, &state.record.owner)
+    }
+    fn register_process(&self, ticket: &str, pid: u32) -> Result<()> {
+        let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        ensure!(
+            !state.sealed && state.seal_intent.is_none(),
+            "Cannot register a helper after sealing"
+        );
+        state.storage.store.register_native_process(
+            &state.record.id,
+            &state.record.owner,
+            ticket,
+            pid,
+        )
+    }
+    fn finish_process(&self, ticket: &str) -> Result<()> {
+        let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        ensure!(
+            !state.sealed && state.seal_intent.is_none(),
+            "Cannot finalize a helper after sealing"
+        );
+        state
+            .storage
+            .store
+            .finish_native_process(&state.record.id, &state.record.owner, ticket)
+    }
     fn report_progress(
         &self,
         progress: jcode_background_types::BackgroundTaskProgress,

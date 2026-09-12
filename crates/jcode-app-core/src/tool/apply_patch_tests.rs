@@ -336,6 +336,15 @@ struct StopAfterReceipt {
     stop: jcode_agent_runtime::InterruptSignal,
 }
 impl jcode_tool_core::OutputCapture for StopAfterReceipt {
+    fn begin_process(&self) -> Result<String> {
+        jcode_tool_core::OutputCapture::begin_process(self.capture.as_ref())
+    }
+    fn register_process(&self, ticket: &str, pid: u32) -> Result<()> {
+        jcode_tool_core::OutputCapture::register_process(self.capture.as_ref(), ticket, pid)
+    }
+    fn finish_process(&self, ticket: &str) -> Result<()> {
+        jcode_tool_core::OutputCapture::finish_process(self.capture.as_ref(), ticket)
+    }
     fn report_progress(
         &self,
         progress: crate::bus::BackgroundTaskProgress,

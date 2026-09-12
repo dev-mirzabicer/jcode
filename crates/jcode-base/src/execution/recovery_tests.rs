@@ -39,6 +39,44 @@ fn replace_image(store: &ExecutionStore, runtime: &RuntimeEndpoint) -> Result<()
 }
 
 #[tokio::test]
+async fn unregistered_native_launch_and_legacy_tracking_cannot_claim_quiescence() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let (store, runtime, record) = fixture(root.path())?;
+    let capture = Capture::create(store.clone(), record.clone(), StorageConfig::default())?;
+    let ticket = capture.begin_process()?;
+    assert!(
+        capture
+            .seal(ToolOutput::new("not completed"), RunState::Completed)
+            .is_err()
+    );
+    assert!(
+        store
+            .finish_native_process(&record.id, "another-owner", &ticket)
+            .is_err()
+    );
+    assert!(
+        store
+            .finish_native_process("another-run", &record.owner, &ticket)
+            .is_err()
+    );
+    replace_image(&store, &runtime)?;
+    drop(capture);
+    let error = store.recover_lost_owner(&record.id).await.unwrap_err();
+    assert!(error.to_string().contains("unproven native launch"));
+    assert_eq!(store.inspect(&record.id)?.unwrap().state, RunState::Running);
+    // Explicitly model a failed spawn acknowledgement from its original owner.
+    store.finish_native_process(&record.id, &record.owner, &ticket)?;
+    store.connection()?.execute(
+        "UPDATE runs SET native_tracking=NULL WHERE id=?1",
+        [&record.id],
+    )?;
+    let error = store.recover_lost_owner(&record.id).await.unwrap_err();
+    assert!(error.to_string().contains("Legacy execution"));
+    assert_eq!(store.inspect(&record.id)?.unwrap().state, RunState::Running);
+    Ok(())
+}
+
+#[tokio::test]
 async fn unleased_live_image_and_active_capture_are_not_mistaken_for_stopped_work() -> Result<()> {
     let root = tempfile::tempdir()?;
     let (store, runtime, record) = fixture(root.path())?;

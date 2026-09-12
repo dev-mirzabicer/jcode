@@ -152,6 +152,39 @@ same captured bytes rather than rereading a possibly changed file. Redirected
 stdout does not emit terminal image escapes. Hosted-provider vision budgets and
 unsupported formats remain explicit provider-boundary verification work.
 
+## Generic native helper process provenance
+
+Nongated native commands reserve a process launch receipt through their existing
+capture owner before spawning. Registration records the actual PID and available
+boot/birth identity before output draining starts. If a very short-lived process
+cannot supply that identity, the failed observation is recorded rather than
+inventing one. These receipts are metadata, not a second supervisor. They never
+authorize recovery to signal a bare PID.
+
+Failed spawn or Stop before spawn closes its launch intent. Otherwise the command
+owner records completion only after the entire private group has no live members
+and its leader is reaped. Normal completion now checks quiet descendants too:
+pipe EOF and leader exit alone do not release ownership. An impossible deadline
+fails before reserving or launching work. Capture sealing refuses unresolved
+native process receipts, so aborting a caller cannot manufacture a terminal
+witness while owned work remains unproven.
+
+Owner-loss recovery inspects recorded helper groups as well as gated command
+workers. A live helper prevents retirement. Once its group is actually quiescent,
+recovery can preserve the committed prefix and publish interruption without
+replaying effects. A crash between launch intent and PID registration stays
+explicitly unproven. Legacy nonterminal runs without complete process-tracking
+metadata also stay unproven rather than acquiring invented process history.
+Existing sealed outcomes retain their normal terminal-witness recovery behavior.
+
+A real process-exit regression reproduced the former false retirement while its
+Python helper was still running. Tests now require refusal while live, recovery
+only after fixture cleanup proves quiescence, preserved prefix bytes, exact
+receipt ownership, pending-launch and legacy refusal, quiet descendant completion,
+failed spawn and deadline rejection. Computer/search helper families, execution
+store tests, integrated execution tests and strict affected lint pass on macOS.
+This does not claim adversarial process containment or native Windows parity.
+
 ## Self-development build and test jobs
 
 Build-producing, test and attached-watcher requests use the common execution owner
@@ -183,7 +216,7 @@ failure, superseded state and terminal-receipt recovery. Forty selfdev tests and
 59 execution-store tests pass (one explicit native archive fixture is not run in
 that matrix), as do strict affected lint, both host checks and 48 TypeScript tests.
 These tests run synthetic commands, not a real source publication. Generic helper
-process-loss proof, compact background summary/reload views and final native
+process-loss proof is covered above. Compact background summary/reload views and final native
 activation remain WP-02 reconciliation work. Unsupported non-Unix build-command
 ownership fails explicitly before launching a process rather than using the old
 unmanaged command path; native platform parity is not claimed.

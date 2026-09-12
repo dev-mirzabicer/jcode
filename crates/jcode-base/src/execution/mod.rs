@@ -9,6 +9,7 @@ pub mod command_handoff;
 pub mod control_transport;
 pub mod inspection;
 mod managed_read;
+mod native_process;
 mod output;
 #[cfg(unix)]
 pub mod owned_child;
