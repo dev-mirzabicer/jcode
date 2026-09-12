@@ -1,6 +1,67 @@
 use super::*;
 
 #[tokio::test]
+async fn retained_image_binary_is_read_as_verified_media_not_a_binary_placeholder()
+-> anyhow::Result<()> {
+    use crate::execution::{Capture, ExecutionStore, PreparedInvocation, RunState};
+    use base64::Engine;
+    let ctx = context();
+    let root = crate::storage::jcode_dir()?;
+    let store = ExecutionStore::open(&root)?;
+    let invocation = crate::execution::invocation(&ctx, "media-fixture", serde_json::json!({}));
+    let PreparedInvocation::New(record) = store.prepare(&invocation, "fixture")? else {
+        panic!()
+    };
+    store.start(&record.id, "fixture")?;
+    let data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+    let capture = Capture::create(store.clone(), record.clone(), Default::default())?;
+    capture.seal(
+        ToolOutput::new("image receipt").with_image("image/png", data),
+        RunState::Completed,
+    )?;
+    let path = store
+        .inspect(&record.id)?
+        .unwrap()
+        .output_path
+        .unwrap()
+        .with_file_name("image-0.bin");
+    let registry = Registry::new(Arc::new(MockProvider)).await;
+    let read = registry
+        .execute("read", serde_json::json!({"file_path":path}), context())
+        .await?;
+    assert_eq!(
+        read.images.len(),
+        1,
+        "Retained image references must remain usable for vision through read"
+    );
+    assert_eq!(read.images[0].media_type, "image/png");
+    assert!(
+        store.retained_image(&path, 1).is_err(),
+        "Atomic media limits apply to retained parts too"
+    );
+    let manifest: serde_json::Value =
+        crate::storage::read_json(&path.with_file_name("manifest.json"))?;
+    assert_eq!(manifest["images"][0]["decoded_file"], "image-0.bin");
+    let encoded_path = path.with_file_name("image-0.base64");
+    std::fs::write(&encoded_path, b"altered original")?;
+    assert!(store.retained_image(&path, 20 * 1024 * 1024).is_err());
+    std::fs::write(&encoded_path, data)?;
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD.decode(&read.images[0].data)?,
+        base64::engine::general_purpose::STANDARD.decode(data)?
+    );
+    std::fs::write(&path, b"modified image bytes")?;
+    assert!(
+        registry
+            .execute("read", serde_json::json!({"file_path":path}), context())
+            .await
+            .is_err(),
+        "A changed backing part must not be presented as the captured original"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn rejected_tool_admission_retains_scoped_input_and_failure_without_producer_effects()
 -> anyhow::Result<()> {
     let (registry, tool, _started) = fixture("must not execute".into(), false, false).await;

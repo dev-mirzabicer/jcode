@@ -1096,6 +1096,11 @@ fn complete_move(
 
 impl ExecutionStore {
     pub(super) fn open_output_file(&self, id: &str) -> Result<File> {
+        self.open_output_part(id, "output.txt")
+    }
+
+    pub(super) fn open_output_part(&self, id: &str, name: &str) -> Result<File> {
+        validate_part(name)?;
         for _ in 0..2 {
             let (physical,archived,spec,generation):(String,bool,Option<String>,i64)=self.connection()?.query_row("SELECT physical,archived,archive_spec,generation FROM output_locations WHERE id=?1",[id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)))?;
             let physical = PathBuf::from(physical);
@@ -1128,7 +1133,7 @@ impl ExecutionStore {
                     std::fs::read_link(&alias)? == physical,
                     "Managed output alias and location disagree"
                 );
-                binding.read_part("output.txt")
+                binding.read_part(name)
             })();
             if opened.is_ok() {
                 return opened;

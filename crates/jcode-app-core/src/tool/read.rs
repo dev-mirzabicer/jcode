@@ -114,11 +114,16 @@ impl Tool for ReadTool {
     fn execution_policy(
         &self,
         input: &Value,
-        _: &ToolContext,
+        ctx: &ToolContext,
     ) -> Result<jcode_tool_core::ExecutionPolicy> {
         let params: ReadInput = serde_json::from_value(input.clone())?;
         let media = is_image_file(Path::new(&params.file_path))
-            || is_pdf_file(Path::new(&params.file_path));
+            || is_pdf_file(Path::new(&params.file_path))
+            || crate::execution::ExecutionStore::retained_image_selector(
+                &crate::storage::jcode_dir()?,
+                &ctx.resolve_path(Path::new(&params.file_path)),
+            )
+            .is_some();
         Ok(jcode_tool_core::ExecutionPolicy {
             capture: if media {
                 jcode_tool_core::CaptureMode::Complete
@@ -185,9 +190,11 @@ impl Tool for ReadTool {
         let path = ctx.resolve_path(Path::new(&params.file_path));
         let root = crate::storage::jcode_dir()?;
         let managed = crate::execution::reader::SourceReader::is_managed_path(&root, &path);
+        let managed_image =
+            crate::execution::ExecutionStore::retained_image_selector(&root, &path).is_some();
 
         // Check if file exists
-        if !managed && !path.exists() {
+        if !managed && !managed_image && !path.exists() {
             // Try to find similar files
             let suggestions = find_similar_files(&path);
             if suggestions.is_empty() {
@@ -202,7 +209,7 @@ impl Tool for ReadTool {
         }
 
         // Check for image files and display in terminal if supported
-        if is_image_file(&path) {
+        if is_image_file(&path) || managed_image {
             anyhow::ensure!(
                 params.read_point.is_none(),
                 "Image reads are atomic; a text read point cannot select image pixels"
@@ -366,12 +373,23 @@ fn handle_image_file(path: &Path, file_path: &str) -> Result<ToolOutput> {
     let protocol = ImageProtocol::detect();
 
     const MAX_IMAGE_SIZE: u64 = 20 * 1024 * 1024;
-    let source_size = std::fs::metadata(path)?.len();
-    if source_size > MAX_IMAGE_SIZE {
-        return Ok(ToolOutput::new(format!("Image: {file_path} ({source_size} bytes). Image exceeds the existing 20-MiB atomic vision limit; no pixels were sent. The source remains at the original path."))
-            .with_error(true).with_metadata(json!({"source":file_path,"source_bytes":source_size,"vision_available":false})));
-    }
-    let (data, source_digest) = media_bytes(path, Some(MAX_IMAGE_SIZE))?;
+    let root = crate::storage::jcode_dir()?;
+    let (data, source_digest, retained_media_type) =
+        if crate::execution::ExecutionStore::retained_image_selector(&root, path).is_some() {
+            use sha2::{Digest, Sha256};
+            let (bytes, media_type) = crate::execution::ExecutionStore::open(&root)?
+                .retained_image(path, MAX_IMAGE_SIZE)?;
+            let digest = format!("{:x}", Sha256::digest(&bytes));
+            (bytes, digest, Some(media_type))
+        } else {
+            let source_size = std::fs::metadata(path)?.len();
+            if source_size > MAX_IMAGE_SIZE {
+                return Ok(ToolOutput::new(format!("Image: {file_path} ({source_size} bytes). Image exceeds the existing 20-MiB atomic vision limit; no pixels were sent. The source remains at the original path."))
+                .with_error(true).with_metadata(json!({"source":file_path,"source_bytes":source_size,"vision_available":false})));
+            }
+            let (bytes, digest) = media_bytes(path, Some(MAX_IMAGE_SIZE))?;
+            (bytes, digest, None)
+        };
     let file_size = data.len() as u64;
 
     let dimensions = get_image_dimensions_from_data(&data);
@@ -406,15 +424,17 @@ fn handle_image_file(path: &Path, file_path: &str) -> Result<ToolOutput> {
         .extension()
         .map(|e| e.to_string_lossy().to_lowercase())
         .unwrap_or_default();
-    let media_type = match ext.as_str() {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        "bmp" => "image/bmp",
-        "ico" => "image/x-icon",
-        _ => "image/png",
-    };
+    let media_type = retained_media_type
+        .as_deref()
+        .unwrap_or(match ext.as_str() {
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            "bmp" => "image/bmp",
+            "ico" => "image/x-icon",
+            _ => "image/png",
+        });
 
     let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &data);
     let display_note = if terminal_displayed {

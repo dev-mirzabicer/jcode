@@ -152,6 +152,32 @@ same captured bytes rather than rereading a possibly changed file. Redirected
 stdout does not emit terminal image escapes. Hosted-provider vision budgets and
 unsupported formats remain explicit provider-boundary verification work.
 
+## Reading retained image parts
+
+Canonical `execution/outputs/<run-id>/image-<index>.bin` references are recognized
+by `read` as atomic media, not generic binary placeholders. The storage owner
+requires a sealed matching invocation/manifest, verifies the logical alias and
+recorded physical/archive identity, and opens parts through the bound directory.
+It verifies the original encoded image's byte count/digest and compares decoded
+bytes with the binary part before delivering pixels. It does not infer a media
+type from a `.bin` filename or accept changed backing bytes as the original.
+
+The existing 20-MiB atomic-image bound applies before binary acquisition. Manifest
+image/resource descriptors expose `decoded_file` only when the received base64
+was actually decodable. Older descriptors remain readable when their original
+integrity evidence is sufficient. Invalid/unsealed/offline references fail rather
+than rerunning the original tool. Rendering uses the same captured-byte image
+renderer as ordinary image reads.
+
+A public Registry/read regression reproduced the original zero-image placeholder
+and now checks exact pixels, media type, encoded and decoded corruption, and the
+atomic size bound. The isolated native Active fixture verifies identical image
+retrieval after relocation and rejection of an offline recorded archive. Store
+regressions and strict base/app-core lint pass. No original producer is repeated.
+SDK binary-part materialization and retained-manifest paging remain separate
+caller reconciliation work; these checks do not claim that text-only SDK paging
+already provides them.
+
 ## Background summary and reload views
 
 The local TUI collects legacy in-process and durable managed background metadata

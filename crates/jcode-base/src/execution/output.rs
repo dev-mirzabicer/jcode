@@ -12,6 +12,8 @@ use std::path::Path;
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct ImagePart {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decoded_file: Option<String>,
     pub(super) media_type: String,
     pub(super) label: Option<String>,
     pub(super) file: String,
@@ -52,6 +54,8 @@ pub(super) struct StoredPart {
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct ResourcePart {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decoded_file: Option<String>,
     pub uri: String,
     pub media_type: Option<String>,
     pub file: String,
@@ -124,6 +128,124 @@ impl PartIntegrity {
 }
 
 impl ExecutionStore {
+    /// Resolve only a canonical retained image reference, never a generic .bin
+    /// file by guesswork. Selection itself performs no filesystem acquisition.
+    pub fn retained_image_selector(root: &Path, path: &Path) -> Option<(String, usize)> {
+        let relative = path.strip_prefix(root.join("execution/outputs")).ok()?;
+        let mut components = relative.components();
+        let std::path::Component::Normal(id) = components.next()? else {
+            return None;
+        };
+        let std::path::Component::Normal(file) = components.next()? else {
+            return None;
+        };
+        if components.next().is_some() {
+            return None;
+        }
+        let id = id.to_str()?;
+        let file = file.to_str()?;
+        if id.len() != 68
+            || !id.starts_with("run-")
+            || !id[4..].bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            return None;
+        }
+        let index: usize = file
+            .strip_prefix("image-")?
+            .strip_suffix(".bin")?
+            .parse()
+            .ok()?;
+        if file != format!("image-{index}.bin") {
+            return None;
+        }
+        Some((id.into(), index))
+    }
+
+    /// Read one atomic image with its declared media type and original integrity.
+    /// Both aliases and physical archive identity are checked by the storage owner.
+    pub fn retained_image(&self, path: &Path, max_bytes: u64) -> Result<(Vec<u8>, String)> {
+        let root = self.root().parent().context("Invalid execution root")?;
+        let (id, index) =
+            Self::retained_image_selector(root, path).context("Invalid retained image path")?;
+        let record = self
+            .inspect(&id)?
+            .context("Retained image invocation is unavailable")?;
+        ensure!(
+            record.state.terminal(),
+            "Image capture is not sealed; wait for the original operation"
+        );
+        let expected = self.root().join("outputs").join(&id);
+        ensure!(
+            record.result_path.as_ref() == Some(&expected.join("manifest.json")),
+            "Retained image has no canonical bundle manifest"
+        );
+        let manifest: Manifest =
+            serde_json::from_reader(self.open_output_part(&id, "manifest.json")?)?;
+        ensure!(
+            manifest.schema == 1 && manifest.invocation_id == id,
+            "Retained image manifest identity changed"
+        );
+        let part = manifest
+            .images
+            .get(index)
+            .context("Retained image index is unavailable")?;
+        ensure!(
+            part.media_type.starts_with("image/"),
+            "Retained part is not declared as image media"
+        );
+        let binary = format!("image-{index}.bin");
+        ensure!(
+            part.decoded_file
+                .as_ref()
+                .is_none_or(|file| file == &binary),
+            "Retained decoded image descriptor changed"
+        );
+        let mut file = self.open_output_part(&id, &binary)?;
+        ensure!(
+            file.metadata()?.len() <= max_bytes,
+            "Retained image exceeds the atomic vision limit; no pixels were acquired"
+        );
+        let mut bytes = Vec::new();
+        (&mut file)
+            .take(max_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)?;
+        ensure!(
+            bytes.len() as u64 <= max_bytes,
+            "Retained image grew beyond the atomic vision limit"
+        );
+        let integrity = part
+            .integrity
+            .as_ref()
+            .context("Retained image has no original integrity receipt")?;
+        if part.raw_base64 {
+            ensure!(
+                part.file == format!("image-{index}.base64"),
+                "Retained image encoding path changed"
+            );
+            let limit = max_bytes
+                .saturating_add(2)
+                .saturating_div(3)
+                .saturating_mul(4);
+            ensure!(
+                integrity.bytes <= limit,
+                "Retained image encoding exceeds the atomic vision limit"
+            );
+            let mut original = Vec::new();
+            self.open_output_part(&id, &part.file)?
+                .take(limit.saturating_add(1))
+                .read_to_end(&mut original)?;
+            integrity.verify(&original)?;
+            ensure!(
+                base64::engine::general_purpose::STANDARD.decode(&original)? == bytes,
+                "Retained decoded image differs from the original captured bytes"
+            );
+        } else {
+            ensure!(part.file == binary, "Retained image byte path changed");
+            integrity.verify(&bytes)?;
+        }
+        Ok((bytes, part.media_type.clone()))
+    }
+
     /// Recover only an already-sealed, identity-checked output. Missing or old
     /// manifests do not authorize repeating an operation with uncertain effects.
     pub fn recover_terminal_output(&self, id: &str) -> Result<RunRecord> {

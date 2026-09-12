@@ -170,6 +170,10 @@ impl Capture {
                         .iter()
                         .enumerate()
                         .map(|(index, image)| ImagePart {
+                            decoded_file: base64::engine::general_purpose::STANDARD
+                                .decode(&image.data)
+                                .ok()
+                                .map(|_| format!("image-{index}.bin")),
                             media_type: image.media_type.clone(),
                             label: image.label.clone(),
                             file: format!("image-{index}.base64"),
@@ -183,6 +187,10 @@ impl Capture {
                         .iter()
                         .enumerate()
                         .map(|(index, part)| ResourcePart {
+                            decoded_file: base64::engine::general_purpose::STANDARD
+                                .decode(&part.data)
+                                .ok()
+                                .map(|_| format!("resource-{index}.bin")),
                             uri: part.uri.clone(),
                             media_type: part.media_type.clone(),
                             file: format!("resource-{index}.base64"),

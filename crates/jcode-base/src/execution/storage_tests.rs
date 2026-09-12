@@ -519,10 +519,15 @@ fn native_archive_fixture_uses_verified_volume_and_stable_aliases() -> Result<()
             format!("{}TAIL", "α".repeat(500)).as_bytes(),
         )?;
         let alias = capture.reference()?.path;
-        let mut output = ToolOutput::new("");
+        let image_data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+        let mut output = ToolOutput::new("").with_image("image/png", image_data);
         output.source = OutputSource::Retained(capture.reference()?);
         capture.seal(output, crate::execution::RunState::Completed)?;
         drop(capture);
+        let image_alias = alias.with_file_name("image-0.bin");
+        let original_image = fixture
+            .store
+            .retained_image(&image_alias, 20 * 1024 * 1024)?;
         let state_root = fixture
             .store
             .root()
@@ -564,6 +569,13 @@ fn native_archive_fixture_uses_verified_volume_and_stable_aliases() -> Result<()
         fixture.store.recover_owned_storage(&record.id, &lease)?;
         fixture.store.recover_owned_storage(&record.id, &lease)?;
         drop(lease);
+        ensure!(
+            fixture
+                .store
+                .retained_image(&image_alias, 20 * 1024 * 1024)?
+                == original_image,
+            "Archived image identity or bytes changed"
+        );
         let mut next = request(page.next_point.clone());
         next.target = std::num::NonZeroUsize::new(10_000).unwrap();
         let continued = reader.read(next)?;
@@ -587,6 +599,13 @@ fn native_archive_fixture_uses_verified_volume_and_stable_aliases() -> Result<()
             "UPDATE output_locations SET archive_spec=?2 WHERE id=?1",
             params![record.id, serde_json::to_string(&offline)?],
         )?;
+        ensure!(
+            fixture
+                .store
+                .retained_image(&image_alias, 20 * 1024 * 1024)
+                .is_err(),
+            "Offline image archive must not be read through an unverified path"
+        );
         ensure!(
             reader.read(request(page.next_point)).is_err() && !offline.mount.exists(),
             "Offline read created a substitute mount"
