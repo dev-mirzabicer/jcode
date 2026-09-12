@@ -710,14 +710,15 @@ impl MultiProvider {
                 CompletionMode::Split {
                     system_static,
                     system_dynamic,
+                    context,
                 } => {
                     self.complete_split_on_provider(
                         candidate,
                         messages,
                         tools,
-                        system_static,
-                        system_dynamic,
+                        (system_static, system_dynamic),
                         resume_session_id,
+                        context,
                     )
                     .await
                 }
@@ -748,6 +749,9 @@ impl MultiProvider {
                     return Ok(stream);
                 }
                 Err(err) => {
+                    if mode.has_received_data() {
+                        return Err(err.context("Provider returned SDK data before request failure; automatic account/provider replay was stopped"));
+                    }
                     let summary =
                         maybe_annotate_limit_summary(candidate, Self::summarize_error(&err));
                     let decision = Self::classify_failover_error(&err);
@@ -1686,6 +1690,29 @@ impl Provider for MultiProvider {
             CompletionMode::Split {
                 system_static,
                 system_dynamic,
+                context: None,
+            },
+            resume_session_id,
+        )
+        .await
+    }
+
+    async fn complete_split_with_context(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        system_static: &str,
+        system_dynamic: &str,
+        resume_session_id: Option<&str>,
+        context: jcode_provider_core::ProviderRequestContext,
+    ) -> Result<EventStream> {
+        self.complete_with_failover(
+            messages,
+            tools,
+            CompletionMode::Split {
+                system_static,
+                system_dynamic,
+                context: Some(&context),
             },
             resume_session_id,
         )

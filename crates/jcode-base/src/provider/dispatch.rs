@@ -8,10 +8,14 @@ pub(super) enum CompletionMode<'a> {
     Split {
         system_static: &'a str,
         system_dynamic: &'a str,
+        context: Option<&'a jcode_provider_core::ProviderRequestContext>,
     },
 }
 
 impl CompletionMode<'_> {
+    pub(super) fn has_received_data(self) -> bool {
+        matches!(self,Self::Split{context:Some(context),..} if context.has_received_data())
+    }
     pub(super) fn log_suffix(self) -> &'static str {
         match self {
             CompletionMode::Unified { .. } => "",
@@ -46,6 +50,7 @@ impl MultiProvider {
             CompletionMode::Split {
                 system_static,
                 system_dynamic,
+                ..
             } => {
                 chars += system_static.len() + system_dynamic.len();
             }
@@ -181,31 +186,34 @@ impl MultiProvider {
         provider: ActiveProvider,
         messages: &[Message],
         tools: &[ToolDefinition],
-        system_static: &str,
-        system_dynamic: &str,
+        system: (&str, &str),
         resume_session_id: Option<&str>,
+        context: Option<&jcode_provider_core::ProviderRequestContext>,
     ) -> Result<EventStream> {
+        let (system_static, system_dynamic) = system;
         self.reconcile_auth_if_provider_missing(provider);
         match provider {
             ActiveProvider::Claude => {
                 if let Some(anthropic) = self.anthropic_provider() {
                     anthropic
-                        .complete_split(
+                        .complete_split_with_context(
                             messages,
                             tools,
                             system_static,
                             system_dynamic,
                             resume_session_id,
+                            context.cloned().unwrap_or_default(),
                         )
                         .await
                 } else if let Some(claude) = self.claude_provider() {
                     claude
-                        .complete_split(
+                        .complete_split_with_context(
                             messages,
                             tools,
                             system_static,
                             system_dynamic,
                             resume_session_id,
+                            context.cloned().unwrap_or_default(),
                         )
                         .await
                 } else {
@@ -217,12 +225,13 @@ impl MultiProvider {
             ActiveProvider::OpenAI => {
                 if let Some(openai) = self.openai_provider() {
                     openai
-                        .complete_split(
+                        .complete_split_with_context(
                             messages,
                             tools,
                             system_static,
                             system_dynamic,
                             resume_session_id,
+                            context.cloned().unwrap_or_default(),
                         )
                         .await
                 } else {
@@ -239,12 +248,13 @@ impl MultiProvider {
                     .clone();
                 if let Some(copilot) = copilot {
                     copilot
-                        .complete_split(
+                        .complete_split_with_context(
                             messages,
                             tools,
                             system_static,
                             system_dynamic,
                             resume_session_id,
+                            context.cloned().unwrap_or_default(),
                         )
                         .await
                 } else {
@@ -257,12 +267,13 @@ impl MultiProvider {
                 let antigravity = self.antigravity_provider();
                 if let Some(antigravity) = antigravity {
                     antigravity
-                        .complete_split(
+                        .complete_split_with_context(
                             messages,
                             tools,
                             system_static,
                             system_dynamic,
                             resume_session_id,
+                            context.cloned().unwrap_or_default(),
                         )
                         .await
                 } else {
@@ -279,12 +290,13 @@ impl MultiProvider {
                     .clone();
                 if let Some(gemini) = gemini {
                     gemini
-                        .complete_split(
+                        .complete_split_with_context(
                             messages,
                             tools,
                             system_static,
                             system_dynamic,
                             resume_session_id,
+                            context.cloned().unwrap_or_default(),
                         )
                         .await
                 } else {
@@ -301,12 +313,13 @@ impl MultiProvider {
                     .clone();
                 if let Some(cursor) = cursor {
                     cursor
-                        .complete_split(
+                        .complete_split_with_context(
                             messages,
                             tools,
                             system_static,
                             system_dynamic,
                             resume_session_id,
+                            context.cloned().unwrap_or_default(),
                         )
                         .await
                 } else {
@@ -318,12 +331,13 @@ impl MultiProvider {
             ActiveProvider::Bedrock => {
                 if let Some(bedrock) = self.bedrock_provider() {
                     bedrock
-                        .complete_split(
+                        .complete_split_with_context(
                             messages,
                             tools,
                             system_static,
                             system_dynamic,
                             resume_session_id,
+                            context.cloned().unwrap_or_default(),
                         )
                         .await
                 } else {
@@ -336,12 +350,13 @@ impl MultiProvider {
                 let openrouter = self.active_openrouter_execution_provider();
                 if let Some(openrouter) = openrouter {
                     openrouter
-                        .complete_split(
+                        .complete_split_with_context(
                             messages,
                             tools,
                             system_static,
                             system_dynamic,
                             resume_session_id,
+                            context.cloned().unwrap_or_default(),
                         )
                         .await
                 } else {

@@ -36,17 +36,19 @@ pub(super) struct PreparedLocalProviderInvocation {
     dynamic_part: String,
     session_id: Option<String>,
     memory_pending: Option<crate::memory::PendingMemoryReservation>,
+    capture: crate::execution::ProviderCaptureScope,
 }
 
 impl PreparedLocalProviderInvocation {
     pub(super) async fn invoke(&self) -> Result<crate::provider::EventStream> {
         self.provider
-            .complete_split(
+            .complete_split_with_context(
                 &self.request_messages,
                 &self.tools,
                 &self.static_part,
                 &self.dynamic_part,
                 self.session_id.as_deref(),
+                self.capture.context(),
             )
             .await
     }
@@ -159,6 +161,7 @@ impl App {
             &split_prompt.dynamic_part,
         );
         Ok(PreparedLocalProviderInvocation {
+            capture: crate::execution::ProviderCaptureScope::new(self.session.id.clone()),
             provider: self.provider.clone(),
             request_messages,
             tools,
@@ -293,112 +296,114 @@ impl App {
             }
 
             // Make API call non-blocking - poll it in select! so we can handle input while waiting
-            let mut api_future = std::pin::pin!(invocation.invoke());
-
-            let mut stream = loop {
-                if self.dispatch_local_instruction_request()
-                    | self.run_pending_instruction_editor(terminal, event_stream)
-                {
-                    status_spinner_renderer.draw_full(self, terminal)?;
-                }
-                tokio::select! {
-                    biased;
-                    // Handle keyboard input while waiting for API
-                    event = event_stream.as_mut().expect("terminal input reader is active").next() => {
-                        match event {
-                            Some(Ok(Event::Key(key))) => {
-                                self.update_copy_badge_key_event(key);
-                                if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
-                                    let scroll_only = super::input::is_scroll_only_key(self, key.code, key.modifiers);
-                                    let _ = self.handle_key_press_event(key);
-                                    if self.cancel_requested {
-                                        self.cancel_requested = false;
-                                        self.interleave_message = None;
-                                        self.pending_soft_interrupts.clear();
-                                        self.pending_soft_interrupt_requests.clear();
-                                        self.clear_streaming_render_state();
-                                        self.stream_buffer.clear();
-                                        self.streaming_tool_calls.clear();
-                                        self.schedule_queued_dispatch_after_interrupt();
-                                        self.push_display_message(DisplayMessage::system("Interrupted"));
-                                        return Ok(());
+            let mut stream = {
+                let mut api_future = std::pin::pin!(invocation.invoke());
+                loop {
+                    if self.dispatch_local_instruction_request()
+                        | self.run_pending_instruction_editor(terminal, event_stream)
+                    {
+                        status_spinner_renderer.draw_full(self, terminal)?;
+                    }
+                    tokio::select! {
+                        biased;
+                        // Handle keyboard input while waiting for API
+                        event = event_stream.as_mut().expect("terminal input reader is active").next() => {
+                            match event {
+                                Some(Ok(Event::Key(key))) => {
+                                    self.update_copy_badge_key_event(key);
+                                    if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                                        let scroll_only = super::input::is_scroll_only_key(self, key.code, key.modifiers);
+                                        let _ = self.handle_key_press_event(key);
+                                        if self.cancel_requested {
+                                            self.cancel_requested = false;
+                                            self.interleave_message = None;
+                                            self.pending_soft_interrupts.clear();
+                                            self.pending_soft_interrupt_requests.clear();
+                                            self.clear_streaming_render_state();
+                                            self.stream_buffer.clear();
+                                            self.streaming_tool_calls.clear();
+                                            self.schedule_queued_dispatch_after_interrupt();
+                                            self.push_display_message(DisplayMessage::system("Interrupted"));
+                                            return Ok(());
+                                        }
+                                        if !scroll_only {
+                                            status_spinner_renderer.draw_full(self, terminal)?;
+                                            super::run_shell::reset_status_spinner_interval(&mut status_spinner_interval, self);
+                                        }
                                     }
-                                    if !scroll_only {
+                                }
+                                Some(Ok(Event::Paste(text))) => {
+                                    self.handle_paste(text);
+                                    status_spinner_renderer.draw_full(self, terminal)?;
+                                    super::run_shell::reset_status_spinner_interval(&mut status_spinner_interval, self);
+                                }
+                                Some(Ok(Event::Mouse(mouse))) => {
+                                    if !matches!(mouse.kind, MouseEventKind::Moved) {
+                                        let scroll_only = self.handle_mouse_event(mouse);
+                                        if !scroll_only {
+                                            status_spinner_renderer.draw_full(self, terminal)?;
+                                            super::run_shell::reset_status_spinner_interval(&mut status_spinner_interval, self);
+                                        }
+                                    }
+                                }
+                                Some(Ok(Event::Resize(_, _))) => {
+                                    if self.should_redraw_after_resize() {
                                         status_spinner_renderer.draw_full(self, terminal)?;
                                         super::run_shell::reset_status_spinner_interval(&mut status_spinner_interval, self);
                                     }
                                 }
+                                _ => {}
                             }
-                            Some(Ok(Event::Paste(text))) => {
-                                self.handle_paste(text);
+                        }
+                        // Redraw periodically
+                        _ = status_spinner_interval.tick(), if status_spinner_renderer.spinner_only_available(self) => {
+                            if !status_spinner_renderer.draw_status_spinner_only(self, terminal)? {
                                 status_spinner_renderer.draw_full(self, terminal)?;
                                 super::run_shell::reset_status_spinner_interval(&mut status_spinner_interval, self);
                             }
-                            Some(Ok(Event::Mouse(mouse))) => {
-                                if !matches!(mouse.kind, MouseEventKind::Moved) {
-                                    let scroll_only = self.handle_mouse_event(mouse);
-                                    if !scroll_only {
+                        }
+                        _ = redraw_interval.tick() => {
+                            let _ = self.flush_pending_resize_redraw();
+                            status_spinner_renderer.draw_full(self, terminal)?;
+                            super::run_shell::reset_status_spinner_interval(&mut status_spinner_interval, self);
+                        }
+                        bus_event = async {
+                            match bus_receiver.as_mut() {
+                                Some(rx) => rx.recv().await,
+                                None => futures::future::pending::<std::result::Result<crate::bus::BusEvent, tokio::sync::broadcast::error::RecvError>>().await,
+                            }
+                        } => {
+                            if super::local::handle_bus_event(self, bus_event) {
+                                status_spinner_renderer.draw_full(self, terminal)?;
+                                super::run_shell::reset_status_spinner_interval(&mut status_spinner_interval, self);
+                            }
+                        }
+                        // Poll API call
+                        result = &mut api_future => {
+                            match result {
+                                Ok(stream) => break stream,
+                                Err(err) => {
+                                    memory_pending.restore_now();
+                                    if invocation.capture.has_received_data(){self.mark_pending_provider_output_started();return Err(err.context("SDK data was received before stream publication; automatic request replay was stopped"));}
+                                    if let Some(reason) = crate::network_retry::classify_network_interruption(err.as_ref()) {
+                                        let plan = crate::network_retry::wait_plan();
+                                        self.push_display_message(DisplayMessage::system(format!(
+                                            "Stream interrupted, likely because {reason}. Waiting to retry: {}.",
+                                            plan.listener_summary
+                                        )));
+                                        self.status = ProcessingStatus::WaitingForNetwork {
+                                            listener: plan.listener_summary.clone(),
+                                        };
                                         status_spinner_renderer.draw_full(self, terminal)?;
                                         super::run_shell::reset_status_spinner_interval(&mut status_spinner_interval, self);
+                                        crate::network_retry::wait_until_probably_online().await;
+                                        self.push_display_message(DisplayMessage::system(
+                                            "Network connectivity looks restored; retrying request.".to_string(),
+                                        ));
+                                        continue 'turn_loop;
                                     }
+                                    return Err(err);
                                 }
-                            }
-                            Some(Ok(Event::Resize(_, _))) => {
-                                if self.should_redraw_after_resize() {
-                                    status_spinner_renderer.draw_full(self, terminal)?;
-                                    super::run_shell::reset_status_spinner_interval(&mut status_spinner_interval, self);
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                    // Redraw periodically
-                    _ = status_spinner_interval.tick(), if status_spinner_renderer.spinner_only_available(self) => {
-                        if !status_spinner_renderer.draw_status_spinner_only(self, terminal)? {
-                            status_spinner_renderer.draw_full(self, terminal)?;
-                            super::run_shell::reset_status_spinner_interval(&mut status_spinner_interval, self);
-                        }
-                    }
-                    _ = redraw_interval.tick() => {
-                        let _ = self.flush_pending_resize_redraw();
-                        status_spinner_renderer.draw_full(self, terminal)?;
-                        super::run_shell::reset_status_spinner_interval(&mut status_spinner_interval, self);
-                    }
-                    bus_event = async {
-                        match bus_receiver.as_mut() {
-                            Some(rx) => rx.recv().await,
-                            None => futures::future::pending::<std::result::Result<crate::bus::BusEvent, tokio::sync::broadcast::error::RecvError>>().await,
-                        }
-                    } => {
-                        if super::local::handle_bus_event(self, bus_event) {
-                            status_spinner_renderer.draw_full(self, terminal)?;
-                            super::run_shell::reset_status_spinner_interval(&mut status_spinner_interval, self);
-                        }
-                    }
-                    // Poll API call
-                    result = &mut api_future => {
-                        match result {
-                            Ok(stream) => break stream,
-                            Err(err) => {
-                                memory_pending.restore_now();
-                                if let Some(reason) = crate::network_retry::classify_network_interruption(err.as_ref()) {
-                                    let plan = crate::network_retry::wait_plan();
-                                    self.push_display_message(DisplayMessage::system(format!(
-                                        "Stream interrupted, likely because {reason}. Waiting to retry: {}.",
-                                        plan.listener_summary
-                                    )));
-                                    self.status = ProcessingStatus::WaitingForNetwork {
-                                        listener: plan.listener_summary.clone(),
-                                    };
-                                    status_spinner_renderer.draw_full(self, terminal)?;
-                                    super::run_shell::reset_status_spinner_interval(&mut status_spinner_interval, self);
-                                    crate::network_retry::wait_until_probably_online().await;
-                                    self.push_display_message(DisplayMessage::system(
-                                        "Network connectivity looks restored; retrying request.".to_string(),
-                                    ));
-                                    continue 'turn_loop;
-                                }
-                                return Err(err);
                             }
                         }
                     }
@@ -421,7 +426,7 @@ impl App {
             let mut call_output_tokens_seen: u64 = 0;
             let mut interleaved = false; // Track if we interleaved a message mid-stream
             // Track tool results from provider (already executed by Claude Code CLI)
-            let mut provider_ingress = crate::execution::ProviderIngress::default();
+            let provider_ingress = invocation.capture.clone();
             let mut sdk_tool_results: std::collections::HashMap<String, crate::tool::ToolOutput> =
                 std::collections::HashMap::new();
             let provider_name = self.provider.name().to_string();
@@ -942,11 +947,12 @@ impl App {
                                         }
                                     }
                                     StreamEvent::Error { message, .. } => {
+                                        if provider_ingress.has_received_data(){self.mark_pending_provider_output_started();}
                                         let no_partial_output = text_content.is_empty()
                                             && tool_calls.is_empty()
                                             && current_tool.is_none()
                                             && self.streaming.streaming_text.is_empty()
-                                            && !saw_message_end;
+                                            && !saw_message_end && !provider_ingress.has_received_data();
                                         if no_partial_output
                                             && let Some(reason) = crate::network_retry::classify_message(&message)
                                         {
@@ -966,7 +972,7 @@ impl App {
                                             ));
                                             continue 'turn_loop;
                                         }
-                                        if !no_partial_output
+                                        if !sdk_tool_results.is_empty() || !no_partial_output
                                             && (is_request_payload_too_large_error(&message)
                                                 || is_context_limit_error(&message))
                                         {
@@ -1072,9 +1078,9 @@ impl App {
                                         // Store the upstream provider (e.g., Fireworks, Together)
                                         self.upstream_provider = Some(provider);
                                     }
-                                    StreamEvent::ToolResult {tool_use_id,content,is_error,original}=>{
+                                    StreamEvent::ToolResult {tool_use_id,content,is_error,original,receipt}=>{
                                         let output=crate::execution::received_sdk_result(&tool_use_id,content,is_error,original);
-                                        let output=match provider_ingress.receive_with_calls(&self.session.id,&tool_use_id,&output,&tool_calls).await {
+                                        let output=match provider_ingress.receive(&tool_use_id,output.clone(),receipt,&tool_calls).await {
                                             Ok(output)=>output,
                                             Err(error)=>{
                                                 if !tool_calls.iter().any(|tool|tool.id==tool_use_id){self.session.add_message(Role::User,vec![ContentBlock::Text{text:format!("[Provider result acquisition failed; no operation was repeated.]\n{}",crate::execution::sdk_failure_body(&output)),cache_control:None}]);}
@@ -1187,11 +1193,12 @@ impl App {
                                 }
                             }
                             Some(Err(e)) => {
+                                        if provider_ingress.has_received_data(){self.mark_pending_provider_output_started();}
                                 let no_partial_output = text_content.is_empty()
                                     && tool_calls.is_empty()
                                     && current_tool.is_none()
                                     && self.streaming.streaming_text.is_empty()
-                                    && !saw_message_end;
+                                    && !saw_message_end && !provider_ingress.has_received_data();
                                 if no_partial_output
                                     && let Some(reason) = crate::network_retry::classify_network_interruption(e.as_ref())
                                 {
@@ -1212,7 +1219,7 @@ impl App {
                                     continue 'turn_loop;
                                 }
                                 let error_text = e.to_string();
-                                if !no_partial_output
+                                if !sdk_tool_results.is_empty() || !no_partial_output
                                     && (is_request_payload_too_large_error(&error_text)
                                         || is_context_limit_error(&error_text))
                                 {
@@ -1235,7 +1242,7 @@ impl App {
                                     && tool_calls.is_empty()
                                     && current_tool.is_none()
                                     && self.streaming.streaming_text.is_empty()
-                                    && !saw_message_end;
+                                    && !saw_message_end && !provider_ingress.has_received_data();
                                 if no_partial_output {
                                     memory_pending.restore_now();
                                     let plan = crate::network_retry::wait_plan();
@@ -1284,6 +1291,7 @@ impl App {
                 )
                 .await?;
                 drop(provider_ingress);
+                drop(invocation);
                 self.repair_missing_tool_outputs().await?;
                 anyhow::bail!(
                     "SDK results could not be uniquely correlated. Received data was retained; no local execution or automatic replay was performed."

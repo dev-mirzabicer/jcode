@@ -3,6 +3,18 @@
 use jcode_tool_types::{ToolOutput, ToolResource};
 use serde_json::{Value, json};
 
+pub fn undecodable_sdk_record(bytes: &[u8], reason: &str) -> ToolOutput {
+    use base64::Engine;
+    let mut output=ToolOutput::new("Provider protocol record could not be decoded. Original received bytes are retained as a resource; no tool input or outcome was invented.").with_error(true)
+        .with_metadata(json!({"provider_supplied":true,"protocol_error":reason,"received_bytes":bytes.len()}));
+    output.resources.push(ToolResource {
+        uri: "jcode:provider-undecoded-record".into(),
+        media_type: Some("application/octet-stream".into()),
+        data: base64::engine::general_purpose::STANDARD.encode(bytes),
+    });
+    output
+}
+
 pub fn received_sdk_result(
     id: &str,
     content: String,

@@ -28,4 +28,6 @@ pub use store::{ExecutionStore, Invocation, PreparedInvocation, RunRecord, RunSt
 mod provider_ingress;
 mod provider_result;
 pub use provider_ingress::ProviderReceipt;
-pub use provider_result::{received_sdk_result, sdk_failure_body, tool_result_blocks};
+pub use provider_result::{
+    received_sdk_result, sdk_failure_body, tool_result_blocks, undecodable_sdk_record,
+};

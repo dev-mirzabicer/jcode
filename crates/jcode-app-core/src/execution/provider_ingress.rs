@@ -17,6 +17,58 @@ struct IngressState {
     owner: Arc<runtime::RuntimeHandle>,
 }
 impl ProviderIngress {
+    pub(super) async fn validate_captured(
+        &self,
+        session: &str,
+        key: &str,
+        output: &ToolOutput,
+        receipt: &jcode_tool_types::ProviderReceiptReference,
+        calls: &[crate::message::ToolCall],
+    ) -> Result<()> {
+        let state = self
+            .state
+            .as_ref()
+            .context("Provider supplied a capture reference without an owning request")?;
+        ensure!(
+            state.session == session,
+            "Provider capture belongs to another session"
+        );
+        let store = state.store.clone();
+        let request = state.request.clone();
+        let session = session.to_string();
+        let key = key.to_string();
+        let receipt = receipt.clone();
+        let digest = crate::execution::output_digest(output)?;
+        let current = calls
+            .iter()
+            .filter(|call| call.id == key)
+            .cloned()
+            .collect::<Vec<_>>();
+        tokio::task::spawn_blocking(move || {
+            store.validate_provider_receipt_reference(&receipt, &session, &request, &key)?;
+            let invocation = store.invocation_input(&receipt.run_id)?;
+            ensure!(
+                invocation.input["payload_digest"] == serde_json::json!(digest),
+                "Provider output differs from its already captured record"
+            );
+            let observed: Vec<crate::message::ToolCall> =
+                serde_json::from_value(invocation.input["observed_tool_calls"].clone())?;
+            if !observed.is_empty() && !current.is_empty() {
+                ensure!(
+                    observed.len() == 1 && current.len() == 1,
+                    "SDK input correlation is ambiguous; original data was retained"
+                );
+                ensure!(
+                    jcode_tool_types::resolve_tool_name(&observed[0].name)
+                        == jcode_tool_types::resolve_tool_name(&current[0].name)
+                        && observed[0].input == current[0].input,
+                    "SDK tool input differs from the adapter's observed invocation"
+                );
+            }
+            Ok(())
+        })
+        .await?
+    }
     /// When some received IDs lack a unique tool use, return only the calls
     /// safe to checkpoint. Original ambiguous inputs stay in acquisition data.
     pub fn correlation_failure(

@@ -247,13 +247,16 @@ impl Agent {
             drop(cache_signature_messages);
             drop(ephemeral_signature_messages);
             let mut keepalive = stream_keepalive_ticker();
+            let provider_ingress =
+                crate::execution::ProviderCaptureScope::new(self.session.id.clone());
             let mut stream = {
-                let mut complete_future = std::pin::pin!(provider.complete_split(
+                let mut complete_future = std::pin::pin!(provider.complete_split_with_context(
                     send_messages,
                     &tools,
                     &split_prompt.static_part,
                     &split_prompt.dynamic_part,
                     resume_session_id.as_deref(),
+                    provider_ingress.context(),
                 ));
                 loop {
                     tokio::select! {
@@ -272,6 +275,7 @@ impl Agent {
                                 Ok(stream) => break stream,
                                 Err(e) => {
                                     memory_pending.restore_now();
+                                    if provider_ingress.has_received_data(){self.mark_provider_output_started();return Err(e.context("SDK data was received before stream publication; automatic request replay was stopped"));}
                                     let provider_error = e.to_string();
                                     match self
                                         .try_unattended_emergency_provider_recovery(
@@ -349,7 +353,6 @@ impl Agent {
             let mut usage_cache_creation: Option<u64> = None;
             let mut saw_message_end = false;
             let mut stop_reason: Option<String> = None;
-            let mut provider_ingress = crate::execution::ProviderIngress::default();
             let mut sdk_tool_results: std::collections::HashMap<String, crate::tool::ToolOutput> =
                 std::collections::HashMap::new();
             let provider_name = self.provider.name().to_string();
@@ -448,6 +451,10 @@ impl Agent {
                                 token_usage,
                             )
                             .await?;
+                        }
+                        if provider_ingress.has_received_data() {
+                            self.mark_provider_output_started();
+                            return Err((e).context("Provider failed after acquired SDK data; automatic replay was stopped"));
                         }
                         match self
                             .try_unattended_emergency_provider_recovery(&err_str, Some(&event_tx))
@@ -639,6 +646,7 @@ impl Agent {
                         content,
                         is_error,
                         original,
+                        receipt,
                     } => {
                         let output = crate::execution::received_sdk_result(
                             &tool_use_id,
@@ -647,12 +655,7 @@ impl Agent {
                             original,
                         );
                         let output = match provider_ingress
-                            .receive_with_calls(
-                                &self.session.id,
-                                &tool_use_id,
-                                &output,
-                                &tool_calls,
-                            )
+                            .receive(&tool_use_id, output.clone(), receipt, &tool_calls)
                             .await
                         {
                             Ok(output) => output,
@@ -951,6 +954,10 @@ impl Agent {
                                 token_usage,
                             )
                             .await?;
+                        }
+                        if provider_ingress.has_received_data() {
+                            self.mark_provider_output_started();
+                            return Err((anyhow::anyhow!(message.clone())).context("Provider failed after acquired SDK data; automatic replay was stopped"));
                         }
                         match self
                             .try_unattended_emergency_provider_recovery(&message, Some(&event_tx))

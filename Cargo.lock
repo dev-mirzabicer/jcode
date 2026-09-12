@@ -3764,6 +3764,7 @@ name = "jcode-message-types"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "jcode-tool-types",
  "serde",
  "serde_json",
 ]
@@ -3944,10 +3945,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "jcode-base",
  "jcode-message-types",
  "jcode-provider-core",
+ "jcode-tool-types",
  "serde",
  "serde_json",
  "tokio",
@@ -3997,6 +4000,7 @@ dependencies = [
  "jcode-logging",
  "jcode-message-types",
  "jcode-schema-dialect",
+ "jcode-tool-types",
  "rand 0.9.3",
  "reqwest 0.12.28",
  "serde",

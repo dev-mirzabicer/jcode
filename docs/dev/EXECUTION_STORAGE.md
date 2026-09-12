@@ -368,6 +368,41 @@ TUI capture. Bytes still queued upstream or rejected by the CLI decoder before a
 ToolResult event remain a separate adapter-ingress boundary, not a guarantee of
 this consumer-stage receipt service.
 
+## Provider adapter capture context
+
+Provider request context carries a host-owned result-capture callback separately
+from prompts, tool definitions, authentication and provider configuration. The
+Agent, local TUI, provider wrapper, route dispatch and account-failover paths
+forward this context explicitly. No task-local or mutable provider singleton is
+used. A received-data flag prevents automatic request/account/provider retries
+after an adapter has observed SDK data, even if capture or stream establishment
+then fails.
+
+With this context, Claude CLI retains a decoded SDK result before publishing it
+to the event channel. Its host-issued receipt is checked against the exact
+request, store namespace, recipient and result digest when consumed. Observed
+complete tool inputs are recorded independently and contradictory consumer input
+is rejected. Receipt references are not parsed from model or remote JSON fields.
+An unscoped CLI request with SDK tools rejects before spawning a process instead
+of silently claiming the new capture guarantee.
+
+CLI stdout records are read as bytes before UTF-8/JSON decoding. Malformed JSON,
+invalid UTF-8, and declared SDK-result blocks that cannot be decoded completely
+stop the owned process and retain the original acquired bytes as a typed binary
+resource, including remaining buffered stdout. Consumer cancellation before a
+record's newline preserves the acquired partial bytes. A failed capture of a
+valid SDK result still supplies the complete original event for the existing
+Session fallback, then stops retries. Ordinary valid-record normalization and
+prompt composition remain unchanged.
+
+Tests exercise real local CLI processes, malformed and incomplete records,
+buffered tails, partial-record cancellation, original input provenance, callback
+ordering before queue consumption, exact receipt reuse and changed-input/ref
+rejection, and both Agent loops before/after stream-publication failures. Both
+host executables compile and strict affected-library/test lint passes. These
+checks do not claim hostile subprocess isolation, vendor acknowledgement, or
+native non-Unix process-tree cancellation.
+
 ## SDK original records and rich results
 
 Decoded CLI tool-result events carry the original UTF-8 protocol record alongside
@@ -387,9 +422,9 @@ Local TUI SDK handling now uses the same retention boundary before debug/display
 publication and persists the actual result instead of an empty Session placeholder.
 Local partial checkpoints retain complete results and media through this owner.
 These are real CLI, Agent and local-TUI mechanism checks, not a hosted vision or
-prompt-quality claim. Raw transport bytes rejected before decoding remain a
-separate adapter-ingress boundary. Acquisition-time receipt recovery is described
-above.
+prompt-quality claim. The request-local adapter capture above additionally retains
+malformed CLI records before failure. Acquisition-time receipt recovery remains
+the owner for correlating or reporting these received records.
 
 ## Local history repair and /fix
 

@@ -4419,6 +4419,7 @@ impl Provider for SuppliedResultProvider {
                         content: body,
                         is_error: result_error,
                         original,
+                        receipt: None,
                     },
                     StreamEvent::MessageEnd {
                         stop_reason: Some("tool_use".into()),
@@ -5336,6 +5337,7 @@ impl Provider for UncorrelatedSdkProvider {
             content: "first received result".into(),
             is_error: false,
             original: None,
+            receipt: None,
         });
         if self.duplicate {
             events.push(StreamEvent::ToolResult {
@@ -5343,6 +5345,7 @@ impl Provider for UncorrelatedSdkProvider {
                 content: "second received result".into(),
                 is_error: true,
                 original: None,
+                receipt: None,
             });
         }
         events.push(StreamEvent::MessageEnd {
@@ -5426,6 +5429,138 @@ async fn unmatched_or_repeated_sdk_results_are_retained_without_provider_replay(
                     .flat_map(|message| &message.content)
                     .all(|block| !matches!(block, ContentBlock::ToolUse { .. })),
                 "Unmatched input must not be invented during recovery"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone)]
+struct AdapterCapturedSdkProvider {
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+    failure_phase: u8,
+}
+#[async_trait]
+impl Provider for AdapterCapturedSdkProvider {
+    async fn complete(
+        &self,
+        _: &[Message],
+        _: &[ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<EventStream> {
+        anyhow::bail!("The request-local capture context was not forwarded")
+    }
+    async fn complete_split_with_context(
+        &self,
+        _: &[Message],
+        _: &[ToolDefinition],
+        _: &str,
+        _: &str,
+        _: Option<&str>,
+        context: jcode_provider_core::ProviderRequestContext,
+    ) -> Result<EventStream> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let capture = context
+            .result_capture
+            .as_ref()
+            .expect("Actual Agent supplied capture context");
+        let output = crate::execution::received_sdk_result(
+            "adapter-sdk",
+            "retained before channel publication".into(),
+            false,
+            None,
+        );
+        let receipt = capture.capture("adapter-sdk", &output).await?;
+        assert!(context.has_received_data());
+        if self.failure_phase == 1 {
+            anyhow::bail!("context length exceeded after SDK work");
+        }
+        if self.failure_phase == 2 {
+            return Ok(Box::pin(futures::stream::once(async {
+                Err(anyhow::anyhow!(
+                    "context length exceeded after captured adapter data"
+                ))
+            })));
+        }
+        Ok(Box::pin(futures::stream::iter(vec![
+            Ok(StreamEvent::ToolUseStart {
+                id: "adapter-sdk".into(),
+                name: "external".into(),
+            }),
+            Ok(StreamEvent::ToolInputDelta("{}".into())),
+            Ok(StreamEvent::ToolUseEnd),
+            Ok(StreamEvent::ToolResult {
+                tool_use_id: "adapter-sdk".into(),
+                content: output.output,
+                is_error: false,
+                original: None,
+                receipt: Some(receipt),
+            }),
+            Ok(StreamEvent::MessageEnd {
+                stop_reason: Some("end_turn".into()),
+            }),
+        ])))
+    }
+    fn handles_tools_internally(&self) -> bool {
+        true
+    }
+    fn name(&self) -> &str {
+        "adapter-captured-fixture"
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+#[tokio::test]
+async fn adapter_sdk_capture_is_reused_and_pre_stream_failure_does_not_replay() -> Result<()> {
+    let _lock = crate::storage::lock_test_env();
+    for streaming in [false, true] {
+        for failure_phase in [0, 1, 2] {
+            let home = tempfile::tempdir()?;
+            let _home = AgentTestEnvRestore::set_path("JCODE_HOME", home.path());
+            let _runtime =
+                AgentTestEnvRestore::set_path("JCODE_RUNTIME_DIR", &home.path().join("runtime"));
+            crate::config::invalidate_config_cache();
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let mut agent = Agent::new(
+                Arc::new(AdapterCapturedSdkProvider {
+                    calls: calls.clone(),
+                    failure_phase,
+                }),
+                Registry::empty(),
+            );
+            let result = if streaming {
+                let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+                agent
+                    .run_once_streaming_mpsc("synthetic", Vec::new(), None, tx)
+                    .await
+                    .map(|_| ())
+            } else {
+                agent.run_once_capture("synthetic").await.map(|_| ())
+            };
+            assert_eq!(
+                result.is_err(),
+                failure_phase != 0,
+                "Unexpected request outcome: {result:?}"
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            let store = crate::execution::ExecutionStore::open(home.path())?;
+            let receipts = store.provider_receipts_after(agent.session_id(), 0)?;
+            assert_eq!(
+                receipts.len(),
+                1,
+                "Consumer must reuse the adapter capture, not acquire it again"
+            );
+            let record = store.inspect(&receipts[0].run_id)?.unwrap();
+            assert_eq!(
+                std::fs::read_to_string(record.output_path.unwrap())?,
+                "retained before channel publication"
+            );
+            agent.repair_missing_tool_outputs().await?;
+            assert_eq!(
+                agent.session.provider_receipt_watermark,
+                receipts[0].sequence
             );
         }
     }

@@ -154,6 +154,42 @@ pub fn default_context_estimator_margin(context_window: usize) -> usize {
         .min(context_window)
 }
 
+/// Host-owned acquisition of already-received provider data. Implementations
+/// report observation even if durable capture fails, so retries cannot duplicate
+/// unknown SDK effects.
+#[async_trait]
+pub trait ProviderResultCapture: Send + Sync {
+    fn has_received_data(&self) -> bool;
+    async fn capture(
+        &self,
+        correlation_key: &str,
+        output: &jcode_tool_types::ToolOutput,
+    ) -> Result<jcode_tool_types::ProviderReceiptReference>;
+    async fn capture_with_calls(
+        &self,
+        key: &str,
+        output: &jcode_tool_types::ToolOutput,
+        _calls: &[jcode_message_types::ToolCall],
+    ) -> Result<jcode_tool_types::ProviderReceiptReference> {
+        self.capture(key, output).await
+    }
+}
+
+/// Host-owned request metadata. It is not part of the provider prompt, API
+/// payload, credential state, tool definitions, or an ambient task-local value.
+#[derive(Clone, Default)]
+pub struct ProviderRequestContext {
+    pub result_capture: Option<std::sync::Arc<dyn ProviderResultCapture>>,
+}
+
+impl ProviderRequestContext {
+    pub fn has_received_data(&self) -> bool {
+        self.result_capture
+            .as_ref()
+            .is_some_and(|capture| capture.has_received_data())
+    }
+}
+
 /// Provider trait for LLM backends.
 #[async_trait]
 pub trait Provider: Send + Sync {
@@ -179,6 +215,28 @@ pub trait Provider: Send + Sync {
         let dynamic_messages = messages_with_dynamic_system_context(messages, system_dynamic);
         self.complete(&dynamic_messages, tools, system_static, resume_session_id)
             .await
+    }
+
+    /// Send the unchanged split prompt with out-of-band request lifetime and
+    /// result-capture metadata. Providers without an adapter hook retain their
+    /// existing split-request behavior.
+    async fn complete_split_with_context(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        system_static: &str,
+        system_dynamic: &str,
+        resume_session_id: Option<&str>,
+        _context: ProviderRequestContext,
+    ) -> Result<EventStream> {
+        self.complete_split(
+            messages,
+            tools,
+            system_static,
+            system_dynamic,
+            resume_session_id,
+        )
+        .await
     }
 
     /// Get the provider name.

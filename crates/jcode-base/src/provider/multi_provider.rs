@@ -52,14 +52,15 @@ impl MultiProvider {
                 CompletionMode::Split {
                     system_static,
                     system_dynamic,
+                    context,
                 } => {
                     self.complete_split_on_provider(
                         provider,
                         messages,
                         tools,
-                        system_static,
-                        system_dynamic,
+                        (system_static, system_dynamic),
                         None,
+                        context,
                     )
                     .await
                 }
@@ -77,6 +78,9 @@ impl MultiProvider {
                     return Ok(Some(stream));
                 }
                 Err(err) => {
+                    if mode.has_received_data() {
+                        return Err(err.context("Provider returned SDK data before request failure; automatic account/provider replay was stopped"));
+                    }
                     let summary =
                         maybe_annotate_limit_summary(provider, Self::summarize_error(&err));
                     let decision = Self::classify_failover_error(&err);

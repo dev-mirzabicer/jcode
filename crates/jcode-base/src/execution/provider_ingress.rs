@@ -53,6 +53,24 @@ impl ProviderReceipt {
     }
 }
 impl ExecutionStore {
+    pub fn validate_provider_receipt_reference(
+        &self,
+        reference: &jcode_tool_types::ProviderReceiptReference,
+        session: &str,
+        request: &str,
+        key: &str,
+    ) -> Result<()> {
+        ensure!(
+            reference.namespace == self.provider_receipt_namespace()?,
+            "Provider receipt namespace differs from the owning request"
+        );
+        let valid:bool=self.connection()?.query_row("SELECT EXISTS(SELECT 1 FROM provider_result_receipts WHERE sequence=?1 AND run_id=?2 AND session_id=?3 AND request_id=?4 AND tool_use_id=?5)",params![reference.sequence,reference.run_id,session,request,key],|row|row.get(0))?;
+        ensure!(
+            valid,
+            "Provider receipt does not match the exact request and recipient"
+        );
+        Ok(())
+    }
     pub fn validate_provider_receipt_watermark(&self, session: &str, sequence: i64) -> Result<()> {
         ensure!(sequence >= 0, "Invalid provider receipt watermark");
         if sequence > 0 {

@@ -18,7 +18,7 @@ use std::process::Stdio;
 use std::sync::{Arc, LazyLock, RwLock};
 #[cfg(any(not(unix), test))]
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{Mutex, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
@@ -472,6 +472,54 @@ struct CliOutputParser {
     saw_message_end: bool,
 }
 
+#[derive(Default)]
+struct ObservedCliTools {
+    current: Option<(jcode_message_types::ToolCall, String)>,
+    complete: Vec<jcode_message_types::ToolCall>,
+}
+impl ObservedCliTools {
+    fn observe(&mut self, event: &StreamEvent) {
+        match event {
+            StreamEvent::ToolUseStart { id, name } => {
+                self.current = Some((
+                    jcode_message_types::ToolCall {
+                        id: id.clone(),
+                        name: name.clone(),
+                        ..Default::default()
+                    },
+                    String::new(),
+                ))
+            }
+            StreamEvent::ToolInputDelta(part) => {
+                if let Some((_, input)) = &mut self.current {
+                    input.push_str(part);
+                }
+            }
+            StreamEvent::ToolUseEnd => {
+                if let Some((mut call, input)) = self.current.take()
+                    && let Ok(value) = serde_json::from_str::<Value>(&input)
+                {
+                    call.input = value;
+                    self.complete.push(call);
+                }
+            }
+            StreamEvent::ToolUseSignature(signature) => {
+                if let Some(call) = self.complete.last_mut() {
+                    call.thought_signature = Some(signature.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    fn matching(&self, id: &str) -> Vec<jcode_message_types::ToolCall> {
+        self.complete
+            .iter()
+            .filter(|call| call.id == id)
+            .cloned()
+            .collect()
+    }
+}
+
 impl CliOutputParser {
     fn new() -> Self {
         Self {
@@ -545,6 +593,7 @@ impl CliOutputParser {
                                 content: content_str,
                                 is_error: is_error.unwrap_or(false),
                                 original: None,
+                                receipt: None,
                             });
                         }
                         _ => {}
@@ -582,6 +631,7 @@ impl CliOutputParser {
                             content: content_str,
                             is_error: is_error.unwrap_or(false),
                             original: None,
+                            receipt: None,
                         });
                     }
                 }
@@ -647,14 +697,14 @@ fn parse_content_blocks(content: &Value) -> Vec<SdkContentBlock> {
     }
 }
 
-#[async_trait]
-impl Provider for ClaudeProvider {
-    async fn complete(
+impl ClaudeProvider {
+    async fn complete_with_capture(
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
         system: &str,
         resume_session_id: Option<&str>,
+        capture: Option<std::sync::Arc<dyn jcode_provider_core::ProviderResultCapture>>,
     ) -> Result<EventStream> {
         let tool_names = self.tool_names_for_cli(tools);
         let prompt = self.extract_user_prompt(messages)?;
@@ -751,20 +801,31 @@ impl Provider for ClaudeProvider {
                     return;
                 };
 
-                match run_claude_cli(
-                    config.clone(),
-                    current_model.clone(),
-                    tool_names.clone(),
-                    system_prompt.clone(),
-                    resume.clone(),
-                    prompt.clone(),
-                    cwd.clone(),
+                match run_claude_request(
+                    CliRequest {
+                        config: config.clone(),
+                        model: current_model.clone(),
+                        tool_names: tool_names.clone(),
+                        system: system_prompt.clone(),
+                        resume_session_id: resume.clone(),
+                        prompt: prompt.clone(),
+                        cwd: cwd.clone(),
+                        capture: capture.clone(),
+                    },
                     tx.clone(),
                 )
                 .await
                 {
                     Ok(()) => return, // Success
                     Err(e) => {
+                        if e.is::<SdkCaptureFailure>()
+                            || capture
+                                .as_ref()
+                                .is_some_and(|capture| capture.has_received_data())
+                        {
+                            let _ = tx.send(Err(e)).await;
+                            return;
+                        }
                         // Use the full anyhow source chain ({:#}) so transport
                         // causes wrapped behind a `.context(...)` (e.g. a TLS
                         // `received fatal alert: BadRecordMac`) are visible to the
@@ -799,6 +860,40 @@ impl Provider for ClaudeProvider {
         });
 
         Ok(Box::pin(ReceiverStream::new(rx)))
+    }
+}
+
+#[async_trait]
+impl Provider for ClaudeProvider {
+    async fn complete(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        system: &str,
+        resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        self.complete_with_capture(messages, tools, system, resume_session_id, None)
+            .await
+    }
+    async fn complete_split_with_context(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        system_static: &str,
+        system_dynamic: &str,
+        resume_session_id: Option<&str>,
+        context: jcode_provider_core::ProviderRequestContext,
+    ) -> Result<EventStream> {
+        let messages =
+            jcode_message_types::messages_with_dynamic_system_context(messages, system_dynamic);
+        self.complete_with_capture(
+            &messages,
+            tools,
+            system_static,
+            resume_session_id,
+            context.result_capture,
+        )
+        .await
     }
 
     fn model(&self) -> String {
@@ -935,9 +1030,33 @@ impl Provider for ClaudeProvider {
     }
 }
 
+struct CliRequest {
+    config: ClaudeCliConfig,
+    model: String,
+    tool_names: Vec<String>,
+    system: String,
+    resume_session_id: Option<String>,
+    prompt: String,
+    cwd: Option<PathBuf>,
+    capture: Option<std::sync::Arc<dyn jcode_provider_core::ProviderResultCapture>>,
+}
+#[derive(Debug)]
+struct SdkCaptureFailure(anyhow::Error);
+impl std::fmt::Display for SdkCaptureFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "Received SDK data could not be retained; automatic replay is unsafe: {:#}",
+            self.0
+        )
+    }
+}
+impl std::error::Error for SdkCaptureFailure {}
+
+#[cfg(test)]
 #[expect(
     clippy::too_many_arguments,
-    reason = "Claude CLI launch threads model, tools, system prompt, cwd, resume state, and stream channel explicitly"
+    reason = "Compatibility fixture helper preserves existing subprocess test inputs"
 )]
 async fn run_claude_cli(
     config: ClaudeCliConfig,
@@ -949,6 +1068,39 @@ async fn run_claude_cli(
     cwd: Option<PathBuf>,
     tx: mpsc::Sender<Result<StreamEvent>>,
 ) -> Result<()> {
+    run_claude_request(
+        CliRequest {
+            config,
+            model,
+            tool_names,
+            system,
+            resume_session_id,
+            prompt,
+            cwd,
+            capture: None,
+        },
+        tx,
+    )
+    .await
+}
+async fn run_claude_request(
+    request: CliRequest,
+    tx: mpsc::Sender<Result<StreamEvent>>,
+) -> Result<()> {
+    let CliRequest {
+        config,
+        model,
+        tool_names,
+        system,
+        resume_session_id,
+        prompt,
+        cwd,
+        capture,
+    } = request;
+    anyhow::ensure!(
+        tool_names.is_empty() || capture.is_some(),
+        "SDK tool execution requires a host result-capture context; no CLI process was started"
+    );
     let mut cmd = Command::new(&config.cli_path);
     if tx.is_closed() {
         return Ok(());
@@ -1065,31 +1217,80 @@ async fn run_claude_cli(
             }
         }));
 
-    let mut reader = BufReader::new(stdout).lines();
+    let mut reader = BufReader::new(stdout);
+    let mut raw_record = Vec::new();
+    let mut record_ordinal = 0u64;
     let mut parser = CliOutputParser::new();
+    let mut observed_tools = ObservedCliTools::default();
     let mut saw_output = false;
 
     loop {
         tokio::select! {
             _ = tx.closed() => {
                 terminate_child(&mut child).await?;
+                let _=reader.read_to_end(&mut raw_record).await;
+                if !raw_record.is_empty() {let _=retain_cli_decode_failure(capture.as_ref(),&raw_record,record_ordinal,"Consumer closed during protocol acquisition").await;}
                 return Ok(());
             }
-            line = reader.next_line() => {
-                let line = match line? {
-                    Some(line) => line,
-                    None => break,
+            line = reader.read_until(b'\n',&mut raw_record) => {
+                let acquired=match line {
+                    Ok(size)=>size,
+                    Err(_)=>{
+                        terminate_child(&mut child).await?;
+                        let _=reader.read_to_end(&mut raw_record).await;
+                        return Err(retain_cli_decode_failure(capture.as_ref(),&raw_record,record_ordinal,"CLI protocol read failed after acquisition").await);
+                    }
                 };
-                let original_line=line;
+                if acquired==0 {break;}
+                record_ordinal=record_ordinal.checked_add(1).context("CLI protocol record sequence exhausted")?;
+                let decoded=match std::str::from_utf8(&raw_record) {
+                    Ok(value)=>value,
+                    Err(_)=>{
+                        terminate_child(&mut child).await?;
+                        let _=reader.read_to_end(&mut raw_record).await;
+                        return Err(retain_cli_decode_failure(capture.as_ref(),&raw_record,record_ordinal,"Invalid UTF-8 in CLI protocol record").await);
+                    }
+                };
+                let original_line=decoded.strip_suffix('\n').unwrap_or(decoded);
+                let original_line=original_line.strip_suffix('\r').unwrap_or(original_line).to_string();
                 let line = original_line.trim();
                 if line.is_empty() {
-                    continue;
+                    raw_record.clear();continue;
                 }
                 match serde_json::from_str::<CliOutput>(line) {
                     Ok(output) => {
-                        for mut event in parser.handle_output(output) {
-                            if let StreamEvent::ToolResult{original,..}=&mut event {
+                        let declared=match &output {
+                            CliOutput::Assistant{message,..}|CliOutput::User{message,..}=>message.content.as_array().map(|blocks|blocks.iter().filter(|block|block["type"]=="tool_result").count()).unwrap_or(0),
+                            _=>0,
+                        };
+                        let events=parser.handle_output(output);
+                        if declared>events.iter().filter(|event|matches!(event,StreamEvent::ToolResult{..})).count(){
+                            terminate_child(&mut child).await?;
+                            let _=reader.read_to_end(&mut raw_record).await;
+                        return Err(retain_cli_decode_failure(capture.as_ref(),&raw_record,record_ordinal,"SDK result blocks could not be decoded completely").await);
+                        }
+                        for mut event in events {
+                            observed_tools.observe(&event);
+                            if let StreamEvent::ToolResult{tool_use_id,content,is_error,original,receipt}=&mut event {
                                 *original=Some(original_line.clone());
+                                if let Some(capture)=&capture {
+                                    let output=jcode_base::execution::received_sdk_result(tool_use_id,content.clone(),*is_error,original.clone());
+                                    let observed=observed_tools.matching(tool_use_id);
+                                    let captured=tokio::select! {
+                                        _=tx.closed()=>{terminate_child(&mut child).await?;return Ok(());},
+                                        result=capture.capture_with_calls(tool_use_id,&output,&observed)=>result,
+                                    };
+                                    match captured {
+                                        Ok(value)=>*receipt=Some(value),
+                                        Err(error)=>{
+                                            terminate_child(&mut child).await?;
+                                            // The consumer can preserve the complete original in
+                                            // its Session checkpoint even if artifact storage failed.
+                                            let _=tx.send(Ok(event)).await;
+                                            return Err(SdkCaptureFailure(error).into());
+                                        }
+                                    }
+                                }
                             }
                             if let StreamEvent::Error { message, .. } = &event {
                                 let err_lower = message.to_lowercase();
@@ -1121,17 +1322,13 @@ async fn run_claude_cli(
                             }
                         }
                     }
-                    Err(err) => {
-                        let event = StreamEvent::Error {
-                            message: format!("Failed to parse Claude CLI output: {}", err),
-                            retry_after_secs: None,
-                        };
-                        if tx.send(Ok(event)).await.is_err() {
-                            terminate_child(&mut child).await?;
-                            return Ok(());
-                        }
+                    Err(_err) => {
+                        terminate_child(&mut child).await?;
+                        let _=reader.read_to_end(&mut raw_record).await;
+                        return Err(retain_cli_decode_failure(capture.as_ref(),&raw_record,record_ordinal,"Invalid CLI JSON protocol record").await);
                     }
                 }
+                raw_record.clear();
             }
         }
     }
@@ -1149,6 +1346,30 @@ async fn run_claude_cli(
     }
 
     Ok(())
+}
+
+async fn retain_cli_decode_failure(
+    capture: Option<&Arc<dyn jcode_provider_core::ProviderResultCapture>>,
+    bytes: &[u8],
+    ordinal: u64,
+    reason: &str,
+) -> anyhow::Error {
+    let output = jcode_base::execution::undecodable_sdk_record(bytes, reason);
+    let error = if let Some(capture) = capture {
+        match capture
+            .capture(&format!("cli-undecoded-{ordinal}"), &output)
+            .await
+        {
+            Ok(receipt) => anyhow::anyhow!(
+                "{reason}. Original protocol bytes retained in acquisition {}. No automatic replay was performed.",
+                receipt.run_id
+            ),
+            Err(error) => error.context(format!("{reason}; original protocol capture failed")),
+        }
+    } else {
+        anyhow::anyhow!("{reason}; this unscoped CLI caller has no host capture capability")
+    };
+    SdkCaptureFailure(error).into()
 }
 
 /// Check if an error is transient and should be retried
@@ -1231,6 +1452,240 @@ mod context_validation_tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn cancelled_partial_cli_record_retains_acquired_bytes() -> Result<()> {
+        use base64::Engine;
+        use std::os::unix::fs::PermissionsExt;
+        let directory = TestDir::new();
+        let script = directory.path().join("partial-cli");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nread request\nprintf '\\377partial'\nprintf x > ready\nsleep 30\nprintf bad > escaped\n",
+        )?;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))?;
+        let capture = Arc::new(CaptureFixture {
+            output: Default::default(),
+            fail: false,
+        });
+        let (tx, rx) = mpsc::channel(10);
+        let request = CliRequest {
+            config: ClaudeCliConfig {
+                cli_path: script.to_string_lossy().into(),
+                model: "fixture".into(),
+                permission_mode: None,
+                include_partial_messages: false,
+            },
+            model: "fixture".into(),
+            tool_names: Vec::new(),
+            system: String::new(),
+            resume_session_id: None,
+            prompt: "fixture".into(),
+            cwd: Some(directory.path().into()),
+            capture: Some(capture.clone()),
+        };
+        let task = jcode_provider_core::request_lifetime::RequestSubtask::new(tokio::spawn(
+            run_claude_request(request, tx),
+        ));
+        let ready = directory.path().join("ready");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !ready.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+        drop(rx);
+        tokio::time::timeout(Duration::from_secs(5), task.finish()).await???;
+        let output = capture
+            .output
+            .lock()
+            .unwrap()
+            .take()
+            .expect("Partial raw acquisition receipt");
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD.decode(&output.resources[0].data)?,
+            b"\xffpartial"
+        );
+        assert!(!directory.path().join("escaped").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn cli_input_provenance_uses_complete_observed_calls_without_inventing_missing_json()
+    -> Result<()> {
+        let mut parser = CliOutputParser::new();
+        let mut observed = ObservedCliTools::default();
+        let record: CliOutput = serde_json::from_value(
+            json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"sdk","name":"Bash","input":{"command":"  observed command  "}}]}}),
+        )?;
+        for event in parser.handle_output(record) {
+            observed.observe(&event);
+        }
+        assert_eq!(
+            observed.matching("sdk")[0].input,
+            json!({"command":"  observed command  "})
+        );
+        observed.observe(&StreamEvent::ToolUseStart {
+            id: "second".into(),
+            name: "external".into(),
+        });
+        observed.observe(&StreamEvent::ToolInputDelta("{\"part\":".into()));
+        observed.observe(&StreamEvent::ToolInputDelta("true}".into()));
+        observed.observe(&StreamEvent::ToolUseEnd);
+        assert_eq!(observed.matching("second")[0].input, json!({"part":true}));
+        observed.observe(&StreamEvent::ToolUseStart {
+            id: "incomplete".into(),
+            name: "external".into(),
+        });
+        observed.observe(&StreamEvent::ToolInputDelta("{".into()));
+        observed.observe(&StreamEvent::ToolUseEnd);
+        assert!(observed.matching("incomplete").is_empty());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn malformed_cli_records_retain_exact_bytes_and_never_authorize_replay() -> Result<()> {
+        use base64::Engine;
+        use std::os::unix::fs::PermissionsExt;
+        for bytes in [b"bad json\nalready-buffered trailing bytes\n".to_vec(),b"\xff\xfe\n".to_vec(),b"{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"content\":\"unmatched body\"}]}}\n".to_vec()] {
+            let directory=TestDir::new();let script=directory.path().join("malformed-cli");
+            std::fs::write(directory.path().join("record"),&bytes)?;
+            std::fs::write(&script,"#!/bin/sh\nread request\nprintf x >> effect\ncat record\n")?;
+            std::fs::set_permissions(&script,std::fs::Permissions::from_mode(0o700))?;
+            let capture=Arc::new(CaptureFixture{output:Default::default(),fail:false});
+            let(tx,_rx)=mpsc::channel(10);
+            let error=run_claude_request(CliRequest{config:ClaudeCliConfig{cli_path:script.to_string_lossy().into(),model:"fixture".into(),permission_mode:None,include_partial_messages:false},model:"fixture".into(),tool_names:Vec::new(),system:String::new(),resume_session_id:None,prompt:"fixture".into(),cwd:Some(directory.path().into()),capture:Some(capture.clone())},tx).await.unwrap_err();
+            assert!(error.is::<SdkCaptureFailure>());
+            let output=capture.output.lock().unwrap().take().expect("Raw acquisition receipt");
+            assert!(output.is_error);
+            assert_eq!(base64::engine::general_purpose::STANDARD.decode(&output.resources[0].data)?,bytes);
+            assert_eq!(std::fs::read(directory.path().join("effect"))?,b"x");
+        }
+        Ok(())
+    }
+    #[tokio::test]
+    async fn unscoped_cli_tool_execution_fails_before_process_creation() -> Result<()> {
+        let (tx, _rx) = mpsc::channel(1);
+        let error = run_claude_cli(
+            ClaudeCliConfig {
+                cli_path: "/nonexistent/must-not-spawn".into(),
+                model: "fixture".into(),
+                permission_mode: None,
+                include_partial_messages: false,
+            },
+            "fixture".into(),
+            vec!["Bash".into()],
+            String::new(),
+            None,
+            "fixture".into(),
+            None,
+            tx,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("requires a host result-capture context")
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    struct CaptureFixture {
+        output: std::sync::Mutex<Option<jcode_tool_types::ToolOutput>>,
+        fail: bool,
+    }
+    #[cfg(unix)]
+    #[async_trait]
+    impl jcode_provider_core::ProviderResultCapture for CaptureFixture {
+        fn has_received_data(&self) -> bool {
+            self.output.lock().unwrap().is_some()
+        }
+        async fn capture(
+            &self,
+            _: &str,
+            output: &jcode_tool_types::ToolOutput,
+        ) -> Result<jcode_tool_types::ProviderReceiptReference> {
+            *self.output.lock().unwrap() = Some(output.clone());
+            if self.fail {
+                anyhow::bail!("synthetic capture timeout");
+            }
+            Ok(jcode_tool_types::ProviderReceiptReference {
+                namespace: "fixture".into(),
+                run_id: "captured-record".into(),
+                sequence: 1,
+            })
+        }
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cli_retains_results_before_queue_delivery_and_preserves_failed_capture_body()
+    -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        for fail in [false, true] {
+            let directory = TestDir::new();
+            let script = directory.path().join("captured-cli");
+            let original=json!({"type":"user","vendor":"preserved","message":{"content":[{"type":"tool_result","tool_use_id":"sdk","content":"complete captured body"}]}}).to_string();
+            std::fs::write(directory.path().join("record"), format!("{original}\n"))?;
+            std::fs::write(
+                &script,
+                "#!/bin/sh\nread request\nprintf x >> effect\ncat record\n",
+            )?;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))?;
+            let capture = std::sync::Arc::new(CaptureFixture {
+                output: Default::default(),
+                fail,
+            });
+            let (tx, mut rx) = mpsc::channel(10);
+            let result = run_claude_request(
+                CliRequest {
+                    config: ClaudeCliConfig {
+                        cli_path: script.to_string_lossy().into(),
+                        model: "fixture".into(),
+                        permission_mode: None,
+                        include_partial_messages: false,
+                    },
+                    model: "fixture".into(),
+                    tool_names: Vec::new(),
+                    system: String::new(),
+                    resume_session_id: None,
+                    prompt: "fixture".into(),
+                    cwd: Some(directory.path().into()),
+                    capture: Some(capture.clone()),
+                },
+                tx,
+            )
+            .await;
+            assert!(
+                capture.output.lock().unwrap().is_some(),
+                "No event was consumed yet, but capture must already be complete"
+            );
+            assert_eq!(std::fs::read(directory.path().join("effect"))?, b"x");
+            let event = rx.recv().await.context("Missing original result")??;
+            let StreamEvent::ToolResult {
+                content,
+                original: received,
+                receipt,
+                ..
+            } = event
+            else {
+                anyhow::bail!("Expected SDK result");
+            };
+            assert_eq!(content, "complete captured body");
+            assert_eq!(received.as_deref(), Some(original.as_str()));
+            if fail {
+                assert!(result.unwrap_err().is::<SdkCaptureFailure>());
+                assert!(receipt.is_none());
+            } else {
+                result?;
+                assert_eq!(receipt.unwrap().run_id, "captured-record");
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn cli_result_preserves_the_original_rich_protocol_record() -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         let directory = TestDir::new();
@@ -1264,6 +1719,7 @@ mod context_validation_tests {
             content,
             is_error,
             original,
+            receipt: _,
         } = rx.recv().await.context("Missing SDK result")??
         else {
             anyhow::bail!("Expected result");

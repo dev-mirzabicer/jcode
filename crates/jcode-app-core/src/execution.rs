@@ -20,6 +20,8 @@ pub mod command_worker;
 pub mod history;
 mod provider_ingress;
 pub use provider_ingress::ProviderIngress;
+mod provider_capture;
+pub use provider_capture::ProviderCaptureScope;
 mod runtime;
 pub use runtime::{ControlOperation, ControlReply, control};
 

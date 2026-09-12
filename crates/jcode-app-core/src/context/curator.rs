@@ -2853,6 +2853,7 @@ mod tests {
                 content: "result".to_string(),
                 is_error: false,
                 original: None,
+                receipt: None,
             },
             StreamEvent::GeneratedImage {
                 id: "image".to_string(),

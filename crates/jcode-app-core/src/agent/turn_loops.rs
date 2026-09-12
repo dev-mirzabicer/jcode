@@ -169,20 +169,27 @@ impl Agent {
             let request_payload = crate::context::request_payload_pressure(send_messages);
             let prompt_has_recent_tool_result = Self::messages_end_with_tool_result(send_messages);
             self.last_status_detail = None;
+            let provider_ingress =
+                crate::execution::ProviderCaptureScope::new(self.session.id.clone());
             let mut stream = match self
                 .provider
-                .complete_split(
+                .complete_split_with_context(
                     send_messages,
                     &tools,
                     &split_prompt.static_part,
                     &split_prompt.dynamic_part,
                     self.provider_session_id.as_deref(),
+                    provider_ingress.context(),
                 )
                 .await
             {
                 Ok(stream) => stream,
                 Err(e) => {
                     memory_pending.restore_now();
+                    if provider_ingress.has_received_data() {
+                        self.mark_provider_output_started();
+                        return Err(e.context("SDK data was received before stream publication; automatic request replay was stopped"));
+                    }
                     let provider_error = e.to_string();
                     match self
                         .try_unattended_emergency_provider_recovery(&provider_error, None)
@@ -248,7 +255,6 @@ impl Agent {
             let mut reasoning_signature = String::new();
             let mut openai_reasoning_items: Vec<ContentBlock> = Vec::new();
             // Track tool results from provider (already executed by Claude Code CLI)
-            let mut provider_ingress = crate::execution::ProviderIngress::default();
             let mut sdk_tool_results: std::collections::HashMap<String, crate::tool::ToolOutput> =
                 std::collections::HashMap::new();
 
@@ -276,6 +282,10 @@ impl Agent {
                                 None,
                             )
                             .await?;
+                        }
+                        if provider_ingress.has_received_data() {
+                            self.mark_provider_output_started();
+                            return Err((e).context("Provider failed after acquired SDK data; automatic replay was stopped"));
                         }
                         match self
                             .try_unattended_emergency_provider_recovery(&err_str, None)
@@ -420,6 +430,7 @@ impl Agent {
                         content,
                         is_error,
                         original,
+                        receipt,
                     } => {
                         // SDK already executed this tool, store the result
                         if trace {
@@ -437,12 +448,7 @@ impl Agent {
                             original,
                         );
                         let output = match provider_ingress
-                            .receive_with_calls(
-                                &self.session.id,
-                                &tool_use_id,
-                                &output,
-                                &tool_calls,
-                            )
+                            .receive(&tool_use_id, output.clone(), receipt, &tool_calls)
                             .await
                         {
                             Ok(output) => output,
@@ -731,6 +737,10 @@ impl Agent {
                                 None,
                             )
                             .await?;
+                        }
+                        if provider_ingress.has_received_data() {
+                            self.mark_provider_output_started();
+                            return Err((anyhow::anyhow!(message.clone())).context("Provider failed after acquired SDK data; automatic replay was stopped"));
                         }
                         match self
                             .try_unattended_emergency_provider_recovery(&message, None)
