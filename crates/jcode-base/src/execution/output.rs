@@ -22,6 +22,8 @@ pub(super) struct ImagePart {
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct Manifest {
+    #[serde(default)]
+    pub provider_receipt: Option<jcode_tool_types::ProviderReceiptReference>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process_exit: Option<jcode_tool_types::ProcessExit>,
     pub(super) schema: u32,
@@ -274,6 +276,7 @@ impl ExecutionStore {
             let path = directory.join(format!("{}.json", record.id));
             let manifest = Manifest {
                 process_exit: output.process_exit.clone(),
+                provider_receipt: output.provider_receipt.clone(),
                 schema: 1,
                 invocation_id: record.id.clone(),
                 title: output.title.clone(),
@@ -320,6 +323,7 @@ impl ExecutionStore {
             .context("Invalid output manifest path")?;
         let mut output = ToolOutput::new("");
         output.process_exit = record.process_exit.clone();
+        output.provider_receipt = manifest.provider_receipt.clone();
         output.is_error = record.state != RunState::Completed;
         output.title = manifest.title;
         output.metadata = manifest.metadata;

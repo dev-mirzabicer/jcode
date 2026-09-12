@@ -1051,7 +1051,7 @@ impl Agent {
         self.tool_call_ids = outcome.calls;
         self.tool_result_ids = outcome.results;
         self.tool_output_scan_index = self.session.messages.len();
-        if outcome.repaired > 0 {
+        if outcome.repaired > 0 || outcome.recovered_provider_receipts > 0 {
             self.after_provider_context_changed(
                 "historical tool repair",
                 format!(
@@ -1061,7 +1061,7 @@ impl Agent {
                 true,
             )?;
         }
-        Ok(outcome.repaired)
+        Ok(outcome.repaired + outcome.recovered_provider_receipts)
     }
 
     fn reset_tool_output_tracking(&mut self) {

@@ -1,5 +1,13 @@
 pub mod presentation;
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ProviderReceiptReference {
+    #[serde(default)]
+    pub namespace: String,
+    pub run_id: String,
+    pub sequence: i64,
+}
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +61,8 @@ impl StopCause {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolOutput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_receipt: Option<ProviderReceiptReference>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process_exit: Option<ProcessExit>,
     pub output: String,
@@ -153,6 +163,7 @@ pub struct ToolResource {
 impl ToolOutput {
     pub fn new(output: impl Into<String>) -> Self {
         Self {
+            provider_receipt: None,
             output: output.into(),
             process_exit: None,
             title: None,

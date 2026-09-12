@@ -154,6 +154,7 @@ impl Capture {
             if complete {
                 let manifest = Manifest {
                     process_exit: output.process_exit.clone(),
+                    provider_receipt: output.provider_receipt.clone(),
                     parts,
                     schema: 1,
                     invocation_id: state.record.id.clone(),
@@ -199,6 +200,7 @@ impl Capture {
                 manifest_path = directory.join(format!("{}.json", state.record.id));
                 let manifest = Manifest {
                     process_exit: output.process_exit.clone(),
+                    provider_receipt: output.provider_receipt.clone(),
                     schema: 1,
                     invocation_id: state.record.id.clone(),
                     title: output.title.clone(),

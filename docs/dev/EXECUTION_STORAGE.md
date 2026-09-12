@@ -333,6 +333,41 @@ waiting applies. Connections leave an already-selected WAL mode unchanged.
 Regression tests cover fresh concurrent opens, metadata opens while a writer is
 active, and real SDK acquisition observed during an unfinished provider stream.
 
+## Acquisition-time SDK receipts
+
+Agent and local TUI consumers durably capture each received SDK result before
+polling the provider again, rather than waiting for the response stream to finish.
+These are explicitly named acquisition records, not fabricated executions of the
+SDK tool. They retain the full result, media, original decoded record when supplied,
+and observed matching tool inputs through the existing output/storage owner.
+Later tool-result publication has its own assistant-message-scoped identity and
+records the acquisition reference before correlation. Host-native rejection
+handling retains the same reference before any authorized host effect.
+
+A private kernel lease owns each request's unacknowledged acquisitions, including
+blocking capture that outlives a cancelled consumer. Active requests cannot be
+recovered as abandoned. Recovery after actual process exit retains available data
+and emits factual references for unmatched results without inventing missing tool
+input, completion or rollback. Duplicate and uncorrelated results are captured
+before automatic retry is stopped. Storage failures preserve complete received
+bodies through existing authoritative partial checkpoints; an unretained storage
+error is never substituted for the original SDK result.
+
+Receipt acknowledgement uses compact Session/journal metadata bound to the
+execution-store namespace. It is published atomically with history, survives
+ordinary resume/rewind, remains present in lightweight and remote startup metadata,
+and is not inherited as a parent's receipt ownership during split. Namespace
+replacement and regressed metadata are checked explicitly. Already paired results
+are acknowledged only against their actual assistant ToolUse and later user
+ToolResult, not a process-global provider ID.
+
+Tests cover paused provider streams in both Agent modes, acquired rich results,
+errors and rollback, duplicate/unmatched IDs, unavailable storage, request leases,
+process exit without destructors, acknowledgement/reload/rewind/split, and local
+TUI capture. Bytes still queued upstream or rejected by the CLI decoder before a
+ToolResult event remain a separate adapter-ingress boundary, not a guarantee of
+this consumer-stage receipt service.
+
 ## SDK original records and rich results
 
 Decoded CLI tool-result events carry the original UTF-8 protocol record alongside
@@ -352,9 +387,9 @@ Local TUI SDK handling now uses the same retention boundary before debug/display
 publication and persists the actual result instead of an empty Session placeholder.
 Local partial checkpoints retain complete results and media through this owner.
 These are real CLI, Agent and local-TUI mechanism checks, not a hosted vision or
-prompt-quality claim. Raw transport bytes rejected before decoding, uncorrelated
-result ingress and persistence before stream-finalization remain separate pending
-reconciliation.
+prompt-quality claim. Raw transport bytes rejected before decoding remain a
+separate adapter-ingress boundary. Acquisition-time receipt recovery is described
+above.
 
 ## Local history repair and /fix
 

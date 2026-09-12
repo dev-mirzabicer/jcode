@@ -86,6 +86,7 @@ pub struct PreparedRepair {
 #[derive(Debug)]
 pub struct RepairOutcome {
     pub repaired: usize,
+    pub recovered_provider_receipts: usize,
     pub calls: HashSet<String>,
     pub results: HashSet<String>,
 }
@@ -110,6 +111,13 @@ impl PreparedRepair {
 
 pub async fn prepare(session: &Session, registry: &Registry) -> Result<PreparedRepair> {
     let source = fingerprint(session)?;
+    let mut received_candidate = session.clone();
+    let recovered_provider_receipts =
+        super::provider_ingress::reconcile(&mut received_candidate).await?;
+    let receipt_changed = received_candidate.provider_receipt_watermark
+        != session.provider_receipt_watermark
+        || received_candidate.provider_receipt_namespace != session.provider_receipt_namespace;
+    let session = &received_candidate;
     let scan = scan(
         session
             .messages
@@ -118,6 +126,7 @@ pub async fn prepare(session: &Session, registry: &Registry) -> Result<PreparedR
     )?;
     let mut outcome = RepairOutcome {
         repaired: 0,
+        recovered_provider_receipts,
         calls: scan.calls,
         results: scan.results,
     };
@@ -150,7 +159,7 @@ pub async fn prepare(session: &Session, registry: &Registry) -> Result<PreparedR
         repairs.push((index, ordinal, tool.id, output));
     }
     let candidate = if repairs.is_empty() {
-        None
+        receipt_changed.then(|| session.clone())
     } else {
         let mut candidate = session.clone();
         for (inserted, (index, _, id, output)) in repairs.into_iter().enumerate() {

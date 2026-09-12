@@ -427,7 +427,7 @@ impl App {
         self.tool_call_ids = outcome.calls;
         self.tool_result_ids = outcome.results;
         self.tool_output_scan_index = self.session.messages.len();
-        if outcome.repaired > 0 {
+        if outcome.repaired > 0 || outcome.recovered_provider_receipts > 0 {
             self.after_local_provider_context_changed(
                 "historical tool repair",
                 &format!(
@@ -437,7 +437,7 @@ impl App {
             )
             .map_err(anyhow::Error::msg)?;
         }
-        Ok(outcome.repaired)
+        Ok(outcome.repaired + outcome.recovered_provider_receipts)
     }
 
     /// Rebuild current session into a new one without tool calls

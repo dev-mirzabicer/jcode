@@ -421,6 +421,7 @@ impl App {
             let mut call_output_tokens_seen: u64 = 0;
             let mut interleaved = false; // Track if we interleaved a message mid-stream
             // Track tool results from provider (already executed by Claude Code CLI)
+            let mut provider_ingress = crate::execution::ProviderIngress::default();
             let mut sdk_tool_results: std::collections::HashMap<String, crate::tool::ToolOutput> =
                 std::collections::HashMap::new();
             let provider_name = self.provider.name().to_string();
@@ -1073,6 +1074,16 @@ impl App {
                                     }
                                     StreamEvent::ToolResult {tool_use_id,content,is_error,original}=>{
                                         let output=crate::execution::received_sdk_result(&tool_use_id,content,is_error,original);
+                                        let output=match provider_ingress.receive_with_calls(&self.session.id,&tool_use_id,&output,&tool_calls).await {
+                                            Ok(output)=>output,
+                                            Err(error)=>{
+                                                if !tool_calls.iter().any(|tool|tool.id==tool_use_id){self.session.add_message(Role::User,vec![ContentBlock::Text{text:format!("[Provider result acquisition failed; no operation was repeated.]\n{}",crate::execution::sdk_failure_body(&output)),cache_control:None}]);}
+                                                sdk_tool_results.insert(tool_use_id.clone(),output);
+                                                self.checkpoint_partial_local_provider_output(&text_content,&reasoning_content,&reasoning_signature,&openai_reasoning_items,&tool_calls,&sdk_tool_results,&generated_image_contexts,store_reasoning_content).await?;
+                                                self.session.save()?;return Err(error);
+                                            }
+                                        };
+                                        anyhow::ensure!(!sdk_tool_results.contains_key(&tool_use_id),"Repeated SDK tool result ID; received records were retained without replay");
                                         sdk_tool_results.insert(tool_use_id,output);
                                     }
                                     StreamEvent::GeneratedImage {
@@ -1256,6 +1267,28 @@ impl App {
             }
 
             memory_pending.restore_now();
+
+            if let Some(correlated) = crate::execution::ProviderIngress::correlation_failure(
+                &tool_calls,
+                &sdk_tool_results,
+            ) {
+                self.checkpoint_partial_local_provider_output(
+                    &text_content,
+                    &reasoning_content,
+                    &reasoning_signature,
+                    &openai_reasoning_items,
+                    &correlated,
+                    &sdk_tool_results,
+                    &generated_image_contexts,
+                    store_reasoning_content,
+                )
+                .await?;
+                drop(provider_ingress);
+                self.repair_missing_tool_outputs().await?;
+                anyhow::bail!(
+                    "SDK results could not be uniquely correlated. Received data was retained; no local execution or automatic replay was performed."
+                );
+            }
 
             // Add assistant message to history
             let mut content_blocks = Vec::new();

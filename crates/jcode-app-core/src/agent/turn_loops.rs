@@ -248,6 +248,7 @@ impl Agent {
             let mut reasoning_signature = String::new();
             let mut openai_reasoning_items: Vec<ContentBlock> = Vec::new();
             // Track tool results from provider (already executed by Claude Code CLI)
+            let mut provider_ingress = crate::execution::ProviderIngress::default();
             let mut sdk_tool_results: std::collections::HashMap<String, crate::tool::ToolOutput> =
                 std::collections::HashMap::new();
 
@@ -434,6 +435,41 @@ impl Agent {
                             content,
                             is_error,
                             original,
+                        );
+                        let output = match provider_ingress
+                            .receive_with_calls(
+                                &self.session.id,
+                                &tool_use_id,
+                                &output,
+                                &tool_calls,
+                            )
+                            .await
+                        {
+                            Ok(output) => output,
+                            Err(error) => {
+                                if !tool_calls.iter().any(|tool| tool.id == tool_use_id) {
+                                    self.add_message(Role::User,vec![ContentBlock::Text{text:format!("[Provider result acquisition failed; no operation was repeated.]\n{}",crate::execution::sdk_failure_body(&output)),cache_control:None}]);
+                                }
+                                sdk_tool_results.insert(tool_use_id.clone(), output);
+                                self.checkpoint_partial_provider_output(
+                                    &text_content,
+                                    &reasoning_content,
+                                    &reasoning_signature,
+                                    &openai_reasoning_items,
+                                    &tool_calls,
+                                    &sdk_tool_results,
+                                    &generated_image_contexts,
+                                    store_reasoning_content,
+                                    None,
+                                )
+                                .await?;
+                                self.session.save()?;
+                                return Err(error);
+                            }
+                        };
+                        anyhow::ensure!(
+                            !sdk_tool_results.contains_key(&tool_use_id),
+                            "Provider returned a repeated tool result ID; both received records were retained and no operation was replayed"
                         );
                         sdk_tool_results.insert(tool_use_id, output);
                     }
@@ -738,6 +774,29 @@ impl Agent {
             // reservation now; Drop remains the fail-safe for every other exit.
             memory_pending.restore_now();
 
+            if let Some(correlated) = crate::execution::ProviderIngress::correlation_failure(
+                &tool_calls,
+                &sdk_tool_results,
+            ) {
+                self.checkpoint_partial_provider_output(
+                    &text_content,
+                    &reasoning_content,
+                    &reasoning_signature,
+                    &openai_reasoning_items,
+                    &correlated,
+                    &sdk_tool_results,
+                    &generated_image_contexts,
+                    store_reasoning_content,
+                    None,
+                )
+                .await?;
+                drop(provider_ingress);
+                self.repair_missing_tool_outputs().await?;
+                anyhow::bail!(
+                    "Provider returned results without unique tool-use correlation. Received records and observed inputs were retained. Automatic replay was stopped to avoid repeating SDK effects."
+                );
+            }
+
             let api_elapsed = api_start.elapsed();
             logging::info(&format!(
                 "API call complete in {:.2}s (input={} output={} cache_read={} cache_write={})",
@@ -1011,12 +1070,14 @@ impl Agent {
 
                 let is_native_tool = self.provider_leaves_tool_to_host(&tc.name);
                 let mut provider_rejection = None;
+                let mut provider_receipt = None;
 
                 // Check if SDK already executed this tool
                 if let Some(sdk_output) = sdk_tool_results.remove(&tc.id) {
                     let sdk_is_error = sdk_output.is_error;
                     // Only a code-declared SDK exclusion proves that host execution has not occurred.
                     if is_native_tool && sdk_is_error {
+                        provider_receipt = sdk_output.provider_receipt.clone();
                         provider_rejection = Some(crate::execution::sdk_failure_body(&sdk_output));
                         if trace {
                             eprintln!(
@@ -1084,6 +1145,7 @@ impl Agent {
                     execution_mode: ToolExecutionMode::AgentTurn,
                     invocation: jcode_tool_core::InvocationContext {
                         provider_rejection,
+                        provider_receipt,
                         ..Default::default()
                     },
                 };

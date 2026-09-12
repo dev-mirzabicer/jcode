@@ -9,6 +9,10 @@ use super::{
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(super) struct SessionJournalMeta {
+    #[serde(default)]
+    pub(super) provider_receipt_watermark: i64,
+    #[serde(default)]
+    pub(super) provider_receipt_namespace: String,
     pub(super) parent_id: Option<String>,
     pub(super) title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

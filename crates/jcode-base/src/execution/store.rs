@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-const SCHEMA: i64 = 12;
+const SCHEMA: i64 = 14;
 
 pub use jcode_tool_types::RunState;
 
@@ -239,6 +239,24 @@ impl ExecutionStore {
             transaction.execute_batch(
                 "ALTER TABLE runtimes ADD COLUMN process_image TEXT; PRAGMA user_version=12;",
             )?;
+        }
+        if version < 13 {
+            transaction.execute_batch("CREATE TABLE provider_result_receipts (
+                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT UNIQUE NOT NULL REFERENCES runs(id),
+                session_id TEXT NOT NULL, request_id TEXT NOT NULL,
+                request_lease TEXT NOT NULL, tool_use_id TEXT NOT NULL,
+                message_id TEXT
+            ); CREATE INDEX provider_receipts_session ON provider_result_receipts(session_id,sequence);
+            PRAGMA user_version=13;")?;
+        }
+        if version < 14 {
+            transaction.execute_batch("CREATE TABLE provider_receipt_namespace (id INTEGER PRIMARY KEY CHECK(id=1), namespace TEXT NOT NULL);")?;
+            transaction.execute(
+                "INSERT INTO provider_receipt_namespace(id,namespace) VALUES (1,?1)",
+                [uuid::Uuid::new_v4().simple().to_string()],
+            )?;
+            transaction.pragma_update(None, "user_version", 14)?;
         }
         transaction.commit()?;
         Ok(store)

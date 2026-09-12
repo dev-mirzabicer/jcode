@@ -4875,8 +4875,8 @@ async fn managed_sdk_retention_failure_preserves_received_body_without_replay() 
         let mut agent = Agent::new(Arc::new(provider), Registry::empty());
         std::fs::create_dir_all(home.path().join("execution"))?;
         std::fs::write(
-            home.path().join("execution/index.sqlite"),
-            b"deliberately invalid isolated database",
+            home.path().join("execution/data"),
+            b"blocked output allocation after provider dispatch",
         )?;
         let result = if streaming {
             let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -5165,6 +5165,267 @@ async fn complete_sdk_original_and_rich_parts_survive_agent_history_and_retentio
                     .iter()
                     .flat_map(|message| &message.content)
                     .any(|block| matches!(block,ContentBlock::Image{data,..} if data=="eA=="))
+            );
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone)]
+struct PausedSdkResultProvider {
+    inner: SuppliedResultProvider,
+    received: Arc<AtomicBool>,
+    release: Arc<tokio::sync::Notify>,
+}
+#[async_trait]
+impl Provider for PausedSdkResultProvider {
+    async fn complete(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        system: &str,
+        resume: Option<&str>,
+    ) -> Result<EventStream> {
+        let stream = self.inner.complete(messages, tools, system, resume).await?;
+        let received = self.received.clone();
+        let release = self.release.clone();
+        Ok(Box::pin(futures::stream::unfold(
+            (stream, false),
+            move |(mut stream, pause)| {
+                let received = received.clone();
+                let release = release.clone();
+                async move {
+                    if pause {
+                        release.notified().await;
+                    }
+                    let event = stream.next().await?;
+                    let pause = matches!(&event, Ok(StreamEvent::ToolResult { .. }));
+                    if pause {
+                        received.store(true, Ordering::SeqCst);
+                    }
+                    Some((event, (stream, pause)))
+                }
+            },
+        )))
+    }
+    fn handles_tools_internally(&self) -> bool {
+        true
+    }
+    fn name(&self) -> &str {
+        "paused-sdk-fixture"
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+#[tokio::test]
+async fn sdk_result_is_durable_before_the_provider_stream_finishes() -> Result<()> {
+    use anyhow::Context;
+    let _guard = crate::storage::lock_test_env();
+    for streaming in [false, true] {
+        let home = tempfile::tempdir()?;
+        let _home = AgentTestEnvRestore::set_path("JCODE_HOME", home.path());
+        let _runtime =
+            AgentTestEnvRestore::set_path("JCODE_RUNTIME_DIR", &home.path().join("runtime"));
+        crate::config::invalidate_config_cache();
+        let received = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(tokio::sync::Notify::new());
+        let body = "already performed SDK result".to_string();
+        let provider = PausedSdkResultProvider {
+            inner: SuppliedResultProvider {
+                calls: Default::default(),
+                largest_result: Default::default(),
+                body: body.clone(),
+                after_result: SdkAfterResult::Success,
+                managed: true,
+                result_error: false,
+                tool_name: "external_result",
+                host_native: false,
+                original: None,
+            },
+            received: received.clone(),
+            release: release.clone(),
+        };
+        let mut agent = Agent::new(Arc::new(provider), Registry::empty());
+        let session_id = agent.session.id.clone();
+        let task =
+            jcode_provider_core::request_lifetime::RequestSubtask::new(tokio::spawn(async move {
+                if streaming {
+                    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+                    agent
+                        .run_once_streaming_mpsc("synthetic task", Vec::new(), None, tx)
+                        .await
+                        .map(|_| ())
+                } else {
+                    agent.run_once_capture("synthetic task").await.map(|_| ())
+                }
+            }));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        while !received.load(Ordering::SeqCst) {
+            if tokio::time::Instant::now() >= deadline {
+                release.notify_one();
+                anyhow::bail!("Fixture did not emit its SDK result");
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let store = crate::execution::ExecutionStore::open(home.path())
+            .with_context(|| format!("Observer opening store, streaming={streaming}"))?;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let mut captured = false;
+        while tokio::time::Instant::now() < deadline {
+            if let Some(receipt) = store
+                .provider_receipts_after(&session_id, 0)
+                .with_context(|| {
+                    format!("Observer reading acquisition index, streaming={streaming}")
+                })?
+                .into_iter()
+                .find(|receipt| receipt.tool_use_id == "sdk-result")
+            {
+                let record = store
+                    .inspect(&receipt.run_id)
+                    .context("Observer inspecting acquisition state")?
+                    .unwrap();
+                if record.state.terminal() {
+                    captured = std::fs::read_to_string(record.output_path.unwrap())? == body;
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        release.notify_one();
+        task.finish()
+            .await?
+            .with_context(|| format!("Provider turn after release, streaming={streaming}"))?;
+        assert!(
+            captured,
+            "Already-received SDK output must be durable while the provider is still running"
+        );
+    }
+    Ok(())
+}
+
+#[derive(Clone)]
+struct UncorrelatedSdkProvider {
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+    duplicate: bool,
+}
+#[async_trait]
+impl Provider for UncorrelatedSdkProvider {
+    async fn complete(
+        &self,
+        _: &[Message],
+        _: &[ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<EventStream> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let mut events = Vec::new();
+        if self.duplicate {
+            events.extend([
+                StreamEvent::ToolUseStart {
+                    id: "sdk-id".into(),
+                    name: "external_result".into(),
+                },
+                StreamEvent::ToolInputDelta("{}".into()),
+                StreamEvent::ToolUseEnd,
+            ]);
+        }
+        events.push(StreamEvent::ToolResult {
+            tool_use_id: "sdk-id".into(),
+            content: "first received result".into(),
+            is_error: false,
+            original: None,
+        });
+        if self.duplicate {
+            events.push(StreamEvent::ToolResult {
+                tool_use_id: "sdk-id".into(),
+                content: "second received result".into(),
+                is_error: true,
+                original: None,
+            });
+        }
+        events.push(StreamEvent::MessageEnd {
+            stop_reason: Some("end_turn".into()),
+        });
+        Ok(Box::pin(futures::stream::iter(events.into_iter().map(Ok))))
+    }
+    fn name(&self) -> &str {
+        "uncorrelated-sdk-fixture"
+    }
+    fn handles_tools_internally(&self) -> bool {
+        true
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+#[tokio::test]
+async fn unmatched_or_repeated_sdk_results_are_retained_without_provider_replay() -> Result<()> {
+    let _guard = crate::storage::lock_test_env();
+    for streaming in [false, true] {
+        for duplicate in [false, true] {
+            let home = tempfile::tempdir()?;
+            let _home = AgentTestEnvRestore::set_path("JCODE_HOME", home.path());
+            let _runtime =
+                AgentTestEnvRestore::set_path("JCODE_RUNTIME_DIR", &home.path().join("runtime"));
+            crate::config::invalidate_config_cache();
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let mut agent = Agent::new(
+                Arc::new(UncorrelatedSdkProvider {
+                    calls: calls.clone(),
+                    duplicate,
+                }),
+                Registry::empty(),
+            );
+            let result = if streaming {
+                let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+                agent
+                    .run_once_streaming_mpsc("synthetic task", Vec::new(), None, tx)
+                    .await
+                    .map(|_| ())
+            } else {
+                agent.run_once_capture("synthetic task").await.map(|_| ())
+            };
+            assert!(result.is_err());
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                1,
+                "Uncorrelated SDK work must not trigger an automatic retry"
+            );
+            let store = crate::execution::ExecutionStore::open(home.path())?;
+            let receipts = store.provider_receipts_after(agent.session_id(), 0)?;
+            assert_eq!(receipts.len(), if duplicate { 2 } else { 1 });
+            for (index, receipt) in receipts.iter().enumerate() {
+                let record = store.inspect(&receipt.run_id)?.unwrap();
+                assert_eq!(
+                    std::fs::read_to_string(record.output_path.unwrap())?,
+                    if index == 0 {
+                        "first received result"
+                    } else {
+                        "second received result"
+                    }
+                );
+                let observed =
+                    store.invocation_input(&receipt.run_id)?.input["observed_tool_calls"]
+                        .as_array()
+                        .unwrap()
+                        .len();
+                assert_eq!(observed, usize::from(duplicate));
+            }
+            agent.repair_missing_tool_outputs().await?;
+            assert_eq!(
+                agent.session.provider_receipt_watermark,
+                receipts.last().unwrap().sequence
+            );
+            assert!(
+                agent
+                    .session
+                    .messages
+                    .iter()
+                    .flat_map(|message| &message.content)
+                    .all(|block| !matches!(block, ContentBlock::ToolUse { .. })),
+                "Unmatched input must not be invented during recovery"
             );
         }
     }

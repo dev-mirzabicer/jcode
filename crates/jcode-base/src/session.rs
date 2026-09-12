@@ -252,6 +252,11 @@ impl std::error::Error for SystemPromptDispatchError {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
+    /// Highest SDK acquisition receipt acknowledged atomically with history.
+    #[serde(default)]
+    pub provider_receipt_watermark: i64,
+    #[serde(default)]
+    pub provider_receipt_namespace: String,
     pub id: String,
     pub parent_id: Option<String>,
     pub title: Option<String>,
@@ -389,6 +394,10 @@ pub struct Session {
 
 #[derive(Debug, Deserialize)]
 struct SessionStartupStub {
+    #[serde(default)]
+    provider_receipt_watermark: i64,
+    #[serde(default)]
+    provider_receipt_namespace: String,
     id: String,
     #[serde(default)]
     parent_id: Option<String>,
@@ -904,6 +913,8 @@ impl Session {
 
     fn session_from_startup_stub(stub: SessionStartupStub) -> Self {
         let mut session = Self::create_with_id(stub.id, stub.parent_id, stub.title);
+        session.provider_receipt_watermark = stub.provider_receipt_watermark;
+        session.provider_receipt_namespace = stub.provider_receipt_namespace;
         session.custom_title = stub.custom_title;
         session.created_at = stub.created_at;
         session.updated_at = stub.updated_at;
@@ -946,6 +957,8 @@ impl Session {
 
     fn session_from_remote_startup_snapshot(snapshot: RemoteStartupSessionSnapshot) -> Self {
         let mut session = Self::create_with_id(snapshot.id, snapshot.parent_id, snapshot.title);
+        session.provider_receipt_watermark = snapshot.provider_receipt_watermark;
+        session.provider_receipt_namespace = snapshot.provider_receipt_namespace;
         session.custom_title = snapshot.custom_title;
         session.created_at = snapshot.created_at;
         session.updated_at = snapshot.updated_at;
@@ -1124,6 +1137,8 @@ impl Session {
 
     fn journal_meta(&self) -> SessionJournalMeta {
         SessionJournalMeta {
+            provider_receipt_watermark: self.provider_receipt_watermark,
+            provider_receipt_namespace: self.provider_receipt_namespace.clone(),
             parent_id: self.parent_id.clone(),
             title: self.title.clone(),
             custom_title: self.custom_title.clone(),
@@ -1435,6 +1450,8 @@ impl Session {
     }
 
     fn apply_journal_meta(&mut self, meta: SessionJournalMeta) {
+        self.provider_receipt_watermark = meta.provider_receipt_watermark;
+        self.provider_receipt_namespace = meta.provider_receipt_namespace;
         self.parent_id = meta.parent_id;
         self.title = meta.title;
         self.custom_title = meta.custom_title;
@@ -1676,6 +1693,8 @@ impl Session {
             updated_at: now,
             messages: Vec::new(),
             agent_profile_message_ids: Vec::new(),
+            provider_receipt_watermark: 0,
+            provider_receipt_namespace: String::new(),
             startup_context: None,
             startup_context_block: None,
             system_prompt: None,
@@ -1744,6 +1763,8 @@ impl Session {
             updated_at: now,
             messages: Vec::new(),
             agent_profile_message_ids: Vec::new(),
+            provider_receipt_watermark: 0,
+            provider_receipt_namespace: String::new(),
             startup_context: None,
             startup_context_block: None,
             system_prompt: None,
@@ -2842,6 +2863,10 @@ fn redact_context_generator(generator: &mut jcode_session_types::StoredContextAr
 
 #[derive(Debug, Deserialize)]
 struct RemoteStartupSessionSnapshot {
+    #[serde(default)]
+    provider_receipt_watermark: i64,
+    #[serde(default)]
+    provider_receipt_namespace: String,
     id: String,
     #[serde(default)]
     parent_id: Option<String>,

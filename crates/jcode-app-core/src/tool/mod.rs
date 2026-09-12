@@ -196,6 +196,17 @@ impl Registry {
         mut ctx: ToolContext,
         output: ToolOutput,
     ) -> Result<ToolOutput> {
+        if let Some(receipt) = output.provider_receipt.clone() {
+            let root = crate::storage::jcode_dir()?;
+            let session = ctx.session_id.clone();
+            let tool_id = ctx.tool_call_id.clone();
+            let message = ctx.message_id.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::execution::ExecutionStore::open(&root)?
+                    .correlate_provider_receipt(&receipt, &session, &tool_id, &message)
+            })
+            .await??;
+        }
         let target = crate::config::config()
             .output
             .target(Self::resolve_tool_name(name), None);
@@ -220,6 +231,7 @@ impl Registry {
             Ok(output) => Ok(self.guard_context_overflow(name, output).await),
             Err(error) => {
                 if let Some(captured) = error.downcast_ref::<crate::execution::CapturedToolError>()
+                    && matches!(&captured.output.source,jcode_tool_types::OutputSource::Retained(reference) if reference.complete)
                 {
                     Ok(self
                         .guard_context_overflow(name, captured.output.clone().with_error(true))

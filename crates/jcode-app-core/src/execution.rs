@@ -18,6 +18,8 @@ pub mod command;
 #[cfg(unix)]
 pub mod command_worker;
 pub mod history;
+mod provider_ingress;
+pub use provider_ingress::ProviderIngress;
 mod runtime;
 pub use runtime::{ControlOperation, ControlReply, control};
 
@@ -375,6 +377,17 @@ async fn supervise(
             .await?;
         }
     };
+    if let Some(receipt) = ctx.invocation.provider_receipt.clone() {
+        let source = store.clone();
+        let session = ctx.session_id.clone();
+        let tool_id = ctx.tool_call_id.clone();
+        let message = ctx.message_id.clone();
+        tokio::task::spawn_blocking(move || {
+            source.correlate_provider_receipt(&receipt, &session, &tool_id, &message)
+        })
+        .await??;
+    }
+    let provider_receipt = ctx.invocation.provider_receipt.clone();
     let capture_result = {
         let store = store.clone();
         let record = record.clone();
@@ -535,6 +548,8 @@ async fn supervise(
                 }
             }
         };
+        let mut output=output;
+        if provider_receipt.is_some(){output.provider_receipt=provider_receipt;}
         let output = if let Some(capture) = capture {
             capture.seal(output, state)?
         } else {
