@@ -254,6 +254,12 @@ impl SelfDevTool {
         execution_mode: ToolExecutionMode,
         working_dir: Option<&std::path::Path>,
     ) -> Result<ToolOutput> {
+        if SelfDevTool::is_test_session() {
+            anyhow::ensure!(
+                std::env::var_os("JCODE_HOME").is_some_and(|path| !path.is_empty()),
+                "Simulated reload requires explicit JCODE_HOME; refusing to publish test metadata in the default home"
+            );
+        }
         let repo_dir = resolve_selfdev_reload_repo_dir(working_dir)
             .ok_or_else(|| anyhow::anyhow!("Could not find jcode repository directory"))?;
 

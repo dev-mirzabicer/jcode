@@ -1,3 +1,11 @@
+// Fixture cleanup must run even when an assertion unwinds.
+struct RestoreFixtureCwd(std::path::PathBuf);
+impl Drop for RestoreFixtureCwd {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.0);
+    }
+}
+
 use super::*;
 use anyhow::{Result, anyhow};
 
@@ -295,7 +303,10 @@ fn initial_session_context_preserves_explicitly_bound_cwd_when_inserted() -> Res
         .tempdir()
         .map_err(|e| anyhow!(e))?;
 
-    std::env::set_current_dir(first_dir.path()).map_err(|e| anyhow!(e))?;
+    let first_path = first_dir.path().canonicalize()?;
+    let second_path = second_dir.path().canonicalize()?;
+    let _restore = RestoreFixtureCwd(original_cwd.clone());
+    std::env::set_current_dir(first_path.as_path()).map_err(|e| anyhow!(e))?;
     let mut session = Session::create_with_id(
         "session_context_cwd_refresh_test".to_string(),
         None,
@@ -303,23 +314,23 @@ fn initial_session_context_preserves_explicitly_bound_cwd_when_inserted() -> Res
     );
     assert_eq!(
         session.working_dir.as_deref(),
-        Some(first_dir.path().to_str().unwrap())
+        Some(first_path.as_path().to_str().unwrap())
     );
 
-    std::env::set_current_dir(second_dir.path()).map_err(|e| anyhow!(e))?;
+    std::env::set_current_dir(second_path.as_path()).map_err(|e| anyhow!(e))?;
     let result: std::result::Result<(), anyhow::Error> = (|| {
         assert!(session.ensure_initial_session_context_message());
         let first = session.messages[0].content_preview();
         assert!(
             first.contains(&format!(
                 "Working directory: {}",
-                first_dir.path().display()
+                first_path.as_path().display()
             )),
             "session context should preserve the bound cwd, got: {first}"
         );
         assert_eq!(
             session.working_dir.as_deref(),
-            Some(first_dir.path().to_str().unwrap())
+            Some(first_path.as_path().to_str().unwrap())
         );
         Ok(())
     })();
@@ -343,7 +354,10 @@ fn initial_session_context_can_refresh_before_real_conversation() -> Result<()> 
         .tempdir()
         .map_err(|e| anyhow!(e))?;
 
-    std::env::set_current_dir(first_dir.path()).map_err(|e| anyhow!(e))?;
+    let first_path = first_dir.path().canonicalize()?;
+    let second_path = second_dir.path().canonicalize()?;
+    let _restore = RestoreFixtureCwd(original_cwd.clone());
+    std::env::set_current_dir(first_path.as_path()).map_err(|e| anyhow!(e))?;
     let result: std::result::Result<(), anyhow::Error> = (|| {
         let mut session = Session::create_with_id(
             "session_context_remote_cwd_refresh_test".to_string(),
@@ -353,22 +367,22 @@ fn initial_session_context_can_refresh_before_real_conversation() -> Result<()> 
         assert!(session.ensure_initial_session_context_message());
         assert!(session.messages[0].content_preview().contains(&format!(
             "Working directory: {}",
-            first_dir.path().display()
+            first_path.as_path().display()
         )));
 
-        session.working_dir = Some(second_dir.path().display().to_string());
+        session.working_dir = Some(second_path.as_path().display().to_string());
         assert!(session.refresh_initial_session_context_message());
         let refreshed = session.messages[0].content_preview();
         assert!(
             refreshed.contains(&format!(
                 "Working directory: {}",
-                second_dir.path().display()
+                second_path.as_path().display()
             )),
             "session context should refresh to subscribed cwd, got: {refreshed}"
         );
         assert!(!refreshed.contains(&format!(
             "Working directory: {}",
-            first_dir.path().display()
+            first_path.as_path().display()
         )));
         Ok(())
     })();
@@ -392,7 +406,10 @@ fn initial_session_context_does_not_refresh_after_real_conversation() -> Result<
         .tempdir()
         .map_err(|e| anyhow!(e))?;
 
-    std::env::set_current_dir(first_dir.path()).map_err(|e| anyhow!(e))?;
+    let first_path = first_dir.path().canonicalize()?;
+    let second_path = second_dir.path().canonicalize()?;
+    let _restore = RestoreFixtureCwd(original_cwd.clone());
+    std::env::set_current_dir(first_path.as_path()).map_err(|e| anyhow!(e))?;
     let result: std::result::Result<(), anyhow::Error> = (|| {
         let mut session = Session::create_with_id(
             "session_context_late_cwd_refresh_test".to_string(),
@@ -408,16 +425,16 @@ fn initial_session_context_does_not_refresh_after_real_conversation() -> Result<
             }],
         );
 
-        session.working_dir = Some(second_dir.path().display().to_string());
+        session.working_dir = Some(second_path.as_path().display().to_string());
         assert!(!session.refresh_initial_session_context_message());
         let original = session.messages[0].content_preview();
         assert!(original.contains(&format!(
             "Working directory: {}",
-            first_dir.path().display()
+            first_path.as_path().display()
         )));
         assert!(!original.contains(&format!(
             "Working directory: {}",
-            second_dir.path().display()
+            second_path.as_path().display()
         )));
         Ok(())
     })();

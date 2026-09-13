@@ -30,6 +30,7 @@ impl AuthTestSandbox {
         std::fs::create_dir_all(temp.path().join("config").join("jcode"))?;
         std::fs::create_dir_all(temp.path().join("external"))?;
         crate::env::set_var("JCODE_HOME", temp.path());
+        crate::env::set_var("JCODE_RUNTIME_DIR", temp.path().join("runtime"));
         crate::provider_catalog::force_apply_openai_compatible_profile_env(None);
         reset_global_auth_state();
 
@@ -94,6 +95,7 @@ impl Drop for AuthTestSandbox {
 }
 
 fn reset_global_auth_state() {
+    crate::config::invalidate_config_cache();
     crate::auth::AuthStatus::invalidate_cache();
     crate::provider::clear_all_provider_unavailability_for_account();
     crate::provider::clear_all_model_unavailability_for_account();
@@ -102,6 +104,7 @@ fn reset_global_auth_state() {
 fn tracked_env_vars() -> Vec<String> {
     let mut keys = [
         "JCODE_HOME",
+        "JCODE_RUNTIME_DIR",
         "XDG_CONFIG_HOME",
         "JCODE_OPENROUTER_API_BASE",
         "JCODE_OPENROUTER_API_KEY_NAME",
@@ -167,6 +170,11 @@ mod tests {
             std::env::var("JCODE_HOME").ok().as_deref(),
             Some(sandbox.root().to_str().unwrap())
         );
+        assert_eq!(
+            std::env::var_os("JCODE_RUNTIME_DIR").map(PathBuf::from),
+            Some(sandbox.root().join("runtime"))
+        );
+        assert!(crate::storage::durable_state_dir().starts_with(sandbox.root()));
         assert_eq!(
             crate::storage::app_config_dir().unwrap(),
             sandbox.config_dir()

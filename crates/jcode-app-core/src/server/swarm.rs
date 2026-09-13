@@ -1759,6 +1759,45 @@ mod tests {
     use std::time::{Duration, Instant};
     use tokio::sync::{RwLock, mpsc};
 
+    // These retained tests exercise only synthetic records and channels, never
+    // agents. Their enabled-feature precondition must not depend on live config.
+    fn synthetic_broadcast_fixture(test: impl std::future::Future<Output = ()>) {
+        let _lock = crate::storage::lock_test_env();
+        struct Restore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                for (name, value) in self.0.drain(..) {
+                    if let Some(value) = value {
+                        crate::env::set_var(name, value);
+                    } else {
+                        crate::env::remove_var(name);
+                    }
+                }
+                crate::config::invalidate_config_cache();
+            }
+        }
+        let keys = ["JCODE_HOME", "JCODE_RUNTIME_DIR", "JCODE_SWARM_ENABLED"];
+        let _restore = Restore(
+            keys.into_iter()
+                .map(|key| (key, std::env::var_os(key)))
+                .collect(),
+        );
+        let root = tempfile::tempdir().expect("private broadcast fixture");
+        crate::env::set_var("JCODE_HOME", root.path());
+        crate::env::set_var("JCODE_RUNTIME_DIR", root.path().join("runtime"));
+        crate::env::set_var("JCODE_SWARM_ENABLED", "true");
+        crate::config::invalidate_config_cache();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                tokio::time::timeout(Duration::from_secs(5), test)
+                    .await
+                    .expect("synthetic broadcast fixture exceeded its deadline");
+            });
+    }
+
     fn plan_item(id: &str, content: &str) -> PlanItem {
         PlanItem {
             content: content.to_string(),
@@ -1979,91 +2018,94 @@ mod tests {
         assert_eq!(swarm_ancestors(&members, "x"), vec!["y"]);
     }
 
-    #[tokio::test]
-    async fn broadcast_swarm_plan_with_previous_includes_newly_ready_ids() {
-        let swarm_plans = Arc::new(RwLock::new(HashMap::from([(
-            "swarm-1".to_string(),
-            VersionedPlan {
-                items: vec![
-                    PlanItem {
-                        content: "setup".to_string(),
-                        status: "completed".to_string(),
-                        priority: "high".to_string(),
-                        id: "setup".to_string(),
-                        subsystem: None,
-                        file_scope: Vec::new(),
-                        blocked_by: Vec::new(),
-                        assigned_to: None,
-                    },
-                    PlanItem {
-                        content: "follow-up".to_string(),
-                        status: "queued".to_string(),
-                        priority: "high".to_string(),
-                        id: "follow-up".to_string(),
-                        subsystem: None,
-                        file_scope: Vec::new(),
-                        blocked_by: vec!["setup".to_string()],
-                        assigned_to: None,
-                    },
-                ],
-                version: 2,
-                participants: HashSet::from(["worker".to_string()]),
-                task_progress: HashMap::new(),
-                mode: "light".to_string(),
-                node_meta: HashMap::new(),
-            },
-        )])));
-        let (worker, mut worker_rx) = swarm_member("worker", "agent", false);
-        let swarm_members = Arc::new(RwLock::new(HashMap::from([("worker".to_string(), worker)])));
-        let swarms_by_id = Arc::new(RwLock::new(HashMap::from([(
-            "swarm-1".to_string(),
-            HashSet::from(["worker".to_string()]),
-        )])));
-        let previous_items = vec![
-            PlanItem {
-                content: "setup".to_string(),
-                status: "running".to_string(),
-                priority: "high".to_string(),
-                id: "setup".to_string(),
-                subsystem: None,
-                file_scope: Vec::new(),
-                blocked_by: Vec::new(),
-                assigned_to: Some("worker".to_string()),
-            },
-            PlanItem {
-                content: "follow-up".to_string(),
-                status: "queued".to_string(),
-                priority: "high".to_string(),
-                id: "follow-up".to_string(),
-                subsystem: None,
-                file_scope: Vec::new(),
-                blocked_by: vec!["setup".to_string()],
-                assigned_to: None,
-            },
-        ];
+    #[test]
+    fn broadcast_swarm_plan_with_previous_includes_newly_ready_ids() {
+        synthetic_broadcast_fixture(async {
+            let swarm_plans = Arc::new(RwLock::new(HashMap::from([(
+                "swarm-1".to_string(),
+                VersionedPlan {
+                    items: vec![
+                        PlanItem {
+                            content: "setup".to_string(),
+                            status: "completed".to_string(),
+                            priority: "high".to_string(),
+                            id: "setup".to_string(),
+                            subsystem: None,
+                            file_scope: Vec::new(),
+                            blocked_by: Vec::new(),
+                            assigned_to: None,
+                        },
+                        PlanItem {
+                            content: "follow-up".to_string(),
+                            status: "queued".to_string(),
+                            priority: "high".to_string(),
+                            id: "follow-up".to_string(),
+                            subsystem: None,
+                            file_scope: Vec::new(),
+                            blocked_by: vec!["setup".to_string()],
+                            assigned_to: None,
+                        },
+                    ],
+                    version: 2,
+                    participants: HashSet::from(["worker".to_string()]),
+                    task_progress: HashMap::new(),
+                    mode: "light".to_string(),
+                    node_meta: HashMap::new(),
+                },
+            )])));
+            let (worker, mut worker_rx) = swarm_member("worker", "agent", false);
+            let swarm_members =
+                Arc::new(RwLock::new(HashMap::from([("worker".to_string(), worker)])));
+            let swarms_by_id = Arc::new(RwLock::new(HashMap::from([(
+                "swarm-1".to_string(),
+                HashSet::from(["worker".to_string()]),
+            )])));
+            let previous_items = vec![
+                PlanItem {
+                    content: "setup".to_string(),
+                    status: "running".to_string(),
+                    priority: "high".to_string(),
+                    id: "setup".to_string(),
+                    subsystem: None,
+                    file_scope: Vec::new(),
+                    blocked_by: Vec::new(),
+                    assigned_to: Some("worker".to_string()),
+                },
+                PlanItem {
+                    content: "follow-up".to_string(),
+                    status: "queued".to_string(),
+                    priority: "high".to_string(),
+                    id: "follow-up".to_string(),
+                    subsystem: None,
+                    file_scope: Vec::new(),
+                    blocked_by: vec!["setup".to_string()],
+                    assigned_to: None,
+                },
+            ];
 
-        broadcast_swarm_plan_with_previous(
-            "swarm-1",
-            Some("task_completed".to_string()),
-            Some(&previous_items),
-            &swarm_plans,
-            &swarm_members,
-            &swarms_by_id,
-        )
-        .await;
+            broadcast_swarm_plan_with_previous(
+                "swarm-1",
+                Some("task_completed".to_string()),
+                Some(&previous_items),
+                &swarm_plans,
+                &swarm_members,
+                &swarms_by_id,
+            )
+            .await;
 
-        match worker_rx.recv().await.expect("swarm plan event") {
-            ServerEvent::SwarmPlan {
-                reason,
-                summary: Some(summary),
-                ..
-            } => {
-                assert_eq!(reason.as_deref(), Some("task_completed"));
-                assert_eq!(summary.newly_ready_ids, vec!["follow-up".to_string()]);
-                assert_eq!(summary.next_ready_ids, vec!["follow-up".to_string()]);
+            match worker_rx.recv().await.expect("swarm plan event") {
+                ServerEvent::SwarmPlan {
+                    reason,
+                    summary: Some(summary),
+                    ..
+                } => {
+                    assert_eq!(reason.as_deref(), Some("task_completed"));
+                    assert_eq!(summary.newly_ready_ids, vec!["follow-up".to_string()]);
+                    assert_eq!(summary.next_ready_ids, vec!["follow-up".to_string()]);
+                }
+                other => panic!("expected SwarmPlan event, got {other:?}"),
             }
-            other => panic!("expected SwarmPlan event, got {other:?}"),
-        }
+        });
     }
 
     /// Deterministic demonstration of the mutate->broadcast version-inversion
@@ -2087,89 +2129,92 @@ mod tests {
     /// whether the TUI-side monotonicity guard (server_events.rs SwarmPlan
     /// handler currently overwrites `swarm_plan_version` unconditionally) is
     /// still needed.
-    #[tokio::test]
-    async fn swarm_plan_broadcast_versions_can_invert_on_one_member_channel() {
-        let swarm_plans = Arc::new(RwLock::new(HashMap::from([(
-            "swarm-1".to_string(),
-            VersionedPlan {
-                items: vec![plan_item("t1", "task one")],
-                version: 5,
-                // Empty participants: broadcast A takes the swarms_by_id
-                // fallback path, which is where we deterministically park it.
-                participants: HashSet::new(),
-                task_progress: HashMap::new(),
-                mode: "light".to_string(),
-                node_meta: HashMap::new(),
-            },
-        )])));
-        let (worker, mut worker_rx) = swarm_member("worker", "agent", false);
-        let swarm_members = Arc::new(RwLock::new(HashMap::from([("worker".to_string(), worker)])));
-        let swarms_by_id = Arc::new(RwLock::new(HashMap::from([(
-            "swarm-1".to_string(),
-            HashSet::from(["worker".to_string()]),
-        )])));
+    #[test]
+    fn swarm_plan_broadcast_versions_can_invert_on_one_member_channel() {
+        synthetic_broadcast_fixture(async {
+            let swarm_plans = Arc::new(RwLock::new(HashMap::from([(
+                "swarm-1".to_string(),
+                VersionedPlan {
+                    items: vec![plan_item("t1", "task one")],
+                    version: 5,
+                    // Empty participants: broadcast A takes the swarms_by_id
+                    // fallback path, which is where we deterministically park it.
+                    participants: HashSet::new(),
+                    task_progress: HashMap::new(),
+                    mode: "light".to_string(),
+                    node_meta: HashMap::new(),
+                },
+            )])));
+            let (worker, mut worker_rx) = swarm_member("worker", "agent", false);
+            let swarm_members =
+                Arc::new(RwLock::new(HashMap::from([("worker".to_string(), worker)])));
+            let swarms_by_id = Arc::new(RwLock::new(HashMap::from([(
+                "swarm-1".to_string(),
+                HashSet::from(["worker".to_string()]),
+            )])));
 
-        // Hold a write guard on swarms_by_id so broadcast A parks after it
-        // has already snapshotted version 5 from swarm_plans.
-        let gate = swarms_by_id.write().await;
+            // Hold a write guard on swarms_by_id so broadcast A parks after it
+            // has already snapshotted version 5 from swarm_plans.
+            let gate = swarms_by_id.write().await;
 
-        let a = tokio::spawn({
-            let swarm_plans = Arc::clone(&swarm_plans);
-            let swarm_members = Arc::clone(&swarm_members);
-            let swarms_by_id = Arc::clone(&swarms_by_id);
-            async move {
-                broadcast_swarm_plan(
-                    "swarm-1",
-                    Some("mutator_1".to_string()),
-                    &swarm_plans,
-                    &swarm_members,
-                    &swarms_by_id,
-                )
-                .await;
+            let a = tokio::spawn({
+                let swarm_plans = Arc::clone(&swarm_plans);
+                let swarm_members = Arc::clone(&swarm_members);
+                let swarms_by_id = Arc::clone(&swarms_by_id);
+                async move {
+                    broadcast_swarm_plan(
+                        "swarm-1",
+                        Some("mutator_1".to_string()),
+                        &swarm_plans,
+                        &swarm_members,
+                        &swarms_by_id,
+                    )
+                    .await;
+                }
+            });
+            // Current-thread test runtime: yielding runs A until it parks on the
+            // contended swarms_by_id.read().await, past its v5 snapshot.
+            for _ in 0..16 {
+                tokio::task::yield_now().await;
             }
-        });
-        // Current-thread test runtime: yielding runs A until it parks on the
-        // contended swarms_by_id.read().await, past its v5 snapshot.
-        for _ in 0..16 {
-            tokio::task::yield_now().await;
-        }
 
-        // Mutator B: bump to v6 and register an explicit participant so B's
-        // broadcast skips the swarms_by_id fallback and is not blocked by
-        // the gate. This mirrors real mutators (write, release, broadcast).
-        {
-            let mut plans = swarm_plans.write().await;
-            let vp = plans.get_mut("swarm-1").expect("plan");
-            vp.version = 6;
-            vp.participants.insert("worker".to_string());
-        }
-        broadcast_swarm_plan(
-            "swarm-1",
-            Some("mutator_2".to_string()),
-            &swarm_plans,
-            &swarm_members,
-            &swarms_by_id,
-        )
-        .await;
-
-        // Release A: it resumes with its stale v5 snapshot and sends it
-        // after v6 on the same ordered channel.
-        drop(gate);
-        a.await.expect("broadcast task");
-
-        let mut versions = Vec::new();
-        while let Ok(event) = worker_rx.try_recv() {
-            if let ServerEvent::SwarmPlan { version, .. } = event {
-                versions.push(version);
+            // Mutator B: bump to v6 and register an explicit participant so B's
+            // broadcast skips the swarms_by_id fallback and is not blocked by
+            // the gate. This mirrors real mutators (write, release, broadcast).
+            {
+                let mut plans = swarm_plans.write().await;
+                let vp = plans.get_mut("swarm-1").expect("plan");
+                vp.version = 6;
+                vp.participants.insert("worker".to_string());
             }
-        }
-        assert_eq!(
-            versions,
-            vec![6, 5],
-            "expected version inversion on one member channel; if this fails \
+            broadcast_swarm_plan(
+                "swarm-1",
+                Some("mutator_2".to_string()),
+                &swarm_plans,
+                &swarm_members,
+                &swarms_by_id,
+            )
+            .await;
+
+            // Release A: it resumes with its stale v5 snapshot and sends it
+            // after v6 on the same ordered channel.
+            drop(gate);
+            a.await.expect("broadcast task");
+
+            let mut versions = Vec::new();
+            while let Ok(event) = worker_rx.try_recv() {
+                if let ServerEvent::SwarmPlan { version, .. } = event {
+                    versions.push(version);
+                }
+            }
+            assert_eq!(
+                versions,
+                vec![6, 5],
+                "expected version inversion on one member channel; if this fails \
              the mutate->broadcast race may have been fixed (update the \
              wiring audit)"
-        );
+            );
+        });
     }
 
     /// Deterministic demonstration of the SwarmStatus immediate-path
@@ -2202,64 +2247,67 @@ mod tests {
     /// SwarmStatus and dropping stale ones consumer-side); update the wiring
     /// audit. If it fails because broadcast A parks somewhere else, the tokio
     /// coop budget constants changed: re-derive the `128 - 2` drain count.
-    #[tokio::test]
-    async fn swarm_status_immediate_broadcasts_can_invert_on_one_member_channel() {
-        let (worker, mut worker_rx) = swarm_member("worker", "agent", false);
-        let swarm_members = Arc::new(RwLock::new(HashMap::from([("worker".to_string(), worker)])));
-        let swarms_by_id = Arc::new(RwLock::new(HashMap::from([(
-            "swarm-1".to_string(),
-            HashSet::from(["worker".to_string()]),
-        )])));
+    #[test]
+    fn swarm_status_immediate_broadcasts_can_invert_on_one_member_channel() {
+        synthetic_broadcast_fixture(async {
+            let (worker, mut worker_rx) = swarm_member("worker", "agent", false);
+            let swarm_members =
+                Arc::new(RwLock::new(HashMap::from([("worker".to_string(), worker)])));
+            let swarms_by_id = Arc::new(RwLock::new(HashMap::from([(
+                "swarm-1".to_string(),
+                HashSet::from(["worker".to_string()]),
+            )])));
 
-        // Broadcast A: snapshots status "ready", then is forced to yield at
-        // the fanout write acquisition, before sending.
-        let a = tokio::spawn({
-            let swarm_members = Arc::clone(&swarm_members);
-            let swarms_by_id = Arc::clone(&swarms_by_id);
-            async move {
-                // Initial task budget is 128. Leave exactly 2 units so the two
-                // read acquisitions (session-id list + status snapshot)
-                // succeed and the fanout write acquisition forces a yield.
-                for _ in 0..126 {
-                    tokio::task::coop::consume_budget().await;
+            // Broadcast A: snapshots status "ready", then is forced to yield at
+            // the fanout write acquisition, before sending.
+            let a = tokio::spawn({
+                let swarm_members = Arc::clone(&swarm_members);
+                let swarms_by_id = Arc::clone(&swarms_by_id);
+                async move {
+                    // Initial task budget is 128. Leave exactly 2 units so the two
+                    // read acquisitions (session-id list + status snapshot)
+                    // succeed and the fanout write acquisition forces a yield.
+                    for _ in 0..126 {
+                        tokio::task::coop::consume_budget().await;
+                    }
+                    broadcast_swarm_status("swarm-1", &swarm_members, &swarms_by_id).await;
                 }
-                broadcast_swarm_status("swarm-1", &swarm_members, &swarms_by_id).await;
+            });
+            // Single yield on the current-thread runtime: A runs its entire first
+            // poll (budget drain + both reads) and parks after snapshotting
+            // "ready". Its coop yield happens *before* joining the lock queue, so
+            // every acquisition below is uncontended and the mutator finishes
+            // within one poll, before A is re-polled.
+            tokio::task::yield_now().await;
+
+            // Concurrent mutator: flips the status and completes its own
+            // immediate broadcast while A is parked between snapshot and send.
+            {
+                let mut members = swarm_members.write().await;
+                members.get_mut("worker").expect("worker member").status = "running".to_string();
             }
-        });
-        // Single yield on the current-thread runtime: A runs its entire first
-        // poll (budget drain + both reads) and parks after snapshotting
-        // "ready". Its coop yield happens *before* joining the lock queue, so
-        // every acquisition below is uncontended and the mutator finishes
-        // within one poll, before A is re-polled.
-        tokio::task::yield_now().await;
+            broadcast_swarm_status("swarm-1", &swarm_members, &swarms_by_id).await;
 
-        // Concurrent mutator: flips the status and completes its own
-        // immediate broadcast while A is parked between snapshot and send.
-        {
-            let mut members = swarm_members.write().await;
-            members.get_mut("worker").expect("worker member").status = "running".to_string();
-        }
-        broadcast_swarm_status("swarm-1", &swarm_members, &swarms_by_id).await;
+            // Release A: it resumes with a fresh budget and sends its stale
+            // "ready" snapshot after "running" on the same ordered channel.
+            a.await.expect("broadcast task");
 
-        // Release A: it resumes with a fresh budget and sends its stale
-        // "ready" snapshot after "running" on the same ordered channel.
-        a.await.expect("broadcast task");
-
-        let mut statuses = Vec::new();
-        while let Ok(event) = worker_rx.try_recv() {
-            if let ServerEvent::SwarmStatus { members } = event {
-                assert_eq!(members.len(), 1);
-                assert_eq!(members[0].session_id, "worker");
-                statuses.push(members[0].status.clone());
+            let mut statuses = Vec::new();
+            while let Ok(event) = worker_rx.try_recv() {
+                if let ServerEvent::SwarmStatus { members } = event {
+                    assert_eq!(members.len(), 1);
+                    assert_eq!(members[0].session_id, "worker");
+                    statuses.push(members[0].status.clone());
+                }
             }
-        }
-        assert_eq!(
-            statuses,
-            vec!["running".to_string(), "ready".to_string()],
-            "expected status inversion (new-then-old) on one member channel; \
+            assert_eq!(
+                statuses,
+                vec!["running".to_string(), "ready".to_string()],
+                "expected status inversion (new-then-old) on one member channel; \
              if this fails with the correct order, the snapshot-vs-send race \
              may have been fixed (update the wiring audit)"
-        );
+            );
+        });
     }
 
     /// Restored (persisted) plan participants with dead channels starve live

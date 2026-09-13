@@ -2,6 +2,22 @@ use super::*;
 use crate::bus::BackgroundTaskStatus;
 use std::ffi::OsStr;
 
+#[test]
+fn simulated_reload_without_explicit_home_fails_before_metadata_access() {
+    let _lock = crate::storage::lock_test_env();
+    let _test = EnvVarGuard::set("JCODE_TEST_SESSION", "1");
+    let _home = EnvVarGuard::remove("JCODE_HOME");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let error = runtime
+        .block_on(SelfDevTool::new().do_reload(None, "fixture", ToolExecutionMode::Direct, None))
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("refusing to publish test metadata")
+    );
+}
+
 struct EnvVarGuard {
     key: &'static str,
     original: Option<std::ffi::OsString>,

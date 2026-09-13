@@ -45,14 +45,12 @@ fn test_skill_prompt_integration() {
 
 #[test]
 fn test_load_agents_md_files_uses_sandboxed_global_files() {
-    let _guard = crate::storage::lock_test_env();
-    let prev_home = std::env::var_os("JCODE_HOME");
-    let temp = tempfile::TempDir::new().unwrap();
-    crate::env::set_var("JCODE_HOME", temp.path());
-    std::fs::create_dir_all(temp.path().join("external")).unwrap();
+    let home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let temp = home.root();
+    std::fs::create_dir_all(temp.join("external")).unwrap();
 
     std::fs::write(
-        temp.path().join("external/AGENTS.md"),
+        temp.join("external/AGENTS.md"),
         "sandboxed global agents instructions",
     )
     .unwrap();
@@ -65,12 +63,6 @@ fn test_load_agents_md_files_uses_sandboxed_global_files() {
     assert!(content.contains("# Global Instructions (~/AGENTS.md)"));
     assert!(!content.contains("~/.AGENTS.md"));
     assert!(content.contains("sandboxed global agents instructions"));
-
-    if let Some(prev_home) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev_home);
-    } else {
-        crate::env::remove_var("JCODE_HOME");
-    }
 }
 
 #[test]
@@ -105,13 +97,11 @@ fn sponsored_discovery_is_not_injected_into_the_system_prompt() {
 
 #[test]
 fn test_prompt_overlay_files_are_loaded_from_project_and_global_jcode_dirs() {
-    let _guard = crate::storage::lock_test_env();
-    let prev_home = std::env::var_os("JCODE_HOME");
-    let temp = tempfile::TempDir::new().unwrap();
-    crate::env::set_var("JCODE_HOME", temp.path());
-    std::fs::create_dir_all(temp.path()).unwrap();
+    let home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let temp = home.root();
+    std::fs::create_dir_all(temp).unwrap();
     std::fs::write(
-        temp.path().join("prompt-overlay.md"),
+        temp.join("prompt-overlay.md"),
         "global prompt overlay instructions",
     )
     .unwrap();
@@ -129,23 +119,15 @@ fn test_prompt_overlay_files_are_loaded_from_project_and_global_jcode_dirs() {
     assert!(prompt.contains("project prompt overlay instructions"));
     assert!(prompt.contains("global prompt overlay instructions"));
     assert!(info.prompt_overlay_chars > 0);
-
-    if let Some(prev_home) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev_home);
-    } else {
-        crate::env::remove_var("JCODE_HOME");
-    }
 }
 
 #[test]
 fn test_preferred_tools_files_are_loaded_from_project_and_global_jcode_dirs() {
-    let _guard = crate::storage::lock_test_env();
-    let prev_home = std::env::var_os("JCODE_HOME");
-    let temp = tempfile::TempDir::new().unwrap();
-    crate::env::set_var("JCODE_HOME", temp.path());
-    std::fs::create_dir_all(temp.path()).unwrap();
+    let home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let temp = home.root();
+    std::fs::create_dir_all(temp).unwrap();
     std::fs::write(
-        temp.path().join("preferred-tools.md"),
+        temp.join("preferred-tools.md"),
         "global preferred tools instructions",
     )
     .unwrap();
@@ -200,12 +182,6 @@ fn test_preferred_tools_files_are_loaded_from_project_and_global_jcode_dirs() {
             .contains("global preferred tools instructions")
     );
     assert!(split_info.preferred_tools_chars > 0);
-
-    if let Some(prev_home) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev_home);
-    } else {
-        crate::env::remove_var("JCODE_HOME");
-    }
 }
 
 #[test]
