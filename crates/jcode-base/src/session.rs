@@ -63,6 +63,8 @@ pub use jcode_session_types::{
     StoredStartupContextBlock, StoredStartupContextReceipt, StoredTokenUsage,
 };
 use journal::{PersistVectorMode, SessionJournalMeta, SessionPersistState};
+mod isolated;
+pub use isolated::{IsolatedChildIdentity, StoredIsolatedChild};
 pub use maintenance::prune_old_session_backups;
 pub use memory_profile::SessionMemoryProfileSnapshot;
 use memory_profile::{
@@ -200,6 +202,7 @@ pub enum SystemPromptDispatchError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentProfileSessionError {
+    InvalidChildDirective(String),
     MissingActivation,
     NotDispatched,
     ActiveTransitionMissing(String),
@@ -210,6 +213,7 @@ pub enum AgentProfileSessionError {
 impl std::fmt::Display for AgentProfileSessionError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::InvalidChildDirective(detail) => formatter.write_str(detail),
             Self::MissingActivation => {
                 formatter.write_str("session has no frozen system-prompt activation")
             }
@@ -270,6 +274,9 @@ pub struct Session {
     pub provider_receipt_namespace: String,
     pub id: String,
     pub parent_id: Option<String>,
+    /// Isolated origin is not primary split/transfer ancestry. Contains no prompt bodies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolated_child: Option<StoredIsolatedChild>,
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_title: Option<String>,
@@ -405,6 +412,8 @@ pub struct Session {
 
 #[derive(Debug, Deserialize)]
 struct SessionStartupStub {
+    #[serde(default)]
+    isolated_child: Option<StoredIsolatedChild>,
     #[serde(default)]
     provider_receipt_watermark: i64,
     #[serde(default)]
@@ -641,6 +650,8 @@ impl Session {
     /// context mutation. An active appended profile must identify exactly one
     /// structurally registered, code-framed authoritative message.
     pub fn validate_active_agent_profile(&self) -> Result<(), AgentProfileSessionError> {
+        self.validate_isolated_child()
+            .map_err(|error| AgentProfileSessionError::InvalidChildDirective(error.to_string()))?;
         let Some(message_id) = self.active_transition_message_id() else {
             return Ok(());
         };
@@ -924,6 +935,7 @@ impl Session {
 
     fn session_from_startup_stub(stub: SessionStartupStub) -> Self {
         let mut session = Self::create_with_id(stub.id, stub.parent_id, stub.title);
+        session.isolated_child = stub.isolated_child;
         session.provider_receipt_watermark = stub.provider_receipt_watermark;
         session.provider_receipt_namespace = stub.provider_receipt_namespace;
         session.custom_title = stub.custom_title;
@@ -968,6 +980,7 @@ impl Session {
 
     fn session_from_remote_startup_snapshot(snapshot: RemoteStartupSessionSnapshot) -> Self {
         let mut session = Self::create_with_id(snapshot.id, snapshot.parent_id, snapshot.title);
+        session.isolated_child = snapshot.isolated_child;
         session.provider_receipt_watermark = snapshot.provider_receipt_watermark;
         session.provider_receipt_namespace = snapshot.provider_receipt_namespace;
         session.custom_title = snapshot.custom_title;
@@ -1148,6 +1161,7 @@ impl Session {
 
     fn journal_meta(&self) -> SessionJournalMeta {
         SessionJournalMeta {
+            isolated_child: self.isolated_child.clone(),
             provider_receipt_watermark: self.provider_receipt_watermark,
             provider_receipt_namespace: self.provider_receipt_namespace.clone(),
             parent_id: self.parent_id.clone(),
@@ -1461,6 +1475,7 @@ impl Session {
     }
 
     fn apply_journal_meta(&mut self, meta: SessionJournalMeta) {
+        self.isolated_child = meta.isolated_child;
         self.provider_receipt_watermark = meta.provider_receipt_watermark;
         self.provider_receipt_namespace = meta.provider_receipt_namespace;
         self.parent_id = meta.parent_id;
@@ -1697,6 +1712,7 @@ impl Session {
         let short_name = extract_session_name(&session_id).map(|s| s.to_string());
         let mut session = Self {
             id: session_id,
+            isolated_child: None,
             persistence_identity: Default::default(),
             parent_id,
             title,
@@ -1768,6 +1784,7 @@ impl Session {
         let is_debug = default_is_test_session();
         let mut session = Self {
             id,
+            isolated_child: None,
             persistence_identity: Default::default(),
             parent_id,
             title,
@@ -2876,6 +2893,8 @@ fn redact_context_generator(generator: &mut jcode_session_types::StoredContextAr
 
 #[derive(Debug, Deserialize)]
 struct RemoteStartupSessionSnapshot {
+    #[serde(default)]
+    isolated_child: Option<StoredIsolatedChild>,
     #[serde(default)]
     provider_receipt_watermark: i64,
     #[serde(default)]

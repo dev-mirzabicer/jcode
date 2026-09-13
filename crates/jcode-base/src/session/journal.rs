@@ -9,6 +9,8 @@ use super::{
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(super) struct SessionJournalMeta {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) isolated_child: Option<super::StoredIsolatedChild>,
     #[serde(default)]
     pub(super) provider_receipt_watermark: i64,
     #[serde(default)]
@@ -100,6 +102,7 @@ pub(super) fn metadata_requires_snapshot(
     current: &SessionJournalMeta,
 ) -> bool {
     prev.parent_id != current.parent_id
+        || prev.isolated_child != current.isolated_child
         || prev.title != current.title
         || prev.custom_title != current.custom_title
         || prev.context_view != current.context_view

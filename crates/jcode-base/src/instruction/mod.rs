@@ -220,7 +220,7 @@ impl fmt::Display for InstructionSelector {
     }
 }
 
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub struct InstructionResourceRef {
     pub scope: InstructionScope,
     pub kind: InstructionKind,

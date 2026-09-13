@@ -591,6 +591,32 @@ impl Session {
         control_text: ControlText<'_>,
         persistence: &dyn StartupContextSessionPersistence,
     ) -> std::result::Result<StartupContextInstallOutcome, StartupContextInstallError> {
+        let previous = self.clone();
+        let installed = self.stage_prepared_startup_context_with(outcome, control_text)?;
+        if let Err(error) = persistence.persist(self) {
+            *self = previous;
+            return Err(StartupContextInstallError::Persistence(error));
+        }
+        Ok(installed)
+    }
+
+    /// Explicit new-caller preparation. The isolated creation owner persists the
+    /// complete Session only after model, tools and context preflight succeed.
+    pub fn stage_isolated_startup_context(
+        &mut self,
+        outcome: StartupPreparationOutcome,
+    ) -> std::result::Result<StartupContextInstallOutcome, StartupContextInstallError> {
+        let working_dir = self.working_dir.clone();
+        self.stage_prepared_startup_context_with(outcome, &|| {
+            control_text(working_dir.as_deref().map(std::path::Path::new), false)
+        })
+    }
+
+    fn stage_prepared_startup_context_with(
+        &mut self,
+        outcome: StartupPreparationOutcome,
+        control_text: ControlText<'_>,
+    ) -> std::result::Result<StartupContextInstallOutcome, StartupContextInstallError> {
         if matches!(outcome, StartupPreparationOutcome::Diagnostic(_)) {
             return Err(StartupContextInstallError::DiagnosticPreparationUnsupported);
         }
@@ -641,11 +667,6 @@ impl Session {
                 detail: error.to_string(),
             });
         }
-        if let Err(error) = persistence.persist(self) {
-            *self = previous;
-            return Err(StartupContextInstallError::Persistence(error));
-        }
-
         let accounting = self.startup_context_accounting();
         Ok(StartupContextInstallOutcome {
             state: accounting

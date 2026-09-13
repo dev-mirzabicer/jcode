@@ -158,6 +158,16 @@ impl Session {
         session_id: &str,
         stop: Option<&jcode_agent_runtime::InterruptSignal>,
     ) -> Result<Option<String>> {
+        Ok(Self::inspection_relationships(state_root, session_id, stop)?.0)
+    }
+
+    /// Primary continuation parent and isolated original parent are distinct.
+    /// This metadata read does not allocate prompt or transcript bodies.
+    pub fn inspection_relationships(
+        state_root: &Path,
+        session_id: &str,
+        stop: Option<&jcode_agent_runtime::InterruptSignal>,
+    ) -> Result<(Option<String>, Option<String>)> {
         ensure!(
             !session_id.is_empty()
                 && session_id
@@ -177,6 +187,16 @@ impl Session {
         struct Header {
             id: String,
             parent_id: Option<String>,
+            #[serde(default)]
+            isolated_child: Option<Child>,
+        }
+        #[derive(Deserialize)]
+        struct Child {
+            identity: Identity,
+        }
+        #[derive(Deserialize)]
+        struct Identity {
+            original_parent: String,
         }
         let header: Header = serde_json::from_reader(BufReader::new(CancellableRead {
             inner: File::open(&path)?,
@@ -186,7 +206,12 @@ impl Session {
             header.id == session_id,
             "Inspection relationship identity mismatch"
         );
-        Ok(header.parent_id)
+        Ok((
+            header.parent_id,
+            header
+                .isolated_child
+                .map(|child| child.identity.original_parent),
+        ))
     }
 
     pub fn capture_readonly(state_root: &Path, session_id: &str) -> Result<CapturedSession> {

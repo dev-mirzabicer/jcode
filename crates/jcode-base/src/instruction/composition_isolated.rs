@@ -264,7 +264,7 @@ mod tests {
             let home = temp.path().join("home");
             let project = temp.path().join("project");
             std::fs::create_dir_all(&project).unwrap();
-            let service = InstructionRepositoryService::from_paths(&home, &home.join("state"));
+            let service = InstructionRepositoryService::from_paths(&home, home.join("state"));
             let composer = SystemPromptComposer::from_repository_service(service);
             composer.ensure_global_store().unwrap();
             let fixture = Self {
