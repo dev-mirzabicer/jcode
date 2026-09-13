@@ -55,10 +55,13 @@ impl Drop for AbortAdoptedOnDrop {
 }
 
 /// Manages background task execution
+type ManagedControls =
+    Arc<RwLock<HashMap<(PathBuf, String), Arc<dyn jcode_tool_core::OwnedExecutionControl>>>>;
+
 pub struct BackgroundTaskManager {
     tasks: Arc<RwLock<HashMap<String, RunningTask>>>,
     output_dir: PathBuf,
-    managed: Arc<RwLock<HashMap<String, Arc<dyn jcode_tool_core::OwnedExecutionControl>>>>,
+    managed: ManagedControls,
 }
 
 impl BackgroundTaskManager {
@@ -1015,10 +1018,12 @@ impl BackgroundTaskManager {
     /// Best-effort synchronous check for whether a task is still live in this process.
     pub fn is_live_task(&self, task_id: &str) -> bool {
         if task_id.starts_with("run-") {
-            return self
-                .managed
-                .try_read()
-                .is_ok_and(|tasks| tasks.contains_key(task_id));
+            let Ok(root) = crate::storage::jcode_dir() else {
+                return false;
+            };
+            return self.managed.try_read().is_ok_and(|tasks| {
+                tasks.contains_key(&(root.join("execution"), task_id.to_string()))
+            });
         }
         let Ok(tasks) = self.tasks.try_read() else {
             return false;

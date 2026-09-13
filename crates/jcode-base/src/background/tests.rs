@@ -5,6 +5,142 @@ use tempfile::tempdir;
 use tokio::time::{Duration, sleep};
 
 #[test]
+fn managed_completion_keeps_its_registration_store_when_current_home_changes() -> Result<()> {
+    use crate::execution::{Capture, ExecutionStore, Invocation, PreparedInvocation, RunState};
+    struct Control {
+        id: String,
+        release: Arc<tokio::sync::Notify>,
+    }
+    #[async_trait::async_trait]
+    impl jcode_tool_core::OwnedExecutionControl for Control {
+        fn execution_id(&self) -> Option<String> {
+            Some(self.id.clone())
+        }
+        async fn request_stop(&self, _: jcode_tool_types::StopCause) -> Result<bool> {
+            Ok(false)
+        }
+        async fn wait(&self) -> Result<RunState> {
+            self.release.notified().await;
+            Ok(RunState::Completed)
+        }
+    }
+    let _lock = crate::storage::lock_test_env();
+    let first = tempdir()?;
+    let second = tempdir()?;
+    struct Restore(Option<std::ffi::OsString>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            if let Some(value) = self.0.take() {
+                crate::env::set_var("JCODE_HOME", value);
+            } else {
+                crate::env::remove_var("JCODE_HOME");
+            }
+        }
+    }
+    let _restore = Restore(std::env::var_os("JCODE_HOME"));
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime.block_on(async {
+        let invocation = Invocation {
+            session_id: "store-bound-completion".into(),
+            message_id: "message".into(),
+            call_path: vec!["call".into()],
+            tool: "fixture".into(),
+            input: serde_json::json!({}),
+            working_dir: None,
+            received_result_digest: None,
+        };
+        let mut records = Vec::new();
+        for root in [first.path(), second.path()] {
+            let store = ExecutionStore::open(root)?;
+            let PreparedInvocation::New(record) = store.prepare(&invocation, "owner")? else {
+                panic!()
+            };
+            store.start(&record.id, "owner")?;
+            store.promote(&record.id, "owner")?;
+            let capture = Capture::create(store.clone(), record.clone(), Default::default())?;
+            records.push((store, record, capture));
+        }
+        let release = Arc::new(tokio::sync::Notify::new());
+        let id = records[0].1.id.clone();
+        let manager = BackgroundTaskManager::with_output_dir(first.path().join("legacy"));
+        let mut events = Bus::global().subscribe();
+        crate::env::set_var("JCODE_HOME", first.path());
+        let waiter = tokio::spawn(async { Ok(jcode_tool_types::ToolOutput::new("waiter")) });
+        manager
+            .adopt_controlled(
+                "fixture",
+                &invocation.session_id,
+                waiter,
+                Arc::new(Control {
+                    id: id.clone(),
+                    release: release.clone(),
+                }),
+            )
+            .await?;
+        // Same logical ID exists in another store with a contradictory outcome.
+        records[0].2.seal(
+            jcode_tool_types::ToolOutput::new("original-store-output"),
+            RunState::Completed,
+        )?;
+        crate::env::set_var("JCODE_HOME", second.path());
+        let second_release = Arc::new(tokio::sync::Notify::new());
+        manager
+            .adopt_controlled(
+                "fixture",
+                &invocation.session_id,
+                tokio::spawn(async { Ok(jcode_tool_types::ToolOutput::new("second waiter")) }),
+                Arc::new(Control {
+                    id: id.clone(),
+                    release: second_release.clone(),
+                }),
+            )
+            .await?;
+        assert!(manager.is_live_task(&id));
+        records[1].2.seal(
+            jcode_tool_types::ToolOutput::new("wrong-store-output").with_error(true),
+            RunState::Failed,
+        )?;
+        crate::env::set_var("JCODE_HOME", second.path());
+        release.notify_one();
+        let event = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let BusEvent::BackgroundTaskCompleted(event) = events.recv().await?
+                    && event.task_id == id
+                {
+                    break Ok::<_, anyhow::Error>(event);
+                }
+            }
+        })
+        .await??;
+        assert_eq!(event.status, BackgroundTaskStatus::Completed);
+        assert!(event.output_file.starts_with(first.path()));
+        assert!(event.output_preview.contains("original-store-output"));
+        assert!(
+            manager
+                .managed
+                .read()
+                .await
+                .contains_key(&(records[1].0.root().to_path_buf(), id.clone())),
+            "The first completion must not remove the second store's control"
+        );
+        second_release.notify_one();
+        let event = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let BusEvent::BackgroundTaskCompleted(event) = events.recv().await?
+                    && event.task_id == id
+                {
+                    break Ok::<_, anyhow::Error>(event);
+                }
+            }
+        })
+        .await??;
+        assert_eq!(event.status, BackgroundTaskStatus::Failed);
+        assert!(event.output_file.starts_with(second.path()));
+        Ok(())
+    })
+}
+
+#[test]
 fn managed_snapshot_and_reload_records_survive_manager_recreation_without_body_reads() -> Result<()>
 {
     use crate::execution::{Capture, ExecutionStore, Invocation, PreparedInvocation, RunState};

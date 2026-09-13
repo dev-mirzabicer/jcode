@@ -685,10 +685,12 @@ impl jcode_tool_core::OwnedExecutionControl for BackgroundControl {
             if receiver.borrow_and_update().is_some() {
                 break;
             }
-            receiver
-                .changed()
-                .await
-                .context("Execution owner ended without a completion receipt")?;
+            if receiver.changed().await.is_err() {
+                // The compatibility waiter can disappear independently of a
+                // native owner or its sealed receipt. The authenticated owner
+                // and durable record below decide completion, not this channel.
+                break;
+            }
         }
         match runtime::control_in_store(
             &self.run.store,

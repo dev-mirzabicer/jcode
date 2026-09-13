@@ -131,8 +131,9 @@ impl BackgroundTaskManager {
         let session = session.to_string();
         let saved = id.clone();
         let scope = (tool.clone(), session.clone());
-        let (info, created) = tokio::task::spawn_blocking(move || {
-            let store = store()?;
+        let registration_root = crate::storage::jcode_dir()?;
+        let (info, created, registration_store) = tokio::task::spawn_blocking(move || {
+            let store = ExecutionStore::open(&registration_root)?;
             let record = store
                 .inspect(&saved)?
                 .context("Unknown controlled invocation")?;
@@ -166,15 +167,17 @@ impl BackgroundTaskManager {
                     status_file,
                 },
                 created,
+                store,
             ))
         })
         .await??;
         // The original Registry waiter is not the work owner. It is safe to
         // detach this delivery-only handle after promotion has been committed.
         drop(handle);
+        let key = (registration_store.root().to_path_buf(), id.clone());
         let mut managed = self.managed.write().await;
-        if !managed.contains_key(&id) {
-            managed.insert(id.clone(), control.clone());
+        if !managed.contains_key(&key) {
+            managed.insert(key.clone(), control.clone());
             let manager = Self {
                 tasks: self.tasks.clone(),
                 output_dir: self.output_dir.clone(),
@@ -182,8 +185,10 @@ impl BackgroundTaskManager {
             };
             tokio::spawn(async move {
                 if control.wait().await.is_ok() {
-                    let _ = manager.publish_managed_completion(&id).await;
-                    manager.managed.write().await.remove(&id);
+                    let _ = manager
+                        .publish_managed_completion_in_store(registration_store, &id)
+                        .await;
+                    manager.managed.write().await.remove(&key);
                 }
             });
         }
@@ -227,9 +232,18 @@ impl BackgroundTaskManager {
     }
 
     pub async fn publish_managed_completion(&self, id: &str) -> Result<()> {
+        let root = crate::storage::jcode_dir()?;
+        let store = tokio::task::spawn_blocking(move || ExecutionStore::open(&root)).await??;
+        self.publish_managed_completion_in_store(store, id).await
+    }
+
+    async fn publish_managed_completion_in_store(
+        &self,
+        store: ExecutionStore,
+        id: &str,
+    ) -> Result<()> {
         let id = id.to_string();
         let completion = tokio::task::spawn_blocking(move || {
-            let store = store()?;
             let Some(delivery) = store.background_delivery(&id)? else {
                 return Ok(None);
             };
@@ -322,7 +336,8 @@ impl BackgroundTaskManager {
             .map(|(id, control)| (id.clone(), control.clone()))
             .collect();
         let mut errors = Vec::new();
-        for (id, control) in controls {
+        for (key, control) in controls {
+            let id = &key.1;
             match control.survives_reload().await {
                 Ok(true) => continue,
                 Ok(false) => {}
@@ -340,7 +355,7 @@ impl BackgroundTaskManager {
             }
             match tokio::time::timeout(Duration::from_secs(2), control.wait()).await {
                 Ok(Ok(_)) => {
-                    self.managed.write().await.remove(&id);
+                    self.managed.write().await.remove(&key);
                 }
                 Ok(Err(error)) => errors.push(format!("{id}: {error}")),
                 Err(_) => errors.push(format!("{id}: owned execution is still quiescing")),

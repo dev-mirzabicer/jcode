@@ -418,6 +418,20 @@ Windows process-control parity or final WP-02 activation.
 
 ## Runtime control
 
+A closed compatibility-delivery channel is not proof that an execution lacks a
+result. The background waiter resolves the actual authenticated execution owner
+and durable receipt after channel closure. A still-running owner remains running;
+closing or timing out this wait does not cancel it. A completed receipt remains
+recoverable even if its earlier notification channel disappeared.
+
+Managed control registrations are keyed by execution-store path and invocation
+ID. Delayed completion publication retains the store captured at registration,
+rather than resolving whichever home configuration happens to be current later.
+Tests use the same logical run ID in two private stores with opposite outcomes to
+prove one cannot replace the other's result or remove its live control. Reload
+still examines all registered owned controls and refuses unproven quiescence;
+this is not a shortcut that discards missing or uncertain work.
+
 Every executing runtime registers a private, versioned control endpoint. The
 metadata stores an instance identity, endpoint and kernel-held lease. Control
 credentials are not serializable as public runtime metadata and are excluded

@@ -1,6 +1,52 @@
 use super::*;
 use jcode_tool_core::ToolExecutionMode;
 
+#[tokio::test]
+async fn closed_delivery_channel_still_reads_the_actual_owner_outcome() -> Result<()> {
+    use jcode_tool_core::OwnedExecutionControl;
+    let mut fixture = start().await?;
+    let original = LIVE
+        .lock()
+        .unwrap()
+        .get(&(fixture.store.root().to_path_buf(), fixture.id.clone()))
+        .unwrap()
+        .clone();
+    let (sender, result) = tokio::sync::watch::channel(None);
+    drop(sender);
+    let control = super::super::BackgroundControl {
+        run: Arc::new(LiveRun {
+            owns_execution: AtomicBool::new(false),
+            store: original.store.clone(),
+            runtime: original.runtime.clone(),
+            invocation: original.invocation.clone(),
+            stop: original.stop.clone(),
+            background: AtomicBool::new(true),
+            ready: original.ready.clone(),
+            delivery: tokio::sync::Mutex::new(()),
+            commands: original.commands.clone(),
+            result,
+        }),
+    };
+    let waiting = tokio::time::timeout(std::time::Duration::from_millis(50), control.wait()).await;
+    assert!(
+        waiting.is_err(),
+        "A closed delivery channel cannot make live work terminal"
+    );
+    assert_eq!(
+        fixture.store.inspect(&fixture.id)?.unwrap().state,
+        RunState::Running
+    );
+    fixture.release.notify_one();
+    (&mut fixture.task).await??;
+    assert_eq!(
+        fixture.store.inspect(&fixture.id)?.unwrap().state,
+        RunState::Completed
+    );
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), control.wait()).await??;
+    assert_eq!(outcome, RunState::Completed);
+    Ok(())
+}
+
 struct Fixture {
     store: ExecutionStore,
     id: String,
