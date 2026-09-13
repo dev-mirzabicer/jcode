@@ -1,4 +1,6 @@
 use super::*;
+#[path = "retention_tests.rs"]
+mod retention_tests;
 use crate::execution::{Invocation, PreparedInvocation};
 use std::sync::{
     Mutex,

@@ -64,6 +64,9 @@ pub fn remove_unpublished_session(session_id: &str) -> Result<()> {
         snapshot.with_extension("bak"),
         journal.clone(),
         journal.with_extension("bak"),
+        // This identity never became usable and its creation owner is still
+        // exclusive. Ordinary published-session leases are never unlinked.
+        snapshot.with_extension("persistence.lock"),
     ] {
         match std::fs::remove_file(&path) {
             Ok(()) => {}

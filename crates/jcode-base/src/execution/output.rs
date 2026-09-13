@@ -445,6 +445,7 @@ impl ExecutionStore {
 
     /// Read a prior terminal outcome. Never call the original producer here.
     pub fn result(&self, record: &RunRecord, target: NonZeroUsize) -> Result<ToolOutput> {
+        self.ensure_output_not_deleted(&record.id)?;
         ensure!(
             record.state.terminal(),
             "Invocation is still active; inspect or wait rather than reexecuting"

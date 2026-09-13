@@ -63,6 +63,7 @@ pub(super) fn persistence_lease(path: &Path) -> Result<File> {
     let parent = path.parent().context("Session snapshot has no parent")?;
     crate::storage::ensure_dir(parent)?;
     let parent = parent.canonicalize()?;
+    super::persistence_writer::register(&parent)?;
     let leaf = path
         .file_name()
         .context("Session snapshot has no filename")?;
@@ -97,6 +98,37 @@ impl CapturedSession {
 }
 
 impl Session {
+    /// Read relationship metadata without loading prompt/transcript bodies or
+    /// invoking the activation/migration loader.
+    pub fn inspection_parent(state_root: &Path, session_id: &str) -> Result<Option<String>> {
+        ensure!(
+            !session_id.is_empty()
+                && session_id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-')),
+            "Invalid inspection session identity"
+        );
+        let path = state_root
+            .join("sessions")
+            .join(format!("{session_id}.json"));
+        ensure!(
+            std::fs::symlink_metadata(&path)?.is_file(),
+            "Inspection relationship source changed type"
+        );
+        let _lease = persistence_lease(&path)?;
+        #[derive(Deserialize)]
+        struct Header {
+            id: String,
+            parent_id: Option<String>,
+        }
+        let header: Header = serde_json::from_reader(BufReader::new(File::open(&path)?))?;
+        ensure!(
+            header.id == session_id,
+            "Inspection relationship identity mismatch"
+        );
+        Ok(header.parent_id)
+    }
+
     pub fn capture_readonly(state_root: &Path, session_id: &str) -> Result<CapturedSession> {
         ensure!(
             !session_id.is_empty()
@@ -114,12 +146,22 @@ impl Session {
     }
 
     pub fn capture_readonly_from_path(path: &Path, session_id: &str) -> Result<CapturedSession> {
+        Self::capture_readonly_with_metadata(path, session_id, |_| Ok(()))
+            .map(|(session, ())| session)
+    }
+
+    pub(crate) fn capture_readonly_with_metadata<T>(
+        path: &Path,
+        session_id: &str,
+        capture_metadata: impl FnOnce(&Session) -> Result<T>,
+    ) -> Result<(CapturedSession, T)> {
         // Reject absence before allocating any lock metadata.
         ensure!(
             std::fs::symlink_metadata(path)?.is_file(),
             "Inspection source is not a regular Session snapshot"
         );
         let _lease = persistence_lease(path)?;
+        super::persistence_writer::verify_active(path, session_id)?;
         let journal = session_journal_path_from_snapshot(path);
         let before = source_stamps(path, &journal)?;
         let mut session: Session = serde_json::from_reader(BufReader::new(File::open(path)?))?;
@@ -152,7 +194,13 @@ impl Session {
         }
         session.reset_persist_state(true);
         session.reset_provider_messages_cache();
-        Ok(CapturedSession { session })
+        let metadata = capture_metadata(&session)?;
+        super::persistence_writer::verify_active(path, session_id)?;
+        ensure!(
+            before == source_stamps(path, &journal)?,
+            "Session source changed outside persistence ownership during inspection metadata capture"
+        );
+        Ok((CapturedSession { session }, metadata))
     }
 }
 

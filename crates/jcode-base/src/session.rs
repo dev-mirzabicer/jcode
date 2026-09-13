@@ -14,19 +14,24 @@ use crate::storage::{active_pids_dir, register_active_pid, unregister_active_pid
 /// additionally holds a macOS power assertion so the system does not
 /// idle-sleep in the middle of a streaming model response.
 pub struct StreamingGuard {
+    _activity: crate::execution::SessionActivityGuard,
     _marker: crate::storage::StreamingGuard,
     #[allow(dead_code)]
     sleep_assertion: crate::platform::PowerAssertion,
 }
 
 impl StreamingGuard {
-    pub fn new(session_id: impl Into<String>) -> Self {
-        Self {
+    pub fn new(session_id: impl Into<String>) -> anyhow::Result<Self> {
+        let session_id = session_id.into();
+        let activity = crate::execution::ExecutionStore::open(&crate::storage::jcode_dir()?)?
+            .begin_session_activity(&session_id)?;
+        Ok(Self {
+            _activity: activity,
             _marker: crate::storage::StreamingGuard::new(session_id),
             sleep_assertion: crate::platform::PowerAssertion::prevent_user_idle_system_sleep(
                 "Jcode streaming model response",
             ),
-        }
+        })
     }
 }
 use chrono::{DateTime, Utc};
@@ -42,6 +47,7 @@ mod maintenance;
 mod memory_profile;
 mod model;
 mod persistence;
+mod persistence_writer;
 mod render;
 mod startup_context;
 mod storage_paths;

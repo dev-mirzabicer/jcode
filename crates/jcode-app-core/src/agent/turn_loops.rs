@@ -30,7 +30,7 @@ impl Agent {
         crate::session_metrics::record_turn(&self.session.id);
         // Mark this session as actively streaming for presence UIs (e.g. the
         // macOS menu bar indicator). Cleared automatically on every exit path.
-        let _streaming_guard = crate::session::StreamingGuard::new(self.session.id.clone());
+        let _streaming_guard = crate::session::StreamingGuard::new(self.session.id.clone())?;
         // Register this turn's cancel signal so session-level cancels reach
         // this in-flight turn even through stale control handles (issue #428).
         let _turn_cancel_guard = crate::turn_cancel_registry::register_active_turn(

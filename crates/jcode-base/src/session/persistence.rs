@@ -583,6 +583,10 @@ impl Session {
             .messages
             .len()
             .saturating_sub(self.persist_state.messages_len);
+        if delta_messages > 0 {
+            crate::execution::ExecutionStore::open(&crate::storage::jcode_dir()?)?
+                .touch_activity(&self.id, Utc::now().timestamp())?;
+        }
         let delta_env_snapshots = self
             .env_snapshots
             .len()

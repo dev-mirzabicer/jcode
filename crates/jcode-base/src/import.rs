@@ -863,13 +863,10 @@ fn import_session_from_file_with_target(
 }
 
 fn remove_prepared_takeover_session(session_id: &str) {
-    let Ok(snapshot) = crate::session::session_path(session_id) else {
-        return;
-    };
-    let journal = crate::session::session_journal_path_from_snapshot(&snapshot);
-    let backup = snapshot.with_extension("bak");
-    for path in [snapshot, journal, backup] {
-        let _ = std::fs::remove_file(path);
+    if let Err(error) = crate::session::remove_unpublished_session(session_id) {
+        crate::logging::warn(&format!(
+            "Failed to remove unpublished takeover session {session_id}: {error:#}"
+        ));
     }
     crate::session_list_cache::invalidate();
 }

@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-const SCHEMA: i64 = 17;
+const SCHEMA: i64 = 18;
 
 pub use jcode_tool_types::RunState;
 
@@ -253,6 +253,43 @@ impl ExecutionStore {
                 "ALTER TABLE runs ADD COLUMN native_tracking INTEGER; PRAGMA user_version=17;",
             )?;
         }
+        if version < 18 {
+            transaction.execute_batch("CREATE TABLE session_activity (
+                session_id TEXT PRIMARY KEY, last_active INTEGER NOT NULL, generation INTEGER NOT NULL
+            );
+            CREATE INDEX session_activity_idle ON session_activity(last_active,session_id);
+            CREATE TABLE session_activity_leases(token TEXT PRIMARY KEY,session_id TEXT NOT NULL,stopped_observed_at INTEGER);
+            CREATE INDEX activity_leases_session ON session_activity_leases(session_id);
+            CREATE TABLE inspection_blobs(digest TEXT PRIMARY KEY,bytes INTEGER NOT NULL);
+            CREATE TABLE inspection_snapshots(
+                sequence INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT UNIQUE NOT NULL,
+                reader TEXT NOT NULL,target TEXT NOT NULL,created INTEGER NOT NULL,
+                manifest_digest TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('retained','pruned'))
+            );
+            CREATE INDEX inspection_reader_target ON inspection_snapshots(reader,target,state,created,sequence);
+            CREATE TABLE inspection_blob_refs(
+                snapshot_id TEXT NOT NULL REFERENCES inspection_snapshots(id),
+                digest TEXT NOT NULL REFERENCES inspection_blobs(digest),
+                PRIMARY KEY(snapshot_id,digest)
+            );
+            CREATE INDEX inspection_blob_owners ON inspection_blob_refs(digest);
+            CREATE TABLE inspection_output_refs(snapshot_id TEXT NOT NULL REFERENCES inspection_snapshots(id),run_id TEXT NOT NULL REFERENCES runs(id),PRIMARY KEY(snapshot_id,run_id));
+            CREATE INDEX inspection_output_owners ON inspection_output_refs(run_id);
+            ALTER TABLE output_locations ADD COLUMN cold_archived_at INTEGER;
+            CREATE TABLE cleanup_reviews(id TEXT PRIMARY KEY,reader TEXT NOT NULL,confirmation TEXT NOT NULL,digest TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('reviewed','confirmed')));
+            CREATE TABLE output_deletions(id TEXT PRIMARY KEY REFERENCES runs(id),review_id TEXT NOT NULL REFERENCES cleanup_reviews(id),stage TEXT NOT NULL CHECK(stage IN ('deleting','deleted')),error TEXT);
+            INSERT INTO session_activity(session_id,last_active,generation)
+                SELECT session_id,MAX(updated),1 FROM runs GROUP BY session_id;
+            CREATE TRIGGER activity_run_created AFTER INSERT ON runs BEGIN
+                INSERT INTO session_activity(session_id,last_active,generation) VALUES (NEW.session_id,NEW.created,1)
+                ON CONFLICT(session_id) DO UPDATE SET last_active=MAX(session_activity.last_active,excluded.last_active),generation=session_activity.generation+1;
+            END;
+            CREATE TRIGGER activity_run_transition AFTER UPDATE OF state ON runs WHEN NEW.state<>OLD.state BEGIN
+                INSERT INTO session_activity(session_id,last_active,generation) VALUES (NEW.session_id,NEW.updated,1)
+                ON CONFLICT(session_id) DO UPDATE SET last_active=MAX(session_activity.last_active,excluded.last_active),generation=session_activity.generation+1;
+            END;
+            PRAGMA user_version=18;")?;
+        }
         transaction.commit()?;
         Ok(store)
     }
@@ -462,7 +499,7 @@ fn path_text(path: &Path) -> Result<&str> {
     path.to_str().context("Execution state path must be UTF-8")
 }
 
-fn query_record(connection: &Connection, id: &str) -> Result<Option<RunRecord>> {
+pub(super) fn query_record(connection: &Connection, id: &str) -> Result<Option<RunRecord>> {
     Ok(connection
         .query_row("SELECT * FROM runs WHERE id=?1", [id], |row| {
             let raw_state: String = row.get("state")?;

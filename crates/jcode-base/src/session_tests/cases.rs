@@ -2662,7 +2662,7 @@ fn streaming_guard_creates_visible_macos_sleep_assertion() {
             .any(|line| line.contains(&process_marker) && line.contains(reason))
     };
     {
-        let _streaming = StreamingGuard::new("session_power");
+        let _streaming = StreamingGuard::new("session_power").expect("activity guard");
 
         let output = std::process::Command::new("pmset")
             .args(["-g", "assertions"])

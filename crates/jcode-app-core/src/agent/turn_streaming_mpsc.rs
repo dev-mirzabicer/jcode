@@ -93,7 +93,7 @@ impl Agent {
         self.set_log_context();
         // Mark this session as actively streaming for presence UIs (e.g. the
         // macOS menu bar indicator). Cleared automatically on every exit path.
-        let _streaming_guard = crate::session::StreamingGuard::new(self.session.id.clone());
+        let _streaming_guard = crate::session::StreamingGuard::new(self.session.id.clone())?;
         // Register this turn's cancel signal in the process-global registry so
         // a cancel routed through *any* control handle for this session (even a
         // stale one built for a different agent object, e.g. after a

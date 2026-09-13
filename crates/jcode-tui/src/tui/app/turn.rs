@@ -200,6 +200,7 @@ impl App {
         mut bus_receiver: Option<&mut tokio::sync::broadcast::Receiver<crate::bus::BusEvent>>,
     ) -> Result<()> {
         let eager_stream_redraw = !crate::perf::tui_policy().enable_decorative_animations;
+        let _activity = crate::session::StreamingGuard::new(self.session.id.clone())?;
         let mut redraw_period = crate::tui::redraw_interval(self);
         let mut redraw_interval = super::run_shell::redraw_timer(redraw_period);
         let mut status_spinner_interval = super::run_shell::status_spinner_interval();

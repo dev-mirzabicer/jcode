@@ -9,6 +9,9 @@ use std::io::{Read, Seek, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
+#[path = "cleanup.rs"]
+mod cleanup;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ArchiveConfig {
@@ -37,6 +40,9 @@ impl Default for StorageConfig {
 pub(super) trait StorageEnvironment: Send + Sync {
     fn available(&self, path: &Path) -> Result<u64>;
     fn archive(&self, config: &ArchiveConfig) -> Result<DirectoryBinding>;
+    fn existing_archive(&self, config: &ArchiveConfig) -> Result<DirectoryBinding> {
+        self.archive(config)
+    }
     fn checkpoint(&self, _stage: &str) -> Result<()> {
         Ok(())
     }
@@ -51,6 +57,9 @@ impl StorageEnvironment for NativeEnvironment {
     }
     fn archive(&self, config: &ArchiveConfig) -> Result<DirectoryBinding> {
         verified_archive(config)
+    }
+    fn existing_archive(&self, config: &ArchiveConfig) -> Result<DirectoryBinding> {
+        resolve_archive(config, false)
     }
 }
 
@@ -1095,12 +1104,107 @@ fn complete_move(
 }
 
 impl ExecutionStore {
+    /// Routine policy over the same placement owner used by emergency capture.
+    /// A false result means the output is no longer cold/eligible or is owned.
+    pub fn archive_cold_output(&self, id: &str, config: &StorageConfig, now: i64) -> Result<bool> {
+        self.archive_cold_output_with_environment(id, config, now, Arc::new(NativeEnvironment))
+    }
+
+    fn archive_cold_output_with_environment(
+        &self,
+        id: &str,
+        config: &StorageConfig,
+        now: i64,
+        environment: Arc<dyn StorageEnvironment>,
+    ) -> Result<bool> {
+        let Some(lease) = try_output_lease(self, id)? else {
+            return Ok(false);
+        };
+        let record = self.inspect(id)?.context("Unknown cold output")?;
+        if !record.state.terminal()
+            || record.result_path.is_none()
+            || !self.session_is_cold(&record.session_id, now)?
+        {
+            return Ok(false);
+        }
+        let Some((physical, archived)) = self.output_location(id)? else {
+            return Ok(false);
+        };
+        let pending: Option<String> = self
+            .connection()?
+            .query_row(
+                "SELECT manifest_path FROM relocations WHERE id=?1 AND stage<>'complete'",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(path) = pending {
+            let manifest: MoveManifest = crate::storage::read_json(Path::new(&path))?;
+            ensure!(manifest.id == id, "Cold relocation identity mismatch");
+            let recorded_config = StorageConfig {
+                archive: manifest.archive_spec.clone(),
+                ..config.clone()
+            };
+            let root = archive_namespace(self, &recorded_config, environment.as_ref())?;
+            ensure!(
+                manifest.destination.parent() == Some(root.path.as_path()),
+                "Cold relocation archive changed"
+            );
+            complete_move(self, &manifest, environment.as_ref())?;
+        } else if archived {
+            // Emergency spillover becomes cold only through the same idle rule.
+            self.connection()?.execute("UPDATE output_locations SET cold_archived_at=COALESCE(cold_archived_at,?2) WHERE id=?1", params![id,now])?;
+            return Ok(false);
+        } else {
+            ensure!(
+                physical == self.root().join("data").join(id),
+                "Cold output is outside its owned local bundle"
+            );
+            let binding = DirectoryBinding::open(&physical)?;
+            let mut bundle = BundleStorage {
+                store: self.clone(),
+                id: id.into(),
+                physical,
+                archived: false,
+                config: config.clone(),
+                environment,
+                _lease: lease,
+                binding,
+            };
+            bundle.spill()?;
+        }
+        self.connection()?.execute("UPDATE output_locations SET cold_archived_at=COALESCE(cold_archived_at,?2) WHERE id=?1 AND archived=1", params![id,now])?;
+        Ok(true)
+    }
+
     pub(super) fn open_output_file(&self, id: &str) -> Result<File> {
         self.open_output_part(id, "output.txt")
     }
 
     pub(super) fn open_output_part(&self, id: &str, name: &str) -> Result<File> {
         validate_part(name)?;
+        self.ensure_output_not_deleted(id)?;
+        self.open_available_output_part(id, name)
+    }
+
+    pub(super) fn ensure_output_not_deleted(&self, id: &str) -> Result<()> {
+        let deletion: Option<String> = self
+            .connection()?
+            .query_row(
+                "SELECT stage FROM output_deletions WHERE id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        ensure!(
+            deletion.is_none(),
+            "Output backing data was deliberately selected for deletion by confirmed human cleanup ({}); prior transcript content remains unchanged",
+            deletion.unwrap_or_default()
+        );
+        Ok(())
+    }
+
+    fn open_available_output_part(&self, id: &str, name: &str) -> Result<File> {
         for _ in 0..2 {
             let (physical,archived,spec,generation):(String,bool,Option<String>,i64)=self.connection()?.query_row("SELECT physical,archived,archive_spec,generation FROM output_locations WHERE id=?1",[id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)))?;
             let physical = PathBuf::from(physical);
