@@ -1,0 +1,825 @@
+{
+  "status": "Original failed runs remain failed; per-test follow-up accounting, not a monolithic all-green claim",
+  "original_app_core": {
+    "passed": 1398,
+    "failed": 119,
+    "ignored": 25
+  },
+  "original_base": {
+    "passed": 1567,
+    "failed": 16,
+    "ignored": 3
+  },
+  "failures": [
+    {
+      "suite": "app-core",
+      "test": "agent::startup_context::tests::active_skill_text_is_frozen_until_reinvocation_and_survives_resume_and_split",
+      "disposition": "repaired-and-reverified",
+      "evidence": "fixture-namespaces-20260913/startup-agent.log"
+    },
+    {
+      "suite": "app-core",
+      "test": "agent::startup_context::tests::direct_clear_retains_agent_renders_current_source_and_clears_active_skill",
+      "disposition": "repaired-and-reverified",
+      "evidence": "fixture-namespaces-20260913/startup-agent.log"
+    },
+    {
+      "suite": "app-core",
+      "test": "agent::startup_context::tests::external_global_active_skill_is_frozen_until_fresh_reinvocation",
+      "disposition": "repaired-and-reverified",
+      "evidence": "fixture-namespaces-20260913/startup-agent.log"
+    },
+    {
+      "suite": "app-core",
+      "test": "agent::startup_context::tests::failed_direct_clear_does_not_replace_the_live_session",
+      "disposition": "repaired-and-reverified",
+      "evidence": "fixture-namespaces-20260913/startup-agent.log"
+    },
+    {
+      "suite": "app-core",
+      "test": "agent::startup_context::tests::failed_old_session_migration_leaves_live_agent_untouched",
+      "disposition": "repaired-and-reverified",
+      "evidence": "fixture-namespaces-20260913/startup-agent.log"
+    },
+    {
+      "suite": "app-core",
+      "test": "agent::startup_context::tests::interactive_block_prevents_provider_call_and_clear_recaptures_after_repair",
+      "disposition": "repaired-and-reverified",
+      "evidence": "fixture-namespaces-20260913/startup-agent.log"
+    },
+    {
+      "suite": "app-core",
+      "test": "agent::startup_context::tests::managed_effort_fails_before_provider_and_preserves_frozen_static_text",
+      "disposition": "repaired-and-reverified",
+      "evidence": "namespace-control-final-20260913/agent-startup_context-tests.log"
+    },
+    {
+      "suite": "app-core",
+      "test": "agent::startup_context::tests::old_session_migration_uses_compatibility_agent_even_when_default_changed",
+      "disposition": "repaired-and-reverified",
+      "evidence": "fixture-namespaces-20260913/startup-agent.log"
+    },
+    {
+      "suite": "app-core",
+      "test": "agent::startup_context::tests::post_dispatch_switch_appends_and_explicit_replace_resets_only_prompt_state",
+      "disposition": "repaired-and-reverified",
+      "evidence": "fixture-namespaces-20260913/startup-agent.log"
+    },
+    {
+      "suite": "app-core",
+      "test": "agent::startup_context::tests::pre_dispatch_explicit_replace_is_provisional_and_cache_neutral",
+      "disposition": "repaired-and-reverified",
+      "evidence": "fixture-namespaces-20260913/startup-agent.log"
+    },
+    {
+      "suite": "app-core",
+      "test": "agent::startup_context::tests::primary_activation_installs_valid_context_and_rejects_noninteractive_blocking",
+      "disposition": "repaired-and-reverified",
+      "evidence": "fixture-namespaces-20260913/startup-agent.log"
+    },
+    {
+      "suite": "app-core",
+      "test": "agent::startup_context::tests::primary_requests_freeze_static_prompt_across_disk_edits_and_restore",
+      "disposition": "repaired-and-reverified",
+      "evidence": "fixture-namespaces-20260913/startup-agent.log"
+    },
+    {
+      "suite": "app-core",
+      "test": "agent::startup_context::tests::profile_append_and_replacement_invalidate_rewind_undo",
+      "disposition": "repaired-and-reverified",
+      "evidence": "fixture-namespaces-20260913/startup-agent.log"
+    },
+    {
+      "suite": "app-core",
+      "test": "agent::startup_context::tests::provider_preparation_rejects_missing_active_profile_message",
+      "disposition": "repaired-and-reverified",
+      "evidence": "fixture-namespaces-20260913/startup-agent.log"
+    },
+    {
+      "suite": "app-core",
+      "test": "agent::startup_context::tests::rejected_noninteractive_agent_creation_leaves_no_orphan_session",
+      "disposition": "repaired-and-reverified",
+      "evidence": "fixture-namespaces-20260913/startup-agent.log"
+    },
+    {
+      "suite": "app-core",
+      "test": "agent::startup_context::tests::routing_guidance_preflight_and_provider_requests_use_one_session_snapshot",
+      "disposition": "repaired-and-reverified",
+      "evidence": "namespace-control-final-20260913/agent-startup_context-tests.log"
+    },
+    {
+      "suite": "app-core",
+      "test": "agent::startup_context::tests::same_agent_selection_is_source_free_and_replacement_save_failure_restores_state",
+      "disposition": "repaired-and-reverified",
+      "evidence": "fixture-namespaces-20260913/startup-agent.log"
+    },
+    {
+      "suite": "app-core",
+      "test": "agent::startup_context::tests::unqualified_same_id_selection_re_resolves_project_specificity",
+      "disposition": "repaired-and-reverified",
+      "evidence": "fixture-namespaces-20260913/startup-agent.log"
+    },
+    {
+      "suite": "app-core",
+      "test": "agent::tests::clear_resets_runtime_interrupt_and_queue_state",
+      "disposition": "repaired-and-reverified",
+      "evidence": "namespace-control-final-20260913/agent-tests.log"
+    },
+    {
+      "suite": "app-core",
+      "test": "agent::tests::empty_post_tool_response_is_retried_in_shared_helper",
+      "disposition": "repaired-and-reverified",
+      "evidence": "namespace-control-final-20260913/agent-tests.log"
+    },
+    {
+      "suite": "app-core",
+      "test": "agent::tests::fable_guardrail_reconsideration_recovers_the_streaming_turn",
+      "disposition": "repaired-and-reverified",
+      "evidence": "namespace-control-final-20260913/agent-tests.log"
+    },
+    {
+      "suite": "app-core",
+      "test": "agent::tests::mark_closed_persists_soft_interrupts_for_restore_after_reload",
+      "disposition": "repaired-and-reverified",
+      "evidence": "namespace-control-final-20260913/agent-tests.log"
+    },
+    {
+      "suite": "app-core",
+      "test": "agent::tests::new_agent_registers_active_pid_and_clear_swaps_it",
+      "disposition": "repaired-and-reverified",
+      "evidence": "namespace-control-final-20260913/agent-tests.log"
+    },
+    {
+      "suite": "app-core",
+      "test": "agent::tests::phase10_correlated_preflight_blocks_before_provider_call_and_rolls_back_pending_turn",
+      "disposition": "repaired-and-reverified",
+      "evidence": "namespace-control-final-20260913/agent-tests.log"
+    },
+    {
+      "suite": "app-core",
+      "test": "agent::tests::phase10_post_output_context_rejection_preserves_partial_authoritative_output",
+      "disposition": "repaired-and-reverified",
+      "evidence": "namespace-control-final-20260913/agent-tests.log"
+    },
+    {
+      "suite": "app-core",
+      "test": "agent::tests::phase10_provider_payload_rejection_preserves_historical_images_and_never_retries",
+      "disposition": "repaired-and-reverified",
+      "evidence": "namespace-control-final-20260913/agent-tests.log"
+    },
+    {
+      "suite": "app-core",
+      "test": "agent::tests::phase11_blocked_preflight_recovers_before_the_first_provider_call",
+      "disposition": "repaired-and-reverified",
+      "evidence": "namespace-control-final-20260913/agent-tests.log"
+    },
+    {
+      "suite": "app-core",
+      "test": "agent::tests::phase11_failed_retry_never_creates_a_second_emergency_transaction",
+      "disposition": "repaired-and-reverified",
+      "evidence": "namespace-control-final-20260913/agent-tests.log"
+    },
+    {
+      "suite": "app-core",
+      "test": "agent::tests::phase11_hidden_provider_limit_uses_one_authorized_transaction_and_one_retry",
+      "disposition": "repaired-and-reverified",
+      "evidence": "namespace-control-final-20260913/agent-tests.log"
+    },
+    {
+      "suite": "app-core",
+      "test": "agent::tests::phase11_interactive_submit_blocks_even_when_session_policy_is_authorized",
+      "disposition": "repaired-and-reverified",
+      "evidence": "namespace-control-final-20260913/agent-tests.log"
+    },
+    {
+      "suite": "app-core",
+      "test": "agent::tests::provider_failure_after_sdk_result_preserves_a_paired_retained_checkpoint",
+      "disposition": "repaired-and-reverified",
+      "evidence": "namespace-control-final-20260913/agent-tests.log"
+    },
+    {
+      "suite": "app-core",
+      "test": "agent::tests::restore_session_rehydrates_injected_memory_ids",
+      "disposition": "repaired-and-reverified",
+      "evidence": "namespace-control-final-20260913/agent-tests.log"
+    },
+    {
+      "suite": "app-core",
+      "test": "agent::tests::restore_session_resets_runtime_interrupt_and_queue_state",
+      "disposition": "repaired-and-reverified",
+      "evidence": "namespace-control-final-20260913/agent-tests.log"
+    },
+    {
+      "suite": "app-core",
+      "test": "agent::tests::retention_readiness_scorecard",
+      "disposition": "repaired-and-reverified",
+      "evidence": "delivery-scope-final-20260913/retention_readiness_scorecard.log"
+    },
+    {
+      "suite": "app-core",
+      "test": "agent::tests::run_turn_streaming_mpsc_emits_keepalive_while_provider_is_quiet",
+      "disposition": "repaired-and-reverified",
+      "evidence": "namespace-control-final-20260913/agent-tests.log"
+    },
+    {
+      "suite": "app-core",
+      "test": "agent::tests::run_turn_streaming_mpsc_emits_model_changed_on_midstream_switch",
+      "disposition": "repaired-and-reverified",
+      "evidence": "namespace-control-final-20260913/agent-tests.log"
+    },
+    {
+      "suite": "app-core",
+      "test": "agent::tests::stranded_tool_use_stop_continues_instead_of_ending_the_turn",
+      "disposition": "repaired-and-reverified",
+      "evidence": "namespace-control-final-20260913/agent-tests.log"
+    },
+    {
+      "suite": "app-core",
+      "test": "agent::tests::supplied_provider_results_are_retained_before_history_and_mpsc_delivery",
+      "disposition": "repaired-and-reverified",
+      "evidence": "namespace-control-final-20260913/agent-tests.log"
+    },
+    {
+      "suite": "app-core",
+      "test": "agent::tests::wp02_blocking_and_mpsc_turns_mark_first_provider_acceptance",
+      "disposition": "repaired-and-reverified",
+      "evidence": "delivery-scope-final-20260913/wp02_blocking_and_mpsc_turns_mark_first_provider_acceptance.log"
+    },
+    {
+      "suite": "app-core",
+      "test": "agent::tests::wp02_dispatch_persistence_failure_prevents_provider_invocation",
+      "disposition": "repaired-and-reverified",
+      "evidence": "namespace-control-final-20260913/agent-tests.log"
+    },
+    {
+      "suite": "app-core",
+      "test": "overnight::tests::managed_overnight_sources_are_current_typed_and_keep_phase_identity",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "workflow.rs render_prompt requires_swarm guard; server/client_actions.rs handle_split; accepted D-27 retirement"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::client_actions::tests::enabling_swarm_does_not_auto_elect_coordinator",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/client_actions.rs feature activation guard, client request retirement classifier, server/debug_help.rs disabled help gate"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::client_actions::tests::notify_session_runs_scheduled_task_immediately_for_idle_live_session",
+      "disposition": "repaired-and-reverified",
+      "evidence": "active-caller-triage-final-20260913/notify_session_runs_scheduled_task_immediately_for_idle_live_session.log"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::client_actions::tests::resume_all_continues_interrupted_idle_live_session",
+      "disposition": "repaired-and-reverified",
+      "evidence": "active-caller-triage-final-20260913/resume_all_continues_interrupted_idle_live_session.log"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::client_actions::tests::transfer_child_uses_authoritative_handoff_instead_of_invalid_legacy_compaction",
+      "disposition": "repaired-and-reverified",
+      "evidence": "active-caller-triage-final-20260913/transfer_child_uses_authoritative_handoff_instead_of_invalid_legacy_compaction.log"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::client_actions::tests::workflow_split_renders_before_creation_and_uses_one_parent_snapshot",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "workflow.rs render_prompt requires_swarm guard; server/client_actions.rs handle_split; accepted D-27 retirement"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::client_lifecycle::tests::lightweight_comm_request_skips_full_session_initialization",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/client_actions.rs feature activation guard, client request retirement classifier, server/debug_help.rs disabled help gate"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::comm_control::tests::assign_next_prefers_worker_with_dependency_context",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/comm_await.rs handle_comm_await_members; server/swarm_mutation_state.rs begin_or_replay; disabled-coordination Error replies in original log"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::comm_control::tests::assign_next_prefers_worker_with_matching_subsystem_metadata",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/comm_await.rs handle_comm_await_members; server/swarm_mutation_state.rs begin_or_replay; disabled-coordination Error replies in original log"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::comm_control::tests::assign_task_allows_taking_over_stale_assignment",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/comm_await.rs handle_comm_await_members; server/swarm_mutation_state.rs begin_or_replay; disabled-coordination Error replies in original log"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::comm_control::tests::assign_task_does_not_stack_on_busy_worker",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/comm_await.rs handle_comm_await_members; server/swarm_mutation_state.rs begin_or_replay; disabled-coordination Error replies in original log"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::comm_control::tests::assign_task_marks_completed_worker_queued_before_returning",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/comm_await.rs handle_comm_await_members; server/swarm_mutation_state.rs begin_or_replay; disabled-coordination Error replies in original log"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::comm_control::tests::assign_task_rejects_double_assignment_of_actively_worked_task",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/comm_await.rs handle_comm_await_members; server/swarm_mutation_state.rs begin_or_replay; disabled-coordination Error replies in original log"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::comm_control::tests::assign_task_rejects_explicit_blocked_task",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/comm_await.rs handle_comm_await_members; server/swarm_mutation_state.rs begin_or_replay; disabled-coordination Error replies in original log"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::comm_control::tests::assign_task_to_client_attached_session_skips_server_side_run",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/comm_await.rs handle_comm_await_members; server/swarm_mutation_state.rs begin_or_replay; disabled-coordination Error replies in original log"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::comm_control::tests::assign_task_without_target_picks_ready_agent",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/comm_await.rs handle_comm_await_members; server/swarm_mutation_state.rs begin_or_replay; disabled-coordination Error replies in original log"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::comm_control::tests::assign_task_without_target_prefers_less_loaded_ready_agent",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/comm_await.rs handle_comm_await_members; server/swarm_mutation_state.rs begin_or_replay; disabled-coordination Error replies in original log"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::comm_control::tests::assign_task_without_task_id_picks_highest_priority_runnable_task",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/comm_await.rs handle_comm_await_members; server/swarm_mutation_state.rs begin_or_replay; disabled-coordination Error replies in original log"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::comm_control::tests::await_members_any_mode_returns_after_first_match",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/comm_await.rs handle_comm_await_members; server/swarm_mutation_state.rs begin_or_replay; disabled-coordination Error replies in original log"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::comm_control::tests::await_members_background_already_expired_answers_tool_call",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/comm_await.rs handle_comm_await_members; server/swarm_mutation_state.rs begin_or_replay; disabled-coordination Error replies in original log"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::comm_control::tests::await_members_blocking_to_background_upgrade_survives_waiter_disconnect",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/comm_await.rs handle_comm_await_members; server/swarm_mutation_state.rs begin_or_replay; disabled-coordination Error replies in original log"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::comm_control::tests::await_members_ignores_persisted_final_when_requested_member_is_queued_again",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/comm_await.rs handle_comm_await_members; server/swarm_mutation_state.rs begin_or_replay; disabled-coordination Error replies in original log"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::comm_control::tests::await_members_includes_late_joiners_when_watching_swarm",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/comm_await.rs handle_comm_await_members; server/swarm_mutation_state.rs begin_or_replay; disabled-coordination Error replies in original log"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::comm_control::tests::await_members_returns_persisted_final_response_after_reload_retry",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/comm_await.rs handle_comm_await_members; server/swarm_mutation_state.rs begin_or_replay; disabled-coordination Error replies in original log"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::comm_control::tests::await_members_reuses_persisted_deadline_after_reload_retry",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/comm_await.rs handle_comm_await_members; server/swarm_mutation_state.rs begin_or_replay; disabled-coordination Error replies in original log"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::comm_control::tests::await_members_watcher_survives_broadcast_lag",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/comm_await.rs handle_comm_await_members; server/swarm_mutation_state.rs begin_or_replay; disabled-coordination Error replies in original log"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::comm_control::tests::e2e_complete_flows_artifact_to_downstream_assignment",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/comm_await.rs handle_comm_await_members; server/swarm_mutation_state.rs begin_or_replay; disabled-coordination Error replies in original log"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::comm_control::tests::e2e_deep_assignment_carries_fanout_and_artifact_contract",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/comm_await.rs handle_comm_await_members; server/swarm_mutation_state.rs begin_or_replay; disabled-coordination Error replies in original log"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::comm_control::tests::e2e_deep_gate_assignment_carries_inject_gap_contract",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/comm_await.rs handle_comm_await_members; server/swarm_mutation_state.rs begin_or_replay; disabled-coordination Error replies in original log"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::comm_control::tests::e2e_deep_participant_can_assign_without_being_coordinator",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/comm_await.rs handle_comm_await_members; server/swarm_mutation_state.rs begin_or_replay; disabled-coordination Error replies in original log"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::comm_control::tests::e2e_solo_seeder_is_elected_coordinator_and_can_assign",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/comm_await.rs handle_comm_await_members; server/swarm_mutation_state.rs begin_or_replay; disabled-coordination Error replies in original log"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::comm_control::tests::resume_background_awaits_finalizes_states_expired_while_down",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/comm_await.rs handle_comm_await_members; server/swarm_mutation_state.rs begin_or_replay; disabled-coordination Error replies in original log"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::comm_control::tests::task_control_reassign_tells_displaced_worker_to_stand_down",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/comm_await.rs handle_comm_await_members; server/swarm_mutation_state.rs begin_or_replay; disabled-coordination Error replies in original log"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::comm_control::tests::task_control_retry_re_dispatches_after_recent_identical_retry",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/comm_await.rs handle_comm_await_members; server/swarm_mutation_state.rs begin_or_replay; disabled-coordination Error replies in original log"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::comm_plan::tests::approve_plan_accepts_valid_dag_proposal",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/swarm_mutation_state.rs load/save/begin_or_replay guards (comm_plan uses begin_or_replay)"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::comm_plan::tests::approve_plan_rejects_proposal_that_forms_cycle_with_existing_plan",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/swarm_mutation_state.rs load/save/begin_or_replay guards (comm_plan uses begin_or_replay)"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::debug::debug_tests::tests::swarm_debug_help_text_mentions_core_swarm_sections",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/client_actions.rs feature activation guard, client request retirement classifier, server/debug_help.rs disabled help gate"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::debug_command_exec::tests::debug_tool_selfdev_reload_returns_promptly_for_direct_execution",
+      "disposition": "repaired-and-reverified",
+      "evidence": "active-caller-triage-final-20260913/debug_tool_selfdev_reload_returns_promptly_for_direct_execution.log"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::swarm::tests::refresh_swarm_task_staleness_marks_running_tasks_stale_and_heartbeat_revives",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/swarm.rs coordination/staleness/broadcast/assignment guards"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::swarm::tests::remove_session_from_swarm_reassigns_to_non_headless_member",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/swarm.rs coordination/staleness/broadcast/assignment guards"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::swarm::tests::remove_session_from_swarm_salvages_running_assignments",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/swarm.rs coordination/staleness/broadcast/assignment guards"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::swarm::tests::remove_session_reparents_children_to_coordinator_when_no_grandparent",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/swarm.rs coordination/staleness/broadcast/assignment guards"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::swarm::tests::remove_session_reparents_children_to_live_grandparent",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/swarm.rs coordination/staleness/broadcast/assignment guards"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::swarm::tests::staleness_sweep_salvages_tasks_of_vanished_assignee",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/swarm.rs coordination/staleness/broadcast/assignment guards"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::swarm::tests::update_member_status_includes_completion_report_in_owner_notification",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/swarm.rs coordination/staleness/broadcast/assignment guards"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::swarm::tests::update_member_status_notifies_coordinator_when_headless_worker_returns_ready",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/swarm.rs coordination/staleness/broadcast/assignment guards"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::swarm::tests::update_member_status_notifies_owner_when_worker_crashes_mid_task",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/swarm.rs coordination/staleness/broadcast/assignment guards"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::swarm::tests::update_member_status_prefers_explicit_report_back_owner_over_coordinator",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/swarm.rs coordination/staleness/broadcast/assignment guards"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::swarm::tests::update_member_status_skips_noop_broadcasts",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/swarm.rs coordination/staleness/broadcast/assignment guards"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::swarm_mutation_state::swarm_mutation_state_tests::control_driven_begin_coalesces_in_flight_duplicates",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/swarm_mutation_state.rs load/save/begin_or_replay guards (comm_plan uses begin_or_replay)"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::swarm_mutation_state::swarm_mutation_state_tests::control_driven_begin_re_dispatches_despite_persisted_final_state",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/swarm_mutation_state.rs load/save/begin_or_replay guards (comm_plan uses begin_or_replay)"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::swarm_mutation_state::swarm_mutation_state_tests::swarm_mutation_concurrent_duplicates_share_final_done_response",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/swarm_mutation_state.rs load/save/begin_or_replay guards (comm_plan uses begin_or_replay)"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::swarm_mutation_state::swarm_mutation_state_tests::swarm_mutation_replays_persisted_spawn_response",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/swarm_mutation_state.rs load/save/begin_or_replay guards (comm_plan uses begin_or_replay)"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::tests::startup_ready_signal_is_not_blocked_by_headless_recovery_delay",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/tests.rs persisted_headless_member/persist_swarm_state_snapshot fixture; server/swarm_persistence.rs load_runtime_state and persist gates"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::tests::startup_recovery_preserves_headed_session_reload_context_for_later_reconnect",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/tests.rs persisted_headless_member/persist_swarm_state_snapshot fixture; server/swarm_persistence.rs load_runtime_state and persist gates"
+    },
+    {
+      "suite": "app-core",
+      "test": "server::tests::startup_recovery_resumes_interrupted_headless_sessions_after_reload",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "server/tests.rs persisted_headless_member/persist_swarm_state_snapshot fixture; server/swarm_persistence.rs load_runtime_state and persist gates"
+    },
+    {
+      "suite": "app-core",
+      "test": "tool::communicate::tests::communicate_assign_next_assigns_next_runnable_task",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "tool/communicate.rs and Registry globally unavailable Swarm boundary; disabled-Swarm errors in original log"
+    },
+    {
+      "suite": "app-core",
+      "test": "tool::communicate::tests::communicate_assign_next_can_prefer_fresh_spawn_server_side",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "tool/communicate.rs and Registry globally unavailable Swarm boundary; disabled-Swarm errors in original log"
+    },
+    {
+      "suite": "app-core",
+      "test": "tool::communicate::tests::communicate_assign_next_can_spawn_if_needed_server_side",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "tool/communicate.rs and Registry globally unavailable Swarm boundary; disabled-Swarm errors in original log"
+    },
+    {
+      "suite": "app-core",
+      "test": "tool::communicate::tests::communicate_assign_task_can_prefer_fresh_spawn_over_reuse",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "tool/communicate.rs and Registry globally unavailable Swarm boundary; disabled-Swarm errors in original log"
+    },
+    {
+      "suite": "app-core",
+      "test": "tool::communicate::tests::communicate_assign_task_can_spawn_fallback_agent",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "tool/communicate.rs and Registry globally unavailable Swarm boundary; disabled-Swarm errors in original log"
+    },
+    {
+      "suite": "app-core",
+      "test": "tool::communicate::tests::communicate_await_members_background_returns_immediately_and_notifies",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "tool/communicate.rs and Registry globally unavailable Swarm boundary; disabled-Swarm errors in original log"
+    },
+    {
+      "suite": "app-core",
+      "test": "tool::communicate::tests::communicate_fill_slots_tops_up_to_concurrency_limit",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "tool/communicate.rs and Registry globally unavailable Swarm boundary; disabled-Swarm errors in original log"
+    },
+    {
+      "suite": "app-core",
+      "test": "tool::communicate::tests::communicate_list_and_await_members_work_end_to_end",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "tool/communicate.rs and Registry globally unavailable Swarm boundary; disabled-Swarm errors in original log"
+    },
+    {
+      "suite": "app-core",
+      "test": "tool::communicate::tests::communicate_message_routes_as_dm_while_broadcast_targets_swarm",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "tool/communicate.rs and Registry globally unavailable Swarm boundary; disabled-Swarm errors in original log"
+    },
+    {
+      "suite": "app-core",
+      "test": "tool::communicate::tests::communicate_run_plan_with_empty_plan_returns_inline_even_in_background_mode",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "tool/communicate.rs and Registry globally unavailable Swarm boundary; disabled-Swarm errors in original log"
+    },
+    {
+      "suite": "app-core",
+      "test": "tool::communicate::tests::communicate_spawn_reports_completion_back_to_spawner",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "tool/communicate.rs and Registry globally unavailable Swarm boundary; disabled-Swarm errors in original log"
+    },
+    {
+      "suite": "app-core",
+      "test": "tool::communicate::tests::communicate_spawn_with_prompt_and_summary_work_end_to_end",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "tool/communicate.rs and Registry globally unavailable Swarm boundary; disabled-Swarm errors in original log"
+    },
+    {
+      "suite": "app-core",
+      "test": "tool::communicate::tests::communicate_status_returns_busy_snapshot_for_running_member",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "tool/communicate.rs and Registry globally unavailable Swarm boundary; disabled-Swarm errors in original log"
+    },
+    {
+      "suite": "app-core",
+      "test": "tool::communicate::tests::description_receives_session_routing_at_request_preparation",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "tool/communicate.rs and Registry globally unavailable Swarm boundary; disabled-Swarm errors in original log"
+    },
+    {
+      "suite": "app-core",
+      "test": "tool::communicate::tests::spawn_execute_rejects_missing_label_before_sending_request",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "tool/communicate.rs and Registry globally unavailable Swarm boundary; disabled-Swarm errors in original log"
+    },
+    {
+      "suite": "app-core",
+      "test": "tool::goal::goal_tests::initiative_tool_create_and_resume_round_trip",
+      "disposition": "expected-under-disabled-memory-policy",
+      "evidence": "Explicit disabled-memory rejection in original diagnostic"
+    },
+    {
+      "suite": "app-core",
+      "test": "tool::goal::goal_tests::initiative_tool_list_does_not_open_side_panel_by_default",
+      "disposition": "expected-under-disabled-memory-policy",
+      "evidence": "Explicit disabled-memory rejection in original diagnostic"
+    },
+    {
+      "suite": "app-core",
+      "test": "tool::goal::goal_tests::initiative_tool_update_refreshes_open_overview_without_stealing_focus",
+      "disposition": "expected-under-disabled-memory-policy",
+      "evidence": "Explicit disabled-memory rejection in original diagnostic"
+    },
+    {
+      "suite": "app-core",
+      "test": "tool::instruction_guidance::failure_tests::routing_snapshot_save_failure_restores_session_and_continuation",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "tool/instruction_guidance.rs prepare/commit global feature guards"
+    },
+    {
+      "suite": "app-core",
+      "test": "tool::instruction_guidance::tests::routing_is_frozen_only_after_preflight_and_survives_snapshot_journal_resume_and_split",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "tool/instruction_guidance.rs prepare/commit global feature guards"
+    },
+    {
+      "suite": "app-core",
+      "test": "tool::tests::reliable_execution::foreground_reload_returns_a_durable_background_receipt_without_stopping_command",
+      "disposition": "repaired-and-reverified",
+      "evidence": "delivery-scope-final-20260913/tool-tests-reliable_execution.log"
+    },
+    {
+      "suite": "app-core",
+      "test": "tool::tests::reliable_execution::native_background_status_survives_reload_quiescence_and_manager_recreation",
+      "disposition": "repaired-and-reverified",
+      "evidence": "delivery-scope-final-20260913/tool-tests-reliable_execution.log"
+    },
+    {
+      "suite": "app-core",
+      "test": "workflow::tests::reviewer_rendering_uses_typed_values_and_project_modules_without_prose_inference",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "workflow.rs render_prompt requires_swarm guard; server/client_actions.rs handle_split; accepted D-27 retirement"
+    },
+    {
+      "suite": "base",
+      "test": "config::tests::migrate_legacy_swarm_spawn_mode_flips_visible_to_inline_once",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "config/config_file.rs migrate_legacy_swarm_spawn_mode_once feature guard, or prompt effort feature gate; accepted WP-01 retirement"
+    },
+    {
+      "suite": "base",
+      "test": "config::tests::migrate_legacy_swarm_spawn_mode_noops_without_visible_value",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "config/config_file.rs migrate_legacy_swarm_spawn_mode_once feature guard, or prompt effort feature gate; accepted WP-01 retirement"
+    },
+    {
+      "suite": "base",
+      "test": "goal::goal_tests::create_and_resume_goal_persists_project_goal",
+      "disposition": "expected-under-disabled-memory-policy",
+      "evidence": "Explicit global memory rejection; accepted Phase 2 hard-disable policy"
+    },
+    {
+      "suite": "base",
+      "test": "goal::goal_tests::write_goal_page_auto_focuses_first_goal_only",
+      "disposition": "expected-under-disabled-memory-policy",
+      "evidence": "Explicit global memory rejection; accepted Phase 2 hard-disable policy"
+    },
+    {
+      "suite": "base",
+      "test": "memory::tests::goal_memory_upsert_skips_embedding_generation",
+      "disposition": "expected-under-disabled-memory-policy",
+      "evidence": "Explicit global memory rejection; accepted Phase 2 hard-disable policy"
+    },
+    {
+      "suite": "base",
+      "test": "memory::tests::graph_based_memory_operations",
+      "disposition": "expected-under-disabled-memory-policy",
+      "evidence": "Explicit global memory rejection; accepted Phase 2 hard-disable policy"
+    },
+    {
+      "suite": "base",
+      "test": "memory::tests::hybrid_excludes_superseded_memories",
+      "disposition": "expected-under-disabled-memory-policy",
+      "evidence": "Explicit global memory rejection; accepted Phase 2 hard-disable policy"
+    },
+    {
+      "suite": "base",
+      "test": "memory::tests::manager_persists_and_forgets_memories",
+      "disposition": "expected-under-disabled-memory-policy",
+      "evidence": "Explicit global memory rejection; accepted Phase 2 hard-disable policy"
+    },
+    {
+      "suite": "base",
+      "test": "memory::tests::manager_search_scoped_normalizes_whitespace_and_separators",
+      "disposition": "expected-under-disabled-memory-policy",
+      "evidence": "Explicit global memory rejection; accepted Phase 2 hard-disable policy"
+    },
+    {
+      "suite": "base",
+      "test": "memory::tests::project_memories_are_isolated_by_explicit_project_dir",
+      "disposition": "expected-under-disabled-memory-policy",
+      "evidence": "Explicit global memory rejection; accepted Phase 2 hard-disable policy"
+    },
+    {
+      "suite": "base",
+      "test": "memory::tests::prompt_memories_scoped_keeps_only_most_recent_entries",
+      "disposition": "expected-under-disabled-memory-policy",
+      "evidence": "Explicit global memory rejection; accepted Phase 2 hard-disable policy"
+    },
+    {
+      "suite": "base",
+      "test": "memory::tests::scoped_retrieval_respects_project_vs_global",
+      "disposition": "expected-under-disabled-memory-policy",
+      "evidence": "Explicit global memory rejection; accepted Phase 2 hard-disable policy"
+    },
+    {
+      "suite": "base",
+      "test": "memory::tests::test_mode_ignores_the_project_dir_and_cannot_see_real_project_memory",
+      "disposition": "expected-under-disabled-memory-policy",
+      "evidence": "Explicit global memory rejection; accepted Phase 2 hard-disable policy"
+    },
+    {
+      "suite": "base",
+      "test": "memory_agent::tests::apply_confidence_updates_batches_boost_and_decay",
+      "disposition": "expected-under-disabled-memory-policy",
+      "evidence": "Explicit global memory rejection; accepted Phase 2 hard-disable policy"
+    },
+    {
+      "suite": "base",
+      "test": "prompt::prompt_tests::swarm_effort_directives_use_current_synthetic_sources_without_changing_static_prefix",
+      "disposition": "expected-under-disabled-swarm-policy",
+      "evidence": "config/config_file.rs migrate_legacy_swarm_spawn_mode_once feature guard, or prompt effort feature gate; accepted WP-01 retirement"
+    },
+    {
+      "suite": "base",
+      "test": "session::startup_context::tests::stale_notification_lifetime_state_survives_session_reload",
+      "disposition": "repaired-and-reverified",
+      "evidence": "fixture-namespaces-20260913/startup-base.log; private runtime guard in 36562f5c6"
+    }
+  ]
+}

@@ -31,6 +31,12 @@ Status: **candidate verification in progress, not accepted**. This ledger is not
 
 ## Verification-harness incident and repair
 
+See [per-test failure dispositions and follow-up ownership](EXECUTION_FAILURE_TRIAGE.md)
+and its complete JSON inventory for all 135 failures in the two completed bounded
+runs. Active-path findings were handled within WP-02. Default-disabled feature
+expectations and nonurgent fixture-suite maintenance are explicitly distinguished
+from production regressions and assigned to future maintenance rather than hidden.
+
 The first complete base suite finished with 1,549 passed, 34 failed and 3 ignored.
 The following app-core suite then hung on an enabled-behavior Swarm broadcast test
 whose unbounded receive awaited an event suppressed by the global retirement gate.
