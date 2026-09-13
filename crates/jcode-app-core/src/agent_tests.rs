@@ -135,6 +135,7 @@ impl AgentTestEnvRestore {
     fn set_path(key: &'static str, value: &Path) -> Self {
         let previous = std::env::var_os(key);
         crate::env::set_var(key, value);
+        crate::config::invalidate_config_cache();
         Self { key, previous }
     }
 }
@@ -1965,7 +1966,9 @@ async fn phase11_hidden_provider_limit_uses_one_authorized_transaction_and_one_r
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().expect("temp dir");
     let prev_home = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", temp.path());
+    let _runtime_fixture =
+        AgentTestEnvRestore::set_path("JCODE_RUNTIME_DIR", &temp.path().join("runtime"));
+    let _home_fixture = AgentTestEnvRestore::set_path("JCODE_HOME", temp.path());
 
     let provider = HiddenLimitEmergencyProvider::default();
     let provider_handle = provider.clone();
@@ -2087,7 +2090,9 @@ async fn phase11_blocked_preflight_recovers_before_the_first_provider_call() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().expect("temp dir");
     let prev_home = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", temp.path());
+    let _runtime_fixture =
+        AgentTestEnvRestore::set_path("JCODE_RUNTIME_DIR", &temp.path().join("runtime"));
+    let _home_fixture = AgentTestEnvRestore::set_path("JCODE_HOME", temp.path());
 
     let provider = HiddenLimitEmergencyProvider {
         context_window: 50_000,
@@ -2160,7 +2165,9 @@ async fn phase11_interactive_submit_blocks_even_when_session_policy_is_authorize
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().expect("temp dir");
     let prev_home = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", temp.path());
+    let _runtime_fixture =
+        AgentTestEnvRestore::set_path("JCODE_RUNTIME_DIR", &temp.path().join("runtime"));
+    let _home_fixture = AgentTestEnvRestore::set_path("JCODE_HOME", temp.path());
 
     let provider = HiddenLimitEmergencyProvider::default();
     let provider_handle = provider.clone();
@@ -2204,7 +2211,9 @@ async fn phase11_failed_retry_never_creates_a_second_emergency_transaction() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().expect("temp dir");
     let prev_home = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", temp.path());
+    let _runtime_fixture =
+        AgentTestEnvRestore::set_path("JCODE_RUNTIME_DIR", &temp.path().join("runtime"));
+    let _home_fixture = AgentTestEnvRestore::set_path("JCODE_HOME", temp.path());
 
     let provider = HiddenLimitEmergencyProvider {
         reject_retry: true,
@@ -2279,7 +2288,9 @@ async fn phase11_retry_that_fails_after_output_is_audited_as_failed_not_succeede
     let _runtime_root = RuntimeRoot(std::env::var_os("JCODE_RUNTIME_DIR"));
     crate::env::set_var("JCODE_RUNTIME_DIR", temp.path().join("runtime"));
     let prev_home = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", temp.path());
+    let _runtime_fixture =
+        AgentTestEnvRestore::set_path("JCODE_RUNTIME_DIR", &temp.path().join("runtime"));
+    let _home_fixture = AgentTestEnvRestore::set_path("JCODE_HOME", temp.path());
 
     let provider = HiddenLimitEmergencyProvider {
         fail_retry_after_output: true,
@@ -2638,6 +2649,7 @@ async fn wp02_dispatch_persistence_failure_prevents_provider_invocation() {
     let _lock = crate::storage::lock_test_env();
     let home = tempfile::tempdir().expect("isolated Jcode home");
     let _home = AgentTestEnvRestore::set_path("JCODE_HOME", home.path());
+    let _runtime = AgentTestEnvRestore::set_path("JCODE_RUNTIME_DIR", &home.path().join("runtime"));
     let provider = ProjectedRequestProvider::new(1_000_000);
     let provider_handle = provider.clone();
     let provider: Arc<dyn Provider> = Arc::new(provider);
@@ -2682,6 +2694,7 @@ async fn wp02_blocking_and_mpsc_turns_mark_first_provider_acceptance() {
     let _lock = crate::storage::lock_test_env();
     let home = tempfile::tempdir().expect("isolated Jcode home");
     let _home = AgentTestEnvRestore::set_path("JCODE_HOME", home.path());
+    let _runtime = AgentTestEnvRestore::set_path("JCODE_RUNTIME_DIR", &home.path().join("runtime"));
 
     let blocking_provider = ProjectedRequestProvider::new(1_000_000);
     let blocking_handle = blocking_provider.clone();
@@ -3007,7 +3020,9 @@ async fn gmail_is_exposed_by_default_and_can_be_explicitly_disabled() {
     let prev_disable_base_tools = std::env::var_os("JCODE_DISABLE_BASE_TOOLS");
     let temp_home = tempfile::TempDir::new().expect("temp home");
 
-    crate::env::set_var("JCODE_HOME", temp_home.path());
+    let _runtime_fixture =
+        AgentTestEnvRestore::set_path("JCODE_RUNTIME_DIR", &temp_home.path().join("runtime"));
+    let _home_fixture = AgentTestEnvRestore::set_path("JCODE_HOME", temp_home.path());
     crate::env::remove_var("JCODE_TOOLS");
     crate::env::remove_var("JCODE_DISABLED_TOOLS");
     crate::env::remove_var("JCODE_TOOL_PROFILE");
@@ -3467,7 +3482,9 @@ async fn mark_closed_persists_soft_interrupts_for_restore_after_reload() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().expect("temp dir");
     let prev_home = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", temp.path());
+    let _runtime_fixture =
+        AgentTestEnvRestore::set_path("JCODE_RUNTIME_DIR", &temp.path().join("runtime"));
+    let _home_fixture = AgentTestEnvRestore::set_path("JCODE_HOME", temp.path());
 
     let provider: Arc<dyn Provider> = Arc::new(ImmediateEmptyProvider);
     let registry = Registry::new(provider.clone()).await;
@@ -3508,7 +3525,9 @@ async fn soft_interrupt_injection_preserves_exact_authorization_scope_and_persis
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().expect("temp dir");
     let prev_home = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", temp.path());
+    let _runtime_fixture =
+        AgentTestEnvRestore::set_path("JCODE_RUNTIME_DIR", &temp.path().join("runtime"));
+    let _home_fixture = AgentTestEnvRestore::set_path("JCODE_HOME", temp.path());
 
     let provider: Arc<dyn Provider> = Arc::new(ImmediateEmptyProvider);
     let registry = Registry::new(provider.clone()).await;

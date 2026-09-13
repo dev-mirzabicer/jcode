@@ -2725,6 +2725,7 @@ mod tests {
         let _lock = crate::storage::lock_test_env();
         let home = tempfile::tempdir().expect("isolated Jcode home");
         let _home = EnvRestore::set_path("JCODE_HOME", home.path());
+        let _runtime = EnvRestore::set_path("JCODE_RUNTIME_DIR", &home.path().join("runtime"));
         let fixture = prepared_fixture(&[("A.md", "alpha")], &["A.md"]);
         let startup = StartupContext::from_durable_state_dir(fixture.root_path.join("state"));
         let mut session = Session::create_with_id("session-wp09-reload".to_string(), None, None);

@@ -281,6 +281,7 @@ async fn retention_readiness_scorecard() {
     let previous_home = std::env::var_os("JCODE_HOME");
     crate::env::set_var("JCODE_HOME", temp.path());
     let _home_restore = RetentionHomeRestore(previous_home);
+    let _runtime = AgentTestEnvRestore::set_path("JCODE_RUNTIME_DIR", &temp.path().join("runtime"));
 
     let provider_fixture = RetentionReadinessProvider::new();
     let provider: std::sync::Arc<dyn Provider> = std::sync::Arc::new(provider_fixture.clone());

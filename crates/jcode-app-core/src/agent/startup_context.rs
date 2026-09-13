@@ -711,36 +711,37 @@ mod tests {
         }
     }
 
-    struct TestHome {
-        _guard: std::sync::MutexGuard<'static, ()>,
-        previous: Option<std::ffi::OsString>,
-        _home: tempfile::TempDir,
+    // Reuse the shared home+runtime-registry fixture. A home-only fixture can
+    // leave the next test pointing at an instruction checkout it has deleted.
+    struct TestHome(crate::auth::test_sandbox::AuthTestSandbox);
+
+    struct SyntheticSwarmSources(Option<std::ffi::OsString>);
+    impl SyntheticSwarmSources {
+        fn enabled() -> Self {
+            let previous = std::env::var_os("JCODE_SWARM_ENABLED");
+            crate::env::set_var("JCODE_SWARM_ENABLED", "true");
+            crate::config::invalidate_config_cache();
+            Self(previous)
+        }
+    }
+    impl Drop for SyntheticSwarmSources {
+        fn drop(&mut self) {
+            if let Some(previous) = self.0.take() {
+                crate::env::set_var("JCODE_SWARM_ENABLED", previous);
+            } else {
+                crate::env::remove_var("JCODE_SWARM_ENABLED");
+            }
+            crate::config::invalidate_config_cache();
+        }
     }
 
     impl TestHome {
         fn new() -> Self {
-            let guard = crate::storage::lock_test_env();
-            let previous = std::env::var_os("JCODE_HOME");
-            let home = tempfile::tempdir().expect("test JCODE_HOME");
-            crate::env::set_var("JCODE_HOME", home.path());
-            Self {
-                _guard: guard,
-                previous,
-                _home: home,
-            }
+            Self(crate::auth::test_sandbox::AuthTestSandbox::new().expect("isolated test home"))
         }
 
         fn path(&self) -> &std::path::Path {
-            self._home.path()
-        }
-    }
-
-    impl Drop for TestHome {
-        fn drop(&mut self) {
-            match self.previous.take() {
-                Some(value) => crate::env::set_var("JCODE_HOME", value),
-                None => crate::env::remove_var("JCODE_HOME"),
-            }
+            self.0.root()
         }
     }
 
@@ -776,6 +777,7 @@ mod tests {
     #[tokio::test]
     async fn routing_guidance_preflight_and_provider_requests_use_one_session_snapshot() {
         let home = TestHome::new();
+        let _swarm_sources = SyntheticSwarmSources::enabled();
         let project = tempfile::tempdir().unwrap();
         let provider = RecordingProvider::default();
         let handle: std::sync::Arc<dyn Provider> = std::sync::Arc::new(provider.clone());
@@ -830,6 +832,7 @@ mod tests {
     #[tokio::test]
     async fn managed_effort_fails_before_provider_and_preserves_frozen_static_text() {
         let home = TestHome::new();
+        let _swarm_sources = SyntheticSwarmSources::enabled();
         let project = tempfile::tempdir().unwrap();
         let provider = RecordingProvider {
             effort: Some("swarm".into()),
