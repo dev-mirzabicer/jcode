@@ -978,8 +978,16 @@ pub(super) async fn handle_client_with_instruction_repositories(
     let mut instruction_inspection = crate::instruction::inspection::InspectionWorker::default();
     let instruction_management =
         crate::instruction::management::InstructionManagementWorker::default();
+    let mut inspection_requests = tokio::task::JoinSet::new();
 
     loop {
+        while let Some(result) = inspection_requests.try_join_next() {
+            if let Err(error) = result {
+                crate::logging::warn(&format!(
+                    "Inspection request task ended unexpectedly: {error}"
+                ));
+            }
+        }
         let request = if let Some(request) = pending_request.take() {
             request
         } else {
@@ -3505,6 +3513,62 @@ pub(super) async fn handle_client_with_instruction_repositories(
                 }
             }
 
+            Request::SessionInspection { id, request } => {
+                let origin = crate::storage::jcode_dir();
+                let session = client_session_id.clone();
+                let client_event_tx = client_event_tx.clone();
+                inspection_requests.spawn(async move {
+                    let result = match origin {
+                        Ok(root) => {
+                            crate::session_inspection::human_inspection(root, session, request)
+                                .await
+                        }
+                        Err(error) => Err(error),
+                    };
+                    match result {
+                        Ok(response) => {
+                            let _ = client_event_tx
+                                .send(ServerEvent::SessionInspectionResponse { id, response });
+                            let _ = client_event_tx.send(ServerEvent::Done { id });
+                        }
+                        Err(error) => {
+                            let _ = client_event_tx.send(ServerEvent::Error {
+                                id,
+                                message: format!("Session inspection failed: {error:#}"),
+                                retry_after_secs: None,
+                            });
+                        }
+                    }
+                });
+            }
+            Request::OutputCleanup { id, request } => {
+                let origin = crate::storage::jcode_dir();
+                let session = client_session_id.clone();
+                let client_event_tx = client_event_tx.clone();
+                inspection_requests.spawn(async move {
+                    let result = match origin {
+                        Ok(root) => {
+                            crate::session_inspection::human_cleanup(root, session, request).await
+                        }
+                        Err(error) => Err(error),
+                    };
+                    match result {
+                        Ok(response) => {
+                            let _ = client_event_tx
+                                .send(ServerEvent::OutputCleanupResponse { id, response });
+                            let _ = client_event_tx.send(ServerEvent::Done { id });
+                        }
+                        Err(error) => {
+                            let _ = client_event_tx.send(ServerEvent::Error {
+                                id,
+                                message: format!("Output cleanup failed: {error:#}"),
+                                retry_after_secs: None,
+                            });
+                        }
+                    }
+                });
+            }
+
             Request::Split { id } => {
                 handle_split(
                     id,
@@ -4388,6 +4452,9 @@ pub(super) async fn handle_client_with_instruction_repositories(
         }
     }
 
+    // Dropping an inspection waiter requests Stop through the common execution
+    // owner. Confirmed cleanup remains a durable transaction if the client leaves.
+    drop(inspection_requests);
     crate::hooks::with_client_terminal_env(
         active_terminal_env,
         cleanup_client_connection(

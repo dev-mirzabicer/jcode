@@ -86,6 +86,15 @@ pub enum ApiRequest {
         session_id: String,
         request: jcode_tool_types::execution::ExecutionRequest,
     },
+    SessionInspection {
+        session_id: String,
+        request: jcode_tool_types::inspection::InspectionRequest,
+    },
+    /// Human frontend only. Review and exact confirmation are separate requests.
+    OutputCleanup {
+        session_id: String,
+        request: jcode_tool_types::cleanup::CleanupRequest,
+    },
 
     /// List valid primary agents for the attached session's project.
     ListAgents { session_id: String },

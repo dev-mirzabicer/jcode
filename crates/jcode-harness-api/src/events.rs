@@ -6,6 +6,14 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "ev", rename_all = "snake_case")]
 pub enum ApiEvent {
+    SessionInspection {
+        session_id: String,
+        response: jcode_tool_types::inspection::InspectionResponse,
+    },
+    OutputCleanup {
+        session_id: String,
+        response: jcode_tool_types::cleanup::CleanupResponse,
+    },
     Execution {
         session_id: String,
         response: jcode_tool_types::execution::ExecutionResponse,

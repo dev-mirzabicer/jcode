@@ -1294,6 +1294,93 @@ async fn repeated_harness_creation_is_fresh_and_failure_preserves_the_attached_s
         started_rx.await.unwrap();
         let attached = sessions.read().await.get(&first_id).unwrap().clone();
         let busy = attached.lock().await;
+        let source_path = crate::session::session_path(&first_id).unwrap();
+        let source_before = std::fs::read(&source_path).unwrap();
+        let outline_events = tokio::time::timeout(Duration::from_secs(3), exchange(
+            &mut read, &mut write,
+            serde_json::json!({"type":"session_inspection","id":703,"request":{"action":"outline","target":"self"}}),
+        )).await.expect("Snapshot capture must not wait for the actual busy Agent mutex");
+        let snapshot_id = outline_events
+            .iter()
+            .find_map(|event| match event {
+                ServerEvent::SessionInspectionResponse { id: 703, response } => {
+                    Some(response.snapshot_id.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("Missing snapshot response: {outline_events:?}"));
+        let transcript_events = tokio::time::timeout(Duration::from_secs(3), exchange(
+            &mut read, &mut write,
+            serde_json::json!({"type":"session_inspection","id":704,"request":{"action":"transcript","snapshot_id":snapshot_id,"raw":true}}),
+        )).await.expect("Snapshot reads must not lock the busy Agent");
+        assert!(transcript_events.iter().any(|event| matches!(
+            event,
+            ServerEvent::SessionInspectionResponse { id: 704, .. }
+        )));
+        let cleanup_events = tokio::time::timeout(
+            Duration::from_secs(3),
+            exchange(
+                &mut read,
+                &mut write,
+                serde_json::json!({"type":"output_cleanup","id":705,"request":{"action":"status"}}),
+            ),
+        )
+        .await
+        .expect("Cleanup metadata must not lock the busy Agent");
+        assert!(
+            cleanup_events
+                .iter()
+                .any(|event| matches!(event, ServerEvent::OutputCleanupResponse { id: 705, .. }))
+        );
+        assert_eq!(std::fs::read(&source_path).unwrap(), source_before);
+        {
+            let storage_lock = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(source_path.with_extension("persistence.lock"))
+                .unwrap();
+            storage_lock.lock().unwrap();
+            write.write_all((serde_json::json!({"type":"session_inspection","id":7999,"request":{"action":"outline","target":"self"}}).to_string()+"\n").as_bytes()).await.unwrap();
+            let blocked_run=tokio::time::timeout(Duration::from_secs(3),async {
+                let mut id=8000;
+                loop {
+                    let events=exchange(&mut read,&mut write,serde_json::json!({"type":"execution","id":id,"request":{"action":"list","limit":200}})).await;
+                    assert!(!events.iter().any(|event|matches!(event,ServerEvent::Error{id:7999,..})),"Blocked inspection failed before Stop: {events:?}");
+                    if let Some(run)=events.iter().find_map(|event|match event {
+                        ServerEvent::ExecutionResponse{response:jcode_tool_types::execution::ExecutionResponse::List{runs,..},..}=>runs.iter().find(|run|run.tool=="session_inspection" && !run.state.terminal()).cloned(),
+                        _=>None,
+                    }) { break run; }
+                    id+=1;
+                    tokio::task::yield_now().await;
+                }
+            }).await.expect("The same client must retain responsive metadata access while inspection waits for storage");
+            let stopped=tokio::time::timeout(Duration::from_secs(3),exchange(&mut read,&mut write,serde_json::json!({"type":"execution","id":9000,"request":{"action":"stop","run_id":blocked_run.id}}))).await.expect("Stop must not wait behind blocked inspection on this connection");
+            let mut received_cancel = stopped
+                .iter()
+                .any(|event| matches!(event, ServerEvent::Error { id: 7999, .. }));
+            tokio::time::timeout(Duration::from_secs(3), async {
+                while !received_cancel {
+                    let mut line = String::new();
+                    read.read_line(&mut line).await.unwrap();
+                    assert!(!line.is_empty());
+                    received_cancel = matches!(
+                        decode_request_or_event(&line),
+                        ServerEvent::Error { id: 7999, .. }
+                    );
+                }
+            })
+            .await
+            .expect("Blocked snapshot request did not stop before the lease was released");
+            let store =
+                crate::execution::ExecutionStore::open(&crate::storage::jcode_dir().unwrap())
+                    .unwrap();
+            assert_eq!(
+                store.inspect(&blocked_run.id).unwrap().unwrap().state,
+                crate::execution::RunState::Cancelled
+            );
+            assert_eq!(std::fs::read(&source_path).unwrap(), source_before);
+            drop(storage_lock);
+        }
         for (id, request) in [
             (700, serde_json::json!({"action":"inspect","run_id":run_id})),
             (

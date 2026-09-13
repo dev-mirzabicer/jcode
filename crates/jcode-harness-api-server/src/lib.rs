@@ -55,6 +55,8 @@ const BRIDGE_CAPABILITIES: &[&str] = &[
     "workflow_prompt_rendering",
     "shared_execution_v1",
     "shared_execution_parts_v1",
+    "session_inspection_v1",
+    "output_cleanup_review_v1",
 ];
 
 /// Read one newline-delimited frame, refusing to buffer more than

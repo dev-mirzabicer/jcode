@@ -21,6 +21,7 @@ pub mod command_worker;
 pub(crate) mod helper;
 pub mod history;
 mod provider_ingress;
+pub mod retention;
 pub use provider_ingress::ProviderIngress;
 mod provider_capture;
 pub use provider_capture::ProviderCaptureScope;
@@ -123,6 +124,18 @@ pub(crate) async fn execute(
     producer: Producer,
 ) -> Result<ToolOutput> {
     let root = crate::storage::jcode_dir()?;
+    execute_at(root, invocation, ctx, target, producer).await
+}
+
+/// Explicit originating namespace for trusted protocol producers. All normal
+/// supervision, replay, output and control ownership stays in this operation.
+pub(crate) async fn execute_at(
+    root: PathBuf,
+    invocation: Invocation,
+    ctx: ToolContext,
+    target: NonZeroUsize,
+    producer: Producer,
+) -> Result<ToolOutput> {
     let policy = ctx.invocation.policy.clone();
     let store = tokio::task::spawn_blocking(move || ExecutionStore::open(&root)).await??;
     let runtime = runtime::ensure_running(&store).await?;

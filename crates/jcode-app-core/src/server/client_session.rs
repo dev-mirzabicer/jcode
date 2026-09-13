@@ -651,6 +651,16 @@ pub(super) async fn handle_subscribe(
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
 ) {
     let subscribe_start = Instant::now();
+    if let Err(error) =
+        crate::execution::retention::record_session_use(client_session_id.to_string()).await
+    {
+        let _ = client_event_tx.send(ServerEvent::Error {
+            id,
+            message: format!("Cannot durably record session opening: {error:#}"),
+            retry_after_secs: None,
+        });
+        return;
+    }
     crate::logging::event_info(
         "SESSION_LIFECYCLE",
         vec![
@@ -1255,6 +1265,9 @@ pub(super) async fn handle_resume_session(
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
 ) -> Result<Arc<Mutex<Agent>>> {
     let resume_start = Instant::now();
+    if crate::session::session_exists(&session_id) {
+        crate::execution::retention::record_session_use(session_id.clone()).await?;
+    }
     let incoming_client_instance_id = client_instance_id.map(str::to_string);
     crate::logging::event_info(
         "SESSION_LIFECYCLE",

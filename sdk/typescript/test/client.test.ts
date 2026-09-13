@@ -11,6 +11,29 @@ import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
 
+test("inspection and cleanup require their own capabilities and correlate session replies", async () => {
+  let sent = 0;
+  const old = await startMockHarness({onRequest() { sent += 1; }});
+  const oldClient = await JcodeClient.connect({socketPath: old.socketPath});
+  try {
+    await assert.rejects(() => oldClient.sessionInspection("s1", {action: "outline", target: "self"}), (error: unknown) => error instanceof HarnessError && error.code === "unsupported_capability");
+    await assert.rejects(() => oldClient.outputCleanup("s1", {action: "status"}), (error: unknown) => error instanceof HarnessError && error.code === "unsupported_capability");
+    assert.equal(sent, 0);
+  } finally { oldClient.close(); await old.close(); }
+  const content = {output: "fixture", title: null, metadata: null, images: [], resources: [], source: {kind: "inline"}, is_error: false};
+  const server = await startMockHarness({capabilities: ["session_inspection_v1", "output_cleanup_review_v1"], onRequest(request, send) {
+    assert.equal(request.session_id, "s1");
+    if (request.req === "session_inspection") send({v: 1, reply_to: request.id, ev: "session_inspection", session_id: "s1", response: {snapshot_id: "snapshot-fixture", content}});
+    else if (request.req === "output_cleanup") send({v: 1, reply_to: request.id, ev: "output_cleanup", session_id: "s1", response: {kind: "status", status: null}});
+    else assert.fail("unexpected request");
+  }});
+  const client = await JcodeClient.connect({socketPath: server.socketPath});
+  try {
+    assert.deepEqual(await client.sessionInspection("s1", {action: "outline", target: "self"}), {snapshot_id: "snapshot-fixture", content});
+    assert.deepEqual(await client.outputCleanup("s1", {action: "status"}), {kind: "status", status: null});
+  } finally { client.close(); await server.close(); }
+});
+
 test("execution controls require capability before sending and preserve typed replies", async () => {
   let sent = 0;
   const old = await startMockHarness({ onRequest() { sent += 1; } });

@@ -1082,6 +1082,8 @@ impl Agent {
         let restore_start = Instant::now();
         let load_start = Instant::now();
         let mut session = Session::load(session_id)?;
+        crate::execution::ExecutionStore::open(&crate::storage::jcode_dir()?)?
+            .touch_activity(session_id, chrono::Utc::now().timestamp())?;
         if let Some(working_dir) = working_dir {
             session.working_dir = Some(working_dir.to_string());
             session.refresh_initial_session_context_message();

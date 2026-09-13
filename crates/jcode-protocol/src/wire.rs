@@ -156,6 +156,16 @@ pub enum Request {
         id: u64,
         request: jcode_tool_types::execution::ExecutionRequest,
     },
+    #[serde(rename = "session_inspection")]
+    SessionInspection {
+        id: u64,
+        request: jcode_tool_types::inspection::InspectionRequest,
+    },
+    #[serde(rename = "output_cleanup")]
+    OutputCleanup {
+        id: u64,
+        request: jcode_tool_types::cleanup::CleanupRequest,
+    },
 
     /// Inspect exact current profile state. Complete prompt and skill text are
     /// returned only on this explicit request, not in ordinary History.
@@ -1125,6 +1135,16 @@ pub enum ServerEvent {
     ExecutionResponse {
         id: u64,
         response: jcode_tool_types::execution::ExecutionResponse,
+    },
+    #[serde(rename = "session_inspection_response")]
+    SessionInspectionResponse {
+        id: u64,
+        response: jcode_tool_types::inspection::InspectionResponse,
+    },
+    #[serde(rename = "output_cleanup_response")]
+    OutputCleanupResponse {
+        id: u64,
+        response: jcode_tool_types::cleanup::CleanupResponse,
     },
 
     /// Tool execution completed

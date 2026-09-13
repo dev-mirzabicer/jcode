@@ -1,6 +1,60 @@
 use super::*;
 
 #[test]
+fn inspection_and_cleanup_require_attachment_and_keep_original_reply_session() {
+    for (req, request, event_type, response) in [
+        (
+            "session_inspection",
+            json!({"action":"outline","target":"self"}),
+            "session_inspection_response",
+            json!({"snapshot_id":"snapshot-fixture","content":{"output":"fixture","images":[],"source":{"kind":"inline"}}}),
+        ),
+        (
+            "output_cleanup",
+            json!({"action":"status"}),
+            "output_cleanup_response",
+            json!({"kind":"status","status":null}),
+        ),
+    ] {
+        let request = json!({"req":req,"id":900,"session_id":"s1","request":request});
+        let mut empty = BridgeState::default();
+        assert!(matches!(
+            only_reply_event(empty.api_request_to_legacy(&request)),
+            ApiEvent::Error {
+                code: ErrorCode::UnknownSession,
+                ..
+            }
+        ));
+        let mut state = state_with_session();
+        let mut wrong = request.clone();
+        wrong["session_id"] = json!("other");
+        assert!(matches!(
+            only_reply_event(state.api_request_to_legacy(&wrong)),
+            ApiEvent::Error {
+                code: ErrorCode::UnknownSession,
+                ..
+            }
+        ));
+        let outbound = state.api_request_to_legacy(&request);
+        let Outbound::Legacy(legacy) = &outbound[0] else {
+            panic!("{outbound:?}");
+        };
+        assert_eq!(legacy["type"], req);
+        state.session_id = Some("s2".into());
+        let event = json!({"type":event_type,"id":legacy["id"],"response":response});
+        let replies = state.legacy_event_to_api(&event);
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0].reply_to, Some(900));
+        assert!(
+            matches!(&replies[0].event,ApiEvent::SessionInspection { session_id,.. } | ApiEvent::OutputCleanup { session_id,.. } if session_id=="s1"),
+            "{:?}",
+            replies[0].event
+        );
+        assert!(state.legacy_event_to_api(&event).is_empty());
+    }
+}
+
+#[test]
 fn execution_control_preserves_attachment_and_exact_response_correlation() {
     let request = json!({"req":"execution","id":500,"session_id":"s1","request":{"action":"list","limit":10}});
     let mut empty = BridgeState::default();

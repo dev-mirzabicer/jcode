@@ -26,6 +26,10 @@ import {
   type ApiRequest,
   type ExecutionRequest,
   type ExecutionResponse,
+  type InspectionRequest,
+  type InspectionResponse,
+  type CleanupRequest,
+  type CleanupResponse,
   type WorkflowPromptRequest,
   type HistoryMessage,
   type ImageAttachment,
@@ -620,6 +624,21 @@ export class JcodeClient extends EventEmitter {
     if (request.action === "read_part") this.requireCapability("shared_execution_parts_v1");
     const frame = await this.expectReply({req: "execution", session_id: sessionId, request}, "execution");
     if (frame.session_id !== sessionId) throw new HarnessError("unexpected_reply", "Execution reply belongs to a different session");
+    return frame.response;
+  }
+
+  async sessionInspection(sessionId: string, request: InspectionRequest): Promise<InspectionResponse> {
+    this.requireCapability("session_inspection_v1");
+    const frame = await this.expectReply({req: "session_inspection", session_id: sessionId, request}, "session_inspection");
+    if (frame.session_id !== sessionId) throw new HarnessError("unexpected_reply", "Inspection reply belongs to a different session");
+    return frame.response;
+  }
+
+  /** Human frontend review and exact confirmation, not a model tool. */
+  async outputCleanup(sessionId: string, request: CleanupRequest): Promise<CleanupResponse> {
+    this.requireCapability("output_cleanup_review_v1");
+    const frame = await this.expectReply({req: "output_cleanup", session_id: sessionId, request}, "output_cleanup");
+    if (frame.session_id !== sessionId) throw new HarnessError("unexpected_reply", "Cleanup reply belongs to a different session");
     return frame.response;
   }
 

@@ -621,6 +621,7 @@ impl App {
     /// Run the TUI application
     /// Returns Some(session_id) if hot-reload was requested
     pub async fn run(mut self, mut terminal: DefaultTerminal) -> Result<RunResult> {
+        crate::execution::retention::record_session_use(self.session.id.clone()).await?;
         super::terminal_liveness::capture_initial_tty();
         let mut event_stream = Some(EventStream::new());
         let mut redraw_period = crate::tui::redraw_interval(&self);

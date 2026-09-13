@@ -35,6 +35,7 @@ mod patch;
 mod read;
 pub mod selfdev;
 pub(crate) mod serde_coerce;
+mod session_inspection;
 mod session_search;
 pub(crate) mod session_search_index;
 mod side_panel;
@@ -443,6 +444,11 @@ impl Registry {
     }
 
     pub async fn new(_provider: Arc<dyn Provider>) -> Self {
+        if let Ok(root) = crate::storage::jcode_dir()
+            && let Err(error) = crate::execution::retention::ensure_worker(root).await
+        {
+            crate::logging::warn(&format!("Cannot start output retention worker: {error:#}"));
+        }
         let start = std::time::Instant::now();
         let skills_start = std::time::Instant::now();
         let skills = Self::shared_skills_registry();
@@ -475,6 +481,10 @@ impl Registry {
             "conversation_search",
             conversation_search::ConversationSearchTool::new(context_budget),
         );
+        for tool in session_inspection::InspectionTool::all() {
+            let name = tool.name().to_string();
+            Self::insert_tool(&mut tools_map, &name, tool);
+        }
         // Integration discovery is on by default (opt-out); when disabled the
         // tool is never registered and no discovery endpoint is ever
         // contacted.

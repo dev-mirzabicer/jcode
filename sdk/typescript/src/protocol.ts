@@ -8,7 +8,7 @@
  */
 
 export const API_VERSION_MAJOR = 1;
-export const API_VERSION_MINOR = 3;
+export const API_VERSION_MINOR = 4;
 
 export type ExecutionState = "prepared" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
 export type OutputSize = number | "very_small" | "small" | "medium" | "large" | "very_large";
@@ -46,6 +46,19 @@ export type ExecutionResponse =
   | {kind: "content"; run_id: string; page: ExecutionPage};
 
 export type PermissionDecision = "allow" | "allow_always" | "deny";
+
+export type InspectionRequest =
+  | {action: "outline"; target: string; output_size?: OutputSize | null}
+  | {action: "transcript"; snapshot_id: string; range?: {start: number; end: number} | null; raw?: boolean; output_size?: OutputSize | null}
+  | {action: "expand_tool"; snapshot_id: string; tool_use_id: string; output_size?: OutputSize | null};
+export interface InspectionResponse {snapshot_id: string; content: ExecutionPage}
+export type CleanupSelection = {selection: "oldest_bytes"; bytes: number} | {selection: "outputs"; run_ids: string[]};
+export interface CleanupCandidate {run_id: string; session_id: string; bytes: number; created_at: number; affected_snapshot_ids: string[]}
+export interface CleanupReview {review_id: string; confirmation_id: string; candidates: CleanupCandidate[]; requested_bytes: number | null; selected_bytes: number; overshoot_bytes: number; impact: string}
+export interface CleanupOutcome {review_id: string; items: {run_id: string; deleted: boolean; error: string | null}[]}
+export interface RetentionReport {checked_at: number; archived_outputs: number; pruned_snapshots: number; resumed_cleanups: number; issues: {id: string; message: string}[]}
+export type CleanupRequest = {action: "status"} | {action: "review"; selection: CleanupSelection} | {action: "confirm"; review_id: string; confirmation_id: string};
+export type CleanupResponse = {kind: "status"; status: RetentionReport | null} | {kind: "review"; review: CleanupReview} | {kind: "outcome"; outcome: CleanupOutcome};
 
 export type ErrorCode =
   | "unsupported_version"
@@ -135,6 +148,8 @@ export type WorkflowPromptRequest =
 
 export type ApiRequest =
   | {req: "execution"; session_id: string; request: ExecutionRequest}
+  | {req: "session_inspection"; session_id: string; request: InspectionRequest}
+  | {req: "output_cleanup"; session_id: string; request: CleanupRequest}
   | { req: "hello"; min_version: number; max_version: number; client: string }
   | { req: "list_sessions"; include_archived?: boolean }
   | { req: "archive_session"; session_id: string }
@@ -188,6 +203,8 @@ export type ApiRequest =
 
 export type ApiEvent =
   | {ev: "execution"; session_id: string; response: ExecutionResponse}
+  | {ev: "session_inspection"; session_id: string; response: InspectionResponse}
+  | {ev: "output_cleanup"; session_id: string; response: CleanupResponse}
   | { ev: "workflow_prompt_rendered"; session_id: string; content: string }
   | { ev: "hello_ok"; version: number; server: string; capabilities?: string[] }
   | { ev: "ok" }
@@ -326,6 +343,8 @@ export type ServerFrame = { v: number; reply_to?: number } & UnknownApiEvent;
 
 /** Every event tag the SDK knows about, for drift checks and routing. */
 export const KNOWN_EVENT_KINDS = [
+  "session_inspection",
+  "output_cleanup",
   "execution",
   "hello_ok",
   "ok",
@@ -365,6 +384,8 @@ export const KNOWN_EVENT_KINDS = [
 
 /** Every request tag the SDK can send. */
 export const KNOWN_REQUEST_KINDS = [
+  "session_inspection",
+  "output_cleanup",
   "execution",
   "hello",
   "list_sessions",

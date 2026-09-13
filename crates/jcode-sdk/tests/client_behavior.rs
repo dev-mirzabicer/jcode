@@ -22,6 +22,82 @@ use std::time::Duration;
 struct PairTransport(UnixStream);
 
 #[test]
+fn inspection_and_cleanup_negotiate_capabilities_before_transport() {
+    use jcode_harness_api::{
+        CleanupRequest, CleanupResponse, InspectionRequest, InspectionResponse,
+    };
+    let old = fake_harness_with_capabilities(vec!["sessions".into()], |_, _| {
+        panic!("Unsupported inspection/cleanup reached transport")
+    });
+    let outline = InspectionRequest::Outline {
+        target: "self".into(),
+        output_size: None,
+    };
+    assert_eq!(
+        old.session_inspection("s1", outline.clone())
+            .unwrap_err()
+            .kind,
+        ErrorKind::UnsupportedCapability
+    );
+    assert_eq!(
+        old.output_cleanup("s1", CleanupRequest::Status)
+            .unwrap_err()
+            .kind,
+        ErrorKind::UnsupportedCapability
+    );
+    let client = fake_harness_with_capabilities(
+        vec![
+            jcode_harness_api::INSPECTION_CAPABILITY.into(),
+            jcode_harness_api::CLEANUP_CAPABILITY.into(),
+        ],
+        |frame, writer| match &frame.request {
+            ApiRequest::SessionInspection {
+                session_id,
+                request,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert!(matches!(request, InspectionRequest::Outline { .. }));
+                let response:InspectionResponse=serde_json::from_value(serde_json::json!({"snapshot_id":"snapshot-fixture","content":{"output":"fixture","images":[]}})).unwrap();
+                reply(
+                    frame,
+                    ApiEvent::SessionInspection {
+                        session_id: session_id.clone(),
+                        response,
+                    },
+                    writer,
+                );
+            }
+            ApiRequest::OutputCleanup {
+                session_id,
+                request,
+            } => {
+                assert!(matches!(request, CleanupRequest::Status));
+                reply(
+                    frame,
+                    ApiEvent::OutputCleanup {
+                        session_id: session_id.clone(),
+                        response: CleanupResponse::Status { status: None },
+                    },
+                    writer,
+                );
+            }
+            _ => panic!("Unexpected request"),
+        },
+    );
+    assert_eq!(
+        client
+            .session_inspection("s1", outline)
+            .unwrap()
+            .snapshot_id,
+        "snapshot-fixture"
+    );
+    assert!(matches!(
+        client.output_cleanup("s1", CleanupRequest::Status).unwrap(),
+        CleanupResponse::Status { status: None }
+    ));
+}
+
+#[test]
 fn execution_control_requires_capability_and_returns_typed_correlated_replies() {
     use jcode_harness_api::{ExecutionRequest, ExecutionResponse};
     let old = fake_harness_with_capabilities(vec!["sessions".into()], |_, _| {

@@ -603,6 +603,8 @@ impl Request {
             Request::SetAgent { id, .. } => *id,
             Request::GetAgentCatalog { id }
             | Request::Execution { id, .. }
+            | Request::SessionInspection { id, .. }
+            | Request::OutputCleanup { id, .. }
             | Request::GetAgentStatus { id, .. }
             | Request::RenderWorkflowPrompt { id, .. }
             | Request::InspectInstructions { id, .. }

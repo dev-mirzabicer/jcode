@@ -806,6 +806,49 @@ impl JcodeClient {
         }
     }
 
+    pub fn session_inspection(
+        &self,
+        session_id: &str,
+        request: jcode_harness_api::InspectionRequest,
+    ) -> Result<jcode_harness_api::InspectionResponse> {
+        self.require_capability(jcode_harness_api::INSPECTION_CAPABILITY)?;
+        match self
+            .request_ok(ApiRequest::SessionInspection {
+                session_id: session_id.into(),
+                request,
+            })?
+            .event
+        {
+            ApiEvent::SessionInspection {
+                session_id: received,
+                response,
+            } if received == session_id => Ok(response),
+            other => Err(unexpected("session_inspection", &other)),
+        }
+    }
+
+    /// Human frontend review/confirmation, not an agent execution tool.
+    pub fn output_cleanup(
+        &self,
+        session_id: &str,
+        request: jcode_harness_api::CleanupRequest,
+    ) -> Result<jcode_harness_api::CleanupResponse> {
+        self.require_capability(jcode_harness_api::CLEANUP_CAPABILITY)?;
+        match self
+            .request_ok(ApiRequest::OutputCleanup {
+                session_id: session_id.into(),
+                request,
+            })?
+            .event
+        {
+            ApiEvent::OutputCleanup {
+                session_id: received,
+                response,
+            } if received == session_id => Ok(response),
+            other => Err(unexpected("output_cleanup", &other)),
+        }
+    }
+
     pub fn set_agent(&self, session_id: &str, agent: &str, replace: bool) -> Result<AgentStatus> {
         self.require_capability("agent_profile_controls")?;
         match self

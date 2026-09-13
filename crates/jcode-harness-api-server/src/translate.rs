@@ -21,6 +21,8 @@ const PEEK_LIMIT: u64 = 12;
 /// `peek_session` and `list_sessions` are deliberately absent: they are served
 /// from stored records precisely so a client can look around before attaching.
 const REQUIRES_ATTACH: &[&str] = &[
+    "session_inspection",
+    "output_cleanup",
     "execution",
     "send_message",
     "cancel",
@@ -152,6 +154,12 @@ enum SimpleKind {
     AgentStatus,
     WorkflowPrompt,
     Execution {
+        session_id: String,
+    },
+    SessionInspection {
+        session_id: String,
+    },
+    OutputCleanup {
         session_id: String,
     },
     Credential {
@@ -570,6 +578,50 @@ impl BridgeState {
                     .push((id, api_id, SimpleKind::Execution { session_id }));
                 vec![Outbound::Legacy(
                     json!({"type":"execution","id":id,"request":request}),
+                )]
+            }
+            "session_inspection" | "output_cleanup" => {
+                let Some(session_id) = self.session_id.clone() else {
+                    return Self::error_reply(
+                        api_id,
+                        ErrorCode::UnknownSession,
+                        "Inspection/cleanup requires a completed attachment",
+                    );
+                };
+                let cleanup = req == "output_cleanup";
+                let parsed = if cleanup {
+                    serde_json::from_value::<jcode_harness_api::CleanupRequest>(
+                        request["request"].clone(),
+                    )
+                    .and_then(serde_json::to_value)
+                } else {
+                    serde_json::from_value::<jcode_harness_api::InspectionRequest>(
+                        request["request"].clone(),
+                    )
+                    .and_then(serde_json::to_value)
+                };
+                let request = match parsed {
+                    Ok(request) => request,
+                    Err(error) => {
+                        return Self::error_reply(
+                            api_id,
+                            ErrorCode::InvalidRequest,
+                            &format!("Invalid inspection/cleanup request: {error}"),
+                        );
+                    }
+                };
+                let id = self.legacy_id();
+                let (kind, name) = if cleanup {
+                    (SimpleKind::OutputCleanup { session_id }, "output_cleanup")
+                } else {
+                    (
+                        SimpleKind::SessionInspection { session_id },
+                        "session_inspection",
+                    )
+                };
+                self.pending_simple.push((id, api_id, kind));
+                vec![Outbound::Legacy(
+                    json!({"type":name,"id":id,"request":request}),
                 )]
             }
             // Answered from the stored record rather than the daemon: the
@@ -1316,6 +1368,49 @@ impl BridgeState {
                         },
                     )],
                 }
+            }
+            "session_inspection_response" | "output_cleanup_response" => {
+                let id = event["id"].as_u64().unwrap_or(0);
+                let cleanup = event["type"].as_str() == Some("output_cleanup_response");
+                let Some(index) = self.pending_simple.iter().position(|(legacy, _, kind)| {
+                    *legacy == id
+                        && if cleanup {
+                            matches!(kind, SimpleKind::OutputCleanup { .. })
+                        } else {
+                            matches!(kind, SimpleKind::SessionInspection { .. })
+                        }
+                }) else {
+                    return vec![];
+                };
+                let (_, api_id, kind) = self.pending_simple.remove(index);
+                let response = match kind {
+                    SimpleKind::SessionInspection { session_id } => {
+                        serde_json::from_value::<jcode_harness_api::InspectionResponse>(
+                            event["response"].clone(),
+                        )
+                        .map(|response| ApiEvent::SessionInspection {
+                            session_id,
+                            response,
+                        })
+                    }
+                    SimpleKind::OutputCleanup { session_id } => {
+                        serde_json::from_value::<jcode_harness_api::CleanupResponse>(
+                            event["response"].clone(),
+                        )
+                        .map(|response| ApiEvent::OutputCleanup {
+                            session_id,
+                            response,
+                        })
+                    }
+                    _ => unreachable!(),
+                };
+                vec![ServerFrame::reply(
+                    api_id,
+                    response.unwrap_or_else(|error| ApiEvent::Error {
+                        code: ErrorCode::Internal,
+                        message: format!("Invalid inspection/cleanup response: {error}"),
+                    }),
+                )]
             }
             "reasoning_effort_changed" => {
                 let id = event["id"].as_u64().unwrap_or(0);
