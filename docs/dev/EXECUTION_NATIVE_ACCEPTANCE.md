@@ -1,8 +1,52 @@
 # Shared execution: native candidate verification
 
-Status: partial WP-02 acceptance evidence, not package acceptance or final activation.
+## Activated WP-02 candidate, 2026-09-13
 
-## Candidate boundary
+Shared/current/running identity is `3485be42d-dirty-39bb6a43a849`, version
+`v0.75.308-dev`, with a passed canary and `SocketReady` reload state. Candidate
+approval and main publication remain pending. Live configuration and all five
+protected unrelated file hashes match the pre-activation record.
+
+All ten earlier native CLI/API/PTY cases passed again against this activated
+binary with unchanged assertions. An eleventh case exercised the shared output
+guard withholding a 1,000,015-byte command result, an explicitly initiated
+reasoning-suppression draft/apply transaction through the existing Context Editor
+service, and a subsequent real read of the retained tail. The next provider payload
+excluded the original synthetic reasoning while retaining its provider-required
+blank placeholder. Exactly four localhost requests and one append-only command
+effect occurred. No live conversation or context architecture was changed.
+This uses the actual manual-operation backend, not physical mouse input or a claim
+that compaction was economically required by the single-output size guard.
+
+`post-activation-3485be42d-final.json` in the private WP-02 evidence root records all twelve
+cases, exact roots/log hashes, and released runtime leases. Native test clients at
+80x24 and 60x24 use the activated binary, have later idle frames after Escape, and
+leave no registered testers. Configuration/current/shared/canary were independently
+checked in the actual running session. No hosted model was used.
+
+A separate standalone `repl` process also completed the exact retained-output/tail
+workflow with three fixture provider requests, one original command effect, and
+CLI-owned execution identity. It is not inferred from JSON/NDJSON Run coverage.
+Post-activation export tests passed for tool input/result and replay redaction,
+exhaustive context-export redaction without source mutation, and active-profile
+structural/export integrity (four tests total).
+
+Failed attempts remain evidence. ENOSPC during `rust-objcopy` left a 3 KB
+non-executable artifact even though Cargo reported success, and coordinated
+validation skipped activation. An initial retry copied the same damaged cached
+artifact. Exact inactive copies were quarantined, compiler headroom restored, and
+a fresh validated build/reload succeeded. No chmod bypass, security weakening or
+force publication was used.
+
+The context fixture first rejected its own command-generation substitution before
+execution, then supplied a missing Subscribe workspace, then corrected its expected
+apply response to `context_transaction_applied`. Another assertion mistook the
+existing provider-required blank reasoning field for meaningful original reasoning.
+The final check requires meaningful reasoning to be absent and preserves all
+transaction/tail/effect assertions. These failed fixture attempts are not passing
+checks and did not justify changing protected context-control behavior.
+
+## Historical isolated candidate boundary
 
 The coordinated TUI build at source `b5fe80d99` produced
 `b5fe80d99-dirty-f086431c892b` (`jcode v0.75.297-dev`). These checks executed that

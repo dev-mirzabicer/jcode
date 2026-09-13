@@ -3,8 +3,8 @@
 This downstream uses one shared execution owner for tool identity, retained output,
 presentation, cancellation, and recovery. The implementation and verification
 boundaries are detailed in [the developer guide](dev/EXECUTION_STORAGE.md) and
-[the acceptance ledger](dev/EXECUTION_ACCEPTANCE.md). WP-02 rollout is still under
-verification; this guide is not a claim of candidate acceptance.
+[the acceptance ledger](dev/EXECUTION_ACCEPTANCE.md). WP-02 is activated as a verified candidate awaiting review; this guide is not a
+claim of candidate acceptance.
 
 ## Retrieve output, do not repeat its effects
 
@@ -90,7 +90,7 @@ and `shared_execution_parts_v1` for bounded binary-part materialization. Paths i
 responses are server-owned, not assumed mounted on the client. Binary continuation
 is digest-bound. See [SDK usage](../sdk/typescript/README.md#retained-executions).
 
-MacOS arm64 is the native verification target. Portable DTO/transport checks are
+macOS arm64 is the native verification target. Portable DTO/transport checks are
 not proof of complete Windows/Linux application support. Unsupported storage or
 process-control capabilities fail explicitly; no weaker ownership fallback is
 claimed as equivalent support.
