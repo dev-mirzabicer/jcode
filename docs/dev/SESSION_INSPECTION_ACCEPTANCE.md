@@ -1,6 +1,6 @@
 # WP-03 inspection and retention acceptance evidence
 
-**State:** Candidate verified and activated on 2026-09-13. Awaiting Mirza's work-package acceptance. This is not Phase 4 completion.
+**State:** Accepted by Mirza on 2026-09-13 at 19:26:02.486 UTC. Exact candidate `6854e1af9` was fast-forwarded to local and downstream main at 19:26:53 UTC. The implementation was verified and activated before acceptance. This is not Phase 4 completion.
 
 **Implementation:** `c2dc31ef44f2407d8eb8823ba0a8c6457a6aacc1` on
 `mirza/phase-04-wp-03-inspection-retention`, based on accepted WP-02 `ed3100a3d`.
@@ -157,5 +157,5 @@ stored blobs; it is not claimed to be constant-time for large histories. The rea
 
 WP-04 still owns actual isolated children/relationships. WP-05 owns the task-monitor
 and child Context Editor navigation. WP-06 and independent closeout still reconcile
-the combined phase. Candidate verification and activation do not waive Mirza's
-work-package acceptance or authorize publication before that approval.
+the combined phase. Mirza accepted the disclosed evidence and boundaries above.
+The documentation-only accepted-status closeout does not change activated code.
