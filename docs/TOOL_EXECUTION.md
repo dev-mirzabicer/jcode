@@ -82,8 +82,10 @@ output placement can use a UUID-verified archive volume when local receipt headr
 would otherwise be exhausted. Successful placement is quiet. Offline requested
 output fails explicitly; it is not reconstructed by repeating the producer. Mirza
 accepted Active's existing unencrypted, ownership-ignored protection boundary.
-Routine seven-day archival/pruning and the new `/tasks` monitor belong to later
-Phase 4 packages, not this package's current UI.
+Routine seven-day archival, reader-owned snapshot pruning, immutable transcript
+inspection and trusted-client cleanup are described in [session inspection and
+retention](SESSION_INSPECTION.md). The convenient `/tasks` monitor remains a later
+Phase 4 package and is not claimed by these backend APIs.
 
 Harness/SDK clients use `shared_execution_v1` for list/inspect/read/Stop/background
 and `shared_execution_parts_v1` for bounded binary-part materialization. Paths in

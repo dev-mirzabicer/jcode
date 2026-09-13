@@ -242,6 +242,14 @@ Structured-output calls require `workflow_prompt_rendering`. Both SDKs render cu
 
 ## Retained executions
 
+Protocol v1.4 additionally provides `sessionInspection(sessionId, request)` under
+`session_inspection_v1` and `outputCleanup(sessionId, request)` under
+`output_cleanup_review_v1`. Both require attachment and reject unsupported
+capabilities before sending. Inspection opens immutable outlines and reads or
+expands their snapshot-bound references. Cleanup is a trusted-client status,
+exact-preview and single-confirmation workflow, not a model tool or physical-human
+attestation mechanism. See [complete examples and lifecycle semantics](../../docs/SESSION_INSPECTION.md).
+
 `execution(sessionId, request)` (also `execution` in the Rust SDK) requires the
 advertised `shared_execution_v1` capability and a completed session attachment.
 It supports `list`, `inspect`, `stop`, `background`, and `read` operations without

@@ -297,6 +297,8 @@ To disable emoji globally in TUI and CLI output, set `emoji = false` under `[dis
 
 Tool results are retained before bounded presentation, with exact read continuation and owned-work cancellation. See [tool execution and recovery](docs/TOOL_EXECUTION.md) for current behavior, configuration and rollout boundaries.
 
+Conversations support [durable as-of inspection and output retention](docs/SESSION_INSPECTION.md), including projected/raw reads, immutable snapshot references, quiet cold archival and reviewed cleanup through trusted clients.
+
 ## Swarm
 
 Swarm is globally unavailable by default in this downstream. `features.swarm = false` blocks tool discovery and execution, coordination requests, automatic restoration, and session reactivation. Its code, instruction assets, and historical data remain dormant. Ordinary sessions, notifications, background work, and self-development remain separate. See [Swarm availability policy](docs/SWARM_POLICY.md).

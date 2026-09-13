@@ -93,7 +93,7 @@ that prior delivered history, invocation inputs, Session data, project files and
 child-authored artifact directories are not removed.
 
 One confirmation is bound to the exact review and its originating trusted client
-session. Changed identity, activity, contents or snapshot impact makes an unconfirmed
+session. Changed identity, contents or snapshot impact makes an unconfirmed
 review stale. Confirmed deletion is journaled and retryable, with per-output failure
 outcomes. A failed item can already have partial physical deletions; `deleted=false`
 means durable completion has not been established, not that no effect occurred.
@@ -113,3 +113,22 @@ owners, kernel locks and injected storage failures. They do not judge prompt or 
 wording. Protocol, SDK, real-volume and activated-runtime evidence must be recorded
 separately from these library tests. Native mandatory acceptance is macOS arm64;
 other-platform guarantees must not be inferred from it.
+
+## Migration and client integration
+
+Cold classification is retained after a session resumes. Opening/inspecting a
+session does not hide its already sealed cold-archived outputs or independently
+invalidate a review. Live output ownership, actual content/location changes and
+new snapshot references remain checked.
+
+Schema 19 adds a one-time retention observation floor for migrated activity rows.
+It leaves their recorded last activity unchanged and prevents archival/pruning
+until a full week of the new tracker is available. New activity then controls
+ordinary eligibility. Reopening a current store does not refresh this floor.
+
+Production inspection rendering streams through the common execution capture and
+Stop owner. The trusted-client adapter uses that same supervisor. Connection-owned
+request tasks keep metadata/Stop responsive while another inspection waits for
+storage. A small captured part preserves snapshot identity if later rendering or
+Stop interrupts the body. Primary descendants can inspect ancestor-owned snapshots
+without changing ownership or refreshing the ancestor's activity clock.

@@ -93,8 +93,8 @@ prefix. Duplicate recovery does not increment the location generation again.
 
 `recover_output_storage` handles the existing allocation and relocation
 journals. It does not scan for orphan-looking files to delete. Week-old archival,
-activity clocks, snapshot pruning and human cleanup selection are separate
-consumers of this owner, not a second mover.
+activity clocks, snapshot pruning and human cleanup selection now use the
+[inspection/retention owner](SESSION_INSPECTION.md), not a second mover.
 
 Active's existing unencrypted, ownership-ignored configuration is an explicitly
 accepted downstream boundary. Normal local permissions and safe-export policy
