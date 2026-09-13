@@ -1,5 +1,10 @@
 #[path = "composition_compatibility.rs"]
 mod compatibility;
+#[path = "composition_isolated.rs"]
+mod isolated;
+pub use isolated::{
+    DelegationInstructionCatalog, DelegationInstructionEntry, TaskPresetActivation,
+};
 
 const PREFERRED_TOOLS_CUTOVER_SEED: u32 = 25;
 use super::ConsumerScopePolicy;
@@ -494,7 +499,16 @@ fn compose_activation(
     environment: &CompositionEnvironment,
     request: SystemPromptActivationRequest<'_>,
 ) -> Result<SystemPromptActivation, SystemPromptActivationError> {
-    let profile = render_agent_profile(environment, request.selection)?;
+    compose_activation_for(environment, request, AgentAvailability::Primary)
+}
+
+fn compose_activation_for(
+    environment: &CompositionEnvironment,
+    request: SystemPromptActivationRequest<'_>,
+    availability: AgentAvailability,
+) -> Result<SystemPromptActivation, SystemPromptActivationError> {
+    let profile =
+        render_agent_profile_with_availability(environment, request.selection, Some(availability))?;
     let mut parts = Vec::new();
     parts.push(render_required_system(&environment.runtime, KERNEL_ID)?);
     parts.push(profile.text);
@@ -982,6 +996,7 @@ pub fn shipped_instruction_seed() -> Result<InstructionStoreSeed, InstructionErr
     documents.extend(super::notification::seed_documents()?);
     documents.extend(super::notification::module_seed_documents()?);
     documents.extend(super::workflow::seed_documents()?);
+    documents.extend(isolated::seed_documents()?);
     Ok(InstructionStoreSeed {
         manifest: InstructionStoreManifest::current(),
         files: documents
@@ -1209,6 +1224,7 @@ pub fn composition_registrations() -> Result<Vec<ConsumerRegistration>, Instruct
         profile_notification_registration(AGENT_TRANSITION_ID)?,
         profile_notification_registration(AGENT_REPLACEMENT_ID)?,
     ];
+    registrations.extend(isolated::registrations()?);
     for id in [KERNEL_ID, MERMAID_ID] {
         registrations.push(ConsumerRegistration::new(format!("primary-system-{id}"), id, InstructionKind::System, format!("system/{id}.md"), "primary system composer", "Required when the owning composition slot is selected; capability policy remains code-owned.")?);
     }
