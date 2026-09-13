@@ -1,6 +1,6 @@
 # WP-02 requirement-to-evidence reconciliation
 
-Status: **activated candidate, requirement-mapped and awaiting Mirza review; not accepted**. This ledger is not a passing aggregate or an approval report. `EXECUTION_STORAGE.md` describes implementation, `EXECUTION_PRODUCERS.md` classifies producers, and `EXECUTION_NATIVE_ACCEPTANCE.md` records actual candidate-binary workflows. The program Phase 4 dossier controls scope.
+Status: **accepted by Mirza on 2026-09-13 at 14:30:30 UTC**, including the documented evidence and platform boundaries. The exact approved candidate `6ad23e42b` was published to local and downstream main. Acceptance does not convert failed aggregate suites into passing results. `EXECUTION_STORAGE.md` describes implementation, `EXECUTION_PRODUCERS.md` classifies producers, and `EXECUTION_NATIVE_ACCEPTANCE.md` records actual binary workflows. The accepted program work-package report controls the durable handoff.
 
 ## Primary work-package requirements
 
@@ -96,4 +96,4 @@ in the final combined evidence. Original logs and failed attempts remain availab
 
 ## Lifecycle boundary
 
-After final verification, present the candidate and all limits to Mirza. Only after his approval perform the standing fast-forward publication to local and `dev-mirzabicer/main`, verify actual refs, write `PROGRESS-WP-02.md`, and update the phase handoff. Do not call this package accepted merely because the implementation or component tests are extensive.
+Mirza approved the candidate and its stated boundaries, and the exact candidate was fast-forwarded to local main and pushed to `dev-mirzabicer/main` on 2026-09-13 at 14:32:34 UTC. The subsequent accepted-status documentation tail changes no runtime implementation. Phase 4 remains incomplete; the accepted WP-02 progress report names WP-03 as the next authorized unit. No acceptance is inferred for later packages.

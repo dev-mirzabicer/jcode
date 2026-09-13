@@ -1,11 +1,10 @@
 # Execution storage internals
 
-This describes the shared storage/read owner in `jcode-base::execution`. The
-Phase 4 WP-02 rollout is still being integrated. The native Registry now uses
-this owner, including batch members and ordinary local/shared callers of
-that Registry. Producer-specific truncation, provider/SDK-supplied results and
-complete detached-command integration remain rollout work. Library and Registry
-tests do not establish those remaining paths.
+This describes the shared storage/read owner in `jcode-base::execution`, accepted
+with Phase 4 WP-02 on 2026-09-13. Registry, batch members, provider/SDK acquisition,
+native command/helper ownership and local/shared callers use the owners described
+below. Adapter evidence and platform bounds are explicit in EXECUTION_PRODUCERS.md
+and EXECUTION_ACCEPTANCE.md; library tests alone are not a native workflow claim.
 
 `jcode-app-core::execution` supervises actual tool tasks independently of the
 caller waiting for a reply. Scoped replay attaches to existing work or a retained
@@ -257,8 +256,8 @@ an invitation to repeat previously accepted work.
 Tests cover recreated managers with unavailable output bodies, exact session
 filtering, terminal removal, local asynchronous cache updates, stale-root reply
 rejection, failure visibility, and existing reload-directive behavior. Strict
-base/app-core/TUI lint passes. Final activated TUI frame verification remains part
-of the WP-02 integrated acceptance, not a claim made by these mechanism tests.
+base/app-core/TUI lint passes. Activated native TUI frame verification is recorded
+separately in EXECUTION_NATIVE_ACCEPTANCE.md rather than inferred from these tests.
 
 ## Generic native helper process provenance
 
@@ -324,8 +323,8 @@ failure, superseded state and terminal-receipt recovery. Forty selfdev tests and
 59 execution-store tests pass (one explicit native archive fixture is not run in
 that matrix), as do strict affected lint, both host checks and 48 TypeScript tests.
 These tests run synthetic commands, not a real source publication. Generic helper
-process-loss proof and local summary/reload views are covered above. Final native
-activation remains WP-02 reconciliation work. Unsupported non-Unix build-command
+process-loss proof and local summary/reload views are covered above. Native
+activation and canary passed as recorded in EXECUTION_NATIVE_ACCEPTANCE.md. Unsupported non-Unix build-command
 ownership fails explicitly before launching a process rather than using the old
 unmanaged command path; native platform parity is not claimed.
 
@@ -455,8 +454,8 @@ still use their background delivery-task ID. User-facing background promotion
 continues through the existing parent handoff path; the low-level ownership
 primitive alone is not a claim that a parent turn has been resumed.
 
-The command-worker/reload integration and full caller reconciliation remain
-WP-02 work. Runtime tests use an ordinary native test process as an execution
+Command-worker/reload and caller integration use the owners described in this
+document. Runtime tests use an ordinary native test process as an execution
 owner, not a model agent or delegated implementation worker.
 
 ## Native command ownership and completion delivery
@@ -578,9 +577,9 @@ that automatic replay and checkpoints the results rather than discarding them.
 These changes reuse the existing checkpoint and context-error owners. They do
 not introduce a second transcript, automatic compaction or a new context policy.
 
-This does not yet establish complete raw provider-ingress capture, uncorrelated
-result recovery or native-SDK fallback semantics. Those boundaries remain in the
-producer reconciliation ledger and final WP-02 verification scope.
+Acquisition-time SDK receipts, adapter capture context and explicit host-native
+selection below supply the earlier-ingress, unmatched-result recovery and native
+fallback boundaries. This history conversion does not independently own them.
 
 ## Native progress and metadata ownership
 
@@ -642,9 +641,9 @@ ToolResult, not a process-global provider ID.
 Tests cover paused provider streams in both Agent modes, acquired rich results,
 errors and rollback, duplicate/unmatched IDs, unavailable storage, request leases,
 process exit without destructors, acknowledgement/reload/rewind/split, and local
-TUI capture. Bytes still queued upstream or rejected by the CLI decoder before a
-ToolResult event remain a separate adapter-ingress boundary, not a guarantee of
-this consumer-stage receipt service.
+TUI capture. Bytes acquired before CLI decoding use the adapter capture owner
+below, not this consumer-stage receipt service. Data never acquired from an
+external producer is not invented.
 
 ## Provider adapter capture context
 
@@ -740,8 +739,8 @@ effects, and its digest participates in invocation replay identity. A conflictin
 rejection cannot cause a second execution. An opaque SDK error from any other
 route, or an already-reported successful result, is retained without executing
 the local producer. Both Agent loops and the CLI exclusion mechanism are tested.
-This is not a claim of complete raw provider-envelope ingress or correlation of
-results received without a matching tool use; those remain separate work.
+Raw CLI ingress and unmatched-result preservation use the separate acquisition
+and adapter owners above; native fallback cannot substitute for those receipts.
 
 ## Optional ChatGPT web route
 

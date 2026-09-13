@@ -3,8 +3,8 @@
 This downstream uses one shared execution owner for tool identity, retained output,
 presentation, cancellation, and recovery. The implementation and verification
 boundaries are detailed in [the developer guide](dev/EXECUTION_STORAGE.md) and
-[the acceptance ledger](dev/EXECUTION_ACCEPTANCE.md). WP-02 is activated as a verified candidate awaiting review; this guide is not a
-claim of candidate acceptance.
+[the acceptance ledger](dev/EXECUTION_ACCEPTANCE.md). Mirza accepted WP-02 on
+2026-09-13 at 14:30:30 UTC with the documented verification and platform boundaries.
 
 ## Retrieve output, do not repeat its effects
 

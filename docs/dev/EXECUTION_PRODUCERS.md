@@ -1,6 +1,7 @@
 # Execution producer integration ledger
 
-This is the **reconciled WP-02 candidate inventory**, not package acceptance. Current source
+This is the **reconciled WP-02 implementation inventory**, accepted by Mirza on
+2026-09-13 with the evidence/platform limits below. Current source
 is authoritative. A passing shared-wrapper test does not prove an adapter retained
 bytes it had already clipped or converted destructively.
 
@@ -52,4 +53,4 @@ selected-result presentation uses the common policy. No broad deletion of every
 Native runtime evidence is macOS arm64 unless an individual test says otherwise.
 No prompt-prose quality test, hosted-model benchmark, unrelated desktop mutation,
 user-output deletion, or stronger-than-configured archive isolation is implied.
-The A14–A20/A25/A27–A30/A33 evidence is mapped in EXECUTION_ACCEPTANCE.md. Shared runtime activation and twelve post-activation native cases passed on 3485be42d. Mirza's candidate review remains required; failed aggregate tests retain their individual dispositions rather than becoming a fictitious all-green suite.
+The A14–A20/A25/A27–A30/A33 evidence is mapped in EXECUTION_ACCEPTANCE.md. Shared runtime activation and twelve post-activation native cases passed on 3485be42d. Mirza accepted the candidate on 2026-09-13; failed aggregate tests retain their individual dispositions rather than becoming a fictitious all-green suite.

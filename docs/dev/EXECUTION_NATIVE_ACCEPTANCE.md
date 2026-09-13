@@ -3,8 +3,9 @@
 ## Activated WP-02 candidate, 2026-09-13
 
 Shared/current/running identity is `3485be42d-dirty-39bb6a43a849`, version
-`v0.75.308-dev`, with a passed canary and `SocketReady` reload state. Candidate
-approval and main publication remain pending. Live configuration and all five
+`v0.75.308-dev`, with a passed canary and `SocketReady` reload state. Mirza accepted
+the candidate on 2026-09-13 at 14:30:30 UTC; exact candidate `6ad23e42b` was published
+to local and downstream main at 14:32:34 UTC. Live configuration and all five
 protected unrelated file hashes match the pre-activation record.
 
 All ten earlier native CLI/API/PTY cases passed again against this activated
@@ -132,13 +133,14 @@ prerequisites: missing `aarch64-linux-gnu-gcc` and Windows C runtime headers.
 The protocol reaches that dependency through provider-core/reqwest, so it was not
 an independent pure-Rust check. These failures are not passing application or
 SDK compilation evidence. No native Linux/Windows execution or process-control
-parity is claimed. Unsupported storage/process branches remain an explicit final
-platform-reconciliation item.
+parity is claimed. The explicit unsupported storage/process boundaries were
+disclosed in the candidate Mirza accepted; approval does not supply missing tests.
 
-## Still required for WP-02
+## Accepted evidence boundary
 
-This file is not the whole requirement matrix. Final configuration cutover,
-combined producer/caller/permission/capability review, remaining platform and
-force-stop semantics, prerequisite regressions, shared-runtime build-reload and
-canary, post-activation TUI frames, final diff review, Mirza's candidate approval,
-and durable publication/closeout remain separate completion conditions.
+The combined requirement mapping is in EXECUTION_ACCEPTANCE.md. Configuration
+cutover, coordinated shared activation/canary, post-activation native checks,
+protected-state and diff review, and Mirza's approval were completed. Historical
+fixture failures and cross-platform limitations remain evidence, not hidden green
+counts. Routine retention/snapshot policy, isolated children and the new task
+monitor remain owned by the next Phase 4 packages.
