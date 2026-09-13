@@ -56,6 +56,7 @@ pub fn session_exists(session_id: &str) -> bool {
 pub fn remove_unpublished_session(session_id: &str) -> Result<()> {
     storage::unregister_active_pid(session_id);
     let snapshot = session_path(session_id)?;
+    let _lease = super::capture::persistence_lease(&snapshot)?;
     let journal = session_journal_path_from_snapshot(&snapshot);
     let mut failures = Vec::new();
     for path in [

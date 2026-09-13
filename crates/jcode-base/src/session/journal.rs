@@ -49,6 +49,10 @@ pub(super) struct SessionJournalMeta {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct SessionJournalEntry {
     pub(super) meta: SessionJournalMeta,
+    #[serde(default)]
+    pub(super) storage_epoch: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) base_lengths: Option<[usize; 4]>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(super) append_messages: Vec<StoredMessage>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -64,6 +68,8 @@ pub(super) struct SessionJournalEntry {
 #[derive(Debug, Deserialize)]
 pub(super) struct SessionJournalMetaEntry {
     pub(super) meta: SessionJournalMeta,
+    #[serde(default)]
+    pub(super) storage_epoch: String,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

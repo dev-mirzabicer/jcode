@@ -1,10 +1,11 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use chrono::Utc;
 use serde::de::DeserializeOwned;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use super::capture::{PersistenceIdentity, file_digest, persistence_lease};
 use super::journal::{
     PersistVectorMode, SessionJournalEntry, SessionJournalMetaEntry, metadata_requires_snapshot,
 };
@@ -136,16 +137,89 @@ fn replay_journal_lines_as<T: DeserializeOwned>(
 
 fn replay_journal_lines(
     journal_path: &Path,
-    apply: impl FnMut(SessionJournalEntry),
+    identity: &PersistenceIdentity,
+    mut apply: impl FnMut(SessionJournalEntry),
 ) -> Result<JournalReplayStats> {
-    replay_journal_lines_as(journal_path, apply)
+    if identity.journal_is_retired(journal_path)? {
+        return Ok(JournalReplayStats::default());
+    }
+    let mut mismatch = false;
+    let stats = replay_journal_lines_as(journal_path, |entry: SessionJournalEntry| {
+        if entry.storage_epoch == identity.epoch {
+            apply(entry);
+        } else {
+            mismatch = true;
+        }
+    })?;
+    ensure!(
+        !mismatch,
+        "Session checkpoint/journal epochs disagree; preserve source and restore through a compatible writer"
+    );
+    Ok(stats)
 }
 
 fn replay_journal_meta_lines(
     journal_path: &Path,
+    identity: &PersistenceIdentity,
     mut apply: impl FnMut(super::journal::SessionJournalMeta),
 ) -> Result<JournalReplayStats> {
-    replay_journal_lines_as::<SessionJournalMetaEntry>(journal_path, |entry| apply(entry.meta))
+    if identity.journal_is_retired(journal_path)? {
+        return Ok(JournalReplayStats::default());
+    }
+    let mut mismatch = false;
+    let stats = replay_journal_lines_as::<SessionJournalMetaEntry>(journal_path, |entry| {
+        if entry.storage_epoch == identity.epoch {
+            apply(entry.meta);
+        } else {
+            mismatch = true;
+        }
+    })?;
+    ensure!(!mismatch, "Session checkpoint/journal epochs disagree");
+    Ok(stats)
+}
+
+/// Inspection must not salvage corrupt lines, create backups, or migrate context.
+pub(super) fn replay_inspection_journal(session: &mut Session, path: &Path) -> Result<()> {
+    if session.persistence_identity.journal_is_retired(path)? {
+        return Ok(());
+    }
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut reader = BufReader::new(file);
+    let mut line = String::new();
+    let mut index = 0;
+    while reader.read_line(&mut line)? > 0 {
+        index += 1;
+        ensure!(
+            line.ends_with('\n'),
+            "Inspection journal contains an uncommitted trailing entry at line {index}"
+        );
+        let entry: SessionJournalEntry = serde_json::from_str(&line).with_context(|| {
+            format!("Inspection journal is corrupt at line {index}; source was not changed")
+        })?;
+        ensure!(
+            entry.storage_epoch == session.persistence_identity.epoch,
+            "Inspection checkpoint/journal epochs disagree"
+        );
+        if let Some(lengths) = entry.base_lengths {
+            ensure!(
+                lengths
+                    == [
+                        session.messages.len(),
+                        session.env_snapshots.len(),
+                        session.memory_injections.len(),
+                        session.replay_events.len()
+                    ],
+                "Inspection journal has a missing or duplicated append; source was not changed"
+            );
+        }
+        session.apply_journal_entry(entry);
+        line.clear();
+    }
+    Ok(())
 }
 
 impl Session {
@@ -217,9 +291,20 @@ impl Session {
             );
         }
         self.guard_snapshot_shrink(snapshot_path, journal_path);
-        storage::write_json_fast(snapshot_path, self)?;
+        let previous_identity = self.persistence_identity.clone();
+        self.persistence_identity = PersistenceIdentity {
+            epoch: uuid::Uuid::new_v4().simple().to_string(),
+            retired_journal_sha256: file_digest(journal_path)?,
+        };
+        if let Err(error) = storage::write_json_secret(snapshot_path, self) {
+            self.persistence_identity = previous_identity;
+            return Err(error);
+        }
         if journal_path.exists() {
-            let _ = std::fs::remove_file(journal_path);
+            std::fs::remove_file(journal_path).context("Remove checkpointed journal")?;
+            #[cfg(unix)]
+            std::fs::File::open(journal_path.parent().context("Missing journal parent")?)?
+                .sync_all()?;
         }
         self.reset_persist_state(true);
         Ok(())
@@ -250,6 +335,7 @@ impl Session {
     }
 
     pub fn load_from_path(path: &Path) -> Result<Self> {
+        let _lease = persistence_lease(path)?;
         let load_start = Instant::now();
         let snapshot_bytes = file_len_or_zero(path);
         let snapshot_start = Instant::now();
@@ -258,7 +344,8 @@ impl Session {
         let journal_path = session_journal_path_from_snapshot(path);
         let journal_bytes = file_len_or_zero(&journal_path);
         let journal_start = Instant::now();
-        let replay_stats = replay_journal_lines(&journal_path, |entry| {
+        let identity = session.persistence_identity.clone();
+        let replay_stats = replay_journal_lines(&journal_path, &identity, |entry| {
             session.apply_journal_entry(entry);
         })?;
         let journal_entries = replay_stats.entries;
@@ -360,19 +447,24 @@ impl Session {
     /// session restore + history bootstrap.
     pub fn load_startup_stub(session_id: &str) -> Result<Self> {
         let path = session_path(session_id)?;
+        let _lease = persistence_lease(&path)?;
+        let identity = PersistenceIdentity::read(&path)?;
         let reader = BufReader::new(std::fs::File::open(&path)?);
         let stub: SessionStartupStub = serde_json::from_reader(reader)?;
         let mut session = Self::session_from_startup_stub(stub);
         let journal_path = session_journal_path_from_snapshot(&path);
-        replay_journal_meta_lines(&journal_path, |meta| {
+        replay_journal_meta_lines(&journal_path, &identity, |meta| {
             session.apply_journal_meta(meta);
         })?;
+        session.persistence_identity = identity;
         session.reset_persist_state(path.exists());
         Ok(session)
     }
 
     pub fn load_for_remote_startup(session_id: &str) -> Result<Self> {
         let path = session_path(session_id)?;
+        let _lease = persistence_lease(&path)?;
+        let identity = PersistenceIdentity::read(&path)?;
         let load_start = Instant::now();
         let snapshot_bytes = file_len_or_zero(&path);
         let snapshot_start = Instant::now();
@@ -384,12 +476,13 @@ impl Session {
         let journal_bytes = file_len_or_zero(&journal_path);
         let journal_start = Instant::now();
         let mut journal_entries = 0usize;
-        replay_journal_lines(&journal_path, |entry| {
+        replay_journal_lines(&journal_path, &identity, |entry| {
             journal_entries += 1;
             session.apply_journal_meta(entry.meta);
             session.messages.extend(entry.append_messages);
             session.replay_events.extend(entry.append_replay_events);
         })?;
+        session.persistence_identity = identity;
         let journal_ms = journal_start.elapsed().as_millis();
         let finalize_start = Instant::now();
         session.reset_persist_state(path.exists());
@@ -449,7 +542,22 @@ impl Session {
     pub fn save(&mut self) -> Result<()> {
         self.updated_at = Utc::now();
         let path = session_path(&self.id)?;
+        let _lease = persistence_lease(&path)?;
         let journal_path = session_journal_path_from_snapshot(&path);
+        if !self.persistence_identity.epoch.is_empty() && path.exists() {
+            ensure!(
+                PersistenceIdentity::read(&path)?.epoch == self.persistence_identity.epoch,
+                "Session checkpoint changed under another writer; refusing stale save"
+            );
+        }
+        // Complete an interrupted checkpoint's exact old journal removal before
+        // appending new-epoch entries. Never delete an unrecognized journal.
+        if self
+            .persistence_identity
+            .journal_is_retired(&journal_path)?
+        {
+            std::fs::remove_file(&journal_path)?;
+        }
         let start = std::time::Instant::now();
         let snapshot_bytes_before = file_len_or_zero(&path);
         let journal_bytes_before = file_len_or_zero(&journal_path);
@@ -459,7 +567,8 @@ impl Session {
             .last_meta
             .as_ref()
             .is_some_and(|prev| metadata_requires_snapshot(prev, &current_meta));
-        let vectors_need_snapshot = !self.persist_state.snapshot_exists
+        let vectors_need_snapshot = self.persistence_identity.epoch.is_empty()
+            || !self.persist_state.snapshot_exists
             || self.persist_state.force_snapshot
             || self.persist_state.messages_mode == PersistVectorMode::Full
             || self.persist_state.env_snapshots_mode == PersistVectorMode::Full
@@ -512,6 +621,13 @@ impl Session {
             let entry_build_start = Instant::now();
             let entry = SessionJournalEntry {
                 meta: current_meta.clone(),
+                storage_epoch: self.persistence_identity.epoch.clone(),
+                base_lengths: Some([
+                    self.persist_state.messages_len,
+                    self.persist_state.env_snapshots_len,
+                    self.persist_state.memory_injections_len,
+                    self.persist_state.replay_events_len,
+                ]),
                 append_messages: self.messages[self.persist_state.messages_len..].to_vec(),
                 append_env_snapshots: self.env_snapshots[self.persist_state.env_snapshots_len..]
                     .to_vec(),
@@ -523,7 +639,15 @@ impl Session {
             };
             let entry_build_ms = entry_build_start.elapsed().as_millis();
             let append_start = Instant::now();
-            let append_result = storage::append_json_line_fast(&journal_path, &entry);
+            let append_result =
+                storage::append_json_line_fast(&journal_path, &entry).and_then(|()| {
+                    jcode_core::fs::set_permissions_owner_only(&journal_path)?;
+                    std::fs::File::open(&journal_path)?.sync_all()?;
+                    #[cfg(unix)]
+                    std::fs::File::open(journal_path.parent().context("Missing journal parent")?)?
+                        .sync_all()?;
+                    Ok(())
+                });
             let append_ms = append_start.elapsed().as_millis();
             match append_result {
                 Ok(()) => {
@@ -643,6 +767,129 @@ impl Session {
 mod tests {
     use super::*;
     use crate::message::{ContentBlock, Role};
+
+    fn text(session: &mut Session, value: &str) {
+        session.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: value.into(),
+                cache_control: None,
+            }],
+        );
+    }
+
+    #[test]
+    fn inspection_strict_capture_preserves_snapshot_and_journal() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("target.json");
+        let journal = session_journal_path_from_snapshot(&path);
+        let mut session = Session::create_with_id("target".into(), None, None);
+        text(&mut session, "first");
+        session.checkpoint_snapshot(&path, &journal)?;
+        let mut later = session.clone();
+        text(&mut later, "tail");
+        let entry = SessionJournalEntry {
+            meta: later.journal_meta(),
+            storage_epoch: session.persistence_identity.epoch.clone(),
+            base_lengths: Some([1, 0, 0, 0]),
+            append_messages: later.messages[1..].to_vec(),
+            append_env_snapshots: vec![],
+            append_memory_injections: vec![],
+            append_replay_events: vec![],
+        };
+        storage::append_json_line_fast(&journal, &entry)?;
+        let before = (std::fs::read(&path)?, std::fs::read(&journal)?);
+        let captured = Session::capture_readonly_from_path(&path, "target")?;
+        assert_eq!(captured.session().messages.len(), 2);
+        assert_eq!(before, (std::fs::read(&path)?, std::fs::read(&journal)?));
+        assert!(!journal.with_extension("corrupt.jsonl").exists());
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&journal)?
+            .write_all(b"{torn")?;
+        assert!(Session::capture_readonly_from_path(&path, "target").is_err());
+        assert!(!journal.with_extension("corrupt.jsonl").exists());
+        assert_eq!(captured.session().messages.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn inspection_checkpoint_crash_does_not_replay_retired_journal() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("target.json");
+        let journal = session_journal_path_from_snapshot(&path);
+        let mut session = Session::create_with_id("target".into(), None, None);
+        text(&mut session, "first");
+        session.checkpoint_snapshot(&path, &journal)?;
+        text(&mut session, "second");
+        let entry = SessionJournalEntry {
+            meta: session.journal_meta(),
+            storage_epoch: session.persistence_identity.epoch.clone(),
+            base_lengths: Some([1, 0, 0, 0]),
+            append_messages: session.messages[1..].to_vec(),
+            append_env_snapshots: vec![],
+            append_memory_injections: vec![],
+            append_replay_events: vec![],
+        };
+        storage::append_json_line_fast(&journal, &entry)?;
+        let old_journal = std::fs::read(&journal)?;
+        session.checkpoint_snapshot(&path, &journal)?;
+        // Exact filesystem state after durable checkpoint but before old unlink.
+        std::fs::write(&journal, &old_journal)?;
+        assert_eq!(
+            Session::capture_readonly_from_path(&path, "target")?
+                .session()
+                .messages
+                .len(),
+            2
+        );
+        assert_eq!(Session::load_from_path(&path)?.messages.len(), 2);
+        assert_eq!(
+            std::fs::read(&journal)?,
+            old_journal,
+            "inspection/load does not clean source"
+        );
+        let mut changed: SessionJournalEntry = serde_json::from_slice(&old_journal)?;
+        changed.meta.title = Some("unrecognized later writer".into());
+        storage::write_json_fast(&journal, &changed)?;
+        assert!(Session::capture_readonly_from_path(&path, "target").is_err());
+        assert!(Session::load_from_path(&path).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn inspection_waits_for_storage_not_agent_and_observes_one_committed_revision() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("target.json");
+        let journal = session_journal_path_from_snapshot(&path);
+        let mut session = Session::create_with_id("target".into(), None, None);
+        text(&mut session, "first");
+        session.checkpoint_snapshot(&path, &journal)?;
+        let agent = std::sync::Mutex::new(session.clone());
+        let _busy_agent = agent.lock().unwrap();
+        let lease = persistence_lease(&path)?;
+        let reader_path = path.clone();
+        let (send, receive) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            send.send(
+                Session::capture_readonly_from_path(&reader_path, "target")
+                    .map(|capture| capture.session().messages.len()),
+            )
+            .unwrap()
+        });
+        assert!(
+            receive
+                .recv_timeout(std::time::Duration::from_millis(30))
+                .is_err()
+        );
+        text(&mut session, "second");
+        session.checkpoint_snapshot(&path, &journal)?;
+        drop(lease);
+        assert_eq!(receive.recv_timeout(std::time::Duration::from_secs(5))??, 2);
+        reader.join().unwrap();
+        Ok(())
+    }
 
     fn pre_wipe_backups(dir: &Path) -> Vec<PathBuf> {
         std::fs::read_dir(dir)

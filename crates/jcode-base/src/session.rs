@@ -33,6 +33,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::Path;
+mod capture;
 mod crash;
 mod export;
 mod journal;
@@ -44,6 +45,7 @@ mod persistence;
 mod render;
 mod startup_context;
 mod storage_paths;
+pub use capture::CapturedSession;
 pub use crash::{
     CrashedSessionsInfo, detect_crashed_sessions, find_recent_crashed_sessions,
     find_session_by_name_or_id, recover_crashed_sessions, recover_crashed_sessions_by_ids,
@@ -252,6 +254,9 @@ impl std::error::Error for SystemPromptDispatchError {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
+    /// Checkpoint/journal pairing, independent of conversation/context identity.
+    #[serde(default)]
+    persistence_identity: capture::PersistenceIdentity,
     /// Highest SDK acquisition receipt acknowledged atomically with history.
     #[serde(default)]
     pub provider_receipt_watermark: i64,
@@ -1686,6 +1691,7 @@ impl Session {
         let short_name = extract_session_name(&session_id).map(|s| s.to_string());
         let mut session = Self {
             id: session_id,
+            persistence_identity: Default::default(),
             parent_id,
             title,
             custom_title: None,
@@ -1756,6 +1762,7 @@ impl Session {
         let is_debug = default_is_test_session();
         let mut session = Self {
             id,
+            persistence_identity: Default::default(),
             parent_id,
             title,
             custom_title: None,
