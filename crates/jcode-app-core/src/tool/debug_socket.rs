@@ -74,10 +74,6 @@ impl Tool for DebugSocketTool {
     async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
         let params: DebugSocketInput = serde_json::from_value(input)?;
         let timeout_secs = params.timeout_secs.unwrap_or(30);
-        let session_label = params
-            .session_id
-            .clone()
-            .unwrap_or_else(|| "<none>".to_string());
 
         // Build title based on command namespace
         let title =
@@ -93,10 +89,13 @@ impl Tool for DebugSocketTool {
             Ok(output) => Ok(ToolOutput::new(output).with_title(title)),
             Err(e) => {
                 crate::logging::warn(&format!(
-                    "[tool:debug_socket] command failed command={} session_id={} timeout_secs={} error={}",
-                    params.command, session_label, timeout_secs, e
+                    "[tool:debug_socket] command failed command_bytes={} timeout_secs={}",
+                    params.command.len(),
+                    timeout_secs
                 ));
-                Ok(ToolOutput::new(format!("Error: {}", e)).with_title(title))
+                Ok(ToolOutput::new(format!("Error: {}", e))
+                    .with_title(title)
+                    .with_error(true))
             }
         }
     }
@@ -163,5 +162,45 @@ async fn execute_debug_command(
         }
         ServerEvent::Error { message, .. } => Err(anyhow::anyhow!("{}", message)),
         _ => Err(anyhow::anyhow!("Unexpected response: {:?}", line.trim())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unavailable_debug_endpoint_is_a_failed_tool_result() -> Result<()> {
+        let _guard = crate::storage::lock_test_env();
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                if let Some(value) = self.0.take() {
+                    crate::env::set_var("JCODE_SOCKET", value);
+                } else {
+                    crate::env::remove_var("JCODE_SOCKET");
+                }
+            }
+        }
+        let _restore = Restore(std::env::var_os("JCODE_SOCKET"));
+        let root = tempfile::tempdir()?;
+        crate::env::set_var("JCODE_SOCKET", root.path().join("absent.sock"));
+        let runtime = tokio::runtime::Runtime::new()?;
+        let output = runtime.block_on(DebugSocketTool::new().execute(
+            json!({"command":"state","timeout_secs":1}),
+            ToolContext {
+                session_id: "debug-fixture".into(),
+                message_id: "message".into(),
+                tool_call_id: "call".into(),
+                working_dir: None,
+                stdin_request_tx: None,
+                graceful_shutdown_signal: None,
+                execution_mode: crate::tool::ToolExecutionMode::Direct,
+                invocation: Default::default(),
+            },
+        ))?;
+        assert!(output.is_error);
+        assert!(output.output.contains("Failed to connect"));
+        Ok(())
     }
 }

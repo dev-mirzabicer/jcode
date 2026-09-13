@@ -1,5 +1,95 @@
 use super::*;
 
+#[cfg(unix)]
+#[tokio::test]
+async fn schedule_metadata_uses_owned_capture_and_pre_cancel_creates_no_work() -> Result<()> {
+    use crate::execution::{Capture, ExecutionStore, Invocation, PreparedInvocation, RunState};
+    use std::sync::Arc;
+    let root = tempfile::tempdir()?;
+    let repo = root.path().join("repo");
+    std::fs::create_dir(&repo)?;
+    for args in [
+        vec!["init", "--quiet", "--template=", "--initial-branch=fixture"],
+        vec![
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "--no-gpg-sign",
+            "-m",
+            "fixture",
+        ],
+    ] {
+        anyhow::ensure!(
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .output()?
+                .status
+                .success(),
+            "Fixture repository setup failed"
+        );
+    }
+    let store = ExecutionStore::open(root.path())?;
+    let input = Invocation {
+        session_id: "metadata".into(),
+        message_id: "m".into(),
+        call_path: vec!["call".into()],
+        tool: "schedule".into(),
+        input: json!({"fixture":"metadata only"}),
+        working_dir: Some(repo.clone()),
+        received_result_digest: None,
+    };
+    let PreparedInvocation::New(record) = store.prepare(&input, "owner")? else {
+        panic!()
+    };
+    store.start(&record.id, "owner")?;
+    let capture = Arc::new(Capture::create(
+        store.clone(),
+        record.clone(),
+        Default::default(),
+    )?);
+    let stop = jcode_agent_runtime::InterruptSignal::new();
+    let ctx = ToolContext {
+        session_id: input.session_id,
+        message_id: input.message_id,
+        tool_call_id: "call".into(),
+        working_dir: Some(repo),
+        stdin_request_tx: None,
+        graceful_shutdown_signal: Some(stop.clone()),
+        execution_mode: crate::tool::ToolExecutionMode::Direct,
+        invocation: jcode_tool_core::InvocationContext {
+            capture: Some(capture.clone()),
+            ..Default::default()
+        },
+    };
+    assert_eq!(
+        captured_working_branch(&ctx).await?.as_deref(),
+        Some("fixture")
+    );
+    capture.seal(ToolOutput::new("metadata acquired"), RunState::Completed)?;
+    let output = store.inspect(&record.id)?.unwrap().output_path.unwrap();
+    assert_eq!(
+        std::fs::read(output.with_file_name("part-schedule-metadata-0-stdout.bin"))?,
+        b"fixture\n"
+    );
+    stop.fire();
+    let error = ScheduleTool::new()
+        .execute(
+            json!({"task":"must not be scheduled","wake_in_minutes":5}),
+            ctx,
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("stopped before mutation"));
+    Ok(())
+}
+
 #[test]
 fn test_parse_priority() {
     assert_eq!(parse_priority(Some("low")), Priority::Low);

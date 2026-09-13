@@ -54,3 +54,28 @@ impl Tool for InvalidTool {
         )))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn malformed_call_diagnostic_preserves_complete_selected_error() -> Result<()> {
+        let error = "α".repeat(30_000) + "DIAGNOSTIC_TAIL";
+        let context = ToolContext {
+            session_id: "invalid-fixture".into(),
+            message_id: "message".into(),
+            tool_call_id: "call".into(),
+            working_dir: None,
+            stdin_request_tx: None,
+            graceful_shutdown_signal: None,
+            execution_mode: crate::tool::ToolExecutionMode::Direct,
+            invocation: Default::default(),
+        };
+        let output = InvalidTool::new()
+            .execute(json!({"tool":"synthetic","error":error}), context)
+            .await?;
+        assert!(output.output.contains(&error));
+        Ok(())
+    }
+}

@@ -719,6 +719,35 @@ impl Default for ScheduleTool {
     }
 }
 
+async fn captured_working_branch(ctx: &ToolContext) -> Result<Option<String>> {
+    if ctx.working_dir.is_none() {
+        return Ok(None);
+    }
+    #[cfg(unix)]
+    {
+        let host = crate::execution::helper::HelperHost::new(ctx, "schedule-metadata")?;
+        let output = tokio::task::spawn_blocking(move || {
+            host.command("git", &["rev-parse", "--abbrev-ref", "HEAD"], None)
+        })
+        .await??;
+        Ok(output
+            .status
+            .success()
+            .then(|| {
+                String::from_utf8(output.stdout)
+                    .ok()
+                    .map(|value| value.trim().to_string())
+            })
+            .flatten())
+    }
+    #[cfg(not(unix))]
+    {
+        anyhow::bail!(
+            "Owned scheduling metadata acquisition is unavailable on this platform; no task was created"
+        )
+    }
+}
+
 impl ScheduleTool {
     pub fn new() -> Self {
         Self
@@ -771,6 +800,16 @@ struct ScheduleEmergencyPolicyInput {
 
 #[async_trait]
 impl Tool for ScheduleTool {
+    fn execution_policy(
+        &self,
+        _: &Value,
+        _: &ToolContext,
+    ) -> Result<jcode_tool_core::ExecutionPolicy> {
+        Ok(jcode_tool_core::ExecutionPolicy {
+            cooperative_stop: true,
+            ..Default::default()
+        })
+    }
     fn name(&self) -> &str {
         "schedule"
     }
@@ -844,7 +883,24 @@ impl Tool for ScheduleTool {
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
+        #[cfg(unix)]
+        if ctx.working_dir.is_some()
+            && ctx.invocation.identity.is_none()
+            && ctx.invocation.capture.is_none()
+        {
+            let registry = super::Registry::empty();
+            registry
+                .register("schedule".into(), std::sync::Arc::new(ScheduleTool::new()))
+                .await;
+            return registry.execute("schedule", input, ctx).await;
+        }
         let params: ScheduleToolInput = serde_json::from_value(input)?;
+        anyhow::ensure!(
+            !ctx.graceful_shutdown_signal
+                .as_ref()
+                .is_some_and(|signal| signal.is_set()),
+            "Scheduling operation stopped before mutation"
+        );
 
         match params.action.as_deref().unwrap_or("create") {
             "create" => self.execute_create(params, ctx).await,
@@ -887,25 +943,7 @@ impl ScheduleTool {
 
         let working_dir = ctx.working_dir.as_ref().map(|p| p.display().to_string());
 
-        let git_branch = ctx
-            .working_dir
-            .as_ref()
-            .and_then(|wd| {
-                std::process::Command::new("git")
-                    .args(["rev-parse", "--abbrev-ref", "HEAD"])
-                    .current_dir(wd)
-                    .output()
-                    .ok()
-            })
-            .and_then(|out| {
-                if out.status.success() {
-                    String::from_utf8(out.stdout)
-                        .ok()
-                        .map(|s| s.trim().to_string())
-                } else {
-                    None
-                }
-            });
+        let git_branch = captured_working_branch(&ctx).await?;
 
         let target = parse_schedule_target(params.target.as_deref(), &ctx.session_id)?;
         let target_summary = format_schedule_target(&target);
@@ -938,6 +976,12 @@ impl ScheduleTool {
             context_emergency_policy: context_emergency_policy.clone(),
         };
 
+        anyhow::ensure!(
+            !ctx.graceful_shutdown_signal
+                .as_ref()
+                .is_some_and(|signal| signal.is_set()),
+            "Scheduling stopped after metadata acquisition; no task was created"
+        );
         let mut manager = AmbientManager::new()?;
         let id = manager.schedule(request)?;
         nudge_schedule_runner();
