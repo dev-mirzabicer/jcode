@@ -8,6 +8,7 @@ pub const IDLE_SECONDS: i64 = 7 * 24 * 60 * 60;
 
 pub struct SessionActivityGuard {
     store: ExecutionStore,
+    namespace: String,
     session: String,
     token: String,
     _lease: File,
@@ -15,6 +16,10 @@ pub struct SessionActivityGuard {
 impl Drop for SessionActivityGuard {
     fn drop(&mut self) {
         let result = (|| -> Result<()> {
+            ensure!(
+                self.store.provider_receipt_namespace()? == self.namespace,
+                "Activity owner namespace changed; no completion was applied to the replacement store"
+            );
             let mut connection = self.store.connection()?;
             let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             ExecutionStore::touch_activity_in(&tx, &self.session, chrono::Utc::now().timestamp())?;
@@ -62,6 +67,7 @@ impl ExecutionStore {
     }
 
     pub fn begin_session_activity(&self, session: &str) -> Result<SessionActivityGuard> {
+        let namespace = self.provider_receipt_namespace()?;
         let token = uuid::Uuid::new_v4().simple().to_string();
         let directory = self.root().join("activity-leases");
         crate::storage::ensure_dir(&directory)?;
@@ -91,6 +97,7 @@ impl ExecutionStore {
         tx.commit()?;
         Ok(SessionActivityGuard {
             store: self.clone(),
+            namespace,
             session: session.into(),
             token,
             _lease: lease,
@@ -152,6 +159,102 @@ impl ExecutionStore {
     }
 
     pub(super) fn session_is_cold(&self, session: &str, now: i64) -> Result<bool> {
-        Ok(self.connection()?.query_row("SELECT EXISTS(SELECT 1 FROM session_activity a WHERE a.session_id=?1 AND a.last_active<=?2 AND NOT EXISTS(SELECT 1 FROM runs r WHERE r.session_id=a.session_id AND r.state IN ('prepared','running')) AND NOT EXISTS(SELECT 1 FROM session_activity_leases l WHERE l.session_id=a.session_id))", params![session, now.saturating_sub(IDLE_SECONDS)], |row| row.get(0))?)
+        Ok(self.connection()?.query_row("SELECT EXISTS(SELECT 1 FROM session_activity a WHERE a.session_id=?1 AND a.last_active<=?2 AND a.retention_not_before<=?3 AND NOT EXISTS(SELECT 1 FROM runs r WHERE r.session_id=a.session_id AND r.state IN ('prepared','running')) AND NOT EXISTS(SELECT 1 FROM session_activity_leases l WHERE l.session_id=a.session_id))", params![session, now.saturating_sub(IDLE_SECONDS), now], |row| row.get(0))?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migration_observes_a_full_idle_week_without_fabricating_legacy_activity() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let store = ExecutionStore::open(root.path())?;
+        store.touch_activity("legacy", 100)?;
+        store.connection()?.execute_batch("ALTER TABLE session_activity DROP COLUMN retention_not_before; PRAGMA user_version=18;")?;
+        let now = chrono::Utc::now().timestamp();
+        let migrated = ExecutionStore::open(root.path())?;
+        assert_eq!(migrated.last_activity("legacy")?, Some(100));
+        assert!(!migrated.session_is_cold("legacy", now)?);
+        let floor: i64 = migrated.connection()?.query_row(
+            "SELECT retention_not_before FROM session_activity WHERE session_id='legacy'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert!(floor >= now + IDLE_SECONDS);
+        assert!(migrated.session_is_cold("legacy", floor)?);
+        assert_eq!(
+            ExecutionStore::open(root.path())?.connection()?.query_row(
+                "SELECT retention_not_before FROM session_activity WHERE session_id='legacy'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )?,
+            floor
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn maintenance_and_lost_lease_observation_do_not_refresh_actual_activity() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let store = ExecutionStore::open(root.path())?;
+        store.touch_activity("reader", 100)?;
+        let now = 100 + IDLE_SECONDS;
+        assert!(store.session_is_cold("reader", now)?);
+        store.maintain_retention(&Default::default(), now)?;
+        store.retention_status()?;
+        store.list("reader", None, 50)?;
+        assert_eq!(store.last_activity("reader")?, Some(100));
+        let token = "11111111111111111111111111111111";
+        let directory = store.root().join("activity-leases");
+        std::fs::create_dir_all(&directory)?;
+        std::fs::write(directory.join(token), b"")?;
+        store.connection()?.execute(
+            "INSERT INTO session_activity_leases(token,session_id) VALUES (?1,'reader')",
+            [token],
+        )?;
+        assert_eq!(store.reconcile_activity_leases(now)?, 0);
+        assert!(!store.session_is_cold("reader", now)?);
+        assert_eq!(store.reconcile_activity_leases(now + IDLE_SECONDS - 1)?, 0);
+        assert_eq!(store.last_activity("reader")?, Some(100));
+        assert_eq!(store.reconcile_activity_leases(now + IDLE_SECONDS)?, 1);
+        assert!(store.session_is_cold("reader", now + IDLE_SECONDS)?);
+        Ok(())
+    }
+
+    #[test]
+    fn live_activity_lease_excludes_quiet_model_work_until_actual_completion() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let store = ExecutionStore::open(root.path())?;
+        let guard = store.begin_session_activity("active")?;
+        let started = store.last_activity("active")?.unwrap();
+        assert!(!store.session_is_cold("active", started + IDLE_SECONDS + 1)?);
+        assert_eq!(
+            store.reconcile_activity_leases(started + IDLE_SECONDS + 1)?,
+            0
+        );
+        drop(guard);
+        assert!(store.last_activity("active")?.unwrap() >= started);
+        let count: i64 = store.connection()?.query_row(
+            "SELECT count(*) FROM session_activity_leases",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(count, 0);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn old_activity_completion_cannot_write_into_a_replacement_namespace() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let store = ExecutionStore::open(root.path())?;
+        let guard = store.begin_session_activity("old")?;
+        std::fs::rename(store.root(), root.path().join("old-execution"))?;
+        let replacement = ExecutionStore::open(root.path())?;
+        drop(guard);
+        assert!(replacement.last_activity("old")?.is_none());
+        Ok(())
     }
 }

@@ -5,7 +5,7 @@ mod retention;
 pub use retention::{RetentionIssue, RetentionReport};
 mod snapshots;
 pub use activity::{IDLE_SECONDS, SessionActivityGuard};
-pub use snapshots::SnapshotRead;
+pub use snapshots::{SnapshotPruneOutcome, SnapshotRead};
 mod delivery;
 mod progress;
 pub use delivery::{BackgroundDelivery, DeliveryAttempt, DeliveryChannel, DeliveryState};

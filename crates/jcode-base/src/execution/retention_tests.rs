@@ -2,6 +2,76 @@ use super::*;
 use jcode_tool_types::{RunState, ToolOutput, cleanup::CleanupSelection};
 
 #[test]
+fn one_failed_deletion_does_not_hide_or_skip_other_confirmed_outputs() -> Result<()> {
+    let (fixture, _) = sealed_fixture()?;
+    let invocation = Invocation {
+        session_id: "storage".into(),
+        message_id: "second".into(),
+        call_path: vec!["call".into()],
+        tool: "fixture".into(),
+        input: serde_json::json!({}),
+        working_dir: None,
+        received_result_digest: None,
+    };
+    let PreparedInvocation::New(second) = fixture.store.prepare(&invocation, "owner")? else {
+        panic!();
+    };
+    fixture.store.start(&second.id, "owner")?;
+    let capture = crate::execution::Capture::create(
+        fixture.store.clone(),
+        second.clone(),
+        Default::default(),
+    )?;
+    capture.seal(ToolOutput::new("second output"), RunState::Completed)?;
+    drop(capture);
+    let now = fixture.store.last_activity("storage")?.unwrap() + crate::execution::IDLE_SECONDS + 1;
+    for id in [&fixture.record.id, &second.id] {
+        fixture.store.archive_cold_output_with_environment(
+            id,
+            &fixture.config,
+            now,
+            fixture.environment.clone(),
+        )?;
+    }
+    let review = fixture.store.review_output_cleanup_with_environment(
+        "human",
+        CleanupSelection::Outputs {
+            run_ids: vec![fixture.record.id.clone(), second.id.clone()],
+        },
+        now,
+        fixture.environment.as_ref(),
+    )?;
+    *fixture.environment.fail_stage.lock().unwrap() = Some("cleanup_after_part");
+    let outcome = fixture.store.confirm_output_cleanup_with_environment(
+        "human",
+        &review.review_id,
+        &review.confirmation_id,
+        now,
+        fixture.environment.as_ref(),
+    )?;
+    assert_eq!(outcome.items.len(), 2);
+    assert_eq!(outcome.items.iter().filter(|item| item.deleted).count(), 1);
+    assert_eq!(
+        outcome
+            .items
+            .iter()
+            .filter(|item| item.error.is_some())
+            .count(),
+        1
+    );
+    assert!(fixture.record.input_path.is_file() && second.input_path.is_file());
+    let retried = fixture.store.confirm_output_cleanup_with_environment(
+        "human",
+        &review.review_id,
+        &review.confirmation_id,
+        now,
+        fixture.environment.as_ref(),
+    )?;
+    assert!(retried.items.iter().all(|item| item.deleted));
+    Ok(())
+}
+
+#[test]
 #[ignore = "requires explicit tiny owned fixture on the verified archive volume"]
 fn native_cold_retention_snapshot_and_cleanup_journey() -> Result<()> {
     let config_path = std::env::var_os("JCODE_EXECUTION_ARCHIVE_FIXTURE")
@@ -363,7 +433,7 @@ fn cleanup_preview_requires_exact_confirmation_and_reports_whole_output_overshoo
             .is_err()
     );
     assert!(physical.exists());
-    fixture.store.touch_activity("storage", now)?;
+    std::fs::write(physical.join("output.txt"), b"changed fixture bytes")?;
     assert!(
         fixture
             .store
@@ -376,7 +446,23 @@ fn cleanup_preview_requires_exact_confirmation_and_reports_whole_output_overshoo
             )
             .is_err()
     );
-    assert_eq!(std::fs::read(physical.join("output.txt"))?, before);
+    assert_eq!(
+        std::fs::read(physical.join("output.txt"))?,
+        b"changed fixture bytes"
+    );
+    std::fs::write(physical.join("output.txt"), &before)?;
+    fixture.store.touch_activity("storage", now)?;
+    let result = fixture.store.confirm_output_cleanup_with_environment(
+        "human",
+        &review.review_id,
+        &review.confirmation_id,
+        now,
+        fixture.environment.as_ref(),
+    )?;
+    assert!(
+        result.items[0].deleted,
+        "Resuming or inspecting a session must not hide its already cold archived outputs"
+    );
     Ok(())
 }
 

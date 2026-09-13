@@ -1104,6 +1104,15 @@ fn complete_move(
 }
 
 impl ExecutionStore {
+    pub(super) fn verify_retention_archive(&self, config: &StorageConfig) -> Result<()> {
+        let root = archive_namespace(self, config, &NativeEnvironment)?;
+        ensure!(
+            available_bytes(&root.path)? >= config.archive_reserve_bytes,
+            "Output archive cannot preserve configured receipt headroom"
+        );
+        Ok(())
+    }
+
     /// Routine policy over the same placement owner used by emergency capture.
     /// A false result means the output is no longer cold/eligible or is owned.
     pub fn archive_cold_output(&self, id: &str, config: &StorageConfig, now: i64) -> Result<bool> {

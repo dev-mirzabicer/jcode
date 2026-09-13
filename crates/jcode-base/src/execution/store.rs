@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-const SCHEMA: i64 = 18;
+const SCHEMA: i64 = 19;
 
 pub use jcode_tool_types::RunState;
 
@@ -289,6 +289,11 @@ impl ExecutionStore {
                 ON CONFLICT(session_id) DO UPDATE SET last_active=MAX(session_activity.last_active,excluded.last_active),generation=session_activity.generation+1;
             END;
             PRAGMA user_version=18;")?;
+        }
+        if version < 19 {
+            transaction.execute_batch("ALTER TABLE session_activity ADD COLUMN retention_not_before INTEGER NOT NULL DEFAULT 0;
+                UPDATE session_activity SET retention_not_before=unixepoch()+604800;
+                PRAGMA user_version=19;")?;
         }
         transaction.commit()?;
         Ok(store)

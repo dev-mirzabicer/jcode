@@ -65,6 +65,15 @@ pub struct SnapshotRead {
     store: ExecutionStore,
     manifest: Manifest,
     _lease: File,
+    stop: Option<jcode_agent_runtime::InterruptSignal>,
+}
+
+#[derive(Debug, Default)]
+pub struct SnapshotPruneOutcome {
+    pub pruned: usize,
+    pub reclaimed_blobs: usize,
+    pub deferred_for_readers: bool,
+    pub errors: Vec<super::RetentionIssue>,
 }
 
 impl ExecutionStore {
@@ -74,6 +83,20 @@ impl ExecutionStore {
         target: &str,
         now: i64,
     ) -> Result<String> {
+        self.create_inspection_snapshot_with_stop(reader, target, now, None)
+    }
+
+    pub fn create_inspection_snapshot_with_stop(
+        &self,
+        reader: &str,
+        target: &str,
+        now: i64,
+        stop: Option<&jcode_agent_runtime::InterruptSignal>,
+    ) -> Result<String> {
+        ensure!(
+            !stop.is_some_and(|signal| signal.is_set()),
+            "Session inspection cancelled"
+        );
         ensure!(
             !reader.is_empty(),
             "Inspection requires an originating reader session"
@@ -90,34 +113,39 @@ impl ExecutionStore {
             .parent()
             .context("Missing execution namespace")?;
         let path = root.join("sessions").join(format!("{target}.json"));
-        let (source, runs) = Session::capture_readonly_with_metadata(&path, target, |session| {
-            let mut connection = self.connection()?;
-            let tx = connection.transaction()?;
-            let ids = {
-                let mut query =
-                    tx.prepare("SELECT id FROM runs WHERE session_id=?1 ORDER BY id")?;
-                query
-                    .query_map([&session.id], |row| row.get::<_, String>(0))?
-                    .collect::<std::result::Result<Vec<_>, _>>()?
-            };
-            ids.into_iter()
-                .map(|id| {
-                    super::store::query_record(&tx, &id)?
-                        .map(|record| (id, record))
-                        .context("Captured run disappeared")
-                })
-                .collect::<Result<HashMap<_, _>>>()
-        })?;
+        let (source, runs) =
+            Session::capture_readonly_with_metadata(&path, target, stop, |session| {
+                let mut connection = self.connection()?;
+                let tx = connection.transaction()?;
+                let ids = {
+                    let mut query =
+                        tx.prepare("SELECT id FROM runs WHERE session_id=?1 ORDER BY id")?;
+                    query
+                        .query_map([&session.id], |row| row.get::<_, String>(0))?
+                        .collect::<std::result::Result<Vec<_>, _>>()?
+                };
+                ids.into_iter()
+                    .map(|id| {
+                        super::store::query_record(&tx, &id)?
+                            .map(|record| (id, record))
+                            .context("Captured run disappeared")
+                    })
+                    .collect::<Result<HashMap<_, _>>>()
+            })?;
         // The short Session lease and SQLite read transaction are gone before
         // projection, blob publication, or any large output acquisition.
         let session = source.session();
         let projection =
             jcode_context_core::project_context(&session.messages, &session.context_view)?;
         let _lease = self
-            .snapshot_lease(false, false)?
+            .snapshot_lease_with_stop(false, false, stop)?
             .context("Snapshot publication lease unavailable")?;
         let mut refs = BTreeSet::new();
         let mut put = |value: &serde_json::Value| -> Result<String> {
+            ensure!(
+                !stop.is_some_and(|signal| signal.is_set()),
+                "Session inspection cancelled before blob publication"
+            );
             let digest = self.put_inspection_blob(value)?;
             refs.insert(digest.clone());
             Ok(digest)
@@ -281,9 +309,41 @@ impl ExecutionStore {
         id: &str,
         now: i64,
     ) -> Result<SnapshotRead> {
+        self.read_inspection_snapshot_with_stop(reader, id, now, None)
+    }
+
+    pub fn read_inspection_snapshot_with_stop(
+        &self,
+        reader: &str,
+        id: &str,
+        now: i64,
+        stop: Option<&jcode_agent_runtime::InterruptSignal>,
+    ) -> Result<SnapshotRead> {
+        self.read_snapshot_authorized(reader, id, now, stop, false)
+    }
+
+    /// Privileged same-user client access. It does not change snapshot ownership.
+    pub fn read_inspection_snapshot_for_client(
+        &self,
+        reader: &str,
+        id: &str,
+        now: i64,
+        stop: Option<&jcode_agent_runtime::InterruptSignal>,
+    ) -> Result<SnapshotRead> {
+        self.read_snapshot_authorized(reader, id, now, stop, true)
+    }
+
+    fn read_snapshot_authorized(
+        &self,
+        reader: &str,
+        id: &str,
+        now: i64,
+        stop: Option<&jcode_agent_runtime::InterruptSignal>,
+        trusted_client: bool,
+    ) -> Result<SnapshotRead> {
         validate_snapshot_id(id)?;
         let lease = self
-            .snapshot_lease(true, false)?
+            .snapshot_lease_with_stop(true, false, stop)?
             .context("Snapshot read ownership unavailable")?;
         let row: Option<(String, String, String)> = self
             .connection()?
@@ -295,17 +355,23 @@ impl ExecutionStore {
             .optional()?;
         let (owner, digest, state) =
             row.context("Unknown inspection snapshot; open a new outline")?;
+        let root = self
+            .root()
+            .parent()
+            .context("Missing inspection namespace")?;
         ensure!(
-            owner == reader,
+            trusted_client
+                || owner == reader
+                || Session::inspection_has_ancestor(root, &owner, reader, stop)?,
             "Inspection snapshot belongs to another reader session"
         );
         ensure!(
             state == "retained",
             "Inspection snapshot was deliberately pruned; previously received transcript content is unchanged"
         );
-        let manifest: Manifest = self.inspection_blob(&digest)?;
+        let manifest: Manifest = self.inspection_blob_with_stop(&digest, stop)?;
         ensure!(
-            manifest.schema == 1 && manifest.id == id && manifest.reader == reader,
+            manifest.schema == 1 && manifest.id == id && manifest.reader == owner,
             "Inspection manifest identity mismatch"
         );
         self.touch_activity(reader, now)?;
@@ -313,10 +379,24 @@ impl ExecutionStore {
             store: self.clone(),
             manifest,
             _lease: lease,
+            stop: stop.cloned(),
         })
     }
 
     pub(super) fn snapshot_lease(&self, shared: bool, nonblocking: bool) -> Result<Option<File>> {
+        self.snapshot_lease_with_stop(shared, nonblocking, None)
+    }
+
+    fn snapshot_lease_with_stop(
+        &self,
+        shared: bool,
+        nonblocking: bool,
+        stop: Option<&jcode_agent_runtime::InterruptSignal>,
+    ) -> Result<Option<File>> {
+        ensure!(
+            !stop.is_some_and(|signal| signal.is_set()),
+            "Snapshot inspection cancelled"
+        );
         let directory = self.root().join("snapshots");
         crate::storage::ensure_dir(&directory)?;
         ensure!(
@@ -348,6 +428,25 @@ impl ExecutionStore {
                 Ok(()) => {}
                 Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
                 Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+            }
+        } else if let Some(stop) = stop {
+            loop {
+                ensure!(
+                    !stop.is_set(),
+                    "Snapshot inspection cancelled while waiting for storage ownership"
+                );
+                let result = if shared {
+                    file.try_lock_shared()
+                } else {
+                    file.try_lock()
+                };
+                match result {
+                    Ok(()) => break,
+                    Err(std::fs::TryLockError::WouldBlock) => {
+                        std::thread::sleep(std::time::Duration::from_millis(10))
+                    }
+                    Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+                }
             }
         } else if shared {
             file.lock_shared()?;
@@ -384,6 +483,14 @@ impl ExecutionStore {
     }
 
     fn inspection_blob<T: DeserializeOwned>(&self, digest: &str) -> Result<T> {
+        self.inspection_blob_with_stop(digest, None)
+    }
+
+    fn inspection_blob_with_stop<T: DeserializeOwned>(
+        &self,
+        digest: &str,
+        stop: Option<&jcode_agent_runtime::InterruptSignal>,
+    ) -> Result<T> {
         ensure!(
             digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit()),
             "Invalid inspection blob identity"
@@ -403,26 +510,43 @@ impl ExecutionStore {
         let mut file = options.open(path)?;
         ensure!(file.metadata()?.is_file(), "Inspection blob changed type");
         let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
+        let mut hash = Sha256::new();
+        let mut buffer = [0; 64 * 1024];
+        loop {
+            ensure!(
+                !stop.is_some_and(|signal| signal.is_set()),
+                "Snapshot blob read cancelled"
+            );
+            let count = file.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            hash.update(&buffer[..count]);
+            bytes.extend_from_slice(&buffer[..count]);
+        }
         ensure!(
-            format!("{:x}", Sha256::digest(&bytes)) == digest,
+            format!("{:x}", hash.finalize()) == digest,
             "Inspection blob failed integrity validation"
         );
         Ok(serde_json::from_slice(&bytes)?)
     }
 
-    pub fn prune_inspection_snapshots(&self, now: i64) -> Result<usize> {
+    pub fn prune_inspection_snapshots(&self, now: i64) -> Result<SnapshotPruneOutcome> {
         let Some(_lease) = self.snapshot_lease(false, true)? else {
-            return Ok(0);
+            return Ok(SnapshotPruneOutcome {
+                deferred_for_readers: true,
+                ..Default::default()
+            });
         };
         let mut connection = self.connection()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let ids = {
-            let mut query = tx.prepare("SELECT id FROM (SELECT s.id,s.reader,row_number() OVER(PARTITION BY s.reader,s.target ORDER BY s.created DESC,s.sequence DESC) AS position FROM inspection_snapshots s WHERE s.state='retained') ranked JOIN session_activity a ON a.session_id=ranked.reader WHERE position>2 AND a.last_active<=?1 AND NOT EXISTS(SELECT 1 FROM runs r WHERE r.session_id=ranked.reader AND r.state IN ('prepared','running')) AND NOT EXISTS(SELECT 1 FROM session_activity_leases l WHERE l.session_id=ranked.reader)")?;
+            let mut query = tx.prepare("SELECT id FROM (SELECT s.id,s.reader,row_number() OVER(PARTITION BY s.reader,s.target ORDER BY s.created DESC,s.sequence DESC) AS position FROM inspection_snapshots s WHERE s.state='retained') ranked JOIN session_activity a ON a.session_id=ranked.reader WHERE position>2 AND a.last_active<=?1 AND a.retention_not_before<=?2 AND NOT EXISTS(SELECT 1 FROM runs r WHERE r.session_id=ranked.reader AND r.state IN ('prepared','running')) AND NOT EXISTS(SELECT 1 FROM session_activity_leases l WHERE l.session_id=ranked.reader)")?;
             query
-                .query_map([now.saturating_sub(super::activity::IDLE_SECONDS)], |row| {
-                    row.get::<_, String>(0)
-                })?
+                .query_map(
+                    rusqlite::params![now.saturating_sub(super::activity::IDLE_SECONDS), now],
+                    |row| row.get::<_, String>(0),
+                )?
                 .collect::<std::result::Result<Vec<_>, _>>()?
         };
         for id in &ids {
@@ -440,27 +564,58 @@ impl ExecutionStore {
             )?;
         }
         tx.commit()?;
-        self.reclaim_inspection_blobs()?;
-        Ok(ids.len())
+        let mut outcome = SnapshotPruneOutcome {
+            pruned: ids.len(),
+            ..Default::default()
+        };
+        match self.reclaim_inspection_blobs() {
+            Ok((reclaimed, errors)) => {
+                outcome.reclaimed_blobs = reclaimed;
+                outcome.errors = errors;
+            }
+            Err(error) => outcome.errors.push(super::RetentionIssue {
+                id: "snapshot-blobs".into(),
+                message: format!(
+                    "Snapshot pruning committed, but blob reclamation failed: {error:#}"
+                ),
+            }),
+        }
+        Ok(outcome)
     }
 
-    fn reclaim_inspection_blobs(&self) -> Result<()> {
+    fn reclaim_inspection_blobs(&self) -> Result<(usize, Vec<super::RetentionIssue>)> {
         let connection = self.connection()?;
         let mut query = connection.prepare("SELECT digest FROM inspection_blobs b WHERE NOT EXISTS(SELECT 1 FROM inspection_blob_refs r WHERE r.digest=b.digest)")?;
         let digests = query
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut reclaimed = 0;
+        let mut errors = Vec::new();
         for digest in digests {
-            let path = self.root().join("snapshots/blobs").join(&digest);
-            if path.exists() {
-                let _: serde_json::Value = self.inspection_blob(&digest)?;
-                std::fs::remove_file(&path)?;
-                #[cfg(unix)]
-                File::open(path.parent().context("Missing blob parent")?)?.sync_all()?;
+            let result = (|| -> Result<()> {
+                ensure!(
+                    digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()),
+                    "Invalid registered inspection blob identity"
+                );
+                let path = self.root().join("snapshots/blobs").join(&digest);
+                if path.exists() {
+                    let _: serde_json::Value = self.inspection_blob(&digest)?;
+                    std::fs::remove_file(&path)?;
+                    #[cfg(unix)]
+                    File::open(path.parent().context("Missing blob parent")?)?.sync_all()?;
+                }
+                connection.execute("DELETE FROM inspection_blobs WHERE digest=?1 AND NOT EXISTS(SELECT 1 FROM inspection_blob_refs WHERE digest=?1)", [&digest])?;
+                Ok(())
+            })();
+            match result {
+                Ok(()) => reclaimed += 1,
+                Err(error) => errors.push(super::RetentionIssue {
+                    id: digest,
+                    message: format!("Blob reclamation remains incomplete: {error:#}"),
+                }),
             }
-            connection.execute("DELETE FROM inspection_blobs WHERE digest=?1 AND NOT EXISTS(SELECT 1 FROM inspection_blob_refs WHERE digest=?1)", [&digest])?;
         }
-        Ok(())
+        Ok((reclaimed, errors))
     }
 }
 
@@ -474,102 +629,5 @@ fn validate_snapshot_id(id: &str) -> Result<()> {
     Ok(())
 }
 
-impl SnapshotRead {
-    pub fn target(&self) -> &str {
-        &self.manifest.target
-    }
-    pub fn id(&self) -> &str {
-        &self.manifest.id
-    }
-
-    pub fn outline(&self) -> Result<String> {
-        let mut entries = Vec::new();
-        for projected in &self.manifest.projected {
-            let message: Message = self.store.inspection_blob(&projected.digest)?;
-            let mut blocks = Vec::new();
-            for block in &message.content {
-                blocks.push(match block {
-                    ContentBlock::Text { text, .. } => serde_json::json!({"type":"text", "text":text}),
-                    ContentBlock::ToolUse { id, name, input, .. } => {
-                        let source_id = &self.manifest.messages[projected.start - 1].id;
-                        let tool = self.manifest.tools.iter().find(|tool| tool.message_id == *source_id && tool.provider_id == *id);
-                        serde_json::json!({"type":"tool_use", "name":name, "intent": input.get("intent").or_else(|| input.get("description")), "tool_use_id":tool.map(|tool| &tool.reference), "state":tool.and_then(|tool| tool.run.as_ref()).map(|run| run.state)})
-                    },
-                    ContentBlock::ToolResult { tool_use_id, is_error, .. } => serde_json::json!({"type":"tool_result","provider_tool_use_id":tool_use_id,"is_error":is_error,"detail":"expand the snapshot-bound tool reference"}),
-                    ContentBlock::Reasoning { text } | ContentBlock::ReasoningTrace { text } => serde_json::json!({"type":"reasoning","characters":text.chars().count(),"detail":"read transcript for stored content"}),
-                    ContentBlock::AnthropicThinking { thinking, .. } => serde_json::json!({"type":"signed_reasoning","characters":thinking.chars().count()}),
-                    ContentBlock::OpenAIReasoning { summary, encrypted_content, .. } => serde_json::json!({"type":"reasoning","summary":summary,"encrypted_payload_present":encrypted_content.is_some()}),
-                    ContentBlock::Image { media_type, .. } => serde_json::json!({"type":"image","media_type":media_type,"detail":"stored payload available in transcript"}),
-                    ContentBlock::OpenAICompaction { .. } => serde_json::json!({"type":"encrypted_compaction","text_unavailable":true}),
-                });
-            }
-            entries.push(serde_json::json!({"source_range":{"start":projected.start,"end":projected.end},"summary":projected.summary,"role":message.role,"blocks":blocks}));
-        }
-        let tools: Vec<_> = self.manifest.tools.iter().map(|tool| serde_json::json!({"tool_use_id":tool.reference,"message_id":tool.message_id,"provider_id":tool.provider_id,"name":tool.name,"run":tool.run})).collect();
-        Ok(serde_json::to_string_pretty(
-            &serde_json::json!({"snapshot_id":self.manifest.id,"target":self.manifest.target,"captured_at":self.manifest.captured_at,"context_revision":self.manifest.context_revision,"message_count":self.manifest.messages.len(),"messages":entries,"tools":tools,"context_transformations": self.store.inspection_blob::<serde_json::Value>(&self.manifest.context_digest)?}),
-        )?)
-    }
-
-    pub fn transcript(&self, range: Option<&TranscriptRange>, raw: bool) -> Result<String> {
-        let count = self.manifest.messages.len();
-        let (start, end) = range
-            .map(|range| (range.start, range.end))
-            .unwrap_or((1, count));
-        ensure!(
-            (count == 0 && range.is_none()) || (start > 0 && start <= end && end <= count),
-            "Transcript range is outside the captured source message positions"
-        );
-        let mut messages = Vec::new();
-        if raw {
-            for (index, source) in self.manifest.messages.iter().enumerate() {
-                if index + 1 >= start && index < end {
-                    messages.push(serde_json::json!({"source_range":{"start":index+1,"end":index+1},"message": self.store.inspection_blob::<StoredMessage>(&source.digest)?}));
-                }
-            }
-        } else {
-            for projected in &self.manifest.projected {
-                if projected.start <= end && projected.end >= start {
-                    messages.push(serde_json::json!({"source_range":{"start":projected.start,"end":projected.end},"summary":projected.summary,"message": self.store.inspection_blob::<Message>(&projected.digest)?}));
-                }
-            }
-        }
-        Ok(serde_json::to_string_pretty(
-            &serde_json::json!({"snapshot_id":self.manifest.id,"raw":raw,"messages":messages,"active_instructions":self.store.inspection_blob::<serde_json::Value>(&self.manifest.instructions_digest)?}),
-        )?)
-    }
-
-    pub fn expand_tool(&self, reference: &str) -> Result<String> {
-        let tool = self.manifest.tools.iter().find(|tool| tool.reference == reference).context("Tool reference does not belong to this snapshot; use its outline reference, not an ambiguous provider ID")?;
-        let input: serde_json::Value = self.store.inspection_blob(&tool.input_digest)?;
-        let mut retained_output = None;
-        if let Some(run) = &tool.run
-            && let Some(path) = &run.output_path
-        {
-            let root = self
-                .store
-                .root()
-                .parent()
-                .context("Missing execution namespace")?;
-            let mut source = super::managed_read::ManagedRead::open(root, path)?
-                .context("Captured output is unavailable")?;
-            ensure!(
-                source.length >= run.output_bytes,
-                "Captured output lost its as-of prefix"
-            );
-            let mut text = String::new();
-            (&mut source)
-                .take(run.output_bytes)
-                .read_to_string(&mut text)?;
-            retained_output = Some(text);
-        }
-        let legacy = tool
-            .legacy_results
-            .iter()
-            .map(|digest| self.store.inspection_blob::<ContentBlock>(digest))
-            .collect::<Result<Vec<_>>>()?;
-        Ok(serde_json::to_string_pretty(
-            &serde_json::json!({"snapshot_id":self.manifest.id,"tool_use_id":tool.reference,"provider_id":tool.provider_id,"name":tool.name,"input":input,"as_of_run":tool.run,"retained_output":retained_output,"stored_results":legacy,"original_output_available":retained_output.is_some(),"legacy_notice":if tool.run.is_none(){Some("No retained execution identity. Stored results are exact received history, not proof of complete original producer output.")}else{None}}),
-        )?)
-    }
-}
+#[path = "snapshot_render.rs"]
+mod render;

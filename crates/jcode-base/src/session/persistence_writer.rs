@@ -98,9 +98,14 @@ pub(super) fn verify_active(snapshot: &Path, session_id: &str) -> Result<()> {
         .context("Active Session writer lacks coherent capture capability")?;
     match file.try_lock_shared() {
         Err(std::fs::TryLockError::WouldBlock) => {}
-        Ok(()) => anyhow::bail!(
-            "Active Session writer capability is not owned by a live compatible runtime"
-        ),
+        Ok(()) => {
+            if writer_has_exited(pid)? {
+                return Ok(());
+            }
+            anyhow::bail!(
+                "Active Session writer capability is not owned by a live compatible runtime"
+            );
+        }
         Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
     }
     let mut bytes = Vec::new();
@@ -111,6 +116,31 @@ pub(super) fn verify_active(snapshot: &Path, session_id: &str) -> Result<()> {
         "Unsupported active Session writer capability"
     );
     Ok(())
+}
+
+fn writer_has_exited(pid: u32) -> Result<bool> {
+    if !crate::platform::is_process_running(pid) {
+        return Ok(true);
+    }
+    #[cfg(unix)]
+    {
+        // kill(pid,0) also succeeds for an unreaped zombie. Only consult native
+        // process state on the rare unowned-capability path, never signal it.
+        let result = std::process::Command::new("/bin/ps")
+            .args(["-p", &pid.to_string(), "-o", "stat="])
+            .output()?;
+        if result.status.code() == Some(1) && result.stdout.is_empty() && result.stderr.is_empty() {
+            return Ok(true);
+        }
+        ensure!(
+            result.status.success(),
+            "Cannot establish stopped Session writer state"
+        );
+        let state = std::str::from_utf8(&result.stdout)?.trim();
+        Ok(state.starts_with('Z') || state.starts_with('X'))
+    }
+    #[cfg(not(unix))]
+    Ok(false)
 }
 
 #[cfg(all(test, unix))]

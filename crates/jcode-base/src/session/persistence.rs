@@ -179,7 +179,11 @@ fn replay_journal_meta_lines(
 }
 
 /// Inspection must not salvage corrupt lines, create backups, or migrate context.
-pub(super) fn replay_inspection_journal(session: &mut Session, path: &Path) -> Result<()> {
+pub(super) fn replay_inspection_journal(
+    session: &mut Session,
+    path: &Path,
+    stop: Option<&jcode_agent_runtime::InterruptSignal>,
+) -> Result<()> {
     if session.persistence_identity.journal_is_retired(path)? {
         return Ok(());
     }
@@ -188,7 +192,7 @@ pub(super) fn replay_inspection_journal(session: &mut Session, path: &Path) -> R
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error.into()),
     };
-    let mut reader = BufReader::new(file);
+    let mut reader = BufReader::new(super::capture::CancellableRead { inner: file, stop });
     let mut line = String::new();
     let mut index = 0;
     while reader.read_line(&mut line)? > 0 {

@@ -7,6 +7,10 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufReader, Read};
 use std::path::Path;
 
+#[cfg(test)]
+#[path = "capture_tests.rs"]
+mod tests;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub(super) struct PersistenceIdentity {
     #[serde(default)]
@@ -60,6 +64,13 @@ pub(super) fn file_digest(path: &Path) -> Result<Option<String>> {
 /// Short cross-process storage ownership, never held during Agent execution or
 /// rendering. Keeping the lock file avoids inode replacement between waiters.
 pub(super) fn persistence_lease(path: &Path) -> Result<File> {
+    persistence_lease_with_stop(path, None)
+}
+
+fn persistence_lease_with_stop(
+    path: &Path,
+    stop: Option<&jcode_agent_runtime::InterruptSignal>,
+) -> Result<File> {
     let parent = path.parent().context("Session snapshot has no parent")?;
     crate::storage::ensure_dir(parent)?;
     let parent = parent.canonicalize()?;
@@ -82,7 +93,23 @@ pub(super) fn persistence_lease(path: &Path) -> Result<File> {
         file.metadata()?.is_file(),
         "Session persistence lease is not a regular file"
     );
-    file.lock().context("Acquire Session persistence lease")?;
+    if let Some(stop) = stop {
+        loop {
+            ensure!(
+                !stop.is_set(),
+                "Session inspection cancelled while waiting for persistence"
+            );
+            match file.try_lock() {
+                Ok(()) => break,
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    std::thread::sleep(std::time::Duration::from_millis(10))
+                }
+                Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+            }
+        }
+    } else {
+        file.lock().context("Acquire Session persistence lease")?;
+    }
     Ok(file)
 }
 
@@ -98,9 +125,39 @@ impl CapturedSession {
 }
 
 impl Session {
+    pub fn inspection_has_ancestor(
+        state_root: &Path,
+        ancestor: &str,
+        descendant: &str,
+        stop: Option<&jcode_agent_runtime::InterruptSignal>,
+    ) -> Result<bool> {
+        let mut current = Some(descendant.to_string());
+        let mut seen = std::collections::HashSet::new();
+        while let Some(id) = current {
+            ensure!(
+                !stop.is_some_and(|signal| signal.is_set()),
+                "Session inspection cancelled"
+            );
+            ensure!(seen.insert(id.clone()), "Session ancestry contains a cycle");
+            if id == ancestor {
+                return Ok(true);
+            }
+            current = Self::inspection_parent_with_stop(state_root, &id, stop)?;
+        }
+        Ok(false)
+    }
+
     /// Read relationship metadata without loading prompt/transcript bodies or
     /// invoking the activation/migration loader.
     pub fn inspection_parent(state_root: &Path, session_id: &str) -> Result<Option<String>> {
+        Self::inspection_parent_with_stop(state_root, session_id, None)
+    }
+
+    pub fn inspection_parent_with_stop(
+        state_root: &Path,
+        session_id: &str,
+        stop: Option<&jcode_agent_runtime::InterruptSignal>,
+    ) -> Result<Option<String>> {
         ensure!(
             !session_id.is_empty()
                 && session_id
@@ -115,13 +172,16 @@ impl Session {
             std::fs::symlink_metadata(&path)?.is_file(),
             "Inspection relationship source changed type"
         );
-        let _lease = persistence_lease(&path)?;
+        let _lease = persistence_lease_with_stop(&path, stop)?;
         #[derive(Deserialize)]
         struct Header {
             id: String,
             parent_id: Option<String>,
         }
-        let header: Header = serde_json::from_reader(BufReader::new(File::open(&path)?))?;
+        let header: Header = serde_json::from_reader(BufReader::new(CancellableRead {
+            inner: File::open(&path)?,
+            stop,
+        }))?;
         ensure!(
             header.id == session_id,
             "Inspection relationship identity mismatch"
@@ -146,13 +206,14 @@ impl Session {
     }
 
     pub fn capture_readonly_from_path(path: &Path, session_id: &str) -> Result<CapturedSession> {
-        Self::capture_readonly_with_metadata(path, session_id, |_| Ok(()))
+        Self::capture_readonly_with_metadata(path, session_id, None, |_| Ok(()))
             .map(|(session, ())| session)
     }
 
     pub(crate) fn capture_readonly_with_metadata<T>(
         path: &Path,
         session_id: &str,
+        stop: Option<&jcode_agent_runtime::InterruptSignal>,
         capture_metadata: impl FnOnce(&Session) -> Result<T>,
     ) -> Result<(CapturedSession, T)> {
         // Reject absence before allocating any lock metadata.
@@ -160,11 +221,14 @@ impl Session {
             std::fs::symlink_metadata(path)?.is_file(),
             "Inspection source is not a regular Session snapshot"
         );
-        let _lease = persistence_lease(path)?;
+        let _lease = persistence_lease_with_stop(path, stop)?;
         super::persistence_writer::verify_active(path, session_id)?;
         let journal = session_journal_path_from_snapshot(path);
         let before = source_stamps(path, &journal)?;
-        let mut session: Session = serde_json::from_reader(BufReader::new(File::open(path)?))?;
+        let mut session: Session = serde_json::from_reader(BufReader::new(CancellableRead {
+            inner: File::open(path)?,
+            stop,
+        }))?;
         ensure!(
             session.id == session_id,
             "Inspection target and stored Session identity disagree"
@@ -180,7 +244,7 @@ impl Session {
                 "Active legacy Session writer does not support coherent inspection; upgrade/resume the writer first"
             );
         }
-        super::persistence::replay_inspection_journal(&mut session, &journal)?;
+        super::persistence::replay_inspection_journal(&mut session, &journal, stop)?;
         ensure!(
             before == source_stamps(path, &journal)?,
             "Session source changed outside the cooperative persistence owner; retry inspection after upgrading its writer"
@@ -201,6 +265,20 @@ impl Session {
             "Session source changed outside persistence ownership during inspection metadata capture"
         );
         Ok((CapturedSession { session }, metadata))
+    }
+}
+
+pub(super) struct CancellableRead<'a, R> {
+    pub inner: R,
+    pub stop: Option<&'a jcode_agent_runtime::InterruptSignal>,
+}
+impl<R: Read> Read for CancellableRead<'_, R> {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        if self.stop.is_some_and(|stop| stop.is_set()) {
+            return Err(std::io::Error::other("Session inspection cancelled"));
+        }
+        let count = bytes.len().min(64 * 1024);
+        self.inner.read(&mut bytes[..count])
     }
 }
 

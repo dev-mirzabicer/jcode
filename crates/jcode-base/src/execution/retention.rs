@@ -60,25 +60,52 @@ impl ExecutionStore {
         }
         if config.archive.is_some() {
             let connection = self.connection()?;
-            let mut query=connection.prepare("SELECT r.id FROM runs r JOIN output_locations l ON l.id=r.id JOIN session_activity a ON a.session_id=r.session_id WHERE r.state NOT IN ('prepared','running') AND a.last_active<=?1 AND (l.archived=0 OR l.cold_archived_at IS NULL OR EXISTS(SELECT 1 FROM relocations m WHERE m.id=r.id AND m.stage<>'complete')) AND NOT EXISTS(SELECT 1 FROM output_deletions d WHERE d.id=r.id) ORDER BY r.id")?;
+            let mut query=connection.prepare("SELECT r.id FROM runs r JOIN output_locations l ON l.id=r.id JOIN session_activity a ON a.session_id=r.session_id WHERE r.state NOT IN ('prepared','running') AND a.last_active<=?1 AND a.retention_not_before<=?2 AND (l.archived=0 OR l.cold_archived_at IS NULL OR EXISTS(SELECT 1 FROM relocations m WHERE m.id=r.id AND m.stage<>'complete')) AND NOT EXISTS(SELECT 1 FROM output_deletions d WHERE d.id=r.id) ORDER BY r.id")?;
             let ids = query
-                .query_map([now.saturating_sub(super::IDLE_SECONDS)], |row| {
-                    row.get::<_, String>(0)
-                })?
+                .query_map(
+                    rusqlite::params![now.saturating_sub(super::IDLE_SECONDS), now],
+                    |row| row.get::<_, String>(0),
+                )?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
-            for id in ids {
+            let archive_ready = if ids.is_empty() {
+                true
+            } else {
+                match self.verify_retention_archive(config) {
+                    Ok(()) => true,
+                    Err(error) => {
+                        report.issues.push(RetentionIssue {
+                            id: "archive".into(),
+                            message: format!("Routine archival deferred: {error:#}"),
+                        });
+                        false
+                    }
+                }
+            };
+            for id in ids.into_iter().filter(|_| archive_ready) {
                 match self.archive_cold_output(&id, config, now) {
                     Ok(true) => report.archived_outputs += 1,
                     Ok(false) => {}
-                    Err(error) => report.issues.push(RetentionIssue {
-                        id,
-                        message: format!("{error:#}"),
-                    }),
+                    Err(error) => {
+                        report.issues.push(RetentionIssue {
+                            id,
+                            message: format!("{error:#}"),
+                        });
+                        if let Err(error) = self.verify_retention_archive(config) {
+                            report.issues.push(RetentionIssue {
+                                id: "archive".into(),
+                                message: format!("Remaining routine archival deferred: {error:#}"),
+                            });
+                            break;
+                        }
+                    }
                 }
             }
         }
         match self.prune_inspection_snapshots(now) {
-            Ok(count) => report.pruned_snapshots = count,
+            Ok(outcome) => {
+                report.pruned_snapshots = outcome.pruned;
+                report.issues.extend(outcome.errors);
+            }
             Err(error) => report.issues.push(RetentionIssue {
                 id: "snapshot-pruning".into(),
                 message: format!("{error:#}"),

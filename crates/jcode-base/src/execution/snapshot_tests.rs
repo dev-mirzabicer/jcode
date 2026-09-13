@@ -5,6 +5,94 @@ use jcode_tool_core::{OutputCapture, OutputStream};
 use jcode_tool_types::{RunState, ToolOutput};
 
 #[test]
+fn inherited_snapshot_reads_keep_original_ownership_but_touch_only_the_actual_reader() -> Result<()>
+{
+    let root = tempfile::tempdir()?;
+    let store = ExecutionStore::open(root.path())?;
+    source(root.path(), "original_reader", "parent history")?;
+    source(root.path(), "target", "snapshot material")?;
+    let descendant =
+        Session::create_with_id("descendant".into(), Some("original_reader".into()), None);
+    persist_source(root.path(), &descendant)?;
+    source(root.path(), "unrelated", "unrelated history")?;
+    let id = store.create_inspection_snapshot("original_reader", "target", 100)?;
+    let inherited = store.read_inspection_snapshot("descendant", &id, 101)?;
+    assert_eq!(inherited.manifest.reader, "original_reader");
+    assert!(
+        inherited
+            .transcript(None, true)?
+            .contains("snapshot material")
+    );
+    drop(inherited);
+    assert_eq!(store.last_activity("original_reader")?, Some(100));
+    assert_eq!(store.last_activity("descendant")?, Some(101));
+    assert!(
+        store
+            .read_inspection_snapshot("unrelated", &id, 102)
+            .is_err()
+    );
+    assert!(
+        store
+            .read_inspection_snapshot_for_client("unrelated", &id, 102, None)?
+            .transcript(None, true)?
+            .contains("snapshot material")
+    );
+    assert_eq!(store.last_activity("original_reader")?, Some(100));
+    Ok(())
+}
+
+#[test]
+fn pruning_reports_committed_ids_even_when_one_unreferenced_blob_cannot_be_reclaimed() -> Result<()>
+{
+    let root = tempfile::tempdir()?;
+    let store = ExecutionStore::open(root.path())?;
+    source(root.path(), "target", "shared snapshot source")?;
+    let mut ids = Vec::new();
+    for time in 100..104 {
+        ids.push(store.create_inspection_snapshot("reader", "target", time)?);
+    }
+    let shared = store
+        .read_inspection_snapshot("reader", &ids[0], 103)?
+        .manifest
+        .messages[0]
+        .digest
+        .clone();
+    let orphan = store.put_inspection_blob(&serde_json::json!({"unpublished":"synthetic"}))?;
+    let orphan_path = store.root().join("snapshots/blobs").join(&orphan);
+    let original = std::fs::read(&orphan_path)?;
+    std::fs::write(&orphan_path, b"corrupt fixture")?;
+    let now = 103 + super::super::IDLE_SECONDS;
+    let outcome = store.prune_inspection_snapshots(now)?;
+    assert_eq!(outcome.pruned, 2);
+    assert_eq!(outcome.errors.len(), 1);
+    assert_eq!(outcome.errors[0].id, orphan);
+    assert!(outcome.reclaimed_blobs >= 2);
+    assert_eq!(
+        store.last_activity("reader")?,
+        Some(103),
+        "Housekeeping must not refresh reader activity"
+    );
+    assert!(store.root().join("snapshots/blobs").join(shared).is_file());
+    assert!(
+        store
+            .read_inspection_snapshot("reader", &ids[0], now)
+            .is_err()
+    );
+    assert!(
+        store
+            .read_inspection_snapshot("reader", &ids[3], now)?
+            .transcript(None, true)?
+            .contains("shared snapshot source")
+    );
+    std::fs::write(&orphan_path, original)?;
+    let retried = store.prune_inspection_snapshots(now)?;
+    assert_eq!(retried.pruned, 0);
+    assert_eq!(retried.reclaimed_blobs, 1);
+    assert!(retried.errors.is_empty() && !orphan_path.exists());
+    Ok(())
+}
+
+#[test]
 fn snapshots_preserve_raw_reasoning_media_distillation_and_active_control_identity() -> Result<()> {
     use jcode_session_types::*;
     let root = tempfile::tempdir()?;
@@ -263,9 +351,9 @@ fn pruning_keeps_newest_two_per_target_and_respects_reader_activity_and_live_rea
     let now = 104 + super::super::IDLE_SECONDS;
     let protected = store.read_inspection_snapshot("reader", &ids[0], 104)?;
     let delivered = protected.transcript(None, false)?;
-    assert_eq!(store.prune_inspection_snapshots(now)?, 0);
+    assert_eq!(store.prune_inspection_snapshots(now)?.pruned, 0);
     drop(protected);
-    assert_eq!(store.prune_inspection_snapshots(now)?, 20);
+    assert_eq!(store.prune_inspection_snapshots(now)?.pruned, 20);
     let retained: i64 = store.connection()?.query_row(
         "SELECT count(*) FROM inspection_snapshots WHERE state='retained'",
         [],
@@ -295,7 +383,7 @@ fn pruning_keeps_newest_two_per_target_and_respects_reader_activity_and_live_rea
         );
     }
     assert!(delivered.contains("synthetic content"));
-    assert_eq!(store.prune_inspection_snapshots(now)?, 0);
+    assert_eq!(store.prune_inspection_snapshots(now)?.pruned, 0);
     assert!(
         store.last_activity("target_0")?.is_none(),
         "inspection activity belongs only to reader"

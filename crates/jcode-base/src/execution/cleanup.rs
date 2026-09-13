@@ -12,7 +12,6 @@ struct DeletionTarget {
     identity: DirectoryIdentity,
     archive: ArchiveConfig,
     generation: i64,
-    activity_generation: i64,
     files: Vec<Part>,
     affected_snapshots: Vec<String>,
 }
@@ -84,12 +83,12 @@ impl ExecutionStore {
         &self,
         reader: &str,
         selection: CleanupSelection,
-        now: i64,
+        _now: i64,
         environment: &dyn StorageEnvironment,
     ) -> Result<CleanupReview> {
         ensure!(
             !reader.is_empty(),
-            "Cleanup review requires an authenticated human session"
+            "Cleanup review requires an attached trusted-client session"
         );
         let _snapshot_lease = self
             .snapshot_lease(false, false)?
@@ -125,9 +124,6 @@ impl ExecutionStore {
             let record = self
                 .inspect(&id)?
                 .context("Cleanup candidate disappeared")?;
-            if !self.session_is_cold(&record.session_id, now)? {
-                continue;
-            }
             let Some(_lease) = try_output_lease(self, &id)? else {
                 continue;
             };
@@ -197,7 +193,7 @@ impl ExecutionStore {
         reader: &str,
         review_id: &str,
         confirmation_id: &str,
-        now: i64,
+        _now: i64,
         environment: &dyn StorageEnvironment,
     ) -> Result<CleanupOutcome> {
         ensure!(
@@ -255,13 +251,13 @@ impl ExecutionStore {
                     .inspect(&target.id)?
                     .context("Cleanup candidate disappeared")?;
                 ensure!(
-                    record.state.terminal() && self.session_is_cold(&record.session_id, now)?,
-                    "Cleanup review is stale because a candidate is no longer cold/completed"
+                    record.state.terminal(),
+                    "Cleanup review is stale because a candidate is no longer completed"
                 );
                 let current = self.capture_deletion_target(&target.id, environment)?;
                 ensure!(
                     serde_json::to_vec(&current)? == serde_json::to_vec(target)?,
-                    "Cleanup review is stale: output identity, activity, contents or snapshot impact changed"
+                    "Cleanup review is stale: output identity, contents or snapshot impact changed"
                 );
             }
             let mut connection = self.connection()?;
@@ -274,18 +270,6 @@ impl ExecutionStore {
                 "Cleanup review changed during confirmation"
             );
             for target in &plan.targets {
-                let record = self
-                    .inspect(&target.id)?
-                    .context("Cleanup candidate disappeared")?;
-                let generation: i64 = tx.query_row(
-                    "SELECT generation FROM session_activity WHERE session_id=?1",
-                    [&record.session_id],
-                    |row| row.get(0),
-                )?;
-                ensure!(
-                    generation == target.activity_generation,
-                    "Cleanup review became stale during confirmation"
-                );
                 tx.execute(
                     "INSERT INTO output_deletions(id,review_id,stage) VALUES (?1,?2,'deleting')",
                     params![target.id, review_id],
@@ -301,12 +285,21 @@ impl ExecutionStore {
         let mut items = Vec::new();
         for target in &plan.targets {
             let result = self.delete_reviewed_output(target, review_id, environment);
-            let error = result.as_ref().err().map(|error| format!("{error:#}"));
-            if let Some(error) = &error {
-                self.connection()?.execute(
-                    "UPDATE output_deletions SET error=?2 WHERE id=?1",
-                    params![target.id, error],
-                )?;
+            let mut error = result.as_ref().err().map(|error| format!("{error:#}"));
+            if let Some(message) = &error {
+                let persisted = self.connection().and_then(|connection| {
+                    connection
+                        .execute(
+                            "UPDATE output_deletions SET error=?2 WHERE id=?1",
+                            params![target.id, message],
+                        )
+                        .map_err(anyhow::Error::from)
+                });
+                if let Err(persistence) = persisted {
+                    error = Some(format!(
+                        "{message}; cleanup diagnostic persistence also failed: {persistence:#}"
+                    ));
+                }
             }
             items.push(CleanupItemOutcome {
                 run_id: target.id.clone(),
@@ -356,7 +349,6 @@ impl ExecutionStore {
             "Cleanup alias changed"
         );
         let manifest = MoveManifest::capture(id, &physical, &physical)?;
-        let activity_generation:i64 = connection.query_row("SELECT a.generation FROM session_activity a JOIN runs r ON r.session_id=a.session_id WHERE r.id=?1",[id],|row|row.get(0))?;
         let mut query = connection.prepare(
             "SELECT snapshot_id FROM inspection_output_refs WHERE run_id=?1 ORDER BY snapshot_id",
         )?;
@@ -369,7 +361,6 @@ impl ExecutionStore {
             identity: manifest.source_identity,
             archive,
             generation,
-            activity_generation,
             files: manifest.files,
             affected_snapshots,
         })
