@@ -654,10 +654,6 @@ mod tests {
     /// guarding one global serialize nothing, which showed up as a rotating set
     /// of failures under `cargo test` that all passed with `--test-threads=1`
     /// (issue #593). Everything touching the environment must share one lock.
-    fn lock_env() -> std::sync::MutexGuard<'static, ()> {
-        crate::storage::lock_test_env()
-    }
-
     struct EnvGuard {
         key: &'static str,
         original: Option<OsString>,
@@ -708,7 +704,8 @@ mod tests {
 
     #[tokio::test]
     async fn debug_tool_selfdev_reload_returns_promptly_for_direct_execution() {
-        let _env_lock = lock_env();
+        let _env_lock = crate::auth::test_sandbox::AuthTestSandbox::new()
+            .expect("private simulated reload fixture");
         let _test_session = EnvGuard::set("JCODE_TEST_SESSION", "1");
         let _debug_control = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
 

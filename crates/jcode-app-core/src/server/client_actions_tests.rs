@@ -261,7 +261,8 @@ fn clone_split_session_uses_persisted_session_state() {
 
 #[test]
 fn transfer_child_uses_authoritative_handoff_instead_of_invalid_legacy_compaction() {
-    let _guard = crate::storage::lock_test_env();
+    let _guard =
+        crate::auth::test_sandbox::AuthTestSandbox::new().expect("private transfer fixture");
     let temp = tempfile::tempdir().expect("tempdir");
     let prev_home = std::env::var_os("JCODE_HOME");
     crate::env::set_var("JCODE_HOME", temp.path());
@@ -712,6 +713,8 @@ async fn rename_session_event_uses_agent_session_id_even_when_client_id_is_stale
 
 #[tokio::test]
 async fn notify_session_runs_scheduled_task_immediately_for_idle_live_session() {
+    let _guard =
+        crate::auth::test_sandbox::AuthTestSandbox::new().expect("private notification fixture");
     let provider = Arc::new(StreamingMockProvider::default());
     provider.queue_response(vec![
         StreamEvent::TextDelta("Working on scheduled task.".to_string()),
@@ -981,7 +984,7 @@ fn live_member(session_id: &str) -> (SwarmMember, mpsc::UnboundedReceiver<Server
 
 #[tokio::test]
 async fn resume_all_continues_interrupted_idle_live_session() {
-    let _guard = crate::storage::lock_test_env();
+    let _guard = crate::auth::test_sandbox::AuthTestSandbox::new().expect("private resume fixture");
     let temp = tempfile::tempdir().expect("tempdir");
     let prev_home = std::env::var_os("JCODE_HOME");
     crate::env::set_var("JCODE_HOME", temp.path());
