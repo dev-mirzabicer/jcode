@@ -328,6 +328,13 @@ try:
             again = subprocess.run(['/usr/sbin/lsof', '-t', str(sockpath)], text=True, capture_output=True)
             if str(pid) in again.stdout.split() and subprocess.check_output(['ps', '-p', str(pid), '-o', 'lstart='], text=True).strip() == before_image:
                 os.kill(pid, signal.SIGTERM)
+                deadline = time.monotonic() + 20
+                while True:
+                    state = subprocess.run(['ps', '-p', str(pid), '-o', 'state=,lstart='], text=True, capture_output=True).stdout.strip()
+                    if not state or state.startswith('Z') or before_image not in state:
+                        break
+                    assert time.monotonic() < deadline, 'Owned autostart daemon did not exit'
+                    time.sleep(.05)
     c, r = start()
     assert subscribe(c, r, parent) == parent
     (home / 'instructions/model-roster.toml').write_text('broken roster = [')
