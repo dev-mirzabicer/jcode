@@ -8,16 +8,13 @@ use jcode_tool_types::{
         TaskCursor, TaskMonitorRequest, TaskMonitorResponse, TaskRow, TaskTextPage, TaskView,
     },
 };
-use ratatui::{
-    Frame,
-    layout::{Constraint, Layout, Rect},
-    style::{Modifier, Style},
-    widgets::{List, ListItem, ListState, Paragraph, Wrap},
-};
+use ratatui::layout::Rect;
 use std::{
     collections::{HashMap, VecDeque},
     time::{Duration, Instant},
 };
+
+mod view;
 
 pub const MIN_WIDTH: u16 = 48;
 pub const MIN_HEIGHT: u16 = 12;
@@ -32,6 +29,9 @@ pub enum Action {
     Expand,
     Back,
     Input,
+    Output,
+    Info,
+    RawInput,
     Follow,
     Stop,
     ForceStop,
@@ -68,6 +68,7 @@ pub struct TaskMonitor {
     pub child_context: Option<String>,
     pub capability: Option<bool>,
     pub status: String,
+    status_until: Option<Instant>,
     view: TaskView,
     all: bool,
     rows: Vec<TaskRow>,
@@ -78,6 +79,8 @@ pub struct TaskMonitor {
     parents: Vec<Breadcrumb>,
     detail: bool,
     content: ExecutionContent,
+    info: bool,
+    raw_input: bool,
     page: Option<TaskTextPage>,
     scroll: usize,
     follow: bool,
@@ -110,6 +113,7 @@ impl TaskMonitor {
             child_context: None,
             capability: (!remote).then_some(true),
             status: "Loading tasks…".into(),
+            status_until: None,
             view: TaskView::Active,
             all: false,
             rows: vec![],
@@ -120,6 +124,8 @@ impl TaskMonitor {
             parents: vec![],
             detail: false,
             content: ExecutionContent::Output,
+            info: false,
+            raw_input: false,
             page: None,
             scroll: 0,
             follow: true,
@@ -166,6 +172,13 @@ impl TaskMonitor {
         self.queued.push_back(Operation::Probe);
     }
     pub fn tick(&mut self) {
+        if self
+            .status_until
+            .is_some_and(|until| Instant::now() >= until)
+        {
+            self.status.clear();
+            self.status_until = None;
+        }
         if self.visible
             && !self.storage
             && !self.help
@@ -237,7 +250,16 @@ impl TaskMonitor {
         }
     }
     fn read_page(&mut self, offset: Option<u64>) {
+        if self.info {
+            return;
+        }
         if let Some(selected) = &self.selected {
+            if self.content == ExecutionContent::Output
+                && selected.run.output_path.is_none()
+                && !selected.run.state.terminal()
+            {
+                return;
+            }
             self.queue(Operation::Monitor(TaskMonitorRequest::Read {
                 run_id: selected.run.id.clone(),
                 content: self.content,
@@ -247,6 +269,8 @@ impl TaskMonitor {
         }
     }
     fn invalidate(&mut self) {
+        self.status.clear();
+        self.status_until = None;
         self.generation += 1;
         self.queued.clear();
         self.page = None;
@@ -265,7 +289,7 @@ impl TaskMonitor {
             }
             self.invalidate();
             self.selected = Some(row);
-            self.follow = true;
+            self.follow = self.content == ExecutionContent::Output && !self.info;
             self.read_page(None);
         }
     }
@@ -320,6 +344,8 @@ impl TaskMonitor {
                 ..
             } => {
                 self.capability = Some(true);
+                self.status.clear();
+                self.status_until = None;
                 self.refresh();
             }
             ServerEvent::TaskMonitorCapabilities { .. } => {
@@ -344,19 +370,9 @@ impl TaskMonitor {
                     if self.selected.is_none() && !self.rows.is_empty() {
                         self.select(0);
                     }
-                    self.status = if self.rows.is_empty() {
-                        "No tasks in this view. Switch to Completed or All sessions.".into()
-                    } else {
-                        format!(
-                            "{} loaded{}",
-                            self.rows.len(),
-                            if self.next.is_some() {
-                                " · more available"
-                            } else {
-                                ""
-                            }
-                        )
-                    };
+                    if self.status == "Loading tasks…" {
+                        self.status.clear();
+                    }
                 }
                 TaskMonitorResponse::Status { row } => {
                     if self
@@ -407,6 +423,9 @@ impl TaskMonitor {
                                 .as_ref()
                                 .is_some_and(|row| row.run.output_bytes > page.total);
                         self.page = Some(page);
+                        if self.content_error.as_ref() == Some(&self.status) {
+                            self.status.clear();
+                        }
                         self.content_error = None;
                         if behind {
                             self.read_page(None);
@@ -421,8 +440,9 @@ impl TaskMonitor {
                     },
                 ..
             } => {
+                self.status_until = Some(Instant::now() + Duration::from_secs(5));
                 self.status = format!(
-                    "{} · {:?}. Terminal state is shown only after work stops and persists.",
+                    "{} · {:?}. Waiting for the owner's final state.",
                     if accepted {
                         "Request accepted"
                     } else {
@@ -478,6 +498,7 @@ impl TaskMonitor {
                 }
             },
             ServerEvent::Error { message, .. } => {
+                self.status_until = None;
                 if matches!(pending.operation, Operation::Probe) {
                     self.capability = Some(false);
                 }
@@ -589,16 +610,44 @@ impl TaskMonitor {
                     self.refresh();
                 }
             }
-            Action::Input => {
-                self.content = if self.content == ExecutionContent::Input {
-                    ExecutionContent::Output
-                } else {
+            Action::Input | Action::Output => {
+                let content = if matches!(action, Action::Input) {
                     ExecutionContent::Input
+                } else {
+                    ExecutionContent::Output
                 };
-                self.invalidate();
-                self.read_page(None);
+                self.output_focus = true;
+                if self.dimensions.0 < 120 {
+                    self.detail = true;
+                }
+                if self.content != content || self.info {
+                    self.invalidate();
+                    self.content = content;
+                    self.info = false;
+                    self.follow = content == ExecutionContent::Output;
+                    self.read_page(None);
+                }
+            }
+            Action::Info => {
+                self.output_focus = true;
+                if self.dimensions.0 < 120 {
+                    self.detail = true;
+                }
+                self.invalidate_pending_content();
+                self.info = true;
+                self.follow = false;
+                self.scroll = 0;
+            }
+            Action::RawInput => {
+                if self.content == ExecutionContent::Input && !self.info {
+                    self.raw_input = !self.raw_input;
+                    self.scroll = 0;
+                }
             }
             Action::Follow => {
+                if self.content != ExecutionContent::Output || self.info {
+                    return;
+                }
                 self.follow = !self.follow;
                 if !self.follow {
                     self.invalidate_pending_content();
@@ -643,6 +692,8 @@ impl TaskMonitor {
                 }
             }
             Action::Storage => {
+                self.status.clear();
+                self.status_until = None;
                 self.storage = true;
                 self.scroll = 0;
                 self.queue(Operation::Cleanup(CleanupRequest::Status));
@@ -722,11 +773,18 @@ impl TaskMonitor {
             ("a  This session / all sessions", Action::Scope),
             ("Enter  Task details", Action::Details),
             ("Right  Expand batch / child", Action::Expand),
-            ("i  Input / output", Action::Input),
-            ("f  Follow / pause output", Action::Follow),
+            ("i  Input: arguments sent by the agent", Action::Input),
+            ("o  Output: retained result / live stream", Action::Output),
+            ("m  Info: identity, timing and capture", Action::Info),
             ("[  Previous page", Action::Older),
             ("]  Next page", Action::Newer),
         ];
+        if self.content == ExecutionContent::Output && !self.info {
+            actions.push(("f  Follow / pause output", Action::Follow));
+        }
+        if self.content == ExecutionContent::Input && !self.info {
+            actions.push(("v  Arguments / raw receipt JSON", Action::RawInput));
+        }
         if self
             .selected
             .as_ref()
@@ -839,8 +897,26 @@ impl TaskMonitor {
             }
             return true;
         }
-        if code == KeyCode::Tab {
-            self.output_focus = !self.output_focus;
+        if matches!(code, KeyCode::Tab | KeyCode::BackTab) {
+            if self.dimensions.0 >= 120 && !self.detail {
+                self.output_focus = !self.output_focus;
+            }
+            return true;
+        }
+        if matches!(code, KeyCode::Home | KeyCode::End) && (self.detail || self.output_focus) {
+            self.follow = false;
+            self.invalidate_pending_content();
+            if self.info {
+                self.scroll = if code == KeyCode::Home { 0 } else { usize::MAX };
+            } else if code == KeyCode::Home {
+                self.scroll = 0;
+                self.read_page(Some(0));
+            } else if self.content == ExecutionContent::Output {
+                self.follow = true;
+                self.read_page(None);
+            } else {
+                self.scroll = usize::MAX;
+            }
             return true;
         }
         let action = match code {
@@ -853,6 +929,9 @@ impl TaskMonitor {
             KeyCode::Right | KeyCode::Char('l') => Some(Action::Expand),
             KeyCode::Left | KeyCode::Char('h') => Some(Action::Back),
             KeyCode::Char('i') => Some(Action::Input),
+            KeyCode::Char('o') => Some(Action::Output),
+            KeyCode::Char('m') => Some(Action::Info),
+            KeyCode::Char('v') => Some(Action::RawInput),
             KeyCode::Char('f') => Some(Action::Follow),
             KeyCode::Char('s') => Some(Action::Stop),
             KeyCode::Char('S') => Some(Action::ForceStop),
@@ -933,318 +1012,8 @@ impl TaskMonitor {
             _ => {}
         }
     }
-    fn buttons(&mut self, frame: &mut Frame, area: Rect, buttons: &[(&str, Action)]) {
-        let mut x = area.x;
-        for (label, action) in buttons {
-            let width = unicode_width::UnicodeWidthStr::width(*label) as u16;
-            if x.saturating_add(width) > area.right() {
-                break;
-            }
-            let rect = Rect::new(x, area.y, width, 1);
-            frame.render_widget(
-                Paragraph::new(*label).style(Style::default().add_modifier(Modifier::BOLD)),
-                rect,
-            );
-            self.hit.push((rect, action.clone()));
-            x = x.saturating_add(width + 2);
-        }
-    }
-    pub fn render(&mut self, frame: &mut Frame, area: Rect) {
-        self.dimensions = (area.width, area.height);
-        self.hit.clear();
-        self.list_area = Rect::default();
-        self.preview_area = Rect::default();
-        self.menu_area = Rect::default();
-        if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
-            frame.render_widget(
-                Paragraph::new(format!(
-                    "Tasks needs {MIN_WIDTH}×{MIN_HEIGHT}\nResize or Esc to close"
-                ))
-                .wrap(Wrap { trim: false }),
-                area,
-            );
-            return;
-        }
-        let [header, nav, body, status, footer] = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(2),
-            Constraint::Length(1),
-        ])
-        .areas(area);
-        let scope = if let Some(parent) = self.parents.last() {
-            if let Some(child) = &parent.row.child_id {
-                format!(
-                    "Child history {}",
-                    child
-                        .strip_prefix("session_child_")
-                        .unwrap_or(child)
-                        .chars()
-                        .take(10)
-                        .collect::<String>()
-                )
-            } else {
-                format!("Nested {}", parent.row.run.tool)
-            }
-        } else if self.all {
-            "All Jcode sessions".into()
-        } else {
-            "This session + children".into()
-        };
-        frame.render_widget(
-            Paragraph::new(format!(
-                "Tasks · {} · {}",
-                if self.view == TaskView::Active {
-                    "Active"
-                } else {
-                    "Completed"
-                },
-                scope
-            ))
-            .style(Style::default().add_modifier(Modifier::BOLD)),
-            header,
-        );
-        if !self.help && !self.storage {
-            self.buttons(
-                frame,
-                nav,
-                &[
-                    ("1 Active", Action::Active),
-                    ("2 Completed", Action::Completed),
-                    ("? Actions", Action::Help),
-                ],
-            );
-        }
-        if self.help {
-            let actions = self.actions();
-            self.menu_area = body;
-            let mut state = ListState::default()
-                .with_selected(Some(self.menu_selection))
-                .with_offset(self.menu_offset);
-            frame.render_stateful_widget(
-                List::new(
-                    actions
-                        .iter()
-                        .map(|(label, _)| ListItem::new(*label))
-                        .collect::<Vec<_>>(),
-                )
-                .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
-                body,
-                &mut state,
-            );
-            self.menu_offset = state.offset();
-            for (index, (_, action)) in actions
-                .iter()
-                .enumerate()
-                .skip(self.menu_offset)
-                .take(usize::from(body.height))
-            {
-                self.hit.push((
-                    Rect::new(
-                        body.x,
-                        body.y + u16::try_from(index - self.menu_offset).unwrap_or(0),
-                        body.width,
-                        1,
-                    ),
-                    action.clone(),
-                ));
-            }
-            self.buttons(frame, footer, &[("Esc Back", Action::Back)]);
-        } else if self.storage {
-            let text = if let Some(review) = &self.review {
-                format!(
-                    "Cleanup review {}\nRequested: {:?} B · selected: {} B · overshoot: {} B\n{}\n\n{}\n\ny Confirm deletion · Esc Back (no deletion)",
-                    review.review_id,
-                    review.requested_bytes,
-                    review.selected_bytes,
-                    review.overshoot_bytes,
-                    review.impact,
-                    review
-                        .candidates
-                        .iter()
-                        .map(|c| format!(
-                            "{} · {} B\n  session {} · snapshots {}",
-                            c.run_id,
-                            c.bytes,
-                            c.session_id,
-                            c.affected_snapshot_ids.join(", ")
-                        ))
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                )
-            } else {
-                format!(
-                    "Storage administration\nCold archived completed outputs only. Live/recent spillover excluded.\n\nOldest whole outputs, byte target: {}\nEnter Review (does not delete)\n\n{}",
-                    self.storage_input, self.storage_text
-                )
-            };
-            frame.render_widget(
-                Paragraph::new(text)
-                    .wrap(Wrap { trim: false })
-                    .scroll((self.scroll.min(usize::from(u16::MAX)) as u16, 0)),
-                body,
-            );
-            if self.review.is_some() {
-                self.buttons(
-                    frame,
-                    footer,
-                    &[("y Confirm", Action::Confirm), ("Esc Back", Action::Back)],
-                );
-            } else {
-                self.buttons(
-                    frame,
-                    footer,
-                    &[("Enter Review", Action::Review), ("Esc Back", Action::Back)],
-                );
-            }
-        } else {
-            if self.detail {
-                self.preview_area = body;
-                self.render_detail(frame, body);
-            } else if area.width >= 120 {
-                let [list, preview] =
-                    Layout::horizontal([Constraint::Percentage(45), Constraint::Fill(1)])
-                        .areas(body);
-                self.render_list(frame, list);
-                self.preview_area = preview;
-                self.render_detail(frame, preview);
-            } else {
-                self.render_list(frame, body);
-            }
-            self.buttons(
-                frame,
-                footer,
-                &[
-                    ("? Actions", Action::Help),
-                    ("Enter Detail", Action::Details),
-                    ("Esc Back", Action::Back),
-                ],
-            );
-        }
-        frame.render_widget(
-            Paragraph::new(&*self.status).wrap(Wrap { trim: false }),
-            status,
-        );
-    }
-    fn render_list(&mut self, frame: &mut Frame, area: Rect) {
-        self.list_area = area;
-        let selected = self
-            .selected
-            .as_ref()
-            .and_then(|r| self.rows.iter().position(|row| row.run.id == r.run.id));
-        let mut state = ListState::default()
-            .with_selected(selected)
-            .with_offset(self.list_offset);
-        let items = self
-            .rows
-            .iter()
-            .map(|row| {
-                ListItem::new(format!(
-                    "{} {:10?} {} {}",
-                    if row.expandable { "▸" } else { " " },
-                    row.run.state,
-                    row.run.tool,
-                    row.run.id.get(4..12).unwrap_or(&row.run.id)
-                ))
-            })
-            .collect::<Vec<_>>();
-        frame.render_stateful_widget(
-            List::new(items).highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
-            area,
-            &mut state,
-        );
-        self.list_offset = state.offset();
-    }
-    fn render_detail(&mut self, frame: &mut Frame, area: Rect) {
-        let Some(row) = &self.selected else {
-            frame.render_widget(
-                Paragraph::new("Select a task to inspect input and retained output."),
-                area,
-            );
-            return;
-        };
-        let header = format!(
-            "{} · {:?}{}\n{}\nSession: {}\n{} · {} B · {}\n",
-            row.run.tool,
-            row.run.state,
-            if row.run.stop_cause.is_some() {
-                " · Stop requested"
-            } else {
-                ""
-            },
-            row.run.id,
-            row.run.session_id,
-            if row.run.background {
-                "Background"
-            } else {
-                "Foreground"
-            },
-            row.run.output_bytes,
-            if row.run.complete {
-                "Complete capture"
-            } else {
-                "Partial/unavailable capture"
-            }
-        );
-        let [meta, text] =
-            Layout::vertical([Constraint::Length(6), Constraint::Min(1)]).areas(area);
-        frame.render_widget(Paragraph::new(header).wrap(Wrap { trim: false }), meta);
-        let body = self.page.as_ref().map_or_else(
-            || {
-                self.content_error
-                    .clone()
-                    .unwrap_or_else(|| "Loading retained content…".into())
-            },
-            |p| {
-                format!(
-                    "{:?} · {} · bytes {}..{}/{}\n{}",
-                    self.content,
-                    if self.follow { "Following" } else { "Paused" },
-                    p.start,
-                    p.end,
-                    p.total,
-                    p.text
-                )
-            },
-        );
-        let body = if self.page.is_some() {
-            self.content_error.as_ref().map_or(body.clone(), |error| {
-                format!("Unavailable: {error}\nLast loaded window:\n{body}")
-            })
-        } else {
-            body
-        };
-        let clean = crate::message::strip_ansi_escape_sequences(&body);
-        let lines = clean
-            .lines()
-            .flat_map(|line| {
-                crate::tui::markdown::wrap_line(
-                    ratatui::text::Line::from(line.to_owned()),
-                    usize::from(text.width),
-                )
-            })
-            .collect::<Vec<_>>();
-        let max_scroll = lines.len().saturating_sub(usize::from(text.height));
-        if self.follow {
-            self.scroll = max_scroll;
-        } else {
-            self.scroll = self.scroll.min(max_scroll);
-        }
-        frame.render_widget(
-            Paragraph::new(
-                lines
-                    .into_iter()
-                    .skip(self.scroll)
-                    .take(usize::from(text.height))
-                    .collect::<Vec<_>>(),
-            ),
-            text,
-        );
-    }
-
     pub fn debug(&self) -> serde_json::Value {
-        serde_json::json!({"visible":self.visible,"capability":self.capability,"generation":self.generation,"session":self.session,"rows":self.rows.len(),"selected":self.selected.as_ref().map(|r|&r.run.id),"selected_state":self.selected.as_ref().map(|r|r.run.state),"selected_child":self.selected.as_ref().and_then(|r|r.child_id.as_ref()),"items":self.rows.iter().map(|r|serde_json::json!({"id":r.run.id,"tool":r.run.tool,"state":r.run.state,"child_id":r.child_id})).collect::<Vec<_>>(),"follow":self.follow,"detail":self.detail,"storage":self.storage,"status":self.status,"all_sessions":self.all,"output_end":self.page.as_ref().map(|p|p.end),"dimensions":self.dimensions})
+        serde_json::json!({"visible":self.visible,"capability":self.capability,"generation":self.generation,"session":self.session,"rows":self.rows.len(),"selected":self.selected.as_ref().map(|r|&r.run.id),"selected_state":self.selected.as_ref().map(|r|r.run.state),"selected_child":self.selected.as_ref().and_then(|r|r.child_id.as_ref()),"items":self.rows.iter().map(|r|serde_json::json!({"id":r.run.id,"tool":r.run.tool,"state":r.run.state,"child_id":r.child_id})).collect::<Vec<_>>(),"follow":self.follow,"detail":self.detail,"content":self.content,"info":self.info,"raw_input":self.raw_input,"storage":self.storage,"status":self.status,"all_sessions":self.all,"output_end":self.page.as_ref().map(|p|p.end),"dimensions":self.dimensions})
     }
 }
 
@@ -1391,7 +1160,13 @@ mod tests {
                 text: format!("{}TAIL_SENTINEL", "漢字e\u{301}".repeat(700)),
             });
             let text = frame(&mut m, w, h);
-            assert!(text.contains("TAIL_SENTINEL"), "{w}x{h}: {text}");
+            // The sentinel may wrap at a different column after adding visible tabs.
+            assert!(
+                text.split_whitespace()
+                    .collect::<String>()
+                    .contains("TAIL_SENTINEL"),
+                "{w}x{h}: {text}"
+            );
             assert!(text.contains("? Actions"));
             m.action(Action::Help);
             for index in 0..m.actions().len() {
@@ -1509,5 +1284,119 @@ mod tests {
         assert!(m.parents.is_empty());
         assert_eq!(m.selected.as_ref().unwrap().run.id, "run-two");
         assert_eq!(m.before.as_ref().unwrap().run_id, "page");
+    }
+    #[test]
+    fn explicit_input_opens_arguments_at_top_and_mouse_output_tab_switches_without_effects() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let mut m = fixture();
+        frame(&mut m, 80, 24);
+        m.key(KeyCode::Char('i'), KeyModifiers::NONE);
+        assert!(m.detail);
+        assert!(!m.follow);
+        assert!(!m.info);
+        assert_eq!(m.content, ExecutionContent::Input);
+        let request = m.reserve(80).unwrap();
+        assert!(matches!(
+            request,
+            Request::TaskMonitor {
+                request: TaskMonitorRequest::Read {
+                    content: ExecutionContent::Input,
+                    offset: None,
+                    ..
+                },
+                ..
+            }
+        ));
+        let original=serde_json::json!({"session_id":"parent","message_id":"m","tool":"bash","input":{"command":"printf INPUT_FIRST\nprintf NEXT_LINE","intent":"Read actual arguments","list":[1,true,null]},"working_dir":"/fixture"}).to_string();
+        m.accept(
+            80,
+            ServerEvent::TaskMonitorResponse {
+                id: 80,
+                response: TaskMonitorResponse::Text {
+                    run_id: "run-one".into(),
+                    content: ExecutionContent::Input,
+                    page: TaskTextPage {
+                        start: 0,
+                        end: original.len() as u64,
+                        total: original.len() as u64,
+                        text: original.clone(),
+                    },
+                },
+            },
+        );
+        let rendered = frame(&mut m, 80, 24);
+        assert!(rendered.contains("INPUT_FIRST"));
+        assert!(
+            rendered.contains("i Input")
+                && rendered.contains("o Output")
+                && rendered.contains("m Info")
+        );
+        assert_eq!(m.scroll, 0);
+        assert!(!rendered.contains("session_id"));
+        m.action(Action::RawInput);
+        let raw = frame(&mut m, 80, 24);
+        assert!(raw.contains("session_id"));
+        assert_eq!(m.page.as_ref().unwrap().text, original);
+        let rect = m
+            .hit
+            .iter()
+            .find(|(_, action)| matches!(action, Action::Output))
+            .unwrap()
+            .0;
+        m.mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: rect.x,
+            row: rect.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(m.content, ExecutionContent::Output);
+        assert!(m.follow);
+        assert!(
+            m.queued
+                .iter()
+                .all(|op| matches!(op, Operation::Monitor(_)))
+        );
+    }
+
+    #[test]
+    fn input_tabs_and_exact_argument_view_survive_narrow_floor_and_large_receipt_paging() {
+        let mut m = fixture();
+        m.action(Action::Input);
+        m.queued.clear();
+        for (w, h) in [(140, 32), (80, 24), (60, 24), (48, 12)] {
+            let input=serde_json::json!({"input":{"command":"FIRST ARGUMENT","empty":"","null":null,"flag":false}}).to_string();
+            m.page = Some(TaskTextPage {
+                start: 0,
+                end: input.len() as u64,
+                total: input.len() as u64,
+                text: input,
+            });
+            let text = frame(&mut m, w, h);
+            assert!(
+                text.contains("i Input") && text.contains("o Output") && text.contains("m Info"),
+                "{text}"
+            );
+            assert!(text.contains("FIRST ARGUMENT"), "{text}");
+            assert_eq!(m.scroll, 0);
+        }
+        m.page = Some(TaskTextPage {
+            start: 0,
+            end: 20,
+            total: 90000,
+            text: "{\"input\":{\"command\":".into(),
+        });
+        assert!(frame(&mut m, 80, 24).contains("Large input"));
+        m.action(Action::Newer);
+        assert!(matches!(
+            m.reserve(81),
+            Some(Request::TaskMonitor {
+                request: TaskMonitorRequest::Read {
+                    offset: Some(20),
+                    content: ExecutionContent::Input,
+                    ..
+                },
+                ..
+            })
+        ));
     }
 }
