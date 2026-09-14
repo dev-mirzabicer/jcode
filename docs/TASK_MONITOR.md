@@ -30,11 +30,31 @@ be bypassed with the terminal's usual Shift gesture for terminal text selection.
 
 ## Read input and live output
 
-`i` switches between the immutable invocation input and retained output. `f`
-toggles live follow/pause. Scrolling output pauses following. A late response cannot
+The visible **Input / Output / Info** tabs separate the three reading tasks:
+
+- `i` opens **Input** at the beginning. Complete receipt pages show every original
+  agent-supplied argument as a labeled field. Text strings display with their real
+  line breaks; arrays, objects, booleans, numbers and null remain explicitly typed.
+- `o` opens **Output**, including its retained live stream. `f` toggles follow/pause.
+- `m` opens **Info** for full run/session IDs, timestamps, stop cause, process
+  outcome, progress and server-owned receipt paths.
+
+The tabs are clickable in both wide preview and narrow detail views. Input is also
+a first-level action on the list footer, rather than a hidden mode toggle. `v`
+switches Input between readable arguments and the complete original receipt JSON.
+Large receipts stay bounded, exact paged JSON, labeled as such. No partial JSON is
+mistaken for a complete argument object. `Home` returns to the beginning. Input
+never inherits output tail-following.
+
+`f` applies only to Output. Scrolling output pauses following. A late response cannot
 replace a paused view or the content for a newly selected run. `[` and `]` page
 backward and forward. In the list these keys navigate bounded metadata pages, and
 in details they navigate the selected text source.
+
+The list uses aligned Tool, State and Output columns, with UTC start time when
+space permits. Full IDs live in Info rather than crowding the content header.
+Focus is distinguished by selection styling and the current reading pane. Semantic
+colors follow Jcode's palette, with text/underline cues retained under `NO_COLOR`.
 
 The UI reads bounded, UTF-8-safe windows from the existing verified output owner.
 It does not rerun producers, load all output bodies for a list, or assume server

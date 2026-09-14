@@ -182,14 +182,14 @@ try:
     tui=Tui(parent);tui.keys(b'/tasks\r');wait(lambda:tui.state().get('visible'),'tasks did not open')
     for w,h in [(140,32),(80,24),(60,24),(48,12),(47,11)]:
         tui.resize(w,h);tui.keys(b'r');tui.frame(f'monitor-{w}x{h}','48' if w<48 else 'Tasks')
-    tui.resize(80,24);tui.keys(b'?');tui.frame('actions-80x24','Storage review');tui.click(3,4)
+    tui.resize(80,24);tui.keys(b'?');tui.frame('actions-80x24','Storage review');tui.click(3,5)
     wait(lambda:tui.state().get('all_sessions'),'mouse scope action did not activate');tui.keys(b'a');wait(lambda:not tui.state().get('all_sessions'),'keyboard scope action did not return')
     # Input is delivered through actual PTY bytes, not a reducer-only invocation.
     tui.keys(b'\x1b[200~NOT-COMPOSER\x1b[201~');assert tui.debug('input').strip()=='input: ""'
     send(c,{'type':'message','id':10,'content':'PARENT_BASH','no_reply':False})
     wait(lambda:(PROJECT/'effect').exists(),'native command did not start')
     wait(lambda:any(row['tool']=='bash' for row in tui.state().get('items',[])),'active bash missing')
-    tui.keys(b'\r');tui.frame('live-output','LIVE_PREFIX');tui.keys(b'f');wait(lambda:not tui.state()['follow'],'pause did not activate');paused=tui.state();time.sleep(.2);assert tui.state()['output_end']==paused['output_end']
+    tui.keys(b'\r');tui.frame('live-output','live-');tui.keys(b'\x1b[H');tui.frame('retained-output-prefix','LIVE_PREFIX');tui.keys(b'\x1b[F');wait(lambda:tui.state()['follow'],'End did not resume following');tui.keys(b'f');wait(lambda:not tui.state()['follow'],'pause did not activate');paused=tui.state();time.sleep(.2);assert tui.state()['output_end']==paused['output_end']
     tui.keys(b'f');wait(lambda:tui.state()['output_end']>paused['output_end'],'follow did not resume')
     selected=tui.state()['selected'];tui.keys(b's')
     def terminal():
@@ -199,6 +199,16 @@ try:
     wait(lambda:tui.state()['selected']==selected and tui.state()['selected_state']=='cancelled','selected completion moved to another row')
     tui.frame('cancelled-selected','Cancelled');until(r,lambda e:e.get('id')==10 and e.get('type') in ('done','error'))
     results['native_stop_partial_and_pinned_selection']=True
+    calls_before_input=len(posts)
+    tui.click(4,4);wait(lambda:tui.state()['content']=='input','visible Input tab did not activate')
+    for w,h in [(140,32),(80,24),(60,24),(48,12)]:
+        tui.resize(w,h);frame=tui.frame(f'tool-input-{w}x{h}','printf completed-effect')
+        assert 'i Input' in frame and 'o Output' in frame and 'm Info' in frame,'input/output/info choices were not visible'
+    tui.resize(80,24);tui.keys(b'v');tui.frame('tool-input-receipt','session_id');tui.keys(b'v')
+    tui.keys(b'm');tui.frame('tool-info',selected);tui.keys(b'o');wait(lambda:tui.state()['content']=='output' and not tui.state()['info'],'Output key did not activate')
+    tui.frame('tool-output-visible-tabs','Cancelled')
+    assert len(posts)==calls_before_input,'Input inspection reran an effect or invoked inference'
+    results['native_visible_input_arguments_and_tabs']=True
     tui.keys(b'\x1b');time.sleep(.1);tui.keys(b'1')
     send(c,{'type':'message','id':12,'content':'PARENT_BASH','no_reply':False})
     wait(lambda:any(row['tool']=='bash' and row['state']=='running' and row['id']!=selected for row in tui.state().get('items',[])),'second native command missing')
@@ -283,7 +293,7 @@ try:
     tui.keys(b'g');tui.frame('storage','Storage administration');tui.keys(b'\x1b[200~1\x1b[201~\r');tui.frame('cleanup-review','Cleanup review')
     if archive_fixture:
         frame=tui.frame('cleanup-exact-candidate',archive_fixture['run_id'])
-        assert archive_fixture['snapshot_id'] in frame,'review omitted affected snapshot'
+        tui.keys(b'\x1b[6~');tui.frame('cleanup-snapshot-impact',archive_fixture['snapshot_id'])
         assert Path(archive_fixture['output_path']).exists(),'review deleted output without confirmation'
         tui.keys(b'y');wait(lambda:not Path(archive_fixture['output_path']).exists(),'confirmed fixture output was not deleted')
         tui.frame('cleanup-completed','Deleted');results['native_exact_cleanup_confirmation']=True

@@ -123,3 +123,27 @@ boundary. The production owners were repaired and the full native workflow rerun
 Failed probe assumptions, compiler/lint attempts and cleanup reports remain in the
 private evidence root. No live user output, instruction source, archive setting or
 protected context architecture was changed by a test.
+
+## Human-review UI refinement
+
+Mirza's 2026-09-14 review praised the functional candidate and requested UI/UX
+refinement, specifically that original tool input was not discoverable. This is
+continued candidate work, not accepted-WP publication.
+
+The refinement makes Input, Output and Info explicit visible tabs. Input starts
+at the beginning and displays original typed arguments, including real multiline
+string content, with raw receipt JSON available separately. Large partial receipts
+remain exact paged JSON rather than being parsed as incomplete argument objects.
+Long IDs and capture metadata move to Info; aligned list columns, palette-based
+state colors, monochrome selection cues and contextual footer actions improve
+readability without another execution or context owner.
+
+Five additional mechanism/render tests cover input-first behavior, exact typed
+argument preservation, mouse tab activation, partial input paging, Unicode cell
+clipping and monochrome cues. The full native script also reads actual command
+arguments at 140×32, 80×24, 60×24 and 48×12, switches raw receipt/Info/Output, and
+checks that these inspections do not execute a producer or invoke inference.
+The previous live-tail sentinel assertion assumed the first output line would
+remain visible. The native check now verifies live tail and then explicitly uses
+Home to verify the retained first line, preserving both claims without a timing
+assumption.
