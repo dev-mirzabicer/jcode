@@ -21,6 +21,7 @@ async fn closed_delivery_channel_still_reads_the_actual_owner_outcome() -> Resul
             invocation: original.invocation.clone(),
             stop: original.stop.clone(),
             background: AtomicBool::new(true),
+            promoted: Default::default(),
             ready: original.ready.clone(),
             delivery: tokio::sync::Mutex::new(()),
             commands: original.commands.clone(),
@@ -373,5 +374,74 @@ async fn ending_a_listener_releases_its_unreferenced_runtime_lease() -> Result<(
     assert!(!endpoint.has_live_lease()?);
     let replacement = ensure_running(&store).await?;
     assert_ne!(replacement.endpoint.id, endpoint.id);
+    Ok(())
+}
+
+#[tokio::test]
+async fn unsupported_force_does_not_cancel_otherwise_running_work() -> Result<()> {
+    let mut fixture = start().await?;
+    let session = fixture.store.inspect(&fixture.id)?.unwrap().session_id;
+    assert!(
+        crate::execution::inspection::inspect(
+            fixture.store.root().parent().unwrap(),
+            &session,
+            jcode_tool_types::execution::ExecutionRequest::ForceStop {
+                run_id: fixture.id.clone()
+            }
+        )
+        .await
+        .is_err()
+    );
+    let current = fixture.store.inspect(&fixture.id)?.unwrap();
+    assert_eq!(current.state, RunState::Running);
+    assert!(current.stop_cause.is_none());
+    fixture.release.notify_one();
+    (&mut fixture.task).await??;
+    assert_eq!(
+        fixture.store.inspect(&fixture.id)?.unwrap().state,
+        RunState::Completed
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn human_background_promotion_releases_foreground_caller_without_restarting_work()
+-> Result<()> {
+    let mut fixture = start().await?;
+    let live = LIVE
+        .lock()
+        .unwrap()
+        .get(&(fixture.store.root().to_path_buf(), fixture.id.clone()))
+        .unwrap()
+        .clone();
+    // The Registry publishes readiness after real preflight. This synthetic
+    // producer uses the same execution owner without a provider/tool dependency.
+    live.ready.mark();
+    let reply = control_in_store(&fixture.store, &fixture.id, ControlOperation::Background).await?;
+    assert!(matches!(reply, ControlReply::Accepted { changed: true }));
+    let receipt =
+        tokio::time::timeout(std::time::Duration::from_secs(2), &mut fixture.task).await???;
+    assert!(matches!(receipt.source, OutputSource::Acceptance(_)));
+    assert_eq!(
+        fixture.store.inspect(&fixture.id)?.unwrap().state,
+        RunState::Running
+    );
+    fixture.release.notify_one();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        control_in_store(&fixture.store, &fixture.id, ControlOperation::Wait),
+    )
+    .await??;
+    assert!(matches!(result,ControlReply::Snapshot{record} if record.state==RunState::Completed));
+    assert!(
+        fixture
+            .store
+            .result(
+                &fixture.store.inspect(&fixture.id)?.unwrap(),
+                NonZeroUsize::new(1000).unwrap()
+            )?
+            .output
+            .contains("retained result")
+    );
     Ok(())
 }

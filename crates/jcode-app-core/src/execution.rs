@@ -55,6 +55,7 @@ struct LiveRun {
     invocation: Invocation,
     stop: InterruptSignal,
     background: AtomicBool,
+    promoted: tokio::sync::Notify,
     ready: jcode_tool_core::ExecutionReady,
     delivery: tokio::sync::Mutex<()>,
     commands: mpsc::UnboundedSender<Command>,
@@ -158,6 +159,7 @@ pub(crate) async fn execute_at(
                 invocation,
                 stop: InterruptSignal::new(),
                 background: AtomicBool::new(policy.background),
+                promoted: Default::default(),
                 ready: Default::default(),
                 delivery: Default::default(),
                 commands,
@@ -194,6 +196,9 @@ pub(crate) async fn execute_at(
     let mut receiver = run.result.clone();
     let mut deadline = policy.background.then(tokio::time::Instant::now);
     loop {
+        let promoted = run.promoted.notified();
+        tokio::pin!(promoted);
+        promoted.as_mut().enable();
         if deadline.is_none() && run.ready.is_ready() {
             deadline = policy
                 .foreground_timeout
@@ -213,7 +218,13 @@ pub(crate) async fn execute_at(
             }
             return Ok(completed.output.clone());
         }
+        if run.background.load(Ordering::SeqCst) && run.ready.is_ready() {
+            let receipt = background_receipt(run.clone(), &policy, target).await?;
+            wait.armed = false;
+            return Ok(receipt);
+        }
         tokio::select! {
+            _=&mut promoted=>{},
             _=run.ready.wait(),if !run.ready.is_ready()=>{}
             changed=receiver.changed()=>{changed.context("Execution owner closed before a result was available")?;}
             _=async {if let Some(at)=deadline{tokio::time::sleep_until(at).await}else{std::future::pending::<()>().await}}=>{
@@ -298,6 +309,20 @@ async fn background_receipt(
     })
     .await??;
     Ok(output)
+}
+
+/// A native command proxy observes the durable owner's promotion without
+/// ending the producer future that still owns terminal-result delivery.
+#[cfg(unix)]
+fn observe_native_background(store: &ExecutionStore, id: &str) {
+    if let Some(run) = LIVE
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(&(store.root().to_path_buf(), id.to_string()))
+        && !run.background.swap(true, Ordering::SeqCst)
+    {
+        run.promoted.notify_waiters();
+    }
 }
 
 pub(crate) async fn background_handoff(ctx: &ToolContext) -> Result<ToolOutput> {
@@ -550,7 +575,7 @@ async fn supervise(
                     let result=if stopping.is_some(){Err("Invocation is already stopping".to_string())}else{
                         let store=store.clone();let id=record.id.clone();let owner=owner.clone();
                         match tokio::task::spawn_blocking(move||store.promote(&id,&owner)).await {
-                            Ok(Ok(true))=>{run.background.store(true,Ordering::SeqCst);Ok(true)},
+                            Ok(Ok(true))=>{run.background.store(true,Ordering::SeqCst);run.promoted.notify_waiters();Ok(true)},
                             Ok(Ok(false))=>Ok(false),
                             Ok(Err(error))=>Err(error.to_string()),Err(error)=>Err(error.to_string()),
                         }
@@ -664,6 +689,7 @@ pub async fn promote(id: &str) -> Result<bool> {
             runtime::control_in_store(&run.store, id, ControlOperation::Background).await?;
         if matches!(result, ControlReply::Accepted { changed: true }) {
             run.background.store(true, Ordering::SeqCst);
+            run.promoted.notify_waiters();
             return Ok(true);
         }
         if let ControlReply::Unavailable { message } = result {

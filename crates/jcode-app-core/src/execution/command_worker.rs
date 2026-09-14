@@ -98,6 +98,9 @@ pub(crate) async fn launch(
             })
             .await??
         };
+        if current.background {
+            super::observe_native_background(&store, &id);
+        }
         if current.background
             && let Some(progress) = &current.progress
             && progress.sequence > last_progress
@@ -269,6 +272,7 @@ async fn worker_with_child(id: &str, child: tokio::process::Command) -> Result<(
         invocation: input,
         stop: InterruptSignal::new(),
         background: AtomicBool::new(record.background),
+        promoted: Default::default(),
         ready: Default::default(),
         delivery: Default::default(),
         commands,
@@ -330,7 +334,7 @@ async fn worker_with_child(id: &str, child: tokio::process::Command) -> Result<(
                 let answer=if run.stop.is_set(){Err("Command is stopping".to_string())}else{
                     let store=store.clone();let id=record.id.clone();let owner=record.owner.clone();
                     match tokio::task::spawn_blocking(move||store.promote(&id,&owner)).await {
-                        Ok(Ok(true))=>{run.background.store(true,Ordering::SeqCst);Ok(true)},
+                        Ok(Ok(true))=>{run.background.store(true,Ordering::SeqCst);run.promoted.notify_waiters();Ok(true)},
                         Ok(Ok(false))=>Ok(false),Ok(Err(error))=>Err(error.to_string()),Err(error)=>Err(error.to_string()),
                     }
                 };let _=reply.send(answer);

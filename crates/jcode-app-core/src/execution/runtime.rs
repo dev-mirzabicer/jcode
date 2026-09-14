@@ -266,8 +266,9 @@ async fn dispatch(
         match action {
             ControlOperation::ForceStop => {
                 ensure!(run.result.borrow().is_none(), "Execution already finished");
-                run.stop.fire_with_cause(StopCause::HumanCancellation);
-                let changed = store.force_native_processes(id, &endpoint.id).await?;
+                let changed = store
+                    .force_native_processes(id, &endpoint.id, &run.stop)
+                    .await?;
                 return Ok(ControlReply::Accepted { changed });
             }
             ControlOperation::Stop { cause } => {

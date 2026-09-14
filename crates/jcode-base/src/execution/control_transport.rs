@@ -4,7 +4,7 @@ use anyhow::{Context, Result, ensure};
 use jcode_tool_types::StopCause;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 pub const MAX_REQUEST: u64 = 16 * 1024;
 const MAX_REPLY: u64 = 128 * 1024;
 
@@ -54,8 +54,12 @@ pub async fn exchange(
     action: ControlOperation,
 ) -> Result<ControlReply> {
     ensure!(
-        endpoint.protocol_version == VERSION,
+        (1..=VERSION).contains(&endpoint.protocol_version),
         "Execution owner does not support this control protocol"
+    );
+    ensure!(
+        !matches!(&action, ControlOperation::ForceStop) || endpoint.protocol_version >= 2,
+        "This execution owner predates force-stop support. Ordinary Stop remains available."
     );
     let check = endpoint.clone();
     ensure!(
@@ -74,7 +78,7 @@ pub async fn exchange(
     );
     let (read, mut write) = stream.into_split();
     let request = Request {
-        version: VERSION,
+        version: endpoint.protocol_version,
         instance: endpoint.id.clone(),
         key: endpoint.transport_key().into(),
         run_id: id.into(),
@@ -100,7 +104,7 @@ pub async fn exchange(
     );
     let response: Response = serde_json::from_slice(&bytes)?;
     ensure!(
-        response.version == VERSION,
+        response.version == endpoint.protocol_version,
         "Execution control protocol changed"
     );
     Ok(response.reply)
@@ -156,4 +160,37 @@ pub async fn control_in_store(
     anyhow::bail!(
         "Execution owner changed during control; retry the control request, not the operation"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn legacy_owner_force_rejects_before_transport_but_ordinary_stop_keeps_legacy_route() {
+        let root = tempfile::tempdir().unwrap();
+        let mut endpoint = RuntimeEndpoint::new(
+            "legacy".into(),
+            root.path().join("absent.sock"),
+            root.path().join("absent.lease"),
+            "private".into(),
+        );
+        endpoint.protocol_version = 1;
+        let error = exchange(&endpoint, "run-fixture", ControlOperation::ForceStop)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("predates"));
+        let error = exchange(
+            &endpoint,
+            "run-fixture",
+            ControlOperation::Stop {
+                cause: StopCause::HumanCancellation,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("lease"),
+            "Ordinary version-one control was rejected as incompatible: {error}"
+        );
+    }
 }

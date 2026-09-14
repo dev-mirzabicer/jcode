@@ -32,7 +32,7 @@ impl RuntimeEndpoint {
             endpoint,
             lease_path,
             auth_key,
-            protocol_version: 1,
+            protocol_version: super::control_transport::VERSION,
             process_id: std::process::id(),
             process_image: Some(crate::background::runtime_instance_id().to_string()),
         }
