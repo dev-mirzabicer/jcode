@@ -594,3 +594,61 @@ async fn child_context_budget_failure_preserves_history_and_never_dispatches() {
     f.cleanup().await;
     result.unwrap().unwrap();
 }
+
+#[tokio::test]
+async fn human_child_context_reuses_curator_apply_undo_and_rejects_stale_followup() {
+    use crate::protocol::{
+        ContextCuratorRunConfig, ContextDraftRequest, ContextMessageRangeSelection, Request,
+        ServerEvent,
+    };
+    let f = Fixture::new().await;
+    let result=std::panic::AssertUnwindSafe(async {
+        f.http.push(Reply::Text("CHILD REPLY"));f.call("context-child",f.create()).await.unwrap();
+        let child=f.child_id("context-child");let before=Session::load(&child).unwrap();
+        let parent=serde_json::to_value(Session::load(&f.parent.id).unwrap()).unwrap();
+        let service=Arc::new(crate::context::ContextTransactionService::default());
+        async fn action(child:&str,request:Request,service:&Arc<crate::context::ContextTransactionService>)->Vec<ServerEvent>{
+            let (tx,mut rx)=mpsc::unbounded_channel();
+            crate::server::child_context::handle(child.into(),request,service.clone(),InstructionRepositoryService::new(),tx).await.unwrap();
+            let mut events=vec![];
+            while let Some(event)=tokio::time::timeout(std::time::Duration::from_secs(20),rx.recv()).await.unwrap(){events.push(event);}
+            events
+        }
+        async fn review(child:&str,mut request:ContextDraftRequest,service:&Arc<crate::context::ContextTransactionService>)->ContextDraftRequest {
+            request.curator.expected_plan_fingerprint=None;
+            let events=action(child,Request::GetContextEditorSnapshot{id:81,page_start:0,page_size:Some(250)},service).await;
+            let snapshot=events.iter().find_map(|event|if let ServerEvent::ContextEditorSnapshot{snapshot,..}=event{Some(snapshot)}else{None}).unwrap();
+            let events=action(child,Request::PreviewContextCuratorPlan{id:82,expected_context_revision:snapshot.context_revision,expected_transcript_digest:snapshot.transcript_digest,request:request.clone()},service).await;
+            let fingerprint=events.iter().find_map(|event|if let ServerEvent::ContextCuratorPlanPreview{preview,..}=event{Some(preview.fingerprint.clone())}else{None}).unwrap_or_else(||panic!("{events:?}"));
+            request.curator.expected_plan_fingerprint=Some(fingerprint);request
+        }
+        let snapshot=action(&child,Request::GetContextEditorSnapshot{id:1,page_start:0,page_size:Some(250)},&service).await;
+        assert!(snapshot.iter().any(|event|matches!(event,ServerEvent::ContextEditorSnapshot{snapshot,..} if snapshot.session_id==child)));
+        assert_eq!(serde_json::to_value(Session::load(&child).unwrap()).unwrap(),serde_json::to_value(&before).unwrap());
+        let request=ContextDraftRequest{summary_ranges:vec![ContextMessageRangeSelection{start_message_id:before.messages[before.messages.len()-2].id.clone(),end_message_id:before.messages.last().unwrap().id.clone()}],reasoning:None,tool_results:vec![],allow_shadowing_active_operations:false,curator:ContextCuratorRunConfig{selection:Some(Default::default()),..Default::default()},authorization:jcode_session_types::StoredContextAuthorization::Manual{initiated_by:Some("human fixture".into())}};
+        f.http.push(Reply::Text(r#"{"summary":"Synthetic summary","file_change_digest":"No files changed.","warnings":[]}"#));
+        let events=action(&child,Request::PrepareContextDraft{id:2,request:review(&child,request.clone(),&service).await},&service).await;
+        let draft=events.iter().find_map(|event|if let ServerEvent::ContextDraftReady{draft,..}=event {Some(draft.identity.draft_id.clone())}else{None}).unwrap_or_else(||panic!("{events:?}"));
+        let applied=action(&child,Request::ApplyContextDraft{id:3,draft_id:draft,selected_distillation_ids:None},&service).await;
+        let transaction=applied.iter().find_map(|event|if let ServerEvent::ContextTransactionApplied{result,..}=event {Some(result.transaction.id.clone())}else{None}).unwrap_or_else(||panic!("{applied:?}"));
+        let edited=Session::load(&child).unwrap();assert_eq!(serde_json::to_value(&edited.messages).unwrap(),serde_json::to_value(&before.messages).unwrap());assert!(edited.context_view.revision>before.context_view.revision);edited.validate_active_agent_profile().unwrap();
+        let undone=action(&child,Request::RevertContextTransaction{id:4,transaction_id:transaction},&service).await;
+        assert!(undone.iter().any(|event|matches!(event,ServerEvent::ContextTransactionReverted{..})),"{undone:?}");
+        f.http.push(Reply::Text(r#"{"summary":"Synthetic next summary","file_change_digest":"No files changed.","warnings":[]}"#));
+        let events=action(&child,Request::PrepareContextDraft{id:5,request:review(&child,request,&service).await},&service).await;
+        let stale=events.iter().find_map(|event|if let ServerEvent::ContextDraftReady{draft,..}=event {Some(draft.identity.draft_id.clone())}else{None}).unwrap_or_else(||panic!("{events:?}"));
+        let calls=f.http.requests.lock().unwrap().len();
+        f.http.push(Reply::Text("EXPLICIT FOLLOWUP"));f.call("context-followup",json!({"child_id":child,"prompt":"Continue explicitly","intent":"fixture"})).await.unwrap();
+        let changed=Session::load(&child).unwrap();
+        let rejected=action(&child,Request::ApplyContextDraft{id:6,draft_id:stale,selected_distillation_ids:None},&service).await;
+        assert!(rejected.iter().any(|event|matches!(event,ServerEvent::ContextRequestRejected{..})),"{rejected:?}");
+        assert_eq!(serde_json::to_value(Session::load(&child).unwrap()).unwrap(),serde_json::to_value(changed).unwrap());
+        assert_eq!(f.http.requests.lock().unwrap().len(),calls+1,"Context apply must not restart child inference");
+        assert_eq!(serde_json::to_value(Session::load(&f.parent.id).unwrap()).unwrap(),parent);
+        let (tx,_)=mpsc::unbounded_channel();assert!(crate::server::child_context::handle(child,Request::Cancel{id:7},service,InstructionRepositoryService::new(),tx).await.is_err());
+    }).catch_unwind().await;
+    f.cleanup().await;
+    if let Err(error) = result {
+        std::panic::resume_unwind(error);
+    }
+}

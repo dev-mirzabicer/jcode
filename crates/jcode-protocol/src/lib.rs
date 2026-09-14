@@ -603,6 +603,9 @@ impl Request {
             Request::SetAgent { id, .. } => *id,
             Request::GetAgentCatalog { id }
             | Request::Execution { id, .. }
+            | Request::TaskMonitorProbe { id }
+            | Request::TaskMonitor { id, .. }
+            | Request::ChildContext { id, .. }
             | Request::SessionInspection { id, .. }
             | Request::DelegationProbe { id }
             | Request::DelegationExecute { id, .. }

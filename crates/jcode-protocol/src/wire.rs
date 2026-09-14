@@ -156,6 +156,21 @@ pub enum Request {
         id: u64,
         request: jcode_tool_types::execution::ExecutionRequest,
     },
+    #[serde(rename = "task_monitor_probe")]
+    TaskMonitorProbe { id: u64 },
+    #[serde(rename = "task_monitor")]
+    TaskMonitor {
+        id: u64,
+        request: jcode_tool_types::task_monitor::TaskMonitorRequest,
+    },
+    /// Explicit target wrapper. Only existing human context operations are
+    /// accepted inside it, never Message, ResumeSession or arbitrary requests.
+    #[serde(rename = "child_context")]
+    ChildContext {
+        id: u64,
+        child_id: String,
+        request: Box<Request>,
+    },
     #[serde(rename = "session_inspection")]
     SessionInspection {
         id: u64,
@@ -1089,6 +1104,23 @@ pub enum Request {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ServerEvent {
+    #[serde(rename = "task_monitor_capabilities")]
+    TaskMonitorCapabilities {
+        id: u64,
+        version: u32,
+        child_context: bool,
+    },
+    #[serde(rename = "task_monitor_response")]
+    TaskMonitorResponse {
+        id: u64,
+        response: jcode_tool_types::task_monitor::TaskMonitorResponse,
+    },
+    #[serde(rename = "child_context_response")]
+    ChildContextResponse {
+        id: u64,
+        child_id: String,
+        event: Box<ServerEvent>,
+    },
     #[serde(rename = "delegation_capabilities")]
     DelegationCapabilities {
         id: u64,

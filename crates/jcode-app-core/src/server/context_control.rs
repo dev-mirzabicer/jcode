@@ -8,7 +8,7 @@ use crate::protocol::{
     CONTEXT_SNAPSHOT_DEFAULT_PAGE_SIZE, CONTEXT_SNAPSHOT_MAX_PAGE_SIZE, ContextCuratorSelection,
     ContextDraftRequest, ContextDraftStatus, ContextMessageRangeSelection,
     ContextReasoningSelectionRequest, ContextRequestKind, ContextServiceError,
-    ContextTransactionDetail, ServerEvent,
+    ContextTransactionDetail, Request, ServerEvent,
 };
 use jcode_session_types::{StoredContextAuthorization, StoredContextEmergencyPolicy};
 use std::sync::Arc;
@@ -893,6 +893,163 @@ fn bounded_rejection_correlation(value: Option<&str>) -> Option<String> {
             !value.trim().is_empty() && value.chars().count() <= CONTEXT_IDENTIFIER_MAX_CHARS
         })
         .map(str::to_string)
+}
+
+/// Shared primary/child context routing. The caller supplies the authoritative
+/// Agent and retains any additional child-admission guard through this call.
+pub(super) fn dispatch_editor_request(
+    request: Request,
+    session_id: &str,
+    agent: &Arc<Mutex<Agent>>,
+    service: &Arc<ContextTransactionService>,
+    processing: bool,
+    event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) -> bool {
+    match request {
+        Request::GetContextEditorSnapshot {
+            id,
+            page_start,
+            page_size,
+        } => handle_get_context_editor_snapshot(
+            id, page_start, page_size, agent, service, processing, event_tx,
+        ),
+
+        Request::GetContextMessageDetail {
+            id,
+            expected_context_revision,
+            expected_transcript_digest,
+            message_id,
+            block_ordinal,
+            start_char,
+            max_chars,
+        } => handle_get_context_message_detail(
+            id,
+            expected_context_revision,
+            expected_transcript_digest,
+            message_id,
+            block_ordinal,
+            start_char,
+            max_chars,
+            agent,
+            service,
+            event_tx,
+        ),
+
+        Request::PreviewContextRanges {
+            id,
+            expected_context_revision,
+            expected_transcript_digest,
+            ranges,
+        } => handle_preview_context_ranges(
+            id,
+            expected_context_revision,
+            expected_transcript_digest,
+            ranges,
+            agent,
+            service,
+            event_tx,
+        ),
+
+        Request::PreviewContextCuratorPlan {
+            id,
+            expected_context_revision,
+            expected_transcript_digest,
+            request,
+        } => handle_preview_context_curator_plan(
+            id,
+            expected_context_revision,
+            expected_transcript_digest,
+            request,
+            agent,
+            service,
+            processing,
+            event_tx,
+        ),
+
+        Request::SaveContextCuratorDefault { id, selection } => {
+            handle_save_context_curator_default(id, selection, agent, processing, event_tx);
+        }
+
+        Request::PrepareContextDraft { id, request } => handle_prepare_context_draft(
+            id, request, session_id, agent, service, processing, event_tx,
+        ),
+
+        Request::CancelContextDraft { id, draft_id } => {
+            handle_cancel_context_draft(id, draft_id, session_id, service, event_tx)
+        }
+
+        Request::GetContextDraftStatus { id, draft_id } => {
+            handle_get_context_draft_status(id, draft_id, session_id, service, event_tx)
+        }
+
+        Request::PreviewContextDraftSelection {
+            id,
+            draft_id,
+            selected_distillation_ids,
+        } => handle_preview_context_draft_selection(
+            id,
+            draft_id,
+            selected_distillation_ids,
+            agent,
+            service,
+            event_tx,
+        ),
+
+        Request::ApplyContextDraft {
+            id,
+            draft_id,
+            selected_distillation_ids,
+        } => handle_apply_context_draft(
+            id,
+            draft_id,
+            selected_distillation_ids,
+            agent,
+            service,
+            processing,
+            event_tx,
+        ),
+
+        Request::ListContextTransactions { id, offset, limit } => {
+            handle_list_context_transactions(id, offset, limit, agent, event_tx);
+        }
+
+        Request::GetContextTransactionDetail {
+            id,
+            expected_context_revision,
+            transaction_id,
+        } => handle_get_context_transaction_detail(
+            id,
+            expected_context_revision,
+            transaction_id,
+            agent,
+            event_tx,
+        ),
+
+        Request::RevertContextTransaction { id, transaction_id } => {
+            handle_revert_context_transaction(
+                id,
+                transaction_id,
+                agent,
+                service,
+                processing,
+                event_tx,
+            );
+        }
+
+        Request::ReapplyContextTransaction { id, transaction_id } => {
+            handle_reapply_context_transaction(
+                id,
+                transaction_id,
+                agent,
+                service,
+                processing,
+                event_tx,
+            );
+        }
+
+        _ => return false,
+    }
+    true
 }
 
 #[cfg(test)]

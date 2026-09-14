@@ -39,16 +39,7 @@ use super::comm_sync::{
     CommResyncPlanContext, handle_comm_plan_status, handle_comm_read_context,
     handle_comm_resync_plan, handle_comm_status, handle_comm_summary,
 };
-use super::context_control::{
-    handle_apply_context_draft, handle_cancel_context_draft, handle_get_context_draft_status,
-    handle_get_context_editor_snapshot, handle_get_context_message_detail,
-    handle_get_context_transaction_detail, handle_list_context_transactions,
-    handle_prepare_context_draft, handle_preview_context_curator_plan,
-    handle_preview_context_draft_selection, handle_preview_context_ranges,
-    handle_reapply_context_transaction, handle_revert_context_transaction,
-    handle_save_context_curator_default, handle_set_context_emergency_policy,
-    reject_legacy_context_request,
-};
+use super::context_control::{handle_set_context_emergency_policy, reject_legacy_context_request};
 use super::provider_control::{
     handle_cycle_model, handle_notify_auth_changed, handle_refresh_models, handle_set_model,
     handle_set_premium_mode, handle_set_reasoning_effort, handle_set_route,
@@ -578,6 +569,64 @@ pub(super) async fn handle_client_with_instruction_repositories(
 
         match decode_request(&line) {
             Ok(request) => {
+                if let Request::TaskMonitorProbe { id } = &request {
+                    write_direct_event(
+                        &writer,
+                        &ServerEvent::TaskMonitorCapabilities {
+                            id: *id,
+                            version: 1,
+                            child_context: true,
+                        },
+                    )
+                    .await?;
+                    continue;
+                }
+                if let Request::ChildContext {
+                    id,
+                    child_id,
+                    request,
+                } = &request
+                {
+                    let (tx, mut rx) = mpsc::unbounded_channel();
+                    let (id, target, request) = (*id, child_id.clone(), request.clone());
+                    let service = context_transactions.clone();
+                    let repositories = (*instruction_repositories).clone();
+                    let route_target = target.clone();
+                    let operation = tokio::spawn(async move {
+                        let result = if request.id() != id {
+                            Err(anyhow::anyhow!("Child context correlation mismatch"))
+                        } else {
+                            super::child_context::handle(
+                                route_target,
+                                *request,
+                                service,
+                                repositories,
+                                tx.clone(),
+                            )
+                            .await
+                        };
+                        if let Err(error) = result {
+                            let _ = tx.send(ServerEvent::Error {
+                                id,
+                                message: format!("Child context: {error:#}"),
+                                retry_after_secs: None,
+                            });
+                        }
+                    });
+                    while let Some(event) = rx.recv().await {
+                        write_direct_event(
+                            &writer,
+                            &ServerEvent::ChildContextResponse {
+                                id,
+                                child_id: target.clone(),
+                                event: Box::new(event),
+                            },
+                        )
+                        .await?;
+                    }
+                    operation.await?;
+                    return Ok(());
+                }
                 if let Request::DelegationProbe { id } = &request {
                     let namespace = crate::storage::jcode_dir()?.canonicalize()?;
                     write_direct_event(
@@ -2663,166 +2712,23 @@ pub(super) async fn handle_client_with_instruction_repositories(
                 }
             }
 
-            Request::GetContextEditorSnapshot {
-                id,
-                page_start,
-                page_size,
-            } => handle_get_context_editor_snapshot(
-                id,
-                page_start,
-                page_size,
-                &agent,
-                &context_transactions,
-                client_is_processing,
-                &client_event_tx,
-            ),
-
-            Request::GetContextMessageDetail {
-                id,
-                expected_context_revision,
-                expected_transcript_digest,
-                message_id,
-                block_ordinal,
-                start_char,
-                max_chars,
-            } => handle_get_context_message_detail(
-                id,
-                expected_context_revision,
-                expected_transcript_digest,
-                message_id,
-                block_ordinal,
-                start_char,
-                max_chars,
-                &agent,
-                &context_transactions,
-                &client_event_tx,
-            ),
-
-            Request::PreviewContextRanges {
-                id,
-                expected_context_revision,
-                expected_transcript_digest,
-                ranges,
-            } => handle_preview_context_ranges(
-                id,
-                expected_context_revision,
-                expected_transcript_digest,
-                ranges,
-                &agent,
-                &context_transactions,
-                &client_event_tx,
-            ),
-
-            Request::PreviewContextCuratorPlan {
-                id,
-                expected_context_revision,
-                expected_transcript_digest,
-                request,
-            } => handle_preview_context_curator_plan(
-                id,
-                expected_context_revision,
-                expected_transcript_digest,
-                request,
-                &agent,
-                &context_transactions,
-                client_is_processing,
-                &client_event_tx,
-            ),
-
-            Request::SaveContextCuratorDefault { id, selection } => {
-                handle_save_context_curator_default(
-                    id,
-                    selection,
-                    &agent,
-                    client_is_processing,
-                    &client_event_tx,
-                );
-            }
-
-            Request::PrepareContextDraft { id, request } => handle_prepare_context_draft(
-                id,
-                request,
-                &client_session_id,
-                &agent,
-                &context_transactions,
-                client_is_processing,
-                &client_event_tx,
-            ),
-
-            Request::CancelContextDraft { id, draft_id } => handle_cancel_context_draft(
-                id,
-                draft_id,
-                &client_session_id,
-                &context_transactions,
-                &client_event_tx,
-            ),
-
-            Request::GetContextDraftStatus { id, draft_id } => handle_get_context_draft_status(
-                id,
-                draft_id,
-                &client_session_id,
-                &context_transactions,
-                &client_event_tx,
-            ),
-
-            Request::PreviewContextDraftSelection {
-                id,
-                draft_id,
-                selected_distillation_ids,
-            } => handle_preview_context_draft_selection(
-                id,
-                draft_id,
-                selected_distillation_ids,
-                &agent,
-                &context_transactions,
-                &client_event_tx,
-            ),
-
-            Request::ApplyContextDraft {
-                id,
-                draft_id,
-                selected_distillation_ids,
-            } => handle_apply_context_draft(
-                id,
-                draft_id,
-                selected_distillation_ids,
-                &agent,
-                &context_transactions,
-                client_is_processing,
-                &client_event_tx,
-            ),
-
-            Request::ListContextTransactions { id, offset, limit } => {
-                handle_list_context_transactions(id, offset, limit, &agent, &client_event_tx);
-            }
-
-            Request::GetContextTransactionDetail {
-                id,
-                expected_context_revision,
-                transaction_id,
-            } => handle_get_context_transaction_detail(
-                id,
-                expected_context_revision,
-                transaction_id,
-                &agent,
-                &client_event_tx,
-            ),
-
-            Request::RevertContextTransaction { id, transaction_id } => {
-                handle_revert_context_transaction(
-                    id,
-                    transaction_id,
-                    &agent,
-                    &context_transactions,
-                    client_is_processing,
-                    &client_event_tx,
-                );
-            }
-
-            Request::ReapplyContextTransaction { id, transaction_id } => {
-                handle_reapply_context_transaction(
-                    id,
-                    transaction_id,
+            request @ (Request::GetContextEditorSnapshot { .. }
+            | Request::GetContextMessageDetail { .. }
+            | Request::PreviewContextRanges { .. }
+            | Request::PreviewContextCuratorPlan { .. }
+            | Request::SaveContextCuratorDefault { .. }
+            | Request::PrepareContextDraft { .. }
+            | Request::CancelContextDraft { .. }
+            | Request::GetContextDraftStatus { .. }
+            | Request::PreviewContextDraftSelection { .. }
+            | Request::ApplyContextDraft { .. }
+            | Request::ListContextTransactions { .. }
+            | Request::GetContextTransactionDetail { .. }
+            | Request::RevertContextTransaction { .. }
+            | Request::ReapplyContextTransaction { .. }) => {
+                super::context_control::dispatch_editor_request(
+                    request,
+                    &client_session_id,
                     &agent,
                     &context_transactions,
                     client_is_processing,
@@ -3569,6 +3475,81 @@ pub(super) async fn handle_client_with_instruction_repositories(
                         });
                     }
                 }
+            }
+
+            Request::TaskMonitorProbe { id } => {
+                let _ = client_event_tx.send(ServerEvent::TaskMonitorCapabilities {
+                    id,
+                    version: 1,
+                    child_context: true,
+                });
+            }
+            Request::TaskMonitor { id, request } => {
+                let session = client_session_id.clone();
+                let event_tx = client_event_tx.clone();
+                inspection_requests.spawn(async move {
+                    let result = match crate::storage::jcode_dir() {
+                        Ok(root) => {
+                            crate::execution::task_monitor::inspect(&root, &session, request).await
+                        }
+                        Err(error) => Err(error),
+                    };
+                    let event = match result {
+                        Ok(response) => ServerEvent::TaskMonitorResponse { id, response },
+                        Err(error) => ServerEvent::Error {
+                            id,
+                            message: format!("Task monitor: {error:#}"),
+                            retry_after_secs: None,
+                        },
+                    };
+                    let _ = event_tx.send(event);
+                });
+            }
+            Request::ChildContext {
+                id,
+                child_id,
+                request,
+            } => {
+                let (tx, mut rx) = mpsc::unbounded_channel();
+                let target = child_id.clone();
+                let destination = client_event_tx.clone();
+                inspection_requests.spawn(async move {
+                    while let Some(event) = rx.recv().await {
+                        if destination
+                            .send(ServerEvent::ChildContextResponse {
+                                id,
+                                child_id: target.clone(),
+                                event: Box::new(event),
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                });
+                let service = context_transactions.clone();
+                let repositories = (*instruction_repositories).clone();
+                inspection_requests.spawn(async move {
+                    let result = if request.id() != id {
+                        Err(anyhow::anyhow!("Child context correlation mismatch"))
+                    } else {
+                        super::child_context::handle(
+                            child_id,
+                            *request,
+                            service,
+                            repositories,
+                            tx.clone(),
+                        )
+                        .await
+                    };
+                    if let Err(error) = result {
+                        let _ = tx.send(ServerEvent::Error {
+                            id,
+                            message: format!("Child context: {error:#}"),
+                            retry_after_secs: None,
+                        });
+                    }
+                });
             }
 
             Request::SessionInspection { id, request } => {
