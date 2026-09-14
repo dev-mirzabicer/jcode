@@ -4,7 +4,9 @@
 //! are managed by the pool and reused across sessions. Servers marked `shared: false`
 //! (e.g., Playwright with browser state) are spawned per-session.
 
-use super::client::{McpClient, McpHandle};
+use super::access::McpAccessPolicy;
+use super::client::McpClient;
+use super::pool::PooledMcpHandle;
 use super::pool::SharedMcpPool;
 use super::protocol::{McpConfig, McpServerConfig, McpToolDef, ToolCallResult};
 use anyhow::{Context, Result};
@@ -31,6 +33,7 @@ fn meter_provenance_call(server: &str, result: &Result<ToolCallResult>) {
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct McpManagerMemoryProfile {
+    pub session_id: String,
     pub shared_pool_enabled: bool,
     pub configured_servers: usize,
     pub connected_servers: usize,
@@ -48,10 +51,11 @@ pub struct McpManagerMemoryProfile {
 pub struct McpManager {
     pool: Option<Arc<SharedMcpPool>>,
     /// Handles from the shared pool (shared servers)
-    pool_handles: RwLock<HashMap<String, McpHandle>>,
+    pool_handles: RwLock<HashMap<String, PooledMcpHandle>>,
     /// Per-session owned clients (non-shared / stateful servers)
     owned_clients: RwLock<HashMap<String, McpClient>>,
     config: McpConfig,
+    access_policy: Option<McpAccessPolicy>,
     session_id: String,
     /// Project directory used to resolve project-local MCP config. `None`
     /// loads only global config and never consults the process working directory.
@@ -64,6 +68,7 @@ impl McpManager {
         let project_dir = std::env::current_dir().ok();
         Self {
             pool: None,
+            access_policy: None,
             pool_handles: RwLock::new(HashMap::new()),
             owned_clients: RwLock::new(HashMap::new()),
             config: McpConfig::load_for_dir(project_dir.as_deref()),
@@ -87,6 +92,7 @@ impl McpManager {
     ) -> Self {
         Self {
             pool: Some(pool),
+            access_policy: None,
             pool_handles: RwLock::new(HashMap::new()),
             owned_clients: RwLock::new(HashMap::new()),
             config: McpConfig::load_for_dir(project_dir.as_deref()),
@@ -99,6 +105,7 @@ impl McpManager {
     pub fn with_config(config: McpConfig) -> Self {
         Self {
             pool: None,
+            access_policy: None,
             pool_handles: RwLock::new(HashMap::new()),
             owned_clients: RwLock::new(HashMap::new()),
             config,
@@ -112,91 +119,42 @@ impl McpManager {
         self.pool.is_some()
     }
 
-    /// Connect to all configured servers.
-    /// Shared servers go to the pool, non-shared are spawned per-session.
-    #[expect(
-        clippy::collapsible_if,
-        reason = "MCP connect flow keeps shared-pool and owned-server paths explicit"
-    )]
-    pub async fn connect_all(&self) -> Result<(usize, Vec<(String, String)>)> {
-        let mut total_successes = 0;
-        let mut total_failures = Vec::new();
+    pub fn with_access_policy(mut self, policy: McpAccessPolicy) -> Self {
+        self.access_policy = Some(policy);
+        self
+    }
 
-        // Disabled servers stay in config (so they can be connected on demand
-        // by name) but are never auto-spawned (issue #436).
-        // Split the rest into shared vs owned.
-        let (shared_servers, owned_servers): (Vec<_>, Vec<_>) = self
+    pub fn server_is_allowed(&self, name: &str) -> bool {
+        self.access_policy
+            .as_ref()
+            .is_none_or(|policy| policy.permits(name, self.config.servers.get(name)))
+    }
+
+    fn authorize_server(&self, name: &str, supplied: Option<&McpServerConfig>) -> Result<()> {
+        if let Some(policy) = &self.access_policy {
+            policy.authorize(name, self.config.servers.get(name), supplied)?;
+        }
+        Ok(())
+    }
+
+    /// All callers use the same effective global/project definitions and sharing
+    /// owner. Child eligibility only subtracts servers before any connection.
+    pub async fn connect_all(&self) -> Result<(usize, Vec<(String, String)>)> {
+        let attempts = self
             .config
             .servers
             .iter()
-            .filter(|(_, config)| config.is_enabled())
-            .partition(|(_, config)| config.shared && self.pool.is_some());
-
-        // Connect shared servers via pool
-        if let Some(pool) = &self.pool {
-            if !shared_servers.is_empty() {
-                let (successes, failures) = pool.connect_all().await;
-                total_successes += successes;
-                total_failures.extend(failures);
-
-                // Acquire handles for shared servers only
-                let all_handles = pool.acquire_handles(&self.session_id).await;
-                let shared_names: std::collections::HashSet<&String> =
-                    shared_servers.iter().map(|(name, _)| *name).collect();
-                let mut pool_handles = self.pool_handles.write().await;
-                for (name, handle) in all_handles {
-                    if shared_names.contains(&name) {
-                        pool_handles.insert(name, handle);
-                    }
-                }
-
-                // If pool already had servers connected, count those as successes
-                if total_successes == 0 && !pool_handles.is_empty() {
-                    total_successes = pool_handles.len();
-                }
+            .filter(|(name, config)| config.is_enabled() && self.server_is_allowed(name))
+            .map(|(name, config)| async move { (name.clone(), self.connect(name, config).await) });
+        let mut successes = 0;
+        let mut failures = Vec::new();
+        for (name, result) in futures::future::join_all(attempts).await {
+            match result {
+                Ok(()) => successes += 1,
+                Err(error) => failures.push((name, format!("{error:#}"))),
             }
         }
-
-        // Connect non-shared servers per-session
-        if !owned_servers.is_empty() {
-            let mut spawn_handles = Vec::new();
-
-            for (name, config) in owned_servers {
-                let name = name.clone();
-                let config = config.clone();
-                let project_dir = self.project_dir.clone();
-                let handle = tokio::spawn(async move {
-                    let result =
-                        McpClient::connect_in_dir(name.clone(), &config, project_dir.as_deref())
-                            .await;
-                    (name, result)
-                });
-                spawn_handles.push(handle);
-            }
-
-            for handle in spawn_handles {
-                match handle.await {
-                    Ok((name, Ok(client))) => {
-                        let mut clients = self.owned_clients.write().await;
-                        clients.insert(name, client);
-                        total_successes += 1;
-                    }
-                    Ok((name, Err(e))) => {
-                        let error_msg = format!("{:#}", e);
-                        crate::logging::error(&format!(
-                            "Failed to connect to MCP server '{}': {}",
-                            name, error_msg
-                        ));
-                        total_failures.push((name, error_msg));
-                    }
-                    Err(e) => {
-                        crate::logging::error(&format!("MCP connection task panicked: {}", e));
-                    }
-                }
-            }
-        }
-
-        Ok((total_successes, total_failures))
+        Ok((successes, failures))
     }
 
     /// Connect to a specific server
@@ -205,6 +163,7 @@ impl McpManager {
         reason = "MCP connect flow keeps shared-pool and owned-server paths explicit"
     )]
     pub async fn connect(&self, name: &str, config: &McpServerConfig) -> Result<()> {
+        self.authorize_server(name, Some(config))?;
         // Partner-discovery provenance: if this server's command matches a
         // setup the agent saw in a discover_tools listing, tag it so calls to
         // it are metered coarsely (counts only; see sponsors::provenance).
@@ -218,13 +177,13 @@ impl McpManager {
         }
         if config.shared {
             if let Some(pool) = &self.pool {
-                pool.connect_server(name, config).await?;
-                if let Some(handle) = pool.get_handle(name).await {
-                    self.pool_handles
-                        .write()
-                        .await
-                        .insert(name.to_string(), handle);
-                }
+                let handle = pool
+                    .connect_scoped(name, config, self.project_dir.as_deref())
+                    .await?;
+                self.pool_handles
+                    .write()
+                    .await
+                    .insert(name.to_string(), handle);
                 return Ok(());
             }
         }
@@ -248,10 +207,6 @@ impl McpManager {
         {
             let mut handles = self.pool_handles.write().await;
             if handles.remove(name).is_some() {
-                if let Some(pool) = &self.pool {
-                    pool.release_handles(&self.session_id, &[name.to_string()])
-                        .await;
-                }
                 return Ok(());
             }
         }
@@ -272,11 +227,7 @@ impl McpManager {
         // Release pool handles
         {
             let mut handles = self.pool_handles.write().await;
-            let names: Vec<String> = handles.keys().cloned().collect();
             handles.clear();
-            if let Some(pool) = &self.pool {
-                pool.release_handles(&self.session_id, &names).await;
-            }
         }
 
         // Shutdown owned clients
@@ -301,6 +252,9 @@ impl McpManager {
 
         // Pool handles
         for (server_name, handle) in self.pool_handles.read().await.iter() {
+            if !self.server_is_allowed(server_name) {
+                continue;
+            }
             for tool in handle.tools() {
                 tools.push((server_name.clone(), tool));
             }
@@ -308,6 +262,9 @@ impl McpManager {
 
         // Owned clients
         for (server_name, client) in self.owned_clients.read().await.iter() {
+            if !self.server_is_allowed(server_name) {
+                continue;
+            }
             for tool in client.tools() {
                 tools.push((server_name.clone(), tool));
             }
@@ -330,6 +287,7 @@ impl McpManager {
         tool: &str,
         arguments: serde_json::Value,
     ) -> Result<ToolCallResult> {
+        self.authorize_server(server, None)?;
         // Fast path: already connected via pool handle.
         {
             let handles = self.pool_handles.read().await;
@@ -399,6 +357,7 @@ impl McpManager {
         server: &str,
         timeout: std::time::Duration,
     ) -> Result<()> {
+        self.authorize_server(server, None)?;
         if self.connected_servers().await.iter().any(|s| s == server) {
             return Ok(());
         }
@@ -422,11 +381,8 @@ impl McpManager {
         // Reload config
         self.config = McpConfig::load_for_dir(self.project_dir.as_deref());
 
-        // If we have a pool, reload it too (reconnects shared servers)
-        if let Some(pool) = &self.pool {
-            pool.reload().await;
-        }
-
+        // Session reload must not shut down the shared pool or unrelated work.
+        // Changed effective definitions acquire distinct pooled identities.
         // Reconnect everything
         self.connect_all().await
     }
@@ -476,6 +432,7 @@ impl McpManager {
         }
 
         McpManagerMemoryProfile {
+            session_id: self.session_id.clone(),
             shared_pool_enabled: self.pool.is_some(),
             configured_servers: self.config.servers.len(),
             connected_servers: pooled_handles + owned_clients,
@@ -580,6 +537,7 @@ mod tests {
         config.servers.insert(
             "off".to_string(),
             McpServerConfig {
+                read_only: false,
                 command: "true".to_string(),
                 args: vec![],
                 env: HashMap::new(),
@@ -613,6 +571,7 @@ mod tests {
             "broken".to_string(),
             McpServerConfig {
                 // `true` exits 0 immediately: the stdio handshake gets EOF, so
+                read_only: false,
                 // connect fails fast instead of waiting on the initialize bound.
                 command: "true".to_string(),
                 args: vec![],
@@ -721,6 +680,7 @@ done
         config.servers.insert(
             "agentcard".to_string(),
             McpServerConfig {
+                read_only: false,
                 command: command.clone(),
                 args: vec![],
                 env: HashMap::new(),

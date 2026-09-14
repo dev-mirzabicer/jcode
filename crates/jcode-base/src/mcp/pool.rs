@@ -14,8 +14,9 @@ use super::protocol::{McpConfig, McpServerConfig, McpToolDef};
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, Notify, RwLock};
+use tokio::sync::{Mutex, RwLock};
 
 const FAILED_CONNECT_RETRY_COOLDOWN: Duration = Duration::from_secs(30);
 
@@ -25,10 +26,25 @@ struct FailedConnectRecord {
     failed_at: Instant,
 }
 
-enum ConnectAttempt {
-    Connected,
-    Leader(Arc<Notify>),
-    Wait(Arc<Notify>),
+/// Session-owned lease. Releasing one session never shuts down a shared server.
+pub(super) struct PooledMcpHandle {
+    handle: McpHandle,
+    references: Arc<AtomicUsize>,
+}
+impl std::ops::Deref for PooledMcpHandle {
+    type Target = McpHandle;
+    fn deref(&self) -> &McpHandle {
+        &self.handle
+    }
+}
+impl Drop for PooledMcpHandle {
+    fn drop(&mut self) {
+        let _ = self
+            .references
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+                Some(value.saturating_sub(1))
+            });
+    }
 }
 
 /// Global shared pool of MCP server processes.
@@ -42,8 +58,8 @@ pub struct SharedMcpPool {
     /// Directory against which the pool's default config was resolved. Keep it
     /// stable across reloads because the daemon may serve sessions in many dirs.
     config_dir: Option<std::path::PathBuf>,
-    ref_counts: Mutex<HashMap<String, usize>>,
-    connecting: Mutex<HashMap<String, Arc<Notify>>>,
+    ref_counts: Mutex<HashMap<String, Arc<AtomicUsize>>>,
+    connecting: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     last_errors: RwLock<HashMap<String, FailedConnectRecord>>,
 }
 
@@ -186,7 +202,9 @@ impl SharedMcpPool {
 
         let mut refs = self.ref_counts.lock().await;
         for name in result.keys() {
-            *refs.entry(name.clone()).or_insert(0) += 1;
+            refs.entry(name.clone())
+                .or_default()
+                .fetch_add(1, Ordering::SeqCst);
         }
 
         if !result.is_empty() {
@@ -206,7 +224,9 @@ impl SharedMcpPool {
         let mut refs = self.ref_counts.lock().await;
         for name in server_names {
             if let Some(count) = refs.get_mut(name) {
-                *count = count.saturating_sub(1);
+                let _ = count.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+                    Some(value.saturating_sub(1))
+                });
             }
         }
 
@@ -277,65 +297,76 @@ impl SharedMcpPool {
 
     /// Get reference counts (for debugging)
     pub async fn ref_counts(&self) -> HashMap<String, usize> {
-        self.ref_counts.lock().await.clone()
+        self.ref_counts
+            .lock()
+            .await
+            .iter()
+            .map(|(name, count)| (name.clone(), count.load(Ordering::SeqCst)))
+            .collect()
     }
 
-    async fn begin_connect(&self, name: &str) -> ConnectAttempt {
-        let mut connecting = self.connecting.lock().await;
-        if let Some(notify) = connecting.get(name) {
-            return ConnectAttempt::Wait(Arc::clone(notify));
-        }
-
-        if self.handles.read().await.contains_key(name) {
-            return ConnectAttempt::Connected;
-        }
-
-        let notify = Arc::new(Notify::new());
-        connecting.insert(name.to_string(), Arc::clone(&notify));
-        ConnectAttempt::Leader(notify)
+    async fn connection_gate(&self, key: &str) -> Arc<Mutex<()>> {
+        self.connecting
+            .lock()
+            .await
+            .entry(key.to_string())
+            .or_default()
+            .clone()
     }
 
-    async fn finish_connect(&self, name: &str, notify: Arc<Notify>, result: Result<McpClient>) {
-        match result {
-            Ok(client) => {
-                let handle = client.handle();
-                {
-                    let mut handles = self.handles.write().await;
-                    handles.insert(name.to_string(), handle);
-                }
-                {
-                    let mut clients = self.clients.lock().await;
-                    clients.insert(name.to_string(), client);
-                }
-                {
-                    let mut errors = self.last_errors.write().await;
-                    errors.remove(name);
-                }
-            }
-            Err(error) => {
-                let mut errors = self.last_errors.write().await;
-                errors.insert(
-                    name.to_string(),
-                    FailedConnectRecord {
-                        message: format!("{:#}", error),
-                        failed_at: Instant::now(),
-                    },
-                );
-            }
-        }
-
-        {
-            let mut connecting = self.connecting.lock().await;
-            if connecting
+    /// The selected definition and cwd, not only its display name, identify a
+    /// shared process. Policy labels do not change launch identity.
+    pub(super) async fn connect_scoped(
+        &self,
+        name: &str,
+        config: &McpServerConfig,
+        working_dir: Option<&std::path::Path>,
+    ) -> Result<PooledMcpHandle> {
+        use sha2::Digest;
+        let cwd = working_dir.map(std::fs::canonicalize).transpose()?;
+        let default_cwd = self
+            .config_dir
+            .as_deref()
+            .map(std::fs::canonicalize)
+            .transpose()?;
+        let is_default = cwd == default_cwd
+            && self
+                .config
+                .read()
+                .await
+                .servers
                 .get(name)
-                .map(|current| Arc::ptr_eq(current, &notify))
-                .unwrap_or(false)
-            {
-                connecting.remove(name);
-            }
-        }
-
-        notify.notify_waiters();
+                .is_some_and(|default| default.same_launch(config));
+        let key = if is_default {
+            name.to_string()
+        } else {
+            let env: std::collections::BTreeMap<_, _> = config.env.iter().collect();
+            let headers: std::collections::BTreeMap<_, _> = config.headers.iter().collect();
+            let identity = serde_json::to_vec(&(
+                name,
+                &config.command,
+                &config.args,
+                env,
+                &config.transport,
+                &config.url,
+                headers,
+                &cwd,
+            ))?;
+            format!("{name}@{:x}", sha2::Sha256::digest(identity))
+        };
+        self.ensure_connected_as(&key, name, config, cwd.as_deref())
+            .await
+            .map_err(anyhow::Error::msg)?;
+        let handle = self
+            .handles
+            .read()
+            .await
+            .get(&key)
+            .cloned()
+            .context("Shared MCP connection disappeared before session acquisition")?;
+        let references = self.ref_counts.lock().await.entry(key).or_default().clone();
+        references.fetch_add(1, Ordering::SeqCst);
+        Ok(PooledMcpHandle { handle, references })
     }
 
     async fn ensure_connected(
@@ -343,48 +374,52 @@ impl SharedMcpPool {
         name: String,
         config: McpServerConfig,
     ) -> std::result::Result<bool, String> {
-        if let Some(record) = self.recent_failure(&name).await {
+        self.ensure_connected_as(&name, &name, &config, self.config_dir.as_deref())
+            .await
+    }
+
+    async fn ensure_connected_as(
+        &self,
+        key: &str,
+        name: &str,
+        config: &McpServerConfig,
+        cwd: Option<&std::path::Path>,
+    ) -> std::result::Result<bool, String> {
+        // Per-identity asynchronous ownership is cancellation-safe. A cancelled
+        // leader drops its guard; no orphan Notify entry can strand followers.
+        let gate = self.connection_gate(key).await;
+        let _owner = gate.lock().await;
+        if self.handles.read().await.contains_key(key) {
+            return Ok(false);
+        }
+        if let Some(record) = self.recent_failure(key).await {
             let retry_after = FAILED_CONNECT_RETRY_COOLDOWN
                 .saturating_sub(record.failed_at.elapsed())
                 .as_secs()
                 .max(1);
-            crate::logging::info(&format!(
-                "MCP: Skipping reconnect to '{}' for {}s after recent failure",
-                name, retry_after
-            ));
             return Err(format!(
                 "{} (retry suppressed for ~{}s after recent failure)",
                 record.message, retry_after
             ));
         }
-
-        match self.begin_connect(&name).await {
-            ConnectAttempt::Connected => Ok(false),
-            ConnectAttempt::Wait(notify) => {
-                notify.notified().await;
-                if self.handles.read().await.contains_key(&name) {
-                    Ok(false)
-                } else {
-                    let error = self
-                        .last_errors
-                        .read()
-                        .await
-                        .get(&name)
-                        .map(|record| record.message.clone())
-                        .unwrap_or_else(|| {
-                            "Connection attempt did not produce a handle".to_string()
-                        });
-                    Err(error)
-                }
+        match McpClient::connect_in_dir(name.to_string(), config, cwd).await {
+            Ok(client) => {
+                let handle = client.handle();
+                self.clients.lock().await.insert(key.to_string(), client);
+                self.handles.write().await.insert(key.to_string(), handle);
+                self.last_errors.write().await.remove(key);
+                Ok(true)
             }
-            ConnectAttempt::Leader(notify) => {
-                let result = McpClient::connect(name.clone(), &config).await;
-                let outcome = match &result {
-                    Ok(_) => Ok(true),
-                    Err(error) => Err(format!("{:#}", error)),
-                };
-                self.finish_connect(&name, notify, result).await;
-                outcome
+            Err(error) => {
+                let message = format!("{error:#}");
+                self.last_errors.write().await.insert(
+                    key.to_string(),
+                    FailedConnectRecord {
+                        message: message.clone(),
+                        failed_at: Instant::now(),
+                    },
+                );
+                Err(message)
             }
         }
     }
@@ -424,7 +459,7 @@ pub fn get_shared_pool() -> Option<Arc<SharedMcpPool>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ConnectAttempt, SharedMcpPool};
+    use super::SharedMcpPool;
     use crate::mcp::protocol::McpConfig;
     use std::sync::Arc;
 
@@ -486,19 +521,13 @@ mod tests {
     async fn begin_connect_deduplicates_concurrent_attempts() {
         let pool = Arc::new(SharedMcpPool::new(McpConfig::default()));
 
-        let first = pool.begin_connect("demo").await;
-        let second = pool.begin_connect("demo").await;
-
-        let first_notify = match first {
-            ConnectAttempt::Leader(notify) => notify,
-            _ => panic!("first attempt should lead"),
-        };
-        let second_notify = match second {
-            ConnectAttempt::Wait(notify) => notify,
-            _ => panic!("second attempt should wait"),
-        };
-
-        assert!(Arc::ptr_eq(&first_notify, &second_notify));
+        let first = pool.connection_gate("demo").await;
+        let second = pool.connection_gate("demo").await;
+        assert!(Arc::ptr_eq(&first, &second));
+        let guard = first.lock().await;
+        assert!(second.try_lock().is_err());
+        drop(guard);
+        assert!(second.try_lock().is_ok());
     }
 
     #[tokio::test]
@@ -510,6 +539,7 @@ mod tests {
         config.servers.insert(
             "owned-only".to_string(),
             crate::mcp::protocol::McpServerConfig {
+                read_only: false,
                 command: "/nonexistent/jcode-test-mcp-557".to_string(),
                 args: vec![],
                 env: Default::default(),

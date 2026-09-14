@@ -4,7 +4,9 @@
 //! Supports shared server pools so multiple sessions reuse the same
 //! MCP server processes instead of spawning duplicates.
 
+mod access;
 mod client;
+pub use access::McpAccessPolicy;
 mod manager;
 pub mod pool;
 mod protocol;

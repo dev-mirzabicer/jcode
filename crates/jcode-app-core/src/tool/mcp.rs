@@ -235,6 +235,7 @@ impl McpManagementTool {
                 env: params.env.unwrap_or_default(),
                 shared: true,
                 transport: None,
+                read_only: false,
                 url: None,
                 headers: std::collections::HashMap::new(),
                 enabled: None,
@@ -595,6 +596,7 @@ mod tests {
         let tool = McpManagementTool::new(manager);
         let ctx = create_test_context();
 
+                read_only: false,
         let result = tool.execute(json!({"action": "list"}), ctx).await.unwrap();
         assert!(
             result.output.contains("off-server"),

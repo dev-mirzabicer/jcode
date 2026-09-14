@@ -195,6 +195,10 @@ pub struct ResourceContent {
 /// MCP server configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct McpServerConfig {
+    /// User-classified server eligibility for read-only child sessions.
+    /// Absence is non-read-only. This is policy, not inferred tool behavior.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub read_only: bool,
     /// Command for stdio servers. Empty for HTTP/SSE servers, which jcode does
     /// not yet support (such entries are skipped at load time).
     #[serde(default)]
@@ -514,6 +518,7 @@ impl McpConfig {
                     config.servers.insert(
                         name.clone(),
                         McpServerConfig {
+                            read_only: false,
                             command,
                             args,
                             env,

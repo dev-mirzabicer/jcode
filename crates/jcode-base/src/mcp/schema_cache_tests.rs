@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 fn cfg(command: &str, args: &[&str]) -> McpServerConfig {
     McpServerConfig {
+        read_only: false,
         command: command.to_string(),
         args: args.iter().map(|s| s.to_string()).collect(),
         env: HashMap::new(),

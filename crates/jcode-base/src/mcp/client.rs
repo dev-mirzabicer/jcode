@@ -586,6 +586,7 @@ while IFS= read -r line; do
 done
 "#;
         McpServerConfig {
+            read_only: false,
             command: "/bin/sh".to_string(),
             args: vec!["-c".to_string(), script.to_string()],
             env: Default::default(),
