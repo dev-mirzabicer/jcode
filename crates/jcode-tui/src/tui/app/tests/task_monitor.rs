@@ -53,3 +53,45 @@ fn task_monitor_child_editor_correlates_target_and_keeps_primary_protocol_separa
     assert_eq!(app.context_protocol.test_signature(),primary);assert_eq!(app.task_ui.child.as_ref().unwrap().protocol.accepted_session_id.as_deref(),Some("child-target"));
     app.context_editor_actions.clear();app.handle_context_editor_key(KeyCode::Esc,KeyModifiers::NONE);assert!(app.task_ui.child.is_none());assert_eq!(app.context_protocol.test_signature(),primary);
 }
+
+#[test]
+fn task_monitor_fast_reconnect_renegotiates_without_resetting_primary_editor() {
+    let _home=SkillTestHome::new();let mut app=create_test_app();app.is_remote=true;app.runtime_mode=super::AppRuntimeMode::RemoteClient;app.remote_session_id=Some("parent-monitor".into());
+    app.handle_task_command("/tasks");app.task_ui.monitor.as_ref().unwrap().borrow_mut().capability=Some(true);
+    app.open_context_editor(crate::tui::context_editor::ContextEditorOpenMode::Edit);
+    let generation=app.task_ui.monitor.as_ref().unwrap().borrow().debug()["generation"].as_u64().unwrap();
+    let runtime=tokio::runtime::Runtime::new().unwrap();let _entered=runtime.enter();
+    let mut remote=crate::tui::backend::RemoteConnection::dummy();remote.set_session_id("parent-monitor".into());remote.mark_history_loaded();
+    let mut terminal=ratatui::Terminal::new(ratatui::backend::TestBackend::new(80,24)).unwrap();
+    let mut state=super::remote::RemoteRunState{reconnect_attempts:1,..Default::default()};
+    runtime.block_on(super::remote::handle_post_connect(&mut app,&mut terminal,&mut remote,&mut state,Some("parent-monitor"))).unwrap();
+    let monitor=app.task_ui.monitor.as_ref().unwrap().borrow();assert!(monitor.debug()["generation"].as_u64().unwrap()>generation);assert_eq!(monitor.capability,None);drop(monitor);
+    assert!(app.context_editor_overlay.is_some());
+    app.reconnect_task_monitor("another-parent");assert!(app.context_editor_overlay.is_some(),"A dormant monitor must not close the primary editor");
+}
+
+#[test]
+fn task_monitor_active_local_dispatch_observes_real_store_without_waiting_for_parent() {
+    let _home=SkillTestHome::new();let mut app=create_test_app();
+    let root=crate::storage::jcode_dir().unwrap();let store=crate::execution::ExecutionStore::open(&root).unwrap();
+    let crate::execution::PreparedInvocation::New(record)=store.prepare(&crate::execution::Invocation{session_id:app.session.id.clone(),message_id:"m".into(),call_path:vec!["active-local".into()],tool:"fixture".into(),input:serde_json::json!({}),working_dir:None,received_result_digest:None},"fixture-owner").unwrap() else{panic!()};
+    store.start(&record.id,"fixture-owner").unwrap();
+    app.is_processing=true;app.input="PRESERVE".into();app.cursor_pos=app.input.len();app.handle_task_command("/tasks");
+    let primary=serde_json::to_value(&app.session).unwrap();
+    let runtime=tokio::runtime::Runtime::new().unwrap();runtime.block_on(async {
+        app.dispatch_active_local_task_ui();
+        let deadline=tokio::time::Instant::now()+Duration::from_secs(5);
+        loop {
+            app.dispatch_active_local_task_ui();
+            if app.task_ui.monitor.as_ref().unwrap().borrow().debug()["selected"]==record.id {break;}
+            assert!(tokio::time::Instant::now()<deadline,"active local dispatcher never loaded its metadata");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(app.is_processing);assert_eq!(app.input,"PRESERVE");
+        app.handle_key(KeyCode::Esc,KeyModifiers::NONE).unwrap();
+        // Drain only already-owned fixture replies before releasing its store.
+        tokio::time::sleep(Duration::from_millis(50)).await;app.dispatch_active_local_task_ui();
+    });
+    assert_eq!(serde_json::to_value(&app.session).unwrap(),primary);
+    store.retain(record,crate::tool::ToolOutput::new("fixture done"),jcode_tool_types::RunState::Completed).unwrap();
+}

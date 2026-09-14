@@ -56,6 +56,12 @@ struct Pending {
     operation: Operation,
 }
 
+struct Breadcrumb {
+    row: TaskRow,
+    before: Option<TaskCursor>,
+    previous: Vec<Option<TaskCursor>>,
+}
+
 pub struct TaskMonitor {
     pub session: String,
     pub visible: bool,
@@ -69,7 +75,7 @@ pub struct TaskMonitor {
     next: Option<TaskCursor>,
     before: Option<TaskCursor>,
     previous: Vec<Option<TaskCursor>>,
-    parents: Vec<String>,
+    parents: Vec<Breadcrumb>,
     detail: bool,
     content: ExecutionContent,
     page: Option<TaskTextPage>,
@@ -88,6 +94,7 @@ pub struct TaskMonitor {
     storage_text: String,
     generation: u64,
     pending: HashMap<u64, Pending>,
+    deferred_read: Option<Operation>,
     pub queued: VecDeque<Operation>,
     last_refresh: Instant,
     hit: Vec<(Rect, Action)>,
@@ -129,6 +136,7 @@ impl TaskMonitor {
             storage_text: String::new(),
             generation: 0,
             pending: HashMap::new(),
+            deferred_read: None,
             queued: VecDeque::new(),
             last_refresh: Instant::now(),
             hit: vec![],
@@ -146,6 +154,7 @@ impl TaskMonitor {
     pub fn reconnect(&mut self, session: &str) {
         self.generation += 1;
         self.pending.clear();
+        self.deferred_read = None;
         self.queued.clear();
         self.capability = None;
         if session != self.session {
@@ -170,26 +179,40 @@ impl TaskMonitor {
         TaskMonitorRequest::List {
             view: self.view,
             all_sessions: self.all,
-            parent_run: self.parents.last().cloned(),
+            parent_run: self.parents.last().map(|parent| parent.row.run.id.clone()),
             before,
             limit: Some(100),
         }
     }
     fn queue(&mut self, operation: Operation) {
-        let same = |a: &Operation, b: &Operation| {
-            std::mem::discriminant(a) == std::mem::discriminant(b)
-                && match (a, b) {
-                    (Operation::Monitor(a), Operation::Monitor(b)) => {
-                        std::mem::discriminant(a) == std::mem::discriminant(b)
-                    }
-                    _ => true,
-                }
+        // Keep one body read in flight even across selection generations. A slow
+        // archive cannot grow a new blocking worker for every arrow/mouse event.
+        if matches!(
+            &operation,
+            Operation::Monitor(TaskMonitorRequest::Read { .. })
+        ) && self.pending.values().any(|pending| {
+            matches!(
+                &pending.operation,
+                Operation::Monitor(TaskMonitorRequest::Read { .. })
+            )
+        }) {
+            self.deferred_read = Some(operation);
+            return;
+        }
+        let same = |a: &Operation, b: &Operation| match (a, b) {
+            (Operation::Monitor(a), Operation::Monitor(b)) => {
+                std::mem::discriminant(a) == std::mem::discriminant(b)
+            }
+            (Operation::Execution(a), Operation::Execution(b)) => a == b,
+            (Operation::Cleanup(_), Operation::Cleanup(_))
+            | (Operation::Probe, Operation::Probe) => true,
+            _ => false,
         };
         if !self
             .pending
             .values()
-            .any(|p| p.generation == self.generation && same(&p.operation, &operation))
-            && !self.queued.iter().any(|p| same(p, &operation))
+            .any(|pending| same(&pending.operation, &operation))
+            && !self.queued.iter().any(|queued| same(queued, &operation))
         {
             self.queued.push_back(operation);
         }
@@ -202,7 +225,14 @@ impl TaskMonitor {
                 run_id: selected.run.id.clone(),
             }));
         }
-        if self.follow || self.page.is_none() {
+        if (self.page.is_none() && self.content_error.is_none())
+            || (self.follow
+                && self.content == ExecutionContent::Output
+                && self
+                    .selected
+                    .as_ref()
+                    .is_some_and(|row| !row.run.state.terminal()))
+        {
             self.read_page(None);
         }
     }
@@ -220,6 +250,7 @@ impl TaskMonitor {
         self.generation += 1;
         self.queued.clear();
         self.page = None;
+        self.deferred_read = None;
         self.content_error = None;
         self.scroll = 0;
     }
@@ -271,6 +302,14 @@ impl TaskMonitor {
         let Some(pending) = self.pending.remove(&id) else {
             return false;
         };
+        if matches!(
+            &pending.operation,
+            Operation::Monitor(TaskMonitorRequest::Read { .. })
+        ) && let Some(operation) = self.deferred_read.take()
+            && self.visible
+        {
+            self.queued.push_back(operation);
+        }
         if pending.generation != self.generation {
             return true;
         }
@@ -332,7 +371,16 @@ impl TaskMonitor {
                         {
                             *current = (*row).clone();
                         }
+                        let behind = self.follow
+                            && self.content == ExecutionContent::Output
+                            && self
+                                .page
+                                .as_ref()
+                                .is_some_and(|page| page.total < row.run.output_bytes);
                         self.selected = Some(*row);
+                        if behind {
+                            self.read_page(None);
+                        }
                     }
                 }
                 TaskMonitorResponse::Text {
@@ -352,7 +400,17 @@ impl TaskMonitor {
                                     self.dimensions.1.saturating_sub(11),
                                 ));
                         }
+                        let behind = self.follow
+                            && content == ExecutionContent::Output
+                            && self
+                                .selected
+                                .as_ref()
+                                .is_some_and(|row| row.run.output_bytes > page.total);
                         self.page = Some(page);
+                        self.content_error = None;
+                        if behind {
+                            self.read_page(None);
+                        }
                     }
                 }
             },
@@ -466,13 +524,19 @@ impl TaskMonitor {
                 } else if self.detail {
                     self.detail = false;
                     self.output_focus = false;
-                } else if self.parents.pop().is_some() {
+                } else if let Some(parent) = self.parents.pop() {
                     self.invalidate();
-                    self.selected = None;
+                    self.rows.clear();
+                    self.list_offset = 0;
+                    self.before = parent.before;
+                    self.previous = parent.previous;
+                    self.selected = Some(parent.row);
+                    self.output_focus = false;
                     self.refresh();
                 } else {
                     self.visible = false;
                     self.queued.clear();
+                    self.deferred_read = None;
                 }
             }
             Action::Help => {
@@ -480,6 +544,7 @@ impl TaskMonitor {
                 self.menu_selection = 0;
             }
             Action::Refresh => {
+                self.content_error = None;
                 if self.capability == Some(false) {
                     self.queued.push_back(Operation::Probe);
                 } else {
@@ -509,9 +574,13 @@ impl TaskMonitor {
                 if let Some(row) = &self.selected
                     && row.expandable
                 {
-                    let id = row.run.id.clone();
+                    let parent = Breadcrumb {
+                        row: row.clone(),
+                        before: self.before.clone(),
+                        previous: std::mem::take(&mut self.previous),
+                    };
                     self.invalidate();
-                    self.parents.push(id);
+                    self.parents.push(parent);
                     self.before = None;
                     self.previous.clear();
                     self.rows.clear();
@@ -634,6 +703,7 @@ impl TaskMonitor {
         }
     }
     fn invalidate_pending_content(&mut self) {
+        self.deferred_read = None;
         self.queued
             .retain(|op| !matches!(op, Operation::Monitor(TaskMonitorRequest::Read { .. })));
         for pending in self.pending.values_mut() {
@@ -733,6 +803,19 @@ impl TaskMonitor {
                     .saturating_add_signed(delta)
                     .min(self.actions().len().saturating_sub(1));
             }
+            return true;
+        }
+        if self.storage
+            && !matches!(code, KeyCode::Esc | KeyCode::Char('q'))
+            && (self
+                .pending
+                .values()
+                .any(|pending| matches!(&pending.operation, Operation::Cleanup(_)))
+                || self
+                    .queued
+                    .iter()
+                    .any(|operation| matches!(operation, Operation::Cleanup(_))))
+        {
             return true;
         }
         if self.storage {
@@ -890,6 +973,25 @@ impl TaskMonitor {
             Constraint::Length(1),
         ])
         .areas(area);
+        let scope = if let Some(parent) = self.parents.last() {
+            if let Some(child) = &parent.row.child_id {
+                format!(
+                    "Child history {}",
+                    child
+                        .strip_prefix("session_child_")
+                        .unwrap_or(child)
+                        .chars()
+                        .take(10)
+                        .collect::<String>()
+                )
+            } else {
+                format!("Nested {}", parent.row.run.tool)
+            }
+        } else if self.all {
+            "All Jcode sessions".into()
+        } else {
+            "This session + children".into()
+        };
         frame.render_widget(
             Paragraph::new(format!(
                 "Tasks · {} · {}",
@@ -898,11 +1000,7 @@ impl TaskMonitor {
                 } else {
                     "Completed"
                 },
-                if self.all {
-                    "All Jcode sessions"
-                } else {
-                    "This session + children"
-                }
+                scope
             ))
             .style(Style::default().add_modifier(Modifier::BOLD)),
             header,
@@ -1110,6 +1208,13 @@ impl TaskMonitor {
                 )
             },
         );
+        let body = if self.page.is_some() {
+            self.content_error.as_ref().map_or(body.clone(), |error| {
+                format!("Unavailable: {error}\nLast loaded window:\n{body}")
+            })
+        } else {
+            body
+        };
         let clean = crate::message::strip_ansi_escape_sequences(&body);
         let lines = clean
             .lines()
@@ -1139,7 +1244,7 @@ impl TaskMonitor {
     }
 
     pub fn debug(&self) -> serde_json::Value {
-        serde_json::json!({"visible":self.visible,"session":self.session,"rows":self.rows.len(),"selected":self.selected.as_ref().map(|r|&r.run.id),"selected_state":self.selected.as_ref().map(|r|r.run.state),"selected_child":self.selected.as_ref().and_then(|r|r.child_id.as_ref()),"items":self.rows.iter().map(|r|serde_json::json!({"id":r.run.id,"tool":r.run.tool,"state":r.run.state,"child_id":r.child_id})).collect::<Vec<_>>(),"follow":self.follow,"detail":self.detail,"storage":self.storage,"status":self.status,"all_sessions":self.all,"output_end":self.page.as_ref().map(|p|p.end),"dimensions":self.dimensions})
+        serde_json::json!({"visible":self.visible,"capability":self.capability,"generation":self.generation,"session":self.session,"rows":self.rows.len(),"selected":self.selected.as_ref().map(|r|&r.run.id),"selected_state":self.selected.as_ref().map(|r|r.run.state),"selected_child":self.selected.as_ref().and_then(|r|r.child_id.as_ref()),"items":self.rows.iter().map(|r|serde_json::json!({"id":r.run.id,"tool":r.run.tool,"state":r.run.state,"child_id":r.child_id})).collect::<Vec<_>>(),"follow":self.follow,"detail":self.detail,"storage":self.storage,"status":self.status,"all_sessions":self.all,"output_end":self.page.as_ref().map(|p|p.end),"dimensions":self.dimensions})
     }
 }
 
@@ -1348,5 +1453,61 @@ mod tests {
             }))
         ));
         assert!(m.rows.len() <= 101);
+    }
+    #[test]
+    fn rapid_selection_keeps_one_slow_body_read_and_controls_stay_independent() {
+        let mut m = fixture();
+        m.read_page(None);
+        m.reserve(1);
+        for i in 0..1000 {
+            m.select(i % 2);
+        }
+        assert_eq!(m.pending.len(), 1);
+        assert!(m.deferred_read.is_some());
+        assert!(!m.queued.iter().any(|operation| matches!(
+            operation,
+            Operation::Monitor(TaskMonitorRequest::Read { .. })
+        )));
+        m.action(Action::Stop);
+        assert!(m.queued.iter().any(|operation| matches!(
+            operation,
+            Operation::Execution(ExecutionRequest::Stop { .. })
+        )));
+        m.accept(
+            1,
+            ServerEvent::Error {
+                id: 1,
+                message: "old read failed".into(),
+                retry_after_secs: None,
+            },
+        );
+        assert_eq!(
+            m.queued
+                .iter()
+                .filter(|operation| matches!(
+                    operation,
+                    Operation::Monitor(TaskMonitorRequest::Read { .. })
+                ))
+                .count(),
+            1
+        );
+        assert!(m.page.is_none());
+    }
+    #[test]
+    fn back_from_child_or_batch_restores_parent_identity_and_page() {
+        let mut m = fixture();
+        m.rows[1].expandable = true;
+        m.select(1);
+        m.before = Some(TaskCursor {
+            created: 5,
+            run_id: "page".into(),
+        });
+        m.action(Action::Expand);
+        assert_eq!(m.parents.len(), 1);
+        assert!(m.selected.is_none());
+        m.action(Action::Back);
+        assert!(m.parents.is_empty());
+        assert_eq!(m.selected.as_ref().unwrap().run.id, "run-two");
+        assert_eq!(m.before.as_ref().unwrap().run_id, "page");
     }
 }

@@ -300,7 +300,8 @@ impl App {
             let mut stream = {
                 let mut api_future = std::pin::pin!(invocation.invoke());
                 loop {
-                    if self.dispatch_local_instruction_request()
+                    if self.dispatch_active_local_task_ui()
+                        | self.dispatch_local_instruction_request()
                         | self.run_pending_instruction_editor(terminal, event_stream)
                     {
                         status_spinner_renderer.draw_full(self, terminal)?;
@@ -439,7 +440,8 @@ impl App {
 
             // Stream with input handling
             loop {
-                if self.dispatch_local_instruction_request()
+                if self.dispatch_active_local_task_ui()
+                    | self.dispatch_local_instruction_request()
                     | self.run_pending_instruction_editor(terminal, event_stream)
                 {
                     status_spinner_renderer.draw_full(self, terminal)?;
@@ -1517,7 +1519,8 @@ impl App {
                 self.batch_progress = None; // Clear previous batch progress
 
                 let result = loop {
-                    if self.dispatch_local_instruction_request()
+                    if self.dispatch_active_local_task_ui()
+                        | self.dispatch_local_instruction_request()
                         | self.run_pending_instruction_editor(terminal, event_stream)
                     {
                         status_spinner_renderer.draw_full(self, terminal)?;

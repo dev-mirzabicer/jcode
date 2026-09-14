@@ -75,6 +75,17 @@ impl App {
         }
     }
     pub(super) fn reconnect_task_monitor(&mut self, session: &str) {
+        if self.task_ui.child.is_some()
+            && self
+                .task_ui
+                .monitor
+                .as_ref()
+                .is_some_and(|monitor| monitor.borrow().session != session)
+        {
+            self.task_ui.child = None;
+            self.context_editor_overlay = None;
+            self.context_editor_actions.clear();
+        }
         if let Some(monitor) = &self.task_ui.monitor {
             monitor.borrow_mut().reconnect(session);
         }
@@ -187,6 +198,14 @@ impl App {
         }
         Ok(monitor.borrow_mut().accept(id, event))
     }
+    pub(super) fn dispatch_active_local_task_ui(&mut self) -> bool {
+        let mut changed = self.dispatch_local_task_requests();
+        if self.task_ui.child.is_some() {
+            changed |= self.drain_local_context_events();
+            changed |= self.dispatch_local_context_editor_actions();
+        }
+        changed
+    }
     pub(super) fn dispatch_local_task_requests(&mut self) -> bool {
         let mut changed = false;
         let ids = self.task_ui.receivers.keys().copied().collect::<Vec<_>>();
@@ -207,7 +226,9 @@ impl App {
             changed |= self.reduce_task_event(event).unwrap_or(false);
         }
         self.open_requested_child_context();
-        if let Some(monitor) = &self.task_ui.monitor {
+        if self.task_ui.child.is_none()
+            && let Some(monitor) = &self.task_ui.monitor
+        {
             monitor.borrow_mut().tick();
         }
         while self
@@ -241,16 +262,19 @@ impl App {
                 .borrow()
                 .session
                 .clone();
+            let root = crate::storage::jcode_dir();
             let (tx, rx) = oneshot::channel();
             self.task_ui.receivers.insert(id, rx);
             tokio::spawn(async move {
-                let event = local_request(session, request)
-                    .await
-                    .unwrap_or_else(|error| ServerEvent::Error {
-                        id,
-                        message: format!("Task monitor: {error:#}"),
-                        retry_after_secs: None,
-                    });
+                let result = match root {
+                    Ok(root) => local_request(root, session, request).await,
+                    Err(error) => Err(error),
+                };
+                let event = result.unwrap_or_else(|error| ServerEvent::Error {
+                    id,
+                    message: format!("Task monitor: {error:#}"),
+                    retry_after_secs: None,
+                });
                 let _ = tx.send(event);
             });
             changed = true;
@@ -259,7 +283,9 @@ impl App {
     }
     pub(super) async fn dispatch_remote_task_requests(&mut self, remote: &mut RemoteConnection) {
         self.open_requested_child_context();
-        if let Some(monitor) = &self.task_ui.monitor {
+        if self.task_ui.child.is_none()
+            && let Some(monitor) = &self.task_ui.monitor
+        {
             monitor.borrow_mut().tick();
         }
         while self
@@ -295,8 +321,11 @@ impl App {
         }
     }
 }
-async fn local_request(session: String, request: Request) -> anyhow::Result<ServerEvent> {
-    let root = crate::storage::jcode_dir()?;
+async fn local_request(
+    root: std::path::PathBuf,
+    session: String,
+    request: Request,
+) -> anyhow::Result<ServerEvent> {
     Ok(match request {
         Request::TaskMonitor { id, request } => ServerEvent::TaskMonitorResponse {
             id,

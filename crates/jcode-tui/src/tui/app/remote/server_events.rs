@@ -2103,7 +2103,14 @@ pub(in crate::tui::app) fn handle_server_event(
             let should_apply_history_payload = session_changed || !remote.has_loaded_history();
             if should_apply_history_payload {
                 app.reconnect_instruction_manager(&session_id);
-                app.reconnect_task_monitor(&session_id);
+                if app
+                    .task_ui
+                    .monitor
+                    .as_ref()
+                    .is_some_and(|monitor| monitor.borrow().session != session_id)
+                {
+                    app.reconnect_task_monitor(&session_id);
+                }
                 if session_changed {
                     app.clear_context_turn_state_for_session_change();
                 }

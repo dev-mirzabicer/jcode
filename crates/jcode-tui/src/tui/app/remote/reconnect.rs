@@ -643,6 +643,16 @@ pub(in crate::tui::app) async fn handle_post_connect<B: ratatui::backend::Backen
         )));
     }
 
+    // Task requests are connection-correlated even when a same-session fast
+    // path deliberately reuses display History. Reset at the transport boundary.
+    if let Some(session) = app
+        .remote_session_id
+        .clone()
+        .or_else(|| session_to_resume.map(str::to_string))
+    {
+        app.reconnect_task_monitor(&session);
+    }
+
     let reload_ctx_available = hints.reload_ctx_for_session.is_some();
     let history_already_loaded = remote.has_loaded_history();
     let reload_reconnect_needs_server_history = state.server_reload_in_progress
