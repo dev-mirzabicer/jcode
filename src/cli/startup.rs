@@ -96,10 +96,15 @@ pub async fn run() -> Result<()> {
     // CLI owns the provider-bootstrap spawn logic and registers it here, so the
     // TUI reconnect loop can request a replacement server via server_spawn
     // without referencing cli.
-    crate::server_spawn::register_default_server_spawner(Box::new(|| {
-        Box::pin(async {
-            dispatch::spawn_server(&crate::cli::provider_init::ProviderChoice::Auto, None, None)
-                .await
+    crate::server_spawn::register_default_server_spawner(Box::new(|environment| {
+        Box::pin(async move {
+            dispatch::spawn_server_with_environment(
+                &crate::cli::provider_init::ProviderChoice::Auto,
+                None,
+                None,
+                environment,
+            )
+            .await
         })
     }));
 

@@ -35,6 +35,9 @@ pub(super) async fn execute(params: BgInput, ctx: ToolContext) -> Result<ToolOut
         ancestry.call_path.pop();
     }
     let record = snapshot(id).await?;
+    if matches!(action, "cancel" | "watch" | "delivery" | "subscribe") {
+        crate::tool::child_policy::authorize_task_control(&ctx, id, &record.session_id)?;
+    }
     if params.session_only == Some(true) {
         ensure!(
             record.session_id == ctx.session_id,

@@ -8,6 +8,7 @@ mod emergency;
 mod environment;
 mod inline_tail;
 mod interrupts;
+mod isolated;
 mod messages;
 mod preflight;
 mod prompting;
@@ -185,9 +186,9 @@ pub struct TokenUsage {
 
 #[derive(Debug, Clone)]
 struct RewindUndoSnapshot {
-    messages: Vec<StoredMessage>,
     active_child_directives: Vec<String>,
     child_directive_message_ids: Vec<String>,
+    messages: Vec<StoredMessage>,
     agent_profile_message_ids: Vec<String>,
     context_view: jcode_session_types::StoredContextViewState,
     visible_message_count: usize,

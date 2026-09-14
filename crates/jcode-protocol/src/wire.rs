@@ -161,6 +161,13 @@ pub enum Request {
         id: u64,
         request: jcode_tool_types::inspection::InspectionRequest,
     },
+    #[serde(rename = "delegation_probe")]
+    DelegationProbe { id: u64 },
+    #[serde(rename = "delegation_execute")]
+    DelegationExecute {
+        id: u64,
+        invocation: Box<jcode_tool_types::delegation::HostedDelegationInvocation>,
+    },
     #[serde(rename = "output_cleanup")]
     OutputCleanup {
         id: u64,
@@ -1082,6 +1089,17 @@ pub enum Request {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ServerEvent {
+    #[serde(rename = "delegation_capabilities")]
+    DelegationCapabilities {
+        id: u64,
+        version: u32,
+        namespace: String,
+    },
+    #[serde(rename = "delegation_result")]
+    DelegationResult {
+        id: u64,
+        output: jcode_tool_types::ToolOutput,
+    },
     #[serde(rename = "queued_messages_rejected")]
     QueuedMessagesRejected { id: u64, message: String },
     /// Acknowledgment of request

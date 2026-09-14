@@ -589,6 +589,11 @@ async fn supervise(
                 return Ok(Completion{output,failed:actual.state!=RunState::Completed});
             }
         }
+        let state = if state == RunState::Interrupted
+            && stopping == Some(StopCause::ReloadQuiescence)
+            && record.tool == "subagent"
+            && store.inspect(&record.id)?.is_some_and(|current| current.state == RunState::Queued)
+        { RunState::Cancelled } else { state };
         if let Some(cause) = stopping {
             ensure!(
                 store.request_stop(&record.id, &record.owner, cause)?,
@@ -691,6 +696,42 @@ pub fn request_stop(id: &str, cause: StopCause) -> Result<bool> {
     } else {
         Ok(false)
     }
+}
+
+fn owned_delegations() -> Result<Vec<Arc<LiveRun>>> {
+    let root = crate::storage::jcode_dir()?.join("execution");
+    Ok(LIVE
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .values()
+        .filter(|run| {
+            run.store.root() == root
+                && run.invocation.tool == "subagent"
+                && run.owns_execution.load(Ordering::SeqCst)
+        })
+        .cloned()
+        .collect())
+}
+
+pub(crate) async fn await_delegations_for_reload(timeout: std::time::Duration) -> Result<()> {
+    let runs = owned_delegations()?;
+    for run in &runs {
+        run.stop.fire_with_cause(StopCause::ReloadQuiescence);
+    }
+    tokio::time::timeout(timeout, async {
+        for run in runs {
+            await_terminal(&run.store, &run.invocation.id(), &InterruptSignal::new()).await?;
+            ensure!(
+                run.store
+                    .inspect(&run.invocation.id())?
+                    .is_some_and(|record| record.state.terminal()),
+                "Child work stopped but its terminal receipt could not be persisted"
+            );
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .context("Reload cannot replace the host while owned child work is still quiescing")?
 }
 
 struct BackgroundControl {

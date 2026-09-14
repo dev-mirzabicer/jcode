@@ -64,6 +64,48 @@ pub enum ChildTurnClaim {
 }
 
 impl ExecutionStore {
+    /// Recover only proven-lost owners. Live owners require no per-turn body
+    /// reads. Unproven work retains its reservation and produces diagnostics.
+    pub async fn recover_abandoned_children(&self) -> Result<Vec<String>> {
+        let owners = {
+            let connection = self.connection()?;
+            let mut query = connection.prepare("SELECT DISTINCT r.owner FROM child_turns c JOIN runs r ON r.id=c.run_id WHERE r.state IN ('prepared','queued','running')")?;
+            query
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let mut issues = Vec::new();
+        for owner in owners {
+            let Some(runtime) = self.runtime_endpoint(&owner)? else {
+                issues.push(format!("Child runtime {owner} has no verifiable owner"));
+                continue;
+            };
+            if !runtime.image_is_gone(self)? {
+                continue;
+            }
+            let ids = {
+                let connection = self.connection()?;
+                let mut query=connection.prepare("SELECT c.run_id FROM child_turns c JOIN runs r ON r.id=c.run_id WHERE r.owner=?1 AND r.state IN ('prepared','queued','running') ORDER BY c.sequence")?;
+                query
+                    .query_map([&owner], |row| row.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            for id in ids {
+                if let Err(error) = self.recover_lost_owner(&id).await {
+                    issues.push(format!("{id}: {error:#}"));
+                }
+            }
+        }
+        Ok(issues)
+    }
+
+    pub(super) fn child_foreground_work(&self, child: &str) -> Result<Vec<String>> {
+        let connection = self.connection()?;
+        let mut query=connection.prepare("SELECT id FROM runs WHERE session_id=?1 AND background=0 AND state IN ('prepared','queued','running') ORDER BY created,id")?;
+        Ok(query
+            .query_map([child], |row| row.get(0))?
+            .collect::<Result<_, _>>()?)
+    }
     /// Capacity admission and child FIFO insertion share one write transaction.
     /// Inputs already belong to the invocation; queueing creates no second copy.
     pub fn admit_child_turn(

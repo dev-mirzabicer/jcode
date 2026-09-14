@@ -208,3 +208,76 @@ async fn actual_owner_process_exit_preserves_prefix_and_never_replays_work() -> 
     assert_eq!(store.list("owner-loss", None, 10)?.len(), 1);
     Ok(())
 }
+
+#[tokio::test]
+async fn abandoned_child_queue_is_cancelled_only_after_owned_foreground_work_stops() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let (store, runtime, _) = fixture(root.path())?;
+    let mut child_runs = Vec::new();
+    for (name, queued) in [("child-first", false), ("child-queued", true)] {
+        let invocation = Invocation {
+            session_id: "parent".into(),
+            message_id: name.into(),
+            call_path: vec![name.into()],
+            tool: "subagent".into(),
+            input: serde_json::json!({"prompt":name}),
+            working_dir: None,
+            received_result_digest: None,
+        };
+        let PreparedInvocation::New(record) = store.prepare(&invocation, &runtime.id)? else {
+            panic!()
+        };
+        store.start(&record.id, &runtime.id)?;
+        let capture = Capture::create(store.clone(), record.clone(), StorageConfig::default())?;
+        capture.write(OutputStream::Text, b"retained preparation")?;
+        store.admit_child_turn(&record.id, &runtime.id, "child", !queued, queued, 1)?;
+        drop(capture);
+        child_runs.push(record);
+    }
+    let lease = root.path().join("live.lease");
+    std::fs::File::create(&lease)?;
+    let live = RuntimeEndpoint::new(
+        uuid::Uuid::new_v4().simple().to_string(),
+        root.path().join("live.sock"),
+        lease,
+        "k".repeat(64),
+    );
+    store.register_runtime(&live)?;
+    let invocation = Invocation {
+        session_id: "child".into(),
+        message_id: "tool".into(),
+        call_path: vec!["tool".into()],
+        tool: "bash".into(),
+        input: serde_json::json!({"command":"fixture"}),
+        working_dir: None,
+        received_result_digest: None,
+    };
+    let PreparedInvocation::New(tool) = store.prepare(&invocation, &live.id)? else {
+        panic!()
+    };
+    store.start(&tool.id, &live.id)?;
+    let capture = Capture::create(store.clone(), tool, StorageConfig::default())?;
+    replace_image(&store, &runtime)?;
+    assert!(store.recover_lost_owner(&child_runs[0].id).await.is_err());
+    assert_eq!(
+        store.inspect(&child_runs[0].id)?.unwrap().state,
+        RunState::Running
+    );
+    capture.seal(ToolOutput::new("foreground stopped"), RunState::Completed)?;
+    drop(capture);
+    assert!(store.recover_abandoned_children().await?.is_empty());
+    assert_eq!(
+        store.inspect(&child_runs[0].id)?.unwrap().state,
+        RunState::Interrupted
+    );
+    let queued = store.inspect(&child_runs[1].id)?.unwrap();
+    assert_eq!(queued.state, RunState::Cancelled);
+    assert_eq!(queued.stop_cause, Some(StopCause::OwnerCrash));
+    let output = store.result(&queued, std::num::NonZeroUsize::new(20000).unwrap())?;
+    assert!(output.output.contains("child turn did not begin"));
+    assert_eq!(
+        store.invocation_input(&queued.id)?.input["prompt"],
+        "child-queued"
+    );
+    Ok(())
+}

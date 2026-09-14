@@ -126,15 +126,29 @@ pub(super) async fn await_reload_signal(
             serde_json::json!({}),
         );
 
-        graceful_shutdown_sessions(
-            &signal.request_id,
-            &sessions,
-            &swarm_members,
-            &shutdown_signals,
-            &swarm_event_tx,
-            signal.triggering_session.as_deref(),
-        )
-        .await;
+        let (child_shutdown, ()) = tokio::join!(
+            crate::execution::await_delegations_for_reload(RELOAD_GRACEFUL_SHUTDOWN_TIMEOUT),
+            graceful_shutdown_sessions(
+                &signal.request_id,
+                &sessions,
+                &swarm_members,
+                &shutdown_signals,
+                &swarm_event_tx,
+                signal.triggering_session.as_deref(),
+            )
+        );
+        if let Err(error) = child_shutdown {
+            crate::server::write_reload_state(
+                &signal.request_id,
+                &signal.hash,
+                crate::server::ReloadPhase::Failed,
+                signal.triggering_session.clone(),
+            );
+            crate::logging::error(&format!(
+                "Reload stopped before exec because child work is not durably quiescent: {error:#}"
+            ));
+            continue;
+        }
         crate::logging::info(&format!(
             "Server: graceful shutdown completed for reload request={} after {}ms state={}",
             signal.request_id,

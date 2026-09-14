@@ -450,7 +450,11 @@ impl ExecutionStore {
             record.state.terminal(),
             "Invocation is still active; inspect or wait rather than reexecuting"
         );
-        if record.state == RunState::Interrupted && record.result_path.is_none() {
+        if (record.state == RunState::Interrupted
+            || record.state == RunState::Cancelled
+                && record.stop_cause == Some(jcode_tool_types::StopCause::OwnerCrash))
+            && record.result_path.is_none()
+        {
             return self.interrupted_result(record, target);
         }
         let manifest_path = record.result_path.as_ref().context("Invocation was interrupted before a retained result was published; do not automatically repeat its effects")?;

@@ -10,7 +10,7 @@
 export const API_VERSION_MAJOR = 1;
 export const API_VERSION_MINOR = 4;
 
-export type ExecutionState = "prepared" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
+export type ExecutionState = "prepared" | "queued" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
 export type OutputSize = number | "very_small" | "small" | "medium" | "large" | "very_large";
 export interface ExecutionRun {
   superseded?: boolean;
@@ -18,7 +18,7 @@ export interface ExecutionRun {
   state: ExecutionState; owner: string; input_path: string;
   result_path: string | null; output_path: string | null; output_bytes: number;
   complete: boolean; background: boolean; parent_id: string | null;
-  stop_cause: "human_cancellation" | "parent_foreground_cancellation" | "reload_quiescence" | "owner_crash" | null;
+  stop_cause: "human_cancellation" | "parent_foreground_cancellation" | "child_predecessor_failure" | "reload_quiescence" | "owner_crash" | null;
   process_exit?: {code: number | null; signal: number | null; timed_out: boolean};
   progress?: {value: Record<string, unknown>; checkpoint: boolean; sequence: number};
 }

@@ -57,6 +57,7 @@ const BRIDGE_CAPABILITIES: &[&str] = &[
     "shared_execution_parts_v1",
     "session_inspection_v1",
     "output_cleanup_review_v1",
+    "isolated_delegation_v1",
 ];
 
 /// Read one newline-delimited frame, refusing to buffer more than

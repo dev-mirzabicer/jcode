@@ -9,6 +9,7 @@ mod client_comm_context;
 mod client_comm_message;
 mod client_disconnect_cleanup;
 mod client_lifecycle;
+pub(crate) use client_lifecycle::server_reload_starting;
 mod client_lifecycle_logging;
 mod client_lightweight_control;
 mod client_session;

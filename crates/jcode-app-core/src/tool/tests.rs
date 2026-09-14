@@ -14,6 +14,18 @@ mod reliable_execution;
 
 struct MockProvider;
 
+#[tokio::test]
+async fn isolated_registry_lifetime_does_not_retain_batch_backedge() {
+    let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let registry = Registry::new(Arc::new(MockProvider)).await;
+    let weak = Arc::downgrade(&registry.tools);
+    drop(registry);
+    assert!(
+        weak.upgrade().is_none(),
+        "batch declaration retained its containing Registry"
+    );
+}
+
 #[async_trait]
 impl Provider for MockProvider {
     async fn complete(
@@ -50,6 +62,7 @@ fn registry_with_context_budget_and_observation(
         context_budget.update_observed_input_tokens(tokens);
     }
     Registry {
+        child_policy: None,
         tools: Arc::new(RwLock::new(HashMap::new())),
         skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
         context_budget: Arc::new(RwLock::new(context_budget)),

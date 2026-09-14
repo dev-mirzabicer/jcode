@@ -3,7 +3,6 @@
 use super::storage::OutputLease;
 use super::{ExecutionStore, RunRecord, RunState};
 use anyhow::{Context, Result, ensure};
-#[cfg(unix)]
 use jcode_tool_types::StopCause;
 
 enum Prepared {
@@ -23,8 +22,12 @@ impl ExecutionStore {
         target: std::num::NonZeroUsize,
     ) -> Result<jcode_tool_types::ToolOutput> {
         use jcode_tool_types::{OutputReference, OutputSource, ToolOutput, UnavailableReference};
+        let unstarted_child = record.state == RunState::Cancelled
+            && record.stop_cause == Some(StopCause::OwnerCrash)
+            && self.child_for_run(&record.id)?.is_some();
         ensure!(
-            record.state == RunState::Interrupted && record.result_path.is_none(),
+            (record.state == RunState::Interrupted || unstarted_child)
+                && record.result_path.is_none(),
             "Interruption receipt requires a missing terminal result"
         );
         let partial = record.output_path.as_ref().map(|path| OutputReference {
@@ -35,10 +38,17 @@ impl ExecutionStore {
             continuation: None,
             manifest_path: None,
         });
-        let mut body = format!(
-            "Execution {} was interrupted after its owner was lost. No sealed result proves the operation's final outcome. Completed effects are unknown and were not rolled back. The operation was not repeated.\n",
-            record.id
-        );
+        let mut body = if unstarted_child {
+            format!(
+                "Queued child input {} was cancelled after its execution owner was lost. The child turn did not begin. Submitted input remains in its original invocation record. Preparation effects were not rolled back and the operation was not repeated.\n",
+                record.id
+            )
+        } else {
+            format!(
+                "Execution {} was interrupted after its owner was lost. No sealed result proves the operation's final outcome. Completed effects are unknown and were not rolled back. The operation was not repeated.\n",
+                record.id
+            )
+        };
         if let Some(partial) = &partial {
             body.push_str(&format!(
                 "Available captured prefix: {} ({} committed bytes).\n",
@@ -52,7 +62,15 @@ impl ExecutionStore {
             std::fs::symlink_metadata(&directory)?.is_dir(),
             "Recovery receipt directory changed type"
         );
-        let path = directory.join(format!("{}.interrupted.txt", record.id));
+        let path = directory.join(format!(
+            "{}.{}.txt",
+            record.id,
+            if unstarted_child {
+                "cancelled"
+            } else {
+                "interrupted"
+            }
+        ));
         if path.try_exists()? {
             let metadata = std::fs::symlink_metadata(&path)?;
             ensure!(
@@ -132,6 +150,15 @@ impl ExecutionStore {
         record: RunRecord,
         lease: OutputLease,
     ) -> Result<Option<RunRecord>> {
+        if let Some(child) = self.child_for_run(&record.id)? {
+            for work in self.child_foreground_work(&child)? {
+                let result = Box::pin(self.recover_lost_owner(&work)).await?;
+                ensure!(
+                    result.is_some_and(|record| record.state.terminal()),
+                    "Child foreground execution {work} is still owned; no idle state or replacement child turn was claimed"
+                );
+            }
+        }
         self.verify_lost_native_processes(&record.id).await?;
         #[cfg(unix)]
         {
@@ -179,7 +206,11 @@ impl ExecutionStore {
                     "Owner-loss receipt lost invocation ownership"
                 );
                 current.stop_cause.get_or_insert(StopCause::OwnerCrash);
-                current.state = RunState::Interrupted;
+                current.state = if current.state == RunState::Queued {
+                    RunState::Cancelled
+                } else {
+                    RunState::Interrupted
+                };
                 current.complete = false;
                 store.finish(&current)?;
                 Ok(Some(current))

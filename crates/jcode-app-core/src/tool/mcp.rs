@@ -25,7 +25,7 @@ struct McpToolInput {
 
 pub struct McpManagementTool {
     manager: Arc<RwLock<McpManager>>,
-    registry: Option<crate::tool::Registry>,
+    registry: Option<crate::tool::WeakRegistry>,
 }
 
 impl McpManagementTool {
@@ -37,7 +37,7 @@ impl McpManagementTool {
     }
 
     pub fn with_registry(mut self, registry: crate::tool::Registry) -> Self {
-        self.registry = Some(registry);
+        self.registry = Some(registry.downgrade());
         self
     }
 }
@@ -163,6 +163,7 @@ impl McpManagementTool {
             .servers
             .iter()
             .filter(|(name, _)| !servers.contains(name))
+            .filter(|(name, _)| manager.server_is_allowed(name))
             .map(|(name, cfg)| (name.clone(), cfg.is_enabled()))
             .collect();
         configured.sort();
@@ -182,6 +183,12 @@ impl McpManagementTool {
 
         for server in &servers {
             output.push_str(&format!("## {}\n", server));
+            let read_only = manager
+                .config()
+                .servers
+                .get(server)
+                .is_some_and(|config| config.read_only);
+            output.push_str(&format!("  Read-only classification: {read_only}\n"));
             let server_tools: Vec<_> = all_tools.iter().filter(|(s, _)| s == server).collect();
 
             if server_tools.is_empty() {
@@ -202,6 +209,14 @@ impl McpManagementTool {
         if !configured.is_empty() {
             output.push_str("Configured but not connected:\n");
             for (name, enabled) in &configured {
+                let read_only = manager
+                    .config()
+                    .servers
+                    .get(name)
+                    .is_some_and(|config| config.read_only);
+                output.push_str(&format!(
+                    "  Read-only classification for {name}: {read_only}\n"
+                ));
                 if *enabled {
                     output.push_str(&format!(
                         "  - {} (enabled; connect with {{\"action\": \"connect\", \"server\": \"{}\"}})\n",
@@ -220,6 +235,11 @@ impl McpManagementTool {
     }
 
     async fn connect_server(&self, params: McpToolInput, session_id: &str) -> Result<ToolOutput> {
+        let registry = self
+            .registry
+            .as_ref()
+            .map(crate::tool::WeakRegistry::upgrade)
+            .transpose()?;
         let server_name = params
             .server
             .ok_or_else(|| anyhow::anyhow!("'server' is required for connect action"))?;
@@ -230,12 +250,12 @@ impl McpManagementTool {
         // rewriting config (issue #436).
         let config = if let Some(command) = params.command {
             McpServerConfig {
+                read_only: false,
                 command,
                 args: params.args.unwrap_or_default(),
                 env: params.env.unwrap_or_default(),
                 shared: true,
                 transport: None,
-                read_only: false,
                 url: None,
                 headers: std::collections::HashMap::new(),
                 enabled: None,
@@ -290,7 +310,7 @@ impl McpManagementTool {
                 drop(manager);
 
                 // Register the new tools in the registry
-                if let Some(ref registry) = self.registry {
+                if let Some(ref registry) = registry {
                     let mcp_tools = crate::mcp::create_mcp_tools(Arc::clone(&self.manager)).await;
                     for (name, tool) in mcp_tools {
                         if name.starts_with(&format!("mcp__{}__", server_name)) {
@@ -320,6 +340,11 @@ impl McpManagementTool {
     }
 
     async fn disconnect_server(&self, params: McpToolInput) -> Result<ToolOutput> {
+        let registry = self
+            .registry
+            .as_ref()
+            .map(crate::tool::WeakRegistry::upgrade)
+            .transpose()?;
         let server_name = params
             .server
             .ok_or_else(|| anyhow::anyhow!("'server' is required for disconnect action"))?;
@@ -346,7 +371,7 @@ impl McpManagementTool {
         drop(manager);
 
         // Unregister tools for this server
-        if let Some(ref registry) = self.registry {
+        if let Some(ref registry) = registry {
             let removed = registry
                 .unregister_prefix(&format!("mcp__{}__", server_name))
                 .await;
@@ -367,13 +392,18 @@ impl McpManagementTool {
     }
 
     async fn reload_config(&self, session_id: &str) -> Result<ToolOutput> {
+        let registry = self
+            .registry
+            .as_ref()
+            .map(crate::tool::WeakRegistry::upgrade)
+            .transpose()?;
         // Load fresh config, resolved against the session's project directory
         // rather than the server process cwd (issue #420).
         let config = self.manager.read().await.load_fresh_config();
 
         if config.servers.is_empty() {
             // Unregister all existing MCP tools before reporting empty
-            if let Some(ref registry) = self.registry {
+            if let Some(ref registry) = registry {
                 registry.unregister_prefix("mcp__").await;
             }
             return Ok(ToolOutput::new(
@@ -385,7 +415,7 @@ impl McpManagementTool {
         }
 
         // Unregister all existing MCP server tools before reload
-        if let Some(ref registry) = self.registry {
+        if let Some(ref registry) = registry {
             registry.unregister_prefix("mcp__").await;
         }
 
@@ -397,7 +427,7 @@ impl McpManagementTool {
         drop(manager);
 
         // Re-register tools from fresh connections
-        if let Some(ref registry) = self.registry {
+        if let Some(ref registry) = registry {
             let mcp_tools = crate::mcp::create_mcp_tools(Arc::clone(&self.manager)).await;
             for (name, tool) in mcp_tools {
                 registry.register(name, tool).await;
@@ -581,6 +611,7 @@ mod tests {
         config.servers.insert(
             "off-server".to_string(),
             McpServerConfig {
+                read_only: false,
                 command: "some-bin".to_string(),
                 args: vec![],
                 env: HashMap::new(),
@@ -596,7 +627,6 @@ mod tests {
         let tool = McpManagementTool::new(manager);
         let ctx = create_test_context();
 
-                read_only: false,
         let result = tool.execute(json!({"action": "list"}), ctx).await.unwrap();
         assert!(
             result.output.contains("off-server"),

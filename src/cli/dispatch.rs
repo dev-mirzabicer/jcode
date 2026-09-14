@@ -1316,6 +1316,21 @@ pub(crate) async fn spawn_server(
     model: Option<&str>,
     provider_profile: Option<&str>,
 ) -> Result<()> {
+    spawn_server_with_environment(
+        provider_choice,
+        model,
+        provider_profile,
+        crate::server_spawn::ServerEnvironment::Inherit,
+    )
+    .await
+}
+
+pub(crate) async fn spawn_server_with_environment(
+    provider_choice: &ProviderChoice,
+    model: Option<&str>,
+    provider_profile: Option<&str>,
+    environment: crate::server_spawn::ServerEnvironment,
+) -> Result<()> {
     let socket_path = server::socket_path();
     if server_is_running_at(&socket_path).await {
         startup_profile::mark("server_ready");
@@ -1348,6 +1363,7 @@ pub(crate) async fn spawn_server(
         .or_else(|| std::env::current_exe().ok())
         .ok_or_else(|| anyhow::anyhow!("Could not determine executable path for server spawn"))?;
     let mut cmd = ProcessCommand::new(&exe);
+    environment.apply(&mut cmd);
     cmd.env_remove(selfdev::CLIENT_SELFDEV_ENV);
     if client_requested_selfdev {
         cmd.env("JCODE_DEBUG_CONTROL", "1");

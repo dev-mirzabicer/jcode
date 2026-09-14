@@ -475,6 +475,7 @@ pub fn on_config_reloaded(listener: fn()) {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct Config {
+    pub delegation: DelegationConfig,
     /// Keybinding configuration
     pub keybindings: KeybindingsConfig,
 
@@ -555,6 +556,19 @@ pub struct Config {
 
     /// Global "launch a new jcode" hotkeys (macOS). Baked once by auto-import.
     pub launch_hotkeys: LaunchHotkeysConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DelegationConfig {
+    pub max_running_children: std::num::NonZeroUsize,
+}
+impl Default for DelegationConfig {
+    fn default() -> Self {
+        Self {
+            max_running_children: std::num::NonZeroUsize::new(15).expect("positive child default"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

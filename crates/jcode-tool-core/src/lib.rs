@@ -56,6 +56,8 @@ pub trait OwnedExecutionControl: Send + Sync {
 
 #[derive(Clone, Default)]
 pub struct InvocationContext {
+    /// Code-owned caller role, retained by nested/background execution.
+    pub isolated_child: bool,
     /// Received SDK rejection for a tool structurally excluded by that SDK.
     /// Retained as an auxiliary part before the host starts its own operation.
     pub provider_rejection: Option<String>,
@@ -227,6 +229,7 @@ pub enum ToolExecutionMode {
 impl ToolContext {
     pub fn for_subcall(&self, tool_call_id: String) -> Self {
         let mut invocation = InvocationContext::default();
+        invocation.isolated_child = self.invocation.isolated_child;
         invocation.ancestors.clone_from(&self.invocation.ancestors);
         invocation.ancestors.push(self.tool_call_id.clone());
         Self {

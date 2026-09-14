@@ -3440,6 +3440,7 @@ dependencies = [
  "jcode-pdf",
  "jcode-plan",
  "jcode-provider-core",
+ "jcode-provider-openrouter-runtime",
  "jcode-schema-dialect",
  "jcode-selfdev-types",
  "jcode-session-types",

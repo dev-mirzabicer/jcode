@@ -2178,7 +2178,8 @@ mod tests {
         // Session. Keep a real unrelated Session and verify its bytes too.
         let mut retained = Session::create(None, Some("retained fixture".into()));
         retained.add_human_message(vec![crate::message::ContentBlock::Text {
-            text: "unrelated authoritative content".into(), cache_control: None,
+            text: "unrelated authoritative content".into(),
+            cache_control: None,
         }]);
         retained.save().unwrap();
         let retained_before = serde_json::to_value(Session::load(&retained.id).unwrap()).unwrap();
@@ -2228,7 +2229,10 @@ mod tests {
             .map(|entry| entry.file_name())
             .collect::<std::collections::HashSet<_>>();
         assert_eq!(files_after, files_before);
-        assert_eq!(serde_json::to_value(Session::load(&retained.id).unwrap()).unwrap(), retained_before);
+        assert_eq!(
+            serde_json::to_value(Session::load(&retained.id).unwrap()).unwrap(),
+            retained_before
+        );
     }
 
     #[tokio::test]

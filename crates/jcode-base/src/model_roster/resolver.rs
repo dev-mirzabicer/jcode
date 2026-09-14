@@ -79,6 +79,16 @@ pub struct ModelRosterResolution {
 }
 
 impl ModelRosterResolution {
+    pub fn validate_provider(&self, provider: &dyn Provider) -> Result<(), CandidateFailure> {
+        crate::provider::route_execution::validate_runtime_identity(provider, &self.selection)
+            .map_err(runtime_error)?;
+        if provider.reasoning_effort() != self.selected_effort {
+            return Err(CandidateFailure::UnsupportedEffort(
+                "runtime effort differs from its stored concrete resolution".into(),
+            ));
+        }
+        Ok(())
+    }
     pub fn requested_alias(&self) -> Option<&str> {
         self.requested_alias.as_deref()
     }

@@ -81,7 +81,11 @@ pub(crate) fn parsed_patch_file_paths(tool_name: &str, patch_text: &str) -> Resu
 struct SessionToolPolicy {
     allowed_tools: Option<HashSet<String>>,
     disabled_tools: HashSet<String>,
+    child: Option<child_policy::ChildToolPolicy>,
 }
+
+pub(crate) mod child_policy;
+pub(crate) mod subagent;
 
 static SESSION_TOOL_POLICIES: LazyLock<StdRwLock<HashMap<String, SessionToolPolicy>>> =
     LazyLock::new(|| StdRwLock::new(HashMap::new()));
@@ -94,11 +98,15 @@ pub(crate) fn set_session_tool_policy(
     let mut policies = SESSION_TOOL_POLICIES
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let child = policies
+        .get(session_id)
+        .and_then(|policy| policy.child.clone());
     policies.insert(
         session_id.to_string(),
         SessionToolPolicy {
             allowed_tools,
             disabled_tools,
+            child,
         },
     );
 }
@@ -128,6 +136,7 @@ pub fn tool_is_globally_available(name: &str) -> bool {
 /// Clone creates fresh context accounting so each subagent gets independent
 /// provider-history tracking. Tools and skills are shared via Arc.
 pub struct Registry {
+    child_policy: Option<Arc<child_policy::ChildToolPolicy>>,
     tools: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
     skills: Arc<RwLock<SkillRegistry>>,
     context_budget: Arc<RwLock<ContextBudgetTracker>>,
@@ -141,6 +150,28 @@ struct BoundTool {
     input: jcode_tool_core::input::InputBinding,
 }
 
+#[derive(Clone)]
+pub(crate) struct WeakRegistry {
+    child_policy: Option<Arc<child_policy::ChildToolPolicy>>,
+    tools: std::sync::Weak<RwLock<HashMap<String, Arc<dyn Tool>>>>,
+    skills: Arc<RwLock<SkillRegistry>>,
+    context_budget: Arc<RwLock<ContextBudgetTracker>>,
+}
+impl WeakRegistry {
+    pub(crate) fn upgrade(&self) -> Result<Registry> {
+        Ok(Registry {
+            tools: self.tools.upgrade().ok_or_else(|| {
+                anyhow::anyhow!("Originating tool registry is no longer available")
+            })?,
+            skills: self.skills.clone(),
+            context_budget: self.context_budget.clone(),
+            // Management changes the tool map, not a provider's frozen input bindings.
+            child_policy: self.child_policy.clone(),
+            bindings: Default::default(),
+        })
+    }
+}
+
 impl Clone for Registry {
     fn clone(&self) -> Self {
         Self {
@@ -149,12 +180,37 @@ impl Clone for Registry {
             // Each clone gets fresh session-local accounting so parallel
             // subagents cannot corrupt one another.
             context_budget: Arc::new(RwLock::new(ContextBudgetTracker::new())),
+            child_policy: self.child_policy.clone(),
             bindings: Default::default(),
         }
     }
 }
 
 impl Registry {
+    pub(crate) fn bind_child_policy(&mut self, session: &crate::session::Session) -> Result<()> {
+        self.child_policy = child_policy::bind(session)?.map(Arc::new);
+        Ok(())
+    }
+    pub(crate) async fn new_for_shared_session(
+        provider: Arc<dyn Provider>,
+        pool: Arc<crate::mcp::SharedMcpPool>,
+        repositories: crate::instruction::InstructionRepositoryService,
+    ) -> Result<Self> {
+        let registry = Self::new(provider.clone()).await;
+        let host = Arc::new(crate::delegation::Host::new(provider, pool, repositories)?);
+        for tool in subagent::DelegationTool::hosted(host) {
+            registry.register(tool.name().into(), Arc::new(tool)).await;
+        }
+        Ok(registry)
+    }
+    pub(crate) fn downgrade(&self) -> WeakRegistry {
+        WeakRegistry {
+            child_policy: self.child_policy.clone(),
+            tools: Arc::downgrade(&self.tools),
+            skills: self.skills.clone(),
+            context_budget: self.context_budget.clone(),
+        }
+    }
     pub(crate) async fn retained_history_result(
         &self,
         name: &str,
@@ -255,6 +311,7 @@ impl Registry {
             tools: self.tools.clone(),
             skills: self.skills.clone(),
             context_budget: self.context_budget.clone(),
+            child_policy: self.child_policy.clone(),
             bindings: self.bindings.clone(),
         }
     }
@@ -319,6 +376,7 @@ impl Registry {
             tools: Arc::new(RwLock::new(HashMap::new())),
             skills: Arc::new(RwLock::new(SkillRegistry::default())),
             context_budget: Arc::new(RwLock::new(ContextBudgetTracker::new())),
+            child_policy: None,
             bindings: Default::default(),
         }
     }
@@ -461,6 +519,7 @@ impl Registry {
             tools: Arc::new(RwLock::new(HashMap::new())),
             skills: skills.clone(),
             context_budget: context_budget.clone(),
+            child_policy: None,
             bindings: Default::default(),
         };
         let registry_struct_ms = registry_struct_start.elapsed().as_millis();
@@ -471,17 +530,17 @@ impl Registry {
 
         // Per-session tools that need provider/registry references
         let session_tools_start = std::time::Instant::now();
-        Self::insert_tool(
-            &mut tools_map,
-            "batch",
-            batch::BatchTool::new(registry.clone_with_shared_context_runtime()),
-        );
+        Self::insert_tool(&mut tools_map, "batch", batch::BatchTool::declaration());
         Self::insert_tool(
             &mut tools_map,
             "conversation_search",
             conversation_search::ConversationSearchTool::new(context_budget),
         );
         for tool in session_inspection::InspectionTool::all() {
+            let name = tool.name().to_string();
+            Self::insert_tool(&mut tools_map, &name, tool);
+        }
+        for tool in subagent::DelegationTool::proxies() {
             let name = tool.name().to_string();
             Self::insert_tool(&mut tools_map, &name, tool);
         }
@@ -795,6 +854,7 @@ impl Registry {
         mut ctx: ToolContext,
     ) -> Result<ToolOutput> {
         let resolved_name = Self::resolve_tool_name(name);
+        ctx.invocation.isolated_child |= self.child_policy.is_some();
         let original_input = input.clone();
         // Mark this call in-flight for the whole execution so the missing
         // tool-output repair paths do not mistake a slow tool for an
@@ -842,6 +902,7 @@ impl Registry {
             drop(tools);
             let bound = self.bound_tool(resolved_name, tool);
             let (input, output_size) = bound.input.decode(input)?;
+            child_policy::authorize(self.child_policy.as_deref(), &ctx, resolved_name, &input)?;
             let tool = bound.tool;
             let target = crate::config::config()
                 .output
@@ -858,7 +919,7 @@ impl Registry {
             Ok((input, tool, target))
         }
         .await;
-        let (target, action) = match prepared {
+        let (target, mut action) = match prepared {
             Ok((input, tool, target)) => (target, Ok((input, tool))),
             Err(error) => {
                 // Rejection is a foreground failure receipt, not a tool launch,
@@ -870,6 +931,24 @@ impl Registry {
             }
         };
 
+        if action
+            .as_ref()
+            .is_ok_and(|(_, tool)| tool.requires_shared_host())
+        {
+            match crate::delegation::forward(resolved_name, original_input.clone(), &ctx).await {
+                Ok(output) => {
+                    let output = self.guard_context_overflow(name, output).await;
+                    if output.is_error {
+                        return Err(crate::execution::CapturedToolError { output }.into());
+                    }
+                    return Ok(output);
+                }
+                Err(error) => {
+                    action = Err(error);
+                    ctx.invocation.policy = Default::default();
+                }
+            }
+        }
         let invocation = crate::execution::invocation(&ctx, resolved_name, original_input);
         let registry = self.clone_with_shared_context_runtime();
         let requested = name.to_string();
@@ -1300,6 +1379,34 @@ impl Registry {
                 }
             });
         }
+    }
+
+    /// Child preparation owns connection setup until it finishes. Each manager
+    /// is child/cwd-bound; shared=false clients are never inherited from a parent.
+    /// The Registry owns the manager through its tools, without a Registry cycle.
+    pub(crate) async fn register_isolated_mcp_tools(
+        &self,
+        pool: Arc<crate::mcp::SharedMcpPool>,
+        session_id: String,
+        working_dir: std::path::PathBuf,
+        policy: crate::mcp::McpAccessPolicy,
+    ) -> Result<Vec<String>> {
+        let manager = Arc::new(RwLock::new(
+            crate::mcp::McpManager::with_shared_pool_for_dir(pool, session_id, Some(working_dir))
+                .with_access_policy(policy),
+        ));
+        let (_, failures) = manager.write().await.connect_all().await?;
+        for (name, tool) in crate::mcp::create_mcp_tools(manager.clone()).await {
+            self.register(name, tool).await;
+        }
+        // Child tools can inspect this manager but cannot change host configuration.
+        let tool = mcp::McpManagementTool::new(manager)
+            .with_registry(self.clone_with_shared_context_runtime());
+        self.register("mcp".to_string(), Arc::new(tool)).await;
+        Ok(failures
+            .into_iter()
+            .map(|(name, detail)| format!("{name}: {detail}"))
+            .collect())
     }
 
     /// Register self-dev tools (only for canary/self-dev sessions)

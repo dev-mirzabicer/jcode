@@ -500,7 +500,7 @@ impl Tool for BgTool {
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
-        let params: BgInput = serde_json::from_value(input)?;
+        let mut params: BgInput = serde_json::from_value(input)?;
         if params
             .task_id
             .as_deref()
@@ -518,6 +518,22 @@ impl Tool for BgTool {
             )
         })?;
         let manager = background::global();
+
+        if matches!(
+            action.as_str(),
+            "cancel" | "watch" | "delivery" | "subscribe"
+        ) {
+            for id in resolve_task_ids(manager, &ctx, &params, &action, false).await? {
+                let task = manager
+                    .status(&id)
+                    .await
+                    .ok_or_else(|| anyhow::anyhow!("Task not found: {id}"))?;
+                super::child_policy::authorize_task_control(&ctx, &task.task_id, &task.session_id)?;
+                params.task_id = Some(task.task_id.clone());
+                params.task_ids = None;
+                params.latest = Some(false);
+            }
+        }
 
         match action.as_str() {
             "list" => {

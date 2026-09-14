@@ -99,12 +99,26 @@ fn subcall_id(ctx: &ToolContext, index: usize, name: &str) -> String {
 }
 
 pub struct BatchTool {
-    registry: Registry,
+    // A catalog declaration must not own the map that contains it. Registry
+    // binds an executing batch to the originating context via execute_with_registry.
+    registry: Option<Registry>,
 }
 
 impl BatchTool {
     pub fn new(registry: Registry) -> Self {
-        Self { registry }
+        Self {
+            registry: Some(registry),
+        }
+    }
+
+    pub(super) fn declaration() -> Self {
+        Self { registry: None }
+    }
+
+    fn bound_registry(&self) -> Result<&Registry> {
+        self.registry.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("Batch execution requires its originating Registry binding")
+        })
     }
 
     async fn prepare_input(&self, mut input: Value) -> Result<Value> {
@@ -121,7 +135,7 @@ impl BatchTool {
                 else {
                     continue;
                 };
-                if self.registry.input_binding_for(&name).await
+                if self.bound_registry()?.input_binding_for(&name).await
                     == Some(jcode_tool_core::input::InputBinding::Wrapped)
                     && !object.contains_key("parameters")
                 {
@@ -352,10 +366,11 @@ impl Tool for BatchTool {
             },
         ));
 
+        let bound_registry = self.bound_registry()?;
         let mut stream: futures::stream::FuturesUnordered<_> = subcalls
             .iter()
             .map(|(i, tool_name, parameters)| {
-                let registry = self.registry.clone_with_shared_context_runtime();
+                let registry = bound_registry.clone_with_shared_context_runtime();
                 let i = *i;
                 let tool_name = tool_name.clone();
                 let parameters = parameters.clone();

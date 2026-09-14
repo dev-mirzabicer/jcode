@@ -604,6 +604,8 @@ impl Request {
             Request::GetAgentCatalog { id }
             | Request::Execution { id, .. }
             | Request::SessionInspection { id, .. }
+            | Request::DelegationProbe { id }
+            | Request::DelegationExecute { id, .. }
             | Request::OutputCleanup { id, .. }
             | Request::GetAgentStatus { id, .. }
             | Request::RenderWorkflowPrompt { id, .. }

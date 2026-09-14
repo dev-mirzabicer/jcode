@@ -376,7 +376,7 @@ fn try_lock_idle_agent_for_request<'a>(
     }
 }
 
-fn server_reload_starting() -> bool {
+pub(crate) fn server_reload_starting() -> bool {
     matches!(
         crate::server::recent_reload_state(RELOAD_STARTING_GUARD_MAX_AGE),
         Some(state) if state.phase == crate::server::ReloadPhase::Starting
@@ -578,6 +578,51 @@ pub(super) async fn handle_client_with_instruction_repositories(
 
         match decode_request(&line) {
             Ok(request) => {
+                if let Request::DelegationProbe { id } = &request {
+                    let namespace = crate::storage::jcode_dir()?.canonicalize()?;
+                    write_direct_event(
+                        &writer,
+                        &ServerEvent::DelegationCapabilities {
+                            id: *id,
+                            version: 1,
+                            namespace: namespace
+                                .to_str()
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!("Delegation namespace must be UTF-8")
+                                })?
+                                .to_string(),
+                        },
+                    )
+                    .await?;
+                    continue;
+                }
+                if let Request::DelegationExecute { id, invocation } = request {
+                    let host = Arc::new(crate::delegation::Host::new(
+                        provider_template.clone(),
+                        mcp_pool.clone(),
+                        (*instruction_repositories).clone(),
+                    )?);
+                    if let Err(error) = crate::delegation::serve_request(
+                        &mut reader,
+                        writer.clone(),
+                        id,
+                        *invocation,
+                        host,
+                    )
+                    .await
+                    {
+                        write_direct_event(
+                            &writer,
+                            &ServerEvent::Error {
+                                id,
+                                message: format!("Hosted delegation failed: {error:#}"),
+                                retry_after_secs: None,
+                            },
+                        )
+                        .await?;
+                    }
+                    return Ok(());
+                }
                 if let Some(error) = unavailable_swarm_response(&request) {
                     write_direct_event(&writer, &ServerEvent::Ack { id: request.id() }).await?;
                     write_direct_event(&writer, &error).await?;
@@ -660,7 +705,12 @@ pub(super) async fn handle_client_with_instruction_repositories(
 
     let mut provider = provider_template.fork_for_new_session();
     let t0 = std::time::Instant::now();
-    let mut registry = Registry::new(provider.clone()).await;
+    let mut registry = Registry::new_for_shared_session(
+        provider.clone(),
+        mcp_pool.clone(),
+        (*instruction_repositories).clone(),
+    )
+    .await?;
     let registry_ms = t0.elapsed().as_millis();
 
     let mut swarm_enabled = crate::config::config().features.swarm;
@@ -1408,6 +1458,9 @@ pub(super) async fn handle_client_with_instruction_repositories(
         };
         match request {
             Request::QueuedMessages { .. } => unreachable!("queued request normalized above"),
+            Request::DelegationProbe { id } | Request::DelegationExecute { id, .. } => {
+                let _ = client_event_tx.send(ServerEvent::Error { id, message:"Hosted delegation uses a dedicated capability-checked connection and does not take over an attached Session.".into(), retry_after_secs:None });
+            }
             Request::Message {
                 id,
                 content,
@@ -1827,7 +1880,12 @@ pub(super) async fn handle_client_with_instruction_repositories(
                             }
                         };
                     let next_provider = provider_template.fork_for_new_session();
-                    let next_registry = Registry::new(Arc::clone(&next_provider)).await;
+                    let next_registry = Registry::new_for_shared_session(
+                        next_provider.clone(),
+                        mcp_pool.clone(),
+                        (*instruction_repositories).clone(),
+                    )
+                    .await?;
                     let is_selfdev = selfdev.unwrap_or(false);
                     let prepared =
                         crate::hooks::with_client_terminal_env(terminal_env.clone(), async {

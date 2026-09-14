@@ -146,6 +146,11 @@ impl Agent {
         stop_reason: Option<&str>,
         attempts: &mut u32,
     ) -> Result<bool> {
+        if self.session.isolated_child.is_some() {
+            // A definitive child reply/failure returns to its parent. This
+            // primary-only prompting workflow is not a transient transport retry.
+            return Ok(false);
+        }
         let model = self.provider.model();
         if !Self::should_reconsider_fable_guardrail(
             &model,

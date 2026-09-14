@@ -24,7 +24,8 @@ enum Actor {
 }
 
 fn parent(root: &Path, id: &str, stop: Option<&InterruptSignal>) -> Result<Option<String>> {
-    Session::inspection_parent_with_stop(root, id, stop)
+    let (continuation, original) = Session::inspection_relationships(root, id, stop)?;
+    Ok(original.or(continuation))
 }
 fn ancestor(
     root: &Path,
@@ -44,8 +45,17 @@ fn authorize(
     if matches!(actor, Actor::Human) || reader == target {
         return Ok(());
     }
-    // Continuation ancestry conveys reading, not follow-up/control ownership.
-    // WP-04 adds actual isolated-child origin here rather than reinterpreting it.
+    let (_, reader_parent) = Session::inspection_relationships(root, reader, stop)?;
+    if reader_parent.as_deref() == Some(target) {
+        return Ok(());
+    }
+    let (_, target_parent) = Session::inspection_relationships(root, target, stop)?;
+    if let Some(original) = target_parent
+        && (original == reader || ancestor(root, &original, reader, stop)?)
+    {
+        return Ok(());
+    }
+    // Continuation ancestry conveys reading, never child follow-up/control ownership.
     ensure!(
         ancestor(root, target, reader, stop)? || ancestor(root, reader, target, stop)?,
         "Target Session is outside this agent's readable conversation relationships"
