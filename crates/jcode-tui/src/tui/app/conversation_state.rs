@@ -343,14 +343,19 @@ impl App {
         if let Some(pending_time) = self.quit_pending
             && pending_time.elapsed() < QUIT_TIMEOUT
         {
-            self.session.provider_session_id = self.provider_session_id.clone();
             crate::telemetry::end_session_with_reason(
                 self.provider.name(),
                 &self.provider.model(),
                 crate::telemetry::SessionEndReason::NormalExit,
             );
-            self.session.mark_closed();
-            let _ = self.session.save();
+            // The daemon owns a remote session's transcript and close state.
+            // This client can hold only a metadata stub, especially after a
+            // failed history bootstrap. Saving it can erase durable history.
+            if !self.is_remote {
+                self.session.provider_session_id = self.provider_session_id.clone();
+                self.session.mark_closed();
+                let _ = self.session.save();
+            }
             self.should_quit = true;
             return true;
         }

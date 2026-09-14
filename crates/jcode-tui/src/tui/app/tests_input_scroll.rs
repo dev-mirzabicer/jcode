@@ -247,6 +247,57 @@ fn test_disconnected_key_handler_ctrl_c_arms_quit() {
 }
 
 #[test]
+fn test_remote_quit_preserves_authoritative_snapshot_and_journal() {
+    let mut app = create_test_app();
+    for text in [
+        "durable snapshot".repeat(400),
+        "durable journal".to_string(),
+    ] {
+        app.session.add_message(
+            crate::message::Role::User,
+            vec![crate::message::ContentBlock::Text {
+                text,
+                cache_control: None,
+            }],
+        );
+        app.session.save().expect("save authoritative session");
+    }
+    let id = app.session.id.clone();
+    let directory = crate::storage::jcode_dir().unwrap().join("sessions");
+    let snapshot = directory.join(format!("{id}.json"));
+    let journal = directory.join(format!("{id}.journal.jsonl"));
+    let before = (
+        std::fs::read(&snapshot).unwrap(),
+        std::fs::read(&journal).unwrap(),
+    );
+    let messages_before = crate::session::Session::load(&id).unwrap().messages;
+    app.session = crate::session::Session::load_startup_stub(&id).unwrap();
+    assert!(app.session.messages.is_empty());
+    app.is_remote = true;
+    app.quit_pending = Some(Instant::now());
+    assert!(app.handle_quit_request());
+    assert!(app.should_quit);
+    assert_eq!(std::fs::read(&snapshot).unwrap(), before.0);
+    assert_eq!(std::fs::read(&journal).unwrap(), before.1);
+    assert_eq!(
+        serde_json::to_value(crate::session::Session::load(&id).unwrap().messages).unwrap(),
+        serde_json::to_value(messages_before).unwrap()
+    );
+}
+
+#[test]
+fn test_local_quit_still_persists_close_state() {
+    let mut app = create_test_app();
+    app.is_remote = false;
+    app.provider_session_id = Some("local-provider-session".to_string());
+    app.quit_pending = Some(Instant::now());
+    assert!(app.handle_quit_request());
+    let saved = crate::session::Session::load(&app.session.id).unwrap();
+    assert_eq!(saved.status, crate::session::SessionStatus::Closed);
+    assert_eq!(saved.provider_session_id, app.provider_session_id);
+}
+
+#[test]
 fn test_remote_scroll_cmd_j_k_fallback() {
     let _render_lock = scroll_render_test_lock();
     let (mut app, mut terminal) = create_scroll_test_app(100, 30, 1, 20);
