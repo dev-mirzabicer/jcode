@@ -50,6 +50,10 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/refresh-model-list", "Refresh provider model catalogs"),
     RegisteredCommand::public("/agent-models", "Configure models for special agent roles"),
     RegisteredCommand::hidden("/agents", "Compatibility alias for /agent-models"),
+    RegisteredCommand::public(
+        "/tasks",
+        "Inspect work, retained output and idle child context",
+    ),
     RegisteredCommand::public("/agent", "Select, replace, or inspect the primary agent"),
     RegisteredCommand::public(
         "/instructions",

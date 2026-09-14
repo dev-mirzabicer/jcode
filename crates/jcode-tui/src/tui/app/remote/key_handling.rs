@@ -298,6 +298,11 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
 
+    if app.handle_task_key(code, modifiers) {
+        app.dispatch_remote_task_requests(remote).await;
+        return Ok(());
+    }
+
     // Remote input has its own async key path so modal actions can dispatch
     // protocol requests immediately. Keep Startup Context beside the existing
     // Context Editor owner, before chat/global handling. Omitting it here lets
@@ -1092,6 +1097,10 @@ async fn handle_remote_key_internal(
                     return Ok(());
                 }
 
+                if app.handle_task_command(trimmed) {
+                    app.dispatch_remote_task_requests(remote).await;
+                    return Ok(());
+                }
                 if app.handle_instruction_command(trimmed) {
                     app.dispatch_remote_instruction_request(remote).await;
                     return Ok(());

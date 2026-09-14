@@ -1,5 +1,6 @@
 pub mod account_picker;
 pub(crate) mod app;
+pub mod task_monitor;
 
 #[derive(Clone)]
 pub struct ContextSnapshot {
@@ -185,6 +186,9 @@ pub enum StartupContextAvailability {
 }
 
 pub trait TuiState {
+    fn draw_task_monitor(&self, _frame: &mut Frame, _area: ratatui::layout::Rect) -> bool {
+        false
+    }
     // ---- Transcript ----
     fn display_messages(&self) -> &[DisplayMessage];
     fn display_user_message_count(&self) -> usize;

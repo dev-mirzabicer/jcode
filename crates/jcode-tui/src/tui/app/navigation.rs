@@ -1356,6 +1356,19 @@ impl App {
             finish_mouse_event!(is_mouse_scroll_kind(mouse.kind), "context_editor_overlay");
         }
 
+        if self
+            .task_ui
+            .monitor
+            .as_ref()
+            .is_some_and(|monitor| monitor.borrow().visible)
+        {
+            if let Some(monitor) = &self.task_ui.monitor {
+                monitor.borrow_mut().mouse(mouse);
+            }
+            self.open_requested_child_context();
+            finish_mouse_event!(false, "task_monitor");
+        }
+
         if self.startup_context_overlay_scroll().is_some() {
             if self.handle_startup_context_editor_mouse(mouse) {
                 finish_mouse_event!(is_mouse_scroll_kind(mouse.kind), "startup_context_editor");

@@ -86,6 +86,7 @@ pub(super) enum RemoteEventOutcome {
 }
 
 pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) -> bool {
+    app.dispatch_remote_task_requests(remote).await;
     app.dispatch_remote_instruction_request(remote).await;
     app.dispatch_remote_context_editor_actions(remote).await;
     app.dispatch_remote_startup_context_request(remote).await;

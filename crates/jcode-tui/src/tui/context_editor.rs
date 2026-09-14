@@ -366,6 +366,7 @@ pub struct ContextEditor {
     rendered_message_start: usize,
     rendered_history_start: usize,
     narrow_layout: bool,
+    child_target_label: Option<String>,
 }
 
 impl ContextEditor {
@@ -453,6 +454,7 @@ impl ContextEditor {
             rendered_message_start: 0,
             rendered_history_start: 0,
             narrow_layout: false,
+            child_target_label: None,
         }
     }
 
@@ -2470,6 +2472,10 @@ impl ContextEditor {
         None
     }
 
+    pub fn set_child_target(&mut self, target: &str) {
+        self.child_target_label = Some(target.to_string());
+    }
+
     pub fn render(&mut self, frame: &mut Frame) {
         if self.curator_workspace_active() {
             self.render_curator_workspace(frame);
@@ -3880,7 +3886,18 @@ impl ContextEditor {
             ContextEditorPhase::History => "history",
             ContextEditorPhase::InspectTransaction => "transaction detail",
         };
-        format!(" Context editor · {phase} ")
+        match &self.child_target_label {
+            Some(target) => format!(
+                " Child {} · Context editor · {phase} ",
+                target
+                    .strip_prefix("session_child_")
+                    .unwrap_or(target)
+                    .chars()
+                    .take(10)
+                    .collect::<String>()
+            ),
+            None => format!(" Context editor · {phase} "),
+        }
     }
 
     fn visible_message_ids(&self) -> Vec<String> {

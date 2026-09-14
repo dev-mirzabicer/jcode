@@ -72,6 +72,7 @@ jcode-config-types = { path = "../jcode-config-types" }
 jcode-context-core = { path = "../jcode-context-core" }
 jcode-selfdev-types = { path = "../jcode-selfdev-types" }
 jcode-session-types = { path = "../jcode-session-types" }
+jcode-tool-types = { path = "../jcode-tool-types" }
 jcode-provider-core = { path = "../jcode-provider-core" }
 jcode-tui-markdown = { path = "../jcode-tui-markdown" }
 jcode-tui-messages = { path = "../jcode-tui-messages" }

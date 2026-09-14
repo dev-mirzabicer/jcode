@@ -2751,6 +2751,31 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         return;
     }
 
+    if app.draw_task_monitor(frame, area) {
+        if visual_debug::is_enabled() {
+            let mut capture = FrameCaptureBuilder::new(area.width, area.height);
+            capture.render_order.push("task_monitor".into());
+            let buffer = frame.buffer_mut();
+            let rows = (area.y..area.bottom())
+                .map(|y| {
+                    (area.x..area.right())
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>();
+            capture.rendered_text.overlay_text = Some(rows.join("\n"));
+            visual_debug::record_frame(capture.build());
+        }
+        finalize_frame_metrics(
+            app,
+            total_start,
+            Duration::ZERO,
+            total_start.elapsed(),
+            None,
+        );
+        return;
+    }
+
     if app.draw_startup_context_editor(frame, area) {
         finalize_frame_metrics(
             app,

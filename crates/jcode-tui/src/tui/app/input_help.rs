@@ -17,6 +17,9 @@ impl App {
             "help" | "commands" => {
                 "/help\nShow general command list and keyboard shortcuts.\n\n/help <command>\nShow detailed help for one command."
             }
+            "tasks" => {
+                "/tasks\nOpen Active/Completed work for this session and its children. Use a for all sessions, Enter for details, and ? for a keyboard/mouse action menu. Inspect full retained input/output, follow or pause, Stop, Background, and force-stop supported native processes. Child Context opens the existing idle-only editor without chat or automatic restart. Storage reviews exact cold-archived outputs before one confirmation."
+            }
             "compact" => {
                 "/compact\nOpen the Context Editor. Review stable transcript ranges, replayed reasoning, and tool-result candidates before preparing and explicitly applying one reversible transaction.\n\nLegacy /compact mode commands no longer change state and point to the Context Editor."
             }

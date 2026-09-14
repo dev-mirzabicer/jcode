@@ -64,6 +64,7 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     needs_redraw |= super::local_delivery::drain(app);
     needs_redraw |= super::history_repair::drain(app);
     needs_redraw |= app.dispatch_local_instruction_request();
+    needs_redraw |= app.dispatch_local_task_requests();
     needs_redraw |= app.drain_local_context_events();
     needs_redraw |= app.dispatch_local_context_editor_actions();
     needs_redraw |= app.maybe_restore_blocked_composer_input();

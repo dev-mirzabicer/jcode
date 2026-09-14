@@ -600,6 +600,10 @@ pub(in crate::tui::app) fn handle_server_event(
         }
         event => event,
     };
+    let event = match app.reduce_task_event(event) {
+        Ok(accepted) => return accepted,
+        Err(event) => *event,
+    };
     let context_action_required = matches!(&event, ServerEvent::ContextActionRequired { .. });
     let event = match app.reduce_context_server_event(event) {
         Ok(accepted) => {
@@ -2099,6 +2103,7 @@ pub(in crate::tui::app) fn handle_server_event(
             let should_apply_history_payload = session_changed || !remote.has_loaded_history();
             if should_apply_history_payload {
                 app.reconnect_instruction_manager(&session_id);
+                app.reconnect_task_monitor(&session_id);
                 if session_changed {
                     app.clear_context_turn_state_for_session_change();
                 }

@@ -608,6 +608,17 @@ impl crate::tui::TuiState for App {
         true
     }
 
+    fn draw_task_monitor(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) -> bool {
+        let Some(monitor) = &self.task_ui.monitor else {
+            return false;
+        };
+        if !monitor.borrow().visible {
+            return false;
+        }
+        monitor.borrow_mut().render(frame, area);
+        true
+    }
+
     fn draw_instruction_manager(
         &self,
         frame: &mut ratatui::prelude::Frame,

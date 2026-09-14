@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 pub(super) struct PreparedRemoteContextRequest {
     pub(super) id: u64,
-    request: Request,
+    pub(super) request: Request,
     request_kind: ContextRequestKind,
     draft_id: Option<String>,
     transaction_id: Option<String>,
@@ -85,6 +85,16 @@ impl App {
         code: KeyCode,
         modifiers: KeyModifiers,
     ) -> bool {
+        self.swap_child_protocol();
+        let result = self.handle_context_editor_key_inner(code, modifiers);
+        self.swap_child_protocol();
+        if self.context_editor_overlay.is_none() {
+            self.task_ui.child = None;
+        }
+        result
+    }
+
+    fn handle_context_editor_key_inner(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
         let Some(editor_cell) = self.context_editor_overlay.as_ref() else {
             return false;
         };
@@ -131,6 +141,13 @@ impl App {
     pub(super) fn drain_local_context_events(&mut self) -> bool {
         let mut changed = false;
         while let Ok(event) = self.local_context_event_rx.try_recv() {
+            let event = match self.reduce_task_event(event) {
+                Ok(accepted) => {
+                    changed |= accepted;
+                    continue;
+                }
+                Err(event) => *event,
+            };
             match self.reduce_context_server_event(event) {
                 Ok(accepted) => changed |= accepted,
                 Err(_) => debug_assert!(false, "local context channel carried a non-context event"),
@@ -149,6 +166,14 @@ impl App {
     pub(super) fn reduce_context_server_event(
         &mut self,
         event: ServerEvent,
+    ) -> Result<bool, Box<ServerEvent>> {
+        self.reduce_context_server_event_inner(event, false)
+    }
+
+    pub(super) fn reduce_context_server_event_inner(
+        &mut self,
+        event: ServerEvent,
+        child_target: bool,
     ) -> Result<bool, Box<ServerEvent>> {
         let accepted = match event {
             ServerEvent::ContextEditorSnapshot { id, snapshot } => {
@@ -247,7 +272,7 @@ impl App {
                     draft_id,
                     result,
                 );
-                if accepted {
+                if accepted && !child_target {
                     self.bump_context_revision();
                     self.clear_context_action_after_context_change();
                 }
@@ -264,7 +289,7 @@ impl App {
                     transaction_id,
                     result,
                 );
-                if accepted {
+                if accepted && !child_target {
                     self.bump_context_revision();
                     self.clear_context_action_after_context_change();
                 }
@@ -281,7 +306,7 @@ impl App {
                     transaction_id,
                     result,
                 );
-                if accepted {
+                if accepted && !child_target {
                     self.bump_context_revision();
                     self.clear_context_action_after_context_change();
                 }
@@ -370,7 +395,7 @@ impl App {
             } => self.context_protocol.accept_policy(id, session_id, policy),
             event => return Err(Box::new(event)),
         };
-        if accepted {
+        if accepted && (child_target || self.task_ui.child.is_none()) {
             self.sync_context_editor_from_protocol();
         }
         Ok(accepted)
@@ -428,6 +453,7 @@ impl App {
         };
         let message =
             format!("Context editor transport request {id} failed before confirmation: {error}");
+        self.swap_child_protocol();
         let accepted = self.context_protocol.accept_rejection(
             id,
             request_kind,
@@ -443,6 +469,7 @@ impl App {
             self.sync_context_editor_from_protocol();
         }
         self.report_context_editor_error(message);
+        self.swap_child_protocol();
         false
     }
 
@@ -452,6 +479,40 @@ impl App {
         action: ContextEditorAction,
     ) -> PreparedRemoteContextRequest {
         let id = remote.reserve_context_request_id();
+        self.prepare_context_editor_action(id, action)
+    }
+
+    pub(super) fn prepare_context_editor_action(
+        &mut self,
+        id: u64,
+        action: ContextEditorAction,
+    ) -> PreparedRemoteContextRequest {
+        self.swap_child_protocol();
+        let mut prepared = self.prepare_context_editor_action_inner(id, action);
+        self.swap_child_protocol();
+        if let Some(child) = &mut self.task_ui.child {
+            child.pending.insert(
+                id,
+                (
+                    prepared.request_kind,
+                    prepared.draft_id.clone(),
+                    prepared.transaction_id.clone(),
+                ),
+            );
+            prepared.request = Request::ChildContext {
+                id,
+                child_id: child.target.clone(),
+                request: Box::new(prepared.request),
+            };
+        }
+        prepared
+    }
+
+    fn prepare_context_editor_action_inner(
+        &mut self,
+        id: u64,
+        action: ContextEditorAction,
+    ) -> PreparedRemoteContextRequest {
         let (request, request_kind, draft_id, transaction_id) = match action {
             ContextEditorAction::LoadSnapshot {
                 page_start,
@@ -731,6 +792,38 @@ impl App {
 
     fn dispatch_one_local_context_editor_action(&mut self, action: ContextEditorAction) {
         let id = self.next_local_context_request_id();
+        if self.task_ui.child.is_some()
+            && !matches!(&action, ContextEditorAction::CopySafeMetadata(_))
+        {
+            let prepared = self.prepare_context_editor_action(id, action);
+            let Request::ChildContext {
+                child_id, request, ..
+            } = prepared.request
+            else {
+                unreachable!()
+            };
+            let destination = self.local_context_event_tx.clone();
+            tokio::spawn(async move {
+                if let Err(error) = crate::server::forward_child_context(
+                    child_id.clone(),
+                    *request,
+                    destination.clone(),
+                )
+                .await
+                {
+                    let _ = destination.send(ServerEvent::ChildContextResponse {
+                        id,
+                        child_id,
+                        event: Box::new(ServerEvent::Error {
+                            id,
+                            message: format!("Child context: {error:#}"),
+                            retry_after_secs: None,
+                        }),
+                    });
+                }
+            });
+            return;
+        }
         match action {
             ContextEditorAction::LoadSnapshot {
                 page_start,
@@ -1222,6 +1315,9 @@ impl App {
     }
 
     fn context_session_id(&self) -> String {
+        if let Some(child) = &self.task_ui.child {
+            return child.target.clone();
+        }
         self.context_protocol
             .accepted_session_id
             .clone()

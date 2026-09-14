@@ -626,6 +626,19 @@ pub(in crate::tui::app) use paste_guard::expire_for_test as paste_guard_expire_f
 use paste_guard::image_media_type;
 
 pub(super) fn handle_paste(app: &mut App, text: String) {
+    if app
+        .task_ui
+        .monitor
+        .as_ref()
+        .is_some_and(|monitor| monitor.borrow().visible)
+    {
+        if app.context_editor_overlay.is_none()
+            && let Some(monitor) = &app.task_ui.monitor
+        {
+            monitor.borrow_mut().paste(&text);
+        }
+        return;
+    }
     if app.handle_instruction_paste(&text) {
         return;
     }
@@ -2522,6 +2535,9 @@ pub(super) fn handle_modal_key(
         return Ok(true);
     }
     if app.handle_context_editor_key(code, modifiers) {
+        return Ok(true);
+    }
+    if app.handle_task_key(code, modifiers) {
         return Ok(true);
     }
 

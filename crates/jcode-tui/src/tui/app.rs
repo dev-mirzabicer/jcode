@@ -109,6 +109,7 @@ mod state_ui_storage;
 mod subscribe_nudge;
 mod support;
 mod swarm_hint;
+mod task_ui;
 mod terminal_liveness;
 mod terminal_setup_command;
 mod todos_view;
@@ -1241,6 +1242,7 @@ pub struct App {
     /// New servers always send a bounded status, including for empty projects.
     startup_context_ui: startup_context_ui::StartupContextUiState,
     instruction_ui: instruction_ui::InstructionUi,
+    task_ui: task_ui::TaskUi,
     // Total session token usage (from server in remote mode)
     remote_total_tokens: Option<(u64, u64)>,
     // Detailed persisted token/cache usage totals (from server in remote mode)

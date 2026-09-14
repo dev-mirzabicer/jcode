@@ -772,11 +772,27 @@ impl RemoteConnection {
         self.send_request(request).await
     }
 
+    /// Metadata/control requests have their own typed sender. They never become
+    /// conversation messages or the connection's pending inference turn.
+    pub async fn send_reserved_task_request(&self, request: Request) -> Result<()> {
+        if !matches!(
+            &request,
+            Request::TaskMonitorProbe { .. }
+                | Request::TaskMonitor { .. }
+                | Request::Execution { .. }
+                | Request::OutputCleanup { .. }
+        ) {
+            anyhow::bail!("Task sender rejected a non-task request");
+        }
+        self.send_request(request).await
+    }
+
     /// Send a context-control request whose ID was reserved and correlated first.
     pub async fn send_reserved_context_request(&self, request: Request) -> Result<()> {
         if !matches!(
             &request,
-            Request::GetContextEditorSnapshot { .. }
+            Request::ChildContext { .. }
+                | Request::GetContextEditorSnapshot { .. }
                 | Request::GetContextMessageDetail { .. }
                 | Request::PreviewContextRanges { .. }
                 | Request::PreviewContextCuratorPlan { .. }
