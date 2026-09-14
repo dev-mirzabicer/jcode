@@ -91,3 +91,42 @@ promised. Existing failed broad-suite inventories remain separately documented i
 Final activation must identify the actual running/current/shared binary and its
 canary, not merely compilation or an older canary entry. Never activate an
 unfinished candidate or downgrade live stores to satisfy an older runtime.
+
+## Observed candidate verification, 2026-09-14
+
+The combined matrix passed: 9 delegation checks, 8 isolated-Agent checks,
+138 context/Startup Context checks (one separately identified ignored case),
+62 MCP checks and 8 model-roster checks. Separate focused checks covered the
+oversized child-context rejection, seven execution-recovery cases, immutable
+turn permissions, stateful MCP continuity, and local-versus-remote failure
+receipt ownership. Counts overlap and are not presented as unique totals.
+
+Harness API/server/Rust SDK groups passed 16/72/10 checks, TypeScript passed all
+50 tests, and changed portable tool/Harness contracts compiled for Linux arm64
+and Windows x64. Native runtime parity outside macOS is not claimed. Strict
+root/core/TUI/protocol/Harness library/test lint passed at the respective changed
+boundaries, along with whole-workspace formatting and diff checks.
+
+The final private actual-binary workflow used 46 scripted localhost responses.
+It passed native child-lock frames at 80x24 and 60x24, a waiting daemon parent
+with child inspection/artifact creation, exact invocation replay, standalone
+JSON/NDJSON, REPL, TypeScript through the actual Harness bridge, active-child
+process-loss with cancelled queued intent, host autostart without arbitrary
+parent exports, and exact source-free child restore after alias/profile edits.
+
+Failed attempts remain evidence, not passing counts: an invalid fixture runtime
+ID, missing private socket directory, wrong root test target, premature native
+host-restart timing and unsupported tester-command forwarding were corrected.
+Actual native checks also exposed missing overlay frame recording and remote
+SIGTERM/panic Session writes. The former now records terminal cells at the existing
+Context Editor render boundary; the latter excludes remote processes from
+failure-receipt persistence and requires local process ownership. These changes
+preserve the existing context and Session authorities.
+
+The earlier verification incident involved tests inheriting live state while an
+older daemon ran. Permanent test/bench wrappers isolate HOME, Jcode state, runtime,
+XDG and endpoint overrides. Remote quit and remote failure handlers cannot save
+Session shadows. A later exact schema comparison confirmed that the recovered
+live schema 20 matches the complete candidate schema without downgrade. Live
+configuration/instruction sentinels remained unchanged during subsequent private
+tests. Recovery and failed-attempt artifacts remain retained separately.
