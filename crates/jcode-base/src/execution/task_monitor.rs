@@ -67,7 +67,7 @@ fn task_row(connection: &Connection, id: &str) -> Result<TaskRow> {
         "SELECT r.created,r.updated,c.child_id,
          EXISTS(SELECT 1 FROM runs nested WHERE nested.parent_id=r.id)
          OR c.child_id IS NOT NULL,
-         EXISTS(SELECT 1 FROM native_processes n WHERE n.run_id=r.id AND n.owner=r.owner AND n.finished=0 AND n.identity IS NOT NULL) AND r.state='running'
+         EXISTS(SELECT 1 FROM native_processes n JOIN runtimes owner ON owner.id=n.owner WHERE n.run_id=r.id AND n.owner=r.owner AND n.finished=0 AND n.identity IS NOT NULL AND owner.protocol_version>=2) AND r.state='running'
          FROM runs r LEFT JOIN child_turns c ON c.run_id=r.id WHERE r.id=?1",
         [id],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
@@ -165,9 +165,23 @@ impl ExecutionStore {
             .context("Execution record is unavailable")?;
         match content {
             ExecutionContent::Output => {
-                let path = record
-                    .output_path
-                    .context("No retained output is available for this execution")?;
+                let Some(path) = record.output_path.clone() else {
+                    // Plain reads deliberately retain a source receipt rather
+                    // than archiving the entire source. Show that existing
+                    // receipt without rereading or rerunning anything.
+                    let receipt = self.result(
+                        &record,
+                        std::num::NonZeroUsize::new(usize::try_from(limit)?).unwrap(),
+                    )?;
+                    let bytes = receipt.output.into_bytes();
+                    let total = u64::try_from(bytes.len())?;
+                    return text_window(
+                        &mut std::io::Cursor::new(bytes),
+                        total,
+                        offset.or(Some(0)),
+                        limit,
+                    );
+                };
                 let mut source = ManagedRead::open(
                     self.root()
                         .parent()
@@ -330,5 +344,235 @@ mod tests {
                 .task_text_page(&id, ExecutionContent::Output, Some(u64::MAX), 7)
                 .is_err()
         );
+    }
+    /// Action-capable fixture setup only. The public TUI performs review/deletion.
+    #[test]
+    #[ignore = "requires an explicit private native monitor fixture manifest"]
+    fn native_monitor_archive_fixture() -> Result<()> {
+        use crate::execution::{ArchiveConfig, IDLE_SECONDS, StorageConfig};
+        #[derive(serde::Deserialize)]
+        struct Setup {
+            root: std::path::PathBuf,
+            archive: ArchiveConfig,
+            result: std::path::PathBuf,
+        }
+        let manifest = std::env::var_os("JCODE_TASK_MONITOR_FIXTURE")
+            .context("Missing native fixture manifest")?;
+        let setup: Setup = crate::storage::read_json(std::path::Path::new(&manifest))?;
+        ensure!(
+            std::fs::read_to_string(setup.root.join("WP05_NATIVE_FIXTURE"))?
+                == "native monitor fixture",
+            "Not an explicitly owned native fixture"
+        );
+        ensure!(
+            setup.archive.directory.components().count() == 1
+                && setup
+                    .archive
+                    .directory
+                    .to_string_lossy()
+                    .starts_with("jcode-execution-fixture-wp05-"),
+            "Archive target is not a private fixture"
+        );
+        ensure!(
+            !setup.archive.mount.join(&setup.archive.directory).exists(),
+            "Archive fixture already exists"
+        );
+        let store = ExecutionStore::open(&setup.root)?;
+        let id = run(
+            &store,
+            "native-monitor-archive",
+            "archive",
+            RunState::Completed,
+        );
+        let mut session =
+            crate::session::Session::create_with_id("native-monitor-archive".into(), None, None);
+        session.add_message(
+            crate::message::Role::Assistant,
+            vec![crate::message::ContentBlock::ToolUse {
+                id: "archive".into(),
+                name: "fixture".into(),
+                input: serde_json::json!({}),
+                thought_signature: None,
+            }],
+        );
+        // Match the fixture invocation's authoritative message identity.
+        session.messages[0].id = "archive".into();
+        crate::storage::write_json_secret(
+            &setup.root.join("sessions/native-monitor-archive.json"),
+            &session,
+        )?;
+        let snapshot = store.create_inspection_snapshot(
+            "native-monitor-reader",
+            "native-monitor-archive",
+            chrono::Utc::now().timestamp(),
+        )?;
+        let now = store.last_activity("native-monitor-archive")?.unwrap() + IDLE_SECONDS + 1;
+        ensure!(
+            store.archive_cold_output(
+                &id,
+                &StorageConfig {
+                    archive: Some(setup.archive),
+                    local_reserve_bytes: 0,
+                    archive_reserve_bytes: 1024 * 1024
+                },
+                now
+            )?,
+            "Fixture output did not archive"
+        );
+        let record = store.inspect(&id)?.unwrap();
+        crate::storage::write_json_secret(
+            &setup.result,
+            &serde_json::json!({"run_id":id,"snapshot_id":snapshot,"output_path":record.output_path,"bytes":record.output_bytes}),
+        )?;
+        Ok(())
+    }
+    #[test]
+    fn large_monitor_history_pages_without_opening_any_payload() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let store = ExecutionStore::open(root.path())?;
+        let mut connection = store.connection()?;
+        let transaction = connection.transaction()?;
+        for index in 0..20000 {
+            transaction.execute("INSERT INTO runs(id,session_id,message_id,tool,input_digest,state,owner,input_path,created,updated) VALUES(?1,?2,'m','fixture','digest','completed','offline','missing-payload',?3,?3)",params![format!("run-{index:064x}"),if index%2==0{"parent"}else{"other"},index])?;
+        }
+        transaction.commit()?;
+        let start = std::time::Instant::now();
+        let TaskMonitorResponse::List { rows, next } =
+            store.task_page("parent", TaskView::Completed, false, None, None, 100)?
+        else {
+            panic!()
+        };
+        assert_eq!(rows.len(), 100);
+        assert!(rows.iter().all(|row| row.run.session_id == "parent"));
+        let TaskMonitorResponse::List { rows: older, .. } =
+            store.task_page("parent", TaskView::Completed, false, None, next, 100)?
+        else {
+            panic!()
+        };
+        assert_eq!(older.len(), 100);
+        assert!(
+            older
+                .iter()
+                .all(|row| !rows.iter().any(|first| first.run.id == row.run.id))
+        );
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(2),
+            "metadata page unexpectedly slow: {:?}",
+            start.elapsed()
+        );
+        assert!(
+            store
+                .task_text_page(&rows[0].run.id, ExecutionContent::Input, None, 100)
+                .is_err()
+        );
+        Ok(())
+    }
+    #[test]
+    fn monitor_scope_and_expansion_use_structural_child_and_batch_relationships() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let store = ExecutionStore::open(root.path())?;
+        let PreparedInvocation::New(parent) = store.prepare(
+            &Invocation {
+                session_id: "parent".into(),
+                message_id: "child".into(),
+                call_path: vec!["child".into()],
+                tool: "subagent".into(),
+                input: serde_json::json!({}),
+                working_dir: None,
+                received_result_digest: None,
+            },
+            "owner",
+        )?
+        else {
+            panic!()
+        };
+        store.admit_child_turn(&parent.id, "owner", "child", true, false, 15)?;
+        store.retain(
+            parent.clone(),
+            ToolOutput::new("child reply"),
+            RunState::Completed,
+        )?;
+        let child_tool = run(&store, "child", "tool", RunState::Completed);
+        run(&store, "unrelated", "other", RunState::Completed);
+        let TaskMonitorResponse::List { rows, .. } =
+            store.task_page("parent", TaskView::Completed, false, None, None, 100)?
+        else {
+            panic!()
+        };
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().any(|row| row.run.id == child_tool));
+        let TaskMonitorResponse::List { rows, .. } = store.task_page(
+            "parent",
+            TaskView::Completed,
+            false,
+            Some(&parent.id),
+            None,
+            100,
+        )?
+        else {
+            panic!()
+        };
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].run.id, child_tool);
+        let batch = run(&store, "parent", "batch", RunState::Completed);
+        let nested = run(&store, "parent", "nested", RunState::Completed);
+        store.connection()?.execute(
+            "UPDATE runs SET parent_id=?1 WHERE id=?2",
+            params![batch, nested],
+        )?;
+        let TaskMonitorResponse::List { rows, .. } = store.task_page(
+            "parent",
+            TaskView::Completed,
+            false,
+            Some(&batch),
+            None,
+            100,
+        )?
+        else {
+            panic!()
+        };
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].run.id, nested);
+        Ok(())
+    }
+    #[test]
+    fn read_page_monitor_shows_retained_receipt_without_reopening_changed_source() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let store = ExecutionStore::open(root.path())?;
+        let path = root.path().join("source.txt");
+        std::fs::write(&path, "ORIGINAL SOURCE")?;
+        let output = crate::execution::reader::SourceReader::new(root.path()).read(
+            crate::execution::reader::ReadRequest {
+                path: path.clone(),
+                point: None,
+                start_line: 1,
+                end_line: None,
+                target: std::num::NonZeroUsize::new(1000).unwrap(),
+                stop: None,
+            },
+        )?;
+        let PreparedInvocation::New(record) = store.prepare(
+            &Invocation {
+                session_id: "reader".into(),
+                message_id: "read".into(),
+                call_path: vec!["read".into()],
+                tool: "read".into(),
+                input: serde_json::json!({"file_path":path}),
+                working_dir: None,
+                received_result_digest: None,
+            },
+            "owner",
+        )?
+        else {
+            panic!()
+        };
+        store.start(&record.id, "owner")?;
+        store.retain(record.clone(), output, RunState::Completed)?;
+        std::fs::write(&path, "CHANGED SOURCE")?;
+        let page = store.task_text_page(&record.id, ExecutionContent::Output, None, 1000)?;
+        assert!(page.text.contains("receipt"));
+        assert!(!page.text.contains("CHANGED SOURCE"));
+        assert!(store.inspect(&record.id)?.unwrap().output_path.is_none());
+        Ok(())
     }
 }

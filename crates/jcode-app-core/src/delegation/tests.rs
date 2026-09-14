@@ -624,6 +624,12 @@ async fn human_child_context_reuses_curator_apply_undo_and_rejects_stale_followu
         }
         let snapshot=action(&child,Request::GetContextEditorSnapshot{id:1,page_start:0,page_size:Some(250)},&service).await;
         assert!(snapshot.iter().any(|event|matches!(event,ServerEvent::ContextEditorSnapshot{snapshot,..} if snapshot.session_id==child)));
+        let source=snapshot.iter().find_map(|event|if let ServerEvent::ContextEditorSnapshot{snapshot,..}=event{Some(snapshot)}else{None}).unwrap();
+        for directive in &before.isolated_child.as_ref().unwrap().directive_message_ids {
+            let rejected=action(&child,Request::PreviewContextRanges{id:80,expected_context_revision:source.context_revision,expected_transcript_digest:source.transcript_digest,ranges:vec![ContextMessageRangeSelection{start_message_id:directive.clone(),end_message_id:directive.clone()}]},&service).await;
+            assert!(rejected.iter().any(|event|matches!(event,ServerEvent::ContextRequestRejected{..})),"Active child directive was transformable: {rejected:?}");
+        }
+
         assert_eq!(serde_json::to_value(Session::load(&child).unwrap()).unwrap(),serde_json::to_value(&before).unwrap());
         let request=ContextDraftRequest{summary_ranges:vec![ContextMessageRangeSelection{start_message_id:before.messages[before.messages.len()-2].id.clone(),end_message_id:before.messages.last().unwrap().id.clone()}],reasoning:None,tool_results:vec![],allow_shadowing_active_operations:false,curator:ContextCuratorRunConfig{selection:Some(Default::default()),..Default::default()},authorization:jcode_session_types::StoredContextAuthorization::Manual{initiated_by:Some("human fixture".into())}};
         f.http.push(Reply::Text(r#"{"summary":"Synthetic summary","file_change_digest":"No files changed.","warnings":[]}"#));
@@ -647,6 +653,62 @@ async fn human_child_context_reuses_curator_apply_undo_and_rejects_stale_followu
         assert_eq!(serde_json::to_value(Session::load(&f.parent.id).unwrap()).unwrap(),parent);
         let (tx,_)=mpsc::unbounded_channel();assert!(crate::server::child_context::handle(child,Request::Cancel{id:7},service,InstructionRepositoryService::new(),tx).await.is_err());
     }).catch_unwind().await;
+    f.cleanup().await;
+    if let Err(error) = result {
+        std::panic::resume_unwind(error);
+    }
+}
+
+#[tokio::test]
+async fn human_child_context_rejects_busy_without_borrowing_parent_or_dispatching_model() {
+    let f = Fixture::new().await;
+    let result = std::panic::AssertUnwindSafe(async {
+        let gate = Arc::new(Semaphore::new(0));
+        f.http.push(Reply::Hold(gate));
+        let mut input = f.create();
+        input["run_in_background"] = json!(true);
+        f.call("busy-context", input).await.unwrap();
+        let child = f.child_id("busy-context");
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            crate::server::child_context::handle(
+                child,
+                crate::protocol::Request::GetContextEditorSnapshot {
+                    id: 1,
+                    page_start: 0,
+                    page_size: Some(10),
+                },
+                Arc::new(crate::context::ContextTransactionService::default()),
+                InstructionRepositoryService::new(),
+                tx,
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(result.unwrap_err().to_string().contains("busy"));
+        let store = ExecutionStore::open(f.home.root()).unwrap();
+        let run = crate::execution::invocation_id(&f.ctx("busy-context"));
+        let reply = crate::execution::control_transport::control_in_store(
+            &store,
+            &run,
+            crate::execution::ControlOperation::Stop {
+                cause: StopCause::HumanCancellation,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            reply,
+            crate::execution::ControlReply::Accepted { .. }
+        ));
+        assert_eq!(
+            f.terminal("busy-context").await.unwrap().state,
+            jcode_tool_types::RunState::Cancelled
+        );
+    })
+    .catch_unwind()
+    .await;
     f.cleanup().await;
     if let Err(error) = result {
         std::panic::resume_unwind(error);
