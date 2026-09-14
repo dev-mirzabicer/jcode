@@ -519,3 +519,14 @@ npm run check   # typecheck + build + tests (mock harness, no daemon needed)
 `test/schema-parity.test.ts` reads the Rust enums directly, and
 `crates/jcode-harness-api`'s `typescript_sdk_lists_every_variant` test reads
 this package. Adding a variant on either side without the other fails CI.
+
+## Isolated delegation
+
+Harness v1.5 advertises `isolated_delegation_v1`. A normal SDK-created primary
+session can use `get_catalog` and `subagent` through its usual `run()`/streaming
+workflow. Results remain ordinary tool events with retained run/child identity.
+Execution states include `queued`; Stop causes include
+`child_predecessor_failure`. Child conversations cannot be attached for direct
+human chat. Use the original parent for follow-ups and the inspection API for
+transcript access. See the repository isolated-delegation guide for MCP
+classification, ownership and recovery.

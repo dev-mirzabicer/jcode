@@ -477,3 +477,11 @@ Before changing Startup Context:
 12. Verify context summaries, revert, and reapply without source or receipt mutation.
 13. Run the focused and integration commands in
     [`dev/STARTUP_CONTEXT_ACCEPTANCE.md`](dev/STARTUP_CONTEXT_ACCEPTANCE.md).
+
+## Isolated child adoption
+
+The `subagent` caller explicitly captures current project defaults or an ordered
+child-only custom selection. It can disable capture. Custom external targets use
+the parent-authorized capture path, not the primary editor's approval workflow.
+Follow-ups preserve captured bytes and use existing staleness observation. See
+[isolated delegation](ISOLATED_DELEGATION.md).

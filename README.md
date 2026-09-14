@@ -505,6 +505,14 @@ Notes:
 - Plain `http://` is accepted for `localhost` and private LAN IPs. Public remote HTTP is still rejected.
 - HTTPS endpoints work as usual.
 
+#### Isolated child conversations
+
+Use `get_catalog` and `subagent` for durable isolated work with explicit profiles,
+model aliases and permissions. Read-only MCP eligibility and optional exclusions
+are enforced through the normal global/project configuration. See
+[isolated delegation](docs/ISOLATED_DELEGATION.md) for waiting, FIFO, recovery and
+host-environment behavior.
+
 #### MCP config files
 
 MCP config is separate from `config.toml`.

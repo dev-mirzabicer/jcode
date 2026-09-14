@@ -155,3 +155,10 @@ route parser or credential detector in the TUI.
 **Phase 10, maintenance:** evolve roster data deliberately as models and routes
 change. Preserve running execution identities and distinguish shipped seed
 updates from accepted downstream working policy.
+
+## Isolated caller adoption
+
+Isolated `subagent` creation now explicitly adopts this roster. Its caller exposes
+alias and optional effort, not concrete model overrides. Follow-ups retain the
+exact resolution and do not reread an edited alias. See [isolated
+delegation](ISOLATED_DELEGATION.md). Ordinary primary model selection is unchanged.
