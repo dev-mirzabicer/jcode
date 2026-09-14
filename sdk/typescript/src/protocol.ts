@@ -36,7 +36,7 @@ export interface ExecutionPartPage {
 export type ExecutionRequest =
   | { action: "read_part"; run_id: string; part: string; offset?: number | null; limit?: number | null; expected_sha256?: string | null }
   | {action: "list"; all_sessions?: boolean; after?: string | null; limit?: number | null}
-  | {action: "inspect" | "stop" | "background"; run_id: string}
+  | {action: "inspect" | "stop" | "force_stop" | "background"; run_id: string}
   | {action: "read"; run_id: string; content: "input" | "output"; read_point?: string | null; output_size?: OutputSize | null};
 export type ExecutionResponse =
   | { kind: "part"; run_id: string; page: ExecutionPartPage }

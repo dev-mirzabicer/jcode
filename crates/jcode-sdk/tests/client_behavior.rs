@@ -959,3 +959,47 @@ fn a_lost_connection_fails_requests_in_flight() {
         .expect_err("a dropped harness must fail the request");
     assert_eq!(error.code(), "disconnected");
 }
+
+#[test]
+fn execution_force_stop_requires_explicit_capability_before_transport() {
+    use jcode_harness_api::{ExecutionRequest, ExecutionResponse};
+    let request = ExecutionRequest::ForceStop {
+        run_id: "run-fixture".into(),
+    };
+    let old = fake_harness_with_capabilities(
+        vec![jcode_harness_api::EXECUTION_CAPABILITY.into()],
+        |_, _| panic!("Force stop transmitted without capability"),
+    );
+    assert_eq!(
+        old.execution("s1", request.clone()).unwrap_err().kind,
+        ErrorKind::UnsupportedCapability
+    );
+    let client = fake_harness_with_capabilities(
+        vec![
+            jcode_harness_api::EXECUTION_CAPABILITY.into(),
+            jcode_harness_api::EXECUTION_FORCE_CAPABILITY.into(),
+        ],
+        |frame, writer| {
+            assert!(matches!(
+                &frame.request,
+                ApiRequest::Execution {
+                    request: ExecutionRequest::ForceStop { .. },
+                    ..
+                }
+            ));
+            let response:ExecutionResponse=serde_json::from_value(serde_json::json!({"kind":"control","run_id":"run-fixture","accepted":true,"state":"running"})).unwrap();
+            reply(
+                frame,
+                ApiEvent::Execution {
+                    session_id: "s1".into(),
+                    response,
+                },
+                writer,
+            );
+        },
+    );
+    assert!(matches!(
+        client.execution("s1", request).unwrap(),
+        ExecutionResponse::Control { accepted: true, .. }
+    ));
+}

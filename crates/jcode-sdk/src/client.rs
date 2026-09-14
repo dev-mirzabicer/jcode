@@ -787,6 +787,12 @@ impl JcodeClient {
         self.require_capability(jcode_harness_api::EXECUTION_CAPABILITY)?;
         if matches!(
             &request,
+            jcode_harness_api::ExecutionRequest::ForceStop { .. }
+        ) {
+            self.require_capability(jcode_harness_api::EXECUTION_FORCE_CAPABILITY)?;
+        }
+        if matches!(
+            &request,
             jcode_harness_api::ExecutionRequest::ReadPart { .. }
         ) {
             self.require_capability(jcode_harness_api::EXECUTION_PARTS_CAPABILITY)?;

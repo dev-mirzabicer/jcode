@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 pub const CAPABILITY: &str = "shared_execution_v1";
+pub const FORCE_CAPABILITY: &str = "execution_force_stop_v1";
 pub const PARTS_CAPABILITY: &str = "shared_execution_parts_v1";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

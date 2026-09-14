@@ -55,6 +55,7 @@ const BRIDGE_CAPABILITIES: &[&str] = &[
     "workflow_prompt_rendering",
     "shared_execution_v1",
     "shared_execution_parts_v1",
+    "execution_force_stop_v1",
     "session_inspection_v1",
     "output_cleanup_review_v1",
     "isolated_delegation_v1",

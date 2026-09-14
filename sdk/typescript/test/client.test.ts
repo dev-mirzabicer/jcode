@@ -772,3 +772,13 @@ test("globalEvents explicitly rejects custom transports", async () => {
     await server.close();
   }
 });
+
+test("force stop rejects unsupported servers before transport", async () => {
+  let sent=0;
+  const server=await startMockHarness({capabilities:["shared_execution_v1"],onRequest(){sent+=1;}});
+  const client=await JcodeClient.connect({socketPath:server.socketPath});
+  try {
+    await assert.rejects(()=>client.execution("s1",{action:"force_stop",run_id:"run-fixture"}),(error:unknown)=>error instanceof HarnessError && error.code==="unsupported_capability");
+    assert.equal(sent,0);
+  } finally {client.close();await server.close();}
+});

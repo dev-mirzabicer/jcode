@@ -621,6 +621,7 @@ export class JcodeClient extends EventEmitter {
   /** Inspect/control retained executions. Control acceptance is not completion. */
   async execution(sessionId: string, request: ExecutionRequest): Promise<ExecutionResponse> {
     this.requireCapability("shared_execution_v1");
+    if (request.action === "force_stop") this.requireCapability("execution_force_stop_v1");
     if (request.action === "read_part") this.requireCapability("shared_execution_parts_v1");
     const frame = await this.expectReply({req: "execution", session_id: sessionId, request}, "execution");
     if (frame.session_id !== sessionId) throw new HarnessError("unexpected_reply", "Execution reply belongs to a different session");

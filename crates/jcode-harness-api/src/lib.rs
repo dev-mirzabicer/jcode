@@ -30,7 +30,8 @@ pub use jcode_tool_types::cleanup::{
 };
 pub use jcode_tool_types::execution::{
     CAPABILITY as EXECUTION_CAPABILITY, ExecutionContent, ExecutionPartPage, ExecutionProgress,
-    ExecutionRequest, ExecutionResponse, PARTS_CAPABILITY as EXECUTION_PARTS_CAPABILITY, RunRecord,
+    ExecutionRequest, ExecutionResponse, FORCE_CAPABILITY as EXECUTION_FORCE_CAPABILITY,
+    PARTS_CAPABILITY as EXECUTION_PARTS_CAPABILITY, RunRecord,
 };
 pub use jcode_tool_types::inspection::{
     CAPABILITY as INSPECTION_CAPABILITY, CLEANUP_CAPABILITY, InspectionRequest, InspectionResponse,
