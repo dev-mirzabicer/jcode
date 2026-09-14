@@ -88,6 +88,17 @@ Future changes must preserve all of these unless product requirements explicitly
 Legacy `/compact mode ...` commands are retired. They return migration guidance and do
 not change state.
 
+## Idle child context from the task monitor
+
+The human [`/tasks`](TASK_MONITOR.md) Context action can target an idle isolated
+child without changing the primary session attachment. The editor title identifies
+the child. Its protocol state, draft identities and replies remain separate from
+primary context pressure. Existing preview, curator, apply, undo and active
+instruction protection remain authoritative. Child admission and a short context
+operation cannot race. Browsing does not reserve the child indefinitely, and a
+later parent follow-up makes an old draft stale at commit. No child chat or
+automatic child restart is introduced.
+
 ## Context Editor workflow
 
 The editor uses typed local/remote protocol state rather than terminal line positions.

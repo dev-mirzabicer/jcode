@@ -210,3 +210,10 @@ reject without a child launch. macOS arm64 is the native validation target;
 platform-specific and external-provider limits remain explicit in acceptance
 records. Local fixtures do not establish hosted billing, prompt quality or remote
 service termination guarantees.
+
+## Human monitoring and context repair
+
+Use [`/tasks`](TASK_MONITOR.md) for Active/Completed runs, retained input/output,
+Stop/background controls and the idle-child Context Editor. Human context editing
+uses the existing reversible transaction service. It does not create a child chat
+attachment or automatically restart inference.

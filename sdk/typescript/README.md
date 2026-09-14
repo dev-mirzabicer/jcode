@@ -530,3 +530,10 @@ Execution states include `queued`; Stop causes include
 human chat. Use the original parent for follow-ups and the inspection API for
 transcript access. See the repository isolated-delegation guide for MCP
 classification, ownership and recovery.
+
+### Native force stop
+
+`execution(sessionId, {action: "force_stop", run_id})` requires the separately
+advertised `execution_force_stop_v1` capability. It targets only a verified owned
+native process. Acceptance is not terminal completion, and the shared Jcode server
+is never killed to stop a task. Ordinary `stop` remains available for older owners.

@@ -513,6 +513,9 @@ are enforced through the normal global/project configuration. See
 [isolated delegation](docs/ISOLATED_DELEGATION.md) for waiting, FIFO, recovery and
 host-environment behavior.
 
+The native [`/tasks` monitor](docs/TASK_MONITOR.md) adds live output/control,
+reviewed storage cleanup and human idle-child context editing.
+
 #### MCP config files
 
 MCP config is separate from `config.toml`.

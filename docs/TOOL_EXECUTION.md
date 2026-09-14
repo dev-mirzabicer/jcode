@@ -96,3 +96,10 @@ macOS arm64 is the native verification target. Portable DTO/transport checks are
 not proof of complete Windows/Linux application support. Unsupported storage or
 process-control capabilities fail explicitly; no weaker ownership fallback is
 claimed as equivalent support.
+
+## Native task monitor
+
+[`/tasks`](TASK_MONITOR.md) provides metadata-only lists, bounded live text previews,
+original-owner Stop/background/conditional force controls, and reviewed cleanup.
+The Rust and TypeScript SDKs require `execution_force_stop_v1` before sending the
+additional `force_stop` request. Existing execution and part paging remain unchanged.
