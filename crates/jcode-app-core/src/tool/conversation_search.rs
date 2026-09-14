@@ -559,7 +559,7 @@ mod tests {
             Arc::new(ConversationSearchTool::new(template_budget.clone())) as Arc<dyn Tool>,
         );
         let template = crate::tool::Registry {
-        child_policy: None,
+            child_policy: None,
             tools: Arc::new(RwLock::new(tools)),
             skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
             context_budget: template_budget,
