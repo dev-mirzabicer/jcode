@@ -25,6 +25,11 @@ mod relay;
 mod tests;
 pub(crate) use relay::{forward, serve_request};
 
+pub(crate) fn release_idle_runtimes() -> Result<()> {
+    idle::clear(&crate::storage::jcode_dir()?);
+    Ok(())
+}
+
 pub(crate) struct Host {
     provider: Arc<dyn Provider>,
     pool: Arc<crate::mcp::SharedMcpPool>,

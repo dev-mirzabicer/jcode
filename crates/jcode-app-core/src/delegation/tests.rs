@@ -534,3 +534,63 @@ for line in sys.stdin:
     f.cleanup().await;
     result.unwrap().unwrap();
 }
+
+#[tokio::test]
+async fn child_context_budget_failure_preserves_history_and_never_dispatches() {
+    let f = Fixture::new().await;
+    let result = std::panic::AssertUnwindSafe(async {
+        let large = "synthetic_context ".repeat(500_000);
+        let file = f.home.root().join("large-startup.txt");
+        std::fs::write(&file, &large)?;
+        let mut create = f.create();
+        create
+            .as_object_mut()
+            .unwrap()
+            .remove("disable_startup_context");
+        create["startup_files"] = json!([file]);
+        ensure!(
+            f.call("oversize-create", create).await.is_err(),
+            "oversize startup was accepted"
+        );
+        ensure!(
+            f.http.requests.lock().unwrap().is_empty(),
+            "rejected startup reached the provider"
+        );
+        ensure!(
+            !crate::session::session_exists(&f.child_id("oversize-create")),
+            "rejected startup published a child"
+        );
+        f.http.push(Reply::Text("INITIAL"));
+        f.call("budget-child", f.create()).await?;
+        let id = f.child_id("budget-child");
+        let before = serde_json::to_value(Session::load(&id)?.messages)?;
+        ensure!(
+            f.call(
+                "oversize-followup",
+                json!({"child_id":id,"prompt":large,"intent":"fixture"})
+            )
+            .await
+            .is_err(),
+            "oversize followup was accepted"
+        );
+        ensure!(
+            serde_json::to_value(Session::load(&id)?.messages)? == before,
+            "blocked followup rewrote history"
+        );
+        ensure!(
+            f.http.requests.lock().unwrap().len() == 1,
+            "blocked followup made an extra provider request"
+        );
+        f.http.push(Reply::Text("CONTINUED"));
+        f.call(
+            "after-budget",
+            json!({"child_id":id,"prompt":"continue explicitly","intent":"fixture"}),
+        )
+        .await?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .catch_unwind()
+    .await;
+    f.cleanup().await;
+    result.unwrap().unwrap();
+}

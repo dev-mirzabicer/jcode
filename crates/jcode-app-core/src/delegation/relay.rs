@@ -150,3 +150,65 @@ pub(crate) async fn serve_request(
     writer.lock().await.write_all(bytes.as_bytes()).await?;
     Ok(())
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn incompatible_host_rejects_before_transmitting_task_or_launching_child() {
+        let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        for (index, version, namespace) in [
+            (0, 2, crate::storage::jcode_dir().unwrap()),
+            (1, 1, std::path::PathBuf::from("/unrelated-namespace")),
+        ] {
+            let path = crate::server::socket_path();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            if path.exists() {
+                std::fs::remove_file(&path).unwrap();
+            }
+            let listener = tokio::net::UnixListener::bind(&path).unwrap();
+            let task = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (read, mut write) = stream.into_split();
+                let mut reader = BufReader::new(read);
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                let probe: serde_json::Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(probe["type"], "delegation_probe");
+                assert!(probe.get("invocation").is_none());
+                let reply = serde_json::json!({"type":"delegation_capabilities","id":1,"version":version,"namespace":namespace});
+                write
+                    .write_all(format!("{reply}\n").as_bytes())
+                    .await
+                    .unwrap();
+                line.clear();
+                assert_eq!(
+                    reader.read_line(&mut line).await.unwrap(),
+                    0,
+                    "incompatible host received a task"
+                );
+            });
+            let ctx = ToolContext {
+                session_id: "parent".into(),
+                message_id: format!("incompatible-{index}"),
+                tool_call_id: "call".into(),
+                working_dir: None,
+                stdin_request_tx: None,
+                graceful_shutdown_signal: None,
+                execution_mode: ToolExecutionMode::AgentTurn,
+                invocation: Default::default(),
+            };
+            assert!(
+                forward(
+                    "subagent",
+                    serde_json::json!({"prompt":"PRIVATE TASK"}),
+                    &ctx
+                )
+                .await
+                .is_err()
+            );
+            task.await.unwrap();
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+}

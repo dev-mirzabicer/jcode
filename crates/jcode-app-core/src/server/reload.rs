@@ -207,6 +207,18 @@ pub(super) async fn await_reload_signal(
         );
 
         let prefers_selfdev = signal.prefer_selfdev_binary;
+        if let Err(error) = crate::delegation::release_idle_runtimes() {
+            crate::server::write_reload_state(
+                &signal.request_id,
+                &signal.hash,
+                crate::server::ReloadPhase::Failed,
+                signal.triggering_session.clone(),
+            );
+            crate::logging::error(&format!(
+                "Reload stopped before idle child runtime cleanup: {error:#}"
+            ));
+            continue;
+        }
 
         if let Some((binary, label)) = super::reload_exec_target(prefers_selfdev) {
             if binary.exists() {

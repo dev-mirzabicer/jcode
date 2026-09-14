@@ -60,8 +60,16 @@ const AVAILABLE_MODELS: &[&str] = &[
 
 /// Native tools that jcode handles locally (not Claude Code built-ins)
 const NATIVE_TOOL_NAMES: &[&str] = &[
-    "selfdev", "communicate", "memory", "session_search", "bg",
-    "get_catalog", "subagent", "session_outline", "read_transcript", "expand_tool_use",
+    "selfdev",
+    "communicate",
+    "memory",
+    "session_search",
+    "bg",
+    "get_catalog",
+    "subagent",
+    "session_outline",
+    "read_transcript",
+    "expand_tool_use",
 ];
 
 #[derive(Clone)]

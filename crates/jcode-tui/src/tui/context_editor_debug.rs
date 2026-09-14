@@ -12,6 +12,7 @@ use jcode_session_types::{
 };
 
 const DEBUG_FIXTURE_NAMES: &[&str] = &[
+    "active-child-directive",
     "empty",
     "loading",
     "paged-long-history",
@@ -90,6 +91,14 @@ impl ContextEditor {
         *self = ContextEditor::new(mode);
 
         match name {
+            "active-child-directive" => {
+                let mut snapshot = debug_snapshot(4, 4, false, CuratorFixture::Unavailable);
+                snapshot.messages[0].active_child_directive = true;
+                snapshot.messages[0].timestamp = None;
+                snapshot.messages[0].preview =
+                    "Active child directive (synthetic render-only fixture)".into();
+                self.apply_snapshot(snapshot);
+            }
             "loading" => {
                 self.status = Some("Loading authoritative Context Editor snapshot…".to_string());
             }

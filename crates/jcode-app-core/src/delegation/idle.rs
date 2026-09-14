@@ -49,7 +49,6 @@ pub(super) fn put(root: &Path, agent: Agent) {
     }
 }
 
-#[cfg(test)]
 pub(super) fn clear(root: &Path) {
     let mut idle = IDLE.lock().unwrap_or_else(|p| p.into_inner());
     idle.retain(|(namespace, id), _| {
