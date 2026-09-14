@@ -969,15 +969,15 @@ run_local_cargo() {
   # A test binary links the current source, even while the daemon still runs an
   # older build. Never let its automatic migrations reach the daemon's stores.
   # Isolate HOME too: fixtures temporarily remove JCODE_HOME during teardown.
-  local test_runner=()
+  local cargo_command=(cargo "${cargo_argv[@]}")
   case "${cargo_argv[0]:-}" in
-    test|bench) test_runner=(python3 "$repo_root/scripts/run_isolated_test.py") ;;
+    test|bench) cargo_command=(python3 "$repo_root/scripts/run_isolated_test.py" cargo "${cargo_argv[@]}") ;;
   esac
   if cargo_test_has_explicit_filter "${cargo_argv[@]}" && [[ "${JCODE_DEV_CARGO_ALLOW_ZERO_TESTS:-0}" != "1" ]]; then
     local output_file
     output_file=$(mktemp "${TMPDIR:-/tmp}/jcode-dev-cargo.XXXXXX")
     local status=0
-    "${test_runner[@]}" cargo "${cargo_argv[@]}" 2>&1 | tee "$output_file" || status=${PIPESTATUS[0]}
+    "${cargo_command[@]}" 2>&1 | tee "$output_file" || status=${PIPESTATUS[0]}
     if [[ "$status" -eq 0 ]] \
       && grep -qE '^running 0 tests$' "$output_file" \
       && ! grep -qE '^running [1-9][0-9]* tests$' "$output_file"; then
@@ -989,7 +989,7 @@ run_local_cargo() {
     return "$status"
   fi
 
-  "${test_runner[@]}" cargo "${cargo_argv[@]}"
+  "${cargo_command[@]}"
 }
 
 cargo_action_needs_gate() {

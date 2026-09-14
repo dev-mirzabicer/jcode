@@ -58,8 +58,8 @@ print(json.dumps({'root': str(root), 'fallback': str(fallback)}))
                        JCODE_HOME=str(root/'state'), JCODE_RUNTIME_DIR=str(root/'runtime'),
                        JCODE_REMOTE_CARGO='0', JCODE_RUST_ACTION_LOG='0', JCODE_CARGO_GATE='off',
                        JCODE_BUILD_JOBS='1', RUSTC_WRAPPER='', TMPDIR=str(root))
-            for action in ['test', 'check']:
-                result = subprocess.run(['bash',str(RUNNER.with_name('dev_cargo.sh')),action],
+            for action in ['test', 'check', 'build']:
+                result = subprocess.run(['/bin/bash' if Path('/bin/bash').exists() else 'bash',str(RUNNER.with_name('dev_cargo.sh')),action],
                                         env=env,text=True,capture_output=True)
                 self.assertEqual(result.returncode,0,result.stderr)
                 probe = next(line.split('=',1)[1] for line in result.stdout.splitlines() if line.startswith('probe-home='))
