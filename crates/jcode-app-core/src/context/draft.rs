@@ -209,6 +209,23 @@ pub struct ContextTransactionService {
 /// Local TUI mode and server mode use the same capture, curator, projection,
 /// provider-validation, and economics pipeline. Current session identity is
 /// revalidated again before application.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub(crate) struct InstructionProtection {
+    pub(crate) profile: Option<String>,
+    pub(crate) child: Vec<String>,
+}
+impl InstructionProtection {
+    pub(crate) fn from_session(session: &Session) -> Self {
+        Self {
+            profile: session.active_transition_message_id().map(str::to_string),
+            child: session.active_child_directive_ids(),
+        }
+    }
+    pub(crate) fn ids(&self) -> impl Iterator<Item = &str> {
+        self.profile.iter().chain(&self.child).map(String::as_str)
+    }
+}
+
 pub struct ContextDraftRuntimeInput {
     session_id: String,
     messages: Vec<StoredMessage>,
@@ -217,7 +234,7 @@ pub struct ContextDraftRuntimeInput {
     route: String,
     model_routes: Vec<ModelRoute>,
     estimated_total_request_tokens_before: Option<usize>,
-    active_agent_profile_message_id: Option<String>,
+    instruction_protection: InstructionProtection,
 }
 
 impl ContextDraftRuntimeInput {
@@ -239,9 +256,7 @@ impl ContextDraftRuntimeInput {
             route,
             model_routes,
             estimated_total_request_tokens_before,
-            active_agent_profile_message_id: session
-                .active_transition_message_id()
-                .map(str::to_string),
+            instruction_protection: InstructionProtection::from_session(session),
         })
     }
 }
@@ -306,7 +321,7 @@ impl ContextTransactionService {
             provider.as_ref(),
             &agent.context_route_identity(),
             agent.current_context_request_token_estimate(),
-            agent.active_transition_message_id(),
+            &InstructionProtection::from_session(agent.startup_context_session()),
         )
     }
 
@@ -329,7 +344,7 @@ impl ContextTransactionService {
             provider,
             route,
             projected_request_tokens,
-            session.active_transition_message_id(),
+            &InstructionProtection::from_session(session),
         )
     }
 
@@ -346,7 +361,7 @@ impl ContextTransactionService {
         provider: &dyn Provider,
         route: &str,
         projected_request_tokens: Option<usize>,
-        active_agent_profile_message_id: Option<&str>,
+        protection: &InstructionProtection,
     ) -> Result<crate::context::ContextEditorSnapshot, ContextServiceError> {
         self.context_editor_snapshot_for_session_with_curator_config_and_active_profile(
             session_id,
@@ -356,7 +371,7 @@ impl ContextTransactionService {
             provider,
             route,
             projected_request_tokens,
-            active_agent_profile_message_id,
+            protection,
             &crate::config::config().context.curator,
         )
     }
@@ -385,7 +400,7 @@ impl ContextTransactionService {
             provider,
             route,
             projected_request_tokens,
-            None,
+            &InstructionProtection::default(),
             curator_config,
         )
     }
@@ -403,7 +418,7 @@ impl ContextTransactionService {
         provider: &dyn Provider,
         route: &str,
         projected_request_tokens: Option<usize>,
-        active_agent_profile_message_id: Option<&str>,
+        protection: &InstructionProtection,
         curator_config: &crate::config::ContextCuratorConfig,
     ) -> Result<crate::context::ContextEditorSnapshot, ContextServiceError> {
         let mut snapshot =
@@ -418,7 +433,8 @@ impl ContextTransactionService {
             .map_err(|error| ContextServiceError::Projection(error.to_string()))?;
         for message in &mut snapshot.messages {
             message.active_agent_profile =
-                active_agent_profile_message_id == Some(message.message_id.as_str());
+                protection.profile.as_deref() == Some(message.message_id.as_str());
+            message.active_child_directive = protection.child.contains(&message.message_id);
         }
         if let Some(projected_request_tokens) = projected_request_tokens {
             snapshot.projected_request_tokens = projected_request_tokens;
@@ -577,7 +593,7 @@ impl ContextTransactionService {
             agent.context_view_state(),
             expected_context_revision,
             expected_transcript_digest,
-            agent.active_transition_message_id(),
+            &InstructionProtection::from_session(agent.startup_context_session()),
             ranges,
         )
     }
@@ -598,7 +614,7 @@ impl ContextTransactionService {
             &session.context_view,
             expected_context_revision,
             expected_transcript_digest,
-            session.active_transition_message_id(),
+            &InstructionProtection::from_session(session),
             ranges,
         )
     }
@@ -614,7 +630,7 @@ impl ContextTransactionService {
         context_view: &StoredContextViewState,
         expected_context_revision: u64,
         expected_transcript_digest: u64,
-        active_agent_profile_message_id: Option<&str>,
+        protection: &InstructionProtection,
         ranges: &[ContextMessageRangeSelection],
     ) -> Result<ContextRangeClosurePreview, ContextServiceError> {
         if context_view.revision != expected_context_revision {
@@ -636,11 +652,7 @@ impl ContextTransactionService {
         }
 
         let resolved = resolve_summary_ranges(messages, context_view, ranges)?;
-        reject_active_agent_profile_ranges(
-            messages,
-            active_agent_profile_message_id,
-            &resolved.closed_ranges,
-        )?;
+        reject_active_agent_profile_ranges(messages, protection, &resolved.closed_ranges)?;
         let previews = resolved
             .closed_ranges
             .iter()
@@ -705,7 +717,7 @@ impl ContextTransactionService {
             expected_context_revision,
             expected_transcript_digest,
             request,
-            agent.active_transition_message_id(),
+            &InstructionProtection::from_session(agent.startup_context_session()),
             &crate::config::config().context.curator,
         )
     }
@@ -740,7 +752,7 @@ impl ContextTransactionService {
             expected_context_revision,
             expected_transcript_digest,
             request,
-            session.active_transition_message_id(),
+            &InstructionProtection::from_session(session),
             configured_default,
         )
     }
@@ -761,7 +773,7 @@ impl ContextTransactionService {
         expected_context_revision: u64,
         expected_transcript_digest: u64,
         request: ContextDraftRequest,
-        active_agent_profile_message_id: Option<&str>,
+        protection: &InstructionProtection,
         configured_default: &crate::config::ContextCuratorConfig,
     ) -> Result<ContextCuratorPlanPreview, ContextServiceError> {
         if processing {
@@ -801,7 +813,7 @@ impl ContextTransactionService {
             context_view,
             identity,
             request,
-            active_agent_profile_message_id,
+            protection,
         )?;
         if capture.ranges.is_empty() && capture.tools.is_empty() {
             return Err(ContextServiceError::InvalidSelection(
@@ -872,7 +884,7 @@ impl ContextTransactionService {
             guard.context_view_state(),
             identity.clone(),
             request,
-            guard.active_transition_message_id(),
+            &InstructionProtection::from_session(guard.startup_context_session()),
         )?;
         let route = if capture.ranges.is_empty() && capture.tools.is_empty() {
             None
@@ -969,7 +981,7 @@ impl ContextTransactionService {
             &input.context_view,
             identity.clone(),
             request,
-            input.active_agent_profile_message_id.as_deref(),
+            &input.instruction_protection,
         )?;
         let route = if capture.ranges.is_empty() && capture.tools.is_empty() {
             None
@@ -1331,8 +1343,8 @@ impl ContextTransactionService {
             self.finish_failed(&draft_id, ContextServiceError::Stale(error.to_string()));
             return;
         }
-        if capture.active_agent_profile_message_id.as_deref()
-            != guard.active_transition_message_id()
+        if capture.instruction_protection
+            != InstructionProtection::from_session(guard.startup_context_session())
         {
             drop(guard);
             drop(artifacts);
@@ -1621,7 +1633,7 @@ struct ReasoningFilterStats {
 struct CapturedContextDraft {
     identity: ContextDraftIdentity,
     authorization: StoredContextAuthorization,
-    active_agent_profile_message_id: Option<String>,
+    instruction_protection: InstructionProtection,
     messages: Vec<StoredMessage>,
     base_context_view: StoredContextViewState,
     ranges: Vec<ContextCuratorRangeWork>,
@@ -1642,7 +1654,13 @@ fn capture_context_draft(
     identity: ContextDraftIdentity,
     request: ContextDraftRequest,
 ) -> Result<CapturedContextDraft, ContextServiceError> {
-    capture_context_draft_with_active_profile(messages, context_view, identity, request, None)
+    capture_context_draft_with_active_profile(
+        messages,
+        context_view,
+        identity,
+        request,
+        &InstructionProtection::default(),
+    )
 }
 
 fn capture_context_draft_with_active_profile(
@@ -1650,7 +1668,7 @@ fn capture_context_draft_with_active_profile(
     context_view: &StoredContextViewState,
     identity: ContextDraftIdentity,
     request: ContextDraftRequest,
-    active_agent_profile_message_id: Option<&str>,
+    protection: &InstructionProtection,
 ) -> Result<CapturedContextDraft, ContextServiceError> {
     validate_context_curator_run_config(&request.curator)?;
     let messages = messages.to_vec();
@@ -1663,11 +1681,7 @@ fn capture_context_draft_with_active_profile(
     let range_instructions =
         resolve_range_instructions(&request.summary_ranges, &request.curator.range_instructions)?;
     let resolved = resolve_summary_ranges(&messages, &base_context_view, &request.summary_ranges)?;
-    reject_active_agent_profile_ranges(
-        &messages,
-        active_agent_profile_message_id,
-        &resolved.closed_ranges,
-    )?;
+    reject_active_agent_profile_ranges(&messages, protection, &resolved.closed_ranges)?;
     let requested_ranges = resolved.requested_ranges;
     let closed_ranges = resolved.closed_ranges;
     let shadowed = resolved.shadowed_active_operations;
@@ -1863,7 +1877,7 @@ fn capture_context_draft_with_active_profile(
     Ok(CapturedContextDraft {
         identity,
         authorization: request.authorization,
-        active_agent_profile_message_id: active_agent_profile_message_id.map(str::to_string),
+        instruction_protection: protection.clone(),
         messages,
         base_context_view,
         ranges,
@@ -1884,27 +1898,31 @@ fn capture_context_draft_with_active_profile(
 
 fn reject_active_agent_profile_ranges(
     messages: &[StoredMessage],
-    active_agent_profile_message_id: Option<&str>,
+    protection: &InstructionProtection,
     ranges: &[jcode_context_core::ClosedMessageRange],
 ) -> Result<(), ContextServiceError> {
-    let Some(message_id) = active_agent_profile_message_id else {
-        return Ok(());
-    };
-    let message_index = messages
-        .iter()
-        .position(|message| message.id == message_id)
-        .ok_or_else(|| {
-            ContextServiceError::Stale(format!(
-                "active agent profile message {message_id} is missing from authoritative history"
-            ))
-        })?;
-    if ranges
-        .iter()
-        .any(|range| range.start <= message_index && message_index <= range.end)
-    {
-        return Err(ContextServiceError::Conflict(format!(
-            "selected range includes active agent profile message {message_id}; switch or explicitly replace the system prompt before transforming it"
-        )));
+    for message_id in protection.ids() {
+        let kind = if protection.profile.as_deref() == Some(message_id) {
+            "active agent profile"
+        } else {
+            "active child directive"
+        };
+        let index = messages
+            .iter()
+            .position(|message| message.id == message_id)
+            .ok_or_else(|| {
+                ContextServiceError::Stale(format!(
+                    "{kind} message {message_id} is missing from authoritative history"
+                ))
+            })?;
+        if ranges
+            .iter()
+            .any(|range| range.start <= index && index <= range.end)
+        {
+            return Err(ContextServiceError::Conflict(format!(
+                "selected range includes {kind} message {message_id}; current instructions cannot be transformed"
+            )));
+        }
     }
     Ok(())
 }
@@ -2403,7 +2421,8 @@ fn build_ready_draft_inner(
     Ok(ContextDraft {
         identity: capture.identity,
         authorization: capture.authorization,
-        active_agent_profile_message_id: capture.active_agent_profile_message_id,
+        active_agent_profile_message_id: capture.instruction_protection.profile,
+        active_child_directive_message_ids: capture.instruction_protection.child,
         required_operations,
         distillation_proposals: proposals,
         ineligible_distillations: ineligible,
@@ -3143,6 +3162,7 @@ mod store_tests {
             identity: identity(id, expires_at),
             authorization: StoredContextAuthorization::Manual { initiated_by: None },
             active_agent_profile_message_id: None,
+            active_child_directive_message_ids: Vec::new(),
             required_operations: Vec::new(),
             distillation_proposals: Vec::new(),
             ineligible_distillations: Vec::new(),

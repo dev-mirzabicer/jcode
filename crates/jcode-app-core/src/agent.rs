@@ -186,6 +186,8 @@ pub struct TokenUsage {
 #[derive(Debug, Clone)]
 struct RewindUndoSnapshot {
     messages: Vec<StoredMessage>,
+    active_child_directives: Vec<String>,
+    child_directive_message_ids: Vec<String>,
     agent_profile_message_ids: Vec<String>,
     context_view: jcode_session_types::StoredContextViewState,
     visible_message_count: usize,

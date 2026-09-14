@@ -1,7 +1,8 @@
 use crate::agent::Agent;
 use crate::context::draft::{
-    ContextTransactionService, DraftEntryState, projection_validation_operations,
-    state_with_transaction, validate_capture_identity, validate_capture_identity_parts,
+    ContextTransactionService, DraftEntryState, InstructionProtection,
+    projection_validation_operations, state_with_transaction, validate_capture_identity,
+    validate_capture_identity_parts,
 };
 use crate::context::history::summarize_context_transaction;
 use crate::context::provider_validation::require_supported_projected_messages;
@@ -253,7 +254,7 @@ impl ContextTransactionService {
         }
         if let Err(error) = validate_active_profile_draft(
             agent.messages(),
-            agent.active_transition_message_id(),
+            &InstructionProtection::from_session(agent.startup_context_session()),
             &draft,
             &selected_distillations,
         ) {
@@ -354,7 +355,7 @@ impl ContextTransactionService {
         })?;
         if let Err(error) = validate_active_profile_draft(
             &session.messages,
-            session.active_transition_message_id(),
+            &InstructionProtection::from_session(session),
             &draft,
             &selected_distillations,
         ) {
@@ -531,19 +532,19 @@ impl ContextTransactionService {
 
 fn validate_active_profile_draft(
     messages: &[crate::session::StoredMessage],
-    current_active_message_id: Option<&str>,
+    protection: &InstructionProtection,
     draft: &ContextDraft,
     selected_distillations: &[StoredContextOperation],
 ) -> Result<(), ContextServiceError> {
-    if draft.active_agent_profile_message_id.as_deref() != current_active_message_id {
+    if draft.active_agent_profile_message_id != protection.profile
+        || draft.active_child_directive_message_ids != protection.child
+    {
         return Err(ContextServiceError::Stale(
             "active agent profile changed after context draft capture".to_string(),
         ));
     }
-    let Some(active_message_id) = current_active_message_id else {
-        return Ok(());
-    };
-    let active_index = messages
+    for active_message_id in protection.ids() {
+        let active_index = messages
         .iter()
         .position(|message| message.id == active_message_id)
         .ok_or_else(|| {
@@ -551,37 +552,38 @@ fn validate_active_profile_draft(
                 "active agent profile message {active_message_id} is missing from authoritative history"
             ))
         })?;
-    for operation in draft
-        .required_operations
-        .iter()
-        .chain(selected_distillations)
-    {
-        if let StoredContextOperation::RangeSummary(summary) = operation {
-            let start = messages
-                .iter()
-                .position(|message| message.id == summary.source_range.start_message_id)
-                .ok_or_else(|| {
-                    ContextServiceError::Stale(
-                        "context draft range start disappeared before apply".to_string(),
-                    )
-                })?;
-            let end = messages
-                .iter()
-                .position(|message| message.id == summary.source_range.end_message_id)
-                .ok_or_else(|| {
-                    ContextServiceError::Stale(
-                        "context draft range end disappeared before apply".to_string(),
-                    )
-                })?;
-            let (start, end) = if start <= end {
-                (start, end)
-            } else {
-                (end, start)
-            };
-            if start <= active_index && active_index <= end {
-                return Err(ContextServiceError::Conflict(format!(
-                    "context draft range includes active agent profile message {active_message_id}"
-                )));
+        for operation in draft
+            .required_operations
+            .iter()
+            .chain(selected_distillations)
+        {
+            if let StoredContextOperation::RangeSummary(summary) = operation {
+                let start = messages
+                    .iter()
+                    .position(|message| message.id == summary.source_range.start_message_id)
+                    .ok_or_else(|| {
+                        ContextServiceError::Stale(
+                            "context draft range start disappeared before apply".to_string(),
+                        )
+                    })?;
+                let end = messages
+                    .iter()
+                    .position(|message| message.id == summary.source_range.end_message_id)
+                    .ok_or_else(|| {
+                        ContextServiceError::Stale(
+                            "context draft range end disappeared before apply".to_string(),
+                        )
+                    })?;
+                let (start, end) = if start <= end {
+                    (start, end)
+                } else {
+                    (end, start)
+                };
+                if start <= active_index && active_index <= end {
+                    return Err(ContextServiceError::Conflict(format!(
+                        "context draft range includes active agent profile message {active_message_id}"
+                    )));
+                }
             }
         }
     }
@@ -1325,6 +1327,9 @@ mod tests {
             active_agent_profile_message_id: agent
                 .active_transition_message_id()
                 .map(str::to_string),
+            active_child_directive_message_ids: agent
+                .startup_context_session()
+                .active_child_directive_ids(),
             required_operations,
             distillation_proposals: vec![proposal],
             ineligible_distillations: Vec::new(),
@@ -1597,6 +1602,7 @@ mod tests {
             active_agent_profile_message_id: source
                 .active_transition_message_id()
                 .map(str::to_string),
+            active_child_directive_message_ids: source.active_child_directive_ids(),
             required_operations: operations,
             distillation_proposals: Vec::new(),
             ineligible_distillations: Vec::new(),
@@ -1891,6 +1897,7 @@ mod tests {
             authorization,
             // Simulate a draft captured through an obsolete/unprotected path.
             active_agent_profile_message_id: None,
+            active_child_directive_message_ids: Vec::new(),
             required_operations: vec![operation],
             distillation_proposals: Vec::new(),
             ineligible_distillations: Vec::new(),

@@ -736,6 +736,7 @@ fn debug_message(index: usize) -> ContextEditorMessage {
         active_operations: Vec::new(),
         removable_reasoning_kinds: removable.then_some(kind).into_iter().collect(),
         active_agent_profile: false,
+        active_child_directive: false,
     }
 }
 
@@ -1292,6 +1293,7 @@ fn debug_draft(pricing: PricingFixture, proposal_count: usize) -> ContextDraft {
         identity: debug_identity(),
         authorization: StoredContextAuthorization::Manual { initiated_by: None },
         active_agent_profile_message_id: None,
+        active_child_directive_message_ids: Vec::new(),
         required_operations: vec![reasoning],
         distillation_proposals: proposals,
         ineligible_distillations: vec![crate::protocol::ContextIneligibleDistillation {

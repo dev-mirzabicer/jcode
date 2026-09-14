@@ -303,6 +303,8 @@ pub struct Session {
     /// Exact Swarm tool description captured after successful preflight. No source access on resume.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub swarm_routing_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation_guidance: Option<String>,
     /// Metadata-only startup projection. Full session loads leave this empty.
     #[serde(skip)]
     system_prompt_metadata: Option<StoredSystemPromptMetadata>,
@@ -800,33 +802,35 @@ impl Session {
         &mut self,
         len: usize,
     ) -> Result<bool, AgentProfileSessionError> {
-        let active_message = self
-            .active_transition_message_id()
-            .map(str::to_string)
-            .map(|message_id| {
-                self.messages
-                    .iter()
-                    .enumerate()
-                    .find(|(_, message)| message.id == message_id)
-                    .map(|(index, message)| (index, message.clone()))
-                    .ok_or(AgentProfileSessionError::ActiveTransitionMissing(
-                        message_id,
-                    ))
-            })
-            .transpose()?;
-        let preserve = active_message
-            .as_ref()
-            .is_some_and(|(index, _)| *index >= len);
+        self.validate_active_agent_profile()?;
+        let mut active = self.active_child_directive_ids();
+        if let Some(profile) = self.active_transition_message_id() {
+            active.push(profile.to_string());
+        }
+        let pinned = self
+            .messages
+            .iter()
+            .enumerate()
+            .filter(|(index, message)| *index >= len && active.contains(&message.id))
+            .map(|(_, message)| message.clone())
+            .collect::<Vec<_>>();
+        let preserve = !pinned.is_empty();
+        let profile_id = self.active_transition_message_id().map(str::to_string);
         self.truncate_messages(len);
-        self.agent_profile_message_ids.retain(|message_id| {
-            self.messages
-                .iter()
-                .any(|message| &message.id == message_id)
-        });
-        if preserve && let Some((_, message)) = active_message {
-            self.agent_profile_message_ids.push(message.id.clone());
+        self.agent_profile_message_ids
+            .retain(|id| self.messages.iter().any(|message| &message.id == id));
+        for message in pinned {
+            if profile_id.as_deref() == Some(&message.id) {
+                self.agent_profile_message_ids.push(message.id.clone());
+            }
             self.append_stored_message(message);
         }
+        if let Some(child) = self.isolated_child.as_mut() {
+            child
+                .directive_message_ids
+                .retain(|id| self.messages.iter().any(|message| &message.id == id));
+        }
+        self.validate_active_agent_profile()?;
         Ok(preserve)
     }
 
@@ -836,6 +840,13 @@ impl Session {
             self.persist_state.force_snapshot = true;
             self.mark_memory_profile_dirty();
         }
+    }
+
+    pub fn set_delegation_guidance(&mut self, text: String) {
+        self.delegation_guidance = Some(text);
+        self.updated_at = Utc::now();
+        self.persist_state.force_snapshot = true;
+        self.mark_memory_profile_dirty();
     }
 
     pub fn set_swarm_routing_prompt(&mut self, text: String) {
@@ -911,6 +922,7 @@ impl Session {
         self.system_prompt = parent.system_prompt.clone();
         self.active_skill = parent.active_skill.clone();
         self.swarm_routing_prompt = parent.swarm_routing_prompt.clone();
+        self.delegation_guidance = parent.delegation_guidance.clone();
         self.system_prompt_metadata = parent.system_prompt_metadata.clone();
         self.active_skill_metadata = parent.active_skill_metadata.clone();
         self.compaction = parent.compaction.clone();
@@ -993,6 +1005,7 @@ impl Session {
         session.system_prompt = snapshot.system_prompt;
         session.active_skill = snapshot.active_skill;
         session.swarm_routing_prompt = snapshot.swarm_routing_prompt;
+        session.delegation_guidance = snapshot.delegation_guidance;
         session.system_prompt_metadata = None;
         session.active_skill_metadata = None;
         session.compaction = snapshot.compaction;
@@ -1728,6 +1741,7 @@ impl Session {
             system_prompt: None,
             active_skill: None,
             swarm_routing_prompt: None,
+            delegation_guidance: None,
             system_prompt_metadata: None,
             active_skill_metadata: None,
             compaction: None,
@@ -1800,6 +1814,7 @@ impl Session {
             system_prompt: None,
             active_skill: None,
             swarm_routing_prompt: None,
+            delegation_guidance: None,
             system_prompt_metadata: None,
             active_skill_metadata: None,
             compaction: None,
@@ -2922,6 +2937,8 @@ struct RemoteStartupSessionSnapshot {
     active_skill: Option<StoredActiveSkill>,
     #[serde(default)]
     swarm_routing_prompt: Option<String>,
+    #[serde(default)]
+    delegation_guidance: Option<String>,
     #[serde(default)]
     compaction: Option<StoredCompactionState>,
     #[serde(default)]

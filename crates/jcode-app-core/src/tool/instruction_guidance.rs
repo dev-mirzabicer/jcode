@@ -1,8 +1,20 @@
-//! One Swarm description snapshot, owned by the ordinary session lifecycle.
+//! Session-owned managed tool descriptions, frozen only after successful preflight.
 use crate::{message::ToolDefinition, session::Session};
 
 /// Read-only request preparation. Do not freeze a source that fails preflight.
 pub fn preview(session: &Session, tools: &mut [ToolDefinition]) -> anyhow::Result<()> {
+    if let Some(tool) = tools.iter_mut().find(|tool| tool.name == "subagent") {
+        if let Some(text) = &session.delegation_guidance {
+            tool.description = text.clone();
+        } else {
+            let body = crate::instruction::SystemPromptComposer::new().delegation_tool_guidance(
+                session.working_dir.as_deref().map(std::path::Path::new),
+            )?;
+            if !body.is_empty() {
+                tool.description = format!("{}\n\n{body}", tool.description);
+            }
+        }
+    }
     if !crate::config::config().features.swarm {
         return Ok(());
     }
@@ -29,19 +41,26 @@ pub fn preview(session: &Session, tools: &mut [ToolDefinition]) -> anyhow::Resul
 /// After successful request preflight, persist the exact description already
 /// counted for this request. Returns whether an old session needs continuation reset.
 pub fn commit(session: &mut Session, tools: &[ToolDefinition]) -> anyhow::Result<bool> {
-    if !crate::config::config().features.swarm {
+    let swarm = (crate::config::config().features.swarm && session.swarm_routing_prompt.is_none())
+        .then(|| tools.iter().find(|tool| tool.name == "swarm"))
+        .flatten();
+    let delegation = session
+        .delegation_guidance
+        .is_none()
+        .then(|| tools.iter().find(|tool| tool.name == "subagent"))
+        .flatten();
+    if swarm.is_none() && delegation.is_none() {
         return Ok(false);
     }
-    if session.swarm_routing_prompt.is_some() {
-        return Ok(false);
-    }
-    let Some(tool) = tools.iter().find(|tool| tool.name == "swarm") else {
-        return Ok(false);
-    };
     let previous = session.clone();
     let migrated =
         session.first_provider_dispatch_at().is_some() || session.provider_session_id.is_some();
-    session.set_swarm_routing_prompt(tool.description.clone());
+    if let Some(tool) = swarm {
+        session.set_swarm_routing_prompt(tool.description.clone());
+    }
+    if let Some(tool) = delegation {
+        session.set_delegation_guidance(tool.description.clone());
+    }
     if migrated {
         session.provider_session_id = None;
     }
@@ -164,5 +183,53 @@ mod failure_tests {
         }];
         assert!(commit(&mut session, &tools).is_err());
         assert_eq!(serde_json::to_value(&session).unwrap(), before);
+    }
+}
+
+#[cfg(test)]
+mod delegation_tests {
+    use super::*;
+    #[test]
+    fn delegation_guidance_freezes_only_after_preflight_and_survives_source_edits() {
+        let home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        crate::instruction::SystemPromptComposer::new()
+            .ensure_global_store()
+            .unwrap();
+        let file = home.root().join("instructions/tools/subagent.md");
+        std::fs::write(
+            &file,
+            "---\nid: subagent\nkind: tool-guidance\n---\nSYNTHETIC FIRST",
+        )
+        .unwrap();
+        let mut session = Session::create(None, None);
+        let mut tools = vec![ToolDefinition {
+            name: "subagent".into(),
+            description: "STRUCTURAL TOOL".into(),
+            input_schema: serde_json::json!({}),
+        }];
+        preview(&session, &mut tools).unwrap();
+        assert!(session.delegation_guidance.is_none());
+        let expected = tools[0].description.clone();
+        commit(&mut session, &tools).unwrap();
+        std::fs::write(file, "invalid source").unwrap();
+        let loaded = Session::load(&session.id).unwrap();
+        tools[0].description = "BASE".into();
+        preview(&loaded, &mut tools).unwrap();
+        assert_eq!(tools[0].description, expected);
+        let mut split = Session::create(Some(session.id.clone()), None);
+        split.inherit_continuation_state_from(&loaded);
+        assert_eq!(split.delegation_guidance, loaded.delegation_guidance);
+        assert!(
+            Session::load_startup_stub(&session.id)
+                .unwrap()
+                .delegation_guidance
+                .is_none()
+        );
+        assert_eq!(
+            Session::load_for_remote_startup(&session.id)
+                .unwrap()
+                .delegation_guidance,
+            loaded.delegation_guidance
+        );
     }
 }

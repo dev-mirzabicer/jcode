@@ -60,6 +60,7 @@ fn parity_draft() -> crate::protocol::ContextDraft {
         identity: parity_identity(),
         authorization: jcode_session_types::StoredContextAuthorization::Manual { initiated_by: None },
         active_agent_profile_message_id: None,
+        active_child_directive_message_ids: Vec::new(),
         required_operations: Vec::new(),
         distillation_proposals: Vec::new(),
         ineligible_distillations: Vec::new(),
@@ -1063,6 +1064,7 @@ fn parity_snapshot_with_selected_message() -> crate::protocol::ContextEditorSnap
         active_operations: Vec::new(),
         removable_reasoning_kinds: Vec::new(),
         active_agent_profile: false,
+        active_child_directive: false,
     }];
     snapshot
 }

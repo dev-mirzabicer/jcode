@@ -374,7 +374,10 @@ impl Agent {
         self.append_user_context_blocks_with_display_role(blocks, display_role)
     }
 
-    fn user_context_blocks(user_message: &str, images: Vec<(String, String)>) -> Vec<ContentBlock> {
+    pub(super) fn user_context_blocks(
+        user_message: &str,
+        images: Vec<(String, String)>,
+    ) -> Vec<ContentBlock> {
         let mut blocks: Vec<ContentBlock> = images
             .into_iter()
             .map(|(media_type, data)| ContentBlock::Image { media_type, data })
@@ -637,6 +640,13 @@ impl Agent {
 
         let removed = message_count - message_index;
         let undo_snapshot = RewindUndoSnapshot {
+            active_child_directives: self.session.active_child_directive_ids(),
+            child_directive_message_ids: self
+                .session
+                .isolated_child
+                .as_ref()
+                .map(|child| child.directive_message_ids.clone())
+                .unwrap_or_default(),
             messages: self.session.messages.clone(),
             agent_profile_message_ids: self.session.agent_profile_message_ids.clone(),
             context_view: self.session.context_view.clone(),
@@ -685,12 +695,21 @@ impl Agent {
         let Some(snapshot) = self.rewind_undo_snapshot.clone() else {
             return Err("No rewind to undo.".to_string());
         };
+        self.session
+            .validate_active_agent_profile()
+            .map_err(|error| error.to_string())?;
+        if snapshot.active_child_directives != self.session.active_child_directive_ids() {
+            return Err("Child instructions changed after rewind; the old history snapshot cannot replace current authority".into());
+        }
 
         let current_count = self.session.rewind_target_count();
         let restored = snapshot.visible_message_count.saturating_sub(current_count);
         let previous_session = self.session.clone();
         self.session.replace_messages(snapshot.messages);
         self.session.agent_profile_message_ids = snapshot.agent_profile_message_ids;
+        if let Some(child) = self.session.isolated_child.as_mut() {
+            child.directive_message_ids = snapshot.child_directive_message_ids;
+        }
         self.session.context_view = snapshot.context_view;
         self.session.provider_session_id = None;
         self.session.updated_at = chrono::Utc::now();
@@ -946,10 +965,10 @@ impl Agent {
         if crate::tool::instruction_guidance::commit(&mut self.session, tools)? {
             self.provider_session_id = None;
             self.provider
-                .invalidate_context_continuation("managed swarm routing migration");
+                .invalidate_context_continuation("managed tool guidance activation");
             self.cache_tracker.reset();
             crate::cache_invalidation::record(
-                "managed swarm routing migration",
+                "managed tool guidance activation",
                 "captured session-owned tool instructions",
             );
         }
@@ -1082,6 +1101,10 @@ impl Agent {
         let restore_start = Instant::now();
         let load_start = Instant::now();
         let mut session = Session::load(session_id)?;
+        anyhow::ensure!(
+            session.isolated_child.is_none(),
+            "Isolated children are controlled by their original parent. Inspect their transcript instead of opening direct chat."
+        );
         crate::execution::ExecutionStore::open(&crate::storage::jcode_dir()?)?
             .touch_activity(session_id, chrono::Utc::now().timestamp())?;
         if let Some(working_dir) = working_dir {

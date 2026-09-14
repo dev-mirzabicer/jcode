@@ -46,6 +46,24 @@ fn same_qualified(selector: &InstructionSelector, current: &InstructionResourceR
 }
 
 impl SystemPromptComposer {
+    pub fn delegation_tool_guidance(
+        &self,
+        working_dir: Option<&Path>,
+    ) -> Result<String, SystemPromptActivationError> {
+        let environment = self.prepare_environment(working_dir)?;
+        let registration = ConsumerRegistration::new(
+            "delegation-guidance",
+            "subagent",
+            InstructionKind::ToolGuidance,
+            "tools/subagent.md",
+            "parent delegation tool",
+            "Framework-stage source, frozen after successful request preflight",
+        )?;
+        Ok(environment
+            .runtime
+            .render_registered(&registration, &())?
+            .text)
+    }
     /// Explicit caller adoption. Never inherit primary defaults or selfdev state.
     /// The task preset is deliberately absent from the returned true system.
     pub fn activate_isolated(

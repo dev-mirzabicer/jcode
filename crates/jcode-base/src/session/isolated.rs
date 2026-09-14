@@ -9,6 +9,8 @@ use std::path::PathBuf;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IsolatedChildIdentity {
+    #[serde(default)]
+    pub blocked_mcps: std::collections::BTreeSet<String>,
     pub profile: StoredAgentReference,
     pub original_parent: String,
     pub creation_run: String,
@@ -318,6 +320,7 @@ mod tests {
         session
             .install_isolated_child(
                 IsolatedChildIdentity {
+                    blocked_mcps: Default::default(),
                     profile,
                     original_parent: "session_parent_fixture".into(),
                     creation_run: "run-fixture".into(),

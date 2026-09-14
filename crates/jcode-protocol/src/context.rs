@@ -104,6 +104,14 @@ pub struct ContextEditorMessage {
     pub removable_reasoning_kinds: Vec<StoredContextBlockKind>,
     #[serde(default)]
     pub active_agent_profile: bool,
+    #[serde(default)]
+    pub active_child_directive: bool,
+}
+
+impl ContextEditorMessage {
+    pub fn instructions_locked(&self) -> bool {
+        self.active_agent_profile || self.active_child_directive
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -485,6 +493,8 @@ pub struct ContextDraft {
     pub authorization: StoredContextAuthorization,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_agent_profile_message_id: Option<String>,
+    #[serde(default)]
+    pub active_child_directive_message_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_operations: Vec<StoredContextOperation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

@@ -1404,12 +1404,13 @@ impl ContextEditor {
             }
             KeyCode::Char(' ') => {
                 if let Some(message) = self.current_message()
-                    && message.active_agent_profile
+                    && message.instructions_locked()
                 {
-                    self.error = Some(
-                        "The active agent profile is locked. Switch agents or explicitly replace the system prompt before transforming it."
-                            .to_string(),
-                    );
+                    self.error = Some(if message.active_child_directive {
+                        "The active child directive is locked. The parent must change current permission or preset instructions.".to_string()
+                    } else {
+                        "The active agent profile is locked. Switch agents or explicitly replace the system prompt before transforming it.".to_string()
+                    });
                     return (false, None);
                 }
                 if let Some(message) = self.current_message()
@@ -1497,11 +1498,12 @@ impl ContextEditor {
         let Some(message) = self.current_message() else {
             return (false, None);
         };
-        if message.active_agent_profile {
-            self.error = Some(
-                "The active agent profile cannot be a summary endpoint. Switch agents or explicitly replace the system prompt first."
-                    .to_string(),
-            );
+        if message.instructions_locked() {
+            self.error = Some(if message.active_child_directive {
+                "An active child directive cannot be a summary endpoint.".to_string()
+            } else {
+                "The active agent profile cannot be a summary endpoint. Switch agents or explicitly replace the system prompt first.".to_string()
+            });
             return (false, None);
         }
         let current_id = message.message_id;
@@ -2651,7 +2653,7 @@ impl ContextEditor {
                     } else {
                         " "
                     };
-                    let selected = if message.active_agent_profile {
+                    let selected = if message.instructions_locked() {
                         "🔒"
                     } else if self.selected_message_ids.contains(&message.message_id) {
                         "●"
@@ -3182,11 +3184,13 @@ impl ContextEditor {
             Line::from(""),
             Line::from(one_line(&message.preview, width.saturating_sub(2))),
         ];
-        if message.active_agent_profile {
+        if message.instructions_locked() {
             lines.push(Line::from(""));
-            lines.push(Line::from(
-                "🔒 Active agent profile. Exact detail remains inspectable, but context transformations cannot cover this message while it is active.",
-            ));
+            lines.push(Line::from(if message.active_child_directive {
+                "🔒 Active child directive. Exact detail remains inspectable, but context transformations cannot cover this message while it is active."
+            } else {
+                "🔒 Active agent profile. Exact detail remains inspectable, but context transformations cannot cover this message while it is active."
+            }));
         }
         let active_context = self.active_context_preview_lines(&message);
         if !active_context.is_empty() {
@@ -5061,6 +5065,7 @@ mod tests {
             active_operations: Vec::new(),
             removable_reasoning_kinds: Vec::new(),
             active_agent_profile: false,
+            active_child_directive: false,
         }
     }
 
@@ -5318,6 +5323,7 @@ mod tests {
             },
             authorization: StoredContextAuthorization::Manual { initiated_by: None },
             active_agent_profile_message_id: None,
+            active_child_directive_message_ids: Vec::new(),
             required_operations: vec![StoredContextOperation::ReasoningSuppression(
                 StoredReasoningSuppression {
                     selection: StoredReasoningSelection::KeepLatestAssistantTurns {

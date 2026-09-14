@@ -220,6 +220,7 @@ pub fn build_context_editor_snapshot(
                 active_operations: message_badges[stored_index].clone(),
                 removable_reasoning_kinds,
                 active_agent_profile: false,
+                active_child_directive: false,
             }
         })
         .collect();
