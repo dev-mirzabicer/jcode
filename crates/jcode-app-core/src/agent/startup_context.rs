@@ -2173,6 +2173,15 @@ mod tests {
     #[test]
     fn rejected_noninteractive_agent_creation_leaves_no_orphan_session() {
         let _home = TestHome::new();
+        // Establish the process-wide writer capability before the baseline.
+        // It is shared infrastructure, not an artifact owned by the rejected
+        // Session. Keep a real unrelated Session and verify its bytes too.
+        let mut retained = Session::create(None, Some("retained fixture".into()));
+        retained.add_human_message(vec![crate::message::ContentBlock::Text {
+            text: "unrelated authoritative content".into(), cache_control: None,
+        }]);
+        retained.save().unwrap();
+        let retained_before = serde_json::to_value(Session::load(&retained.id).unwrap()).unwrap();
         let project = tempfile::tempdir().expect("project tempdir");
         let required = project.path().join("required.txt");
         std::fs::write(&required, "remove me").expect("write startup file");
@@ -2219,6 +2228,7 @@ mod tests {
             .map(|entry| entry.file_name())
             .collect::<std::collections::HashSet<_>>();
         assert_eq!(files_after, files_before);
+        assert_eq!(serde_json::to_value(Session::load(&retained.id).unwrap()).unwrap(), retained_before);
     }
 
     #[tokio::test]
