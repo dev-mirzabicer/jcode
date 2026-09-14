@@ -267,6 +267,11 @@ else
     echo "[1/3] Skipping source sync (--no-sync)"
 fi
 
+# Remote tests need the same state boundary as local selfdev tests. This runner
+# is synced with the source; --no-sync fails closed if it is not installed.
+case "$SUBCOMMAND" in
+    test|bench) CARGO_CMD=(python3 scripts/run_isolated_test.py "${CARGO_CMD[@]}") ;;
+esac
 printf -v REMOTE_CARGO_CMD '%q ' "${CARGO_CMD[@]}"
 printf -v REMOTE_INNER_CMD 'cd %q && env JCODE_BUILD_METADATA_FILE=.jcode-build-meta %s' "$REMOTE_DIR" "$REMOTE_CARGO_CMD"
 printf -v REMOTE_RUN_CMD 'sh -lc %q' "$REMOTE_INNER_CMD"
