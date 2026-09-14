@@ -55,6 +55,8 @@ pub enum ChildStartupContext {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateChild {
+    #[serde(default)]
+    pub blocked_mcps: std::collections::BTreeSet<String>,
     pub agent: String,
     pub model_alias: String,
     pub permission: Permission,
@@ -104,11 +106,31 @@ pub struct SubagentRequest {
     pub delivery: ChildDelivery,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostedDelegationInvocation {
+    pub session_id: String,
+    pub message_id: String,
+    pub call_path: Vec<String>,
+    pub working_dir: Option<PathBuf>,
+    pub tool: String,
+    pub input: serde_json::Value,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ChildExecutionReceipt {
+    pub child_id: ChildSessionId,
+    pub turn_id: String,
+    pub artifact_dir: PathBuf,
+    pub queued: bool,
+}
+
 /// The model-facing flat schema has one interpretation. Null optional fields are
 /// omission. Do not infer a creation from an empty or malformed child selector.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Input {
+    blocked_mcps: Option<std::collections::BTreeSet<String>>,
     child_id: Option<ChildSessionId>,
     agent: Option<String>,
     model_alias: Option<String>,
@@ -142,6 +164,9 @@ impl SubagentRequest {
             wake: input.wake.unwrap_or(false),
         };
         let request = if let Some(child_id) = input.child_id {
+            if input.blocked_mcps.is_some() {
+                return Err("MCP exclusions are fixed at child creation".into());
+            }
             if input.agent.is_some()
                 || input.model_alias.is_some()
                 || input.effort.is_some()
@@ -190,6 +215,7 @@ impl SubagentRequest {
                 ChildStartupContext::ProjectDefault
             };
             ChildRequest::Create(CreateChild {
+                blocked_mcps: input.blocked_mcps.unwrap_or_default(),
                 agent,
                 model_alias,
                 permission,

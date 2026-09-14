@@ -159,7 +159,7 @@ impl ExecutionStore {
     }
 
     pub(super) fn session_is_cold(&self, session: &str, now: i64) -> Result<bool> {
-        Ok(self.connection()?.query_row("SELECT EXISTS(SELECT 1 FROM session_activity a WHERE a.session_id=?1 AND a.last_active<=?2 AND a.retention_not_before<=?3 AND NOT EXISTS(SELECT 1 FROM runs r WHERE r.session_id=a.session_id AND r.state IN ('prepared','running')) AND NOT EXISTS(SELECT 1 FROM session_activity_leases l WHERE l.session_id=a.session_id))", params![session, now.saturating_sub(IDLE_SECONDS), now], |row| row.get(0))?)
+        Ok(self.connection()?.query_row("SELECT EXISTS(SELECT 1 FROM session_activity a WHERE a.session_id=?1 AND a.last_active<=?2 AND a.retention_not_before<=?3 AND NOT EXISTS(SELECT 1 FROM runs r WHERE r.session_id=a.session_id AND r.state IN ('prepared','queued','running')) AND NOT EXISTS(SELECT 1 FROM child_turns c JOIN runs r ON r.id=c.run_id WHERE c.child_id=a.session_id AND r.state IN ('prepared','queued','running')) AND NOT EXISTS(SELECT 1 FROM session_activity_leases l WHERE l.session_id=a.session_id))", params![session, now.saturating_sub(IDLE_SECONDS), now], |row| row.get(0))?)
     }
 }
 

@@ -7,6 +7,15 @@ use std::path::PathBuf;
 
 impl ExecutionStore {
     pub fn background_acceptance(&self, id: &str, requesting_owner: &str) -> Result<ToolOutput> {
+        self.background_acceptance_with_child(id, requesting_owner, None)
+    }
+
+    pub fn background_acceptance_with_child(
+        &self,
+        id: &str,
+        requesting_owner: &str,
+        child: Option<&jcode_tool_types::delegation::ChildExecutionReceipt>,
+    ) -> Result<ToolOutput> {
         ensure!(
             id.len() == 68
                 && id.starts_with("run-")
@@ -48,6 +57,29 @@ impl ExecutionStore {
             path.display()
         );
         let mut output=ToolOutput::new(body).with_metadata(serde_json::json!({"background":true,"task_id":id,"run_id":id,"output_file":record.output_path}));
+        if let Some(child) = child {
+            let registered: Option<String> = transaction
+                .query_row(
+                    "SELECT child_id FROM child_turns WHERE run_id=?1",
+                    [id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            ensure!(
+                child.turn_id == id && registered.as_deref() == Some(child.child_id.as_str()),
+                "Child acceptance does not match its admitted invocation"
+            );
+            output.output.push_str(&format!(
+                "\nChild: {}\nArtifact directory: {}\nQueued: {}",
+                child.child_id.as_str(),
+                child.artifact_dir.display(),
+                child.queued
+            ));
+            output
+                .metadata
+                .as_mut()
+                .context("Missing acceptance metadata")?["child"] = serde_json::to_value(child)?;
+        }
         output.source = OutputSource::Acceptance(AcceptanceReference {
             invocation_id: id.into(),
             path: path.clone(),

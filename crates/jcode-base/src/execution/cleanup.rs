@@ -108,7 +108,7 @@ impl ExecutionStore {
             }
         };
         let connection = self.connection()?;
-        let mut query = connection.prepare("SELECT r.id,r.created FROM runs r JOIN output_locations l ON l.id=r.id WHERE r.state NOT IN ('prepared','running') AND l.archived=1 AND l.cold_archived_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM output_deletions d WHERE d.id=r.id) AND NOT EXISTS(SELECT 1 FROM relocations m WHERE m.id=r.id AND m.stage<>'complete') ORDER BY r.created,r.id")?;
+        let mut query = connection.prepare("SELECT r.id,r.created FROM runs r JOIN output_locations l ON l.id=r.id WHERE r.state NOT IN ('prepared','queued','running') AND l.archived=1 AND l.cold_archived_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM output_deletions d WHERE d.id=r.id) AND NOT EXISTS(SELECT 1 FROM relocations m WHERE m.id=r.id AND m.stage<>'complete') ORDER BY r.created,r.id")?;
         let rows = query
             .query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))

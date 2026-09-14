@@ -326,7 +326,7 @@ impl CaptureState {
         let mut connection = self.storage.store.connection()?;
         let transaction =
             connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        ensure!(transaction.execute("UPDATE runs SET output_bytes=?3,updated=unixepoch() WHERE id=?1 AND owner=?2 AND state='running' AND output_bytes=?4",params![self.record.id,self.record.owner,i64::try_from(next)?,i64::try_from(self.committed)?])?==1,"Output capture lost invocation ownership or committed prefix");
+        ensure!(transaction.execute("UPDATE runs SET output_bytes=?3,updated=unixepoch() WHERE id=?1 AND owner=?2 AND state IN ('queued','running') AND output_bytes=?4",params![self.record.id,self.record.owner,i64::try_from(next)?,i64::try_from(self.committed)?])?==1,"Output capture lost invocation ownership or committed prefix");
         if !bytes.is_empty() {
             transaction.execute(
                 "INSERT INTO output_chunks(run_id,start_byte,end_byte,sha256) VALUES (?1,?2,?3,?4)",
@@ -467,7 +467,7 @@ impl OutputCapture for Capture {
         state.parts.insert(file.clone());
         let result = (|| {
             let owned: bool = state.storage.store.connection()?.query_row(
-                "SELECT EXISTS(SELECT 1 FROM runs WHERE id=?1 AND owner=?2 AND state='running')",
+                "SELECT EXISTS(SELECT 1 FROM runs WHERE id=?1 AND owner=?2 AND state IN ('queued','running'))",
                 params![state.record.id, state.record.owner],
                 |row| row.get(0),
             )?;

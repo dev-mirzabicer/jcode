@@ -77,7 +77,7 @@ impl Drop for DeliveryAttempt {
 impl ExecutionStore {
     pub fn unfinished_background_deliveries(&self) -> Result<Vec<String>> {
         let connection = self.connection()?;
-        let mut query=connection.prepare("SELECT d.run_id FROM background_deliveries d JOIN runs r ON r.id=d.run_id WHERE r.state IN ('prepared','running') ORDER BY d.run_id")?;
+        let mut query=connection.prepare("SELECT d.run_id FROM background_deliveries d JOIN runs r ON r.id=d.run_id WHERE r.state IN ('prepared','queued','running') ORDER BY d.run_id")?;
         Ok(query
             .query_map([], |row| row.get(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?)

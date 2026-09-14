@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum RunState {
     Prepared,
+    Queued,
     Running,
     Completed,
     Failed,
@@ -27,6 +28,7 @@ impl RunState {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Prepared => "prepared",
+            Self::Queued => "queued",
             Self::Running => "running",
             Self::Completed => "completed",
             Self::Failed => "failed",
@@ -35,13 +37,14 @@ impl RunState {
         }
     }
     pub fn terminal(self) -> bool {
-        !matches!(self, Self::Prepared | Self::Running)
+        !matches!(self, Self::Prepared | Self::Queued | Self::Running)
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StopCause {
+    ChildPredecessorFailure,
     HumanCancellation,
     ParentForegroundCancellation,
     ReloadQuiescence,
@@ -51,6 +54,9 @@ pub enum StopCause {
 impl StopCause {
     pub fn description(self) -> &'static str {
         match self {
+            Self::ChildPredecessorFailure => {
+                "Cancelled after preceding child work failed or stopped"
+            }
             Self::HumanCancellation => "Cancelled by user",
             Self::ParentForegroundCancellation => "Cancelled with parent foreground work",
             Self::ReloadQuiescence => {

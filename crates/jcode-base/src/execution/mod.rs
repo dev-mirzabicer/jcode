@@ -1,5 +1,7 @@
 //! Shared execution persistence and source/output reading.
 mod acceptance;
+mod delegation;
+pub use delegation::{ChildAdmission, ChildTurnClaim};
 mod activity;
 mod retention;
 pub use retention::{RetentionIssue, RetentionReport};

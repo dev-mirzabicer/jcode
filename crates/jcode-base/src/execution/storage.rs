@@ -559,7 +559,7 @@ impl BundleStorage {
         let mut connection = store.connection()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let owned: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM runs WHERE id=?1 AND owner=?2 AND state='running')",
+            "SELECT EXISTS(SELECT 1 FROM runs WHERE id=?1 AND owner=?2 AND state IN ('queued','running'))",
             params![record.id, record.owner],
             |row| row.get(0),
         )?;

@@ -108,10 +108,18 @@ impl Default for ExecutionPolicy {
 
 #[derive(Clone, Default)]
 pub struct ExecutionReady {
+    child: Arc<std::sync::Mutex<Option<jcode_tool_types::delegation::ChildExecutionReceipt>>>,
     flag: Arc<std::sync::atomic::AtomicBool>,
     notify: Arc<tokio::sync::Notify>,
 }
 impl ExecutionReady {
+    pub fn mark_child(&self, child: jcode_tool_types::delegation::ChildExecutionReceipt) {
+        *self.child.lock().unwrap_or_else(|p| p.into_inner()) = Some(child);
+        self.mark();
+    }
+    pub fn child_receipt(&self) -> Option<jcode_tool_types::delegation::ChildExecutionReceipt> {
+        self.child.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
     pub fn mark(&self) {
         self.flag.store(true, std::sync::atomic::Ordering::SeqCst);
         self.notify.notify_waiters();
@@ -247,6 +255,11 @@ impl ToolContext {
 /// A tool that can be executed by the agent.
 #[async_trait]
 pub trait Tool: Send + Sync {
+    /// Hosted tools transfer their original invocation to the compatible shared
+    /// server before local supervision. This is code-owned, never a JSON flag.
+    fn requires_shared_host(&self) -> bool {
+        false
+    }
     /// Tool name (must match what's sent to the API).
     fn name(&self) -> &str;
 

@@ -541,7 +541,7 @@ impl ExecutionStore {
         let mut connection = self.connection()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let ids = {
-            let mut query = tx.prepare("SELECT id FROM (SELECT s.id,s.reader,row_number() OVER(PARTITION BY s.reader,s.target ORDER BY s.created DESC,s.sequence DESC) AS position FROM inspection_snapshots s WHERE s.state='retained') ranked JOIN session_activity a ON a.session_id=ranked.reader WHERE position>2 AND a.last_active<=?1 AND a.retention_not_before<=?2 AND NOT EXISTS(SELECT 1 FROM runs r WHERE r.session_id=ranked.reader AND r.state IN ('prepared','running')) AND NOT EXISTS(SELECT 1 FROM session_activity_leases l WHERE l.session_id=ranked.reader)")?;
+            let mut query = tx.prepare("SELECT id FROM (SELECT s.id,s.reader,row_number() OVER(PARTITION BY s.reader,s.target ORDER BY s.created DESC,s.sequence DESC) AS position FROM inspection_snapshots s WHERE s.state='retained') ranked JOIN session_activity a ON a.session_id=ranked.reader WHERE position>2 AND a.last_active<=?1 AND a.retention_not_before<=?2 AND NOT EXISTS(SELECT 1 FROM runs r WHERE r.session_id=ranked.reader AND r.state IN ('prepared','queued','running')) AND NOT EXISTS(SELECT 1 FROM child_turns c JOIN runs r ON r.id=c.run_id WHERE c.child_id=ranked.reader AND r.state IN ('prepared','queued','running')) AND NOT EXISTS(SELECT 1 FROM session_activity_leases l WHERE l.session_id=ranked.reader)")?;
             query
                 .query_map(
                     rusqlite::params![now.saturating_sub(super::activity::IDLE_SECONDS), now],

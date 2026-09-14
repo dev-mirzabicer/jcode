@@ -292,9 +292,11 @@ async fn background_receipt(
             (policy.notify, policy.wake),
         )
         .await?;
-    let output =
-        tokio::task::spawn_blocking(move || store.background_acceptance(&receipt_id, &requester))
-            .await??;
+    let child = run.ready.child_receipt();
+    let output = tokio::task::spawn_blocking(move || {
+        store.background_acceptance_with_child(&receipt_id, &requester, child.as_ref())
+    })
+    .await??;
     Ok(output)
 }
 
@@ -314,6 +316,45 @@ pub(crate) async fn background_handoff(ctx: &ToolContext) -> Result<ToolOutput> 
             .context("Missing presentation target")?,
     )
     .await
+}
+
+pub(crate) async fn await_terminal(
+    store: &ExecutionStore,
+    id: &str,
+    stop: &InterruptSignal,
+) -> Result<()> {
+    let run = LIVE
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(&(store.root().to_path_buf(), id.to_string()))
+        .cloned();
+    if let Some(run) = run {
+        let mut result = run.result.clone();
+        loop {
+            ensure!(!stop.is_set(), "Child FIFO wait cancelled");
+            if result.borrow_and_update().is_some() {
+                return Ok(());
+            }
+            tokio::select! {
+                changed = result.changed() => { changed.context("Preceding execution owner closed without terminal publication")?; },
+                _ = stop.notified() => anyhow::bail!("Child FIFO wait cancelled"),
+            }
+        }
+    }
+    if store
+        .inspect(id)?
+        .is_some_and(|record| record.state.terminal())
+    {
+        return Ok(());
+    }
+    ensure!(
+        store
+            .recover_lost_owner(id)
+            .await?
+            .is_some_and(|record| record.state.terminal()),
+        "Preceding child work belongs to an unavailable or still-active runtime. It was not replayed."
+    );
+    Ok(())
 }
 
 async fn supervise(
@@ -519,10 +560,16 @@ async fn supervise(
             }
         }
     };
+    // A cooperative producer can fire Stop and return in the same poll. The
+    // completion-biased select must not turn that cancellation into failure or
+    // success merely because its notification branch was not polled first.
+    let stopping = stopping.or_else(|| run.stop.stop_cause());
     let state = match stopping {
-        Some(StopCause::HumanCancellation | StopCause::ParentForegroundCancellation) => {
-            RunState::Cancelled
-        }
+        Some(
+            StopCause::HumanCancellation
+            | StopCause::ParentForegroundCancellation
+            | StopCause::ChildPredecessorFailure,
+        ) => RunState::Cancelled,
         Some(StopCause::ReloadQuiescence | StopCause::OwnerCrash) => RunState::Interrupted,
         None if !result.as_ref().is_ok_and(|output| !output.is_error) => RunState::Failed,
         None => RunState::Completed,

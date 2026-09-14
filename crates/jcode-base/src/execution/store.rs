@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-const SCHEMA: i64 = 19;
+const SCHEMA: i64 = 20;
 
 pub use jcode_tool_types::RunState;
 
@@ -95,6 +95,10 @@ impl ExecutionStore {
         if current == SCHEMA {
             return Ok(store);
         }
+        // SQLite's documented table-rebuild procedure keeps every existing
+        // foreign-key reference pointing at runs. The migration transaction
+        // verifies all references before commit and never uses writable_schema.
+        connection.pragma_update(None, "foreign_keys", "OFF")?;
         // Only migrations need a writer. Re-read under the transaction because
         // another process may have completed migration after this observation.
         let transaction = connection
@@ -295,7 +299,19 @@ impl ExecutionStore {
                 UPDATE session_activity SET retention_not_before=unixepoch()+604800;
                 PRAGMA user_version=19;")?;
         }
+        if version < 20 {
+            super::delegation::migrate(&transaction)?;
+        }
+        let broken: i64 =
+            transaction.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })?;
+        ensure!(
+            broken == 0,
+            "Execution metadata migration failed foreign-key validation"
+        );
         transaction.commit()?;
+        connection.pragma_update(None, "foreign_keys", "ON")?;
         Ok(store)
     }
 
@@ -429,7 +445,7 @@ impl ExecutionStore {
     }
 
     pub fn promote(&self, id: &str, owner: &str) -> Result<bool> {
-        Ok(self.connection()?.execute("UPDATE runs SET background=1,updated=unixepoch() WHERE id=?1 AND owner=?2 AND state IN ('prepared','running')",params![id,owner])?==1)
+        Ok(self.connection()?.execute("UPDATE runs SET background=1,updated=unixepoch() WHERE id=?1 AND owner=?2 AND state IN ('prepared','queued','running')",params![id,owner])?==1)
     }
 
     pub fn request_stop(
@@ -438,7 +454,7 @@ impl ExecutionStore {
         owner: &str,
         cause: jcode_tool_types::StopCause,
     ) -> Result<bool> {
-        Ok(self.connection()?.execute("UPDATE runs SET stop_cause=COALESCE(stop_cause,?3),updated=unixepoch() WHERE id=?1 AND owner=?2 AND state IN ('prepared','running')",params![id,owner,serde_json::to_string(&cause)?])?==1)
+        Ok(self.connection()?.execute("UPDATE runs SET stop_cause=COALESCE(stop_cause,?3),updated=unixepoch() WHERE id=?1 AND owner=?2 AND state IN ('prepared','queued','running')",params![id,owner,serde_json::to_string(&cause)?])?==1)
     }
 
     /// Finalization references only files already flushed by the output owner.
@@ -510,6 +526,7 @@ pub(super) fn query_record(connection: &Connection, id: &str) -> Result<Option<R
             let raw_state: String = row.get("state")?;
             let state = match raw_state.as_str() {
                 "prepared" => RunState::Prepared,
+                "queued" => RunState::Queued,
                 "running" => RunState::Running,
                 "completed" => RunState::Completed,
                 "failed" => RunState::Failed,

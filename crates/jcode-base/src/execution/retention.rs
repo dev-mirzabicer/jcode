@@ -60,7 +60,7 @@ impl ExecutionStore {
         }
         if config.archive.is_some() {
             let connection = self.connection()?;
-            let mut query=connection.prepare("SELECT r.id FROM runs r JOIN output_locations l ON l.id=r.id JOIN session_activity a ON a.session_id=r.session_id WHERE r.state NOT IN ('prepared','running') AND a.last_active<=?1 AND a.retention_not_before<=?2 AND (l.archived=0 OR l.cold_archived_at IS NULL OR EXISTS(SELECT 1 FROM relocations m WHERE m.id=r.id AND m.stage<>'complete')) AND NOT EXISTS(SELECT 1 FROM output_deletions d WHERE d.id=r.id) ORDER BY r.id")?;
+            let mut query=connection.prepare("SELECT r.id FROM runs r JOIN output_locations l ON l.id=r.id JOIN session_activity a ON a.session_id=r.session_id WHERE r.state NOT IN ('prepared','queued','running') AND a.last_active<=?1 AND a.retention_not_before<=?2 AND (l.archived=0 OR l.cold_archived_at IS NULL OR EXISTS(SELECT 1 FROM relocations m WHERE m.id=r.id AND m.stage<>'complete')) AND NOT EXISTS(SELECT 1 FROM output_deletions d WHERE d.id=r.id) ORDER BY r.id")?;
             let ids = query
                 .query_map(
                     rusqlite::params![now.saturating_sub(super::IDLE_SECONDS), now],

@@ -352,7 +352,9 @@ async fn worker_with_child(id: &str, child: tokio::process::Command) -> Result<(
             Ok(outcome) => {
                 let state = match outcome.stop_cause {
                     Some(
-                        StopCause::HumanCancellation | StopCause::ParentForegroundCancellation,
+                        StopCause::HumanCancellation
+                        | StopCause::ParentForegroundCancellation
+                        | StopCause::ChildPredecessorFailure,
                     ) => RunState::Cancelled,
                     Some(StopCause::ReloadQuiescence | StopCause::OwnerCrash) => {
                         RunState::Interrupted
@@ -378,9 +380,11 @@ async fn worker_with_child(id: &str, child: tokio::process::Command) -> Result<(
                 .inspect(&id)?
                 .and_then(|record| record.stop_cause)
             {
-                Some(StopCause::HumanCancellation | StopCause::ParentForegroundCancellation) => {
-                    RunState::Cancelled
-                }
+                Some(
+                    StopCause::HumanCancellation
+                    | StopCause::ParentForegroundCancellation
+                    | StopCause::ChildPredecessorFailure,
+                ) => RunState::Cancelled,
                 Some(StopCause::ReloadQuiescence | StopCause::OwnerCrash) => RunState::Interrupted,
                 None => RunState::Failed,
             }
