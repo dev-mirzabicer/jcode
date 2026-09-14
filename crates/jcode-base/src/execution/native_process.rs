@@ -7,6 +7,33 @@ use anyhow::{Result, ensure};
 use rusqlite::{TransactionBehavior, params};
 
 impl ExecutionStore {
+    /// Called only by the authenticated live execution owner. Existing process
+    /// identity checks reject reused PIDs, nonprivate groups and this runtime.
+    pub async fn force_native_processes(&self, run: &str, owner: &str) -> Result<bool> {
+        #[cfg(unix)]
+        {
+            let store = self.clone();
+            let run = run.to_owned();
+            let owner = owner.to_owned();
+            tokio::task::spawn_blocking(move || -> Result<bool> {
+                let connection = store.connection()?;
+                let mut query=connection.prepare("SELECT n.identity FROM native_processes n JOIN runs r ON r.id=n.run_id WHERE n.run_id=?1 AND n.owner=?2 AND r.owner=?2 AND r.state='running' AND n.finished=0 AND n.identity IS NOT NULL")?;
+                let identities=query.query_map(params![run,owner],|row|row.get::<_,String>(0))?.collect::<std::result::Result<Vec<_>,_>>()?;
+                ensure!(!identities.is_empty(), "This execution has no verified native process available for force stop. Ordinary Stop remains the supported control.");
+                for raw in identities {
+                    let identity:super::process::ProcessIdentity=serde_json::from_str(&raw)?;
+                    identity.signal_group(libc::SIGKILL)?;
+                }
+                Ok(true)
+            }).await?
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (run, owner);
+            anyhow::bail!("Verified native force stop is unsupported on this platform")
+        }
+    }
+
     pub(super) fn begin_native_process(&self, run: &str, owner: &str) -> Result<String> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;

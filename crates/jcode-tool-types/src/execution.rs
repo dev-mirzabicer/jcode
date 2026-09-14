@@ -85,6 +85,9 @@ pub enum ExecutionRequest {
     Stop {
         run_id: String,
     },
+    ForceStop {
+        run_id: String,
+    },
     Background {
         run_id: String,
     },

@@ -1,7 +1,7 @@
 //! Shared execution persistence and source/output reading.
 mod acceptance;
 mod delegation;
-pub use delegation::{ChildAdmission, ChildTurnClaim};
+pub use delegation::{ChildAdmission, ChildControlLease, ChildTurnClaim};
 mod activity;
 mod retention;
 pub use retention::{RetentionIssue, RetentionReport};
@@ -27,6 +27,7 @@ pub mod process;
 pub mod reader;
 mod recovery;
 mod runtime;
+pub mod task_monitor;
 pub use output::present;
 pub use runtime::RuntimeEndpoint;
 mod capture;

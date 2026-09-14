@@ -2,6 +2,13 @@
 use super::ExecutionStore;
 use anyhow::{Context, Result, ensure};
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
+use sha2::{Digest, Sha256};
+
+/// Kernel-owned short transaction lease, shared by admission and human context
+/// operations. It is never held while the human browses or the curator runs.
+pub struct ChildControlLease {
+    _file: std::fs::File,
+}
 
 pub(super) fn migrate(tx: &Transaction<'_>) -> Result<()> {
     tx.execute_batch("CREATE TABLE runs_with_queue (
@@ -64,6 +71,43 @@ pub enum ChildTurnClaim {
 }
 
 impl ExecutionStore {
+    fn child_control_lease(&self, child: &str) -> Result<ChildControlLease> {
+        ensure!(!child.is_empty(), "Child control requires an identity");
+        let directory = self.root().join("child-controls");
+        crate::storage::ensure_dir(&directory)?;
+        ensure!(
+            std::fs::symlink_metadata(&directory)?.is_dir(),
+            "Child control directory changed type"
+        );
+        let path = directory.join(format!("{:x}", Sha256::digest(child.as_bytes())));
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).read(true).write(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        let file = options.open(path)?;
+        file.try_lock()
+            .context("Child control is busy; retry the requested action")?;
+        Ok(ChildControlLease { _file: file })
+    }
+
+    /// Retain this guard through source capture or context persistence. A new
+    /// turn cannot pass admission between the idle check and the transaction.
+    pub fn idle_child_control(&self, child: &str) -> Result<ChildControlLease> {
+        let lease = self.child_control_lease(child)?;
+        ensure!(
+            self.unfinished_child_turns(child)?.is_empty(),
+            "Child is busy; context editing requires an idle child"
+        );
+        ensure!(
+            self.child_foreground_work(child)?.is_empty(),
+            "Child still owns foreground work"
+        );
+        Ok(lease)
+    }
+
     /// Recover only proven-lost owners. Live owners require no per-turn body
     /// reads. Unproven work retains its reservation and produces diagnostics.
     pub async fn recover_abandoned_children(&self) -> Result<Vec<String>> {
@@ -118,6 +162,7 @@ impl ExecutionStore {
         limit: usize,
     ) -> Result<ChildAdmission> {
         ensure!(limit != 0, "Child capacity must be positive");
+        let _control = self.child_control_lease(child_id)?;
         let mut connection = self.connection()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let (tool, actual_owner, state): (String, String, String) = tx.query_row(
@@ -248,6 +293,29 @@ mod tests {
             panic!()
         };
         record
+    }
+
+    #[test]
+    fn idle_context_lease_and_child_admission_are_mutually_exclusive() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ExecutionStore::open(temp.path()).unwrap();
+        let first = run(&store, "first");
+        let lease = store.idle_child_control("child").unwrap();
+        assert!(
+            store
+                .admit_child_turn(&first.id, "owner", "child", true, false, 15)
+                .is_err()
+        );
+        assert!(store.child_for_run(&first.id).unwrap().is_none());
+        drop(lease);
+        store
+            .admit_child_turn(&first.id, "owner", "child", true, false, 15)
+            .unwrap();
+        assert!(store.idle_child_control("child").is_err());
+        store
+            .retain(first, ToolOutput::new("reply"), RunState::Completed)
+            .unwrap();
+        assert!(store.idle_child_control("child").is_ok());
     }
 
     #[test]

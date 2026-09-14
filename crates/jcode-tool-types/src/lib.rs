@@ -1,6 +1,7 @@
 pub mod delegation;
 pub mod execution;
 pub mod presentation;
+pub mod task_monitor;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct ProviderReceiptReference {

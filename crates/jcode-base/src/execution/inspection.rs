@@ -45,6 +45,7 @@ pub async fn inspect(
     let root = state_root.to_path_buf();
     let store = tokio::task::spawn_blocking(move || ExecutionStore::open(&root)).await??;
     let is_stop = matches!(&request, ExecutionRequest::Stop { .. });
+    let is_force = matches!(&request, ExecutionRequest::ForceStop { .. });
     match request {
         ExecutionRequest::ReadPart {
             run_id,
@@ -99,9 +100,13 @@ pub async fn inspect(
         ExecutionRequest::Inspect { run_id } => Ok(ExecutionResponse::Status {
             run: Box::new(record(&store, &run_id).await?),
         }),
-        ExecutionRequest::Stop { run_id } | ExecutionRequest::Background { run_id } => {
+        ExecutionRequest::Stop { run_id }
+        | ExecutionRequest::Background { run_id }
+        | ExecutionRequest::ForceStop { run_id } => {
             validate_id(&run_id)?;
-            let operation = if is_stop {
+            let operation = if is_force {
+                ControlOperation::ForceStop
+            } else if is_stop {
                 ControlOperation::Stop {
                     cause: StopCause::HumanCancellation,
                 }

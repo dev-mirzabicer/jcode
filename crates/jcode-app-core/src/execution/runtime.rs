@@ -264,6 +264,12 @@ async fn dispatch(
         run.runtime.endpoint.id == endpoint.id && run.owns_execution.load(Ordering::SeqCst)
     }) {
         match action {
+            ControlOperation::ForceStop => {
+                ensure!(run.result.borrow().is_none(), "Execution already finished");
+                run.stop.fire_with_cause(StopCause::HumanCancellation);
+                let changed = store.force_native_processes(id, &endpoint.id).await?;
+                return Ok(ControlReply::Accepted { changed });
+            }
             ControlOperation::Stop { cause } => {
                 let changed = run.result.borrow().is_none();
                 if changed {

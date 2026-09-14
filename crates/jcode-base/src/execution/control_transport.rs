@@ -14,6 +14,7 @@ pub enum ControlOperation {
     Inspect,
     Wait,
     Stop { cause: StopCause },
+    ForceStop,
     Background,
 }
 
