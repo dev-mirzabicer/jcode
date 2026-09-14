@@ -40,7 +40,7 @@ def main():
     })
     # Explicit endpoints and state paths take precedence over the private home.
     # A nested fixture must opt into its own endpoints inside this invocation.
-    for key in ("JCODE_SOCKET", "JCODE_DEBUG_SOCKET", "JCODE_REPO_DIR",
+    for key in ("JCODE_SOCKET", "JCODE_DEBUG_SOCKET", "JCODE_API_SOCKET", "JCODE_REPO_DIR",
                 "JCODE_SESSION_ID", "JCODE_RUNTIME_PROVIDER", "JCODE_ACTIVE_PROVIDER",
                 "JCODE_RUST_ACTION_LOG_PATH", "JCODE_CLIENT_SELFDEV"):
         env.pop(key, None)

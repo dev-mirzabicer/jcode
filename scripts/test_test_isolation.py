@@ -25,6 +25,7 @@ for key in ['HOME','JCODE_HOME','JCODE_RUNTIME_DIR','XDG_CONFIG_HOME','XDG_CACHE
     assert Path(os.environ[key]).is_relative_to(root), key
 assert 'JCODE_SOCKET' not in os.environ
 assert 'JCODE_DEBUG_SOCKET' not in os.environ
+assert 'JCODE_API_SOCKET' not in os.environ
 assert 'JCODE_REPO_DIR' not in os.environ
 assert Path(os.environ['CARGO_HOME']).is_absolute()
 assert Path(os.environ['RUSTUP_HOME']).is_absolute()
@@ -36,7 +37,7 @@ assert fallback.is_relative_to(root)
 print(json.dumps({'root': str(root), 'fallback': str(fallback)}))
 '''
         first = self.invoke(code, JCODE_HOME="/must-not-use", JCODE_SOCKET="/live.sock",
-                            JCODE_DEBUG_SOCKET="/debug.sock", JCODE_REPO_DIR="/live/repo")
+                            JCODE_DEBUG_SOCKET="/debug.sock", JCODE_API_SOCKET="/live-api.sock", JCODE_REPO_DIR="/live/repo")
         self.assertEqual(first.returncode, 0, first.stderr)
         second = self.invoke(code)
         self.assertEqual(second.returncode, 0, second.stderr)
