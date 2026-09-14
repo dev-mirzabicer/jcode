@@ -181,6 +181,26 @@ try:
     c, r = start()
     parent = subscribe(c, r)
     def debug(command):
+        parts = command.split(':', 2)
+        if len(parts) == 3 and parts[1] in testers and parts[2] != 'stop':
+            entry = next(entry for entry in json.loads((home / 'testers.json').read_text()) if entry['id'] == parts[1])
+            target = Path(entry['debug_cmd_path'])
+            response = Path(entry['debug_response_path'])
+            operation = {'frame': 'screen-json', 'frame-normalized': 'screen-json-normalized'}.get(parts[2], parts[2])
+            if response.exists():
+                response.unlink()
+            temporary = target.with_suffix('.next')
+            temporary.write_text(operation)
+            os.replace(temporary, target)
+            deadline = time.monotonic() + 15
+            while True:
+                if response.exists():
+                    text = response.read_text()
+                    if text:
+                        response.unlink()
+                        return text
+                assert time.monotonic() < deadline, 'Owned tester did not answer ' + operation
+                time.sleep(.025)
         return run([BIN, 'debug', command, '--socket', str(sockpath)])
     wrapper = ROOT / 'tester.sh'
     wrapper.write_text('#!/bin/sh\nexec ' + ' '.join(shlex.quote(v) for v in base + ['--socket', str(sockpath), '--resume', parent]) + ' "$@"\n')
@@ -193,6 +213,7 @@ try:
         debug(f'tester:{tid}:keys:esc,esc')
         fixture = debug(f'tester:{tid}:context-editor-fixture:active-child-directive')
         assert 'active-child-directive' in fixture, fixture
+        debug(f'tester:{tid}:frame')  # enable capture before an input-triggered repaint
         debug(f'tester:{tid}:keys:space')
         deadline = time.monotonic() + 15
         while True:
@@ -201,7 +222,7 @@ try:
                 (ROOT / f'child-lock-{width}x24.json').write_text(rendered)
                 break
             assert time.monotonic() < deadline, rendered
-            debug(f'tester:{tid}:keys:up')
+            debug(f'tester:{tid}:keys:down,up')
             time.sleep(.1)
         debug(f'tester:{tid}:stop')
         testers.remove(tid)
