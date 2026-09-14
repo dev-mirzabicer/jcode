@@ -4,6 +4,19 @@ use std::panic;
 
 use crate::{id, session, telemetry, tui};
 
+static REMOTE_CLIENT_PROCESS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub(super) fn mark_remote_client_process() {
+    REMOTE_CLIENT_PROCESS.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn process_owns_failure_receipt(session: &session::Session) -> bool {
+    !REMOTE_CLIENT_PROCESS.load(std::sync::atomic::Ordering::SeqCst)
+        && session.last_pid == Some(std::process::id())
+        && should_record_panic_as_crash(&session.status)
+}
+
 pub struct TuiRuntimeState {
     mouse_capture: bool,
     keyboard_enhanced: bool,
@@ -193,8 +206,9 @@ pub fn install_panic_hook() {
                 telemetry::record_crash(&provider, &model, telemetry::SessionEndReason::Panic);
             }
 
-            if let Ok(mut session) = session::Session::load(&session_id)
-                && should_record_panic_as_crash(&session.status)
+            if !REMOTE_CLIENT_PROCESS.load(std::sync::atomic::Ordering::SeqCst)
+                && let Ok(mut session) = session::Session::load(&session_id)
+                && process_owns_failure_receipt(&session)
             {
                 session.mark_crashed(Some(format!("Panic: {}", info)));
                 let _ = session.save();
@@ -208,8 +222,9 @@ pub fn mark_current_session_crashed(message: String) {
         if let Some((provider, model)) = telemetry::current_provider_model() {
             telemetry::record_crash(&provider, &model, telemetry::SessionEndReason::Signal);
         }
-        if let Ok(mut session) = session::Session::load(&session_id)
-            && matches!(session.status, session::SessionStatus::Active)
+        if !REMOTE_CLIENT_PROCESS.load(std::sync::atomic::Ordering::SeqCst)
+            && let Ok(mut session) = session::Session::load(&session_id)
+            && process_owns_failure_receipt(&session)
         {
             session.mark_crashed(Some(message));
             let _ = session.save();
@@ -781,6 +796,27 @@ mod tests {
 
         let stored = get_current_session();
         assert_eq!(stored.as_deref(), Some("test_session_123"));
+    }
+
+    #[test]
+    fn crash_receipts_require_local_process_ownership_not_remote_client_identity() {
+        use std::sync::atomic::Ordering;
+        let _guard = TEST_SESSION_LOCK.lock().unwrap();
+        struct Restore(bool);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                REMOTE_CLIENT_PROCESS.store(self.0, Ordering::SeqCst);
+            }
+        }
+        let _restore = Restore(REMOTE_CLIENT_PROCESS.swap(false, Ordering::SeqCst));
+        let mut session = session::Session::create_with_id("ownership-fixture".into(), None, None);
+        session.last_pid = Some(std::process::id());
+        assert!(process_owns_failure_receipt(&session));
+        mark_remote_client_process();
+        assert!(!process_owns_failure_receipt(&session));
+        REMOTE_CLIENT_PROCESS.store(false, Ordering::SeqCst);
+        session.last_pid = Some(0);
+        assert!(!process_owns_failure_receipt(&session));
     }
 
     #[test]

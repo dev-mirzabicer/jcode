@@ -90,6 +90,7 @@ pub async fn run_tui_client(
     onboarding_sim: bool,
 ) -> Result<()> {
     startup_profile::mark("tui_client_enter");
+    super::terminal::mark_remote_client_process();
     let (terminal, tui_runtime) = init_tui_runtime()?;
     startup_profile::mark("tui_terminal_init");
     startup_profile::mark("mermaid_picker");
