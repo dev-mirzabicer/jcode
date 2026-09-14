@@ -201,6 +201,9 @@ pub struct StateSnapshot {
 /// Actual rendered text content
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct RenderedText {
+    /// Actual rendered cells for a full-screen overlay, not conversation text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overlay_text: Option<String>,
     /// Status line text (spinner, tokens, elapsed, etc.)
     pub status_line: String,
     /// Input area text (what the user is typing)

@@ -2726,6 +2726,21 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
 
     if let Some(editor_cell) = app.context_editor_overlay() {
         editor_cell.borrow_mut().render(frame);
+        if visual_debug::is_enabled() {
+            let mut capture = FrameCaptureBuilder::new(area.width, area.height);
+            capture.render_order.push("context_editor".into());
+            let buffer = frame.buffer_mut();
+            let mut rows = Vec::with_capacity(usize::from(area.height));
+            for y in area.y..area.bottom() {
+                let mut row = String::new();
+                for x in area.x..area.right() {
+                    row.push_str(buffer[(x, y)].symbol());
+                }
+                rows.push(row);
+            }
+            capture.rendered_text.overlay_text = Some(rows.join("\n"));
+            visual_debug::record_frame(capture.build());
+        }
         finalize_frame_metrics(
             app,
             total_start,
