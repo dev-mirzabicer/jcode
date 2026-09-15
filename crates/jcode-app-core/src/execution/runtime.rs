@@ -138,7 +138,7 @@ fn prepare_endpoint(store: &ExecutionStore) -> Result<(RuntimeEndpoint, File)> {
     let user = unsafe { libc::geteuid() };
     #[cfg(not(unix))]
     let user = std::process::id();
-    let ipc = std::env::temp_dir().join(format!("jx-{user}"));
+    let ipc = socket_directory(&std::env::temp_dir(), user);
     crate::storage::ensure_dir(&ipc)?;
     let metadata = std::fs::symlink_metadata(&ipc)?;
     ensure!(
@@ -160,6 +160,39 @@ fn prepare_endpoint(store: &ExecutionStore) -> Result<(RuntimeEndpoint, File)> {
         uuid::Uuid::new_v4().simple()
     );
     Ok((RuntimeEndpoint::new(id, endpoint, lease_path, key), lease))
+}
+
+fn socket_directory(temporary: &std::path::Path, user: u32) -> PathBuf {
+    let directory = temporary.join(format!("jx-{user}"));
+    #[cfg(unix)]
+    {
+        // macOS has the smaller Unix sockaddr path (104 including NUL).
+        // Only IPC moves to the short, still owner-checked directory. Durable
+        // receipts, output and the runtime lease retain the original namespace.
+        let probe = directory.join(format!("{}.sock", "0".repeat(32)));
+        if probe.as_os_str().as_encoded_bytes().len() >= 104 {
+            return PathBuf::from("/tmp").join(format!("jx-{user}"));
+        }
+    }
+    directory
+}
+
+#[cfg(unix)]
+#[test]
+fn long_temporary_paths_keep_control_endpoints_within_unix_socket_bounds() {
+    let ordinary = std::path::Path::new("/tmp/fixture");
+    assert_eq!(socket_directory(ordinary, 501), ordinary.join("jx-501"));
+    let long = PathBuf::from(format!("/fixture/{}", "long".repeat(50)));
+    let directory = socket_directory(&long, 501);
+    assert_eq!(directory, PathBuf::from("/tmp/jx-501"));
+    assert!(
+        directory
+            .join(format!("{}.sock", "0".repeat(32)))
+            .as_os_str()
+            .as_encoded_bytes()
+            .len()
+            < 104
+    );
 }
 
 fn key_matches(expected: &str, provided: &str) -> bool {
