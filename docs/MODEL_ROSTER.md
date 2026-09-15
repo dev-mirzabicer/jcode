@@ -134,20 +134,19 @@ Unavailable stored identities fail rather than switch provider. This reusable
 execution-state type deliberately adds no alias field to ordinary primary
 sessions. No roster hashes or instruction Git revisions are persisted.
 
-### Future owners
+### Adopting and future owners
 
-**Phase 4, isolated delegation:** expose only relevant alias descriptions, accept
-optional overrides, resolve at child launch, persist the concrete result and
-return failures as ordinary tool errors. Own prompt context, attachments,
-permissions, cancellation, concurrency, result handling and post-launch retry or
-replacement policy.
+**Isolated delegation:** exposes alias descriptions and optional creation-time
+effort, resolves at child launch and persists the concrete result. Its public tool
+does not expose concrete model overrides. The delegation owner handles context,
+permissions, cancellation, concurrency, results and post-launch recovery.
 
 **Phase 9, asynchronous execution:** store aliases in job definitions only when
 future runs should track edits. Resolve each new run and persist its concrete
 result. Own quotas, approvals, unattended context failures, retries and
 replacement execution. Explicitly opt into the missing-file Git fallback rule.
 
-**Phase 3 WP-09/WP-10:** consume the list/inspection/diagnostic/availability views
+**Instruction manager:** consumes the list/inspection/diagnostic/availability views
 and existing repository service for central management. Model-facing discovery
 contains only alias and description, never human-only notes. Do not build another
 route parser or credential detector in the TUI.

@@ -84,8 +84,8 @@ output fails explicitly; it is not reconstructed by repeating the producer. Mirz
 accepted Active's existing unencrypted, ownership-ignored protection boundary.
 Routine seven-day archival, reader-owned snapshot pruning, immutable transcript
 inspection and trusted-client cleanup are described in [session inspection and
-retention](SESSION_INSPECTION.md). The convenient `/tasks` monitor remains a later
-Phase 4 package and is not claimed by these backend APIs.
+retention](SESSION_INSPECTION.md). The native [`/tasks` monitor](TASK_MONITOR.md)
+provides these controls and reviewed cleanup without a separate execution owner.
 
 Harness/SDK clients use `shared_execution_v1` for list/inspect/read/Stop/background
 and `shared_execution_parts_v1` for bounded binary-part materialization. Paths in

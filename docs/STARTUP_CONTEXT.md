@@ -277,6 +277,8 @@ ordinary read tool when the task truly requires current disk contents.
 | Split or fork | Inherit the complete transcript and receipt without reinjection. |
 | Clear | Create a new primary context and capture again before replacing the old session. |
 | Transfer | Create a new reduced primary context, capture again, then append the transfer handoff. |
+| Isolated `subagent` creation | Explicit adopting caller: latest saved selection by default, ordered custom replacement or disabled capture; fail preparation without changing the saved default. |
+| Isolated child follow-up | Retain creation-time capture and use existing bounded staleness observation. |
 | Internal Swarm, debug, ambient, scheduled, overnight, and headless work | Explicitly disabled in this phase. A later owner must opt in deliberately. |
 
 Historical sessions without a Startup Context receipt retain their existing behavior. They
@@ -446,11 +448,11 @@ Session, or sequences durable apply stages.
 
 The following integration points are intentionally explicit:
 
-- **Phase 3, prompt composition:** decide the future placement of stable interpretation
-  guidance while preserving user-message authority, timestamp exclusion, and startup-file
-  cache order.
-- **Phase 4, isolated sub-agents:** decide whether and how an isolated sub-agent opts into
-  Startup Context. A working directory alone must not activate it.
+- **Managed prompt composition:** eligible interpretation guidance now uses managed
+  instruction sources. File-message authority, timestamp exclusion and startup-file
+  cache order remain unchanged.
+- **Isolated sub-agents:** the explicit adopting caller uses the creation/follow-up
+  contract below. A working directory alone does not activate capture in other callers.
 - **Phase 9, unattended execution:** select the typed `InjectDiagnostic` failure policy for
   appropriate scheduled or asynchronous callers and author unattended diagnostic prose.
   Do not inherit interactive blocking accidentally.

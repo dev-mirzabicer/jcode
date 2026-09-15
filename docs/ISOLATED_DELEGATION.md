@@ -167,8 +167,8 @@ own environment.
 Same-parent resume preserves children. Split/transfer descendants can inspect
 inherited history but do not gain control or clone children. Clear creates fresh
 ownership without deleting old data. Child conversations are not direct human chat
-sessions. The task-monitor navigation and human idle-child Context action are a
-separate UI integration; backend directive protection is already enforced.
+sessions. The task monitor provides a human idle-child Context action using the
+existing editor and the same enforced directive protection.
 
 A stopped child becomes available for an explicit follow-up after owned work is
 actually quiescent. Capture keeps available partial output. Context exhaustion is

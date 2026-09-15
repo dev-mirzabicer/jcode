@@ -76,7 +76,7 @@ Worker report, deep-node/gate, assignment, restart, wake, synthesis, salvage, re
 
 Swarm core retains the structural report/deep markers, wrapper spacing, idempotency and existing bounded-node selector. It accepts lazy render callbacks rather than owning another loader. Already-framed contracts do not read sources again. Assignment contracts render before plan mutation, and stand-down guidance renders before takeover. An invalid source leaves the prior assignment intact. Pre-mutation source failures notify duplicate waiters without caching the failure as a completed mutation, allowing an identical explicit retry after repair. Successful operation replay remains unchanged.
 
-If integration instructions fail after workers completed, the error preserves their outputs rather than implying those tasks were rolled back. No new delegation system or roster adoption was introduced. Phase 4 still owns future isolated delegation and Phase 9 owns future async policy.
+If integration instructions fail after workers completed, the error preserves their outputs rather than implying those tasks were rolled back. The dormant Swarm workflow does not adopt the roster. The implemented [isolated delegation](ISOLATED_DELEGATION.md) service adopts profiles and model aliases independently. Phase 9 owns future async policy.
 
 ### Preferred-tool guidance
 

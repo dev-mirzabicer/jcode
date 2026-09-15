@@ -31,9 +31,10 @@ expand_tool_use(snapshot_id, tool_use_id)
 Snapshots survive source edits, rewind, resume and process reload. They do not
 activate the inspected profile or skill in the reader. Primary continuation
 sessions may read inherited ancestor-owned references without gaining control or
-changing snapshot ownership. Isolated-child creation and its additional relationship
-integration are a separate feature. No child launch or task-monitor UI is implied
-by these inspection tools.
+changing snapshot ownership. [Isolated children](ISOLATED_DELEGATION.md) and their
+original parent can inspect each other on demand. Inspection never launches a child
+or transfers conversational ownership. Humans use the [task monitor](TASK_MONITOR.md)
+for live work and idle-child context repair.
 
 ## Snapshot lifetime
 
@@ -86,8 +87,9 @@ storage cannot retain output, capture fails honestly with its available prefix.
 
 ## Reviewed cleanup through trusted clients
 
-The backend is available before the convenient task-monitor menu. It is not a
-model-advertised deletion tool. Harness API v1.4 and both SDKs advertise:
+The task monitor's Storage action and the trusted-client API share one reviewed
+cleanup operation. It is not a model-advertised deletion tool. Both SDKs require
+the capabilities introduced in Harness API v1.4:
 
 - `session_inspection_v1`
 - `output_cleanup_review_v1`

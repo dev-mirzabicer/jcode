@@ -36,6 +36,14 @@ Invocation identity includes session, assistant-message identity and the entire
 nested call path. An existing scope with different input is a conflict. An
 existing invocation is not permission to repeat its producer.
 
+Schema 21 adds execution-parent and session/state/time indexes without changing
+existing run, input, output, activity or child records. Task pages seek by exact
+state and applicable session/parent partitions, merge only bounded candidate IDs,
+and keep the existing newest-first `(created, id)` cursor. Nested-row discovery
+uses the parent index instead of scanning the complete run history per row.
+An older binary that does not understand the new schema rejects it. Do not
+downgrade the live database or run candidate tests against the live home.
+
 `Capture` owns the streaming sink and the lease on its bundle. `ToolContext`
 carries the lower-layer `OutputCapture` interface, avoiding an upward dependency
 from tool-core. Inline output, an already captured result and a source-read page
@@ -403,10 +411,10 @@ Supported request actions:
 
 Paths returned in metadata describe server-owned storage. Remote clients retrieve
 text through the read operation rather than assuming those paths exist locally.
-This API does not install a monitor UI, create another execution owner, or expose
-raw runtime control credentials. It requires a completed authenticated session
-attachment. Unknown operation fields reject rather than silently enable unsupported
-force-stop or other semantics.
+The native task monitor uses the same execution owner, with its own bounded
+metadata/text projection. Raw runtime control credentials are not exposed. The
+Harness API requires a completed authenticated session attachment. Unknown fields
+reject, and the additive `force_stop` operation requires `execution_force_stop_v1`.
 
 Tests exercise metadata paging with unavailable bodies, input/output retrieval,
 SDK rejection before transport on old capability sets, duplicate/cross-session
@@ -437,6 +445,10 @@ credentials are not serializable as public runtime metadata and are excluded
 from debug formatting. Unix connections additionally verify the peer user.
 Binding is exclusive, including the named-pipe path, rather than joining an
 existing endpoint after an ownership conflict.
+On Unix, an oversized temporary path uses `/tmp/jx-<uid>` for only the short IPC
+endpoint. The directory must still be owned by the user with no group/other
+permissions. Durable runtime leases, credentials and records remain in the
+original execution namespace. This avoids macOS Unix-socket path overflow.
 
 Status and control RPCs transfer metadata only. Stop acknowledges a request,
 not actual quiescence. Wait returns a persisted terminal state. Dropping a wait
@@ -508,11 +520,10 @@ Local TUI delivery acquires receipts outside the event loop, retains pending wor
 while busy, and rechecks the recipient before changing session history. It does
 not inject an old session's completion into a newly selected session.
 
-These mechanisms still require the complete final WP-02 caller, recovery,
-producer and activation matrix. Other-platform command
-paths, provider/SDK-supplied output, command progress and remaining clipped
-producers must be reconciled before package acceptance. No claim of complete
-WP-02 rollout or activated behavior follows from these library tests.
+The accepted WP-02 caller/producer and native evidence is recorded in
+EXECUTION_ACCEPTANCE.md and EXECUTION_NATIVE_ACCEPTANCE.md. Later delegation,
+inspection and task-monitor integrations retain these owners. Historical evidence
+is revision-bound and does not replace combined verification of current source.
 
 ## MCP result and transport boundaries
 
@@ -793,8 +804,8 @@ later request from an out-of-band callback. An in-flight response-chain lease
 also clears that exact state if its producer future is dropped during a send or
 read. Completed chains remain reusable. The whole OpenAI request producer is
 receiver-bound, including connection establishment and retry backoff. Quiet and
-abrupt-cancellation continuation tests pass. Remaining CLI/web subprocess and
-pre-dispatch caller boundaries still require final reconciliation. These checks
+abrupt-cancellation continuation tests pass. CLI/web subprocess and
+pre-dispatch boundaries have separate evidence in the producer ledger. These checks
 do not prove that a hosted service acknowledges cancellation or stops remote
 compute, which remains outside the approved owned-work boundary.
 
