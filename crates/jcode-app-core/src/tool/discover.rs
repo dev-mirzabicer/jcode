@@ -120,6 +120,7 @@ struct DiscoveryRequestContext<'a> {
     reason: &'a str,
     benchmark_run: bool,
     provenance: DiscoveryRequestProvenance,
+    tool_context: Option<&'a ToolContext>,
 }
 
 #[derive(Debug, Clone)]
@@ -139,7 +140,7 @@ struct DiscoveryRequestProvenance {
 
 impl DiscoveryRequestProvenance {
     fn from_tool_context(ctx: &ToolContext) -> Self {
-        let session = crate::session::Session::load(&ctx.session_id).ok();
+        let session = crate::session::Session::load_startup_stub(&ctx.session_id).ok();
         let runtime = crate::telemetry::runtime_provenance();
         Self {
             session_id: ctx.session_id.clone(),
@@ -502,6 +503,17 @@ impl Tool for DiscoverToolsTool {
         })
     }
 
+    fn execution_policy(
+        &self,
+        _: &Value,
+        _: &ToolContext,
+    ) -> Result<jcode_tool_core::ExecutionPolicy> {
+        Ok(jcode_tool_core::ExecutionPolicy {
+            cooperative_stop: true,
+            ..Default::default()
+        })
+    }
+
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let started_at = Instant::now();
         let request_id = uuid::Uuid::new_v4().to_string();
@@ -646,6 +658,7 @@ impl Tool for DiscoverToolsTool {
             reason: &reason,
             benchmark_run,
             provenance: DiscoveryRequestProvenance::from_tool_context(&ctx),
+            tool_context: Some(&ctx),
         };
 
         if action == DiscoveryAction::Suggest {
@@ -930,6 +943,78 @@ impl Tool for DiscoverToolsTool {
     }
 }
 
+async fn catalog_cancelled(context: &DiscoveryRequestContext<'_>) {
+    match context
+        .tool_context
+        .and_then(|ctx| ctx.graceful_shutdown_signal.as_ref())
+    {
+        Some(stop) => stop.notified().await,
+        None => std::future::pending().await,
+    }
+}
+
+fn catalog_cancel_error(status: Option<u16>, bytes: u64) -> DiscoveryFetchError {
+    DiscoveryFetchError {
+        message: "Catalog request stopped; acquired response bytes remain retained".into(),
+        failure_reason: "cancelled",
+        http_status: status,
+        response_bytes: Some(bytes),
+    }
+}
+
+/// Retain every acquired chunk before decoding, selection, or acquisition-limit
+/// rejection. Keep the existing limit as a failed acquisition, not clipping.
+async fn acquire_catalog_response(
+    context: &DiscoveryRequestContext<'_>,
+    mut response: reqwest::Response,
+) -> std::result::Result<Vec<u8>, DiscoveryFetchError> {
+    let status = response.status().as_u16();
+    let mut body = Vec::new();
+    loop {
+        let chunk = tokio::select! {
+            biased;
+            _ = catalog_cancelled(context) => return Err(catalog_cancel_error(Some(status), body.len() as u64)),
+            chunk = response.chunk() => chunk,
+        }.map_err(|error| DiscoveryFetchError {
+            message: format!("Catalog response acquisition failed: {error}"),
+            failure_reason: "body_error",
+            http_status: Some(status),
+            response_bytes: Some(body.len() as u64),
+        })?;
+        let Some(chunk) = chunk else { return Ok(body) };
+        let received = body.len().saturating_add(chunk.len());
+        if let Some(capture) = context
+            .tool_context
+            .and_then(|ctx| ctx.invocation.capture.clone())
+        {
+            let retained = chunk.clone();
+            // Do not abandon an in-flight storage write on Stop. Cooperative
+            // execution waits for retention, then observes Stop at the next poll.
+            tokio::task::spawn_blocking(move || capture.append_part("catalog-response", &retained))
+                .await
+                .map_err(anyhow::Error::from)
+                .and_then(|result| result)
+                .map_err(|error| DiscoveryFetchError {
+                    message: format!("Catalog response retention failed: {error:#}"),
+                    failure_reason: "capture_error",
+                    http_status: Some(status),
+                    response_bytes: Some(received as u64),
+                })?;
+        }
+        if received > MAX_RESPONSE_BYTES {
+            return Err(DiscoveryFetchError {
+                message: format!(
+                    "Catalog response exceeded the {MAX_RESPONSE_BYTES}-byte acquisition limit; every received chunk is retained, remaining bytes were not acquired"
+                ),
+                failure_reason: "response_too_large",
+                http_status: Some(status),
+                response_bytes: Some(received as u64),
+            });
+        }
+        body.extend_from_slice(&chunk);
+    }
+}
+
 /// Fetch a category listing (browse) or one tool's entry (select) from the
 /// discovery endpoint. Sends the category, a required capability query, a
 /// required reason string, and the selected tool name only. Hard fails on
@@ -962,7 +1047,12 @@ async fn fetch_listing(
         request = request.header(DISCOVERY_BENCHMARK_HEADER, "1");
     }
 
-    let response = request.send().await.map_err(|err| DiscoveryFetchError {
+    let response = tokio::select! {
+        biased;
+        _ = catalog_cancelled(context) => return Err(catalog_cancel_error(None, 0)),
+        response = request.send() => response,
+    }
+    .map_err(|err| DiscoveryFetchError {
         message: format!("discovery unavailable: {err}"),
         failure_reason: if err.is_timeout() {
             "timeout"
@@ -975,24 +1065,11 @@ async fn fetch_listing(
         response_bytes: None,
     })?;
     let status = response.status();
+    let body = acquire_catalog_response(context, response).await?;
     if !status.is_success() {
         return Err(DiscoveryFetchError {
             message: format!("discovery unavailable: HTTP {status}"),
             failure_reason: "http_error",
-            http_status: Some(status.as_u16()),
-            response_bytes: response.content_length(),
-        });
-    }
-    let body = response.bytes().await.map_err(|err| DiscoveryFetchError {
-        message: format!("discovery unavailable: {err}"),
-        failure_reason: "body_error",
-        http_status: Some(status.as_u16()),
-        response_bytes: None,
-    })?;
-    if body.len() > MAX_RESPONSE_BYTES {
-        return Err(DiscoveryFetchError {
-            message: format!("discovery response too large ({} bytes)", body.len()),
-            failure_reason: "response_too_large",
             http_status: Some(status.as_u16()),
             response_bytes: Some(body.len() as u64),
         });
@@ -1040,7 +1117,12 @@ async fn submit_suggestion(
     if context.benchmark_run {
         request = request.header(DISCOVERY_BENCHMARK_HEADER, "1");
     }
-    let response = request.send().await.map_err(|err| DiscoveryFetchError {
+    let response = tokio::select! {
+        biased;
+        _ = catalog_cancelled(context) => return Err(catalog_cancel_error(None, 0)),
+        response = request.send() => response,
+    }
+    .map_err(|err| DiscoveryFetchError {
         message: format!("catalog suggestion unavailable: {err}"),
         failure_reason: if err.is_timeout() {
             "timeout"
@@ -1053,28 +1135,12 @@ async fn submit_suggestion(
         response_bytes: None,
     })?;
     let status = response.status();
+    let body = acquire_catalog_response(context, response).await?;
     let duplicate = status == reqwest::StatusCode::CONFLICT;
     if !status.is_success() && !duplicate {
         return Err(DiscoveryFetchError {
             message: format!("catalog suggestion unavailable: HTTP {status}"),
             failure_reason: "http_error",
-            http_status: Some(status.as_u16()),
-            response_bytes: response.content_length(),
-        });
-    }
-    let body = response.bytes().await.map_err(|err| DiscoveryFetchError {
-        message: format!("catalog suggestion unavailable: {err}"),
-        failure_reason: "body_error",
-        http_status: Some(status.as_u16()),
-        response_bytes: None,
-    })?;
-    if body.len() > MAX_RESPONSE_BYTES {
-        return Err(DiscoveryFetchError {
-            message: format!(
-                "catalog suggestion response too large ({} bytes)",
-                body.len()
-            ),
-            failure_reason: "response_too_large",
             http_status: Some(status.as_u16()),
             response_bytes: Some(body.len() as u64),
         });
@@ -2224,6 +2290,7 @@ mod tests {
             reason: "task needs an online payment capability",
             benchmark_run,
             provenance: test_provenance(),
+            tool_context: None,
         }
     }
 
@@ -2241,6 +2308,138 @@ mod tests {
             is_ci: false,
             ran_from_cargo: true,
         }
+    }
+
+    fn captured_catalog_context(
+        root: &std::path::Path,
+    ) -> (ToolContext, std::sync::Arc<crate::execution::Capture>) {
+        let mut ctx = test_ctx();
+        let store = crate::execution::ExecutionStore::open(root).unwrap();
+        let invocation = crate::execution::invocation(&ctx, "integration_tools", json!({}));
+        let crate::execution::PreparedInvocation::New(record) =
+            store.prepare(&invocation, "fixture").unwrap()
+        else {
+            panic!()
+        };
+        store.start(&record.id, "fixture").unwrap();
+        let capture = std::sync::Arc::new(
+            crate::execution::Capture::create(store, record, Default::default()).unwrap(),
+        );
+        ctx.invocation.capture = Some(capture.clone());
+        (ctx, capture)
+    }
+
+    #[tokio::test]
+    async fn catalog_acquisition_failures_preserve_exact_received_bytes() {
+        use jcode_tool_core::OutputCapture;
+        use std::io::Read;
+        for (status, body, reason) in [
+            (
+                "HTTP/1.1 200 OK",
+                "not JSON é漢字".to_owned(),
+                "invalid_json",
+            ),
+            (
+                "HTTP/1.1 503 Unavailable",
+                "original HTTP failure é漢字".to_owned(),
+                "http_error",
+            ),
+            (
+                "HTTP/1.1 200 OK",
+                "x".repeat(MAX_RESPONSE_BYTES * 2),
+                "response_too_large",
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let (ctx, capture) = captured_catalog_context(root.path());
+            let (endpoint, server) = one_shot_server(status, body.clone()).await;
+            let client = reqwest::Client::new();
+            let mut request = test_discovery_request(&client, &endpoint, "fixture", false);
+            request.tool_context = Some(&ctx);
+            let error = fetch_listing(&request, None).await.unwrap_err();
+            assert_eq!(error.failure_reason, reason);
+            let mut acquired = Vec::new();
+            capture
+                .read_part("catalog-response")
+                .unwrap()
+                .reader
+                .read_to_end(&mut acquired)
+                .unwrap();
+            if reason == "response_too_large" {
+                assert!(acquired.len() > MAX_RESPONSE_BYTES);
+                assert!(body.as_bytes().starts_with(&acquired));
+            } else {
+                assert_eq!(acquired, body.as_bytes());
+            }
+            assert_eq!(error.response_bytes, Some(acquired.len() as u64));
+            capture
+                .seal(
+                    ToolOutput::new(error.message).with_error(true),
+                    crate::execution::RunState::Failed,
+                )
+                .unwrap();
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn catalog_stop_closes_quiet_response_and_preserves_prefix() {
+        use jcode_tool_core::OutputCapture;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let root = tempfile::tempdir().unwrap();
+        let (mut ctx, capture) = captured_catalog_context(root.path());
+        let stop = jcode_agent_runtime::InterruptSignal::new();
+        ctx.graceful_shutdown_signal = Some(stop.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                request.push(stream.read_u8().await.unwrap());
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\nPREFIX")
+                .await
+                .unwrap();
+            let mut byte = [0];
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(5), stream.read(&mut byte))
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                0
+            );
+        });
+        let client = reqwest::Client::new();
+        let mut request = test_discovery_request(&client, &endpoint, "fixture", false);
+        request.tool_context = Some(&ctx);
+        let cancellation = async {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Ok(part) = capture.read_part("catalog-response")
+                        && part.reader.metadata().unwrap().len() == 6
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            stop.fire();
+        };
+        let (result, ()) = tokio::join!(fetch_listing(&request, None), cancellation);
+        assert_eq!(result.unwrap_err().failure_reason, "cancelled");
+        let part = capture.read_part("catalog-response").unwrap();
+        assert_eq!(std::fs::read(part.path).unwrap(), b"PREFIX");
+        capture
+            .seal(
+                ToolOutput::new("stopped").with_error(true),
+                crate::execution::RunState::Cancelled,
+            )
+            .unwrap();
+        server.await.unwrap();
     }
 
     #[tokio::test]
@@ -2341,6 +2540,7 @@ mod tests {
             reason: "the current payment listing only provides cards and cannot manage Stripe test data",
             benchmark_run: true,
             provenance: test_provenance(),
+            tool_context: None,
         };
         let result = submit_suggestion(&request, &suggestion).await.unwrap();
         assert_eq!(result.http_status, 202);
@@ -2394,6 +2594,7 @@ mod tests {
             reason: "the current payment listing only provides cards and cannot manage Stripe test data",
             benchmark_run: false,
             provenance: test_provenance(),
+            tool_context: None,
         };
         let result = submit_suggestion(&request, &suggestion).await.unwrap();
         assert_eq!(result.http_status, 409);
@@ -2499,6 +2700,7 @@ mod tests {
         seed_discovery_test_source(temp.path());
 
         let body = json!({"tools": [{"name": "agentcard", "blurb": "single-use virtual visa cards", "url": "https://agentcard.example", "setup": "MCP server: npx agentcard-mcp"}]}).to_string();
+        let original_body = body.clone();
         let (endpoint, _server) = one_shot_server("HTTP/1.1 200 OK", body).await;
         std::fs::write(
             temp.path().join("config.toml"),
@@ -2508,6 +2710,19 @@ mod tests {
         crate::config::Config::invalidate_cache();
 
         let tool = DiscoverToolsTool::new();
+        let mut ctx = test_ctx();
+        let store = crate::execution::ExecutionStore::open(temp.path()).unwrap();
+        let invocation = crate::execution::invocation(&ctx, "integration_tools", json!({}));
+        let crate::execution::PreparedInvocation::New(record) =
+            store.prepare(&invocation, "fixture").unwrap()
+        else {
+            panic!()
+        };
+        store.start(&record.id, "fixture").unwrap();
+        let capture = std::sync::Arc::new(
+            crate::execution::Capture::create(store, record, Default::default()).unwrap(),
+        );
+        ctx.invocation.capture = Some(capture.clone());
         let output = tool
             .execute(
                 json!({
@@ -2515,9 +2730,26 @@ mod tests {
                     "query": "virtual card for checkout",
                     "reason": "task requires a safe online card payment capability not present in the current tools"
                 }),
-                test_ctx(),
+                ctx,
             )
             .await
+            .unwrap();
+
+        use jcode_tool_core::OutputCapture;
+        use std::io::Read;
+        let mut acquired = String::new();
+        capture
+            .read_part("catalog-response")
+            .unwrap()
+            .reader
+            .read_to_string(&mut acquired)
+            .unwrap();
+        assert_eq!(
+            acquired, original_body,
+            "Selected rendering must not discard the acquired catalog response"
+        );
+        capture
+            .seal(output.clone(), crate::execution::RunState::Completed)
             .unwrap();
 
         assert!(output.output.contains("agentcard"));
