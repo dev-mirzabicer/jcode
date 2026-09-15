@@ -1068,7 +1068,7 @@ export class JcodeClient extends EventEmitter {
       try {
         const sessions = await this.listSessions({ includeArchived: true });
         if (stopped) return;
-        const tasks = sessions.map((session) => {
+        const tasks = sessions.filter((session) => session.attachable !== false).map((session) => {
           const task = startChild(session.session_id);
           startTasks.add(task);
           void task.finally(() => startTasks.delete(task));

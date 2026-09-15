@@ -178,8 +178,8 @@ is reserved for transport faults.
 ### All-session events
 
 `globalEvents()` is the process-wide stream for dashboards and integrations. The
-bridge attaches one session per connection, so the SDK discovers every persisted
-session, opens one child connection for each, and fans their streams into one
+bridge attaches one session per connection, so the SDK discovers persisted
+sessions, opens one connection for each attachable primary, and fans their streams into one
 bounded iterator. Discovery repeats to include sessions created later.
 
 ```ts
@@ -521,6 +521,13 @@ npm run check   # typecheck + build + tests (mock harness, no daemon needed)
 this package. Adding a variant on either side without the other fails CI.
 
 ## Isolated delegation
+
+Harness v1.6 session listings expose optional `attachable` metadata. Isolated
+children remain listed and inspectable with `attachable: false`, but are skipped
+by `globalEvents()` because they prohibit direct chat attachment. Missing metadata
+from older servers retains legacy attachment behavior. Upgrade the SDK and bridge
+together for this distinction. Session listing reads minimal headers, not full
+conversation or frozen-instruction objects.
 
 Harness v1.5 advertises `isolated_delegation_v1`. A normal SDK-created primary
 session can use `get_catalog` and `subagent` through its usual `run()`/streaming

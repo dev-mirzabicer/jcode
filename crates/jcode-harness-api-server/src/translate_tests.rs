@@ -1426,6 +1426,44 @@ fn unattached_list_sessions_discovers_all_persisted_records() {
     );
     assert_eq!(sessions[0].working_dir.as_deref(), first_root.to_str());
     assert_eq!(sessions[1].working_dir.as_deref(), second_root.to_str());
+    assert!(
+        sessions
+            .iter()
+            .all(|session| session.attachable == Some(true))
+    );
+}
+
+#[test]
+fn session_list_preserves_children_without_loading_conversation_bodies() {
+    let home = ScopedJcodeHome::new("child-listing");
+    std::fs::create_dir_all(home.path.join("sessions")).unwrap();
+    let path = home.path.join("sessions/isolated_child.json");
+    std::fs::write(&path, serde_json::to_vec(&json!({
+        "working_dir": "/fixture/project", "isolated_child": {"identity": {"original_parent": "parent"}},
+        "messages": [{"content": "large synthetic body".repeat(200000)}],
+        "system_prompt": {"text": "synthetic instructions".repeat(200000)}
+    })).unwrap()).unwrap();
+    let header = BridgeState::session_header("isolated_child").unwrap();
+    assert_eq!(header.working_dir.as_deref(), Some("/fixture/project"));
+    assert!(header.isolated_child.is_some());
+    let mut state = BridgeState::default();
+    let event =
+        only_reply_event(state.api_request_to_legacy(&json!({"req":"list_sessions","id":1})));
+    let ApiEvent::Sessions { sessions } = event else {
+        panic!()
+    };
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].attachable, Some(false));
+    assert!(serde_json::to_vec(&sessions).unwrap().len() < 1000);
+    // Listing reuses successfully read fixed origin metadata rather than
+    // repeatedly decoding multi-megabyte conversation/instruction bodies.
+    std::fs::write(path, "temporarily unreadable fixture").unwrap();
+    let event =
+        only_reply_event(state.api_request_to_legacy(&json!({"req":"list_sessions","id":2})));
+    let ApiEvent::Sessions { sessions } = event else {
+        panic!()
+    };
+    assert_eq!(sessions[0].attachable, Some(false));
 }
 
 #[test]

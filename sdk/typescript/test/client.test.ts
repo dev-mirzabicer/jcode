@@ -637,9 +637,13 @@ test("globalEvents discovers persisted and newly-created sessions and cleans up 
           v: 1,
           reply_to: request.id,
           ev: "sessions",
-          sessions: sessions.map((session_id) => ({ session_id, status: "idle" })),
+          sessions: [
+            ...sessions.map((session_id) => ({ session_id, status: "idle" })),
+            { session_id: "isolated-child", status: "idle", attachable: false },
+          ],
         });
       } else if (request.req === "attach_session") {
+        assert.notEqual(request.session_id, "isolated-child", "globalEvents must not attach a child conversation");
         send({
           v: 1,
           reply_to: request.id,

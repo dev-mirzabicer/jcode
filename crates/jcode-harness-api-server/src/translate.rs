@@ -11,6 +11,14 @@ use std::io::{Read, Write};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[derive(serde::Deserialize)]
+struct SessionHeader {
+    #[serde(default)]
+    working_dir: Option<String>,
+    #[serde(default)]
+    isolated_child: Option<serde::de::IgnoredAny>,
+}
+
 /// Default number of messages a `peek_session` returns. A preview is a glance,
 /// so this is a tail rather than a transcript: enough to recognise which
 /// conversation it is, few enough that peeking a dozen sessions stays cheap.
@@ -91,6 +99,9 @@ type SessionFileStatusResult = Result<SessionFileStatus, (ErrorCode, String)>;
 /// Per-connection translation state.
 #[derive(Debug, Default)]
 pub struct BridgeState {
+    /// Isolated-child origin is fixed before publication. Cache only successfully
+    /// read eligibility, never full transcripts or instruction bodies.
+    session_attachable: BTreeMap<String, bool>,
     /// Session id assigned by the daemon for this connection.
     pub session_id: Option<String>,
     /// Next id to use on the legacy connection.
@@ -664,10 +675,15 @@ impl BridgeState {
                     ids.insert(attached);
                 }
                 for id in &ids {
-                    if !self.session_dirs.contains_key(id)
-                        && let Some(dir) = Self::resolve_working_dir(id)
+                    if (!self.session_dirs.contains_key(id)
+                        || !self.session_attachable.contains_key(id))
+                        && let Some(header) = Self::session_header(id)
                     {
-                        self.session_dirs.insert(id.clone(), dir);
+                        if let Some(dir) = header.working_dir {
+                            self.session_dirs.insert(id.clone(), dir);
+                        }
+                        self.session_attachable
+                            .insert(id.clone(), header.isolated_child.is_none());
                     }
                 }
                 let _write_guard = Self::state_write_guard();
@@ -696,6 +712,7 @@ impl BridgeState {
                         include_archived || !archive.sessions.contains_key(session_id)
                     })
                     .map(|session_id| SessionInfo {
+                        attachable: self.session_attachable.get(&session_id).copied(),
                         working_dir: self.session_dirs.get(&session_id).cloned(),
                         title: None,
                         status: if self.session_id.as_ref() == Some(&session_id) {
@@ -987,6 +1004,7 @@ impl BridgeState {
                 };
                 let session_id = event["session_id"].as_str().unwrap_or("").to_string();
                 pending.observed_session = Some(SessionInfo {
+                    attachable: Some(true),
                     transcript_bytes: Self::transcript_bytes(&session_id),
                     session_id,
                     working_dir: None,
@@ -1644,13 +1662,15 @@ impl BridgeState {
     /// record simply leaves the session ungrouped rather than failing the
     /// list, and results are cached because this is on a poll path.
     fn resolve_working_dir(session_id: &str) -> Option<String> {
+        Self::session_header(session_id)?.working_dir
+    }
+
+    fn session_header(session_id: &str) -> Option<SessionHeader> {
         let path = Self::session_record_path(session_id)?;
         // A missing or malformed record is expected (a session may predate the
         // field, or be mid-write), and the only cost is an ungrouped bar, so
         // this degrades rather than failing the whole session list.
-        let text = std::fs::read_to_string(path).ok()?;
-        let value: Value = serde_json::from_str(&text).ok()?;
-        value["working_dir"].as_str().map(str::to_string)
+        serde_json::from_reader(std::io::BufReader::new(std::fs::File::open(path).ok()?)).ok()
     }
 
     /// Size of a session's stored record, in bytes.

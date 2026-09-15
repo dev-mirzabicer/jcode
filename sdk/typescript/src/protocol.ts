@@ -8,7 +8,7 @@
  */
 
 export const API_VERSION_MAJOR = 1;
-export const API_VERSION_MINOR = 4;
+export const API_VERSION_MINOR = 6;
 
 export type ExecutionState = "prepared" | "queued" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
 export type OutputSize = number | "very_small" | "small" | "medium" | "large" | "very_large";
@@ -69,6 +69,8 @@ export type ErrorCode =
 
 export interface SessionInfo {
   session_id: string;
+  /** False for isolated children. Missing means eligibility is not known. */
+  attachable?: boolean;
   working_dir?: string;
   title?: string;
   status: string;

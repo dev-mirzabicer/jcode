@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 fn session(id: &str) -> SessionInfo {
     SessionInfo {
         session_id: id.to_string(),
+        attachable: Some(true),
         working_dir: None,
         title: None,
         status: "idle".to_string(),

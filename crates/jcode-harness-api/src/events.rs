@@ -333,6 +333,10 @@ pub struct StartupContextCreateError {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SessionInfo {
     pub session_id: String,
+    /// False for isolated children: inspect through the parent, not a chat attachment.
+    /// None means an older server or unavailable metadata, not confirmed eligibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachable: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
