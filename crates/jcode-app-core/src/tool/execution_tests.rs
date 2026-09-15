@@ -634,15 +634,15 @@ async fn explicit_stop_reaches_a_background_run() -> anyhow::Result<()> {
     });
     started.await?;
     assert!(crate::execution::promote(&id).await?);
+    // Promotion releases the original waiter with acceptance, not a later
+    // terminal error. Stop owns the still-running producer after that handoff.
+    let accepted = tokio::time::timeout(std::time::Duration::from_secs(5), call).await???;
+    assert!(!accepted.is_error);
+    assert!(!tool.dropped.load(Ordering::SeqCst));
     assert!(crate::execution::request_stop(
         &id,
         StopCause::HumanCancellation
     )?);
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_secs(5), call)
-            .await??
-            .is_err()
-    );
     let record = crate::execution::wait_for(&id).await?;
     assert_eq!(record.state, crate::execution::RunState::Cancelled);
     assert_eq!(record.stop_cause, Some(StopCause::HumanCancellation));

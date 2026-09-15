@@ -5,6 +5,60 @@ use jcode_tool_core::{OutputCapture, OutputStream};
 use jcode_tool_types::{RunState, ToolOutput};
 
 #[test]
+fn snapshot_metadata_and_narrow_reads_do_not_open_unrequested_bodies() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = ExecutionStore::open(root.path())?;
+    let mut session = Session::create_with_id("large_target".into(), None, None);
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "selected small message".into(),
+            cache_control: None,
+        }],
+    );
+    session.add_message(
+        Role::Assistant,
+        vec![ContentBlock::Text {
+            text: "large synthetic material ".repeat(200_000),
+            cache_control: None,
+        }],
+    );
+    persist_source(root.path(), &session)?;
+    let first = store.create_inspection_snapshot("reader", &session.id, 100)?;
+    let second = store.create_inspection_snapshot("reader", &session.id, 101)?;
+    let snapshot = store.read_inspection_snapshot("reader", &first, 102)?;
+    let repeated = store.read_inspection_snapshot("reader", &second, 102)?;
+    assert_eq!(
+        snapshot.manifest.messages[1].digest,
+        repeated.manifest.messages[1].digest
+    );
+    let large = snapshot.manifest.messages[1].digest.clone();
+    let instructions = snapshot.manifest.instructions_digest.clone();
+    let instruction_path = store.root().join("snapshots/blobs").join(&instructions);
+    let instruction_bytes = std::fs::read(&instruction_path)?;
+    drop(snapshot);
+    drop(repeated);
+    // Missing unrelated blobs prove they were never opened. Returning only
+    // metadata after first deserializing a large body would fail this check.
+    for digest in [large, instructions] {
+        std::fs::remove_file(store.root().join("snapshots/blobs").join(digest))?;
+    }
+    let reopened = ExecutionStore::open(root.path())?;
+    let snapshot = reopened.read_inspection_snapshot("reader", &first, 103)?;
+    assert_eq!(snapshot.id(), first);
+    assert_eq!(snapshot.target(), session.id);
+    // Transcript reads explicitly include captured active instructions. Only
+    // metadata access is body-free; keep that established contract intact.
+    std::fs::write(instruction_path, instruction_bytes)?;
+    let range = TranscriptRange { start: 1, end: 1 };
+    let text = snapshot.transcript(Some(&range), true)?;
+    assert!(text.contains("selected small message"));
+    assert!(!text.contains("large synthetic material"));
+    assert!(snapshot.transcript(None, true).is_err());
+    Ok(())
+}
+
+#[test]
 fn inherited_snapshot_reads_keep_original_ownership_but_touch_only_the_actual_reader() -> Result<()>
 {
     let root = tempfile::tempdir()?;
