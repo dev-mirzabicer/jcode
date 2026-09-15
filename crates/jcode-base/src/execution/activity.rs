@@ -170,9 +170,12 @@ mod tests {
     #[test]
     fn migration_observes_a_full_idle_week_without_fabricating_legacy_activity() -> Result<()> {
         let root = tempfile::tempdir()?;
-        let store = ExecutionStore::open(root.path())?;
-        store.touch_activity("legacy", 100)?;
-        store.connection()?.execute_batch("ALTER TABLE session_activity DROP COLUMN retention_not_before; PRAGMA user_version=18;")?;
+        let directory = root.path().join("execution");
+        std::fs::create_dir(&directory)?;
+        let historical = rusqlite::Connection::open(directory.join("index.sqlite"))?;
+        historical.execute_batch(include_str!("fixtures/schema-18.sql"))?;
+        historical.execute("INSERT INTO session_activity(session_id,last_active,generation) VALUES('legacy',100,1)", [])?;
+        drop(historical);
         let now = chrono::Utc::now().timestamp();
         let migrated = ExecutionStore::open(root.path())?;
         assert_eq!(migrated.last_activity("legacy")?, Some(100));
