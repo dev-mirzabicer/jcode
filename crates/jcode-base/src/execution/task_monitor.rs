@@ -7,7 +7,8 @@ use jcode_tool_types::{
         TaskCursor, TaskMonitorRequest, TaskMonitorResponse, TaskRow, TaskTextPage, TaskView,
     },
 };
-use rusqlite::{Connection, params};
+use rusqlite::Connection;
+use std::collections::BTreeSet;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
@@ -104,34 +105,60 @@ impl ExecutionStore {
             .map(|id| task_row(&transaction, id))
             .transpose()?
             .and_then(|row| row.child_id);
-        let states = match view {
-            TaskView::Active => "'prepared','queued','running'",
-            TaskView::Completed => "'completed','failed','cancelled','interrupted'",
+        // Partition by exact state/session so each query can seek directly to
+        // the cursor and stop at the page bound. Optional OR filters and a
+        // multi-state ORDER BY otherwise scan/sort an unbounded history.
+        let sessions = if all_sessions {
+            vec![None]
+        } else {
+            let mut scoped = BTreeSet::from([session.to_owned()]);
+            let mut query = transaction.prepare(
+                "SELECT c.child_id FROM child_turns c CROSS JOIN runs origin
+                 ON origin.id=c.run_id WHERE c.initial=1 AND origin.session_id=?1",
+            )?;
+            for child in query.query_map([session], |row| row.get::<_, String>(0))? {
+                scoped.insert(child?);
+            }
+            scoped.into_iter().map(Some).collect()
         };
-        let sql = format!(
-            "SELECT r.id FROM runs r WHERE r.state IN ({states})
-            AND (?1 OR r.session_id=?2 OR r.session_id IN (
-                SELECT c.child_id FROM child_turns c JOIN runs origin ON origin.id=c.run_id
-                WHERE c.initial=1 AND origin.session_id=?2))
-            AND (?3 IS NULL OR r.parent_id=?3 OR (r.session_id=?4 AND r.parent_id IS NULL))
-            AND (r.created<?5 OR (r.created=?5 AND r.id<?6))
-            ORDER BY r.created DESC,r.id DESC LIMIT ?7"
-        );
-        let mut statement = transaction.prepare(&sql)?;
-        let ids = statement
-            .query_map(
-                params![
-                    all_sessions,
-                    session,
-                    parent_run,
-                    parent_child,
-                    before.as_ref().map_or(i64::MAX, |cursor| cursor.created),
-                    before.as_ref().map_or("", |cursor| cursor.run_id.as_str()),
-                    limit + 1
-                ],
-                |row| row.get::<_, String>(0),
-            )?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let states: &[&str] = match view {
+            TaskView::Active => &["prepared", "queued", "running"],
+            TaskView::Completed => &["completed", "failed", "cancelled", "interrupted"],
+        };
+        let mut candidates = BTreeSet::new();
+        for scope in &sessions {
+            for state in states {
+                collect_page_candidates(
+                    &transaction,
+                    &TaskPartition {
+                        session: scope.as_deref(),
+                        parent: parent_run,
+                        roots_only: false,
+                        state,
+                    },
+                    before.as_ref(),
+                    limit + 1,
+                    &mut candidates,
+                )?;
+                if let Some(child) = parent_child.as_deref()
+                    && scope.as_deref().is_none_or(|scope| scope == child)
+                {
+                    collect_page_candidates(
+                        &transaction,
+                        &TaskPartition {
+                            session: Some(child),
+                            parent: None,
+                            roots_only: true,
+                            state,
+                        },
+                        before.as_ref(),
+                        limit + 1,
+                        &mut candidates,
+                    )?;
+                }
+            }
+        }
+        let ids: Vec<_> = candidates.into_iter().rev().map(|(_, id)| id).collect();
         let has_more = ids.len() > limit as usize;
         let rows = ids
             .iter()
@@ -209,6 +236,61 @@ impl ExecutionStore {
     }
 }
 
+struct TaskPartition<'a> {
+    session: Option<&'a str>,
+    parent: Option<&'a str>,
+    roots_only: bool,
+    state: &'a str,
+}
+
+impl TaskPartition<'_> {
+    fn sql(&self, has_cursor: bool) -> String {
+        let mut sql = String::from("SELECT created,id FROM runs WHERE state=:state");
+        if self.session.is_some() {
+            sql.push_str(" AND session_id=:session");
+        }
+        if self.parent.is_some() {
+            sql.push_str(" AND parent_id=:parent");
+        } else if self.roots_only {
+            sql.push_str(" AND parent_id IS NULL");
+        }
+        if has_cursor {
+            sql.push_str(" AND (created,id)<(:created,:id)");
+        }
+        sql.push_str(" ORDER BY created DESC,id DESC LIMIT :limit");
+        sql
+    }
+}
+
+fn collect_page_candidates(
+    connection: &Connection,
+    partition: &TaskPartition<'_>,
+    before: Option<&TaskCursor>,
+    limit: u32,
+    candidates: &mut BTreeSet<(i64, String)>,
+) -> Result<()> {
+    let mut statement = connection.prepare(&partition.sql(before.is_some()))?;
+    let mut values: Vec<(&str, &dyn rusqlite::ToSql)> =
+        vec![(":state", &partition.state), (":limit", &limit)];
+    if let Some(ref session) = partition.session {
+        values.push((":session", session));
+    }
+    if let Some(ref parent) = partition.parent {
+        values.push((":parent", parent));
+    }
+    if let Some(cursor) = before {
+        values.push((":created", &cursor.created));
+        values.push((":id", &cursor.run_id));
+    }
+    for row in statement.query_map(values.as_slice(), |row| Ok((row.get(0)?, row.get(1)?)))? {
+        candidates.insert(row?);
+        if candidates.len() > limit as usize {
+            candidates.pop_first();
+        }
+    }
+    Ok(())
+}
+
 fn text_window(
     source: &mut (impl Read + Seek),
     total: u64,
@@ -250,6 +332,7 @@ mod tests {
     use super::*;
     use crate::execution::{Invocation, PreparedInvocation, RunState};
     use jcode_tool_types::ToolOutput;
+    use rusqlite::params;
 
     fn run(store: &ExecutionStore, session: &str, name: &str, state: RunState) -> String {
         let PreparedInvocation::New(record) = store
@@ -467,6 +550,88 @@ mod tests {
         );
         Ok(())
     }
+    #[test]
+    fn sparse_deep_pages_seek_indexes_and_keep_exact_mixed_state_order() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let store = ExecutionStore::open(root.path())?;
+        let mut connection = store.connection()?;
+        let transaction = connection.transaction()?;
+        {
+            let mut insert = transaction.prepare("INSERT INTO runs(id,session_id,message_id,tool,input_digest,state,owner,input_path,created,updated) VALUES(?1,?2,'m','fixture','digest',?3,'offline','missing-payload',?4,?4)")?;
+            for index in 0..200_000 {
+                insert.execute(params![
+                    format!("run-{index:064x}"),
+                    if index % 1000 == 0 { "sparse" } else { "other" },
+                    ["completed", "failed", "cancelled", "interrupted"][index / 1000 % 4],
+                    i64::try_from(index / 3)?,
+                ])?;
+            }
+        }
+        transaction.commit()?;
+        let cursor = TaskCursor {
+            created: 50_000,
+            run_id: format!("run-{:064x}", 150_000),
+        };
+        let start = std::time::Instant::now();
+        for all in [false, true] {
+            let TaskMonitorResponse::List { rows, next } = store.task_page(
+                "sparse",
+                TaskView::Completed,
+                all,
+                None,
+                Some(cursor.clone()),
+                37,
+            )?
+            else {
+                panic!()
+            };
+            let expected: Vec<String> = connection.prepare(
+                "SELECT id FROM runs WHERE (?1 OR session_id='sparse') AND (created,id)<(?2,?3) ORDER BY created DESC,id DESC LIMIT 38",
+            )?.query_map(params![all, cursor.created, cursor.run_id], |row| row.get(0))?
+                .collect::<std::result::Result<_,_>>()?;
+            assert_eq!(
+                rows.iter()
+                    .map(|row| row.run.id.clone())
+                    .collect::<Vec<_>>(),
+                expected[..37]
+            );
+            assert_eq!(next.unwrap().run_id, expected[36]);
+        }
+        eprintln!(
+            "200000-record sparse/deep production pages: {:?}",
+            start.elapsed()
+        );
+
+        // Query-engine work, not a fragile wall-clock threshold: exact session,
+        // state and cursor predicates must not scan or sort unrelated history.
+        let partition = TaskPartition {
+            session: Some("sparse"),
+            parent: None,
+            roots_only: false,
+            state: "completed",
+        };
+        let mut query = connection.prepare(&partition.sql(true))?;
+        query
+            .query_map(
+                rusqlite::named_params! {
+                    ":state": "completed", ":session": "sparse", ":created": cursor.created,
+                    ":id": cursor.run_id, ":limit": 38,
+                },
+                |row| row.get::<_, String>(1),
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        assert_eq!(query.get_status(rusqlite::StatementStatus::FullscanStep), 0);
+        assert_eq!(query.get_status(rusqlite::StatementStatus::Sort), 0);
+        let mut nested =
+            connection.prepare("SELECT EXISTS(SELECT 1 FROM runs WHERE parent_id=?1)")?;
+        assert!(!nested.query_row(["absent-parent"], |row| row.get::<_, bool>(0))?);
+        assert_eq!(
+            nested.get_status(rusqlite::StatementStatus::FullscanStep),
+            0
+        );
+        Ok(())
+    }
+
     #[test]
     fn monitor_scope_and_expansion_use_structural_child_and_batch_relationships() -> Result<()> {
         let root = tempfile::tempdir()?;

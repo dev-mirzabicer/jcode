@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-const SCHEMA: i64 = 20;
+const SCHEMA: i64 = 21;
 
 pub use jcode_tool_types::RunState;
 
@@ -301,6 +301,13 @@ impl ExecutionStore {
         }
         if version < 20 {
             super::delegation::migrate(&transaction)?;
+        }
+        if version < 21 {
+            transaction.execute_batch(
+                "CREATE INDEX runs_parent_page ON runs(parent_id,state,created,id);
+                 CREATE INDEX runs_session_state_page ON runs(session_id,state,created,id);
+                 PRAGMA user_version=21;",
+            )?;
         }
         let broken: i64 =
             transaction.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
@@ -609,6 +616,44 @@ pub(super) fn query_record(connection: &Connection, id: &str) -> Result<Option<R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn monitor_index_upgrade_preserves_records_receipts_and_activity() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let store = ExecutionStore::open(root.path())?;
+        let PreparedInvocation::New(record) = store.prepare(&invocation(), "owner")? else {
+            panic!()
+        };
+        store.start(&record.id, "owner")?;
+        store.retain(
+            record.clone(),
+            jcode_tool_types::ToolOutput::new("complete retained fixture"),
+            RunState::Completed,
+        )?;
+        let before = store.inspect(&record.id)?.unwrap();
+        let input = std::fs::read(&before.input_path)?;
+        let output = std::fs::read(before.output_path.as_ref().unwrap())?;
+        let connection = store.connection()?;
+        let activity: (i64,i64,i64) = connection.query_row("SELECT last_active,generation,retention_not_before FROM session_activity WHERE session_id=?1", [&before.session_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)))?;
+        connection.execute_batch("DROP INDEX runs_parent_page; DROP INDEX runs_session_state_page; PRAGMA user_version=20;")?;
+        drop(connection);
+        let upgraded = ExecutionStore::open(root.path())?;
+        assert_eq!(
+            serde_json::to_value(upgraded.inspect(&record.id)?)?,
+            serde_json::to_value(Some(&before))?
+        );
+        assert_eq!(std::fs::read(&before.input_path)?, input);
+        assert_eq!(std::fs::read(before.output_path.as_ref().unwrap())?, output);
+        let connection = upgraded.connection()?;
+        let after: (i64,i64,i64) = connection.query_row("SELECT last_active,generation,retention_not_before FROM session_activity WHERE session_id=?1", [&before.session_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)))?;
+        assert_eq!(activity, after);
+        assert_eq!(
+            connection.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
+            SCHEMA
+        );
+        ExecutionStore::open(root.path())?;
+        Ok(())
+    }
 
     #[test]
     fn concurrent_first_opens_publish_one_valid_schema() -> Result<()> {
