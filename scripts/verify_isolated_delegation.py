@@ -61,7 +61,20 @@ class Provider(http.server.BaseHTTPRequestHandler):
         if 'BOOTSTRAP' in last:
             delta, finish = ({'content': 'BOOTSTRAP OK'}, 'stop')
         elif parent:
-            if 'PARENT_BATCH' in last:
+            if 'PARENT_WAIT' in last:
+                delta, finish = call('bash', {'command': 'printf x >> wait-effects; sleep 2; printf WAIT_COMPLETE', 'run_in_background': True, 'notify': False, 'wake': False}, 'p-wait-start-')
+            elif lastid.startswith('p-wait-start-'):
+                run_id = re.search(r'run-[0-9a-f]{64}', json.dumps(tools[-1]['content'])).group(0)
+                with sqlite3.connect(f'file:{home}/execution/index.sqlite?mode=ro', uri=True) as db:
+                    assert db.execute('SELECT state FROM runs WHERE id=?', (run_id,)).fetchone()[0] == 'running', 'Fixture missed the in-flight wait boundary'
+                delta, finish = call('bg', {'action': 'wait', 'task_id': run_id, 'max_wait_seconds': 30, 'return_on_progress': False, 'include_output_preview': True}, 'p-wait-result-')
+            elif lastid.startswith('p-wait-result-'):
+                result = tools[-1]['content']
+                if not isinstance(result, str):
+                    result = ''.join(part.get('text', '') for part in result)
+                assert 'WAIT_COMPLETE' in result and '"completed"' in result and '"terminal"' in result, result
+                delta, finish = ({'content': 'BACKGROUND WAIT DONE'}, 'stop')
+            elif 'PARENT_BATCH' in last:
                 member = {'tool': 'subagent', 'intent': 'independent native child', 'agent': 'fixture', 'model_alias': 'fixture', 'permission': 'read_only', 'prompt': 'SIMPLE CHILD', 'disable_startup_context': True}
                 delta, finish = call('batch', {'tool_calls': [member, dict(member)]}, 'p-batch-')
             elif lastid.startswith('p-batch-'):
@@ -308,6 +321,12 @@ try:
     text = run(base + ['--agent', 'fixture', 'repl'], input='PARENT TASK\nexit\n', env=dict(env, WP04_PARENT_ONLY='must-not-forward'))
     assert 'PARENT NATIVE DONE' in text and len(posts) - before == 8
     results['direct_repl'] = True
+    for attempt in range(3):
+        before = len(posts)
+        reply = json.loads(run(base + ['--agent', 'fixture', 'run', '--json', 'PARENT_WAIT']))
+        assert 'BACKGROUND WAIT DONE' in json.dumps(reply) and len(posts) == before + 3
+        assert (project / 'wait-effects').read_text() == 'x' * (attempt + 1)
+    results['native_inflight_background_wait_returns_terminal_result'] = 3
     api = runtime / 'wp04-api.sock'
     bridge = subprocess.Popen([BIN, '--no-update', 'api-bridge'], env=dict(env, JCODE_API_SOCKET=str(api)), stdout=log, stderr=log)
     deadline = time.monotonic() + 30
