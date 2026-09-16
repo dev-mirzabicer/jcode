@@ -142,6 +142,21 @@ pub async fn control_in_store(
         .await??;
         match exchange(&endpoint, id, action.clone()).await {
             Ok(ControlReply::OwnerChanged) => continue,
+            Ok(reply @ ControlReply::Unavailable { .. }) => {
+                // A native worker may seal its outcome before shutting down
+                // the task serving this request. Treat that reply like a lost
+                // transport: durable truth wins, but unproven work stays unavailable.
+                let current = inspect(store, id).await?;
+                if current.state.terminal() {
+                    return Ok(ControlReply::Snapshot {
+                        record: Box::new(current),
+                    });
+                }
+                if current.owner != endpoint.id {
+                    continue;
+                }
+                return Ok(reply);
+            }
             Ok(reply) => return Ok(reply),
             Err(error) => {
                 let current = inspect(store, id).await?;
@@ -165,6 +180,96 @@ pub async fn control_in_store(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unavailable_wait_reply_preserves_the_durable_terminal_outcome() -> Result<()> {
+        use super::super::{Invocation, PreparedInvocation, RunState};
+        for state in [
+            RunState::Completed,
+            RunState::Failed,
+            RunState::Cancelled,
+            RunState::Interrupted,
+            RunState::Running,
+        ] {
+            let root = tempfile::tempdir()?;
+            let store = ExecutionStore::open(root.path())?;
+            let lease_path = root.path().join("owner.lease");
+            let lease = std::fs::File::create(&lease_path)?;
+            lease.lock()?;
+            let endpoint = RuntimeEndpoint::new(
+                "1".repeat(32),
+                root.path().join("control.sock"),
+                lease_path,
+                "2".repeat(64),
+            );
+            let listener = tokio::net::UnixListener::bind(&endpoint.endpoint)?;
+            store.register_runtime(&endpoint)?;
+            let invocation = Invocation {
+                session_id: "waiter".into(),
+                message_id: "message".into(),
+                call_path: vec!["call".into()],
+                tool: "fixture".into(),
+                input: serde_json::json!({}),
+                working_dir: None,
+                received_result_digest: None,
+            };
+            let PreparedInvocation::New(record) = store.prepare(&invocation, &endpoint.id)? else {
+                panic!("new fixture invocation")
+            };
+            store.start(&record.id, &record.owner)?;
+            let producer_store = store.clone();
+            let id = record.id.clone();
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await?;
+                let (read, mut write) = stream.into_split();
+                let mut line = String::new();
+                BufReader::new(read).read_line(&mut line).await?;
+                let request: Request = serde_json::from_str(&line)?;
+                assert!(matches!(request.action, ControlOperation::Wait));
+                assert_eq!(request.run_id, record.id);
+                // A native worker seals its result, then its runtime shutdown
+                // can cancel the control handler's final metadata read.
+                if state.terminal() {
+                    producer_store.retain(
+                        record,
+                        jcode_tool_types::ToolOutput::new("result"),
+                        state,
+                    )?;
+                }
+                let response = Response {
+                    version: VERSION,
+                    reply: ControlReply::Unavailable {
+                        message: "synthetic owner shutdown".into(),
+                    },
+                };
+                write
+                    .write_all(format!("{}\n", serde_json::to_string(&response)?).as_bytes())
+                    .await?;
+                Ok::<_, anyhow::Error>(())
+            });
+            let outcome = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                control_in_store(&store, &id, ControlOperation::Wait),
+            )
+            .await??;
+            server.await??;
+            if state.terminal() {
+                let ControlReply::Snapshot { record } = outcome else {
+                    panic!(
+                        "Persisted {state:?} outcome was hidden by the unavailable reply: {outcome:?}"
+                    )
+                };
+                assert_eq!(record.state, state);
+                assert_eq!(record.id, id);
+            } else {
+                assert!(matches!(outcome, ControlReply::Unavailable { .. }));
+                assert_eq!(store.inspect(&id)?.unwrap().state, RunState::Running);
+            }
+        }
+        Ok(())
+    }
+
     #[tokio::test]
     async fn legacy_owner_force_rejects_before_transport_but_ordinary_stop_keeps_legacy_route() {
         let root = tempfile::tempdir().unwrap();
