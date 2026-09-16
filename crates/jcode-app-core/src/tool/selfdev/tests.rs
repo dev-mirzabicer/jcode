@@ -1036,6 +1036,15 @@ async fn build_queues_background_tasks_and_reports_queue_status() {
     let _home_guard = EnvVarGuard::set("JCODE_HOME", temp_home.path());
     let _test_guard = EnvVarGuard::set("JCODE_TEST_SESSION", "1");
     let repo = create_repo_fixture();
+    // Keep the simulated producer queued until its status has been inspected.
+    // Its short completion delay is not a synchronization guarantee.
+    let queue_barrier = SelfDevTool::try_acquire_build_lock(
+        &SelfDevTool::requested_source_state(repo.path())
+            .expect("fixture source")
+            .worktree_scope,
+    )
+    .expect("acquire queue barrier")
+    .expect("fixture queue is idle");
 
     let mut session_one = session::Session::create(None, Some("First build session".to_string()));
     session_one.short_name = Some("alpha".to_string());
@@ -1084,6 +1093,7 @@ async fn build_queues_background_tasks_and_reports_queue_status() {
             .contains("Target version: `test-build`")
     );
 
+    drop(queue_barrier);
     let first_status = wait_for_task_completion(first_task_id).await;
     let second_status = wait_for_task_completion(second_task_id).await;
     assert_eq!(first_status.status, BackgroundTaskStatus::Completed);
@@ -1170,6 +1180,13 @@ async fn build_dedupes_identical_reason_and_version_with_attached_watcher() {
     let _home_guard = EnvVarGuard::set("JCODE_HOME", temp_home.path());
     let _test_guard = EnvVarGuard::set("JCODE_TEST_SESSION", "1");
     let repo = create_repo_fixture();
+    let queue_barrier = SelfDevTool::try_acquire_build_lock(
+        &SelfDevTool::requested_source_state(repo.path())
+            .expect("fixture source")
+            .worktree_scope,
+    )
+    .expect("acquire queue barrier")
+    .expect("fixture queue is idle");
 
     let mut session_one = session::Session::create(None, Some("Build A".to_string()));
     session_one.short_name = Some("alpha".to_string());
@@ -1208,6 +1225,7 @@ async fn build_dedupes_identical_reason_and_version_with_attached_watcher() {
     assert!(status_output.output.contains("alpha"));
     assert!(status_output.output.contains("beta"));
 
+    drop(queue_barrier);
     let first_status = wait_for_task_completion(first_meta["task_id"].as_str().unwrap()).await;
     let second_status = wait_for_task_completion(second_meta["task_id"].as_str().unwrap()).await;
     assert_eq!(first_status.status, BackgroundTaskStatus::Completed);

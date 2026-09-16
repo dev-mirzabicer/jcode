@@ -682,7 +682,7 @@ async fn apply_claim_pins_live_lease_and_recovery_guard_serializes_named_coordin
     let first = StartupContextCoordinator::for_test(
         env.state.path().to_path_buf(),
         "first",
-        Duration::from_millis(20),
+        Duration::from_secs(30),
     );
     let second = StartupContextCoordinator::for_test(
         env.state.path().to_path_buf(),
@@ -707,7 +707,14 @@ async fn apply_claim_pins_live_lease_and_recovery_guard_serializes_named_coordin
     let claim = first
         .claim_apply("synthetic-pin", &editor.project.key_digest)
         .expect("claim active apply");
-    std::thread::sleep(Duration::from_millis(30));
+    // Age only this fixture's lease. A short real-time lease also expires
+    // during the later durable apply/close operations on a loaded machine.
+    first
+        .lock_state()
+        .leases
+        .get_mut(&editor.project.key_digest)
+        .expect("opened editor lease")
+        .renewed_instant = Instant::now() - Duration::from_secs(31);
     assert_eq!(first.expire_abandoned_leases(), 0);
     drop(claim);
     assert_eq!(first.expire_abandoned_leases(), 1);
