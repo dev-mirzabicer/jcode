@@ -5,6 +5,10 @@ acceptance and independent phase acceptance are separate human decisions. Earlie
 work-package counts remain revision-bound evidence, not an all-green claim for
 current source. Final run results belong in the exact-source evidence record.
 
+The subsequent [independent closeout ledger](PHASE4_CLOSEOUT_ACCEPTANCE.md)
+records the final phase-wide rerun, requirement reconciliation and fixture repairs.
+Its candidate evidence does not itself confer Mirza's final phase acceptance.
+
 ## Requirement routes
 
 | Requirements | Production owners and repeatable checks |

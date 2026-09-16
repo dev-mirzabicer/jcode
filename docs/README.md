@@ -22,6 +22,7 @@ Reference documentation for the jcode codebase.
 - Tool execution: [retained output, exact reads and cancellation](TOOL_EXECUTION.md), [storage/control architecture](dev/EXECUTION_STORAGE.md), [producer inventory](dev/EXECUTION_PRODUCERS.md), [acceptance reconciliation](dev/EXECUTION_ACCEPTANCE.md)
 - Task monitor: [native task/output controls, child Context Editor and storage review](TASK_MONITOR.md)
 - Combined execution/delegation verification: [requirements, native journeys and evidence boundaries](dev/PHASE4_INTEGRATION_ACCEPTANCE.md)
+- Independent Phase 4 closeout: [requirement reconciliation, repairs and acceptance limits](dev/PHASE4_CLOSEOUT_ACCEPTANCE.md)
 - Isolated children: [workflow, permissions, MCP eligibility and recovery](ISOLATED_DELEGATION.md)
 - Session inspection: [snapshots, activity, archival and reviewed cleanup](SESSION_INSPECTION.md), [persistence and ownership](dev/SESSION_INSPECTION.md), [acceptance evidence and limits](dev/SESSION_INSPECTION_ACCEPTANCE.md)
 - Startup Context: `STARTUP_CONTEXT.md`, `dev/STARTUP_CONTEXT_ACCEPTANCE.md`
