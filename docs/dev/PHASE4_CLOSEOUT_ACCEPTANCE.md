@@ -19,6 +19,57 @@ Commit `e57930cc0` contains only these test changes. No production behavior or p
 
 The supplemental matrix passed 12 of 13 groups. The remaining group was an erroneous child-policy filter matching zero tests, not a product assertion failure. The wrapper rejected it. Exact immutable-permission and isolated-Registry-lifetime selectors replaced that invocation and each passed one test in coordinated run `run-1458800ef88d4d430c9e8a96cdd7b2c441ee816434ed3e225266cd5ab5e9075e`. Do not describe the original aggregate as green.
 
+### Final field findings
+
+Actual in-flight `bg wait` twice reported a cancelled control task when a native
+background command had completed successfully. Already-terminal retrieval worked.
+The native worker could seal its durable result and then shut down while its control
+handler performed the final metadata read. The client reconciled transport errors
+with durable state, but returned an `Unavailable` protocol reply without that same
+check. Commit `3d2054994` applies the existing durable-truth reconciliation to that
+reply too. A deterministic real-store/socket regression first failed, then passed
+for completed, failed, cancelled and interrupted outcomes. A still-running case
+remains unavailable, not falsely terminal. No producer is repeated and no error
+message is parsed to infer completion.
+
+The same review found direct file reads in managed background output consumers,
+bypassing the shared archive/deletion/chunk-integrity owner. A same-length changed
+output regression reproduced that defect. Commit `67b59a04c` routes bg output/tail,
+compatibility output and completion previews through the existing verified reader.
+It retains bounded streaming, exact selected tails and cancellation. The regression
+and eight affected groups passed in `bg-fix-01`, including base/app execution,
+Registry execution, bg tools, background integration and formatting. The initial
+fixture attempt omitted the required start transition and failed at ownership
+validation; the corrected red run reproduced the intended integrity failure.
+
+Commit `b95db8179` extends the native child/CLI verifier with three ordinary
+in-flight background waits and one-effect counters. The fixture checks that each
+command is still running before the wait starts. The expanded journey uses 67
+scripted localhost responses rather than the earlier 58.
+
+### Verification disk-pressure incident
+
+An intervening `wait-fix-01` run passed its five test groups but exhausted the
+internal filesystem during strict lint. The compiler recorded ENOSPC, and live
+database-open errors were observed by both the agent and Mirza. That run is
+interrupted evidence, not a passing lint or matrix. Only manifested inactive
+incremental caches were removed. The blocked queued cleanup was cancelled before
+the exact-manifest fallback, after verifying no active compiler. Read-only SQLite
+quick_check returned `ok`, schema21 and configuration/instruction identities were
+preserved. The exact failed session-owned task was recovered as interrupted with
+its input/prefix intact after authenticated owner inspection, absent process-group
+proof and exclusive output-lease acquisition. No successful result was invented.
+
+Subsequent compiler work uses a 3-GiB free-space stop guard and reviewed cache
+cleanup between compiler slices. Output reserves cannot reserve disk against
+unrelated compiler writes. Exact incident/recovery before-images and receipts are
+under `disk-incident-20260916/`; the program's incident report retains the human
+observation and operational recovery. Final strict lint and activation are separate
+gates after that incident. Strict base/app-core library/test Clippy, full formatting
+and diff checks passed in coordinated run
+`run-533ec2abdb3a74ca9356b3e916abcf62c84beb86205a1bf1b0bb0a8689d2afe8`
+with the free-space guard and no guard-triggered stop.
+
 ## Requirement-to-evidence ledger
 
 `Validated` denotes production-owner mechanism/integration tests. `Verified` identifies the native public workflow where exercised. Synthetic content is used for mechanics, never to grade instructions.

@@ -75,6 +75,12 @@ not promised. Reload quiescence is distinct from human cancellation. Supported
 native background commands preserve identity across daemon replacement; uncertain
 owner loss produces an inspectable interruption rather than automatic replay.
 
+A worker's final control connection can close after it seals output. Wait uses the
+durable terminal receipt in that race, including failed/cancelled outcomes, rather
+than mistaking control-handler shutdown for cancellation of the completed command.
+Managed background output and previews use the same archive identity and integrity
+checks as ordinary retained-output reads.
+
 ## Storage and remote clients
 
 Execution metadata and receipts stay in private local state. Configured emergency
