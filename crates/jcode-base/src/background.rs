@@ -1037,14 +1037,13 @@ impl BackgroundTaskManager {
             let root = crate::storage::jcode_dir().ok()?;
             let id = task_id.to_string();
             return tokio::task::spawn_blocking(move || {
-                let record = crate::execution::ExecutionStore::open(&root)?
-                    .inspect(&id)?
-                    .ok_or_else(|| anyhow::anyhow!("Unknown execution"))?;
-                Ok::<_, anyhow::Error>(std::fs::read_to_string(
-                    record
-                        .output_path
-                        .ok_or_else(|| anyhow::anyhow!("Output not captured"))?,
-                )?)
+                use std::io::Read;
+                let store = crate::execution::ExecutionStore::open(&root)?;
+                let mut output = String::new();
+                store
+                    .open_retained_output(&id, None)?
+                    .read_to_string(&mut output)?;
+                Ok::<_, anyhow::Error>(output)
             })
             .await
             .ok()?

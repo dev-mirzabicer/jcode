@@ -262,6 +262,7 @@ impl BackgroundTaskManager {
             let record = store
                 .inspect(&id)?
                 .context("Unknown completed invocation")?;
+            let captured = record.output_path.is_some();
             let path = if record.state == RunState::Interrupted && record.result_path.is_none() {
                 let result = store.result(&record, std::num::NonZeroUsize::new(500).unwrap())?;
                 let jcode_tool_types::OutputSource::Unavailable(reference) = result.source else {
@@ -274,7 +275,12 @@ impl BackgroundTaskManager {
                     .unwrap_or_else(|| store.root().join("receipts").join(format!("{id}.json")))
             };
             let mut bytes = Vec::new();
-            if let Ok(file) = std::fs::File::open(&path) {
+            if captured && record.result_path.is_some() {
+                store
+                    .open_retained_output(&id, None)?
+                    .take(2000)
+                    .read_to_end(&mut bytes)?;
+            } else if let Ok(file) = std::fs::File::open(&path) {
                 file.take(2000).read_to_end(&mut bytes)?;
             }
             let output_preview = String::from_utf8_lossy(&bytes).into_owned();

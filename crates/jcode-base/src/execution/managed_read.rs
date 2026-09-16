@@ -20,6 +20,28 @@ pub(super) struct ManagedRead {
     chunk_start: u64,
     chunk: Vec<u8>,
 }
+
+impl ExecutionStore {
+    /// Open this invocation's committed text through the same volume, deletion
+    /// and chunk-integrity checks as source paging. Never expose raw file paths
+    /// as an alternate retained-output trust boundary.
+    pub fn open_retained_output(
+        &self,
+        id: &str,
+        stop: Option<&jcode_agent_runtime::InterruptSignal>,
+    ) -> Result<impl Read + Seek + use<>> {
+        let root = self
+            .root()
+            .parent()
+            .context("Missing execution namespace")?;
+        ManagedRead::open_with_stop(
+            root,
+            &self.root().join("outputs").join(id).join("output.txt"),
+            stop,
+        )?
+        .context("Invalid retained output identity")
+    }
+}
 impl ManagedRead {
     pub fn is_path(root: &Path, path: &Path) -> bool {
         path.strip_prefix(root.join("execution/outputs"))
@@ -279,6 +301,9 @@ fn ensure_legacy_index(
 }
 impl Read for ManagedRead {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if self.stop.as_ref().is_some_and(|stop| stop.is_set()) {
+            return Err(io::Error::other("Managed output read cancelled"));
+        }
         if buffer.is_empty() || self.position >= self.length {
             return Ok(0);
         }

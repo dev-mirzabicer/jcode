@@ -129,18 +129,17 @@ async fn read_output(
     prefix: String,
     metadata: Value,
 ) -> Result<ToolOutput> {
-    let path = record
-        .output_path
-        .context("Run has no retained output yet")?;
+    ensure!(
+        record.output_path.is_some(),
+        "Run has no retained output yet"
+    );
+    let root = crate::storage::jcode_dir()?;
+    let stop = ctx.graceful_shutdown_signal;
     let capture = ctx.invocation.capture;
     let limit = record.output_bytes;
     tokio::task::spawn_blocking(move || {
-        let mut file = std::fs::File::open(&path)
-            .context("Retained output is offline or unavailable; do not repeat its producer")?;
-        ensure!(
-            file.metadata()?.len() >= limit,
-            "Retained output is shorter than its committed prefix"
-        );
+        let store = ExecutionStore::open(&root)?;
+        let mut file = store.open_retained_output(&record.id, stop.as_ref())?;
         let start = if let Some(lines) = lines {
             tail_start(&mut file, limit, lines)?
         } else {
@@ -169,7 +168,7 @@ async fn read_output(
     .await?
 }
 
-fn tail_start(file: &mut std::fs::File, end: u64, lines: usize) -> Result<u64> {
+fn tail_start(file: &mut (impl Read + Seek), end: u64, lines: usize) -> Result<u64> {
     if lines == 0 {
         return Ok(end);
     }
@@ -248,6 +247,61 @@ async fn wait_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn background_output_rejects_changed_retained_bytes() -> Result<()> {
+        let _home = crate::auth::test_sandbox::AuthTestSandbox::new()?;
+        let store = ExecutionStore::open(&crate::storage::jcode_dir()?)?;
+        let invocation = crate::execution::Invocation {
+            session_id: "reader".into(),
+            message_id: "message".into(),
+            call_path: vec!["source".into()],
+            tool: "fixture".into(),
+            input: json!({}),
+            working_dir: None,
+            received_result_digest: None,
+        };
+        let crate::execution::PreparedInvocation::New(record) =
+            store.prepare(&invocation, "fixture")?
+        else {
+            panic!("new source")
+        };
+        store.start(&record.id, &record.owner)?;
+        store.retain(
+            record.clone(),
+            ToolOutput::new("first\r\noriginal\n"),
+            crate::execution::RunState::Completed,
+        )?;
+        let record = store.inspect(&record.id)?.unwrap();
+        let context = || ToolContext {
+            session_id: "reader".into(),
+            message_id: "message".into(),
+            tool_call_id: "read".into(),
+            working_dir: None,
+            stdin_request_tx: None,
+            graceful_shutdown_signal: None,
+            execution_mode: jcode_tool_core::ToolExecutionMode::Direct,
+            invocation: Default::default(),
+        };
+        assert_eq!(
+            read_output(record.clone(), Some(1), context(), String::new(), json!({}))
+                .await?
+                .output,
+            "original\n"
+        );
+        // Same length: checking only metadata/length cannot establish integrity.
+        std::fs::write(record.output_path.as_ref().unwrap(), "first\r\nmodified\n")?;
+        for lines in [None, Some(1)] {
+            assert!(
+                read_output(record.clone(), lines, context(), String::new(), json!({}))
+                    .await
+                    .is_err(),
+                "bg must not label modified bytes as retained output"
+            );
+        }
+        Ok(())
+    }
+
     #[test]
     fn tail_offsets_preserve_crlf_and_arbitrarily_long_lines() -> Result<()> {
         for text in [
