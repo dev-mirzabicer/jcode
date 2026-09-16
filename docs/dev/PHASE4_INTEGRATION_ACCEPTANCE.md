@@ -7,7 +7,9 @@ current source. Final run results belong in the exact-source evidence record.
 
 The subsequent [independent closeout ledger](PHASE4_CLOSEOUT_ACCEPTANCE.md)
 records the final phase-wide rerun, requirement reconciliation and fixture repairs.
-Its candidate evidence does not itself confer Mirza's final phase acceptance.
+Mirza accepted the independently verified Phase 4 result on 2026-09-16.
+The dated WP-06 observations below remain supporting history, not the final
+phase acceptance boundary.
 
 ## Requirement routes
 

@@ -1,6 +1,6 @@
 # Independent Phase 4 closeout verification
 
-**Status:** Candidate evidence, not final phase acceptance. Mirza's approval and the external phase completion report are separate gates.
+**Status:** Phase 4 accepted by Mirza on 2026-09-16 at 16:27:11.167 UTC. The exact accepted implementation is `f2ea363c4013107aa3d8394df2eb345353057720`, activated as `f2ea363c4-dirty-c80238522ec5`, with running/current/shared equality and passed canary. It was fast-forwarded to local and actual downstream main at 16:28:16 UTC. This acceptance update is documentation-only.
 
 ## Reviewed boundary
 
@@ -114,8 +114,8 @@ with the free-space guard and no guard-triggered stop.
 | A36 | Native child curator/apply/history/undo through parent monitor, unattached child routing and no chat/restart. Hosted busy/stale/target-race tests preserve parent state and current directives. | Native verified plus race coverage |
 | A37 | Structural redacted export and source-equality tests, private store/IPC identities, verified archive UUID and accurately disclosed unencrypted/ownership-ignored policy. | Validated plus live configuration evidence |
 | A38 | Session, startup, composition, roster, skills, 58 context-core and 97 TUI editor tests, explicit disabled-memory negatives and runtime/config preservation. | Validated plus native preservation |
-| A39 | Current shipped guides, exact phase commits/paths, configuration/schema, source/runtime/channel/canary, documentation links and final activation. External capability-map and phase status updates follow approval. | Candidate verification, final authority updates pending |
-| A40 | D-26 provisional framework-stage prose and accepted package review retained unchanged. No wording snapshots, phrase grading or automated LLM benchmark added. | Existing human acceptance, final phase approval pending |
+| A39 | Current shipped guides, exact phase commits/paths, configuration/schema, source/runtime/channel/canary, documentation links and final activation. External capability-map and phase status updates are recorded by the accepted program completion report. | Verified; final phase accepted |
+| A40 | D-26 provisional framework-stage prose and accepted package review retained unchanged. No wording snapshots, phrase grading or automated LLM benchmark added. | Human accepted within provisional framework scope |
 
 ## Combined journeys
 
@@ -150,4 +150,23 @@ The first native rerun used exact activated `6c0890311-dirty-658f4fa15a52`. Chil
 - [Historical failed repository suites](EXECUTION_FAILURE_TRIAGE.md) remain failed evidence. The focused independent matrix does not claim a universally green repository. The named Phase 10 fixture-maintenance handoff remains, without waiving active Phase 4 correctness.
 - Active retains its accepted existing protection level. Native cleanup touched only uniquely identified tiny fixture outputs, not user archives. Manifested inactive incremental-cache cleanup preserved binaries, source, sessions, instructions and durable evidence.
 
-Final source/runtime identity and phase approval belong in the external completion report after Mirza accepts this candidate. This ledger cannot confer that approval.
+Mirza explicitly accepted the final candidate and publication on 2026-09-16 at 16:27:11.167 UTC. The program PHASE_COMPLETION.md is the authoritative downstream rationale and future handoff. This ledger records observed evidence and does not erase the disclosed limits or failed historical runs.
+
+## Final activated acceptance
+
+All four native suites passed again on immutable `f2ea363c4-dirty-c80238522ec5`.
+The expanded child/CLI/SDK suite completed 67 localhost requests, including three
+in-flight background waits and exact one-effect counters. Pressure retained
+1,000,015 bytes with one effect. Retention archived ten owned fixtures and retained
+the newest two snapshots. Physical monitor controls, child curator/apply/undo,
+cleanup and reconnect passed at five sizes, with 29 monitor and two child-lock
+frames reporting no anomalies and no unfinished fixture work. This session also
+received a correct terminal result from an actual in-flight bg wait on that native
+runner. Final SQLite quick_check returned ok, schema21 and protected file/config/
+instruction identities remained intact, and about 6.7 GiB was free.
+
+`FINAL-ACTIVATION.json`, `FINAL-VERIFICATION.json`, `final-runner-results.json` and
+`native-final/` retain the final evidence. Source changes after the accepted
+implementation are limited to this acceptance/index record. No runtime source,
+configuration or instruction asset differs, so the documentation-only tail does
+not require another build.
