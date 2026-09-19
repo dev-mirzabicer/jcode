@@ -87,6 +87,11 @@ impl WorkspaceService {
         if let Some(receipt) = replay(&connection, request, &input)? {
             return Ok(receipt);
         }
+        let _root_lease = prepared
+            .binding
+            .as_ref()
+            .map(|binding| self.acquire_binding(binding))
+            .transpose()?;
         if let Some(binding) = &prepared.binding {
             self.resolver
                 .resolve_directory(binding)

@@ -1,5 +1,49 @@
 use super::*;
 
+#[cfg(target_os = "macos")]
+#[test]
+fn registration_cannot_bypass_a_physical_owner_in_another_catalog() {
+    let first = tempfile::tempdir().unwrap();
+    let a = WorkspaceService::new(first.path());
+    a.initialize(RequestId::new()).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let EntityId::Location(id) = change(
+        &a,
+        OrganizationChange::RegisterLocation {
+            name: "root".into(),
+            path: root.path().into(),
+            registration: Registration::Standalone,
+        },
+    )
+    .targets[0] else {
+        panic!()
+    };
+    let lease = a.acquire_root(id).unwrap();
+    let second = tempfile::tempdir().unwrap();
+    let b = WorkspaceService::new(second.path());
+    b.initialize(RequestId::new()).unwrap();
+    let review = b
+        .review_organization_change(
+            0,
+            OrganizationChange::RegisterLocation {
+                name: "root".into(),
+                path: root.path().into(),
+                registration: Registration::Standalone,
+            },
+        )
+        .unwrap();
+    let request = RequestId::new();
+    assert_eq!(
+        b.apply_organization_change(request, review.id)
+            .unwrap_err()
+            .code,
+        IssueCode::Busy
+    );
+    assert_eq!(b.status().unwrap().revision, 0);
+    drop(lease);
+    assert!(b.apply_organization_change(request, review.id).is_ok());
+}
+
 #[test]
 fn named_backup_receipt_remains_readable_when_current_catalog_is_corrupt() {
     let dir = tempfile::tempdir().unwrap();

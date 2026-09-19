@@ -48,7 +48,6 @@ pub mod import;
 pub mod instruction;
 pub mod live_tests;
 pub mod location;
-pub mod workspace;
 pub mod logging;
 pub mod login_qr;
 pub mod mcp;
@@ -91,6 +90,7 @@ pub mod storage;
 pub mod subscription_api;
 pub mod subscription_catalog;
 pub mod telegram;
+pub mod workspace;
 pub mod telemetry {
     pub use jcode_telemetry_core::*;
 }

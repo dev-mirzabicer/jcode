@@ -221,7 +221,7 @@ impl WorkspaceService {
         status(&connection)
     }
     pub fn acquire_root(&self, location: LocationId) -> Result<RootLease> {
-        let catalog = self.lease(false)?;
+        let _catalog = self.lease(false)?;
         let connection = self.connection()?;
         let body: String = connection
             .query_row(
@@ -231,10 +231,14 @@ impl WorkspaceService {
             )
             .map_err(corrupt)?;
         let bound: BoundLocation = decode(&body)?;
+        self.acquire_binding(&bound.binding)
+    }
+    pub(super) fn acquire_binding(&self, binding: &PhysicalBinding) -> Result<RootLease> {
+        let catalog = self.lease(false)?;
         self.resolver
-            .resolve_directory(&bound.binding)
+            .resolve_directory(binding)
             .map_err(|e| issue(IssueCode::ReplacedRoot, e.to_string()))?;
-        let key = physical_key(&bound.binding)?;
+        let key = physical_key(binding)?;
         // Same-user physical-root ownership spans independently named state roots.
         #[cfg(unix)]
         let shared = {
