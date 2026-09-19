@@ -3,7 +3,7 @@ use super::lease::{acquire_mutation_lease, acquire_setup_lease};
 use super::mutation::{atomic_write_path, validate_relative_path};
 use super::service::InstructionRepositoryService;
 use super::types::*;
-use crate::startup_context::{ProjectKey, StartupContext};
+use crate::location::{ProjectKey, resolve_project};
 use std::path::{Path, PathBuf};
 
 const PROJECT_CONFIG_RELATIVE_PATH: &str = ".jcode/instructions.toml";
@@ -14,9 +14,8 @@ impl InstructionRepositoryService {
         &self,
         launch_dir: impl AsRef<Path>,
     ) -> InstructionRepositoryResult<PathBuf> {
-        let roots = self.roots()?;
-        StartupContext::from_durable_state_dir(&roots.durable_state)
-            .resolve_project(launch_dir)
+        self.roots()?;
+        resolve_project(launch_dir.as_ref())
             .map(|project| project.active_root().to_path_buf())
             .map_err(|error| {
                 InstructionRepositoryError::new(
@@ -32,15 +31,13 @@ impl InstructionRepositoryService {
         launch_dir: impl AsRef<Path>,
     ) -> InstructionRepositoryResult<Option<InstructionRepositoryRef>> {
         let roots = self.roots()?;
-        let project = StartupContext::from_durable_state_dir(&roots.durable_state)
-            .resolve_project(launch_dir)
-            .map_err(|error| {
-                InstructionRepositoryError::new(
-                    InstructionRepositoryErrorKind::Configuration,
-                    "resolve instruction project",
-                    error.to_string(),
-                )
-            })?;
+        let project = resolve_project(launch_dir.as_ref()).map_err(|error| {
+            InstructionRepositoryError::new(
+                InstructionRepositoryErrorKind::Configuration,
+                "resolve instruction project",
+                error.to_string(),
+            )
+        })?;
         let project_root = project.active_root().to_path_buf();
         let config_path = project_root.join(PROJECT_CONFIG_RELATIVE_PATH);
         let project_id = format!("project-{}", project.key().digest());
@@ -79,16 +76,14 @@ impl InstructionRepositoryService {
         &self,
         launch_dir: impl AsRef<Path>,
     ) -> InstructionRepositoryResult<Option<InstructionProjectConfig>> {
-        let roots = self.roots()?;
-        let project = StartupContext::from_durable_state_dir(&roots.durable_state)
-            .resolve_project(launch_dir)
-            .map_err(|error| {
-                InstructionRepositoryError::new(
-                    InstructionRepositoryErrorKind::Configuration,
-                    "resolve instruction project configuration",
-                    error.to_string(),
-                )
-            })?;
+        self.roots()?;
+        let project = resolve_project(launch_dir.as_ref()).map_err(|error| {
+            InstructionRepositoryError::new(
+                InstructionRepositoryErrorKind::Configuration,
+                "resolve instruction project configuration",
+                error.to_string(),
+            )
+        })?;
         let path = project.active_root().join(PROJECT_CONFIG_RELATIVE_PATH);
         if !project_config_present(&path)? {
             return Ok(None);
@@ -174,15 +169,13 @@ impl InstructionRepositoryService {
         expected_configuration: Option<&str>,
     ) -> InstructionRepositoryResult<InstructionRepositoryRef> {
         let roots = self.roots()?;
-        let project = StartupContext::from_durable_state_dir(&roots.durable_state)
-            .resolve_project(launch_dir)
-            .map_err(|error| {
-                InstructionRepositoryError::new(
-                    InstructionRepositoryErrorKind::Configuration,
-                    "resolve submodule project",
-                    error.to_string(),
-                )
-            })?;
+        let project = resolve_project(launch_dir.as_ref()).map_err(|error| {
+            InstructionRepositoryError::new(
+                InstructionRepositoryErrorKind::Configuration,
+                "resolve submodule project",
+                error.to_string(),
+            )
+        })?;
         if !project.key().is_git() {
             return Err(InstructionRepositoryError::new(
                 InstructionRepositoryErrorKind::Configuration,
@@ -280,15 +273,13 @@ impl InstructionRepositoryService {
         expected_configuration: Option<&str>,
     ) -> InstructionRepositoryResult<InstructionRepositoryRef> {
         let roots = self.roots()?;
-        let project = StartupContext::from_durable_state_dir(&roots.durable_state)
-            .resolve_project(launch_dir)
-            .map_err(|error| {
-                InstructionRepositoryError::new(
-                    InstructionRepositoryErrorKind::Configuration,
-                    "resolve external instruction project",
-                    error.to_string(),
-                )
-            })?;
+        let project = resolve_project(launch_dir.as_ref()).map_err(|error| {
+            InstructionRepositoryError::new(
+                InstructionRepositoryErrorKind::Configuration,
+                "resolve external instruction project",
+                error.to_string(),
+            )
+        })?;
         let config_path = project.active_root().join(PROJECT_CONFIG_RELATIVE_PATH);
         let checkout = external_checkout_root(roots, project.key());
         let repository = InstructionRepositoryRef {
@@ -361,15 +352,13 @@ impl InstructionRepositoryService {
         expected_configuration: Option<&str>,
     ) -> InstructionRepositoryResult<InstructionRepositoryRef> {
         let roots = self.roots()?;
-        let project = StartupContext::from_durable_state_dir(&roots.durable_state)
-            .resolve_project(launch_dir)
-            .map_err(|error| {
-                InstructionRepositoryError::new(
-                    InstructionRepositoryErrorKind::Configuration,
-                    "resolve external instruction project",
-                    error.to_string(),
-                )
-            })?;
+        let project = resolve_project(launch_dir.as_ref()).map_err(|error| {
+            InstructionRepositoryError::new(
+                InstructionRepositoryErrorKind::Configuration,
+                "resolve external instruction project",
+                error.to_string(),
+            )
+        })?;
         let checkout = absolute_project_path(project.active_root(), checkout.as_ref());
         let canonical = std::fs::canonicalize(&checkout).map_err(|error| {
             InstructionRepositoryError::new(
@@ -455,15 +444,13 @@ impl InstructionRepositoryService {
         expected_configuration: Option<&str>,
     ) -> InstructionRepositoryResult<InstructionStoreInitialization> {
         let roots = self.roots()?;
-        let project = StartupContext::from_durable_state_dir(&roots.durable_state)
-            .resolve_project(launch_dir)
-            .map_err(|error| {
-                InstructionRepositoryError::new(
-                    InstructionRepositoryErrorKind::Configuration,
-                    "resolve non-Git instruction project",
-                    error.to_string(),
-                )
-            })?;
+        let project = resolve_project(launch_dir.as_ref()).map_err(|error| {
+            InstructionRepositoryError::new(
+                InstructionRepositoryErrorKind::Configuration,
+                "resolve non-Git instruction project",
+                error.to_string(),
+            )
+        })?;
         if project.key().is_git() {
             return Err(InstructionRepositoryError::new(
                 InstructionRepositoryErrorKind::Configuration,

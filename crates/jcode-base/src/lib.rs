@@ -47,6 +47,7 @@ pub mod id;
 pub mod import;
 pub mod instruction;
 pub mod live_tests;
+pub mod location;
 pub mod logging;
 pub mod login_qr;
 pub mod mcp;
