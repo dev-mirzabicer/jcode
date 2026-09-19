@@ -1090,14 +1090,6 @@ impl Agent {
 
     /// Restore a session by ID (loads from disk)
     pub fn restore_session(&mut self, session_id: &str) -> Result<SessionStatus> {
-        self.restore_session_with_working_dir(session_id, None)
-    }
-
-    pub(crate) fn restore_session_with_working_dir(
-        &mut self,
-        session_id: &str,
-        working_dir: Option<&str>,
-    ) -> Result<SessionStatus> {
         let restore_start = Instant::now();
         let load_start = Instant::now();
         let mut session = Session::load(session_id)?;
@@ -1107,10 +1099,6 @@ impl Agent {
         );
         crate::execution::ExecutionStore::open(&crate::storage::jcode_dir()?)?
             .touch_activity(session_id, chrono::Utc::now().timestamp())?;
-        if let Some(working_dir) = working_dir {
-            session.working_dir = Some(working_dir.to_string());
-            session.refresh_initial_session_context_message();
-        }
         let load_ms = load_start.elapsed().as_millis();
         logging::info(&format!(
             "Restoring session '{}' with {} messages, provider_session_id: {:?}, status: {}",

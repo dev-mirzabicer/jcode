@@ -20,7 +20,7 @@ use crate::transport::WriteHalf;
 use anyhow::Result;
 use jcode_agent_runtime::InterruptSignal;
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
@@ -486,121 +486,15 @@ async fn ensure_client_swarm_member(
     inserted
 }
 
-/// Resolve the working directory a subscribe should actually bind to.
-///
-/// Returns the reported dir when it is acceptable, or the session's existing
-/// dir when the report is rejected by [`subscribe_working_dir_replacement`].
-/// Every consumer of a subscribe cwd (agent state, swarm id, project-local MCP
-/// resolution) must agree on this one answer, otherwise the session's tools,
-/// swarm grouping, and MCP config can each resolve against a different
-/// directory (issue #481).
-pub(super) fn effective_subscribe_working_dir(
-    current: Option<&str>,
-    reported: &str,
-    home: Option<&Path>,
-) -> String {
-    match subscribe_working_dir_replacement(current, reported, home) {
-        Some(accepted) => accepted,
-        None => current
-            .map(str::to_string)
-            .unwrap_or_else(|| reported.trim().to_string()),
+/// Attachment never selects a location. Busy sessions use the durable metadata
+/// projection rather than waiting for inference or trusting another client's cwd.
+fn session_working_dir(agent: &Arc<Mutex<Agent>>, session_id: &str) -> Result<Option<PathBuf>> {
+    if let Ok(agent) = agent.try_lock() {
+        return Ok(agent.working_dir().map(PathBuf::from));
     }
-}
-
-/// Decide whether a client-reported subscribe cwd may replace the session's
-/// current working directory.
-///
-/// Requiring a subscribe cwd to be non-empty and absolute (the earlier
-/// require-cwd change) is necessary but not sufficient: a client that launches
-/// with an inherited environment can report the user's *home* directory even
-/// though the real project lives elsewhere. Accepting that silently re-pins the
-/// session to home, so bash/file tools run against home while the header still
-/// shows the project path (issue #481).
-///
-/// The rule is deliberately narrow so it cannot break legitimate directory
-/// changes: a reported cwd that is exactly the home directory is ignored *only*
-/// when the session already has a different working directory. Working in home
-/// on purpose (no prior cwd, or a session already pinned to home) still works,
-/// and every other path is accepted as before.
-pub(super) fn subscribe_working_dir_replacement(
-    current: Option<&str>,
-    reported: &str,
-    home: Option<&Path>,
-) -> Option<String> {
-    let reported_trimmed = reported.trim();
-    if reported_trimmed.is_empty() {
-        return None;
-    }
-    let current = current.map(str::trim).filter(|dir| !dir.is_empty());
-    if current == Some(reported_trimmed) {
-        return None;
-    }
-    if let (Some(current), Some(home)) = (current, home)
-        && Path::new(reported_trimmed) == home
-        && Path::new(current) != home
-    {
-        return None;
-    }
-    Some(reported_trimmed.to_string())
-}
-
-fn log_ignored_subscribe_working_dir(session_id: &str, current: &str, reported: &str) {
-    crate::logging::warn(&format!(
-        "Ignoring subscribe working_dir {} for session {}: it is the home directory while the session is already bound to {} (issue #481)",
-        reported, session_id, current
-    ));
-}
-
-fn apply_or_defer_subscribe_working_dir(
-    agent: &Arc<Mutex<Agent>>,
-    working_dir: &str,
-    session_id: &str,
-) {
-    let home = dirs::home_dir();
-    if let Ok(mut agent_guard) = agent.try_lock() {
-        match subscribe_working_dir_replacement(
-            agent_guard.working_dir(),
-            working_dir,
-            home.as_deref(),
-        ) {
-            Some(accepted) => agent_guard.set_working_dir(&accepted),
-            None => {
-                if let Some(current) = agent_guard.working_dir()
-                    && current != working_dir
-                {
-                    log_ignored_subscribe_working_dir(session_id, current, working_dir);
-                }
-            }
-        }
-        return;
-    }
-
-    let agent = Arc::clone(agent);
-    let working_dir = working_dir.to_string();
-    let session_id = session_id.to_string();
-    tokio::spawn(async move {
-        let mut agent_guard = agent.lock().await;
-        match subscribe_working_dir_replacement(
-            agent_guard.working_dir(),
-            &working_dir,
-            home.as_deref(),
-        ) {
-            Some(accepted) => {
-                agent_guard.set_working_dir(&accepted);
-                crate::logging::info(&format!(
-                    "Applied deferred subscribe working directory for session {}",
-                    session_id
-                ));
-            }
-            None => {
-                if let Some(current) = agent_guard.working_dir()
-                    && current != working_dir
-                {
-                    log_ignored_subscribe_working_dir(&session_id, current, &working_dir);
-                }
-            }
-        }
-    });
+    Ok(crate::session::Session::load_startup_stub(session_id)?
+        .working_dir
+        .map(PathBuf::from))
 }
 
 fn apply_or_defer_subscribe_selfdev(agent: &Arc<Mutex<Agent>>, session_id: &str) {
@@ -651,6 +545,17 @@ pub(super) async fn handle_subscribe(
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
 ) {
     let subscribe_start = Instant::now();
+    let bound_working_dir = match session_working_dir(agent, client_session_id) {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = client_event_tx.send(ServerEvent::Error {
+                id,
+                message: format!("Cannot inspect the session working directory: {error:#}"),
+                retry_after_secs: None,
+            });
+            return;
+        }
+    };
     if let Err(error) =
         crate::execution::retention::record_session_use(client_session_id.to_string()).await
     {
@@ -691,20 +596,7 @@ pub(super) async fn handle_subscribe(
     )
     .await;
 
-    if let Some(ref dir) = subscribe_working_dir {
-        apply_or_defer_subscribe_working_dir(agent, dir, client_session_id);
-
-        // Swarm grouping must use the *bound* directory, not the raw report, or
-        // a home-dir subscribe would still re-key the session's swarm even
-        // though its agent stayed in the project (issue #481).
-        let bound_dir = {
-            let current = agent
-                .try_lock()
-                .ok()
-                .and_then(|guard| guard.working_dir().map(str::to_string));
-            effective_subscribe_working_dir(current.as_deref(), dir, dirs::home_dir().as_deref())
-        };
-        let new_path = PathBuf::from(&bound_dir);
+    if let Some(new_path) = bound_working_dir.clone() {
         let mut old_swarm_id: Option<String> = None;
         let mut updated_swarm_id: Option<String> = None;
         {
@@ -855,33 +747,7 @@ pub(super) async fn handle_subscribe(
 
     let mcp_register_ms = if register_mcp_tools {
         let mcp_register_start = Instant::now();
-        // Resolve project-local MCP config against the session working dir,
-        // not the server process cwd (issue #420). Prefer the subscribe
-        // request's dir; fall back to the agent's stored session dir.
-        let mcp_working_dir = match subscribe_working_dir.as_ref() {
-            // Resolve against the bound directory so a rejected home-dir report
-            // cannot point project-local MCP discovery at home (issue #481).
-            Some(dir) => {
-                let current = agent
-                    .try_lock()
-                    .ok()
-                    .and_then(|guard| guard.working_dir().map(str::to_string));
-                Some(PathBuf::from(effective_subscribe_working_dir(
-                    current.as_deref(),
-                    dir,
-                    dirs::home_dir().as_deref(),
-                )))
-            }
-            None => agent
-                .try_lock()
-                .ok()
-                .and_then(|agent_guard| agent_guard.working_dir().map(PathBuf::from))
-                .or_else(|| {
-                    crate::session::Session::load_startup_stub(client_session_id)
-                        .ok()
-                        .and_then(|session| session.working_dir.map(PathBuf::from))
-                }),
-        };
+        let mcp_working_dir = bound_working_dir;
         registry
             .register_mcp_tools_for_dir(
                 Some(client_event_tx.clone()),
@@ -1231,7 +1097,6 @@ async fn claim_live_target_agent(
 pub(super) async fn handle_resume_session(
     id: u64,
     session_id: String,
-    working_dir_override: Option<&str>,
     client_instance_id: Option<&str>,
     client_has_local_history: bool,
     allow_session_takeover: bool,
@@ -1300,6 +1165,7 @@ pub(super) async fn handle_resume_session(
     .await;
 
     if let Some(live_target_agent) = live_target_agent.as_ref() {
+        let mcp_working_dir = session_working_dir(live_target_agent, &session_id)?;
         let old_session_id = client_session_id.clone();
 
         let conflicting_live_client = if old_session_id == session_id {
@@ -1460,17 +1326,6 @@ pub(super) async fn handle_resume_session(
         // working dir, not the server process cwd (issue #420).
         // Do not block on the agent lock here: the target agent may be busy
         // mid-turn (lock held), and awaiting it would deadlock the resume.
-        let mcp_working_dir = working_dir_override.map(PathBuf::from).or_else(|| {
-            live_target_agent
-                .try_lock()
-                .ok()
-                .and_then(|agent_guard| agent_guard.working_dir().map(PathBuf::from))
-                .or_else(|| {
-                    crate::session::Session::load_startup_stub(&session_id)
-                        .ok()
-                        .and_then(|session| session.working_dir.map(PathBuf::from))
-                })
-        });
         registry
             .register_mcp_tools_for_dir(
                 Some(client_event_tx.clone()),
@@ -1627,8 +1482,7 @@ pub(super) async fn handle_resume_session(
 
     let (result, is_canary) = {
         let mut agent_guard = agent.lock().await;
-        let result =
-            agent_guard.restore_session_with_working_dir(&session_id, working_dir_override);
+        let result = agent_guard.restore_session(&session_id);
         if *client_selfdev {
             agent_guard.set_canary("self-dev");
         }

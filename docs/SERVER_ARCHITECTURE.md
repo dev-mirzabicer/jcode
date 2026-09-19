@@ -95,10 +95,13 @@ The server shuts down when:
 
 ### Remote Client Working Directory
 
-By default, a client sends its current working directory to the server when it
-subscribes, and the server uses that as the session working directory. Socket
-forwarding wrappers for remote daemons can keep the client and server paths
-separate with `--remote-working-dir`:
+For a fresh session, the client supplies its command working directory to the
+server. Attaching, resuming, reconnecting or navigating to an existing session
+retains that session's stored working directory. A Subscribe report never moves
+an existing session, even while it is busy. Project-local MCP discovery and
+presence metadata use the same server-owned directory, not the attaching
+client's path. Socket forwarding wrappers can select the initial server path
+separately with `--remote-working-dir`:
 
 ```bash
 jcode --socket /tmp/jcode.sock -C /local/checkout --remote-working-dir /remote/checkout

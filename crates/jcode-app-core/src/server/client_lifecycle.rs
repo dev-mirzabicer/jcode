@@ -2070,7 +2070,6 @@ pub(super) async fn handle_client_with_instruction_repositories(
                             handle_resume_session(
                                 id,
                                 target_session_id.clone(),
-                                subscribe_working_dir.as_deref(),
                                 client_instance_id.as_deref(),
                                 client_has_local_history,
                                 allow_session_takeover,
@@ -2799,10 +2798,6 @@ pub(super) async fn handle_client_with_instruction_repositories(
                 allow_session_takeover,
             } => {
                 let previous_session_id = client_session_id.clone();
-                let resume_working_dir = {
-                    let agent_guard = agent.lock().await;
-                    agent_guard.working_dir().map(str::to_string)
-                };
                 current_client_instance_id = client_instance_id.clone();
                 {
                     let mut connections = client_connections.write().await;
@@ -2815,7 +2810,6 @@ pub(super) async fn handle_client_with_instruction_repositories(
                     handle_resume_session(
                         id,
                         session_id,
-                        resume_working_dir.as_deref(),
                         client_instance_id.as_deref(),
                         client_has_local_history,
                         allow_session_takeover,

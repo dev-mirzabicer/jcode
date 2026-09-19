@@ -123,7 +123,6 @@ async fn handle_resume_session_registers_live_events_before_history_replay() -> 
                 46,
                 target_session_id.to_string(),
                 None,
-                None,
                 false,
                 false,
                 &mut client_selfdev,

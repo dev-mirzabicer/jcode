@@ -1,10 +1,8 @@
 use super::{
-    apply_or_defer_subscribe_working_dir, claim_live_target_agent, effective_subscribe_working_dir,
-    handle_clear_session, handle_reload, handle_resume_session, handle_subscribe,
-    mark_remote_reload_started, remove_detached_source_if_unclaimed, rename_shutdown_signal,
-    rename_swarm_member_session, restored_session_was_interrupted,
+    claim_live_target_agent, handle_clear_session, handle_reload, handle_resume_session,
+    handle_subscribe, mark_remote_reload_started, remove_detached_source_if_unclaimed,
+    rename_shutdown_signal, rename_swarm_member_session, restored_session_was_interrupted,
     session_was_interrupted_by_reload, subscribe_should_mark_ready,
-    subscribe_working_dir_replacement,
 };
 use crate::agent::Agent;
 use crate::message::ContentBlock;
@@ -302,134 +300,8 @@ async fn live_target_claim_is_atomic_with_detached_source_cleanup() {
     }
 }
 
-/// Issue #481: a subscribe cwd that is merely absolute is not enough. A client
-/// reporting the *home* directory must not silently re-pin (or clobber) a
-/// session that is already bound to a real project directory, because tools then
-/// run in home while the UI still shows the project.
-#[test]
-fn subscribe_working_dir_ignores_home_when_session_has_a_project_dir() {
-    let home = std::path::Path::new("/home/tester");
-    let project = "/home/tester/work/project";
-
-    assert_eq!(
-        subscribe_working_dir_replacement(Some(project), "/home/tester", Some(home)),
-        None,
-        "home must not clobber an established project cwd"
-    );
-
-    // A session with no cwd yet, or one already in home, may legitimately use home.
-    assert_eq!(
-        subscribe_working_dir_replacement(None, "/home/tester", Some(home)),
-        Some("/home/tester".to_string())
-    );
-    assert_eq!(
-        subscribe_working_dir_replacement(Some("/home/tester"), "/home/tester", Some(home)),
-        None,
-        "an unchanged cwd needs no reassignment"
-    );
-
-    // Genuine project-to-project moves still apply.
-    assert_eq!(
-        subscribe_working_dir_replacement(Some(project), "/home/tester/work/other", Some(home)),
-        Some("/home/tester/work/other".to_string())
-    );
-
-    // A subdirectory of home that is not home itself is a real project path.
-    assert_eq!(
-        subscribe_working_dir_replacement(Some(project), "/home/tester/scratch", Some(home)),
-        Some("/home/tester/scratch".to_string())
-    );
-
-    // Blank/whitespace reports are never applied, and an unknown home disables
-    // the guard rather than rejecting valid directories.
-    assert_eq!(
-        subscribe_working_dir_replacement(Some(project), "   ", Some(home)),
-        None
-    );
-    assert_eq!(
-        subscribe_working_dir_replacement(Some(project), "/home/tester", None),
-        Some("/home/tester".to_string())
-    );
-}
-
-/// Issue #481: agent cwd, swarm grouping, and project-local MCP resolution must
-/// all bind to the *same* directory. If a rejected home-dir report still reached
-/// the swarm id or the MCP resolver, tools would run in the project while swarm
-/// membership and `.jcode/mcp.json` discovery pointed at home.
-#[test]
-fn effective_subscribe_working_dir_binds_all_consumers_to_one_directory() {
-    let home = std::path::Path::new("/home/tester");
-    let project = "/home/tester/work/project";
-
-    // Rejected home report: every consumer keeps the project dir.
-    assert_eq!(
-        effective_subscribe_working_dir(Some(project), "/home/tester", Some(home)),
-        project
-    );
-
-    // Accepted move: every consumer follows to the new dir.
-    assert_eq!(
-        effective_subscribe_working_dir(Some(project), "/home/tester/work/other", Some(home)),
-        "/home/tester/work/other"
-    );
-
-    // No prior cwd: the report is authoritative, including home.
-    assert_eq!(
-        effective_subscribe_working_dir(None, "/home/tester", Some(home)),
-        "/home/tester"
-    );
-
-    // Unchanged report resolves to the same dir rather than dropping it.
-    assert_eq!(
-        effective_subscribe_working_dir(Some(project), project, Some(home)),
-        project
-    );
-}
-
-/// Issue #481 end to end: drive the real subscribe-cwd application path against
-/// a live `Agent` and assert the agent's stored working directory, which is what
-/// bash/file tools actually run in. The pure-resolver tests above cover the
-/// decision; this covers the wiring that applies it.
-#[tokio::test]
-async fn apply_subscribe_working_dir_keeps_project_when_client_reports_home() {
-    let home = dirs::home_dir().expect("home directory");
-    let home_str = home.to_string_lossy().to_string();
-    let project = home.join("jcode-481-project");
-    let project_str = project.to_string_lossy().to_string();
-
-    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
-    let registry = Registry::new(Arc::clone(&provider)).await;
-    let agent = Arc::new(Mutex::new(Agent::new_with_initial_working_dir(
-        provider,
-        registry,
-        Some(&project_str),
-    )));
-
-    assert_eq!(
-        agent.lock().await.working_dir(),
-        Some(project_str.as_str()),
-        "precondition: session starts bound to the project"
-    );
-
-    // A client whose inherited cwd is home must not re-pin the session.
-    apply_or_defer_subscribe_working_dir(&agent, &home_str, "session_test_481");
-    assert_eq!(
-        agent.lock().await.working_dir(),
-        Some(project_str.as_str()),
-        "a home-dir subscribe must not clobber the project cwd"
-    );
-
-    // A genuine project-to-project move still applies.
-    let other = home.join("jcode-481-other");
-    let other_str = other.to_string_lossy().to_string();
-    apply_or_defer_subscribe_working_dir(&agent, &other_str, "session_test_481");
-    assert_eq!(
-        agent.lock().await.working_dir(),
-        Some(other_str.as_str()),
-        "a real directory change must still be honored"
-    );
-}
-
+#[path = "client_session_tests/attachment_location.rs"]
+mod attachment_location;
 #[path = "client_session_tests/clear.rs"]
 mod clear_tests;
 #[path = "client_session_tests/reload.rs"]

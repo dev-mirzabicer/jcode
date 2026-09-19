@@ -99,7 +99,6 @@ async fn handle_resume_session_allows_reconnect_takeover_with_local_history() ->
         43,
         target_session_id.to_string(),
         None,
-        None,
         true,
         true,
         &mut client_selfdev,
