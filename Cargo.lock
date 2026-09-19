@@ -3551,6 +3551,7 @@ dependencies = [
  "jcode-tool-types",
  "jcode-transport",
  "jcode-usage-types",
+ "jcode-workspace-types",
  "libc",
  "open",
  "proctitle",
@@ -4605,6 +4606,14 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "jcode-workspace-types"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "uuid",
 ]
 
 [[package]]
@@ -9279,6 +9288,7 @@ dependencies = [
  "atomic",
  "getrandom 0.4.1",
  "js-sys",
+ "serde_core",
  "sha1_smol",
  "wasm-bindgen",
 ]

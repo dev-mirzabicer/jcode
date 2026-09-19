@@ -17,6 +17,7 @@ path = "src/lib.rs"
 
 [dependencies]
 jcode-instruction-types = { path = "../jcode-instruction-types" }
+jcode-workspace-types = { path = "../jcode-workspace-types" }
 # Memory allocator (reduces fragmentation for long-running server)
 tikv-jemalloc-ctl = { version = "0.6", optional = true }
 tikv-jemalloc-sys = { version = "0.6", optional = true }
@@ -59,7 +60,7 @@ jcode-logging = { path = "../jcode-logging" }
 # OAuth
 base64 = "0.22"
 sha2 = "0.10"
-rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled"] }
+rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled", "backup"] }
 jcode-transport = { path = "../jcode-transport" }
 rand = "0.9.3"
 hex = "0.4"
