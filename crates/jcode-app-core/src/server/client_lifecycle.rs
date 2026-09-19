@@ -569,6 +569,30 @@ pub(super) async fn handle_client_with_instruction_repositories(
 
         match decode_request(&line) {
             Ok(request) => {
+                if let Request::WorkspaceProbe { id } = &request {
+                    write_direct_event(
+                        &writer,
+                        &ServerEvent::WorkspaceCapabilities {
+                            id: *id,
+                            catalog_version: 1,
+                            managed_rollout: false,
+                        },
+                    )
+                    .await?;
+                    continue;
+                }
+                if let Request::Workspace { id, request } = &request {
+                    let response = crate::workspace::dispatch(*request.clone()).await;
+                    write_direct_event(
+                        &writer,
+                        &ServerEvent::WorkspaceResponse {
+                            id: *id,
+                            response: Box::new(response),
+                        },
+                    )
+                    .await?;
+                    continue;
+                }
                 if let Request::TaskMonitorProbe { id } = &request {
                     write_direct_event(
                         &writer,
@@ -3482,6 +3506,23 @@ pub(super) async fn handle_client_with_instruction_repositories(
                     id,
                     version: 1,
                     child_context: true,
+                });
+            }
+            Request::WorkspaceProbe { id } => {
+                let _ = client_event_tx.send(ServerEvent::WorkspaceCapabilities {
+                    id,
+                    catalog_version: 1,
+                    managed_rollout: false,
+                });
+            }
+            Request::Workspace { id, request } => {
+                let event_tx = client_event_tx.clone();
+                inspection_requests.spawn(async move {
+                    let response = crate::workspace::dispatch(*request).await;
+                    let _ = event_tx.send(ServerEvent::WorkspaceResponse {
+                        id,
+                        response: Box::new(response),
+                    });
                 });
             }
             Request::TaskMonitor { id, request } => {

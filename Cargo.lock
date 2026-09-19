@@ -3843,6 +3843,7 @@ dependencies = [
  "jcode-side-panel-types",
  "jcode-task-types",
  "jcode-tool-types",
+ "jcode-workspace-types",
  "rand 0.9.3",
  "serde",
  "serde_json",

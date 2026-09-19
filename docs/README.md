@@ -20,6 +20,7 @@ Reference documentation for the jcode codebase.
 - Agent memory policy: `MEMORY_POLICY.md`; dormant implementation: `MEMORY_ARCHITECTURE.md`
 - Process RAM and allocator diagnostics: `MEMORY_BUDGET.md`, `MEMORY_INCIDENT_RUNBOOK.md`
 - Tool execution: [retained output, exact reads and cancellation](TOOL_EXECUTION.md), [storage/control architecture](dev/EXECUTION_STORAGE.md), [producer inventory](dev/EXECUTION_PRODUCERS.md), [acceptance reconciliation](dev/EXECUTION_ACCEPTANCE.md)
+- Workspace foundation: [private catalog and recovery](dev/WORKSPACE_CATALOG.md). Managed session/scope rollout and the human management client remain separately gated.
 - Task monitor: [native task/output controls, child Context Editor and storage review](TASK_MONITOR.md)
 - Combined execution/delegation verification: [requirements, native journeys and evidence boundaries](dev/PHASE4_INTEGRATION_ACCEPTANCE.md)
 - Independent Phase 4 closeout: [requirement reconciliation, repairs and acceptance limits](dev/PHASE4_CLOSEOUT_ACCEPTANCE.md)

@@ -47,6 +47,13 @@ pub enum LegacyContextCommand {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Request {
+    #[serde(rename = "workspace_probe")]
+    WorkspaceProbe { id: u64 },
+    #[serde(rename = "workspace")]
+    Workspace {
+        id: u64,
+        request: Box<jcode_workspace_types::WorkspaceRequest>,
+    },
     /// Typed queued control intent. The server renders its current instruction
     /// sources before accepting the combined user-authority message.
     #[serde(rename = "queued_messages")]
@@ -1104,6 +1111,17 @@ pub enum Request {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ServerEvent {
+    #[serde(rename = "workspace_capabilities")]
+    WorkspaceCapabilities {
+        id: u64,
+        catalog_version: u32,
+        managed_rollout: bool,
+    },
+    #[serde(rename = "workspace_response")]
+    WorkspaceResponse {
+        id: u64,
+        response: Box<jcode_workspace_types::WorkspaceResponse>,
+    },
     #[serde(rename = "task_monitor_capabilities")]
     TaskMonitorCapabilities {
         id: u64,

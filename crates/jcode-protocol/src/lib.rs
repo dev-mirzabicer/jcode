@@ -203,6 +203,8 @@ impl AuthChanged {
 pub type ReloadRecoverySnapshot = jcode_selfdev_types::ReloadRecoveryDirective;
 
 mod wire;
+#[cfg(test)]
+mod workspace_tests;
 pub use wire::TaskGraphNodeSpec;
 pub use wire::{LegacyContextCommand, Request, ServerEvent};
 
@@ -602,6 +604,8 @@ impl Request {
             Request::ActivateSkill { id, .. } => *id,
             Request::SetAgent { id, .. } => *id,
             Request::GetAgentCatalog { id }
+            | Request::WorkspaceProbe { id }
+            | Request::Workspace { id, .. }
             | Request::Execution { id, .. }
             | Request::TaskMonitorProbe { id }
             | Request::TaskMonitor { id, .. }

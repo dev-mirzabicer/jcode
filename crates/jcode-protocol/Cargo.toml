@@ -7,6 +7,7 @@ publish = false
 [dependencies]
 jcode-tool-types = { path = "../jcode-tool-types" }
 jcode-instruction-types = { path = "../jcode-instruction-types" }
+jcode-workspace-types = { path = "../jcode-workspace-types" }
 jcode-batch-types = { path = "../jcode-batch-types" }
 jcode-config-types = { path = "../jcode-config-types" }
 jcode-message-types = { path = "../jcode-message-types" }
