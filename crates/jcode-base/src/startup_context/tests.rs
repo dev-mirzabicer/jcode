@@ -58,6 +58,118 @@ fn issue_kinds(preparation: &StartupPreparation) -> Vec<&StartupFileIssueKind> {
 }
 
 #[test]
+fn physical_identity_compatibility_bytes_and_instruction_specificity() {
+    use crate::instruction::InstructionRepositoryService;
+    let temp = TempDir::new().unwrap();
+    let engine = context(&temp);
+    let root = temp.path().join("repo");
+    let linked = temp.path().join("linked");
+    let plain = temp.path().join("plain");
+    init_git(&root);
+    git(
+        &root,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "compat",
+            linked.to_str().unwrap(),
+        ],
+    );
+    fs::create_dir_all(root.join("sub")).unwrap();
+    fs::create_dir_all(&plain).unwrap();
+    let service = InstructionRepositoryService::from_paths(
+        temp.path().join("home"),
+        temp.path().join("state"),
+    );
+    for (launch, active, kind, identity) in [
+        (root.clone(), root.clone(), "git", root.join(".git")),
+        (root.join("sub"), root.clone(), "git", root.join(".git")),
+        (linked.clone(), linked.clone(), "git", root.join(".git")),
+        (plain.clone(), plain.clone(), "directory", plain.clone()),
+    ] {
+        let identity = identity.canonicalize().unwrap();
+        let active = active.canonicalize().unwrap();
+        let project = engine.resolve_project(&launch).unwrap();
+        let expected_bytes = format!("{kind}\0{}", identity.display()).into_bytes();
+        assert_eq!(project.key().stable_bytes(), expected_bytes);
+        assert_eq!(
+            project.key().digest(),
+            format!("{:x}", Sha256::digest(&expected_bytes))
+        );
+        let expected = if kind == "git" {
+            jcode_session_types::StoredStartupProjectIdentity::Git {
+                canonical_common_dir: identity.to_str().unwrap().into(),
+            }
+        } else {
+            jcode_session_types::StoredStartupProjectIdentity::Directory {
+                canonical_root: identity.to_str().unwrap().into(),
+            }
+        };
+        assert_eq!(
+            serde_json::to_vec(&project.key().to_stored().unwrap()).unwrap(),
+            serde_json::to_vec(&expected).unwrap()
+        );
+        assert_eq!(project.active_root(), active);
+        assert_eq!(service.resolve_project_root(&launch).unwrap(), active);
+        fs::create_dir_all(active.join(".jcode")).unwrap();
+        fs::write(active.join(".jcode/instructions.toml"), "schema_version = 1\n[repository]\nmode = 'external-remote'\nurl = 'https://example.invalid/instructions.git'\nbranch = 'main'\n").unwrap();
+        let repo = service
+            .resolve_project_repository(&launch)
+            .unwrap()
+            .unwrap();
+        assert_eq!(repo.id, format!("project-{}", project.key().digest()));
+        assert_eq!(
+            repo.root,
+            temp.path()
+                .join("home/instruction-repositories/projects")
+                .join(project.key().digest())
+        );
+        assert_eq!(repo.project_root.as_deref(), Some(active.as_path()));
+    }
+}
+
+#[test]
+fn physical_identity_rejects_bare_and_malformed_git() {
+    let temp = TempDir::new().unwrap();
+    let engine = context(&temp);
+    let bare = temp.path().join("bare");
+    fs::create_dir(&bare).unwrap();
+    git(&bare, &["init", "--bare", "--quiet"]);
+    assert!(engine.resolve_project(&bare).is_err());
+    let broken = temp.path().join("broken");
+    fs::create_dir(&broken).unwrap();
+    fs::write(broken.join(".git"), "gitdir: missing\n").unwrap();
+    assert!(engine.resolve_project(&broken).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn physical_identity_symlink_uses_target_key_and_active_capture() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("repo");
+    init_git(&root);
+    let alias = temp.path().join("alias");
+    std::os::unix::fs::symlink(&root, &alias).unwrap();
+    let engine = context(&temp);
+    let direct = engine.resolve_project(&root).unwrap();
+    let aliased = engine.resolve_project(&alias).unwrap();
+    assert_eq!(direct, aliased);
+    let selection = engine.preview_selection(&aliased, [StartupSelectionInput::new("README.md")]);
+    let capture = engine
+        .prepare_selection(&aliased, 0, &selection, StartupFailurePolicy::Block)
+        .unwrap()
+        .into_preparation();
+    let file = capture.captured_files().next().unwrap();
+    assert_eq!(file.text(), "initial\n");
+    assert_eq!(
+        file.resolved_path(),
+        root.join("README.md").canonicalize().unwrap()
+    );
+}
+
+#[test]
 fn non_git_identity_uses_canonical_launch_directory() {
     let temp = TempDir::new().expect("tempdir");
     let root = temp.path().join("project");
