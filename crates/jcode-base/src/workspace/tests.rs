@@ -1,5 +1,161 @@
 use super::*;
 
+#[test]
+fn gitfile_repository_is_not_automatically_a_linked_worktree() {
+    fn git(path: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .current_dir(path)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let dir = tempfile::tempdir().unwrap();
+    git(
+        dir.path(),
+        &["init", "-q", "--separate-git-dir", "metadata", "checkout"],
+    );
+    let root = dir.path().join("checkout").canonicalize().unwrap();
+    let repo = RepositoryId::new();
+    assert!(root.join(".git").is_file());
+    assert!(matches!(
+        organization::checkout_kind(&root, repo).unwrap(),
+        LocationKind::Checkout {
+            origin: CheckoutOrigin::AdoptedGit,
+            ..
+        }
+    ));
+    git(
+        &root,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "fixture",
+        ],
+    );
+    git(
+        &root,
+        &["worktree", "add", "-q", "-b", "linked", "../linked"],
+    );
+    assert!(matches!(
+        organization::checkout_kind(&dir.path().join("linked").canonicalize().unwrap(), repo)
+            .unwrap(),
+        LocationKind::Checkout {
+            origin: CheckoutOrigin::LinkedWorktree,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn initialization_replay_does_not_change_with_later_organization() {
+    let dir = tempfile::tempdir().unwrap();
+    let service = WorkspaceService::new(dir.path());
+    let request = RequestId::new();
+    let first = service.initialize(request).unwrap();
+    project(&service, "later");
+    assert_eq!(service.initialize(request).unwrap(), first);
+    assert_eq!(service.status().unwrap().revision, 1);
+}
+
+#[test]
+fn automatic_snapshot_pruning_resumes_after_database_removal() {
+    let dir = tempfile::tempdir().unwrap();
+    let service = WorkspaceService::new(dir.path());
+    service.initialize(RequestId::new()).unwrap();
+    for n in 0..10 {
+        project(&service, &format!("p{n}"));
+    }
+    let broken = fault(&service, "prune_removed_database");
+    let review = broken
+        .review_organization_change(
+            service.status().unwrap().revision,
+            OrganizationChange::CreateProject {
+                name: "eleven".into(),
+            },
+        )
+        .unwrap();
+    let receipt = broken
+        .apply_organization_change(RequestId::new(), review.id)
+        .unwrap();
+    assert_eq!(receipt.issues[0].code, IssueCode::BackupFailed);
+    project(&service, "twelve");
+    let snapshots = service.snapshots().unwrap();
+    assert_eq!(snapshots.len(), 10);
+    for snapshot in snapshots {
+        assert!(service.verify_snapshot(&snapshot).is_ok());
+    }
+    assert!(
+        !std::fs::read_dir(service.root.join("snapshots"))
+            .unwrap()
+            .any(|p| p
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("prune-"))
+    );
+}
+
+#[test]
+fn cross_project_grant_definitions_roundtrip_without_authorizing_external_targets() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = WorkspaceService::new(dir.path());
+    source.initialize(RequestId::new()).unwrap();
+    let a = project(&source, "a");
+    let b = project(&source, "b");
+    let grant = GrantDefinition {
+        id: GrantId::new(),
+        audience: Audience::Project(a),
+        target: WriteTarget::ProjectMembers(b),
+        state: GrantState::Active,
+        revision: 1,
+        copied_from: None,
+    };
+    portable::save_grant(&source.connection().unwrap(), &grant).unwrap();
+    let export = source
+        .export_project(RequestId::new(), a, "a".into())
+        .unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let destination = WorkspaceService::new(other.path());
+    destination.initialize(RequestId::new()).unwrap();
+    let review = destination
+        .review_import(export, 0, ImportCollisionPolicy::Reject, vec![])
+        .unwrap();
+    assert_eq!(review.disabled_grants, vec![grant.id]);
+    destination
+        .apply_import(RequestId::new(), review.id)
+        .unwrap();
+    assert!(
+        portable::grants(&destination.connection().unwrap())
+            .unwrap()
+            .is_empty()
+    );
+    assert!(destination.inspect(EntityId::Project(b)).is_err());
+    let export = destination
+        .export_project(RequestId::new(), a, "again".into())
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&std::fs::read(export).unwrap()).unwrap();
+    let definitions: Vec<GrantDefinition> = body["catalog"]["inherited_session_references"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|r| r["grant_definitions"].as_array().into_iter().flatten())
+        .map(|v| serde_json::from_value(v.clone()).unwrap())
+        .collect();
+    let mut disabled = grant;
+    disabled.state = GrantState::Disabled;
+    assert_eq!(definitions, vec![disabled]);
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn registration_cannot_bypass_a_physical_owner_in_another_catalog() {
@@ -832,6 +988,15 @@ fn archive_keeps_active_sessions_and_retirement_keeps_references() {
         EntityId::WorkArea(id) => id,
         _ => panic!(),
     };
+    let grant = GrantDefinition {
+        id: GrantId::new(),
+        audience: Audience::Project(p),
+        target: WriteTarget::WorkAreaMembers(area),
+        state: GrantState::Active,
+        revision: 1,
+        copied_from: None,
+    };
+    portable::save_grant(&service.connection().unwrap(), &grant).unwrap();
     let index = SessionIndex {
         session: "session-fixture".into(),
         placement: Placement::WorkArea(area),
@@ -912,6 +1077,10 @@ fn archive_keeps_active_sessions_and_retirement_keeps_references() {
         },
     );
     assert!(service.inspect(EntityId::Project(unused)).is_err());
+    assert_eq!(
+        portable::grants(&service.connection().unwrap()).unwrap(),
+        vec![grant]
+    );
 }
 
 #[cfg(target_os = "macos")]

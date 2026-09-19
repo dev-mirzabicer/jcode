@@ -3,6 +3,33 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+impl ProjectFacts {
+    /// A gitfile also represents submodules and separate Git directories. Only
+    /// distinct per-worktree and common metadata directories prove linked sharing.
+    /// This additional observation never changes the legacy physical key.
+    pub fn is_linked_worktree(&self) -> Result<bool, ProjectResolutionError> {
+        let ProjectKey::Git {
+            canonical_common_dir,
+        } = self.key()
+        else {
+            return Ok(false);
+        };
+        let root = self.active_root();
+        let output = run_git(root, ["rev-parse", "--absolute-git-dir"]).map_err(|e| {
+            git_identity_error(root, format!("could not inspect Git directory: {e}"))
+        })?;
+        if !output.status.success() {
+            return Err(git_command_error(
+                root,
+                "rev-parse --absolute-git-dir",
+                &output,
+            ));
+        }
+        let directory = parse_git_path(root, &output.stdout, "Git directory")?;
+        Ok(canonical_git_path(root, directory, "Git directory")? != *canonical_common_dir)
+    }
+}
+
 pub fn resolve_project(launch_dir: &Path) -> Result<ProjectFacts, ProjectResolutionError> {
     let active_dir = std::fs::canonicalize(launch_dir).map_err(|error| ProjectResolutionError {
         path: launch_dir.to_path_buf(),

@@ -150,7 +150,11 @@ impl WorkspaceService {
         let mut installation = if marker_present {
             let known: Installation = read_json(&marker)?;
             if known.ready {
-                return self.connection().and_then(|c| status(&c));
+                let mut initialized = status(&self.connection()?)?;
+                // Initialization acknowledges the original creation, not a new
+                // current-state read. The status operation supplies fresh revisions.
+                initialized.revision = 0;
+                return Ok(initialized);
             }
             if known.request != request {
                 return Err(issue(

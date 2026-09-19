@@ -344,10 +344,10 @@ pub(super) fn checkout_kind(path: &Path, repository: RepositoryId) -> Result<Loc
             canonical_common_dir,
         } if facts.active_root() == path => Ok(LocationKind::Checkout {
             repository,
-            origin: if path.join(".git").is_dir() {
-                CheckoutOrigin::AdoptedGit
-            } else {
+            origin: if facts.is_linked_worktree().map_err(io)? {
                 CheckoutOrigin::LinkedWorktree
+            } else {
+                CheckoutOrigin::AdoptedGit
             },
             common_directory: canonical_common_dir.clone(),
         }),

@@ -29,6 +29,9 @@ its UUID/root-witness binding. Canonical aliases return the existing live locati
 identity rather than changing ownership. Git common-directory identity and Startup
 Context/instruction keys remain separate from logical project IDs. Remote metadata
 rejects credential-bearing URLs. Credentials remain with Git's existing owners.
+Linked-worktree classification compares Git's per-worktree metadata directory with
+its common directory. A `.git` file alone is not proof of linked sharing, since
+submodules and separate Git directories also use that form.
 
 Archive/unarchive changes presentation only. Active session-index rows keep relevant
 archived organization visible in the current view. Retired records retain references.
@@ -78,6 +81,8 @@ backups are request-idempotent and retained until explicit user cleanup. Automat
 snapshots follow successful organization/import mutation batches and precede import
 or restore. The rolling automatic set retains the latest ten. A failed automatic
 backup is reported separately from an already committed mutation in its receipt.
+Automatic snapshot reclamation has its own exact-target journal, so interruption
+between removing a database and its manifest resumes without blocking later backups.
 
 Restore requires a specific reviewed snapshot and current-state fingerprint. It
 validates the replacement before touching current authority, acquires exclusive
@@ -104,6 +109,9 @@ Export carries typed organization, repository associations, physical bindings, g
 definitions, closed metadata and session references, plus an explicit external-content
 manifest. It excludes credentials, conversation bodies and checkout/preservation
 contents. Export paths refer to server-owned storage, not a remote client's filesystem.
+Cross-project grant definitions remain complete, source-installation-qualified
+external references. Import retains them disabled outside the live grant table until
+their external audiences and targets receive explicit binding review.
 
 Import captures and validates the complete manifest, previews identity collisions,
 explicit location remapping, offline locations and disabled grant definitions.
@@ -135,6 +143,8 @@ later complete `workspace_v1`/primary-host capabilities from this foundation.
 Typed operations include status/explicit initialize, paged list, inspect,
 organization review/apply, receipt inspection, derived-session reads, named backup,
 snapshot listing, project export, import review/apply and restore review/apply.
+Initialize acknowledges the original zero-revision creation even on retry. Use
+Status for the current catalog revision.
 The same adapter works for already attached clients. Lists include total and
 revision-bound continuation. The page-size bound is not a member-count ceiling.
 An old server must be probed before sending catalog requests.

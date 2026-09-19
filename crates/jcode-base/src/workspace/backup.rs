@@ -263,6 +263,17 @@ impl WorkspaceService {
     pub(super) fn automatic_backup(&self) -> Result<()> {
         let lock = storage::private_file(&self.root.join("snapshots.lock"), false)?;
         lock.lock().map_err(io)?;
+        for entry in std::fs::read_dir(self.root.join("snapshots")).map_err(io)? {
+            let path = entry.map_err(io)?.path();
+            if path
+                .file_name()
+                .and_then(|v| v.to_str())
+                .is_some_and(|v| v.starts_with("prune-") && v.ends_with(".json"))
+            {
+                let old: Snapshot = storage::read_json(&path)?;
+                self.finish_snapshot_prune(&old, &path)?;
+            }
+        }
         self.snapshot_locked(
             &self.connection()?,
             "Automatic catalog snapshot".into(),
@@ -276,15 +287,45 @@ impl WorkspaceService {
             .skip(10)
         {
             drop(self.verify_snapshot(&old)?);
-            std::fs::remove_file(&old.path).map_err(io)?;
-            std::fs::remove_file(
-                self.root
-                    .join("snapshots")
-                    .join(format!("snapshot-{}.json", old.id)),
-            )
-            .map_err(io)?;
+            let journal = self
+                .root
+                .join("snapshots")
+                .join(format!("prune-{}.json", old.id));
+            storage::atomic_json(&journal, &old)?;
+            self.finish_snapshot_prune(&old, &journal)?;
         }
         storage::sync_dir(&self.root.join("snapshots"))
+    }
+    fn finish_snapshot_prune(&self, old: &Snapshot, journal: &Path) -> Result<()> {
+        let directory = self.root.join("snapshots");
+        if !old.automatic
+            || old.path != directory.join(format!("{}.sqlite3", old.id))
+            || journal != directory.join(format!("prune-{}.json", old.id))
+        {
+            return Err(corrupt("Snapshot pruning ownership mismatch"));
+        }
+        let manifest = directory.join(format!("snapshot-{}.json", old.id));
+        if manifest.try_exists().map_err(io)? && storage::read_json::<Snapshot>(&manifest)? != *old
+        {
+            return Err(corrupt("Snapshot pruning manifest changed"));
+        }
+        let exists = match std::fs::symlink_metadata(&old.path) {
+            Ok(_) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(e) => return Err(io(e)),
+        };
+        if exists {
+            drop(self.verify_snapshot(old)?);
+            std::fs::remove_file(&old.path).map_err(io)?;
+            storage::sync_dir(&directory)?;
+            self.checkpoint("prune_removed_database")?;
+        }
+        if manifest.try_exists().map_err(io)? {
+            std::fs::remove_file(&manifest).map_err(io)?;
+            storage::sync_dir(&directory)?;
+        }
+        std::fs::remove_file(journal).map_err(io)?;
+        storage::sync_dir(&directory)
     }
     pub(super) fn after_mutation(&self, mut receipt: Receipt) -> Result<Receipt> {
         if let Err(error) = self.automatic_backup() {

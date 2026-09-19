@@ -23,6 +23,8 @@ pub(super) struct SessionReferenceSet {
     projects: Vec<ProjectId>,
     installation: InstallationId,
     sessions: Vec<SessionIndex>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    grant_definitions: Vec<GrantDefinition>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -139,6 +141,25 @@ pub(super) fn validate_graph(connection: &Connection) -> Result<()> {
     }
     for grant in grants(connection)? {
         validate_grant(connection, &grant)?;
+    }
+    let mut references = connection
+        .prepare("SELECT body FROM imported_references")
+        .map_err(io)?;
+    for body in references
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(io)?
+    {
+        let record: SessionReferenceSet = decode(&body.map_err(io)?)?;
+        for project in record.projects {
+            entity(connection, EntityId::Project(project))?;
+        }
+        if record
+            .grant_definitions
+            .iter()
+            .any(|g| g.state != GrantState::Disabled)
+        {
+            return Err(corrupt("Imported external grant reference is not disabled"));
+        }
     }
     let mut stmt = connection
         .prepare("SELECT body,target FROM session_index")
@@ -315,12 +336,14 @@ impl WorkspaceService {
                 }
             }
         }
+        let mut external_grants = vec![];
         let grants = grants(&tx)?
             .into_iter()
             .filter(|g| {
                 let refs = grant_targets(g);
                 let included = refs.iter().all(|v| ids.contains(&v.to_string()));
                 if !included && refs.iter().any(|v| ids.contains(&v.to_string())) {
+                    external_grants.push(g.clone());
                     external_content.push(format!(
                         "Grant {} references identities outside this project and remains external",
                         g.id
@@ -343,6 +366,14 @@ impl WorkspaceService {
             }
         }
         let mut inherited_session_references = vec![];
+        if !external_grants.is_empty() {
+            inherited_session_references.push(SessionReferenceSet {
+                projects: vec![project],
+                installation: status.installation,
+                sessions: vec![],
+                grant_definitions: external_grants,
+            });
+        }
         let mut references = tx
             .prepare("SELECT body FROM imported_references ORDER BY id")
             .map_err(io)?;
@@ -474,9 +505,24 @@ impl WorkspaceService {
                 }
             }
         }
-        let disabled_grants = payload.grants.iter().map(|g| g.id).collect();
+        let disabled_grants = payload
+            .grants
+            .iter()
+            .chain(
+                payload
+                    .inherited_session_references
+                    .iter()
+                    .flat_map(|r| r.grant_definitions.iter()),
+            )
+            .map(|g| g.id)
+            .collect();
         for grant in &mut payload.grants {
             grant.state = GrantState::Disabled;
+        }
+        for record in &mut payload.inherited_session_references {
+            for grant in &mut record.grant_definitions {
+                grant.state = GrantState::Disabled;
+            }
         }
         if policy == ImportCollisionPolicy::NewIdentities {
             remap_identities(&mut payload)?;
@@ -682,6 +728,7 @@ fn install_portable(
                 .collect(),
             installation: payload.installation,
             sessions: payload.session_references.clone(),
+            grant_definitions: vec![],
         };
         for record in std::iter::once(&own).chain(payload.inherited_session_references.iter()) {
             for project in &record.projects {
