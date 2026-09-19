@@ -1,5 +1,79 @@
 use super::*;
 
+#[test]
+fn resume_all_rejected_admission_preserves_recovery_intent() -> Result<()> {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    tokio::runtime::Runtime::new()?.block_on(async {
+        let recorder = Arc::new(RecordingImmediateProvider::default());
+        let provider: Arc<dyn Provider> = recorder.clone();
+        let registry = Registry::new(provider.clone()).await;
+        let mut agent = Agent::new(provider, registry);
+        agent.add_message(
+            crate::message::Role::User,
+            vec![ContentBlock::Text {
+                text: "pending fixture input".into(),
+                cache_control: None,
+            }],
+        );
+        let session = agent.session_id().to_string();
+        let agent = Arc::new(Mutex::new(agent));
+        let host = Arc::new(crate::primary::PrimaryHost::new(HashMap::from([(
+            session.clone(),
+            agent.clone(),
+        )])));
+        crate::server::reload_recovery::persist_intent(
+            "fixture-resume-race",
+            &session,
+            crate::server::reload_recovery::ReloadRecoveryRole::InterruptedPeer,
+            crate::tool::selfdev::ReloadRecoveryDirective {
+                reconnect_notice: None,
+                continuation_message: "fixture continuation".into(),
+            },
+            "fixture",
+        )?;
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let (finish, release) = tokio::sync::oneshot::channel();
+        host.start(
+            host.admit(&session, 1, agent)?,
+            |_| async { Ok(None) },
+            move |_| async move {
+                let _ = entered.send(());
+                let _ = release.await;
+            },
+        );
+        ready.await?;
+        let status = status_fixture(&session);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        crate::server::client_actions::handle_resume_all_sessions(
+            42,
+            &host,
+            &status.members,
+            &status.swarms_by_id,
+            &status.event_history,
+            &status.event_counter,
+            &status.event_tx,
+            &tx,
+        )
+        .await;
+        assert!(matches!(
+            rx.recv().await,
+            Some(ServerEvent::ResumeAllResult {
+                resumed: 0,
+                skipped: 1,
+                ..
+            })
+        ));
+        assert!(crate::server::reload_recovery::has_pending_for_session(
+            &session
+        ));
+        assert!(recorder.snapshots.lock().unwrap().is_empty());
+        finish.send(()).unwrap();
+        host.wait_idle(&session).await?;
+        host.shutdown().await
+    })
+}
+
 #[tokio::test]
 async fn departed_origin_cannot_receive_detached_primary_events() -> Result<()> {
     let session = "session_detached_origin";

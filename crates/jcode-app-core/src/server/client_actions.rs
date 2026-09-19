@@ -1111,15 +1111,9 @@ pub(super) async fn handle_resume_all_sessions(
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
-    // Snapshot live sessions (those with at least one live client attachment).
-    let live_session_ids: Vec<String> = {
-        let members = swarm_members.read().await;
-        members
-            .iter()
-            .filter(|(_, member)| !member.event_txs.is_empty() || !member.event_tx.is_closed())
-            .map(|(session_id, _)| session_id.clone())
-            .collect()
-    };
+    // Runtime ownership, not attachment count, determines which primaries can
+    // receive an explicit human resume operation.
+    let live_session_ids: Vec<String> = sessions.read().await.keys().cloned().collect();
 
     let mut resumed_sessions: Vec<String> = Vec::new();
     let mut skipped = 0usize;
@@ -1155,25 +1149,15 @@ pub(super) async fn handle_resume_all_sessions(
             .unwrap_or_else(|| session_id[..8.min(session_id.len())].to_string());
         drop(agent_guard);
 
-        // Best-effort: record that the durable recovery intent was delivered.
-        if let Err(error) = super::reload_recovery::mark_delivered_if_matching_continuation(
-            &session_id,
-            &reminder,
-            "resume_all_sessions",
-        ) {
-            crate::logging::warn(&format!(
-                "resume_all_sessions: failed to mark recovery intent delivered for {}: {}",
-                session_id, error
-            ));
-        }
-
-        super::live_turn::spawn_tracked_live_turn(
+        let started = super::live_turn::spawn_tracked_live_turn(
             &session_id,
             Arc::clone(&agent),
             sessions,
             super::live_turn::TrackedLiveTurn {
                 message: String::new(),
-                system_reminder: Some(super::live_turn::LiveTurnReminder::Rendered(reminder)),
+                system_reminder: Some(super::live_turn::LiveTurnReminder::Rendered(
+                    reminder.clone(),
+                )),
                 display_role: None,
                 unattended_context: None,
                 status_detail: Some("resuming interrupted session".to_string()),
@@ -1188,12 +1172,28 @@ pub(super) async fn handle_resume_all_sessions(
         )
         .await;
 
+        if !started {
+            skipped += 1;
+            continue;
+        }
+        // Best-effort: record that the durable recovery intent was delivered.
+        if let Err(error) = super::reload_recovery::mark_delivered_if_matching_continuation(
+            &session_id,
+            &reminder,
+            "resume_all_sessions",
+        ) {
+            crate::logging::warn(&format!(
+                "resume_all_sessions: failed to mark recovery intent delivered for {}: {}",
+                session_id, error
+            ));
+        }
+
         resumed_sessions.push(display_name);
     }
 
     let resumed = resumed_sessions.len();
     let message = if resumed == 0 {
-        "No interrupted sessions to resume. All live sessions are idle or already complete."
+        "No interrupted sessions were started. Sessions may already be running or have no pending work."
             .to_string()
     } else if resumed == 1 {
         format!("Resuming 1 interrupted session: {}.", resumed_sessions[0])

@@ -1085,6 +1085,11 @@ async fn resume_all_continues_interrupted_idle_live_session() {
         other => panic!("expected ResumeAllResult, got {other:?}"),
     }
 
+    sessions
+        .wait_idle(&session_id)
+        .await
+        .expect("owned turn settled");
+
     if let Some(home) = prev_home {
         crate::env::set_var("JCODE_HOME", home);
     } else {
