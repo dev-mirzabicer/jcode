@@ -90,55 +90,7 @@ fn resolve_archive(config: &ArchiveConfig, create: bool) -> Result<DirectoryBind
         .canonicalize()
         .context("Configured output archive is offline")?;
     let mut binding = DirectoryBinding::open(&mount)?;
-    #[cfg(target_os = "macos")]
-    {
-        use std::process::{Command, Stdio};
-        let info = Command::new("/usr/sbin/diskutil")
-            .args(["info", "-plist"])
-            .arg(&mount)
-            .output()?;
-        ensure!(
-            info.status.success(),
-            "Cannot verify output archive identity"
-        );
-        let mut converter = Command::new("/usr/bin/plutil")
-            .args(["-convert", "json", "-o", "-", "-"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()?;
-        converter
-            .stdin
-            .take()
-            .context("Missing plist converter input")?
-            .write_all(&info.stdout)?;
-        let converted = converter.wait_with_output()?;
-        ensure!(
-            converted.status.success(),
-            "Invalid output archive identity response"
-        );
-        let value: serde_json::Value = serde_json::from_slice(&converted.stdout)?;
-        ensure!(
-            value["VolumeUUID"]
-                .as_str()
-                .is_some_and(|uuid| uuid.eq_ignore_ascii_case(&config.volume_uuid))
-                && value["MountPoint"]
-                    .as_str()
-                    .is_some_and(|path| Path::new(path) == mount),
-            "Output archive volume identity does not match configuration"
-        );
-    }
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let device = std::fs::metadata(Path::new("/dev/disk/by-uuid").join(&config.volume_uuid))?;
-        ensure!(
-            device.rdev() == std::fs::metadata(&mount)?.dev(),
-            "Output archive volume identity does not match configuration"
-        );
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    bail!("Verified archive-volume placement is unsupported on this platform");
+    crate::location::volume::verify_archive_mount(&mount, &config.volume_uuid)?;
     binding.verify()?;
     for component in config.directory.components() {
         let name = component
@@ -154,29 +106,7 @@ fn resolve_archive(config: &ArchiveConfig, create: bool) -> Result<DirectoryBind
     Ok(binding)
 }
 
-fn available_bytes(path: &Path) -> Result<u64> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        let name = std::ffi::CString::new(path.as_os_str().as_bytes())?;
-        let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
-        // SAFETY: name is NUL-terminated and stats points to writable statvfs storage.
-        if unsafe { libc::statvfs(name.as_ptr(), stats.as_mut_ptr()) } != 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
-        // SAFETY: successful statvfs initialized the entire structure.
-        let stats = unsafe { stats.assume_init() };
-        Ok(
-            (u128::from(stats.f_bavail) * u128::from(stats.f_frsize)).min(u128::from(u64::MAX))
-                as u64,
-        )
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-        bail!("Reserve-aware output storage is unsupported on this platform")
-    }
-}
+use crate::location::volume::available_bytes;
 
 fn private_directory(path: &Path) -> Result<()> {
     if path.exists() {

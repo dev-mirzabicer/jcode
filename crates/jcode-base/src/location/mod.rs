@@ -3,6 +3,7 @@
 //! changes a Session. Legacy keys keep their original path-based digest.
 mod project;
 mod resolve;
+pub mod volume;
 pub use project::{ProjectFacts, ProjectKey};
 pub use resolve::resolve_project;
 
