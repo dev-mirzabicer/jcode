@@ -40,6 +40,7 @@ pub fn resolve_project(launch_dir: &Path) -> Result<ProjectFacts, ProjectResolut
 fn discover_git_project(
     launch_dir: &Path,
 ) -> Result<Option<(PathBuf, PathBuf)>, ProjectResolutionError> {
+    let marker = nearest_git_marker(launch_dir)?;
     let top_level = run_git(launch_dir, ["rev-parse", "--show-toplevel"]);
     let top_level = match top_level {
         Ok(output) if output.status.success() => {
@@ -52,7 +53,7 @@ fn discover_git_project(
                     "bare Git repositories have no active worktree root",
                 ));
             }
-            if nearest_git_marker(launch_dir).is_some() {
+            if marker.is_some() {
                 return Err(git_command_error(
                     launch_dir,
                     "rev-parse --show-toplevel",
@@ -62,7 +63,7 @@ fn discover_git_project(
             return Ok(None);
         }
         Err(error) => {
-            if nearest_git_marker(launch_dir).is_some() {
+            if marker.is_some() {
                 return Err(git_identity_error(
                     launch_dir,
                     format!("could not invoke Git for a repository: {error}"),
@@ -86,6 +87,14 @@ fn discover_git_project(
     let common_dir = parse_git_path(launch_dir, &common_output.stdout, "common directory")?;
 
     let active_root = canonical_git_path(launch_dir, top_level, "Git worktree root")?;
+    if let Some(marker) = marker
+        && marker.parent() != Some(active_root.as_path())
+    {
+        return Err(git_identity_error(
+            launch_dir,
+            "Git discovery skipped a closer .git marker; repair that location before use",
+        ));
+    }
     let common_dir = canonical_git_path(launch_dir, common_dir, "Git common directory")?;
     Ok(Some((active_root, common_dir)))
 }
@@ -103,9 +112,25 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    Command::new("git")
-        .args(args)
-        .current_dir(launch_dir)
+    let mut command = Command::new("git");
+    command.args(args).current_dir(launch_dir);
+    // Physical discovery must describe this directory. Keep ordinary Git trust
+    // configuration, but not process-local repository/index/object redirection.
+    for key in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_COMMON_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CEILING_DIRECTORIES",
+        "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    ] {
+        command.env_remove(key);
+    }
+    command
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_TERMINAL_PROMPT", "0")
         .output()
 }
 
@@ -154,10 +179,21 @@ fn canonical_git_path(
     Ok(canonical)
 }
 
-fn nearest_git_marker(path: &Path) -> Option<PathBuf> {
-    path.ancestors()
-        .map(|ancestor| ancestor.join(".git"))
-        .find(|candidate| candidate.is_dir() || candidate.is_file())
+fn nearest_git_marker(path: &Path) -> Result<Option<PathBuf>, ProjectResolutionError> {
+    for ancestor in path.ancestors() {
+        let marker = ancestor.join(".git");
+        match std::fs::symlink_metadata(&marker) {
+            Ok(_) => return Ok(Some(marker)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(git_identity_error(
+                    path,
+                    format!("cannot inspect {}: {error}", marker.display()),
+                ));
+            }
+        }
+    }
+    Ok(None)
 }
 
 fn git_command_error(launch_dir: &Path, command: &str, output: &Output) -> ProjectResolutionError {
@@ -187,4 +223,75 @@ fn validate_absolute_utf8_path(path: &Path, label: &str) -> Result<(), String> {
         return Err(format!("{label} is not valid UTF-8: {}", path.display()));
     }
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dangling_git_marker_is_damage_not_a_non_git_project() {
+        let temp = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(temp.path().join("missing"), temp.path().join(".git")).unwrap();
+        assert!(resolve_project(temp.path()).is_err());
+    }
+
+    #[test]
+    fn nested_damaged_marker_does_not_adopt_enclosing_repository() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "--quiet"])
+                .arg(temp.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let nested = temp.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        std::os::unix::fs::symlink(nested.join("missing"), nested.join(".git")).unwrap();
+        assert!(resolve_project(&nested).is_err());
+    }
+
+    #[test]
+    fn ambient_git_redirection_cannot_change_physical_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let foreign = temp.path().join("foreign");
+        let requested = temp.path().join("requested");
+        std::fs::create_dir(&requested).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "--quiet"])
+                .arg(&foreign)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "location::resolve::tests::ambient_git_redirection_child",
+            ])
+            .env("JCODE_LOCATION_REQUESTED", &requested)
+            .env("GIT_DIR", foreign.join(".git"))
+            .env("GIT_WORK_TREE", &foreign)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+
+    #[test]
+    fn ambient_git_redirection_child() {
+        let Some(path) = std::env::var_os("JCODE_LOCATION_REQUESTED") else {
+            return;
+        };
+        let path = PathBuf::from(path).canonicalize().unwrap();
+        let project = resolve_project(&path).unwrap();
+        assert!(!project.key().is_git());
+        assert_eq!(project.active_root(), path);
+    }
 }
