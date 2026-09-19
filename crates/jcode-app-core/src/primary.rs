@@ -10,6 +10,8 @@ use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard, watch};
 use tokio::task::{AbortHandle, JoinSet};
 
+pub(crate) mod presentation;
+
 type Agents = HashMap<String, Arc<Mutex<Agent>>>;
 
 pub struct PrimaryHost {
@@ -22,6 +24,7 @@ pub struct PrimaryHost {
     provisional: StdMutex<HashSet<String>>,
     resources: StdMutex<HashMap<String, PrimaryResources>>,
     accepting: AtomicBool,
+    presentations: StdMutex<HashMap<String, Arc<presentation::Presentation>>>,
 }
 
 #[derive(Clone)]
@@ -111,6 +114,7 @@ impl PrimaryHost {
             provisional: StdMutex::new(HashSet::new()),
             resources: StdMutex::new(resources),
             accepting: AtomicBool::new(true),
+            presentations: StdMutex::new(HashMap::new()),
         }
     }
 
@@ -125,6 +129,15 @@ impl PrimaryHost {
 
     pub(crate) fn subscribe(&self) -> watch::Receiver<u64> {
         self.revision.subscribe()
+    }
+
+    pub(crate) fn presentation(&self, session: &str) -> Arc<presentation::Presentation> {
+        self.presentations
+            .lock()
+            .expect("primary presentations")
+            .entry(session.into())
+            .or_insert_with(|| Arc::new(presentation::Presentation::new(session)))
+            .clone()
     }
 
     pub(crate) fn resources(
@@ -291,6 +304,8 @@ impl PrimaryHost {
             "Primary identity changed before admission"
         );
         self.own(session)?;
+        let presentation = self.presentation(session);
+        presentation.begin(request_id);
         let control = Arc::new(TurnControl {
             // The stable Registry/provider objects stay inspectable while the
             // Agent guard is held by inference.

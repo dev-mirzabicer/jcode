@@ -388,15 +388,14 @@ pub(super) async fn unregister_session_event_sender(
     }
 }
 
-pub(super) async fn fanout_session_event(
+pub(super) async fn session_event_targets(
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     session_id: &str,
-    event: ServerEvent,
-) -> usize {
-    let targets = {
+) -> Vec<crate::client_delivery::ClientEventSender> {
+    {
         let mut members = swarm_members.write().await;
         let Some(member) = members.get_mut(session_id) else {
-            return 0;
+            return Vec::new();
         };
 
         member.event_txs.retain(|_, tx| !tx.is_closed());
@@ -409,7 +408,15 @@ pub(super) async fn fanout_session_event(
             }
             member.event_txs.values().cloned().collect::<Vec<_>>()
         }
-    };
+    }
+}
+
+pub(super) async fn fanout_session_event(
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    session_id: &str,
+    event: ServerEvent,
+) -> usize {
+    let targets = session_event_targets(swarm_members, session_id).await;
 
     let mut delivered = 0;
     for tx in targets {
@@ -452,26 +459,6 @@ pub(super) fn session_event_fanout_sender(
     tokio::spawn(async move {
         while let Some(event) = rx.recv().await {
             let _ = fanout_session_event(&swarm_members, &session_id, event).await;
-        }
-    });
-    tx
-}
-
-pub(super) fn session_event_fanout_sender_with_fallback(
-    session_id: String,
-    swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
-    fallback_tx: crate::client_delivery::ClientEventSender,
-) -> mpsc::UnboundedSender<ServerEvent> {
-    let (tx, mut rx) = mpsc::unbounded_channel::<ServerEvent>();
-    tokio::spawn(async move {
-        while let Some(event) = rx.recv().await {
-            if fanout_session_event(&swarm_members, &session_id, event.clone()).await == 0
-                && !swarm_members.read().await.contains_key(&session_id)
-            {
-                // Compatibility for unregistered callers, never for a detached
-                // registered primary whose origin has navigated elsewhere.
-                let _ = fallback_tx.send(event);
-            }
         }
     });
     tx

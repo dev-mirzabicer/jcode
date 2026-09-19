@@ -381,12 +381,11 @@ fn test_handle_server_event_history_same_session_rewind_reapply_clears_streaming
     );
     // The client-side /rewind path arms a pending notice before the server's
     // History redelivery arrives (remote/key_handling.rs).
-    app.pending_remote_rewind_notice =
-        Some(crate::tui::app::PendingRemoteRewindNotice {
-            undo: false,
-            message_index: Some(1),
-            changed_messages: 2,
-        });
+    app.pending_remote_rewind_notice = Some(crate::tui::app::PendingRemoteRewindNotice {
+        undo: false,
+        message_index: Some(1),
+        changed_messages: 2,
+    });
 
     // Truncated payload after the rewind: same session id, fewer messages.
     app.handle_server_event(
@@ -462,7 +461,8 @@ fn test_handle_server_event_history_same_session_rewind_reapply_clears_streaming
 }
 
 #[test]
-fn test_handle_server_event_history_same_session_midstream_duplicate_is_dropped_and_keeps_preview() {
+fn test_handle_server_event_history_same_session_midstream_duplicate_is_dropped_and_keeps_preview()
+{
     // Multi-client rewind fan-out pin (server side has NO fan-out: a /rewind
     // History redelivery is written only to the rewinding connection's socket,
     // per-client event channel, server/client_lifecycle.rs:521 and
@@ -554,9 +554,9 @@ fn test_handle_server_event_history_same_session_midstream_duplicate_is_dropped_
         "unsolicited same-session History must not replace a bootstrapped mid-stream transcript"
     );
     assert!(
-        !app.display_messages()
-            .iter()
-            .any(|m| m.content.contains("truncated payload from another client's rewind")),
+        !app.display_messages().iter().any(|m| m
+            .content
+            .contains("truncated payload from another client's rewind")),
         "unsolicited same-session History payload should be dropped, not applied"
     );
     // Live stream state preserved: preview and streaming text survive.
@@ -623,7 +623,7 @@ fn test_handle_server_event_history_same_session_midstream_duplicate_is_dropped_
                 context_revision: 0,
                 activity: None,
                 side_panel: crate::side_panel::SidePanelSnapshot::default(),
-            startup_context: None,
+                startup_context: None,
             },
             &mut remote,
         );
@@ -747,15 +747,11 @@ fn test_handle_server_event_history_same_session_rewind_then_late_done_does_not_
 
     // The stale Done from the rewound-away turn arrives AFTER the truncated
     // History (mpsc forwarder ordering).
-    app.handle_server_event(
-        crate::protocol::ServerEvent::Done { id: 7 },
-        &mut remote,
-    );
+    app.handle_server_event(crate::protocol::ServerEvent::Done { id: 7 }, &mut remote);
 
     assert!(!app.is_processing, "late Done should settle the turn");
     assert!(
-        !app
-            .display_messages()
+        !app.display_messages()
             .iter()
             .any(|m| m.content.contains("rewound-away assistant text")),
         "late Done must not resurrect assistant text that the rewind removed"
@@ -1230,8 +1226,10 @@ fn test_handle_server_event_message_end_marks_stream_as_finalizing_without_stall
     app.status = ProcessingStatus::Streaming;
     app.streaming.streaming_tps_collect_output = true;
 
-    let needs_redraw =
-        app.handle_server_event(crate::protocol::ServerEvent::MessageEnd { stop_reason: None }, &mut remote);
+    let needs_redraw = app.handle_server_event(
+        crate::protocol::ServerEvent::MessageEnd { stop_reason: None },
+        &mut remote,
+    );
 
     assert!(needs_redraw);
     assert!(app.stream_message_ended);
@@ -1254,14 +1252,19 @@ fn test_remote_done_waits_for_paced_backlog_and_one_live_frame() {
     app.apply_stream_ops(ops);
     assert!(!app.stream_buffer.is_empty());
 
-    app.handle_server_event(crate::protocol::ServerEvent::MessageEnd { stop_reason: None }, &mut remote);
+    app.handle_server_event(
+        crate::protocol::ServerEvent::MessageEnd { stop_reason: None },
+        &mut remote,
+    );
     app.handle_server_event(crate::protocol::ServerEvent::Done { id: 42 }, &mut remote);
 
     assert!(app.is_processing, "Done must not force-flush the backlog");
     assert_eq!(app.deferred_stream_done_id, Some(42));
-    assert!(app.display_messages.iter().all(|message| {
-        message.role != "assistant" || !message.content.contains(response)
-    }));
+    assert!(
+        app.display_messages
+            .iter()
+            .all(|message| { message.role != "assistant" || !message.content.contains(response) })
+    );
 
     // The first tick drains the short backlog, but deliberately leaves the live
     // streaming representation visible for one frame before committing it.
@@ -1277,9 +1280,11 @@ fn test_remote_done_waits_for_paced_backlog_and_one_live_frame() {
     rt.block_on(crate::tui::app::remote::handle_tick(&mut app, &mut remote));
     assert!(!app.is_processing);
     assert_eq!(app.deferred_stream_done_id, None);
-    assert!(app.display_messages.iter().any(|message| {
-        message.role == "assistant" && message.content == response
-    }));
+    assert!(
+        app.display_messages
+            .iter()
+            .any(|message| { message.role == "assistant" && message.content == response })
+    );
 }
 
 #[test]
@@ -1384,7 +1389,10 @@ fn test_handle_server_event_tps_message_end_counts_late_usage_without_timer_runn
     );
     app.streaming.streaming_tps_start = Some(Instant::now() - Duration::from_secs(4));
 
-    app.handle_server_event(crate::protocol::ServerEvent::MessageEnd { stop_reason: None }, &mut remote);
+    app.handle_server_event(
+        crate::protocol::ServerEvent::MessageEnd { stop_reason: None },
+        &mut remote,
+    );
 
     assert!(app.streaming.streaming_tps_collect_output);
     assert!(app.streaming.streaming_tps_start.is_none());
@@ -1430,7 +1438,10 @@ fn test_handle_server_event_tps_redundant_late_usage_after_message_end_does_not_
         },
         &mut remote,
     );
-    app.handle_server_event(crate::protocol::ServerEvent::MessageEnd { stop_reason: None }, &mut remote);
+    app.handle_server_event(
+        crate::protocol::ServerEvent::MessageEnd { stop_reason: None },
+        &mut remote,
+    );
     app.handle_server_event(
         crate::protocol::ServerEvent::TokenUsage {
             input: 100,
@@ -1471,7 +1482,9 @@ fn test_handle_server_event_interrupted_clears_stream_state_and_sets_idle() {
         id: "tool_1".to_string(),
         name: "bash".to_string(),
         input: serde_json::Value::Null,
-        intent: None, thought_signature: None, });
+        intent: None,
+        thought_signature: None,
+    });
     app.interleave_message = Some("queued interrupt".to_string());
     app.pending_soft_interrupts
         .push("pending soft interrupt".to_string());
@@ -1672,7 +1685,12 @@ fn test_remote_done_auto_pokes_again_when_todos_remain() {
         assert!(needs_redraw);
         assert!(app.pending_queued_dispatch);
         assert_eq!(app.queued_messages().len(), 1);
-        assert!(matches!(&app.queued_messages[0], crate::todo::QueuedMessage::Current(crate::todo::QueuedMessageContent::Todo { request: crate::todo::TodoNoticeRequest::Incomplete { .. } })));
+        assert!(matches!(
+            &app.queued_messages[0],
+            crate::todo::QueuedMessage::Current(crate::todo::QueuedMessageContent::Todo {
+                request: crate::todo::TodoNoticeRequest::Incomplete { .. }
+            })
+        ));
     });
 }
 
@@ -1945,4 +1963,188 @@ fn test_pending_startup_notice_survives_history_bootstrap_for_fresh_session() {
         card_count, 1,
         "startup notice should be re-applied exactly once after bootstrap"
     );
+}
+
+#[test]
+fn primary_snapshot_replay_replaces_inflight_display_without_duplicate_text() {
+    use crate::protocol::{PrimaryStreamCursor, PrimaryStreamPosition, ServerEvent};
+    use crate::tui::backend::{RemoteConnection, RemoteRead};
+    fn deliver(
+        app: &mut App,
+        remote: &mut RemoteConnection,
+        peer: &mut crate::transport::Stream,
+        rt: &tokio::runtime::Runtime,
+        event: &ServerEvent,
+        position: Option<PrimaryStreamPosition>,
+    ) {
+        let json = match position {
+            Some(position) => crate::protocol::encode_primary_event(event, &position).unwrap(),
+            None => crate::protocol::encode_event(event),
+        };
+        let decoded = rt.block_on(async {
+            tokio::io::AsyncWriteExt::write_all(peer, json.as_bytes())
+                .await
+                .unwrap();
+            match remote.next_event().await {
+                RemoteRead::Event(event) => event,
+                other => panic!("unexpected transport outcome: {other:?}"),
+            }
+        });
+        app.handle_server_event(decoded, remote);
+    }
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = RemoteConnection::dummy();
+    let mut peer = remote.take_dummy_peer().unwrap();
+    rt.block_on(remote.resume_session("session_primary_snapshot"))
+        .unwrap();
+    let attachment = rt.block_on(async {
+        let mut reader = tokio::io::BufReader::new(&mut peer);
+        let mut line = String::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut line),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        serde_json::from_str::<crate::protocol::Request>(&line)
+            .unwrap()
+            .id()
+    });
+    remote.mark_history_loaded();
+    app.remote_session_id = Some("session_primary_snapshot".into());
+    let history = crate::protocol::ServerEvent::History {
+        id: 3,
+        session_id: "session_primary_snapshot".to_string(),
+        messages: vec![crate::protocol::HistoryMessage {
+            role: "user".to_string(),
+            content: "canonical fixture input".to_string(),
+            tool_calls: None,
+            tool_data: None,
+        }],
+        images: vec![],
+        provider_name: Some("claude".to_string()),
+        provider_model: Some("claude-sonnet-4-20250514".to_string()),
+        subagent_model: None,
+        autoreview_enabled: None,
+        autojudge_enabled: None,
+        available_models: vec![],
+        available_model_routes: vec![],
+        mcp_servers: vec![],
+        skills: vec![],
+        total_tokens: None,
+        token_usage_totals: None,
+        all_sessions: vec![],
+        client_count: None,
+        is_canary: None,
+        reload_recovery: None,
+        server_version: None,
+        server_name: None,
+        server_icon: None,
+        server_has_update: None,
+        was_interrupted: None,
+        connection_type: None,
+        status_detail: None,
+        upstream_provider: None,
+        resolved_credential: None,
+        reasoning_effort: None,
+        service_tier: None,
+        context_revision: 0,
+        activity: Some(crate::protocol::SessionActivitySnapshot {
+            is_processing: true,
+            current_tool_name: None,
+        }),
+        side_panel: crate::side_panel::SidePanelSnapshot::default(),
+        startup_context: None,
+    };
+    let mut cursor = PrimaryStreamCursor {
+        session_id: "session_primary_snapshot".into(),
+        stream_id: "fixture-stream".into(),
+        sequence: 0,
+        request_id: 99,
+        origin: Some("peer".into()),
+    };
+    deliver(
+        &mut app,
+        &mut remote,
+        &mut peer,
+        &rt,
+        &history,
+        Some(PrimaryStreamPosition::Snapshot {
+            cursor: cursor.clone(),
+            replay_events: 0,
+        }),
+    );
+    assert!(app.is_processing);
+    assert!(app.remote_resume_activity.is_some());
+    deliver(
+        &mut app,
+        &mut remote,
+        &mut peer,
+        &rt,
+        &ServerEvent::Done { id: attachment },
+        None,
+    );
+    assert!(
+        app.is_processing,
+        "attachment acknowledgement is not primary completion"
+    );
+    assert!(app.remote_resume_activity.is_some());
+    cursor.sequence = 1;
+    for _ in 0..2 {
+        app.push_display_message(DisplayMessage::assistant("old inflight fixture"));
+        app.streaming.streaming_text = "old partial fixture".into();
+        deliver(
+            &mut app,
+            &mut remote,
+            &mut peer,
+            &rt,
+            &history,
+            Some(PrimaryStreamPosition::Snapshot {
+                cursor: cursor.clone(),
+                replay_events: 1,
+            }),
+        );
+        deliver(
+            &mut app,
+            &mut remote,
+            &mut peer,
+            &rt,
+            &ServerEvent::TextDelta {
+                text: "exact fixture prefix".into(),
+            },
+            Some(PrimaryStreamPosition::Replay {
+                cursor: cursor.clone(),
+                index: 0,
+            }),
+        );
+        let ops = app.stream_buffer.flush();
+        app.apply_stream_ops(ops);
+        assert_eq!(app.streaming.streaming_text, "exact fixture prefix");
+        assert!(
+            !app.display_messages()
+                .iter()
+                .any(|message| message.content.contains("old inflight fixture"))
+        );
+        assert_eq!(
+            app.display_messages()
+                .iter()
+                .filter(|message| message.content == "canonical fixture input")
+                .count(),
+            1
+        );
+    }
+    cursor.sequence = 2;
+    deliver(
+        &mut app,
+        &mut remote,
+        &mut peer,
+        &rt,
+        &ServerEvent::Done { id: 99 },
+        Some(PrimaryStreamPosition::Live { cursor }),
+    );
+    assert!(!app.is_processing);
 }

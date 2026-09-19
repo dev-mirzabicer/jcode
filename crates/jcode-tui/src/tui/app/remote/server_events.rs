@@ -682,7 +682,6 @@ pub(in crate::tui::app) fn handle_server_event(
             | ServerEvent::RetryRollback { .. }
             | ServerEvent::UpstreamProvider { .. }
             | ServerEvent::Interrupted
-            | ServerEvent::Done { .. }
             | ServerEvent::Error { .. }
     ) {
         app.remote_resume_activity = None;
@@ -1197,6 +1196,7 @@ pub(in crate::tui::app) fn handle_server_event(
             true
         }
         ServerEvent::Done { id } => {
+            let permit_turn_completion = remote.permit_turn_completion(id);
             let mut auto_poked = false;
             let mut completed_current_message = false;
             crate::logging::info(&format!(
@@ -1214,7 +1214,9 @@ pub(in crate::tui::app) fn handle_server_event(
                 );
             let completes_resumed_turn =
                 app.current_message_id.is_none() && app.is_processing && has_resumed_turn_evidence;
-            if app.current_message_id == Some(id) || completes_resumed_turn {
+            if permit_turn_completion
+                && (app.current_message_id == Some(id) || completes_resumed_turn)
+            {
                 if !app.stream_buffer.is_empty() {
                     crate::logging::info(&format!(
                         "Deferring Done id={} until paced stream backlog drains",
@@ -1224,6 +1226,7 @@ pub(in crate::tui::app) fn handle_server_event(
                     return true;
                 }
                 app.deferred_stream_done_id = None;
+                remote.finish_turn_completion(id);
                 let turn_duration_secs = app.display_turn_duration_secs();
                 if completes_resumed_turn {
                     crate::logging::info(&format!(
@@ -1802,7 +1805,9 @@ pub(in crate::tui::app) fn handle_server_event(
             app.status_notice = Some((format!("Reload: {}", message), std::time::Instant::now()));
             false
         }
+        ServerEvent::PrimaryCheckpoint { .. } => false,
         ServerEvent::History {
+            id,
             messages,
             images,
             session_id,
@@ -1838,6 +1843,7 @@ pub(in crate::tui::app) fn handle_server_event(
             startup_context,
             ..
         } => {
+            let primary_snapshot = remote.take_primary_snapshot(id);
             let prev_session_id = app.remote_session_id.clone();
             let history_message_count = messages.len();
             let history_mcp_count = mcp_servers.len();
@@ -1913,6 +1919,28 @@ pub(in crate::tui::app) fn handle_server_event(
                 return false;
             }
 
+            if primary_snapshot {
+                app.stream_buffer.clear();
+                app.clear_streaming_render_state();
+                app.streaming_tool_calls.clear();
+                app.batch_progress = None;
+                app.thought_line_inserted = false;
+                app.thinking_prefix_emitted = false;
+                app.thinking_buffer.clear();
+                app.attempt_committed_assistant_messages = 0;
+                app.clear_live_usage_state();
+            }
+            if primary_snapshot
+                && app.current_message_id.is_none()
+                && activity
+                    .as_ref()
+                    .is_none_or(|activity| !activity.is_processing)
+            {
+                app.is_processing = false;
+                app.status = ProcessingStatus::Idle;
+                app.processing_started = None;
+                app.remote_resume_activity = None;
+            }
             remote.set_session_id(session_id.clone());
             app.remote_session_id = Some(session_id.clone());
             crate::set_current_session(&session_id);
@@ -2100,7 +2128,8 @@ pub(in crate::tui::app) fn handle_server_event(
                     .collect();
             }
 
-            let should_apply_history_payload = session_changed || !remote.has_loaded_history();
+            let should_apply_history_payload =
+                primary_snapshot || session_changed || !remote.has_loaded_history();
             if should_apply_history_payload {
                 app.reconnect_instruction_manager(&session_id);
                 if app
@@ -2160,13 +2189,15 @@ pub(in crate::tui::app) fn handle_server_event(
                     let fingerprint = history_payload_fingerprint(&messages);
                     let last_applied =
                         last_applied_history_fingerprint(&app.remote_client_instance_id);
-                    if should_skip_identical_history_payload(
-                        session_changed,
-                        app.display_messages().is_empty(),
-                        last_applied.as_ref(),
-                        &session_id,
-                        fingerprint,
-                    ) {
+                    if !primary_snapshot
+                        && should_skip_identical_history_payload(
+                            session_changed,
+                            app.display_messages().is_empty(),
+                            last_applied.as_ref(),
+                            &session_id,
+                            fingerprint,
+                        )
+                    {
                         // Watchdog re-requests and reconnect re-bootstraps can
                         // redeliver a byte-identical full payload seconds apart.
                         // Rebuilding the transcript would stack multi-megabyte

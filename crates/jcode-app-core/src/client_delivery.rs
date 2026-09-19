@@ -1,5 +1,7 @@
 //! Client delivery is expendable. Session and execution storage retain the work.
-use crate::protocol::{ServerEvent, encode_event};
+use crate::protocol::{
+    PrimaryStreamCursor, PrimaryStreamPosition, ServerEvent, encode_event, encode_primary_event,
+};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -16,7 +18,6 @@ impl std::fmt::Display for DeliveryClosed {
 }
 impl std::error::Error for DeliveryClosed {}
 
-#[derive(Clone)]
 pub struct ClientEventSender {
     route: Route,
     binding: Option<Binding>,
@@ -38,6 +39,8 @@ struct Binding {
 }
 
 struct State {
+    connection: String,
+    primary_stream: std::sync::atomic::AtomicBool,
     metadata: Mutex<Metadata>,
     disconnected: CancellationToken,
     byte_limit: usize,
@@ -49,16 +52,29 @@ struct Metadata {
     target: Option<Binding>,
     bytes: usize,
     paused: bool,
+    cursor: Option<PrimaryStreamCursor>,
+    written: std::collections::HashMap<String, PrimaryStreamCursor>,
 }
 
 pub(crate) struct ClientEvent {
     pub event: ServerEvent,
     pub json: String,
+    cursor: Option<PrimaryStreamCursor>,
     binding: Option<Binding>,
     state: Arc<State>,
 }
 
 impl ClientEvent {
+    pub fn written(&self) {
+        if let Some(cursor) = &self.cursor {
+            self.state
+                .metadata
+                .lock()
+                .expect("client delivery")
+                .written
+                .insert(cursor.stream_id.clone(), cursor.clone());
+        }
+    }
     pub async fn ready(&self) {
         loop {
             let changed = self.state.changed.notified();
@@ -74,8 +90,9 @@ impl ClientEvent {
     /// Recheck while holding the socket writer so a navigation barrier cannot
     /// be overtaken by a previously dequeued event.
     pub fn is_current(&self) -> bool {
-        self.binding.is_none()
-            || self.binding == self.state.metadata.lock().expect("client delivery").target
+        let state = self.state.metadata.lock().expect("client delivery");
+        (self.binding.is_none() || self.binding == state.target)
+            && !covered(self.cursor.as_ref(), state.cursor.as_ref())
     }
 }
 
@@ -102,7 +119,73 @@ pub fn local_event_channel() -> (ClientEventSender, mpsc::UnboundedReceiver<Serv
     (sender.into(), receiver)
 }
 
+fn covered(event: Option<&PrimaryStreamCursor>, snapshot: Option<&PrimaryStreamCursor>) -> bool {
+    matches!((event, snapshot), (Some(event),Some(snapshot)) if event.stream_id == snapshot.stream_id && event.session_id == snapshot.session_id && event.sequence <= snapshot.sequence)
+}
+
+impl Clone for ClientEventSender {
+    fn clone(&self) -> Self {
+        let binding = self.binding.clone().or_else(|| match &self.route {
+            Route::Client { state, .. } => state
+                .metadata
+                .lock()
+                .expect("client delivery")
+                .target
+                .clone(),
+            Route::Local(_) => None,
+        });
+        Self {
+            route: self.route.clone(),
+            binding,
+        }
+    }
+}
+
+pub(crate) struct SnapshotDelivery(ClientEventSender);
+impl Drop for SnapshotDelivery {
+    fn drop(&mut self) {
+        self.0.finish_snapshot();
+    }
+}
+
 impl ClientEventSender {
+    pub(crate) async fn closed(&self) {
+        match &self.route {
+            Route::Client { state, .. } => state.disconnected.cancelled().await,
+            Route::Local(_) => std::future::pending().await,
+        }
+    }
+    pub(crate) fn enable_primary_stream(&self) {
+        if let Route::Client { state, .. } = &self.route {
+            state
+                .primary_stream
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+    pub(crate) fn primary_stream_enabled(&self) -> bool {
+        match &self.route {
+            Route::Client { state, .. } => state
+                .primary_stream
+                .load(std::sync::atomic::Ordering::Acquire),
+            Route::Local(_) => false,
+        }
+    }
+    pub(crate) fn identity(&self) -> Option<&str> {
+        match &self.route {
+            Route::Client { state, .. } => Some(&state.connection),
+            Route::Local(_) => None,
+        }
+    }
+    pub(crate) async fn pause_for_snapshot(
+        &self,
+        writer: &Arc<tokio::sync::Mutex<crate::transport::WriteHalf>>,
+    ) -> SnapshotDelivery {
+        if matches!(self.route, Route::Client { .. }) {
+            let _writer = writer.lock().await;
+            self.pause_snapshot();
+        }
+        SnapshotDelivery(self.clone())
+    }
     pub(crate) async fn begin_snapshot(
         &self,
         session: &str,
@@ -126,6 +209,8 @@ impl ClientEventSender {
         let (sender, receiver) = mpsc::channel(capacity);
         let disconnected = CancellationToken::new();
         let state = Arc::new(State {
+            connection: crate::id::new_id("connection"),
+            primary_stream: std::sync::atomic::AtomicBool::new(false),
             metadata: Mutex::new(Metadata::default()),
             disconnected: disconnected.clone(),
             byte_limit,
@@ -196,7 +281,55 @@ impl ClientEventSender {
         }
     }
 
+    pub(crate) fn written_cursor(&self, stream: &str) -> Option<PrimaryStreamCursor> {
+        match &self.route {
+            Route::Client { state, .. } => state
+                .metadata
+                .lock()
+                .expect("client delivery")
+                .written
+                .get(stream)
+                .cloned(),
+            Route::Local(_) => None,
+        }
+    }
+    pub(crate) fn snapshot_written(&self, cursor: PrimaryStreamCursor) {
+        if let Route::Client { state, .. } = &self.route {
+            state
+                .metadata
+                .lock()
+                .expect("client delivery")
+                .written
+                .insert(cursor.stream_id.clone(), cursor);
+        }
+    }
+    pub(crate) fn install_snapshot_cursor(&self, cursor: PrimaryStreamCursor) {
+        if let Route::Client { state, .. } = &self.route {
+            let mut metadata = state.metadata.lock().expect("client delivery");
+            if metadata
+                .target
+                .as_ref()
+                .is_some_and(|target| target.session == cursor.session_id)
+            {
+                metadata.cursor = Some(cursor);
+            }
+        }
+    }
+    pub(crate) fn send_sequenced(
+        &self,
+        event: ServerEvent,
+        cursor: PrimaryStreamCursor,
+    ) -> Result<(), DeliveryClosed> {
+        self.send_inner(event, self.primary_stream_enabled().then_some(cursor))
+    }
     pub fn send(&self, event: ServerEvent) -> Result<(), DeliveryClosed> {
+        self.send_inner(event, None)
+    }
+    fn send_inner(
+        &self,
+        event: ServerEvent,
+        cursor: Option<PrimaryStreamCursor>,
+    ) -> Result<(), DeliveryClosed> {
         let Route::Client { sender, state } = &self.route else {
             let Route::Local(sender) = &self.route else {
                 unreachable!()
@@ -206,9 +339,35 @@ impl ClientEventSender {
         if self.is_closed() {
             return Err(DeliveryClosed);
         }
-        let json = encode_event(&event);
+        let json = match &cursor {
+            Some(cursor) => encode_primary_event(
+                &event,
+                &PrimaryStreamPosition::Live {
+                    cursor: cursor.clone(),
+                },
+            )
+            .map_err(|_| DeliveryClosed)?,
+            None if matches!(event, ServerEvent::SessionId { .. }) => {
+                #[derive(serde::Serialize)]
+                struct SessionFrame<'a> {
+                    #[serde(flatten)]
+                    event: &'a ServerEvent,
+                    client_connection_id: &'a str,
+                }
+                let mut json = serde_json::to_string(&SessionFrame {
+                    event: &event,
+                    client_connection_id: &state.connection,
+                })
+                .map_err(|_| DeliveryClosed)?;
+                json.push('\n');
+                json
+            }
+            None => encode_event(&event),
+        };
         let mut metadata = state.metadata.lock().expect("client delivery");
-        if self.binding.is_some() && self.binding != metadata.target {
+        if (self.binding.is_some() && self.binding != metadata.target)
+            || covered(cursor.as_ref(), metadata.cursor.as_ref())
+        {
             return Ok(());
         }
         // One complete oversized event is allowed in an otherwise empty queue.
@@ -221,6 +380,7 @@ impl ClientEventSender {
         let queued = ClientEvent {
             event,
             json,
+            cursor,
             binding: self.binding.clone(),
             state: state.clone(),
         };

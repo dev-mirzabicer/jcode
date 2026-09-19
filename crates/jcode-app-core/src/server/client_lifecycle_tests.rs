@@ -2808,6 +2808,24 @@ async fn lightweight_comm_request_skips_full_session_initialization() {
 
     let (client_reader, mut client_writer) = client_stream.into_split();
     let mut client_reader = BufReader::new(client_reader);
+    for id in [5, 6] {
+        let request = Request::PrimaryStreamSubscribe { id };
+        client_writer
+            .write_all((serde_json::to_string(&request).unwrap() + "\n").as_bytes())
+            .await
+            .unwrap();
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(5), client_reader.read_line(&mut line))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(decode_request_or_event(&line),ServerEvent::PrimaryStreamCapabilities{id:reply,version:1} if reply==id)
+        );
+        assert!(!forked.load(Ordering::SeqCst));
+        assert!(sessions.read().await.is_empty());
+        assert!(client_connections.read().await.is_empty());
+    }
     let request = Request::CommList {
         id: 7,
         session_id: "not-in-swarm".to_string(),

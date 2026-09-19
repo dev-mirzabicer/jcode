@@ -47,6 +47,9 @@ pub enum LegacyContextCommand {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Request {
+    /// Negotiate ordered presentation before Subscribe, without creating a Session.
+    #[serde(rename = "primary_stream_subscribe")]
+    PrimaryStreamSubscribe { id: u64 },
     #[serde(rename = "workspace_probe")]
     WorkspaceProbe { id: u64 },
     #[serde(rename = "workspace")]
@@ -1111,6 +1114,11 @@ pub enum Request {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ServerEvent {
+    #[serde(rename = "primary_stream_capabilities")]
+    PrimaryStreamCapabilities { id: u64, version: u32 },
+    /// Internal ordered primary checkpoint. The primary host consumes it before client delivery.
+    #[serde(rename = "primary_checkpoint")]
+    PrimaryCheckpoint { token: String, terminal: bool },
     #[serde(rename = "workspace_capabilities")]
     WorkspaceCapabilities {
         id: u64,

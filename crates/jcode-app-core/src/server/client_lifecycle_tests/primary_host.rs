@@ -1,5 +1,143 @@
 use super::*;
 
+#[test]
+fn stopped_snapshot_retains_partial_output_without_fabricating_source() -> Result<()> {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    crate::instruction::SystemPromptComposer::new().ensure_global_store()?;
+    tokio::runtime::Runtime::new()?.block_on(async {
+        let gate = GatedClientProvider::default();
+        let provider: Arc<dyn Provider> = Arc::new(gate);
+        let registry = Registry::new(provider.clone()).await;
+        let agent = Arc::new(Mutex::new(Agent::new(provider, registry)));
+        let session = agent.lock().await.session_id().to_string();
+        let host = Arc::new(crate::primary::PrimaryHost::new(HashMap::from([(
+            session.clone(),
+            agent.clone(),
+        )])));
+        let status = status_fixture(&session);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        crate::server::register_session_event_sender(
+            &status.members,
+            &session,
+            "observer",
+            tx.into(),
+        )
+        .await;
+        assert!(
+            crate::server::live_turn::run_live_turn_if_idle(
+                &session,
+                "fixture input",
+                None,
+                &host,
+                status
+            )
+            .await
+        );
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(event) = rx.recv().await {
+                if matches!(event, ServerEvent::TextDelta { .. }) {
+                    return;
+                }
+            }
+            panic!("provider closed before its prefix");
+        })
+        .await?;
+        assert!(host.stop(&session).await?);
+        let snapshot = host.presentation(&session).snapshot().await?;
+        let canonical = snapshot
+            .session
+            .messages
+            .iter()
+            .filter(|message| message.role == crate::message::Role::Assistant)
+            .flat_map(|message| &message.content)
+            .filter_map(|block| match block {
+                ContentBlock::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        let replay = snapshot
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                ServerEvent::TextDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(format!("{canonical}{replay}"), "fixture prefix ");
+        assert!(!snapshot.processing);
+        assert!(
+            snapshot
+                .events
+                .iter()
+                .any(|event| matches!(event, ServerEvent::Interrupted))
+        );
+        let seen = host
+            .presentation(&session)
+            .recovery_events(&snapshot.session, Some(&snapshot.cursor));
+        assert!(
+            !seen
+                .iter()
+                .any(|event| matches!(event, ServerEvent::Done { .. } | ServerEvent::Interrupted))
+        );
+        host.shutdown().await
+    })
+}
+
+#[test]
+fn busy_snapshot_replays_prefix_once_then_continues_after_its_cursor() -> Result<()> {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    crate::instruction::SystemPromptComposer::new().ensure_global_store()?;
+    tokio::runtime::Runtime::new()?.block_on(async {
+        let gate=GatedClientProvider::default();
+        let provider:Arc<dyn Provider>=Arc::new(gate.clone());
+        let registry=Registry::new(provider.clone()).await;
+        let agent=Arc::new(Mutex::new(Agent::new(provider.clone(),registry)));
+        let session=agent.lock().await.session_id().to_string();
+        let host=Arc::new(crate::primary::PrimaryHost::new(HashMap::from([(session.clone(),agent.clone())])));
+        let status=status_fixture(&session);
+        let members=status.members.clone();
+        let (observer,mut events,_)=crate::client_delivery::ClientEventSender::bounded_client();
+        observer.enable_primary_stream();
+        observer.retarget(&session);
+        crate::server::register_session_event_sender(&members,&session,"observer",observer.clone()).await;
+        assert!(crate::server::live_turn::run_live_turn_if_idle(&session,"fixture input",None,&host,status).await);
+        let prefix=tokio::time::timeout(Duration::from_secs(10),async {
+            loop { let event=events.recv().await.unwrap(); if matches!(&event.event,ServerEvent::TextDelta{text} if text=="fixture prefix ") {break event;} }
+        }).await?;
+        let (stream,mut reader)=crate::transport::stream_pair()?;
+        let (_,writer)=stream.into_split();
+        let writer=Arc::new(Mutex::new(writer));
+        crate::server::client_state::handle_get_history(41,&session,true,&agent,&crate::server::startup_context::test_coordinator(),&provider,&host,&Arc::new(RwLock::new(HashMap::new())),&Arc::new(RwLock::new(1)),&writer,"fixture","",None,Some(&observer)).await?;
+        assert!(!prefix.is_current(),"queued prefix is already represented by the snapshot replay");
+        drop(writer);
+        let mut bytes=Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut reader,&mut bytes).await?;
+        let frames=String::from_utf8(bytes)?.lines().map(serde_json::from_str::<serde_json::Value>).collect::<std::result::Result<Vec<_>,_>>()?;
+        assert_eq!(frames[0]["type"],"history");
+        assert!(frames[0]["messages"].as_array().unwrap().iter().any(|message|message["content"].as_str().is_some_and(|content|content.contains("fixture input"))));
+        assert_eq!(frames[0]["primary_stream"]["phase"],"snapshot");
+        assert_eq!(frames[0]["primary_stream"]["replay_events"].as_u64().unwrap() as usize,frames.len()-1);
+        let text=frames.iter().filter(|frame|frame["type"]=="text_delta").filter_map(|frame|frame["text"].as_str()).collect::<String>();
+        assert_eq!(text,"fixture prefix ");
+        assert!(frames.iter().all(|frame|frame["type"]!="primary_checkpoint"));
+        gate.release.notify_one();
+        let suffix=tokio::time::timeout(Duration::from_secs(10),async {
+            loop { let event=events.recv().await.unwrap(); if matches!(&event.event,ServerEvent::TextDelta{text} if text=="fixture suffix") {break event;} }
+        }).await?;
+        assert!(suffix.is_current());
+        let live:serde_json::Value=serde_json::from_str(&suffix.json)?;
+        assert!(live["primary_stream"]["cursor"]["sequence"].as_u64().unwrap()>frames[0]["primary_stream"]["cursor"]["sequence"].as_u64().unwrap());
+        host.wait_idle(&session).await?;
+        let final_view=host.presentation(&session).snapshot().await?;
+        assert!(!final_view.processing);
+        assert!(matches!(&final_view.events[..],[ServerEvent::Done{id:0}]));
+        assert!(final_view.session.messages.iter().flat_map(|message|&message.content).any(|block|matches!(block,ContentBlock::Text{text,..} if text=="fixture prefix fixture suffix")));
+        host.shutdown().await
+    })
+}
+
 #[derive(Clone, Default)]
 struct GatedClientProvider {
     entered: Arc<tokio::sync::Notify>,
@@ -41,18 +179,31 @@ fn slow_client_overflow_does_not_stop_the_primary() -> Result<()> {
         let control = GatedClientProvider::default();
         let provider: Arc<dyn Provider> = Arc::new(control.clone());
         let registry = Registry::new(provider.clone()).await;
-        let agent = Arc::new(Mutex::new(Agent::new(provider,registry)));
+        let agent = Arc::new(Mutex::new(Agent::new(provider.clone(),registry)));
         let session = agent.lock().await.session_id().to_string();
         let host = Arc::new(crate::primary::PrimaryHost::new(HashMap::from([(session.clone(),agent.clone())])));
         let status = status_fixture(&session);
         let members = status.members.clone();
         let (observer,_receiver,disconnected) = crate::client_delivery::ClientEventSender::bounded_client();
+        observer.enable_primary_stream();
         observer.retarget(&session);
         crate::server::register_session_event_sender(&members,&session,"slow",observer.clone()).await;
         assert!(crate::server::live_turn::run_live_turn_if_idle(&session,"fixture input",None,&host,status).await);
         tokio::time::timeout(Duration::from_secs(5),control.entered.notified()).await?;
+        let (stream,_peer)=crate::transport::stream_pair()?;
+        let (_,writer)=stream.into_split();
+        let writer=Arc::new(Mutex::new(writer));
+        let held_writer=writer.lock().await;
+        let startup=crate::server::startup_context::test_coordinator();
+        let connections=Arc::new(RwLock::new(HashMap::new()));
+        let count=Arc::new(RwLock::new(1));
+        let snapshot=crate::server::client_state::handle_get_history(77,&session,true,&agent,&startup,&provider,&host,&connections,&count,&writer,"fixture","",None,Some(&observer));
+        tokio::pin!(snapshot);
+        assert!(tokio::time::timeout(Duration::from_millis(10),snapshot.as_mut()).await.is_err());
         for id in 0..1024 { if observer.send(ServerEvent::Done{id}).is_err() { break; } }
         assert!(disconnected.is_cancelled());
+        assert!(tokio::time::timeout(Duration::from_secs(1),snapshot.as_mut()).await?.is_err());
+        drop(held_writer);
         assert!(host.processing(&session).is_some());
         control.release.notify_one();
         tokio::time::timeout(Duration::from_secs(10),host.wait_idle(&session)).await??;
@@ -164,11 +315,13 @@ async fn departed_origin_cannot_receive_detached_primary_events() -> Result<()> 
             .await,
         0
     );
-    let stream = crate::server::state::session_event_fanout_sender_with_fallback(
+    let output = crate::server::primary_output::PrimaryOutput::new(
         session.into(),
+        Arc::new(crate::primary::presentation::Presentation::new(session)),
         status.members.clone(),
-        origin.into(),
+        Some(origin.into()),
     );
+    let stream = output.tx.clone();
     stream.send(ServerEvent::Done { id: 3 })?;
     assert!(
         tokio::time::timeout(Duration::from_millis(100), received.recv())

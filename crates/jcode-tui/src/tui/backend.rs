@@ -222,8 +222,30 @@ pub struct BackendInfo {
     pub skills: Vec<String>,
 }
 
+#[derive(Default)]
+struct RemotePresentation {
+    tracker: crate::protocol::PrimaryStreamTracker,
+    connection: Option<String>,
+    attachments: std::collections::HashSet<u64>,
+    outgoing: std::collections::HashSet<u64>,
+    deferred_completions: std::collections::HashSet<u64>,
+    snapshots: std::collections::HashMap<u64, usize>,
+    completions: std::collections::HashMap<
+        u64,
+        std::collections::VecDeque<Option<crate::protocol::PrimaryStreamCursor>>,
+    >,
+}
+#[derive(serde::Deserialize)]
+struct PresentationEnvelope {
+    #[serde(default)]
+    primary_stream: Option<crate::protocol::PrimaryStreamPosition>,
+    #[serde(default)]
+    client_connection_id: Option<String>,
+}
+
 /// Remote connection to jcode server
 pub struct RemoteConnection {
+    presentation: std::sync::Mutex<RemotePresentation>,
     reader: BufReader<crate::transport::ReadHalf>,
     writer: Arc<Mutex<WriteHalf>>,
     _dummy_peer: Option<Stream>,
@@ -301,6 +323,13 @@ pub(crate) trait RemoteEventState {
     fn set_session_id(&mut self, id: String);
     fn has_loaded_history(&self) -> bool;
     fn mark_history_loaded(&mut self);
+    fn take_primary_snapshot(&mut self, _id: u64) -> bool {
+        false
+    }
+    fn permit_turn_completion(&mut self, _id: u64) -> bool {
+        true
+    }
+    fn finish_turn_completion(&mut self, _id: u64) {}
 }
 
 #[derive(Default)]
@@ -317,8 +346,8 @@ impl RemoteConnection {
 
     /// Connect to the server and optionally resume a specific session.
     ///
-    /// When `client_has_local_history` is true, the client already restored the
-    /// transcript locally and only needs lightweight session metadata from the server.
+    /// Local-history and takeover hints retain their existing meaning. Negotiated
+    /// presentation still receives the server's authoritative snapshot and cursor.
     pub async fn connect_with_session(
         resume_session: Option<&str>,
         client_instance_id: Option<&str>,
@@ -339,6 +368,7 @@ impl RemoteConnection {
             session_id: None,
             client_instance_id: client_instance_id.map(str::to_string),
             next_request_id: 1,
+            presentation: Default::default(),
             tool_diff: RemoteDiffTracker::default(),
             read_buffer: Vec::new(),
             read_buffer_scan_start: 0,
@@ -349,12 +379,25 @@ impl RemoteConnection {
             next_message_skill: None,
         };
 
+        let capability_id = conn.next_request_id;
+        conn.next_request_id += 1;
+        conn.send_request(Request::PrimaryStreamSubscribe { id: capability_id })
+            .await?;
+        match tokio::time::timeout(std::time::Duration::from_secs(10), conn.next_event()).await? {
+            RemoteRead::Event(ServerEvent::PrimaryStreamCapabilities { id, version: 1 })
+                if id == capability_id => {}
+            RemoteRead::Event(ServerEvent::Error { .. }) => crate::logging::info(
+                "Server uses legacy presentation; sequenced primary snapshots unavailable",
+            ),
+            _ => anyhow::bail!("Server did not negotiate a supported primary presentation stream"),
+        }
+
         // Subscribe to events
         let subscribe_start = Instant::now();
         let (working_dir, selfdev) = super::subscribe_metadata(remote_working_dir);
-        let resume_target = resume_session
-            .filter(|session_id| crate::session::session_exists(session_id))
-            .map(|session_id| session_id.to_string());
+        // The target belongs to the server, which may use another state root
+        // or host. Only that owner can decide whether it is missing.
+        let resume_target = resume_session.map(str::to_string);
         conn.send_request(Request::Subscribe {
             id: conn.next_request_id,
             working_dir,
@@ -460,6 +503,25 @@ impl RemoteConnection {
         request: Request,
         interrupt_trigger: Option<&str>,
     ) -> Result<()> {
+        {
+            let mut presentation = self.presentation.lock().expect("remote presentation");
+            if matches!(
+                request,
+                Request::Subscribe { .. } | Request::ResumeSession { .. }
+            ) {
+                presentation.attachments.insert(request.id());
+            }
+            if matches!(
+                request,
+                Request::Message {
+                    no_reply: false,
+                    ..
+                } | Request::QueuedMessages { .. }
+                    | Request::AgentTask { .. }
+            ) {
+                presentation.outgoing.insert(request.id());
+            }
+        }
         let json = serde_json::to_string(&request)? + "\n";
         let interrupt_log = self.interrupt_request_log_fields(&request, interrupt_trigger);
         if let Some(fields) = &interrupt_log {
@@ -1414,7 +1476,73 @@ impl RemoteConnection {
             return LineOutcome::Skip;
         }
         match serde_json::from_str(&text) {
-            Ok(event) => LineOutcome::Event(Box::new(event)),
+            Ok(event) => {
+                if matches!(event, ServerEvent::PrimaryCheckpoint { .. }) {
+                    return LineOutcome::Disconnect(RemoteDisconnectReason::Protocol(
+                        "Unexpected internal primary checkpoint".into(),
+                    ));
+                }
+                let envelope = match serde_json::from_str::<PresentationEnvelope>(&text) {
+                    Ok(envelope) => envelope,
+                    Err(_) => {
+                        return LineOutcome::Disconnect(RemoteDisconnectReason::Protocol(
+                            "Invalid primary stream metadata".into(),
+                        ));
+                    }
+                };
+                let mut presentation = self.presentation.lock().expect("remote presentation");
+                if let Some(connection) = envelope.client_connection_id {
+                    presentation.connection = Some(connection);
+                }
+                if let Some(position) = &envelope.primary_stream {
+                    if let Err(error) = presentation.tracker.observe(position) {
+                        return LineOutcome::Disconnect(RemoteDisconnectReason::Protocol(
+                            error.into(),
+                        ));
+                    }
+                    if matches!(
+                        position,
+                        crate::protocol::PrimaryStreamPosition::Snapshot { .. }
+                    ) && let ServerEvent::History { id, .. } = &event
+                    {
+                        *presentation.snapshots.entry(*id).or_default() += 1;
+                    }
+                }
+                if let Some(
+                    crate::protocol::PrimaryStreamPosition::Live { cursor }
+                    | crate::protocol::PrimaryStreamPosition::Replay { cursor, .. },
+                ) = &envelope.primary_stream
+                    && presentation.outgoing.contains(&cursor.request_id)
+                    && cursor.origin != presentation.connection
+                    && matches!(
+                        event,
+                        ServerEvent::Error { .. }
+                            | ServerEvent::ContextActionRequired { .. }
+                            | ServerEvent::StartupContextFailed { .. }
+                            | ServerEvent::StartupContextStatus {
+                                action_required: Some(_),
+                                ..
+                            }
+                    )
+                {
+                    return LineOutcome::Skip;
+                }
+                if let ServerEvent::Done { id } = &event {
+                    let cursor = match envelope.primary_stream {
+                        Some(
+                            crate::protocol::PrimaryStreamPosition::Live { cursor }
+                            | crate::protocol::PrimaryStreamPosition::Replay { cursor, .. },
+                        ) => Some(cursor),
+                        _ => None,
+                    };
+                    presentation
+                        .completions
+                        .entry(*id)
+                        .or_default()
+                        .push_back(cursor);
+                }
+                LineOutcome::Event(Box::new(event))
+            }
             Err(error) => {
                 // A single unparseable JSON line (e.g. the tail half of a frame
                 // split by a lost write, or an event variant this client build
@@ -1468,6 +1596,7 @@ impl RemoteConnection {
             session_id: None,
             client_instance_id: None,
             next_request_id: 1,
+            presentation: Default::default(),
             tool_diff: RemoteDiffTracker::default(),
             read_buffer: Vec::new(),
             read_buffer_scan_start: 0,
@@ -1549,6 +1678,53 @@ impl RemoteConnection {
 }
 
 impl RemoteEventState for RemoteConnection {
+    fn take_primary_snapshot(&mut self, id: u64) -> bool {
+        let mut presentation = self.presentation.lock().expect("remote presentation");
+        if let Some(count) = presentation.snapshots.get_mut(&id) {
+            *count -= 1;
+            if *count == 0 {
+                presentation.snapshots.remove(&id);
+            }
+            true
+        } else {
+            false
+        }
+    }
+    fn permit_turn_completion(&mut self, id: u64) -> bool {
+        let mut presentation = self.presentation.lock().expect("remote presentation");
+        let record = presentation
+            .completions
+            .get_mut(&id)
+            .and_then(|queue| queue.pop_front());
+        if presentation
+            .completions
+            .get(&id)
+            .is_some_and(|queue| queue.is_empty())
+        {
+            presentation.completions.remove(&id);
+        }
+        match record {
+            Some(Some(cursor)) => {
+                let allowed = !presentation.outgoing.contains(&id)
+                    || cursor.origin == presentation.connection;
+                if allowed {
+                    presentation.deferred_completions.insert(id);
+                }
+                allowed
+            }
+            Some(None) => !presentation.attachments.contains(&id),
+            None => {
+                presentation.deferred_completions.contains(&id)
+                    || !presentation.attachments.contains(&id)
+            }
+        }
+    }
+    fn finish_turn_completion(&mut self, id: u64) {
+        let mut presentation = self.presentation.lock().expect("remote presentation");
+        presentation.deferred_completions.remove(&id);
+        presentation.outgoing.remove(&id);
+    }
+
     fn handle_tool_start(&mut self, id: &str, name: &str) {
         Self::handle_tool_start(self, id, name);
     }
@@ -1639,6 +1815,170 @@ impl RemoteEventState for ReplayRemoteState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn reconnect_negotiates_without_guessing_remote_session_existence() {
+        let _lock = crate::storage::lock_test_env();
+        let root = tempfile::tempdir().unwrap();
+        struct Restore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                for (key, value) in &self.0 {
+                    match value {
+                        Some(value) => crate::env::set_var(key, value),
+                        None => crate::env::remove_var(key),
+                    }
+                }
+            }
+        }
+        let _restore = Restore(vec![
+            ("JCODE_SOCKET", std::env::var_os("JCODE_SOCKET")),
+            (
+                "JCODE_REMOTE_BOOTSTRAP_MODEL_CATALOG",
+                std::env::var_os("JCODE_REMOTE_BOOTSTRAP_MODEL_CATALOG"),
+            ),
+        ]);
+        crate::env::remove_var("JCODE_REMOTE_BOOTSTRAP_MODEL_CATALOG");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            for supported in [true,false] {
+                let path=root.path().join(if supported {"new.sock"} else {"old.sock"});
+                let listener=tokio::net::UnixListener::bind(&path).unwrap();
+                crate::env::set_var("JCODE_SOCKET",&path);
+                let server=tokio::spawn(async move {
+                    let (stream,_)=listener.accept().await.unwrap();
+                    let (read,mut write)=stream.into_split();
+                    let mut read=BufReader::new(read);
+                    let mut line=String::new();
+                    read.read_line(&mut line).await.unwrap();
+                    let probe:Request=serde_json::from_str(&line).unwrap();
+                    assert!(matches!(probe,Request::PrimaryStreamSubscribe{..}));
+                    let reply=if supported {ServerEvent::PrimaryStreamCapabilities{id:probe.id(),version:1}} else {ServerEvent::Error{id:0,message:"unsupported fixture request".into(),retry_after_secs:None}};
+                    write.write_all(crate::protocol::encode_event(&reply).as_bytes()).await.unwrap();
+                    line.clear();
+                    read.read_line(&mut line).await.unwrap();
+                    serde_json::from_str::<Request>(&line).unwrap()
+                });
+                let target=format!("remote-only-{}",crate::id::new_id("fixture"));
+                assert!(!crate::session::session_exists(&target));
+                let connection=RemoteConnection::connect_with_session(Some(&target),Some("fixture-client"),true,false,Some("/server/project")).await.unwrap();
+                let request=server.await.unwrap();
+                assert!(matches!(request,Request::Subscribe{target_session_id:Some(actual),working_dir:Some(cwd),..} if actual==target && cwd=="/server/project"));
+                drop(connection);
+            }
+        });
+    }
+
+    #[tokio::test]
+    async fn primary_cursor_distinguishes_attach_done_and_other_client_request_ids() {
+        let mut remote = RemoteConnection::dummy();
+        remote
+            .send_request(Request::ResumeSession {
+                id: 9,
+                session_id: "fixture".into(),
+                client_instance_id: None,
+                client_has_local_history: false,
+                allow_session_takeover: false,
+            })
+            .await
+            .unwrap();
+        let mut stray = 0;
+        let session=b"{\"type\":\"session\",\"session_id\":\"fixture\",\"client_connection_id\":\"mine\"}\n".to_vec();
+        assert!(matches!(
+            remote.classify_protocol_line(session, &mut stray),
+            LineOutcome::Event(_)
+        ));
+        for _ in 0..2 {
+            assert!(matches!(
+                remote.classify_protocol_line(
+                    crate::protocol::encode_event(&ServerEvent::Done { id: 9 }).into_bytes(),
+                    &mut stray
+                ),
+                LineOutcome::Event(_)
+            ));
+            assert!(!remote.permit_turn_completion(9));
+        }
+        let mut cursor = crate::protocol::PrimaryStreamCursor {
+            session_id: "fixture".into(),
+            stream_id: "stream".into(),
+            sequence: 1,
+            request_id: 9,
+            origin: Some("peer".into()),
+        };
+        let frame = crate::protocol::encode_primary_event(
+            &ServerEvent::Done { id: 9 },
+            &crate::protocol::PrimaryStreamPosition::Live {
+                cursor: cursor.clone(),
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            remote.classify_protocol_line(frame.into_bytes(), &mut stray),
+            LineOutcome::Event(_)
+        ));
+        assert!(remote.permit_turn_completion(9));
+        assert!(
+            remote.permit_turn_completion(9),
+            "paced completion retains its structural identity"
+        );
+        remote.finish_turn_completion(9);
+        remote
+            .send_request(Request::Message {
+                id: 10,
+                content: "fixture input".into(),
+                images: Vec::new(),
+                system_reminder: None,
+                no_reply: false,
+                observe_startup_context: true,
+                activate_skill: None,
+            })
+            .await
+            .unwrap();
+        cursor.sequence = 2;
+        cursor.request_id = 10;
+        let frame = crate::protocol::encode_primary_event(
+            &ServerEvent::Done { id: 10 },
+            &crate::protocol::PrimaryStreamPosition::Live {
+                cursor: cursor.clone(),
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            remote.classify_protocol_line(frame.into_bytes(), &mut stray),
+            LineOutcome::Event(_)
+        ));
+        assert!(
+            !remote.permit_turn_completion(10),
+            "another client's equal request number is not this input"
+        );
+        cursor.sequence = 3;
+        cursor.origin = Some("mine".into());
+        let frame = crate::protocol::encode_primary_event(
+            &ServerEvent::Done { id: 10 },
+            &crate::protocol::PrimaryStreamPosition::Live {
+                cursor: cursor.clone(),
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            remote.classify_protocol_line(frame.into_bytes(), &mut stray),
+            LineOutcome::Event(_)
+        ));
+        assert!(remote.permit_turn_completion(10));
+        cursor.sequence = 5;
+        let frame = crate::protocol::encode_primary_event(
+            &ServerEvent::TextDelta {
+                text: "fixture gap".into(),
+            },
+            &crate::protocol::PrimaryStreamPosition::Live { cursor },
+        )
+        .unwrap();
+        assert!(matches!(
+            remote.classify_protocol_line(frame.into_bytes(), &mut stray),
+            LineOutcome::Disconnect(RemoteDisconnectReason::Protocol(_))
+        ));
+    }
     use crate::protocol::ContextDraftRequest;
     use std::time::Duration;
 

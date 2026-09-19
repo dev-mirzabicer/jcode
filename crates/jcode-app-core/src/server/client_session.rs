@@ -293,6 +293,7 @@ pub(super) async fn handle_clear_session(
     }
 
     *client_session_id = new_id.clone();
+    client_event_tx.retarget(&new_id);
     {
         let mut connections = client_connections.write().await;
         if let Some(info) = connections.get_mut(client_connection_id) {
@@ -521,6 +522,7 @@ pub(super) async fn handle_subscribe(
     event_counter: &Arc<std::sync::atomic::AtomicU64>,
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
 ) {
+    let client_event_tx = &client_event_tx.for_session(client_session_id);
     let subscribe_start = Instant::now();
     let bound_working_dir = match session_working_dir(agent, client_session_id) {
         Ok(path) => path,
@@ -1316,6 +1318,7 @@ pub(super) async fn handle_resume_session(
             server_name,
             server_icon,
             was_interrupted,
+            Some(client_event_tx),
         )
         .await?;
         client_event_tx.finish_snapshot();

@@ -114,6 +114,35 @@ target cannot follow the connection to another session. Attachment snapshot
 publication precedes that target's queued output. In-process observers use their
 existing local channels and do not own primary lifetime.
 
+Sequenced presentation is explicitly negotiated with
+`primary_stream_subscribe` before ordinary `Subscribe`. The response is
+`primary_stream_capabilities` version 1. Negotiation creates no Agent or Session.
+The TUI negotiates this mode, while an older server's unsupported-request response
+keeps the legacy presentation path without claiming cursor support. Clients that
+do not negotiate are not sent snapshot replay semantics.
+
+For negotiated clients, History comes from an ordered primary checkpoint, followed
+by exactly the announced number of in-flight replay frames. Each frame's optional
+`primary_stream` metadata identifies its snapshot/replay/live phase and cursor.
+The cursor identifies the session, runtime stream, published sequence, originating
+connection and request. It is a presentation cutoff, not a replacement Session
+revision or a permission token. Live sequence gaps and incomplete replay require
+a new snapshot, never another provider call or tool execution.
+
+`primary::presentation` holds disposable copies of canonical Session checkpoints
+and losslessly coalesced subsequent display events. Agent checkpoint markers share
+the same ordered channel as deltas and are consumed before network delivery.
+Canonical history retains its existing owner and Startup Context privacy policy.
+Terminal delivery is drained before admitting the next turn. Unseen terminal and
+prompt-recovery receipts remain available, and a stopped in-flight preview is not
+inserted into authoritative history merely to display it. This transient preview
+does not promise recovery of uncommitted provider bytes after process loss.
+
+The TUI replaces its transient display before snapshot replay. It distinguishes
+attachment acknowledgements from primary completion, including equal request
+numbers belonging to different connections. Writing a frame is not proof that a
+human read it. Reconnection obtains fresh state through the same snapshot path.
+
 ### Remote Client Working Directory
 
 For a fresh session, the client supplies its command working directory to the

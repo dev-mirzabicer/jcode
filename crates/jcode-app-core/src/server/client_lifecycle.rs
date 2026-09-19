@@ -544,6 +544,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
     let writer = Arc::new(Mutex::new(writer));
     let mut line = String::new();
 
+    let mut primary_stream_enabled = false;
     let initial_request = loop {
         line.clear();
         let n = match reader.read_line(&mut line).await {
@@ -565,6 +566,18 @@ pub(super) async fn handle_client_with_instruction_repositories(
 
         match decode_request(&line) {
             Ok(request) => {
+                if let Request::PrimaryStreamSubscribe { id } = &request {
+                    primary_stream_enabled = true;
+                    write_direct_event(
+                        &writer,
+                        &ServerEvent::PrimaryStreamCapabilities {
+                            id: *id,
+                            version: 1,
+                        },
+                    )
+                    .await?;
+                    continue;
+                }
                 if let Request::WorkspaceProbe { id } = &request {
                     write_direct_event(
                         &writer,
@@ -986,6 +999,9 @@ pub(super) async fn handle_client_with_instruction_repositories(
     let (client_event_tx, mut client_event_rx, delivery_cancelled) =
         crate::client_delivery::ClientEventSender::bounded_client();
     let _delivery_owner = delivery_cancelled.clone().drop_guard();
+    if primary_stream_enabled {
+        client_event_tx.enable_primary_stream();
+    }
     client_event_tx.retarget(&client_session_id);
 
     let writer_clone = Arc::clone(&writer);
@@ -999,7 +1015,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
                 _ = delivery_stop.cancelled() => break,
                 frame = client_event_rx.recv() => match frame { Some(frame) => frame, None => break },
             };
-            let result = tokio::select! {
+            let result: std::io::Result<bool> = tokio::select! {
                 biased;
                 _ = delivery_stop.cancelled() => break,
                 result = async {
@@ -1008,7 +1024,9 @@ pub(super) async fn handle_client_with_instruction_repositories(
                         let mut writer = writer_clone.lock().await;
                         if !frame.is_current() { return Ok(false); }
                         if frame.paused() { continue; }
-                        return super::client_writer::write_bytes(&mut *writer,frame.json.as_bytes()).await.map(|_| true);
+                        super::client_writer::write_bytes(&mut *writer,frame.json.as_bytes()).await?;
+                        frame.written();
+                        return Ok(true);
                     }
                 } => result,
             };
@@ -1474,6 +1492,10 @@ pub(super) async fn handle_client_with_instruction_repositories(
             request => (request, None),
         };
         match request {
+            Request::PrimaryStreamSubscribe{id} => {
+                client_event_tx.enable_primary_stream();
+                let _=client_event_tx.send(ServerEvent::PrimaryStreamCapabilities{id,version:1});
+            },
             Request::QueuedMessages { .. } => unreachable!("queued request normalized above"),
             Request::DelegationProbe { id } | Request::DelegationExecute { id, .. } => {
                 let _ = client_event_tx.send(ServerEvent::Error { id, message:"Hosted delegation uses a dedicated capability-checked connection and does not take over an attached Session.".into(), retry_after_secs:None });
@@ -1717,6 +1739,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
                             &server_name,
                             &server_icon,
                             None,
+                    Some(&client_event_tx),
                         )
                         .await
                         .is_err()
@@ -1782,6 +1805,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
                             &server_name,
                             &server_icon,
                             None,
+                            Some(&client_event_tx),
                         )
                         .await
                         .is_err()
@@ -2197,6 +2221,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
                     &server_name,
                     &server_icon,
                     None,
+                    Some(&client_event_tx),
                 )
                 .await
                 .is_err()
@@ -4648,11 +4673,13 @@ async fn start_processing_message(
             return;
         }
     };
-    let tx = super::state::session_event_fanout_sender_with_fallback(
+    let output = super::primary_output::PrimaryOutput::new(
         client_session_id.to_string(),
+        host.presentation(client_session_id),
         Arc::clone(swarm.members),
-        client_event_tx.clone(),
+        Some(client_event_tx.clone()),
     );
+    let tx = output.tx.clone();
     if let Some(skill) = message.activate_skill.as_deref() {
         match admission.agent.activate_skill(skill) {
             Ok(activation) => {
@@ -4708,6 +4735,8 @@ async fn start_processing_message(
     let session = client_session_id.to_string();
     let startup_context = startup_context.clone();
     let terminal_tx = tx.clone();
+    let snapshot_agent = agent.clone();
+    admission.agent.primary_presentation = Some(host.presentation(client_session_id));
     host.start(
         admission,
         move |mut agent| async move {
@@ -4721,6 +4750,7 @@ async fn start_processing_message(
         },
         move |outcome| async move {
             status.complete(&session, id, outcome, &terminal_tx).await;
+            output.finish(&snapshot_agent).await;
         },
     );
 }

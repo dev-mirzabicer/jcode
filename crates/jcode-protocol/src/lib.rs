@@ -9,6 +9,8 @@
 
 use serde::{Deserialize, Serialize};
 
+mod primary_stream;
+pub use primary_stream::*;
 mod comm_format;
 mod instruction_management_transport;
 pub use instruction_management_transport::*;
@@ -625,6 +627,7 @@ impl Request {
             Request::DebugCommand { id, .. } => *id,
             Request::ClientDebugCommand { id, .. } => *id,
             Request::ClientDebugResponse { id, .. } => *id,
+            Request::PrimaryStreamSubscribe { id } => *id,
             Request::Subscribe { id, .. } => *id,
             Request::GetHistory { id } => *id,
             Request::GetModelCatalog { id } => *id,

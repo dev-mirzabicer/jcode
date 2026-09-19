@@ -14,7 +14,7 @@
 //! started turn in their UI.
 
 use super::{
-    SwarmEvent, SwarmMember, session_event_fanout_sender, truncate_detail, update_member_status,
+    SwarmEvent, SwarmMember, truncate_detail, update_member_status,
     update_member_status_with_report,
 };
 use crate::agent::Agent;
@@ -185,7 +185,7 @@ pub(super) async fn spawn_tracked_live_turn(
     turn: TrackedLiveTurn,
     swarm: LiveTurnSwarmContext,
 ) -> bool {
-    let admission = match host.admit(session_id, 0, agent) {
+    let mut admission = match host.admit(session_id, 0, agent.clone()) {
         Ok(admission) => admission,
         Err(error) => {
             crate::logging::warn(&format!(
@@ -205,9 +205,16 @@ pub(super) async fn spawn_tracked_live_turn(
         Some(&swarm.event_tx),
     )
     .await;
-    let tx = session_event_fanout_sender(session_id.to_string(), swarm.members.clone());
+    let output = super::primary_output::PrimaryOutput::new(
+        session_id.into(),
+        host.presentation(session_id),
+        swarm.members.clone(),
+        None,
+    );
+    let tx = output.tx.clone();
     let terminal_tx = tx.clone();
     let session = session_id.to_string();
+    admission.agent.primary_presentation = Some(host.presentation(session_id));
     host.start(
         admission,
         move |mut agent| async move {
@@ -233,6 +240,7 @@ pub(super) async fn spawn_tracked_live_turn(
         },
         move |outcome| async move {
             swarm.complete(&session, 0, outcome, &terminal_tx).await;
+            output.finish(&agent).await;
         },
     );
     true

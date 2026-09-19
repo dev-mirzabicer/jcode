@@ -136,21 +136,87 @@ pub(super) async fn handle_get_history(
     server_name: &str,
     server_icon: &str,
     was_interrupted: Option<bool>,
+    delivery: Option<&crate::client_delivery::ClientEventSender>,
 ) -> Result<()> {
-    let history_start = Instant::now();
-    let activity =
-        session_activity_snapshot(client_connections, client_session_id, client_is_processing)
+    let operation = async {
+        let delivery = delivery.filter(|delivery| delivery.primary_stream_enabled());
+        let _delivery_guard = match delivery {
+            Some(delivery) => Some(delivery.pause_for_snapshot(writer).await),
+            None => None,
+        };
+        let agent_guard = agent.try_lock().ok();
+        let processing = sessions.processing(client_session_id).is_some();
+        if let Some(delivery) = delivery
+            && (processing || agent_guard.is_none())
+        {
+            drop(agent_guard);
+            anyhow::ensure!(processing, "Primary metadata is busy; retry inspection");
+            let presentation = sessions.presentation(client_session_id);
+            let seen = delivery.written_cursor(&presentation.cursor().stream_id);
+            let snapshot = presentation.snapshot_since(seen.as_ref()).await?;
+            let activity = Some(SessionActivitySnapshot {
+                is_processing: snapshot.processing,
+                current_tool_name: None,
+            });
+            return send_history_from_persisted_session(
+                id,
+                client_session_id,
+                provider,
+                startup_context,
+                sessions,
+                client_count,
+                writer,
+                server_name,
+                server_icon,
+                was_interrupted,
+                activity,
+                Some((delivery, snapshot)),
+            )
             .await;
+        }
+        let history_start = Instant::now();
+        let activity = if delivery.is_some() {
+            Some(SessionActivitySnapshot {
+                is_processing: false,
+                current_tool_name: None,
+            })
+        } else {
+            session_activity_snapshot(client_connections, client_session_id, client_is_processing)
+                .await
+        };
 
-    if agent.try_lock().is_err() {
-        crate::logging::info(&format!(
-            "handle_get_history: session {} busy, falling back to persisted remote-startup snapshot",
-            client_session_id
-        ));
-        send_history_from_persisted_session(
+        let Some(agent_guard) = agent_guard else {
+            crate::logging::info(&format!(
+                "handle_get_history: session {} busy, falling back to persisted remote-startup snapshot",
+                client_session_id
+            ));
+            send_history_from_persisted_session(
+                id,
+                client_session_id,
+                provider,
+                startup_context,
+                sessions,
+                client_count,
+                writer,
+                server_name,
+                server_icon,
+                was_interrupted,
+                activity,
+                None,
+            )
+            .await?;
+            crate::logging::info(&format!(
+                "[TIMING] handle_get_history: session={}, persisted_fallback total={}ms",
+                client_session_id,
+                history_start.elapsed().as_millis(),
+            ));
+            return Ok(());
+        };
+
+        send_history(
             id,
             client_session_id,
-            provider,
+            agent_guard,
             startup_context,
             sessions,
             client_count,
@@ -159,44 +225,33 @@ pub(super) async fn handle_get_history(
             server_icon,
             was_interrupted,
             activity,
+            HistoryPayloadMode::Full,
+            true,
+            delivery,
         )
         .await?;
+        let send_history_ms = history_start.elapsed().as_millis();
+
+        let prefetch_start = Instant::now();
+        spawn_model_prefetch_update(Arc::clone(provider), Arc::clone(agent));
         crate::logging::info(&format!(
-            "[TIMING] handle_get_history: session={}, persisted_fallback total={}ms",
+            "[TIMING] handle_get_history: session={}, send_history={}ms, prefetch_spawn={}ms, total={}ms",
             client_session_id,
+            send_history_ms,
+            prefetch_start.elapsed().as_millis(),
             history_start.elapsed().as_millis(),
         ));
-        return Ok(());
+        Ok(())
+    };
+    if let Some(delivery) = delivery {
+        tokio::select! {
+            biased;
+            _ = delivery.closed()=>anyhow::bail!("Client delivery closed during snapshot publication"),
+            result=operation=>result,
+        }
+    } else {
+        operation.await
     }
-
-    send_history(
-        id,
-        client_session_id,
-        agent,
-        startup_context,
-        sessions,
-        client_count,
-        writer,
-        server_name,
-        server_icon,
-        was_interrupted,
-        activity,
-        HistoryPayloadMode::Full,
-        true,
-    )
-    .await?;
-    let send_history_ms = history_start.elapsed().as_millis();
-
-    let prefetch_start = Instant::now();
-    spawn_model_prefetch_update(Arc::clone(provider), Arc::clone(agent));
-    crate::logging::info(&format!(
-        "[TIMING] handle_get_history: session={}, send_history={}ms, prefetch_spawn={}ms, total={}ms",
-        client_session_id,
-        send_history_ms,
-        prefetch_start.elapsed().as_millis(),
-        history_start.elapsed().as_millis(),
-    ));
-    Ok(())
 }
 
 pub(super) async fn handle_get_model_catalog(
@@ -508,9 +563,17 @@ async fn send_history_from_persisted_session(
     server_icon: &str,
     was_interrupted: Option<bool>,
     activity: Option<SessionActivitySnapshot>,
+    presentation: Option<(
+        &crate::client_delivery::ClientEventSender,
+        crate::primary::presentation::Snapshot,
+    )>,
 ) -> Result<()> {
-    let session = crate::session::Session::load_for_remote_startup(session_id)
-        .or_else(|_| crate::session::Session::load_startup_stub(session_id))?;
+    let session = match &presentation {
+        Some((_, snapshot)) => snapshot.session.clone(),
+        None => Arc::new(crate::session::Session::load_for_remote_startup(
+            session_id,
+        )?),
+    };
     let token_usage_totals = session.token_usage_totals();
     let (rendered_messages, images) =
         crate::session::render_messages_and_images_for_remote_history(&session);
@@ -588,7 +651,32 @@ async fn send_history_from_persisted_session(
         startup_context,
     };
 
-    write_event(writer, &history_event).await
+    if let Some((delivery, snapshot)) = presentation {
+        let mut writer = writer.lock().await;
+        delivery.install_snapshot_cursor(snapshot.cursor.clone());
+        let json = crate::protocol::encode_primary_event(
+            &history_event,
+            &crate::protocol::PrimaryStreamPosition::Snapshot {
+                cursor: snapshot.cursor.clone(),
+                replay_events: snapshot.events.len(),
+            },
+        )?;
+        super::client_writer::write_bytes(&mut *writer, json.as_bytes()).await?;
+        for (index, event) in snapshot.events.iter().enumerate() {
+            let json = crate::protocol::encode_primary_event(
+                event,
+                &crate::protocol::PrimaryStreamPosition::Replay {
+                    cursor: snapshot.cursor.clone(),
+                    index,
+                },
+            )?;
+            super::client_writer::write_bytes(&mut *writer, json.as_bytes()).await?;
+        }
+        delivery.snapshot_written(snapshot.cursor);
+        Ok(())
+    } else {
+        write_event(writer, &history_event).await
+    }
 }
 
 #[expect(
@@ -598,7 +686,7 @@ async fn send_history_from_persisted_session(
 pub(super) async fn send_history(
     id: u64,
     session_id: &str,
-    agent: &Arc<Mutex<Agent>>,
+    agent_guard: tokio::sync::MutexGuard<'_, Agent>,
     startup_context: &Arc<super::startup_context::StartupContextCoordinator>,
     sessions: &SessionAgents,
     client_count: &Arc<RwLock<usize>>,
@@ -609,7 +697,14 @@ pub(super) async fn send_history(
     activity: Option<SessionActivitySnapshot>,
     payload_mode: HistoryPayloadMode,
     include_model_catalog: bool,
+    delivery: Option<&crate::client_delivery::ClientEventSender>,
 ) -> Result<()> {
+    anyhow::ensure!(
+        agent_guard.session_id() == session_id,
+        "Primary changed during snapshot capture; reattach before inspection"
+    );
+    let publication_cursor;
+    let recovery_events;
     let history_start = Instant::now();
     let agent_lock_start = Instant::now();
     let (
@@ -644,7 +739,15 @@ pub(super) async fn send_history(
         provider_meta_ms,
         context_view_state_ms,
     ) = {
-        let agent_guard = agent.lock().await;
+        let presentation = sessions.presentation(session_id);
+        publication_cursor = presentation.cursor();
+        let seen =
+            delivery.and_then(|delivery| delivery.written_cursor(&publication_cursor.stream_id));
+        recovery_events = delivery
+            .map(|_| {
+                presentation.recovery_events(agent_guard.startup_context_session(), seen.as_ref())
+            })
+            .unwrap_or_default();
         let agent_lock_ms = agent_lock_start.elapsed().as_millis();
         let provider = agent_guard.provider_handle();
 
@@ -724,6 +827,7 @@ pub(super) async fn send_history(
         )
     };
 
+    drop(agent_guard);
     let side_panel_start = Instant::now();
     let startup_context = Some(Box::new(
         startup_context.compact_status(startup_snapshot).await,
@@ -811,7 +915,17 @@ pub(super) async fn send_history(
         startup_context,
     };
     let encode_start = Instant::now();
-    let json = encode_event(&history_event);
+    let json = if delivery.is_some() {
+        crate::protocol::encode_primary_event(
+            &history_event,
+            &crate::protocol::PrimaryStreamPosition::Snapshot {
+                cursor: publication_cursor.clone(),
+                replay_events: recovery_events.len(),
+            },
+        )?
+    } else {
+        encode_event(&history_event)
+    };
     // Free the structured event as soon as the wire bytes exist so only ~1x
     // the payload stays resident across the awaited socket write.
     drop(history_event);
@@ -819,9 +933,29 @@ pub(super) async fn send_history(
     let encode_ms = encode_start.elapsed().as_millis();
     let writer_lock_start = Instant::now();
     let mut writer_guard = writer.lock().await;
+    if let Some(delivery) = delivery {
+        delivery.install_snapshot_cursor(publication_cursor.clone());
+    }
     let writer_lock_ms = writer_lock_start.elapsed().as_millis();
     let write_start = Instant::now();
-    let result = super::client_writer::write_bytes(&mut *writer_guard, json.as_bytes()).await;
+    let result = async {
+        super::client_writer::write_bytes(&mut *writer_guard, json.as_bytes()).await?;
+        if let Some(delivery) = delivery {
+            for (index, event) in recovery_events.iter().enumerate() {
+                let replay = crate::protocol::encode_primary_event(
+                    event,
+                    &crate::protocol::PrimaryStreamPosition::Replay {
+                        cursor: publication_cursor.clone(),
+                        index,
+                    },
+                )?;
+                super::client_writer::write_bytes(&mut *writer_guard, replay.as_bytes()).await?;
+            }
+            delivery.snapshot_written(publication_cursor);
+        }
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
     drop(writer_guard);
     // Release the serialized payload before any further work (logging below
     // only needs the captured length).

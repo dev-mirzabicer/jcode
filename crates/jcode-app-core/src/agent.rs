@@ -337,6 +337,7 @@ impl From<crate::instruction::SystemPromptActivationError> for PrimaryInstructio
 }
 
 pub struct Agent {
+    pub(crate) primary_presentation: Option<Arc<crate::primary::presentation::Presentation>>,
     provider: Arc<dyn Provider>,
     registry: Registry,
     skills: Arc<SkillRegistry>,
@@ -435,6 +436,7 @@ impl Agent {
         let skills = SkillRegistry::shared_snapshot();
         let initial_provider_model = provider.model();
         let agent = Self {
+            primary_presentation: None,
             provider,
             registry,
             skills,

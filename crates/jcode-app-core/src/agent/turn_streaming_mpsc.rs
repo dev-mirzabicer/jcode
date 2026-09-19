@@ -209,6 +209,10 @@ impl Agent {
             // No side effect above this boundary survives a blocked request.
             self.record_client_cache_request(&messages);
             self.session.release_provider_messages_cache();
+            if let Some(presentation) = &self.primary_presentation {
+                self.session.save()?;
+                presentation.checkpoint(&self.session, &event_tx, false)?;
+            }
 
             logging::info(&format!(
                 "API call starting: {} messages, {} tools",
