@@ -19,7 +19,7 @@ pub async fn dispatch(request: WorkspaceRequest) -> WorkspaceResponse {
 pub fn dispatch_with(service: &WorkspaceService, request: WorkspaceRequest) -> WorkspaceResponse {
     use WorkspaceResponse as Response;
     let result = match request {
-        WorkspaceRequest::Status => service.status().map(Response::Status),
+        WorkspaceRequest::Status {} => service.status().map(Response::Status),
         WorkspaceRequest::Initialize { request } => {
             service.initialize(request).map(Response::Status)
         }
@@ -51,7 +51,7 @@ pub fn dispatch_with(service: &WorkspaceService, request: WorkspaceRequest) -> W
         WorkspaceRequest::Backup { request, name } => {
             service.backup(request, name).map(Response::Snapshot)
         }
-        WorkspaceRequest::Snapshots => service.snapshots().map(Response::Snapshots),
+        WorkspaceRequest::Snapshots {} => service.snapshots().map(Response::Snapshots),
         WorkspaceRequest::Export {
             request,
             project,

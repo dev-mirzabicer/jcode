@@ -449,7 +449,7 @@ pub struct RestoreReview {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkspaceRequest {
-    Status,
+    Status {},
     Initialize {
         request: RequestId,
     },
@@ -481,7 +481,7 @@ pub enum WorkspaceRequest {
         request: RequestId,
         name: String,
     },
-    Snapshots,
+    Snapshots {},
     Export {
         request: RequestId,
         project: ProjectId,

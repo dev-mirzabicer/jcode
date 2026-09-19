@@ -1,5 +1,17 @@
 use super::*;
 
+#[test]
+fn named_backup_receipt_remains_readable_when_current_catalog_is_corrupt() {
+    let dir = tempfile::tempdir().unwrap();
+    let service = WorkspaceService::new(dir.path());
+    service.initialize(RequestId::new()).unwrap();
+    let request = RequestId::new();
+    let snapshot = service.backup(request, "repair".into()).unwrap();
+    std::fs::write(service.root.join("catalog.sqlite3"), b"fixture corruption").unwrap();
+    assert!(service.status().is_err());
+    assert_eq!(service.backup(request, "repair".into()).unwrap(), snapshot);
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn replaced_standalone_cannot_be_adopted_under_old_identity() {
@@ -347,6 +359,20 @@ fn portable_offline_locations_and_reviewed_remap_do_not_create_paths_or_activate
         .export_project(RequestId::new(), p, "fixture".into())
         .unwrap();
     std::fs::rename(&root, a.path().join("moved-outside-jcode")).unwrap();
+    let offline_export = source
+        .export_project(RequestId::new(), p, "offline".into())
+        .unwrap();
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(offline_export).unwrap()).unwrap();
+    assert!(
+        manifest["catalog"]["external_content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry
+                .as_str()
+                .is_some_and(|value| value.contains(&location.to_string())))
+    );
     let b = tempfile::tempdir().unwrap();
     let target = WorkspaceService::new(b.path());
     target.initialize(RequestId::new()).unwrap();

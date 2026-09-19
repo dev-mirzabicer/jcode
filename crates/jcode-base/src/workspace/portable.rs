@@ -270,8 +270,8 @@ impl WorkspaceService {
         }
         let ids: BTreeSet<_> = entities.iter().map(|v| v.id().to_string()).collect();
         let mut associations = vec![];
-        let mut bindings = vec![];
-        let mut closed = vec![];
+        let mut bindings: Vec<(LocationId, BoundLocation)> = vec![];
+        let mut closed: Vec<ClosedReference> = vec![];
         for value in &entities {
             if let Entity::Repository(repo) = value {
                 associations.push((project, repo.id));
@@ -299,6 +299,22 @@ impl WorkspaceService {
             }
         }
         let mut external_content=vec!["Checkout/directory contents, Session transcripts, retained outputs, preserved file bodies and credentials are external and are NOT included".into()];
+        for (id, bound) in &bindings {
+            if let Err(error) = self.resolver.resolve_directory(&bound.binding) {
+                external_content.push(format!("Location {id} is unavailable at export: {error}"));
+            }
+        }
+        for record in &closed {
+            for path in record.preservation_paths.iter().chain(record.report.iter()) {
+                if let Err(error) = std::fs::metadata(path) {
+                    external_content.push(format!(
+                        "Preservation reference for {} is unavailable: {} ({error})",
+                        record.location,
+                        path.display()
+                    ));
+                }
+            }
+        }
         let grants = grants(&tx)?
             .into_iter()
             .filter(|g| {
@@ -334,8 +350,9 @@ impl WorkspaceService {
             .query_map([], |r| r.get::<_, String>(0))
             .map_err(io)?
         {
-            let record: SessionReferenceSet = decode(&body.map_err(io)?)?;
+            let mut record: SessionReferenceSet = decode(&body.map_err(io)?)?;
             if record.projects.contains(&project) {
+                record.projects = vec![project];
                 inherited_session_references.push(record);
             }
         }

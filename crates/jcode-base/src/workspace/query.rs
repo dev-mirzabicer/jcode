@@ -1,16 +1,22 @@
 use super::*;
 use rusqlite::{TransactionBehavior, params};
 
-const VIEW: &str = "WITH locations AS (
+const VIEW: &str = "WITH active_sessions AS MATERIALIZED (
+    SELECT s.target, e.home_area,e.home_project,e.area_project,a.area_project ancestor_project
+    FROM session_index s JOIN entities e ON e.id=s.target LEFT JOIN entities a ON a.id=e.home_area
+    WHERE json_extract(s.body,'$.active')=1
+), active_ids AS MATERIALIZED (
+    SELECT target id FROM active_sessions UNION SELECT home_area FROM active_sessions
+    UNION SELECT home_project FROM active_sessions UNION SELECT area_project FROM active_sessions
+    UNION SELECT ancestor_project FROM active_sessions
+), locations AS (
     SELECT e.*,coalesce(e.home_project,a.area_project) owner_project,
     coalesce(json_extract(e.body,'$.value.state'), CASE WHEN json_extract(e.body,'$.value.retired')=1 THEN 'retired' ELSE 'active' END) own_state,
     coalesce(json_extract(a.body,'$.value.state'),'active') area_state
     FROM entities e LEFT JOIN entities a ON a.id=e.home_area
 ), visible AS (
     SELECT l.*,coalesce(json_extract(p.body,'$.value.state'),'active') project_state,
-    EXISTS(SELECT 1 FROM session_index s LEFT JOIN entities sl ON sl.id=s.target LEFT JOIN entities sa ON sa.id=sl.home_area
-        WHERE json_extract(s.body,'$.active')=1 AND
-        (s.target=l.id OR sl.home_area=l.id OR sl.home_project=l.id OR sl.area_project=l.id OR sa.area_project=l.id)) has_active
+    EXISTS(SELECT 1 FROM active_ids WHERE id=l.id) has_active
     FROM locations l LEFT JOIN entities p ON p.id=coalesce(l.owner_project,l.area_project)
 ) ";
 

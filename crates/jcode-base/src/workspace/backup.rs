@@ -113,6 +113,18 @@ impl WorkspaceService {
                     "Backup request already used with another name",
                 ));
             }
+            let manifest = self
+                .root
+                .join("snapshots")
+                .join(format!("snapshot-{}.json", existing.id));
+            if manifest.try_exists().map_err(io)? {
+                let snapshot: Snapshot = storage::read_json(&manifest)?;
+                if snapshot.id != existing.id || snapshot.name != name || snapshot.automatic {
+                    return Err(corrupt("Named backup receipt identity mismatch"));
+                }
+                drop(self.verify_snapshot(&snapshot)?);
+                return Ok(snapshot);
+            }
             return self.publish_snapshot(&self.connection()?, existing.id, name, false);
         }
         if name.trim().is_empty() || name.chars().any(char::is_control) {
