@@ -7,6 +7,11 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
+mod backup;
+mod organization;
+mod portable;
+mod query;
+mod restore;
 mod storage;
 #[cfg(test)]
 mod tests;
@@ -40,16 +45,27 @@ pub(crate) fn digest(value: &[u8]) -> String {
 pub struct WorkspaceService {
     root: PathBuf,
     resolver: LocationResolver,
+    #[cfg(test)]
+    fault: Option<std::sync::Arc<dyn Fn(&str) -> Result<()> + Send + Sync>>,
 }
 impl WorkspaceService {
     pub fn new(state_root: &Path) -> Self {
         Self {
             root: state_root.join("workspace"),
             resolver: LocationResolver::new(),
+            #[cfg(test)]
+            fault: None,
         }
     }
     pub fn root(&self) -> &Path {
         &self.root
+    }
+    fn checkpoint(&self, _stage: &str) -> Result<()> {
+        #[cfg(test)]
+        if let Some(fault) = &self.fault {
+            fault(_stage)?;
+        }
+        Ok(())
     }
     pub fn status(&self) -> Result<CatalogStatus> {
         let _lease = self.lease(false)?;

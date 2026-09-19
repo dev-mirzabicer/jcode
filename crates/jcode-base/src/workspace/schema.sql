@@ -42,4 +42,5 @@ CREATE TABLE proposals (id TEXT PRIMARY KEY, body TEXT NOT NULL CHECK(json_valid
 CREATE TABLE grant_references (grant_id TEXT NOT NULL REFERENCES grants(id), target TEXT NOT NULL REFERENCES entities(id), PRIMARY KEY(grant_id,target));
 CREATE TABLE proposal_references (proposal_id TEXT NOT NULL REFERENCES proposals(id), target TEXT NOT NULL REFERENCES entities(id), PRIMARY KEY(proposal_id,target));
 CREATE TABLE closed_history (location TEXT PRIMARY KEY REFERENCES entities(id), body TEXT NOT NULL CHECK(json_valid(body)));
+CREATE TABLE imported_references (id TEXT PRIMARY KEY, body TEXT NOT NULL CHECK(json_valid(body)));
 PRAGMA user_version=1;

@@ -103,7 +103,7 @@ pub(crate) fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
     std::fs::rename(&temp, path).map_err(io)?;
     sync_dir(parent)
 }
-fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
+pub(super) fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -301,6 +301,12 @@ pub(crate) fn raw_connection(path: &Path, create: bool) -> Result<Connection> {
     Ok(connection)
 }
 pub(crate) fn connect(root: &Path) -> Result<Connection> {
+    if root.join("restore-pending.json").try_exists().map_err(io)? {
+        return Err(issue(
+            IssueCode::RecoveryRequired,
+            "Catalog replacement is pending. Resume the exact reviewed restore request",
+        ));
+    }
     let marker: Installation = read_json(&root.with_file_name("workspace-installation.json"))?;
     if !marker.ready {
         return Err(issue(
@@ -328,6 +334,11 @@ pub(crate) fn validate(connection: &Connection, installation: InstallationId) ->
         return Err(corrupt("Foreign workspace installation identity"));
     }
     Ok(())
+}
+
+pub(super) fn installation(root: &Path) -> Result<InstallationId> {
+    let marker: Installation = read_json(&root.with_file_name("workspace-installation.json"))?;
+    Ok(marker.installation)
 }
 pub(crate) fn status(connection: &Connection) -> Result<CatalogStatus> {
     let version: u32 = connection
