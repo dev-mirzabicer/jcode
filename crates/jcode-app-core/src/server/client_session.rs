@@ -1056,6 +1056,7 @@ pub(super) async fn handle_resume_session(
     startup_context: &Arc<super::startup_context::StartupContextCoordinator>,
     provider: &Arc<dyn Provider>,
     instruction_repositories: &crate::instruction::InstructionRepositoryService,
+    prepared_restore_status: Option<crate::session::SessionStatus>,
     sessions: &SessionAgents,
     shutdown_signals: &Arc<RwLock<HashMap<String, InterruptSignal>>>,
     soft_interrupt_queues: &SessionInterruptQueues,
@@ -1108,7 +1109,7 @@ pub(super) async fn handle_resume_session(
         .restore(&session_id, provider, mcp_pool, instruction_repositories)
         .await
     {
-        Ok(status) => status,
+        Ok(status) => status.or(prepared_restore_status),
         Err(error) => {
             let _ = client_event_tx.send(ServerEvent::Error {
                 id,
@@ -1134,9 +1135,7 @@ pub(super) async fn handle_resume_session(
         let mcp_working_dir = session_working_dir(live_target_agent, &session_id)?;
         let old_session_id = client_session_id.clone();
 
-        let conflicting_live_client = if old_session_id == session_id {
-            None
-        } else {
+        let conflicting_live_client = {
             let connections = client_connections.read().await;
             connections
                 .values()

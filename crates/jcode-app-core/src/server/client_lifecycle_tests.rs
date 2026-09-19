@@ -1,3 +1,5 @@
+#[path = "client_lifecycle_tests/initial_attachment.rs"]
+mod initial_attachment;
 use super::*;
 use crate::message::{ContentBlock, Message, StreamEvent, ToolDefinition};
 use crate::provider::{EventStream, Provider};

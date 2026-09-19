@@ -32,12 +32,18 @@ pub struct PrimaryHost {
 pub(crate) struct PrimaryResources {
     pub provider: Arc<dyn crate::provider::Provider>,
     pub registry: crate::tool::Registry,
+    pub interrupts: crate::agent::SoftInterruptQueue,
+    pub background: InterruptSignal,
+    pub shutdown: InterruptSignal,
 }
 impl PrimaryResources {
     fn from_agent(agent: &Agent) -> Self {
         Self {
             provider: agent.provider_handle(),
             registry: agent.registry(),
+            interrupts: agent.soft_interrupt_queue(),
+            background: agent.background_tool_signal(),
+            shutdown: agent.graceful_shutdown_signal(),
         }
     }
 }
@@ -177,21 +183,22 @@ impl PrimaryHost {
         agent: &Arc<Mutex<Agent>>,
     ) -> Result<PrimaryResources> {
         let mut resources = self.resources.lock().expect("primary resources");
-        if let Some(value) = resources.get(session) {
-            return Ok(value.clone());
+        if let Ok(agent) = agent.try_lock() {
+            ensure!(
+                agent.session_id() == session,
+                "Primary resource identity changed"
+            );
+            let value = PrimaryResources::from_agent(&agent);
+            resources.insert(session.into(), value.clone());
+            return Ok(value);
         }
-        let agent = agent.try_lock().map_err(|_| {
-            anyhow::anyhow!("Primary resources are unavailable during unregistered work")
-        })?;
-        ensure!(
-            agent.session_id() == session,
-            "Primary resource identity changed"
-        );
-        let value = PrimaryResources::from_agent(&agent);
-        resources.insert(session.to_string(), value.clone());
-        Ok(value)
+        resources
+            .get(session)
+            .cloned()
+            .context("Primary resources are unavailable during unregistered work")
     }
 
+    #[cfg(test)]
     pub(crate) fn mark_provisional(&self, session: &str) {
         self.provisional
             .lock()
@@ -349,8 +356,7 @@ impl PrimaryHost {
         self.resources
             .lock()
             .expect("primary resources")
-            .entry(session.to_string())
-            .or_insert_with(|| PrimaryResources::from_agent(&agent));
+            .insert(session.to_string(), PrimaryResources::from_agent(&agent));
         turns.insert(session.to_string(), control.clone());
         self.revision.send_modify(|r| *r = r.wrapping_add(1));
         Ok(Admission {

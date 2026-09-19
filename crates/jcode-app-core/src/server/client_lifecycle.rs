@@ -61,7 +61,7 @@ use crate::provider::Provider;
 use crate::session::Session;
 use crate::tool::Registry;
 use crate::transport::Stream;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use jcode_agent_runtime::{InterruptSignal, SoftInterruptSource};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -780,149 +780,156 @@ pub(super) async fn handle_client_with_instruction_repositories(
 
     let client_start = std::time::Instant::now();
 
-    let mut provider = provider_template.fork_for_new_session();
-    let t0 = std::time::Instant::now();
-    let mut registry = Registry::new_for_shared_session(
-        provider.clone(),
-        mcp_pool.clone(),
-        (*instruction_repositories).clone(),
-    )
-    .await?;
-    let registry_ms = t0.elapsed().as_millis();
-
-    let mut swarm_enabled = crate::config::config().features.swarm;
-    let mut last_available_models_snapshot: Option<String> = None;
-    const MAX_LIVE_AVAILABLE_MODELS_UPDATE_BYTES: usize = 64 * 1024;
-
-    // Create a provisional session for this client. Target-aware subscribes are
-    // always born with Startup Context disabled, then either restore their target
-    // unchanged or activate the provisional session as a fresh primary fallback.
-    let t0 = std::time::Instant::now();
-    let mut new_agent =
-        crate::hooks::with_client_terminal_env(active_terminal_env.clone(), async {
-            Agent::new_with_disabled_startup_context(
-                Arc::clone(&provider),
-                registry.clone(),
-                Some(&initial_working_dir),
-            )
-        })
-        .await;
-    new_agent.set_instruction_repositories((*instruction_repositories).clone());
     let requested_target = initial_subscribe_target_session(&initial_request);
-    let target_available = requested_target.is_some_and(crate::session::session_exists);
+    let target_available = match requested_target {
+        Some(target) => {
+            sessions.read().await.contains_key(target) || crate::session::session_exists(target)
+        }
+        None => false,
+    };
     let initial_startup_caller = initial_subscribe_startup_caller(&initial_request);
     let allow_fresh_fallback = initial_subscribe_allows_fresh_fallback(&initial_request);
     if requested_target.is_some() && !target_available && !allow_fresh_fallback {
-        let provisional_session_id = new_agent.session_id().to_string();
-        new_agent.mark_closed();
-        crate::tool::clear_session_tool_policy(&provisional_session_id);
-        let cleanup_error = crate::session::remove_unpublished_session(&provisional_session_id)
-            .err()
-            .map(|error| format!("; provisional session cleanup failed: {error}"))
-            .unwrap_or_default();
         write_direct_event(
             &writer,
             &ServerEvent::Error {
                 id: initial_request.id(),
-                message: format!(
-                    "Target session is unavailable; attach did not create a replacement session{cleanup_error}"
-                ),
+                message:
+                    "Target session is unavailable; attach did not create a replacement session"
+                        .into(),
                 retry_after_secs: None,
             },
         )
         .await?;
         return Ok(());
     }
-    let mut client_primary_startup_activated = false;
-    if requested_target.is_none() || !target_available {
-        if initial_subscribe_selfdev(&initial_request) {
-            new_agent.set_canary("self-dev");
-        }
-        let instruction_selection = match crate::instruction::AgentSelection::parse(
-            initial_subscribe_agent(&initial_request),
-        ) {
-            Ok(selection) => selection,
-            Err(error) => {
-                let provisional_session_id = new_agent.session_id().to_string();
-                new_agent.mark_closed();
-                crate::tool::clear_session_tool_policy(&provisional_session_id);
-                let cleanup_error =
-                    crate::session::remove_unpublished_session(&provisional_session_id)
-                        .err()
-                        .map(|cleanup| format!("; unpublished session cleanup failed: {cleanup}"))
-                        .unwrap_or_default();
-                write_direct_event(
-                    &writer,
-                    &ServerEvent::Error {
-                        id: initial_request.id(),
-                        message: format!("Invalid initial agent selection: {error}{cleanup_error}"),
-                        retry_after_secs: None,
-                    },
+    let mut initial_restore_status = None;
+    let (mut agent, mut provider, mut registry, mut client_session_id, mut friendly_name) =
+        if let Some(target) = requested_target.filter(|_| target_available) {
+            match sessions
+                .restore(
+                    target,
+                    &provider_template,
+                    &mcp_pool,
+                    &instruction_repositories,
                 )
-                .await?;
-                return Ok(());
+                .await
+            {
+                Ok(status) => initial_restore_status = status,
+                Err(error) => {
+                    write_direct_event(
+                        &writer,
+                        &ServerEvent::Error {
+                            id: initial_request.id(),
+                            message: format!("Failed to restore session: {error:#}"),
+                            retry_after_secs: None,
+                        },
+                    )
+                    .await?;
+                    return Ok(());
+                }
             }
-        };
-        if let Err(error) = new_agent.activate_primary_instructions(instruction_selection) {
-            let provisional_session_id = new_agent.session_id().to_string();
-            new_agent.mark_closed();
-            crate::tool::clear_session_tool_policy(&provisional_session_id);
-            let cleanup_error = crate::session::remove_unpublished_session(&provisional_session_id)
-                .err()
-                .map(|cleanup| format!("; unpublished session cleanup failed: {cleanup}"))
-                .unwrap_or_default();
-            write_direct_event(
-                &writer,
-                &ServerEvent::Error {
-                    id: initial_request.id(),
-                    message: format!("Initial agent activation failed: {error}{cleanup_error}"),
-                    retry_after_secs: None,
-                },
+            let agent = sessions
+                .read()
+                .await
+                .get(target)
+                .cloned()
+                .context("Restored primary is unavailable")?;
+            let resources = sessions.resources(target, &agent)?;
+            let name = if let Ok(agent) = agent.try_lock() {
+                agent.session_short_name().map(str::to_string)
+            } else {
+                crate::session::Session::load_startup_stub(target)?.short_name
+            };
+            (
+                agent,
+                resources.provider,
+                resources.registry,
+                target.to_string(),
+                name,
+            )
+        } else {
+            let selection = match crate::instruction::AgentSelection::parse(
+                initial_subscribe_agent(&initial_request),
+            ) {
+                Ok(selection) => selection,
+                Err(error) => {
+                    write_direct_event(
+                        &writer,
+                        &ServerEvent::Error {
+                            id: initial_request.id(),
+                            message: format!("Invalid initial agent selection: {error}"),
+                            retry_after_secs: None,
+                        },
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            };
+            let provider = provider_template.fork_for_new_session();
+            let registry = Registry::new_for_shared_session(
+                provider.clone(),
+                mcp_pool.clone(),
+                (*instruction_repositories).clone(),
             )
             .await?;
-            return Ok(());
-        }
-        match new_agent.activate_startup_context(crate::agent::StartupContextActivation::primary(
-            initial_startup_caller,
-        )) {
-            Ok(_) => client_primary_startup_activated = true,
-            Err(error) => {
-                let caller = error.caller();
-                let activation_error = error.to_string();
-                let provisional_session_id = new_agent.session_id().to_string();
-                new_agent.mark_closed();
-                crate::tool::clear_session_tool_policy(&provisional_session_id);
-                let error =
-                    match crate::session::remove_unpublished_session(&provisional_session_id) {
-                        Ok(()) => error,
-                        Err(source) => crate::agent::StartupContextActivationError::Cleanup {
-                            caller,
-                            activation_error,
-                            source,
-                        },
+            let prepared =
+                crate::hooks::with_client_terminal_env(active_terminal_env.clone(), async {
+                    Agent::new_with_startup_context_and_agent_with_repositories(
+                        provider.clone(),
+                        registry.clone(),
+                        Some(&initial_working_dir),
+                        crate::agent::StartupContextActivation::primary(initial_startup_caller),
+                        selection,
+                        initial_subscribe_selfdev(&initial_request),
+                        (*instruction_repositories).clone(),
+                    )
+                })
+                .await;
+            let (mut prepared, _) = match prepared {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    let event = if matches!(
+                        error,
+                        crate::agent::StartupContextActivationError::Instruction { .. }
+                    ) {
+                        ServerEvent::Error {
+                            id: initial_request.id(),
+                            message: format!("Initial agent activation failed: {error}"),
+                            retry_after_secs: None,
+                        }
+                    } else {
+                        ServerEvent::StartupContextFailed {
+                            id: initial_request.id(),
+                            failure: super::startup_context::primary_activation_failure(&error),
+                        }
                     };
-                write_direct_event(
-                    &writer,
-                    &ServerEvent::StartupContextFailed {
-                        id: initial_request.id(),
-                        failure: super::startup_context::primary_activation_failure(&error),
-                    },
-                )
-                .await?;
-                return Ok(());
+                    write_direct_event(&writer, &event).await?;
+                    return Ok(());
+                }
+            };
+            prepared.set_memory_enabled(crate::config::config().features.memory);
+            let id = prepared.session_id().to_string();
+            let name = prepared.session_short_name().map(str::to_string);
+            if let Err(error) = sessions.own(&id) {
+                prepared.mark_closed();
+                crate::tool::clear_session_tool_policy(&id);
+                crate::session::remove_unpublished_session(&id)?;
+                return Err(error);
             }
-        }
-    }
-    let agent_new_ms = t0.elapsed().as_millis();
-
-    new_agent.set_memory_enabled(crate::config::config().features.memory);
-
+            let agent = Arc::new(Mutex::new(prepared));
+            sessions.write().await.insert(id.clone(), agent.clone());
+            (agent, provider, registry, id, name)
+        };
+    let mut swarm_enabled = crate::config::config().features.swarm;
+    let mut last_available_models_snapshot: Option<String> = None;
+    const MAX_LIVE_AVAILABLE_MODELS_UPDATE_BYTES: usize = 64 * 1024;
+    let mut client_primary_startup_activated = true;
     crate::logging::info(&format!(
-        "[TIMING] handle_client setup: registry={registry_ms}ms, agent_new={agent_new_ms}ms, total={}ms",
+        "[TIMING] handle_client prepared primary: existing={}, total={}ms",
+        target_available,
         client_start.elapsed().as_millis()
     ));
-    let mut client_session_id = new_agent.session_id().to_string();
-    let mut friendly_name = new_agent.session_short_name().map(|s| s.to_string());
     let client_connection_id = id::new_id("conn");
     let connected_at = Instant::now();
     let (disconnect_tx, mut disconnect_rx) = mpsc::unbounded_channel::<()>();
@@ -938,7 +945,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
                 debug_client_id: None,
                 connected_at,
                 last_seen: connected_at,
-                is_processing: false,
+                is_processing: sessions.processing(&client_session_id).is_some(),
                 current_tool_name: None,
                 terminal_env: active_terminal_env.clone(),
                 disconnect_tx: disconnect_tx.clone(),
@@ -953,44 +960,27 @@ pub(super) async fn handle_client_with_instruction_repositories(
         }
     }
 
-    // Get lock-free control-plane handles BEFORE wrapping in Mutex.
-    // This allows cancel/soft-interrupt/background-tool requests while the agent is processing.
+    let resources = sessions.resources(&client_session_id, &agent)?;
     let mut session_control = SessionControlHandle::new(
-        client_session_id.clone(),
-        new_agent.soft_interrupt_queue(),
-        new_agent.background_tool_signal(),
-        new_agent.graceful_shutdown_signal(),
+        &client_session_id,
+        resources.interrupts.clone(),
+        resources.background,
+        resources.shutdown,
     );
-
-    // Register the shutdown signal in the server-level map so
-    // graceful_shutdown_sessions can signal it without locking the agent mutex
-    {
-        let mut signals = shutdown_signals.write().await;
-        signals.insert(
-            client_session_id.clone(),
-            session_control.stop_current_turn_signal(),
-        );
-    }
+    shutdown_signals.write().await.insert(
+        client_session_id.clone(),
+        session_control.stop_current_turn_signal(),
+    );
     register_session_interrupt_queue(
         &soft_interrupt_queues,
         &client_session_id,
-        new_agent.soft_interrupt_queue(),
+        resources.interrupts,
     )
     .await;
-
-    let mut agent = Arc::new(Mutex::new(new_agent));
-    sessions.own(&client_session_id)?;
-    if requested_target.is_some() && target_available {
-        sessions.mark_provisional(&client_session_id);
-    }
-    {
-        let mut sessions_guard = sessions.write().await;
-        sessions_guard.insert(client_session_id.clone(), Arc::clone(&agent));
-    }
     crate::runtime_memory_log::emit_event(
         crate::runtime_memory_log::RuntimeMemoryLogEvent::new(
-            "session_created",
-            "new_live_session_attached",
+            "session_attached",
+            "prepared_primary_attached",
         )
         .with_session_id(client_session_id.clone())
         .force_attribution(),
@@ -2008,6 +1998,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
                                 &startup_context,
                                 attach_provider,
                                 &instruction_repositories,
+                            initial_restore_status.take(),
                                 &sessions,
                                 &shutdown_signals,
                                 &soft_interrupt_queues,
@@ -2749,6 +2740,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
                         &startup_context,
                         &provider,
                         &instruction_repositories,
+                    None,
                         &sessions,
                         &shutdown_signals,
                         &soft_interrupt_queues,

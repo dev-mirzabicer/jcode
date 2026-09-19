@@ -562,11 +562,19 @@ impl Agent {
         registry: Registry,
         working_dir: Option<&str>,
     ) -> Self {
-        let tool_selection = crate::config::config().tools.selection();
         let mut session = Session::create(None, None);
         if let Some(working_dir) = working_dir {
             session.working_dir = Some(working_dir.to_string());
         }
+        Self::new_with_initial_session(provider, registry, session)
+    }
+
+    fn new_with_initial_session(
+        provider: Arc<dyn Provider>,
+        registry: Registry,
+        session: Session,
+    ) -> Self {
+        let tool_selection = crate::config::config().tools.selection();
         let mut agent = Self::build_base(
             provider,
             registry,
@@ -644,7 +652,49 @@ impl Agent {
         instruction_repositories: crate::instruction::InstructionRepositoryService,
     ) -> std::result::Result<(Self, StartupContextActivationOutcome), StartupContextActivationError>
     {
-        let mut agent = Self::new_with_initial_working_dir(provider, registry, working_dir);
+        let mut session = Session::create(None, None);
+        if let Some(cwd) = working_dir {
+            session.working_dir = Some(cwd.into());
+        }
+        Self::prepare_primary_session(
+            provider,
+            registry,
+            session,
+            activation,
+            agent_selection,
+            is_selfdev,
+            instruction_repositories,
+        )
+    }
+
+    pub(crate) fn prepare_primary_session(
+        provider: Arc<dyn Provider>,
+        registry: Registry,
+        session: Session,
+        activation: StartupContextActivation,
+        agent_selection: crate::instruction::AgentSelection,
+        is_selfdev: bool,
+        instruction_repositories: crate::instruction::InstructionRepositoryService,
+    ) -> std::result::Result<(Self, StartupContextActivationOutcome), StartupContextActivationError>
+    {
+        let agent = Self::new_with_initial_session(provider, registry, session);
+        Self::prepare_primary_agent(
+            agent,
+            activation,
+            agent_selection,
+            is_selfdev,
+            instruction_repositories,
+        )
+    }
+
+    fn prepare_primary_agent(
+        mut agent: Self,
+        activation: StartupContextActivation,
+        agent_selection: crate::instruction::AgentSelection,
+        is_selfdev: bool,
+        instruction_repositories: crate::instruction::InstructionRepositoryService,
+    ) -> std::result::Result<(Self, StartupContextActivationOutcome), StartupContextActivationError>
+    {
         agent.instruction_repositories = instruction_repositories;
         if is_selfdev {
             agent.set_canary("self-dev");

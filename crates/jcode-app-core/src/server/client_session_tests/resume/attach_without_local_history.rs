@@ -130,6 +130,7 @@ async fn handle_resume_session_allows_attach_without_local_history() -> Result<(
         &crate::server::startup_context::test_coordinator(),
         &provider,
         &crate::instruction::InstructionRepositoryService::new(),
+        None,
         &sessions,
         &shutdown_signals,
         &soft_interrupt_queues,
