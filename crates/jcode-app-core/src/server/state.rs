@@ -25,7 +25,7 @@ use tokio::sync::{RwLock, mpsc};
 /// (which always has both the session id and the correct signal), so the
 /// lock-free fallback can still fire the background signal without the agent
 /// lock. Entries are keyed by session id; renames/removals reuse
-/// [`rename_background_tool_signal`]/[`remove_background_tool_signal`] alongside
+/// [`remove_background_tool_signal`] alongside
 /// the existing shutdown-signal lifecycle.
 static BACKGROUND_TOOL_SIGNALS: LazyLock<StdMutex<HashMap<String, InterruptSignal>>> =
     LazyLock::new(|| StdMutex::new(HashMap::new()));
@@ -43,18 +43,6 @@ pub(super) fn background_tool_signal_for_session(session_id: &str) -> Option<Int
         .lock()
         .ok()
         .and_then(|map| map.get(session_id).cloned())
-}
-
-/// Move a session's background-tool signal registration to a new session id.
-pub(super) fn rename_background_tool_signal(old_session_id: &str, new_session_id: &str) {
-    if old_session_id == new_session_id {
-        return;
-    }
-    if let Ok(mut map) = BACKGROUND_TOOL_SIGNALS.lock()
-        && let Some(signal) = map.remove(old_session_id)
-    {
-        map.insert(new_session_id.to_string(), signal);
-    }
 }
 
 /// Drop a session's background-tool signal registration.
@@ -389,6 +377,12 @@ pub(super) async fn unregister_session_event_sender(
         member.event_txs.remove(connection_id);
         if let Some((_, tx)) = member.event_txs.iter().next() {
             member.event_tx = tx.clone();
+        } else {
+            // The old connection may still be open on a different primary.
+            // Retaining it as the legacy sender would cross session boundaries.
+            let (closed, receiver) = mpsc::unbounded_channel();
+            drop(receiver);
+            member.event_tx = closed;
         }
     }
 }
@@ -470,7 +464,11 @@ pub(super) fn session_event_fanout_sender_with_fallback(
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerEvent>();
     tokio::spawn(async move {
         while let Some(event) = rx.recv().await {
-            if fanout_session_event(&swarm_members, &session_id, event.clone()).await == 0 {
+            if fanout_session_event(&swarm_members, &session_id, event.clone()).await == 0
+                && !swarm_members.read().await.contains_key(&session_id)
+            {
+                // Compatibility for unregistered callers, never for a detached
+                // registered primary whose origin has navigated elsewhere.
                 let _ = fallback_tx.send(event);
             }
         }
@@ -686,17 +684,6 @@ pub(super) async fn register_session_interrupt_queue(
 ) {
     let mut guard = queues.write().await;
     guard.insert(session_id.to_string(), queue);
-}
-
-pub(super) async fn rename_session_interrupt_queue(
-    queues: &SessionInterruptQueues,
-    old_session_id: &str,
-    new_session_id: &str,
-) {
-    let mut guard = queues.write().await;
-    if let Some(queue) = guard.remove(old_session_id) {
-        guard.insert(new_session_id.to_string(), queue);
-    }
 }
 
 pub(super) async fn remove_session_interrupt_queue(

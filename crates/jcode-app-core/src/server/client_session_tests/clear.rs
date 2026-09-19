@@ -71,7 +71,7 @@ async fn handle_clear_session_replaces_runtime_handles_and_updates_shutdown_regi
         guard.graceful_shutdown_signal()
     };
 
-    let sessions = Arc::new(RwLock::new(HashMap::from([(
+    let sessions = Arc::new(crate::primary::PrimaryHost::new(HashMap::from([(
         old_session_id.to_string(),
         Arc::clone(&agent),
     )])));

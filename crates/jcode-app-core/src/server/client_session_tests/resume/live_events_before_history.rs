@@ -22,10 +22,11 @@ async fn handle_resume_session_registers_live_events_before_history_replay() -> 
         Vec::new(),
     )));
 
-    let sessions = Arc::new(RwLock::new(HashMap::from([(
+    let sessions = Arc::new(crate::primary::PrimaryHost::new(HashMap::from([(
         temp_session_id.to_string(),
         Arc::clone(&agent),
     )])));
+    sessions.mark_provisional(temp_session_id);
     let shutdown_signals = Arc::new(RwLock::new(HashMap::<String, InterruptSignal>::new()));
     let soft_interrupt_queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
     let now = Instant::now();
@@ -98,7 +99,6 @@ async fn handle_resume_session_registers_live_events_before_history_replay() -> 
     let resume_task = tokio::spawn({
         let agent = Arc::clone(&agent);
         let provider = Arc::clone(&provider);
-        let registry = registry.clone();
         let sessions = Arc::clone(&sessions);
         let shutdown_signals = Arc::clone(&shutdown_signals);
         let soft_interrupt_queues = Arc::clone(&soft_interrupt_queues);
@@ -131,7 +131,7 @@ async fn handle_resume_session_registers_live_events_before_history_replay() -> 
                 &agent,
                 &crate::server::startup_context::test_coordinator(),
                 &provider,
-                &registry,
+                &crate::instruction::InstructionRepositoryService::new(),
                 &sessions,
                 &shutdown_signals,
                 &soft_interrupt_queues,

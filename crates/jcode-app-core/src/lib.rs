@@ -40,6 +40,7 @@ pub mod network_retry;
 pub mod notifications;
 pub mod overnight;
 pub mod perf;
+pub mod primary;
 pub mod replay;
 pub mod restart_snapshot;
 pub mod server;

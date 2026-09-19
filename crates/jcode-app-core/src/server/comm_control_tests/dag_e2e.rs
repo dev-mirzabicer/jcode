@@ -50,7 +50,7 @@ async fn graph_fixture_named(swarm_id: &str, coord: &str, worker: &str) -> Graph
     let coord = coord.to_string();
     let worker = worker.to_string();
     let (client_tx, client_rx) = mpsc::unbounded_channel();
-    let sessions = Arc::new(RwLock::new(HashMap::from([
+    let sessions = Arc::new(crate::primary::PrimaryHost::new(HashMap::from([
         (coord.clone(), test_agent().await),
         (worker.clone(), test_agent().await),
     ])));
@@ -887,7 +887,7 @@ async fn e2e_solo_seeder_is_elected_coordinator_and_can_assign() {
     let seeder = "seeder".to_string();
     let worker = "worker".to_string();
     let (client_tx, _client_rx) = mpsc::unbounded_channel();
-    let sessions: crate::server::SessionAgents = Arc::new(RwLock::new(HashMap::from([
+    let sessions: crate::server::SessionAgents = Arc::new(crate::primary::PrimaryHost::new(HashMap::from([
         (seeder.clone(), test_agent().await),
         (worker.clone(), test_agent().await),
     ])));

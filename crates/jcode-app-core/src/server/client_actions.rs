@@ -19,7 +19,7 @@ use std::time::Instant;
 use tokio::process::Command;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
-type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
+type SessionAgents = Arc<crate::primary::PrimaryHost>;
 type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
 
 const INPUT_SHELL_MAX_OUTPUT_LEN: usize = 30_000;
@@ -1170,6 +1170,7 @@ pub(super) async fn handle_resume_all_sessions(
         super::live_turn::spawn_tracked_live_turn(
             &session_id,
             Arc::clone(&agent),
+            sessions,
             super::live_turn::TrackedLiveTurn {
                 message: String::new(),
                 system_reminder: Some(super::live_turn::LiveTurnReminder::Rendered(reminder)),

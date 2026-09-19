@@ -88,10 +88,15 @@ so `mount-cloud/fabian` displays as `mount-cloud-fabian`.
 
 ### Server Shutdown
 
-The server shuts down when:
-- **Idle timeout**: no clients connected for 5 minutes (configurable)
-- **Manual**: server process is killed
-- **Reload**: server execs into a new binary (same socket path)
+Ordinary shared servers do not exit because every client disconnected. Primary
+turns, their completion and Stop controls belong to the runtime, not a terminal.
+Connection teardown releases subscriptions and editor leases without closing
+the primary or discarding its output. Explicit runtime exit and reload remain
+separate operations. Explicitly temporary servers retain their owner/idle policy.
+
+Run/REPL inference remains process-owned. This change does not install a login
+service or give standalone callers detached execution guarantees. Managed
+workspace launch and its human controls remain separately gated.
 
 ### Remote Client Working Directory
 

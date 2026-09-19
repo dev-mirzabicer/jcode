@@ -164,7 +164,7 @@ fn plan_fixture(swarm_id: &str, coord: &str, worker: &str) -> PlanFixture {
         worker,
         client_tx,
         client_rx,
-        sessions: Arc::new(RwLock::new(HashMap::new())),
+        sessions: Arc::new(crate::primary::PrimaryHost::default()),
         soft_interrupt_queues: Arc::new(RwLock::new(HashMap::new())),
         swarm_members,
         swarms_by_id,

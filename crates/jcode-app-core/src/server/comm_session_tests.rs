@@ -89,7 +89,7 @@ async fn test_agent_with_working_dir(session_id: &str, working_dir: &str) -> Arc
 
 #[tokio::test]
 async fn resolve_spawn_working_dir_prefers_explicit_then_spawner_agent_dir() {
-    let sessions = Arc::new(RwLock::new(HashMap::new()));
+    let sessions = Arc::new(crate::primary::PrimaryHost::new(HashMap::new()));
     sessions.write().await.insert(
         "req".to_string(),
         test_agent_with_working_dir("req", "/tmp/spawner-agent").await,
@@ -117,7 +117,7 @@ async fn resolve_spawn_working_dir_prefers_explicit_then_spawner_agent_dir() {
 
 #[tokio::test]
 async fn resolve_spawn_working_dir_falls_back_to_member_dir() {
-    let sessions = Arc::new(RwLock::new(HashMap::new()));
+    let sessions = Arc::new(crate::primary::PrimaryHost::new(HashMap::new()));
     let swarm_members = Arc::new(RwLock::new(HashMap::new()));
     let (mut req_member, _rx) = member("req", Some("swarm-1"), "coordinator");
     req_member.working_dir = Some(std::path::PathBuf::from("/tmp/member-dir"));
@@ -716,7 +716,7 @@ fn resolve_swarm_spawn_model_blank_requested_model_falls_back_to_config() {
 async fn coordinator_identity_uses_live_agent_when_lock_is_available() {
     let agent = test_agent_with_working_dir("coord", "/tmp/coord").await;
     let live_model = agent.lock().await.provider_model();
-    let sessions = Arc::new(RwLock::new(HashMap::new()));
+    let sessions = Arc::new(crate::primary::PrimaryHost::new(HashMap::new()));
     sessions
         .write()
         .await
@@ -746,7 +746,7 @@ async fn coordinator_identity_falls_back_to_persisted_session_when_agent_busy() 
     // Hold the agent lock to simulate a coordinator mid-turn: the spawn path
     // must not block and must read the persisted identity instead of defaults.
     let _held = agent.lock().await;
-    let sessions = Arc::new(RwLock::new(HashMap::new()));
+    let sessions = Arc::new(crate::primary::PrimaryHost::new(HashMap::new()));
     sessions
         .write()
         .await

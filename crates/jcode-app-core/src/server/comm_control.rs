@@ -32,7 +32,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc, watch};
 
-type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
+type SessionAgents = Arc<crate::primary::PrimaryHost>;
 
 /// Eligible auto-assignment targets for a swarm task.
 ///

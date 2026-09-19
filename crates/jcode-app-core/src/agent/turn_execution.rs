@@ -1089,6 +1089,31 @@ impl Agent {
     }
 
     /// Restore a session by ID (loads from disk)
+    pub(crate) fn restore_primary(
+        session_id: &str,
+        provider: Arc<dyn Provider>,
+        registry: Registry,
+        repositories: crate::instruction::InstructionRepositoryService,
+    ) -> Result<Self> {
+        let session = Session::load(session_id)?;
+        anyhow::ensure!(
+            session.isolated_child.is_none(),
+            "Isolated children are controlled by their original parent. Inspect their transcript instead of opening direct chat."
+        );
+        let selection = crate::config::config().tools.selection();
+        let mut candidate = Self::build_base(
+            provider,
+            registry,
+            session,
+            selection.allowed_tools,
+            selection.disabled_tools,
+        );
+        candidate.instruction_repositories = repositories;
+        candidate.restore_session(session_id)?;
+        Ok(candidate)
+    }
+
+    /// Restore a session by ID (loads from disk)
     pub fn restore_session(&mut self, session_id: &str) -> Result<SessionStatus> {
         let restore_start = Instant::now();
         let load_start = Instant::now();

@@ -6,6 +6,15 @@ use futures::stream;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+async fn process_message_streaming_mpsc_with_request_id(
+    agent: Arc<Mutex<Agent>>,
+    coordinator: Arc<super::super::startup_context::StartupContextCoordinator>,
+    message: ProcessingMessage,
+    events: mpsc::UnboundedSender<ServerEvent>,
+) -> Result<()> {
+    process_admitted_message(&mut *agent.lock().await, coordinator, message, events).await
+}
+
 struct IsolatedRuntimeDir {
     _prev_runtime: Option<std::ffi::OsString>,
     _temp: tempfile::TempDir,
@@ -374,17 +383,16 @@ async fn cancel_without_local_task_still_signals_session_control() {
     let mut client_is_processing = true;
     let mut message_id = Some(99);
     let mut session_id = Some("session_detached_cancel".to_string());
-    let mut task = None;
 
     cancel_processing_message(
         &mut ProcessingState {
             client_is_processing: &mut client_is_processing,
             message_id: &mut message_id,
             session_id: &mut session_id,
-            task: &mut task,
         },
         &control,
         &client_event_tx,
+        &Arc::new(crate::primary::PrimaryHost::default()),
         &SwarmStatusRefs {
             members: &swarm_members,
             swarms_by_id: &swarms_by_id,
@@ -442,16 +450,16 @@ async fn deferred_cancel_reset_does_not_erase_newer_cancel() {
         let mut client_is_processing = true;
         let mut message_id = Some(request_id);
         let mut session_id = Some("session_detached_cancel_race".to_string());
-        let mut task = None;
+
         cancel_processing_message(
             &mut ProcessingState {
                 client_is_processing: &mut client_is_processing,
                 message_id: &mut message_id,
                 session_id: &mut session_id,
-                task: &mut task,
             },
             &control,
             &client_event_tx,
+            &Arc::new(crate::primary::PrimaryHost::default()),
             &SwarmStatusRefs {
                 members: &swarm_members,
                 swarms_by_id: &swarms_by_id,
@@ -618,17 +626,16 @@ fn cancel_aborts_detached_streaming_turn_with_stale_stop_signal() -> anyhow::Res
         let mut client_is_processing = false;
         let mut message_id = None;
         let mut cancel_session_id = None;
-        let mut task = None;
 
         cancel_processing_message(
             &mut ProcessingState {
                 client_is_processing: &mut client_is_processing,
                 message_id: &mut message_id,
                 session_id: &mut cancel_session_id,
-                task: &mut task,
             },
             &control,
             &client_event_tx,
+            &Arc::new(crate::primary::PrimaryHost::default()),
             &SwarmStatusRefs {
                 members: &swarm_members,
                 swarms_by_id: &swarms_by_id,
@@ -700,7 +707,6 @@ fn idle_cancel_does_not_arm_the_signal_for_the_next_turn() -> anyhow::Result<()>
         let mut client_is_processing = false;
         let mut message_id = None;
         let mut cancel_session_id = None;
-        let mut task = None;
 
         assert!(
             !crate::turn_cancel_registry::has_active_turn(session_id),
@@ -712,10 +718,10 @@ fn idle_cancel_does_not_arm_the_signal_for_the_next_turn() -> anyhow::Result<()>
                 client_is_processing: &mut client_is_processing,
                 message_id: &mut message_id,
                 session_id: &mut cancel_session_id,
-                task: &mut task,
             },
             &control,
             &client_event_tx,
+            &Arc::new(crate::primary::PrimaryHost::default()),
             &SwarmStatusRefs {
                 members: &swarm_members,
                 swarms_by_id: &swarms_by_id,
@@ -975,7 +981,7 @@ async fn fresh_shared_startup_session_with_agent(
     crate::session::Session,
 ) {
     let (server_stream, client_stream) = crate::transport::stream_pair().expect("stream pair");
-    let sessions = Arc::new(RwLock::new(HashMap::new()));
+    let sessions = Arc::new(crate::primary::PrimaryHost::new(HashMap::new()));
     let client_connections = Arc::new(RwLock::new(HashMap::new()));
     let (debug_response_tx, _) = broadcast::channel(8);
     let (swarm_event_tx, _) = broadcast::channel(8);
@@ -1147,7 +1153,7 @@ async fn repeated_harness_creation_is_fresh_and_failure_preserves_the_attached_s
     let first_project = tempfile::tempdir().unwrap();
     let second_project = tempfile::tempdir().unwrap();
     let (server_stream, client_stream) = crate::transport::stream_pair().unwrap();
-    let sessions = Arc::new(RwLock::new(HashMap::new()));
+    let sessions = Arc::new(crate::primary::PrimaryHost::new(HashMap::new()));
     let connections = Arc::new(RwLock::new(HashMap::new()));
     let (debug_tx, _) = broadcast::channel(8);
     let (swarm_tx, _) = broadcast::channel(8);
@@ -1743,7 +1749,7 @@ async fn blocked_shared_startup_emits_prompt_safe_action_and_rolls_back_unanswer
     std::fs::remove_file(&selected_path).expect("remove selected file");
 
     let (server_stream, client_stream) = crate::transport::stream_pair().expect("stream pair");
-    let sessions = Arc::new(RwLock::new(HashMap::new()));
+    let sessions = Arc::new(crate::primary::PrimaryHost::new(HashMap::new()));
     let client_connections = Arc::new(RwLock::new(HashMap::new()));
     let (debug_response_tx, _) = broadcast::channel(8);
     let (swarm_event_tx, _) = broadcast::channel(8);
@@ -1918,7 +1924,7 @@ async fn later_real_user_turn_observes_staleness_before_prompt_and_continues() {
     let provider = RecordingImmediateProvider::default();
     let snapshots = Arc::clone(&provider.snapshots);
     let (server_stream, client_stream) = crate::transport::stream_pair().expect("stream pair");
-    let sessions = Arc::new(RwLock::new(HashMap::new()));
+    let sessions = Arc::new(crate::primary::PrimaryHost::new(HashMap::new()));
     let client_connections = Arc::new(RwLock::new(HashMap::new()));
     let (debug_response_tx, _) = broadcast::channel(8);
     let (swarm_event_tx, _) = broadcast::channel(8);
@@ -2232,11 +2238,11 @@ fn reload_starting_rejects_new_turn_without_spawning_processing_task() {
         )));
 
         let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
-        let (processing_done_tx, mut processing_done_rx) = mpsc::unbounded_channel();
+        let host = Arc::new(crate::primary::PrimaryHost::default());
         let mut client_is_processing = false;
         let mut processing_message_id = None;
         let mut processing_session_id = None;
-        let mut processing_task = None;
+
         let swarm_members = Arc::new(RwLock::new(HashMap::new()));
         let swarms_by_id = Arc::new(RwLock::new(HashMap::new()));
         let event_history = Arc::new(RwLock::new(std::collections::VecDeque::new()));
@@ -2258,11 +2264,10 @@ fn reload_starting_rejects_new_turn_without_spawning_processing_task() {
                 client_is_processing: &mut client_is_processing,
                 message_id: &mut processing_message_id,
                 session_id: &mut processing_session_id,
-                task: &mut processing_task,
             },
             &agent,
             &client_event_tx,
-            &processing_done_tx,
+            &host,
             Vec::new(),
             &crate::server::startup_context::test_coordinator(),
             &SwarmStatusRefs {
@@ -2287,8 +2292,8 @@ fn reload_starting_rejects_new_turn_without_spawning_processing_task() {
         assert!(!client_is_processing);
         assert_eq!(processing_message_id, None);
         assert_eq!(processing_session_id, None);
-        assert!(processing_task.is_none());
-        assert!(processing_done_rx.try_recv().is_err());
+        assert!(host.processing("session_guard").is_none());
+        assert!(!host.subscribe().has_changed().unwrap());
         assert!(
             !forked.load(Ordering::SeqCst),
             "rejecting during reload should not fork or invoke provider work"
@@ -2327,11 +2332,11 @@ fn turn_coupled_skill_activation_persists_before_shared_server_processing() {
             provider, registry, session, None,
         )));
         let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
-        let (processing_done_tx, mut processing_done_rx) = mpsc::unbounded_channel();
+        let host = Arc::new(crate::primary::PrimaryHost::default());
         let mut client_is_processing = false;
         let mut processing_message_id = None;
         let mut processing_session_id = None;
-        let mut processing_task = None;
+
         let swarm_members = Arc::new(RwLock::new(HashMap::new()));
         let swarms_by_id = Arc::new(RwLock::new(HashMap::new()));
         let event_history = Arc::new(RwLock::new(std::collections::VecDeque::new()));
@@ -2353,11 +2358,10 @@ fn turn_coupled_skill_activation_persists_before_shared_server_processing() {
                 client_is_processing: &mut client_is_processing,
                 message_id: &mut processing_message_id,
                 session_id: &mut processing_session_id,
-                task: &mut processing_task,
             },
             &agent,
             &client_event_tx,
-            &processing_done_tx,
+            &host,
             Vec::new(),
             &crate::server::startup_context::test_coordinator(),
             &SwarmStatusRefs {
@@ -2379,8 +2383,8 @@ fn turn_coupled_skill_activation_persists_before_shared_server_processing() {
                 ..
             } if skill_id == "server-skill"
         ));
-        let (_, result, _) = processing_done_rx.recv().await.expect("turn completion");
-        result.expect("turn succeeds");
+        expect_turn_success(&mut client_event_rx, 84, Duration::from_secs(30)).await;
+        host.wait_idle("session_turn_coupled_skill").await.unwrap();
         let agent = agent.lock().await;
         assert_eq!(agent.active_skill_id(), Some("server-skill"));
         assert!(
@@ -2449,11 +2453,10 @@ async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attac
     let event_history = Arc::new(RwLock::new(std::collections::VecDeque::new()));
     let event_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let (swarm_event_tx, _) = broadcast::channel(8);
-    let (processing_done_tx, mut processing_done_rx) = mpsc::unbounded_channel();
+    let host = Arc::new(crate::primary::PrimaryHost::default());
     let mut client_is_processing = false;
     let mut processing_message_id = None;
     let mut processing_session_id = None;
-    let mut processing_task = None;
 
     start_processing_message(
         ProcessingMessage {
@@ -2470,11 +2473,10 @@ async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attac
             client_is_processing: &mut client_is_processing,
             message_id: &mut processing_message_id,
             session_id: &mut processing_session_id,
-            task: &mut processing_task,
         },
         &agent,
         &origin_tx,
-        &processing_done_tx,
+        &host,
         Vec::new(),
         &crate::server::startup_context::test_coordinator(),
         &SwarmStatusRefs {
@@ -2526,17 +2528,11 @@ async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attac
         }
     }
 
-    let (done_id, result, _) =
-        tokio::time::timeout(Duration::from_secs(2), processing_done_rx.recv())
-            .await
-            .expect("processing should complete promptly")
-            .expect("processing completion channel should remain open");
-    assert_eq!(done_id, 479);
-    result.expect("turn should complete successfully");
-
-    if let Some(handle) = processing_task.take() {
-        handle.await.expect("processing task join");
-    }
+    tokio::time::timeout(Duration::from_secs(2), host.wait_idle(session_id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(swarm_members.read().await[session_id].status, "ready");
 }
 
 #[test]
@@ -2575,12 +2571,12 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
             provider, registry, session, None,
         )));
 
-        let (client_event_tx, _client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
-        let (processing_done_tx, mut processing_done_rx) = mpsc::unbounded_channel();
+        let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
+        let host = Arc::new(crate::primary::PrimaryHost::default());
         let mut client_is_processing = false;
         let mut processing_message_id = None;
         let mut processing_session_id = None;
-        let mut processing_task = None;
+
         let swarm_members = Arc::new(RwLock::new(HashMap::new()));
         let swarms_by_id = Arc::new(RwLock::new(HashMap::new()));
         let event_history = Arc::new(RwLock::new(std::collections::VecDeque::new()));
@@ -2602,11 +2598,10 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
                 client_is_processing: &mut client_is_processing,
                 message_id: &mut processing_message_id,
                 session_id: &mut processing_session_id,
-                task: &mut processing_task,
             },
             &agent,
             &client_event_tx,
-            &processing_done_tx,
+            &host,
             Vec::new(),
             &crate::server::startup_context::test_coordinator(),
             &SwarmStatusRefs {
@@ -2622,22 +2617,14 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
         assert!(client_is_processing);
         assert_eq!(processing_message_id, Some(77));
         assert_eq!(processing_session_id.as_deref(), Some(session_id));
-        assert!(processing_task.is_some());
+        assert_eq!(host.processing(session_id), Some(77));
         assert!(
             !super::super::reload_recovery::has_pending_for_session(session_id),
             "server acceptance of the exact hidden continuation should consume the durable intent"
         );
 
-        let (done_id, result, _report) =
-            tokio::time::timeout(std::time::Duration::from_secs(5), processing_done_rx.recv())
-                .await
-                .expect("processing task should finish")
-                .expect("processing task should report completion");
-        assert_eq!(done_id, 77);
-        result?;
-        if let Some(handle) = processing_task.take() {
-            handle.await.expect("processing task join");
-        }
+        expect_turn_success(&mut client_event_rx, 77, Duration::from_secs(5)).await;
+        tokio::time::timeout(Duration::from_secs(5), host.wait_idle(session_id)).await??;
         Ok::<(), anyhow::Error>(())
     })?;
 
@@ -2684,11 +2671,10 @@ fn reload_starting_rejects_new_turns_for_multiple_sessions() {
             )));
 
             let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
-            let (processing_done_tx, mut processing_done_rx) = mpsc::unbounded_channel();
+            let host = Arc::new(crate::primary::PrimaryHost::default());
             let mut client_is_processing = false;
             let mut processing_message_id = None;
             let mut processing_session_id = None;
-            let mut processing_task = None;
 
             start_processing_message(
                 ProcessingMessage {
@@ -2705,11 +2691,10 @@ fn reload_starting_rejects_new_turns_for_multiple_sessions() {
                     client_is_processing: &mut client_is_processing,
                     message_id: &mut processing_message_id,
                     session_id: &mut processing_session_id,
-                    task: &mut processing_task,
                 },
                 &agent,
                 &client_event_tx,
-                &processing_done_tx,
+                &host,
                 Vec::new(),
                 &crate::server::startup_context::test_coordinator(),
                 &SwarmStatusRefs {
@@ -2744,10 +2729,10 @@ fn reload_starting_rejects_new_turns_for_multiple_sessions() {
             assert_eq!(processing_message_id, None);
             assert_eq!(processing_session_id, None);
             assert!(
-                processing_task.is_none(),
+                host.processing(session_id).is_none(),
                 "{session_id} should not spawn a processing task during reload"
             );
-            assert!(processing_done_rx.try_recv().is_err());
+            assert!(!host.subscribe().has_changed().unwrap());
         }
 
         assert!(
@@ -2765,7 +2750,7 @@ async fn lightweight_comm_request_skips_full_session_initialization() {
         forked: Arc::clone(&forked),
     });
 
-    let sessions: SessionAgents = Arc::new(RwLock::new(HashMap::new()));
+    let sessions: SessionAgents = Arc::new(crate::primary::PrimaryHost::new(HashMap::new()));
     let global_session_id = Arc::new(RwLock::new(String::new()));
     let client_count = Arc::new(RwLock::new(0usize));
     let client_connections = Arc::new(RwLock::new(HashMap::new()));
@@ -2847,12 +2832,19 @@ async fn lightweight_comm_request_skips_full_session_initialization() {
         .await
         .expect("read terminal response");
     let response = decode_request_or_event(&line);
-    match response {
-        ServerEvent::Error { id, message, .. } => {
-            assert_eq!(id, 7);
-            assert!(message.contains("Not in a swarm"));
+    if let Some(expected) = unavailable_swarm_response(&request) {
+        assert_eq!(
+            serde_json::to_value(&response).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+    } else {
+        match response {
+            ServerEvent::Error { id, message, .. } => {
+                assert_eq!(id, 7);
+                assert!(message.contains("Not in a swarm"));
+            }
+            other => panic!("expected error response, got {other:?}"),
         }
-        other => panic!("expected error response, got {other:?}"),
     }
 
     drop(client_writer);
@@ -2889,7 +2881,7 @@ async fn legacy_compaction_wire_requests_reject_without_mutating_live_session_as
     let (server_stream, client_stream) = crate::transport::Stream::pair().expect("socket pair");
     let provider_template: Arc<dyn Provider> = Arc::new(CompleteImmediatelyProvider);
 
-    let sessions: SessionAgents = Arc::new(RwLock::new(HashMap::new()));
+    let sessions: SessionAgents = Arc::new(crate::primary::PrimaryHost::new(HashMap::new()));
     let global_session_id = Arc::new(RwLock::new(String::new()));
     let client_count = Arc::new(RwLock::new(0usize));
     let client_connections = Arc::new(RwLock::new(HashMap::new()));
@@ -3069,7 +3061,7 @@ async fn startup_context_protocol_journey_uses_server_state_and_releases_editor(
     std::fs::create_dir(project.path().join("docs")).expect("create docs directory");
 
     let (server_stream, client_stream) = crate::transport::stream_pair().expect("stream pair");
-    let sessions = Arc::new(RwLock::new(HashMap::new()));
+    let sessions = Arc::new(crate::primary::PrimaryHost::new(HashMap::new()));
     let global_session_id = Arc::new(RwLock::new(String::new()));
     let client_count = Arc::new(RwLock::new(1usize));
     let client_connections = Arc::new(RwLock::new(HashMap::new()));
@@ -3643,7 +3635,7 @@ fn managed_workflow_rendering_uses_server_project_sources_without_a_turn() {
         .join("modules/structured-output.md");
     tokio::runtime::Runtime::new().unwrap().block_on(async {
         let (server_stream, client_stream) = crate::transport::stream_pair().expect("stream pair");
-        let sessions = Arc::new(RwLock::new(HashMap::new()));
+        let sessions = Arc::new(crate::primary::PrimaryHost::new(HashMap::new()));
         let client_connections = Arc::new(RwLock::new(HashMap::new()));
         let (debug_response_tx, _) = broadcast::channel(8);
         let (swarm_event_tx, _) = broadcast::channel(8);
@@ -3837,3 +3829,29 @@ fn managed_workflow_rendering_uses_server_project_sources_without_a_turn() {
         assert!(client_connections.read().await.is_empty());
     });
 }
+
+async fn expect_turn_success(
+    events: &mut mpsc::UnboundedReceiver<ServerEvent>,
+    id: u64,
+    deadline: Duration,
+) {
+    tokio::time::timeout(deadline, async {
+        loop {
+            let event = events.recv().await.expect("terminal event");
+            match event {
+                ServerEvent::Done { id: done } if done == id => break,
+                ServerEvent::Error {
+                    id: failed,
+                    message,
+                    ..
+                } if failed == id => panic!("turn failed: {message}"),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("turn completion deadline");
+}
+
+#[path = "client_lifecycle_tests/primary_host.rs"]
+mod primary_host;

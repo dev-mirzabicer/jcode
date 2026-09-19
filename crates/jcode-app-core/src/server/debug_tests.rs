@@ -667,7 +667,7 @@ mod debug_execution_tests {
             let agent = agent.lock().await;
             agent.session_id().to_string()
         };
-        let sessions = Arc::new(RwLock::new(HashMap::from([(
+        let sessions = Arc::new(crate::primary::PrimaryHost::new(HashMap::from([(
             session_id.clone(),
             agent.clone(),
         )])));
@@ -689,7 +689,7 @@ mod debug_execution_tests {
             let agent = agent.lock().await;
             agent.session_id().to_string()
         };
-        let sessions = Arc::new(RwLock::new(HashMap::from([(
+        let sessions = Arc::new(crate::primary::PrimaryHost::new(HashMap::from([(
             session_id.clone(),
             agent.clone(),
         )])));
@@ -710,7 +710,7 @@ mod debug_execution_tests {
             let agent = agent.lock().await;
             agent.session_id().to_string()
         };
-        let sessions = Arc::new(RwLock::new(HashMap::from([(
+        let sessions = Arc::new(crate::primary::PrimaryHost::new(HashMap::from([(
             session_id.clone(),
             agent.clone(),
         )])));
@@ -736,7 +736,7 @@ mod debug_execution_tests {
             agent.session_id().to_string()
         };
 
-        let sessions = Arc::new(RwLock::new(HashMap::from([
+        let sessions = Arc::new(crate::primary::PrimaryHost::new(HashMap::from([
             (id_a.clone(), agent_a),
             (id_b.clone(), agent_b),
         ])));

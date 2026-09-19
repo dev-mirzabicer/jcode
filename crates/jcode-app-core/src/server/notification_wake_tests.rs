@@ -41,7 +41,7 @@ async fn managed_wake_turn_renders_recipient_scope_and_fails_visibly_before_disp
         .set_working_dir(project.path().to_str().unwrap());
     let session_id = agent.lock().await.session_id().to_string();
     let before_count = agent.lock().await.message_count();
-    let sessions = Arc::new(RwLock::new(HashMap::from([(
+    let sessions = Arc::new(crate::primary::PrimaryHost::new(HashMap::from([(
         session_id.clone(),
         agent.clone(),
     )])));

@@ -86,15 +86,23 @@ async fn removing_server_session_clears_active_pid_marker() {
     let home = tempfile::tempdir().expect("create temporary JCODE_HOME");
     let _home_guard = ScopedEnvVar::set("JCODE_HOME", home.path());
     let session_id = "session_marker_cleanup_test";
+    let provider: Arc<dyn Provider> = Arc::new(StreamingMockProvider::default());
+    let registry = crate::tool::Registry::new(provider.clone()).await;
+    let agent = Arc::new(Mutex::new(Agent::new_with_session(
+        provider,
+        registry,
+        crate::session::Session::create_with_id(session_id.into(), None, None),
+        None,
+    )));
     crate::storage::register_active_pid(session_id, std::process::id());
 
-    let sessions = Arc::new(RwLock::new(HashMap::from([(
+    let sessions = Arc::new(crate::primary::PrimaryHost::new(HashMap::from([(
         session_id.to_string(),
-        "agent",
+        agent.clone(),
     )])));
     let removed = remove_session_entry(&sessions, session_id).await;
 
-    assert_eq!(removed, Some("agent"));
+    assert!(Arc::ptr_eq(&removed.expect("removed Agent"), &agent));
     assert!(!sessions.read().await.contains_key(session_id));
     assert!(
         !crate::storage::active_session_ids()
@@ -340,7 +348,7 @@ async fn background_task_wake_runs_live_session_immediately_when_idle() {
     let provider_dyn: Arc<dyn Provider> = provider.clone();
     let agent = test_agent(provider_dyn).await;
     let session_id = agent.lock().await.session_id().to_string();
-    let sessions = Arc::new(RwLock::new(HashMap::from([(
+    let sessions = Arc::new(crate::primary::PrimaryHost::new(HashMap::from([(
         session_id.clone(),
         agent.clone(),
     )])));
@@ -438,7 +446,7 @@ async fn wake_turn_tracks_member_status_and_emits_terminal_done() {
     let provider_dyn: Arc<dyn Provider> = provider.clone();
     let agent = test_agent(provider_dyn).await;
     let session_id = agent.lock().await.session_id().to_string();
-    let sessions = Arc::new(RwLock::new(HashMap::from([(
+    let sessions = Arc::new(crate::primary::PrimaryHost::new(HashMap::from([(
         session_id.clone(),
         agent.clone(),
     )])));
@@ -541,7 +549,7 @@ async fn background_task_notify_without_wake_does_not_queue_soft_interrupt() {
     let agent = test_agent(provider).await;
     let session_id = agent.lock().await.session_id().to_string();
     let queue = agent.lock().await.soft_interrupt_queue();
-    let sessions = Arc::new(RwLock::new(HashMap::from([(
+    let sessions = Arc::new(crate::primary::PrimaryHost::new(HashMap::from([(
         session_id.clone(),
         agent.clone(),
     )])));
@@ -629,7 +637,7 @@ async fn managed_completion_is_pending_without_parent_and_notifies_once_after_at
         store.register_background_delivery(&record.id, true, false)?;
         record.state = RunState::Completed;
         store.finish(&record)?;
-        let sessions = Arc::new(RwLock::new(HashMap::new()));
+        let sessions = Arc::new(crate::primary::PrimaryHost::new(HashMap::new()));
         let queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
         let members = Arc::new(RwLock::new(HashMap::new()));
         let task = BackgroundTaskCompleted {

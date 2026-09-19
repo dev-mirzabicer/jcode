@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{Mutex, RwLock};
 
-type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
+type SessionAgents = Arc<crate::primary::PrimaryHost>;
 
 /// Which memory store a headless session gets.
 ///

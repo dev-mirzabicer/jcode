@@ -71,7 +71,7 @@ use self::swarm::{
     MAX_SWARM_MEMBERS, broadcast_swarm_plan, broadcast_swarm_plan_with_previous,
     broadcast_swarm_status, expired_terminal_member_ids, member_consumes_swarm_capacity,
     record_swarm_event, record_swarm_event_for_session, refresh_swarm_task_staleness,
-    remove_plan_participant, remove_session_from_swarm, rename_plan_participant, run_swarm_message,
+    remove_plan_participant, remove_session_from_swarm, run_swarm_message,
     send_swarm_plan_to_session, set_member_task_label, swarm_is_self_or_ancestor,
     update_member_status, update_member_status_with_report, update_member_status_with_report_tldr,
 };
@@ -111,7 +111,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, OnceCell, RwLock, broadcast, mpsc};
 
-pub(super) type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
+pub(super) type SessionAgents = Arc<crate::primary::PrimaryHost>;
 pub(super) type ChannelSubscriptions =
     Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
 
@@ -119,10 +119,10 @@ pub(super) type ChannelSubscriptions =
 /// lifecycle operation. Server-owned sessions all share the long-running
 /// server PID, so leaving the marker behind makes presence UIs count the
 /// removed session forever.
-pub(super) async fn remove_session_entry<T>(
-    sessions: &Arc<RwLock<HashMap<String, T>>>,
+pub(super) async fn remove_session_entry(
+    sessions: &SessionAgents,
     session_id: &str,
-) -> Option<T> {
+) -> Option<Arc<Mutex<Agent>>> {
     let removed = sessions.write().await.remove(session_id);
     if removed.is_some() {
         crate::storage::unregister_active_pid(session_id);
@@ -585,8 +585,7 @@ use self::state::{
     SessionInterruptQueues, fanout_live_client_event, fanout_session_event,
     queue_soft_interrupt_for_session, register_background_tool_signal,
     register_session_event_sender, register_session_interrupt_queue, remove_background_tool_signal,
-    remove_session_interrupt_queue, rename_background_tool_signal, rename_session_interrupt_queue,
-    session_event_fanout_sender, unregister_session_event_sender,
+    remove_session_interrupt_queue, session_event_fanout_sender, unregister_session_event_sender,
 };
 pub use crate::plan::{SwarmTaskProgress, VersionedPlan};
 
@@ -638,9 +637,6 @@ mod queue_tests;
 #[cfg(test)]
 mod file_activity_tests;
 
-/// Idle timeout for the shared server when no clients are connected (5 minutes)
-const IDLE_TIMEOUT_SECS: u64 = 300;
-
 /// How often to check whether the embedding model can be unloaded. Keep this
 /// comfortably below the default idle threshold so reclamation is prompt and
 /// predictable rather than delayed by another full sampling interval.
@@ -672,7 +668,7 @@ pub struct Server {
     /// Broadcast channel for streaming events to all subscribers
     event_tx: broadcast::Sender<ServerEvent>,
     /// Active sessions (session_id -> Agent)
-    sessions: Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
+    sessions: Arc<crate::primary::PrimaryHost>,
     /// Current processing state
     is_processing: Arc<RwLock<bool>>,
     /// Session ID for the default session
@@ -781,7 +777,7 @@ impl Server {
             gateway_config_override: None,
             identity,
             event_tx,
-            sessions: Arc::new(RwLock::new(HashMap::new())),
+            sessions: Arc::new(crate::primary::PrimaryHost::default()),
             is_processing: Arc::new(RwLock::new(false)),
             session_id: Arc::new(RwLock::new(String::new())),
             client_count: Arc::new(RwLock::new(0)),
@@ -1838,51 +1834,9 @@ impl Server {
                 self.identity.name.clone(),
                 policy,
             );
-        } else if debug_control_allowed() {
-            crate::logging::info("Debug control enabled; idle timeout monitor disabled.");
-        } else {
-            let idle_client_count = Arc::clone(&self.client_count);
-            let idle_server_name = self.identity.name.clone();
-            tokio::spawn(async move {
-                let mut idle_since: Option<std::time::Instant> = None;
-                let mut check_interval = tokio::time::interval(std::time::Duration::from_secs(10));
-
-                loop {
-                    check_interval.tick().await;
-
-                    let count = *idle_client_count.read().await;
-
-                    if count == 0 {
-                        // No clients connected
-                        if idle_since.is_none() {
-                            idle_since = Some(std::time::Instant::now());
-                            crate::logging::info(&format!(
-                                "No clients connected. Server will exit after {} minutes of idle.",
-                                IDLE_TIMEOUT_SECS / 60
-                            ));
-                        }
-
-                        if let Some(since) = idle_since {
-                            let idle_duration = since.elapsed().as_secs();
-                            if idle_duration >= IDLE_TIMEOUT_SECS {
-                                crate::logging::info(&format!(
-                                    "Server idle for {} minutes with no clients. Shutting down.",
-                                    idle_duration / 60
-                                ));
-                                let _ = crate::registry::unregister_server(&idle_server_name).await;
-                                std::process::exit(EXIT_IDLE_TIMEOUT);
-                            }
-                        }
-                    } else {
-                        // Clients connected - reset idle timer
-                        if idle_since.is_some() {
-                            crate::logging::info("Client connected. Idle timer cancelled.");
-                        }
-                        idle_since = None;
-                    }
-                }
-            });
         }
+        // Ordinary primary execution belongs to the runtime, not client count.
+        // Only explicitly temporary namespaces use owner/idle termination.
     }
 
     fn spawn_registry_metadata_publisher(&self, registry_info: crate::registry::ServerInfo) {
@@ -1985,7 +1939,7 @@ impl Server {
         _swarm_plans: Arc<RwLock<HashMap<String, VersionedPlan>>>,
         _swarm_coordinators: Arc<RwLock<HashMap<String, String>>>,
         _shared_context: Arc<RwLock<HashMap<String, HashMap<String, SharedContext>>>>,
-        sessions: Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
+        sessions: Arc<crate::primary::PrimaryHost>,
         soft_interrupt_queues: SessionInterruptQueues,
         event_history: Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
         event_counter: Arc<std::sync::atomic::AtomicU64>,

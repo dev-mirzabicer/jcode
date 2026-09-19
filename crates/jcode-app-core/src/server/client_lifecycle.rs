@@ -52,7 +52,7 @@ use super::{
     SwarmMutationRuntime, VersionedPlan, fanout_live_client_event,
     format_structured_completion_report, register_session_interrupt_queue,
     send_swarm_plan_to_session, truncate_detail, update_member_status,
-    update_member_status_with_report, update_member_status_with_report_tldr,
+    update_member_status_with_report_tldr,
 };
 use crate::agent::Agent;
 use crate::bus::{Bus, BusEvent};
@@ -63,8 +63,7 @@ use crate::session::Session;
 use crate::tool::Registry;
 use crate::transport::Stream;
 use anyhow::Result;
-use futures::FutureExt;
-use jcode_agent_runtime::{InterruptSignal, SoftInterruptSource, StreamError};
+use jcode_agent_runtime::{InterruptSignal, SoftInterruptSource};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{
@@ -75,14 +74,13 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
-type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
+type SessionAgents = Arc<crate::primary::PrimaryHost>;
 type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
 const RELOAD_STARTING_GUARD_MAX_AGE: Duration = Duration::from_secs(30);
 const REQUEST_HANDLER_STALL_THRESHOLDS_MS: [u64; 3] = [2_000, 10_000, 60_000];
 
 struct FreshPrimaryRuntime {
     provider: Arc<dyn Provider>,
-    registry: Registry,
     friendly_name: Option<String>,
     is_selfdev: bool,
 }
@@ -183,7 +181,6 @@ struct ProcessingState<'a> {
     client_is_processing: &'a mut bool,
     message_id: &'a mut Option<u64>,
     session_id: &'a mut Option<String>,
-    task: &'a mut Option<tokio::task::JoinHandle<()>>,
 }
 
 struct SwarmStatusRefs<'a> {
@@ -764,12 +761,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
     let mut active_terminal_env = initial_subscribe_terminal_env(&initial_request);
 
     // Per-client state
-    let mut client_is_processing = false;
-    let (processing_done_tx, mut processing_done_rx) =
-        mpsc::unbounded_channel::<(u64, Result<()>, Option<String>)>();
-    let mut processing_task: Option<tokio::task::JoinHandle<()>> = None;
-    let mut processing_message_id: Option<u64> = None;
-    let mut processing_session_id: Option<String> = None;
+    let mut primary_changes = sessions.subscribe();
     let mut current_client_instance_id: Option<String> = None;
     // Client selfdev status is determined by Subscribe request, not server's env
     let mut client_selfdev = false;
@@ -975,6 +967,10 @@ pub(super) async fn handle_client_with_instruction_repositories(
     .await;
 
     let mut agent = Arc::new(Mutex::new(new_agent));
+    sessions.own(&client_session_id)?;
+    if requested_target.is_some() && target_available {
+        sessions.mark_provisional(&client_session_id);
+    }
     {
         let mut sessions_guard = sessions.write().await;
         sessions_guard.insert(client_session_id.clone(), Arc::clone(&agent));
@@ -1135,86 +1131,13 @@ pub(super) async fn handle_client_with_instruction_repositories(
                     info.last_seen = Instant::now();
                 }
             }
-            done = processing_done_rx.recv() => {
-                if let Some((done_id, result, completion_report)) = done {
-                    if Some(done_id) != processing_message_id {
-                        crate::logging::warn(&format!(
-                            "Done event id={} doesn't match processing_message_id={:?}, dropping",
-                            done_id, processing_message_id
-                        ));
-                        continue;
-                    }
-                    crate::logging::info(&format!(
-                        "Processing done for message id={}, result={}",
-                        done_id,
-                        if result.is_ok() { "ok" } else { "err" }
-                    ));
-                    processing_message_id = None;
-                    processing_task = None;
-                    client_is_processing = false;
-                    {
-                        let mut connections = client_connections.write().await;
-                        if let Some(info) = connections.get_mut(&client_connection_id) {
-                            info.is_processing = false;
-                            info.current_tool_name = None;
-                        }
-                    }
-
-                    let done_session = processing_session_id.take();
-                    match result {
-                        Ok(()) => {
-                            if let Some(session_id) = done_session.as_deref() {
-                                update_member_status_with_report(
-                                    session_id,
-                                    "ready",
-                                    None,
-                                    completion_report,
-                                    &swarm_members,
-                                    &swarms_by_id,
-                                    Some(&event_history),
-                                    Some(&event_counter),
-                                    Some(&swarm_event_tx),
-                                )
-                                .await;
-                            }
-                        }
-                        Err(e) => {
-                            if let Some(session_id) = done_session.as_deref() {
-                                update_member_status(
-                                    session_id,
-                                    "failed",
-                                    Some(truncate_detail(&e.to_string(), 120)),
-                                    &swarm_members,
-                                    &swarms_by_id,
-                                    Some(&event_history),
-                                    Some(&event_counter),
-                                    Some(&swarm_event_tx),
-                                )
-                                .await;
-                            }
-                            let retry_after_secs = e.downcast_ref::<StreamError>().and_then(|se| se.retry_after_secs);
-                            if retry_after_secs.is_some() {
-                                crate::telemetry::record_error(crate::telemetry::ErrorCategory::RateLimited);
-                            } else {
-                                let msg = e.to_string();
-                                let lower = msg.to_lowercase();
-                                if lower.contains("timeout") {
-                                    crate::telemetry::record_error(crate::telemetry::ErrorCategory::ProviderTimeout);
-                                } else if crate::provider::error_looks_like_credential_failure(&msg)
-                                    || lower.contains("403 forbidden")
-                                {
-                                    // Use the shared credential-failure classifier instead of a
-                                    // bare `contains("auth")`: that substring also matched
-                                    // unrelated errors (e.g. any message mentioning "author" or
-                                    // OAuth flow noise) and inflated the auth_failed telemetry
-                                    // counter.
-                                    crate::telemetry::record_error(crate::telemetry::ErrorCategory::AuthFailed);
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    break;
+            changed = primary_changes.changed() => {
+                if changed.is_err() { break; }
+                let client_is_processing = sessions.processing(&client_session_id).is_some();
+                let mut connections = client_connections.write().await;
+                if let Some(info) = connections.get_mut(&client_connection_id) {
+                    info.is_processing = client_is_processing;
+                    if !client_is_processing { info.current_tool_name = None; }
                 }
                 continue;
             }
@@ -1335,6 +1258,12 @@ pub(super) async fn handle_client_with_instruction_repositories(
                 }
             }
         };
+        let mut processing_message_id = sessions.processing(&client_session_id);
+        let resources = sessions.resources(&client_session_id, &agent)?;
+        provider = resources.provider;
+        registry = resources.registry;
+        let mut client_is_processing = processing_message_id.is_some();
+        let mut processing_session_id = processing_message_id.map(|_| client_session_id.clone());
         let request_decoded_at = Instant::now();
         let request_id = request.id();
         let request_kind = protocol_type_from_line(&line);
@@ -1373,7 +1302,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
             &client_session_id,
             client_is_processing,
             processing_message_id,
-            processing_task.is_some(),
+            sessions.processing(&client_session_id).is_some(),
             line.len(),
         ) {
             crate::logging::info(&format!("SERVER_INTERRUPT_REQUEST_DECODED {}", fields));
@@ -1400,10 +1329,10 @@ pub(super) async fn handle_client_with_instruction_repositories(
                     client_is_processing: &mut client_is_processing,
                     message_id: &mut processing_message_id,
                     session_id: &mut processing_session_id,
-                    task: &mut processing_task,
                 },
                 &session_control,
                 &client_event_tx,
+                &sessions,
                 &SwarmStatusRefs {
                     members: &swarm_members,
                     swarms_by_id: &swarms_by_id,
@@ -1564,13 +1493,6 @@ pub(super) async fn handle_client_with_instruction_repositories(
                     .await;
                     continue;
                 }
-                if !client_is_processing {
-                    let mut connections = client_connections.write().await;
-                    if let Some(info) = connections.get_mut(&client_connection_id) {
-                        info.is_processing = true;
-                        info.current_tool_name = None;
-                    }
-                }
                 start_processing_message(
                     ProcessingMessage {
                         queued_messages,
@@ -1586,11 +1508,10 @@ pub(super) async fn handle_client_with_instruction_repositories(
                         client_is_processing: &mut client_is_processing,
                         message_id: &mut processing_message_id,
                         session_id: &mut processing_session_id,
-                        task: &mut processing_task,
                     },
                     &agent,
                     &client_event_tx,
-                    &processing_done_tx,
+                    &sessions,
                     active_terminal_env.clone(),
                     &startup_context,
                     &SwarmStatusRefs {
@@ -1610,10 +1531,10 @@ pub(super) async fn handle_client_with_instruction_repositories(
                         client_is_processing: &mut client_is_processing,
                         message_id: &mut processing_message_id,
                         session_id: &mut processing_session_id,
-                        task: &mut processing_task,
                     },
                     &session_control,
                     &client_event_tx,
+                    &sessions,
                     &SwarmStatusRefs {
                         members: &swarm_members,
                         swarms_by_id: &swarms_by_id,
@@ -2039,7 +1960,6 @@ pub(super) async fn handle_client_with_instruction_repositories(
                     target_session_id = Some(next_id);
                     fresh_runtime = Some(FreshPrimaryRuntime {
                         provider: next_provider,
-                        registry: next_registry,
                         friendly_name: next_name,
                         is_selfdev,
                     });
@@ -2061,10 +1981,10 @@ pub(super) async fn handle_client_with_instruction_repositories(
                     if fresh_runtime.is_some() || crate::session::session_exists(&target_session_id)
                     {
                         let pre_resume_session_id = client_session_id.clone();
-                        let (attach_provider, attach_registry) = fresh_runtime
+                        let attach_provider = fresh_runtime
                             .as_ref()
-                            .map(|fresh| (&fresh.provider, &fresh.registry))
-                            .unwrap_or((&provider, &registry));
+                            .map(|fresh| &fresh.provider)
+                            .unwrap_or(&provider);
                         agent = crate::hooks::with_client_terminal_env(
                             active_terminal_env.clone(),
                             handle_resume_session(
@@ -2079,7 +1999,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
                                 &agent,
                                 &startup_context,
                                 attach_provider,
-                                attach_registry,
+                                &instruction_repositories,
                                 &sessions,
                                 &shutdown_signals,
                                 &soft_interrupt_queues,
@@ -2113,14 +2033,14 @@ pub(super) async fn handle_client_with_instruction_repositories(
                         .await;
                         if client_session_id == target_session_id {
                             if let Some(fresh) = fresh_runtime.take() {
-                                provider = fresh.provider;
-                                registry = fresh.registry;
                                 friendly_name = fresh.friendly_name;
                                 client_selfdev = fresh.is_selfdev;
                                 client_primary_startup_activated = true;
                                 swarm_enabled = crate::config::config().features.swarm;
                                 *global_session_id.write().await = client_session_id.clone();
                             }
+                            let resources = sessions.resources(&client_session_id, &agent)?;
+                            registry = resources.registry;
                             handle_subscribe(
                                 id,
                                 subscribe_working_dir,
@@ -2819,7 +2739,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
                         &agent,
                         &startup_context,
                         &provider,
-                        &registry,
+                        &instruction_repositories,
                         &sessions,
                         &shutdown_signals,
                         &soft_interrupt_queues,
@@ -4532,28 +4452,16 @@ pub(super) async fn handle_client_with_instruction_repositories(
     crate::hooks::with_client_terminal_env(
         active_terminal_env,
         cleanup_client_connection(
-            &sessions,
-            &client_session_id,
-            client_is_processing,
-            &mut processing_task,
+            super::client_disconnect_cleanup::DepartingClient {
+                session_id: &client_session_id,
+                debug_id: &client_debug_id,
+                connection_id: &client_connection_id,
+            },
             event_handle,
             &swarm_members,
-            &swarms_by_id,
-            &swarm_coordinators,
-            &swarm_plans,
-            &file_touch,
-            &channel_subscriptions,
-            &channel_subscriptions_by_session,
             &client_debug_state,
-            &client_debug_id,
             &client_connections,
-            &client_connection_id,
             &startup_context,
-            &shutdown_signals,
-            &soft_interrupt_queues,
-            &event_history,
-            &event_counter,
-            &swarm_event_tx,
         ),
     )
     .await?;
@@ -4686,50 +4594,34 @@ async fn start_processing_message(
     state: &mut ProcessingState<'_>,
     agent: &Arc<Mutex<Agent>>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
-    processing_done_tx: &mpsc::UnboundedSender<(u64, Result<()>, Option<String>)>,
+    host: &SessionAgents,
     client_terminal_env: Vec<(String, String)>,
     startup_context: &Arc<super::startup_context::StartupContextCoordinator>,
     swarm: &SwarmStatusRefs<'_>,
 ) {
-    let ProcessingMessage {
-        id,
-        queued_messages,
-        content,
-        images,
-        system_reminder,
-        observe_startup_context,
-        activate_skill,
-    } = message;
+    let id = message.id;
     if server_reload_starting() {
-        crate::logging::info(&format!(
-            "Rejecting new message for session {} because server reload is starting",
-            client_session_id
-        ));
         let _ = client_event_tx.send(ServerEvent::Reloading { new_socket: None });
         return;
     }
-
-    if *state.client_is_processing {
-        let _ = client_event_tx.send(ServerEvent::Error {
-            id,
-            message: "Already processing a message".to_string(),
-            retry_after_secs: None,
-        });
-        return;
-    }
-
+    let mut admission = match host.admit(client_session_id, id, agent.clone()) {
+        Ok(admission) => admission,
+        Err(error) => {
+            let _ = client_event_tx.send(ServerEvent::Error {
+                id,
+                message: error.to_string(),
+                retry_after_secs: None,
+            });
+            return;
+        }
+    };
     let tx = super::state::session_event_fanout_sender_with_fallback(
         client_session_id.to_string(),
         Arc::clone(swarm.members),
         client_event_tx.clone(),
     );
-
-    if let Some(skill) = activate_skill.as_deref() {
-        let activation = {
-            let mut agent_guard = agent.lock().await;
-            agent_guard.activate_skill(skill)
-        };
-        match activation {
+    if let Some(skill) = message.activate_skill.as_deref() {
+        match admission.agent.activate_skill(skill) {
             Ok(activation) => {
                 let _ = tx.send(ServerEvent::SkillActivated {
                     id,
@@ -4748,12 +4640,10 @@ async fn start_processing_message(
             }
         }
     }
-
     *state.client_is_processing = true;
     *state.message_id = Some(id);
     *state.session_id = Some(client_session_id.to_string());
-
-    if let Some(reminder) = system_reminder.as_deref()
+    if let Some(reminder) = message.system_reminder.as_deref()
         && let Err(error) = super::reload_recovery::mark_delivered_if_matching_continuation(
             client_session_id,
             reminder,
@@ -4761,15 +4651,13 @@ async fn start_processing_message(
         )
     {
         crate::logging::warn(&format!(
-            "Failed to mark reload recovery intent delivered for accepted message session={} id={}: {}",
-            client_session_id, id, error
+            "Failed to mark reload recovery intent delivered: {error}"
         ));
     }
-
     update_member_status(
         client_session_id,
         "running",
-        Some(truncate_detail(&content, 120)),
+        Some(truncate_detail(&message.content, 120)),
         swarm.members,
         swarm.swarms_by_id,
         Some(swarm.event_history),
@@ -4777,269 +4665,73 @@ async fn start_processing_message(
         Some(swarm.event_tx),
     )
     .await;
-
-    let start_message_index = {
-        let agent_guard = agent.lock().await;
-        agent_guard.message_count()
-    };
-    let agent = Arc::clone(agent);
-    let report_agent = Arc::clone(&agent);
-    let done_tx = processing_done_tx.clone();
-    let startup_context = Arc::clone(startup_context);
-    crate::logging::info(&format!("Processing message id={} spawning task", id));
-    *state.task = Some(tokio::spawn(async move {
-        let event_tx = tx.clone();
-        let result = match std::panic::AssertUnwindSafe(crate::hooks::with_client_terminal_env(
-            client_terminal_env,
-            process_message_streaming_mpsc_with_request_id(
-                agent,
-                startup_context,
-                ProcessingMessage {
-                    queued_messages,
-                    id,
-                    content,
-                    images,
-                    system_reminder,
-                    observe_startup_context,
-                    activate_skill: None,
-                },
-                event_tx,
-            ),
-        ))
-        .catch_unwind()
-        .await
-        {
-            Ok(result) => result,
-            Err(panic_payload) => {
-                let msg = if let Some(text) = panic_payload.downcast_ref::<&str>() {
-                    text.to_string()
-                } else if let Some(text) = panic_payload.downcast_ref::<String>() {
-                    text.clone()
-                } else {
-                    "unknown panic".to_string()
-                };
-                crate::logging::error(&format!(
-                    "Processing task PANICKED for message id={}: {}",
-                    id, msg
-                ));
-                Err(anyhow::anyhow!("Processing task panicked: {}", msg))
-            }
-        };
-        match &result {
-            Ok(()) => crate::logging::info(&format!(
-                "Processing task completed OK for message id={}",
-                id
-            )),
-            Err(error) => crate::logging::warn(&format!(
-                "Processing task completed with error for message id={}: {}",
-                id, error
-            )),
-        }
-        let completion_report = if result.is_ok() {
-            let agent = report_agent.lock().await;
-            agent.latest_assistant_text_after(start_message_index)
-        } else {
-            None
-        };
-        // Keep the terminal event on the same ordered fanout channel as the
-        // stream. Sending it later from the owning client's event loop could
-        // race ahead of the final MessageEnd for newly attached clients.
-        let terminal_event = match &result {
-            Ok(()) => ServerEvent::Done { id },
-            Err(error) => ServerEvent::Error {
-                id,
-                message: crate::util::format_error_chain(error),
-                retry_after_secs: error
-                    .downcast_ref::<StreamError>()
-                    .and_then(|stream_error| stream_error.retry_after_secs),
-            },
-        };
-        let _ = tx.send(terminal_event);
-        let _ = done_tx.send((id, result, completion_report));
-    }));
+    let status = super::live_turn::LiveTurnSwarmContext::new(
+        swarm.members,
+        swarm.swarms_by_id,
+        swarm.event_history,
+        swarm.event_counter,
+        swarm.event_tx,
+    );
+    let session = client_session_id.to_string();
+    let startup_context = startup_context.clone();
+    let terminal_tx = tx.clone();
+    host.start(
+        admission,
+        move |mut agent| async move {
+            let start = agent.message_count();
+            crate::hooks::with_client_terminal_env(
+                client_terminal_env,
+                process_admitted_message(&mut agent, startup_context, message, tx),
+            )
+            .await?;
+            Ok(agent.latest_assistant_text_after(start))
+        },
+        move |outcome| async move {
+            status.complete(&session, id, outcome, &terminal_tx).await;
+        },
+    );
 }
 
 async fn cancel_processing_message(
     state: &mut ProcessingState<'_>,
     session_control: &SessionControlHandle,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
-    swarm: &SwarmStatusRefs<'_>,
+    host: &SessionAgents,
+    _swarm: &SwarmStatusRefs<'_>,
     request_id: Option<u64>,
-    request_decoded_at: Option<Instant>,
+    _request_decoded_at: Option<Instant>,
 ) {
-    let cancel_start = Instant::now();
-    let session_label = state
-        .session_id
-        .as_deref()
-        .unwrap_or(session_control.session_id.as_str())
-        .to_string();
-    crate::logging::info(&format!(
-        "SERVER_INTERRUPT_CANCEL_RECEIVED request_id={:?} session={} control_session={} client_processing={} message_id={:?} has_task={} decoded_age_ms={:?}",
-        request_id,
-        session_label,
-        session_control.session_id,
-        *state.client_is_processing,
-        *state.message_id,
-        state.task.is_some(),
-        request_decoded_at.map(|instant| instant.elapsed().as_millis())
-    ));
-    if let Some(mut handle) = state.task.take() {
-        if handle.is_finished() {
-            crate::logging::info(&format!(
-                "SERVER_INTERRUPT_CANCEL_IGNORED_FINISHED request_id={:?} session={} message_id={:?} total_ms={}",
-                request_id,
-                session_label,
-                *state.message_id,
-                cancel_start.elapsed().as_millis()
-            ));
-            *state.task = Some(handle);
-            return;
-        }
-        let cancel_epoch = session_control.request_cancel();
-        crate::logging::info(&format!(
-            "SERVER_INTERRUPT_CANCEL_SIGNALLED request_id={:?} session={} message_id={:?} wait_ms=500",
-            request_id, session_label, *state.message_id
-        ));
-        match tokio::time::timeout(std::time::Duration::from_millis(500), &mut handle).await {
-            Ok(_) => {
-                crate::logging::info(&format!(
-                    "SERVER_INTERRUPT_CANCEL_COOPERATIVE_DONE request_id={:?} session={} message_id={:?} elapsed_ms={}",
-                    request_id,
-                    session_label,
-                    *state.message_id,
-                    cancel_start.elapsed().as_millis()
-                ));
-            }
-            Err(_) => {
-                crate::logging::warn(&format!(
-                    "SERVER_INTERRUPT_CANCEL_COOPERATIVE_TIMEOUT request_id={:?} session={} message_id={:?} elapsed_ms={} action=abort_task",
-                    request_id,
-                    session_label,
-                    *state.message_id,
-                    cancel_start.elapsed().as_millis()
-                ));
-                handle.abort();
-                match tokio::time::timeout(std::time::Duration::from_millis(2000), handle).await {
-                    Ok(_) => crate::logging::info(&format!(
-                        "SERVER_INTERRUPT_CANCEL_ABORT_RELEASED request_id={:?} session={} elapsed_ms={}",
-                        request_id,
-                        session_label,
-                        cancel_start.elapsed().as_millis()
-                    )),
-                    Err(_) => crate::logging::warn(&format!(
-                        "SERVER_INTERRUPT_CANCEL_ABORT_RELEASE_TIMEOUT request_id={:?} session={} elapsed_ms={} wait_ms=2000",
-                        request_id,
-                        session_label,
-                        cancel_start.elapsed().as_millis()
-                    )),
+    let session = &session_control.session_id;
+    match host.stop(session).await {
+        Ok(true) => {}
+        Ok(false) => {
+            // Compatibility control for an explicitly internal, non-hosted turn.
+            if crate::turn_cancel_registry::has_active_turn(session) {
+                let epoch = session_control.request_cancel();
+                let control = session_control.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    control.reset_cancel_if_epoch(epoch);
+                });
+                let _ = client_event_tx.send(ServerEvent::Interrupted);
+                if let Some(id) = *state.message_id {
+                    let _ = client_event_tx.send(ServerEvent::Done { id });
                 }
+            } else {
+                let _ = client_event_tx.send(ServerEvent::Interrupted);
             }
         }
-        // Only clear the cancel we fired: a newer cancel (repeated Esc, jade
-        // relay, another connection) must not be erased before its target
-        // observes it (issue #428).
-        session_control.reset_cancel_if_epoch(cancel_epoch);
-        *state.task = None;
-        *state.client_is_processing = false;
-        if let Some(session_id) = state.session_id.take() {
-            update_member_status(
-                &session_id,
-                "stopped",
-                Some("cancelled".to_string()),
-                swarm.members,
-                swarm.swarms_by_id,
-                Some(swarm.event_history),
-                Some(swarm.event_counter),
-                Some(swarm.event_tx),
-            )
-            .await;
-        }
-        if let Some(message_id) = state.message_id.take() {
-            let _ = client_event_tx.send(ServerEvent::Interrupted);
-            let _ = client_event_tx.send(ServerEvent::Done { id: message_id });
-            crate::logging::info(&format!(
-                "SERVER_INTERRUPT_CANCEL_EVENTS_EMITTED request_id={:?} session={} interrupted=true done_id={} total_ms={}",
-                request_id,
-                session_label,
-                message_id,
-                cancel_start.elapsed().as_millis()
-            ));
-        }
-    } else {
-        crate::logging::warn(&format!(
-            "SERVER_INTERRUPT_CANCEL_NO_LOCAL_TASK request_id={:?} session={} control_session={} client_processing={} message_id={:?}; signalling session cancel handle anyway",
-            request_id,
-            session_label,
-            session_control.session_id,
-            *state.client_is_processing,
-            *state.message_id
-        ));
-        // Nothing is running anywhere for this session, so there is no turn to
-        // interrupt and arming the signal can only harm the *next* one: the
-        // deferred reset below runs 500ms later, and a message sent inside
-        // that window starts with the cancel flag already set and dies
-        // immediately, with no reply and no error. Report the interrupt and
-        // stop. Sessions whose turn is owned by another connection still take
-        // the signalling path, since the registry sees those turns.
-        if !crate::turn_cancel_registry::has_active_turn(&session_control.session_id) {
-            crate::logging::info(&format!(
-                "SERVER_INTERRUPT_CANCEL_IDLE_NOOP request_id={:?} session={}",
-                request_id, session_label
-            ));
-            *state.client_is_processing = false;
-            let _ = client_event_tx.send(ServerEvent::Interrupted);
-            if let Some(message_id) = state.message_id.take() {
-                let _ = client_event_tx.send(ServerEvent::Done { id: message_id });
-            }
-            return;
-        }
-        let cancel_epoch = session_control.request_cancel();
-        let reset_control = session_control.clone();
-        tokio::spawn(async move {
-            // The running turn is not owned by this connection (post-reload
-            // recovery, server-initiated turn, or attach), so we cannot await
-            // it. Clear the flag later so the *next* turn is not aborted by a
-            // stale cancel, but only if no newer cancel fired in the meantime:
-            // an unconditional reset here used to erase rapid repeated Esc
-            // cancels before the busy turn observed them (issue #428).
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            reset_control.reset_cancel_if_epoch(cancel_epoch);
-        });
-        *state.client_is_processing = false;
-        let status_session_id = state
-            .session_id
-            .take()
-            .unwrap_or_else(|| session_control.session_id.clone());
-        update_member_status(
-            &status_session_id,
-            "stopped",
-            Some("cancelled".to_string()),
-            swarm.members,
-            swarm.swarms_by_id,
-            Some(swarm.event_history),
-            Some(swarm.event_counter),
-            Some(swarm.event_tx),
-        )
-        .await;
-        let _ = client_event_tx.send(ServerEvent::Interrupted);
-        if let Some(message_id) = state.message_id.take() {
-            let _ = client_event_tx.send(ServerEvent::Done { id: message_id });
-            crate::logging::info(&format!(
-                "SERVER_INTERRUPT_CANCEL_EVENTS_EMITTED request_id={:?} session={} interrupted=true done_id={} total_ms={}",
-                request_id,
-                session_label,
-                message_id,
-                cancel_start.elapsed().as_millis()
-            ));
-        } else {
-            crate::logging::info(&format!(
-                "SERVER_INTERRUPT_CANCEL_EVENTS_EMITTED request_id={:?} session={} interrupted=true done_id=None total_ms={}",
-                request_id,
-                session_label,
-                cancel_start.elapsed().as_millis()
-            ));
+        Err(error) => {
+            let _ = client_event_tx.send(ServerEvent::Error {
+                id: request_id.unwrap_or(0),
+                message: error.to_string(),
+                retry_after_secs: None,
+            });
         }
     }
+    *state.message_id = host.processing(session);
+    *state.client_is_processing = state.message_id.is_some();
+    *state.session_id = state.message_id.map(|_| session.clone());
 }
 
 fn try_available_models_snapshot(agent: &Arc<Mutex<Agent>>) -> Option<String> {
@@ -5166,8 +4858,8 @@ pub(super) async fn process_message_streaming_mpsc(
     result
 }
 
-async fn process_message_streaming_mpsc_with_request_id(
-    agent: Arc<Mutex<Agent>>,
+async fn process_admitted_message(
+    agent: &mut Agent,
     startup_context: Arc<super::startup_context::StartupContextCoordinator>,
     message: ProcessingMessage,
     event_tx: tokio::sync::mpsc::UnboundedSender<ServerEvent>,
@@ -5181,11 +4873,10 @@ async fn process_message_streaming_mpsc_with_request_id(
         observe_startup_context,
         activate_skill: _,
     } = message;
-    let mut agent = agent.lock().await;
     let session_id = agent.session_id().to_string();
-    emit_startup_apply_drain_events(&startup_context, &mut agent, &event_tx);
+    emit_startup_apply_drain_events(&startup_context, agent, &event_tx);
     match observe_startup_context
-        .then(|| startup_context.observe_before_user_turn(&mut agent))
+        .then(|| startup_context.observe_before_user_turn(agent))
         .transpose()
     {
         Ok(None) => {}
@@ -5237,7 +4928,7 @@ async fn process_message_streaming_mpsc_with_request_id(
             )
             .await
     };
-    emit_startup_apply_drain_events(&startup_context, &mut agent, &event_tx);
+    emit_startup_apply_drain_events(&startup_context, agent, &event_tx);
     let startup_action = result
         .as_ref()
         .err()
@@ -5248,7 +4939,6 @@ async fn process_message_streaming_mpsc_with_request_id(
             agent.startup_context_session(),
         )
     });
-    drop(agent);
     if let (Some(action_required), Some(session)) = (startup_action, startup_session) {
         let snapshot = startup_context
             .status_snapshot(

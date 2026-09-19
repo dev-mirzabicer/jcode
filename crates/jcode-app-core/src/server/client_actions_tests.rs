@@ -724,7 +724,10 @@ async fn notify_session_runs_scheduled_task_immediately_for_idle_live_session() 
     let registry = Registry::new(provider_dyn.clone()).await;
     let agent = Arc::new(Mutex::new(Agent::new(provider_dyn, registry)));
     let session_id = agent.lock().await.session_id().to_string();
-    let sessions = Arc::new(RwLock::new(HashMap::<String, Arc<Mutex<Agent>>>::from([(
+    let sessions = Arc::new(crate::primary::PrimaryHost::new(HashMap::<
+        String,
+        Arc<Mutex<Agent>>,
+    >::from([(
         session_id.clone(),
         agent.clone(),
     )])));
@@ -840,7 +843,10 @@ async fn notify_session_queues_soft_interrupt_when_live_session_is_busy() {
     let session_id = agent.lock().await.session_id().to_string();
     let queue = agent.lock().await.soft_interrupt_queue();
 
-    let sessions = Arc::new(RwLock::new(HashMap::<String, Arc<Mutex<Agent>>>::from([(
+    let sessions = Arc::new(crate::primary::PrimaryHost::new(HashMap::<
+        String,
+        Arc<Mutex<Agent>>,
+    >::from([(
         session_id.clone(),
         agent.clone(),
     )])));
@@ -1011,7 +1017,10 @@ async fn resume_all_continues_interrupted_idle_live_session() {
         guard.session_id().to_string()
     };
 
-    let sessions = Arc::new(RwLock::new(HashMap::<String, Arc<Mutex<Agent>>>::from([(
+    let sessions = Arc::new(crate::primary::PrimaryHost::new(HashMap::<
+        String,
+        Arc<Mutex<Agent>>,
+    >::from([(
         session_id.clone(),
         agent.clone(),
     )])));
@@ -1113,7 +1122,10 @@ async fn resume_all_skips_session_with_completed_turn() {
         guard.session_id().to_string()
     };
 
-    let sessions = Arc::new(RwLock::new(HashMap::<String, Arc<Mutex<Agent>>>::from([(
+    let sessions = Arc::new(crate::primary::PrimaryHost::new(HashMap::<
+        String,
+        Arc<Mutex<Agent>>,
+    >::from([(
         session_id.clone(),
         agent.clone(),
     )])));

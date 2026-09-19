@@ -126,7 +126,7 @@ fn double_assign_fixture(
     contested: PlanItem,
     progress: crate::server::SwarmTaskProgress,
 ) -> (
-    Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
+    Arc<crate::primary::PrimaryHost>,
     Arc<RwLock<HashMap<String, SwarmMember>>>,
     Arc<RwLock<HashMap<String, HashSet<String>>>>,
     Arc<RwLock<HashMap<String, VersionedPlan>>>,
@@ -165,7 +165,7 @@ fn double_assign_fixture(
         swarm_id.to_string(),
         requester.to_string(),
     )])));
-    let sessions = Arc::new(RwLock::new(HashMap::new()));
+    let sessions = Arc::new(crate::primary::PrimaryHost::new(HashMap::new()));
     (
         sessions,
         swarm_members,

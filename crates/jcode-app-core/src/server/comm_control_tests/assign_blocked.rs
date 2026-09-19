@@ -6,7 +6,7 @@ async fn assign_task_rejects_explicit_blocked_task() {
     let worker = "worker";
     let (client_tx, mut client_rx) = mpsc::unbounded_channel();
     let worker_agent = test_agent().await;
-    let sessions = Arc::new(RwLock::new(HashMap::from([(
+    let sessions = Arc::new(crate::primary::PrimaryHost::new(HashMap::from([(
         worker.to_string(),
         worker_agent,
     )])));

@@ -13,7 +13,6 @@
 //! `Done`/`Error` event (id 0) so attached clients can settle the externally
 //! started turn in their UI.
 
-use super::client_lifecycle::process_message_streaming_mpsc;
 use super::{
     SwarmEvent, SwarmMember, session_event_fanout_sender, truncate_detail, update_member_status,
     update_member_status_with_report,
@@ -26,7 +25,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use tokio::sync::{Mutex, RwLock, broadcast};
 
-type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
+type SessionAgents = Arc<crate::primary::PrimaryHost>;
 
 pub(super) struct TrackedLiveTurn {
     pub(super) message: String,
@@ -83,46 +82,118 @@ impl LiveTurnSwarmContext {
     }
 }
 
-/// Return the live agent for `session_id` when the session has at least one
-/// live client attachment and its agent is currently idle (lock not held).
+impl LiveTurnSwarmContext {
+    pub(super) async fn complete(
+        &self,
+        session: &str,
+        id: u64,
+        outcome: crate::primary::TurnOutcome,
+        tx: &tokio::sync::mpsc::UnboundedSender<ServerEvent>,
+    ) {
+        if let Err(error) = &outcome.result {
+            let retry_after = error
+                .downcast_ref::<jcode_agent_runtime::StreamError>()
+                .and_then(|e| e.retry_after_secs);
+            let message = error.to_string();
+            let lower = message.to_lowercase();
+            if retry_after.is_some() {
+                crate::telemetry::record_error(crate::telemetry::ErrorCategory::RateLimited);
+            } else if lower.contains("timeout") {
+                crate::telemetry::record_error(crate::telemetry::ErrorCategory::ProviderTimeout);
+            } else if crate::provider::error_looks_like_credential_failure(&message)
+                || lower.contains("403 forbidden")
+            {
+                crate::telemetry::record_error(crate::telemetry::ErrorCategory::AuthFailed);
+            }
+        }
+        let terminal = if outcome.interrupted {
+            update_member_status(
+                session,
+                "stopped",
+                Some("cancelled".into()),
+                &self.members,
+                &self.swarms_by_id,
+                Some(&self.event_history),
+                Some(&self.event_counter),
+                Some(&self.event_tx),
+            )
+            .await;
+            let _ = tx.send(ServerEvent::Interrupted);
+            ServerEvent::Done { id }
+        } else {
+            match outcome.result {
+                Ok(report) => {
+                    update_member_status_with_report(
+                        session,
+                        "ready",
+                        None,
+                        report,
+                        &self.members,
+                        &self.swarms_by_id,
+                        Some(&self.event_history),
+                        Some(&self.event_counter),
+                        Some(&self.event_tx),
+                    )
+                    .await;
+                    ServerEvent::Done { id }
+                }
+                Err(error) => {
+                    update_member_status(
+                        session,
+                        "failed",
+                        Some(truncate_detail(&error.to_string(), 120)),
+                        &self.members,
+                        &self.swarms_by_id,
+                        Some(&self.event_history),
+                        Some(&self.event_counter),
+                        Some(&self.event_tx),
+                    )
+                    .await;
+                    ServerEvent::Error {
+                        id,
+                        message: crate::util::format_error_chain(&error),
+                        retry_after_secs: error
+                            .downcast_ref::<jcode_agent_runtime::StreamError>()
+                            .and_then(|e| e.retry_after_secs),
+                    }
+                }
+            }
+        };
+        // Same ordered stream as final MessageEnd. No client owns settlement.
+        let _ = tx.send(terminal);
+    }
+}
+
+/// Discovery only. Actual admission retains the Agent guard in PrimaryHost.
 pub(super) async fn idle_live_agent(
     session_id: &str,
     sessions: &SessionAgents,
-    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    _members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
 ) -> Option<Arc<Mutex<Agent>>> {
-    let agent = {
-        let guard = sessions.read().await;
-        guard.get(session_id).cloned()
-    }?;
-
-    let has_live_attachments = {
-        let members = swarm_members.read().await;
-        members
-            .get(session_id)
-            .map(|member| !member.event_txs.is_empty() || !member.event_tx.is_closed())
-            .unwrap_or(false)
-    };
-    if !has_live_attachments {
+    if sessions.processing(session_id).is_some() {
         return None;
     }
-
-    let is_idle = agent.try_lock().is_ok();
-    is_idle.then_some(agent)
+    let agent = sessions.read().await.get(session_id).cloned()?;
+    let idle = agent.try_lock().is_ok();
+    idle.then_some(agent)
 }
 
-/// Spawn `message` as a full tracked turn in a live session.
-///
-/// Mirrors the client-initiated turn lifecycle: the swarm member is marked
-/// `running` before the turn starts and `ready` (with a completion report) or
-/// `failed` when it finishes. A synthetic terminal `Done { id: 0 }` (or
-/// `Error { id: 0, .. }`) is fanned out to attached clients so their UI can
-/// finish rendering the externally started turn.
 pub(super) async fn spawn_tracked_live_turn(
     session_id: &str,
     agent: Arc<Mutex<Agent>>,
+    host: &SessionAgents,
     turn: TrackedLiveTurn,
     swarm: LiveTurnSwarmContext,
-) {
+) -> bool {
+    let admission = match host.admit(session_id, 0, agent) {
+        Ok(admission) => admission,
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "Primary wake not admitted for {session_id}: {error}"
+            ));
+            return false;
+        }
+    };
     update_member_status(
         session_id,
         "running",
@@ -134,103 +205,37 @@ pub(super) async fn spawn_tracked_live_turn(
         Some(&swarm.event_tx),
     )
     .await;
-
-    let event_tx = session_event_fanout_sender(session_id.to_string(), Arc::clone(&swarm.members));
-    let session_id = session_id.to_string();
-    tokio::spawn(async move {
-        let unattended = turn.unattended_context.is_some();
-        let (start_message_index, reminder) = {
-            let agent_guard = agent.lock().await;
-            (
-                agent_guard.message_count(),
-                turn.system_reminder
-                    .map(|reminder| reminder.render(&agent_guard))
-                    .transpose(),
-            )
-        };
-        // A render failure follows the same visible terminal-error path as a
-        // failed turn. It must not masquerade as a busy-session queue fallback.
-        let result = async {
-            let system_reminder = reminder?;
-            if let Some(display_role) = turn.display_role {
-                let mut agent = agent.lock().await;
+    let tx = session_event_fanout_sender(session_id.to_string(), swarm.members.clone());
+    let terminal_tx = tx.clone();
+    let session = session_id.to_string();
+    host.start(
+        admission,
+        move |mut agent| async move {
+            let start = agent.message_count();
+            let reminder = turn.system_reminder.map(|r| r.render(&agent)).transpose()?;
+            if let Some(role) = turn.display_role {
                 agent
                     .run_once_streaming_mpsc_with_display_role_and_unattended(
                         &turn.message,
                         vec![],
-                        system_reminder,
-                        event_tx.clone(),
-                        Some(display_role),
+                        reminder,
+                        tx,
+                        Some(role),
                         turn.unattended_context,
                     )
-                    .await
+                    .await?;
             } else {
-                process_message_streaming_mpsc(
-                    Arc::clone(&agent),
-                    &turn.message,
-                    vec![],
-                    system_reminder,
-                    event_tx.clone(),
-                )
-                .await
+                agent
+                    .run_once_streaming_mpsc(&turn.message, vec![], reminder, tx)
+                    .await?;
             }
-        }
-        .await;
-        match result {
-            Ok(()) => {
-                let completion_report = {
-                    let agent_guard = agent.lock().await;
-                    agent_guard.latest_assistant_text_after(start_message_index)
-                };
-                update_member_status_with_report(
-                    &session_id,
-                    "ready",
-                    None,
-                    completion_report,
-                    &swarm.members,
-                    &swarm.swarms_by_id,
-                    Some(&swarm.event_history),
-                    Some(&swarm.event_counter),
-                    Some(&swarm.event_tx),
-                )
-                .await;
-                let _ = event_tx.send(ServerEvent::Done { id: 0 });
-            }
-            Err(error) => {
-                if unattended {
-                    crate::logging::error(&format!(
-                        "Server-initiated unattended turn failed safely for live session {}",
-                        session_id
-                    ));
-                } else {
-                    crate::logging::error(&format!(
-                        "Server-initiated turn failed for live session {}: {}",
-                        session_id, error
-                    ));
-                }
-                update_member_status(
-                    &session_id,
-                    "failed",
-                    Some(if unattended {
-                        "unattended turn failed safely".to_string()
-                    } else {
-                        truncate_detail(&error.to_string(), 120)
-                    }),
-                    &swarm.members,
-                    &swarm.swarms_by_id,
-                    Some(&swarm.event_history),
-                    Some(&swarm.event_counter),
-                    Some(&swarm.event_tx),
-                )
-                .await;
-                let _ = event_tx.send(ServerEvent::Error {
-                    id: 0,
-                    message: crate::util::format_error_chain(&error),
-                    retry_after_secs: None,
-                });
-            }
-        }
-    });
+            Ok(agent.latest_assistant_text_after(start))
+        },
+        move |outcome| async move {
+            swarm.complete(&session, 0, outcome, &terminal_tx).await;
+        },
+    );
+    true
 }
 
 /// Run `message` immediately as a tracked turn if the session is live and
@@ -249,6 +254,7 @@ pub(super) async fn run_live_turn_if_idle(
     spawn_tracked_live_turn(
         session_id,
         agent,
+        sessions,
         TrackedLiveTurn {
             message: message.to_string(),
             system_reminder,
@@ -258,8 +264,7 @@ pub(super) async fn run_live_turn_if_idle(
         },
         swarm,
     )
-    .await;
-    true
+    .await
 }
 
 pub(super) async fn run_live_system_turn_if_idle(
@@ -276,6 +281,7 @@ pub(super) async fn run_live_system_turn_if_idle(
     spawn_tracked_live_turn(
         session_id,
         agent,
+        sessions,
         TrackedLiveTurn {
             message: message.to_string(),
             system_reminder: None,
@@ -285,6 +291,5 @@ pub(super) async fn run_live_system_turn_if_idle(
         },
         swarm,
     )
-    .await;
-    true
+    .await
 }

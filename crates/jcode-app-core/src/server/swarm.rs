@@ -984,18 +984,6 @@ pub(super) async fn send_swarm_plan_to_session(
     }
 }
 
-pub(super) async fn rename_plan_participant(
-    swarm_id: &str,
-    old_session_id: &str,
-    new_session_id: &str,
-    swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
-) {
-    let mut plans = swarm_plans.write().await;
-    if let Some(vp) = plans.get_mut(swarm_id) {
-        vp.rename_session(old_session_id, new_session_id);
-    }
-}
-
 pub(super) async fn remove_plan_participant(
     swarm_id: &str,
     session_id: &str,

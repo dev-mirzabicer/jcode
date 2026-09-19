@@ -145,7 +145,7 @@ async fn handle_get_history_falls_back_to_persisted_snapshot_when_agent_is_busy(
     )));
     let busy_guard = agent.lock().await;
 
-    let sessions = Arc::new(RwLock::new(HashMap::from([(
+    let sessions = Arc::new(crate::primary::PrimaryHost::new(HashMap::from([(
         session_id.to_string(),
         Arc::clone(&agent),
     )])));

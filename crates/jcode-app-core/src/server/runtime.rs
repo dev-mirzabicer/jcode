@@ -6,7 +6,6 @@ use super::{
     AwaitMembersRuntime, FileTouchService, ServerIdentity, SessionInterruptQueues, SharedContext,
     SwarmEvent, SwarmMutationRuntime, SwarmState,
 };
-use crate::agent::Agent;
 use crate::ambient_runner::AmbientRunnerHandle;
 use crate::gateway::GatewayClient;
 use crate::protocol::ServerEvent;
@@ -89,7 +88,7 @@ fn log_task_completion(result: Result<(), tokio::task::JoinError>) {
 
 #[derive(Clone)]
 pub(super) struct ServerRuntime {
-    sessions: Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
+    sessions: Arc<crate::primary::PrimaryHost>,
     event_tx: broadcast::Sender<ServerEvent>,
     provider: Arc<dyn Provider>,
     context_transactions: Arc<crate::context::ContextTransactionService>,
@@ -313,6 +312,9 @@ impl ServerRuntime {
     }
 
     pub(super) async fn shutdown(&self) {
+        if let Err(error) = self.sessions.shutdown().await {
+            crate::logging::error(&format!("Primary shutdown did not complete: {error:#}"));
+        }
         self.tasks.shutdown().await;
     }
 

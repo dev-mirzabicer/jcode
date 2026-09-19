@@ -58,7 +58,7 @@ async fn queue_soft_interrupt_for_session_uses_registered_queue_when_agent_busy(
     };
     let queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
     register_session_interrupt_queue(&queues, &session_id, queue.clone()).await;
-    let sessions = Arc::new(RwLock::new(HashMap::from([(
+    let sessions = Arc::new(crate::primary::PrimaryHost::new(HashMap::from([(
         session_id.clone(),
         agent.clone(),
     )])));
@@ -97,7 +97,7 @@ async fn queue_soft_interrupt_for_session_registers_queue_on_fallback_lookup() {
         guard.soft_interrupt_queue()
     };
     let queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
-    let sessions = Arc::new(RwLock::new(HashMap::from([(
+    let sessions = Arc::new(crate::primary::PrimaryHost::new(HashMap::from([(
         session_id.clone(),
         agent.clone(),
     )])));
@@ -141,7 +141,7 @@ async fn queue_soft_interrupt_for_session_persists_when_live_queue_is_unavailabl
         .expect("save session snapshot");
 
     let queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
-    let sessions = Arc::new(RwLock::new(HashMap::new()));
+    let sessions = Arc::new(crate::primary::PrimaryHost::new(HashMap::new()));
 
     let queued = queue_soft_interrupt_for_session(
         &session_id,

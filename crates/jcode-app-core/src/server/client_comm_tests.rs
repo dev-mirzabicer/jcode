@@ -52,7 +52,7 @@ async fn comm_message_default_does_not_queue_soft_interrupt_for_connected_sessio
     let target_id = target.lock().await.session_id().to_string();
     let target_queue = target.lock().await.soft_interrupt_queue();
 
-    let sessions = Arc::new(RwLock::new(HashMap::from([
+    let sessions = Arc::new(crate::primary::PrimaryHost::new(HashMap::from([
         (sender_id.clone(), sender.clone()),
         (target_id.clone(), target.clone()),
     ])));
@@ -210,7 +210,7 @@ async fn comm_message_with_wake_queues_soft_interrupt_for_busy_connected_session
     let target_id = target.lock().await.session_id().to_string();
     let target_queue = target.lock().await.soft_interrupt_queue();
 
-    let sessions = Arc::new(RwLock::new(HashMap::from([
+    let sessions = Arc::new(crate::primary::PrimaryHost::new(HashMap::from([
         (sender_id.clone(), sender.clone()),
         (target_id.clone(), target.clone()),
     ])));
@@ -437,7 +437,7 @@ async fn comm_list_includes_member_status_and_detail() {
         HashSet::from([requester_id.clone(), peer_id.clone()]),
     )])));
     let file_touch = crate::server::FileTouchService::new();
-    let sessions = Arc::new(RwLock::new(HashMap::from([
+    let sessions = Arc::new(crate::primary::PrimaryHost::new(HashMap::from([
         (requester_id.clone(), requester.clone()),
         (peer_id.clone(), peer.clone()),
     ])));
@@ -478,7 +478,7 @@ async fn comm_message_accepts_friendly_name_dm_target() {
     let target_id = target.lock().await.session_id().to_string();
     let swarm_id = "swarm-test".to_string();
 
-    let sessions = Arc::new(RwLock::new(HashMap::from([
+    let sessions = Arc::new(crate::primary::PrimaryHost::new(HashMap::from([
         (sender_id.clone(), sender.clone()),
         (target_id.clone(), target.clone()),
     ])));
@@ -611,7 +611,7 @@ async fn comm_message_rejects_ambiguous_friendly_name_dm_target() {
     let target_two_id = target_two.lock().await.session_id().to_string();
     let swarm_id = "swarm-test".to_string();
 
-    let sessions = Arc::new(RwLock::new(HashMap::from([
+    let sessions = Arc::new(crate::primary::PrimaryHost::new(HashMap::from([
         (sender_id.clone(), sender.clone()),
         (target_one_id.clone(), target_one.clone()),
         (target_two_id.clone(), target_two.clone()),
@@ -816,7 +816,7 @@ async fn comm_broadcast_reaches_only_senders_spawned_subtree() {
             "outsider".to_string(),
         ]),
     )])));
-    let sessions = Arc::new(RwLock::new(HashMap::new()));
+    let sessions = Arc::new(crate::primary::PrimaryHost::new(HashMap::new()));
     let soft_interrupt_queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
     let channel_subscriptions = Arc::new(RwLock::new(HashMap::new()));
     let event_history: Arc<RwLock<std::collections::VecDeque<SwarmEvent>>> =
