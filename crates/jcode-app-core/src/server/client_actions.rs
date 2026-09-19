@@ -1221,11 +1221,17 @@ pub(super) async fn handle_stdin_response(
     id: u64,
     request_id: String,
     input: String,
-    stdin_responses: &Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<String>>>>,
+    session: &str,
+    sessions: &SessionAgents,
     client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
-    if let Some(tx) = stdin_responses.lock().await.remove(&request_id) {
-        let _ = tx.send(input);
-    }
-    let _ = client_event_tx.send(ServerEvent::Done { id });
+    let event = match sessions.respond_stdin(session, &request_id, input) {
+        Ok(()) => ServerEvent::Done { id },
+        Err(error) => ServerEvent::Error {
+            id,
+            message: error.to_string(),
+            retry_after_secs: None,
+        },
+    };
+    let _ = client_event_tx.send(event);
 }

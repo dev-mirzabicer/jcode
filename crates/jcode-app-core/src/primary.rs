@@ -24,6 +24,7 @@ pub struct PrimaryHost {
     provisional: StdMutex<HashSet<String>>,
     resources: StdMutex<HashMap<String, PrimaryResources>>,
     accepting: AtomicBool,
+    stdin: StdMutex<HashMap<String, Arc<crate::server::primary_stdin::PrimaryStdin>>>,
     presentations: StdMutex<HashMap<String, Arc<presentation::Presentation>>>,
 }
 
@@ -114,6 +115,7 @@ impl PrimaryHost {
             provisional: StdMutex::new(HashSet::new()),
             resources: StdMutex::new(resources),
             accepting: AtomicBool::new(true),
+            stdin: StdMutex::new(HashMap::new()),
             presentations: StdMutex::new(HashMap::new()),
         }
     }
@@ -129,6 +131,35 @@ impl PrimaryHost {
 
     pub(crate) fn subscribe(&self) -> watch::Receiver<u64> {
         self.revision.subscribe()
+    }
+
+    pub(crate) fn stdin(
+        &self,
+        session: &str,
+        create: impl FnOnce() -> crate::server::primary_stdin::PrimaryStdin,
+    ) -> Arc<crate::server::primary_stdin::PrimaryStdin> {
+        self.stdin
+            .lock()
+            .expect("primary stdin owners")
+            .entry(session.into())
+            .or_insert_with(|| Arc::new(create()))
+            .clone()
+    }
+    pub(crate) fn pending_stdin(&self, session: &str) -> Vec<crate::protocol::ServerEvent> {
+        self.stdin
+            .lock()
+            .expect("primary stdin owners")
+            .get(session)
+            .map(|input| input.pending())
+            .unwrap_or_default()
+    }
+    pub(crate) fn respond_stdin(&self, session: &str, request: &str, input: String) -> Result<()> {
+        self.stdin
+            .lock()
+            .expect("primary stdin owners")
+            .get(session)
+            .ok_or_else(|| anyhow::anyhow!("Primary has no pending input"))?
+            .respond(request, input)
     }
 
     pub(crate) fn presentation(&self, session: &str) -> Arc<presentation::Presentation> {
@@ -444,6 +475,16 @@ impl PrimaryHost {
         let mut tasks = std::mem::take(&mut *self.tasks.lock().expect("primary tasks"));
         while let Some(result) = tasks.join_next().await {
             result?;
+        }
+        let inputs = self
+            .stdin
+            .lock()
+            .expect("primary stdin owners")
+            .drain()
+            .map(|(_, input)| input)
+            .collect::<Vec<_>>();
+        for input in inputs {
+            input.shutdown().await;
         }
         Ok(())
     }

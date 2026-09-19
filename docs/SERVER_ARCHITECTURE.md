@@ -208,3 +208,10 @@ When running `jcode` inside the jcode repository:
 | `/reload` | Server execs new binary, clients reconnect |
 | All clients close | Server idle-timeout after 5 min |
 | Resume session | `jcode --resume fox` reconnects to existing session |
+
+Hosted tool-stdin requests are also primary-owned. A new attachment can inspect
+pending prompts and answer through the existing `stdin_response` protocol.
+Foreign-primary, closed and duplicate responses fail rather than reporting false
+success. Input bodies are not stored in the pending-prompt view. The current TUI's
+limited interactive-terminal notice is unchanged; this does not introduce a new
+stdin UI or the later questionnaire framework.

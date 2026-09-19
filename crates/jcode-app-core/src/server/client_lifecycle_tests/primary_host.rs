@@ -1,5 +1,72 @@
 use super::*;
 
+#[tokio::test]
+async fn primary_stdin_survives_observer_loss_and_rejects_foreign_or_duplicate_answers()
+-> Result<()> {
+    let host = Arc::new(crate::primary::PrimaryHost::default());
+    let session = "stdin-primary-fixture";
+    let status = status_fixture(session);
+    let input = host.stdin(session, || {
+        crate::server::primary_stdin::PrimaryStdin::new(session.into(), status.members.clone())
+    });
+    let (events, mut observer) = mpsc::unbounded_channel();
+    crate::server::register_session_event_sender(&status.members, session, "old", events.into())
+        .await;
+    let (response, answer) = tokio::sync::oneshot::channel();
+    input.sender().send(crate::tool::StdinInputRequest {
+        request_id: "fixture-input".into(),
+        prompt: "synthetic input prompt".into(),
+        is_password: true,
+        response_tx: response,
+    })?;
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(1), observer.recv()).await?,
+        Some(ServerEvent::StdinRequest {
+            is_password: true,
+            ..
+        })
+    ));
+    crate::server::unregister_session_event_sender(&status.members, session, "old").await;
+    drop(observer);
+    assert_eq!(host.pending_stdin(session).len(), 1);
+    let (events, mut observer) = mpsc::unbounded_channel();
+    let events: crate::client_delivery::ClientEventSender = events.into();
+    crate::server::client_actions::handle_stdin_response(
+        3,
+        "fixture-input".into(),
+        "not accepted".into(),
+        "other-primary",
+        &host,
+        &events,
+    )
+    .await;
+    assert!(matches!(
+        observer.recv().await,
+        Some(ServerEvent::Error { id: 3, .. })
+    ));
+    // The pending authority lives in the retained service even after the old
+    // observer disappears. No input body is placed in its discovery event.
+    assert_eq!(input.pending().len(), 1);
+    crate::server::client_actions::handle_stdin_response(
+        4,
+        "fixture-input".into(),
+        "synthetic private answer".into(),
+        session,
+        &host,
+        &events,
+    )
+    .await;
+    assert!(matches!(
+        observer.recv().await,
+        Some(ServerEvent::Done { id: 4 })
+    ));
+    assert_eq!(answer.await?, "synthetic private answer");
+    assert!(input.respond("fixture-input", "duplicate".into()).is_err());
+    assert!(input.pending().is_empty());
+    host.shutdown().await?;
+    Ok(())
+}
+
 #[test]
 fn stopped_snapshot_retains_partial_output_without_fabricating_source() -> Result<()> {
     let _lock = crate::storage::lock_test_env();

@@ -1085,40 +1085,9 @@ pub(super) async fn handle_client_with_instruction_repositories(
         }
     }
 
-    let stdin_responses: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<String>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-
     // Subscribe to bus events so we can forward ModelsUpdated to this client
     // (e.g. when Copilot finishes async init after the initial History was sent)
     let mut bus_rx = Bus::global().subscribe();
-
-    // Set up stdin request forwarding: tools send StdinInputRequest, we forward to TUI
-    let (stdin_req_tx, mut stdin_req_rx) =
-        tokio::sync::mpsc::unbounded_channel::<crate::tool::StdinInputRequest>();
-    {
-        let mut agent_guard = agent.lock().await;
-        agent_guard.set_stdin_request_tx(stdin_req_tx);
-    }
-    let _stdin_forwarder = {
-        let client_event_tx = client_event_tx.clone();
-        let stdin_responses = stdin_responses.clone();
-        let tool_call_id = String::new();
-        tokio::spawn(async move {
-            while let Some(req) = stdin_req_rx.recv().await {
-                let request_id = req.request_id.clone();
-                stdin_responses
-                    .lock()
-                    .await
-                    .insert(request_id.clone(), req.response_tx);
-                let _ = client_event_tx.send(ServerEvent::StdinRequest {
-                    request_id,
-                    prompt: req.prompt,
-                    is_password: req.is_password,
-                    tool_call_id: tool_call_id.clone(),
-                });
-            }
-        })
-    };
 
     // Do not drain global bus traffic until the client has completed its first
     // subscribe. Under heavy swarm file-activity load, ignored bus frames can
@@ -3669,7 +3638,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
                 request_id,
                 input,
             } => {
-                handle_stdin_response(id, request_id, input, &stdin_responses, &client_event_tx)
+                handle_stdin_response(id, request_id, input, &client_session_id, &sessions, &client_event_tx)
                     .await;
             }
 
@@ -4736,6 +4705,10 @@ async fn start_processing_message(
     let startup_context = startup_context.clone();
     let terminal_tx = tx.clone();
     let snapshot_agent = agent.clone();
+    let stdin = host.stdin(client_session_id, || {
+        super::primary_stdin::PrimaryStdin::new(client_session_id.into(), swarm.members.clone())
+    });
+    admission.agent.set_stdin_request_tx(stdin.sender());
     admission.agent.primary_presentation = Some(host.presentation(client_session_id));
     host.start(
         admission,

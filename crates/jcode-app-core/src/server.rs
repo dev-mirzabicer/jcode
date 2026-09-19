@@ -42,6 +42,7 @@ mod lifecycle;
 mod live_turn;
 mod notification;
 mod primary_output;
+pub(crate) mod primary_stdin;
 mod provider_control;
 mod reload;
 mod reload_recovery;

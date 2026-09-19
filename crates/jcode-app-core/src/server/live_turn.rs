@@ -214,6 +214,10 @@ pub(super) async fn spawn_tracked_live_turn(
     let tx = output.tx.clone();
     let terminal_tx = tx.clone();
     let session = session_id.to_string();
+    let stdin = host.stdin(session_id, || {
+        super::primary_stdin::PrimaryStdin::new(session_id.into(), swarm.members.clone())
+    });
+    admission.agent.set_stdin_request_tx(stdin.sender());
     admission.agent.primary_presentation = Some(host.presentation(session_id));
     host.start(
         admission,

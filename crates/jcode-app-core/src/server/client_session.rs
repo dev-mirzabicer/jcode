@@ -1321,6 +1321,9 @@ pub(super) async fn handle_resume_session(
             Some(client_event_tx),
         )
         .await?;
+        for request in sessions.pending_stdin(&session_id) {
+            let _ = client_event_tx.for_session(&session_id).send(request);
+        }
         client_event_tx.finish_snapshot();
         let _ = client_event_tx.send(ServerEvent::Done { id });
         // Resolve project-local MCP config against the resumed session's
