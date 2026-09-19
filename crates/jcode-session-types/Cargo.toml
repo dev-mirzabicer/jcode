@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
+jcode-workspace-types = { path = "../jcode-workspace-types" }
 chrono = { version = "0.4", features = ["serde"] }
 jcode-message-types = { path = "../jcode-message-types" }
 memchr = "2"

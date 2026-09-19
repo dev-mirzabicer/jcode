@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 mod backup;
 mod organization;
 mod portable;
+mod primary_location;
+pub use primary_location::PreparedPrimaryLocation;
 #[cfg(test)]
 mod process_tests;
 mod query;

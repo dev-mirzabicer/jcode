@@ -4243,6 +4243,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "jcode-message-types",
+ "jcode-workspace-types",
  "memchr",
  "serde",
  "serde_json",

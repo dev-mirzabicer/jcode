@@ -262,6 +262,9 @@ impl std::error::Error for SystemPromptDispatchError {
     }
 }
 
+pub type StoredSessionLocation =
+    jcode_session_types::StoredSessionLocation<crate::location::volume::PhysicalBinding>;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     /// Checkpoint/journal pairing, independent of conversation/context identity.
@@ -356,6 +359,8 @@ pub struct Session {
     /// Working directory (for self-dev detection)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<StoredSessionLocation>,
     /// Memorable short name (e.g., "fox", "oak")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub short_name: Option<String>,
@@ -465,6 +470,8 @@ struct SessionStartupStub {
     testing_build: Option<String>,
     #[serde(default)]
     working_dir: Option<String>,
+    #[serde(default)]
+    location: Option<StoredSessionLocation>,
     #[serde(default)]
     short_name: Option<String>,
     #[serde(default)]
@@ -939,6 +946,7 @@ impl Session {
         self.is_canary = parent.is_canary;
         self.testing_build = parent.testing_build.clone();
         self.working_dir = parent.working_dir.clone();
+        self.location = parent.location.clone();
         self.is_debug = parent.is_debug;
         self.memory_injections = parent.memory_injections.clone();
         self.replay_events = parent.replay_events.clone();
@@ -973,6 +981,7 @@ impl Session {
         session.is_canary = stub.is_canary;
         session.testing_build = stub.testing_build;
         session.working_dir = stub.working_dir;
+        session.location = stub.location;
         session.short_name = stub.short_name;
         session.status = stub.status;
         session.last_pid = stub.last_pid;
@@ -1196,6 +1205,7 @@ impl Session {
             is_canary: self.is_canary,
             testing_build: self.testing_build.clone(),
             working_dir: self.working_dir.clone(),
+            location: self.location.clone(),
             short_name: self.short_name.clone(),
             status: self.status.clone(),
             last_pid: self.last_pid,
@@ -1510,6 +1520,7 @@ impl Session {
         self.is_canary = meta.is_canary;
         self.testing_build = meta.testing_build;
         self.working_dir = meta.working_dir;
+        self.location = meta.location;
         self.short_name = meta.short_name;
         self.status = meta.status;
         self.last_pid = meta.last_pid;
@@ -1758,6 +1769,7 @@ impl Session {
             is_canary: false,
             testing_build: None,
             working_dir: current_working_dir_string(),
+            location: None,
             short_name,
             status: SessionStatus::Active,
             last_pid: Some(std::process::id()),
@@ -1831,6 +1843,7 @@ impl Session {
             is_canary: false,
             testing_build: None,
             working_dir: current_working_dir_string(),
+            location: None,
             short_name: Some(short_name),
             status: SessionStatus::Active,
             last_pid: Some(std::process::id()),

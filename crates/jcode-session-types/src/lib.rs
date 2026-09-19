@@ -3,6 +3,8 @@ use jcode_message_types::{ContentBlock, Message, Role, ToolCall};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
+mod location;
+pub use location::*;
 mod context;
 pub use context::*;
 mod startup_context;

@@ -1327,3 +1327,136 @@ fn catalog_and_wal_are_private_and_database_symlinks_reject() {
     symlink(&saved, &db).unwrap();
     assert!(catalog.status().is_err());
 }
+
+#[test]
+#[cfg(target_os = "macos")]
+fn primary_location_preparation_requires_explicit_cwd_and_preserves_placement() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = WorkspaceService::new(&temp.path().join("state"));
+    service.initialize(RequestId::new()).unwrap();
+    let project = project(&service, "fixture");
+    let area = match change(
+        &service,
+        OrganizationChange::CreateWorkArea {
+            project,
+            name: "area".into(),
+        },
+    )
+    .targets[0]
+    {
+        EntityId::WorkArea(id) => id,
+        _ => panic!("area"),
+    };
+    let repository = repository(&service, "repository");
+    change(
+        &service,
+        OrganizationChange::AssociateRepository {
+            project,
+            repository,
+        },
+    );
+    let mut roots = Vec::new();
+    for (name, registration, git) in [
+        (
+            "checkout",
+            Registration::Checkout {
+                home: Home::WorkArea(area),
+                repository,
+            },
+            true,
+        ),
+        (
+            "directory",
+            Registration::Directory {
+                home: Home::Project(project),
+            },
+            false,
+        ),
+        ("standalone", Registration::Standalone, false),
+    ] {
+        let root = temp.path().join(name);
+        std::fs::create_dir(&root).unwrap();
+        if git {
+            assert!(
+                std::process::Command::new("git")
+                    .args(["init", "-q"])
+                    .arg(&root)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let receipt = change(
+            &service,
+            OrganizationChange::RegisterLocation {
+                name: name.into(),
+                path: root.clone(),
+                registration,
+            },
+        );
+        let EntityId::Location(id) = receipt.targets[0] else {
+            panic!("location")
+        };
+        roots.push((id, root));
+    }
+    let sub = roots[0].1.join("subdirectory");
+    std::fs::create_dir(&sub).unwrap();
+    let before = service.status().unwrap();
+    for (placement, cwd) in [
+        (Placement::Project(project), &sub),
+        (Placement::WorkArea(area), &sub),
+        (Placement::Checkout(roots[0].0), &sub),
+        (Placement::Directory(roots[1].0), &roots[1].1),
+        (Placement::Standalone(roots[2].0), &roots[2].1),
+    ] {
+        let operation = OperationId::new();
+        let prepared = service
+            .prepare_primary_location(placement, Some(cwd), operation)
+            .unwrap();
+        assert_eq!(prepared.location.placement, placement);
+        assert_eq!(
+            prepared.location.cwd.observed_path(),
+            cwd.canonicalize().unwrap()
+        );
+        assert_eq!(prepared.location.last_operation, Some(operation));
+        assert_eq!(prepared.catalog_revision, before.revision);
+        assert!(
+            service.acquire_root(prepared.root).is_err(),
+            "preparation retains physical admission"
+        );
+        drop(prepared);
+    }
+    assert_eq!(service.status().unwrap(), before);
+    assert_eq!(
+        service
+            .prepare_primary_location(Placement::Project(project), None, OperationId::new())
+            .err()
+            .unwrap()
+            .code,
+        IssueCode::NeedsCwd
+    );
+    assert_eq!(
+        service
+            .prepare_primary_location(
+                Placement::Checkout(roots[0].0),
+                Some(&roots[1].1),
+                OperationId::new()
+            )
+            .err()
+            .unwrap()
+            .code,
+        IssueCode::PermissionRequired
+    );
+    let missing = temp.path().join("must-not-be-created");
+    assert!(
+        service
+            .prepare_primary_location(
+                Placement::Project(project),
+                Some(&missing),
+                OperationId::new()
+            )
+            .is_err()
+    );
+    assert!(!missing.exists());
+    assert!(!roots[1].1.join(".git").exists());
+}

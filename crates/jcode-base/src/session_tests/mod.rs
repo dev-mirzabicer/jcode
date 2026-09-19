@@ -39,3 +39,5 @@ mod cases;
 
 #[path = "context_view.rs"]
 mod context_view;
+
+mod location;
