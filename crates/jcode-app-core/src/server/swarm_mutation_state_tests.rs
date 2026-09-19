@@ -50,9 +50,16 @@ async fn swarm_mutation_replays_persisted_spawn_response() {
         ],
     );
 
-    let state = begin_or_replay(&runtime, &key, "spawn", "coord", 1, &client_tx)
-        .await
-        .expect("first request should start execution");
+    let state = begin_or_replay(
+        &runtime,
+        &key,
+        "spawn",
+        "coord",
+        1,
+        &client_tx.clone().into(),
+    )
+    .await
+    .expect("first request should start execution");
     finish_request(
         &runtime,
         &state,
@@ -63,7 +70,15 @@ async fn swarm_mutation_replays_persisted_spawn_response() {
     .await;
 
     let (retry_tx, mut retry_rx) = tokio::sync::mpsc::unbounded_channel();
-    let replay = begin_or_replay(&runtime, &key, "spawn", "coord", 2, &retry_tx).await;
+    let replay = begin_or_replay(
+        &runtime,
+        &key,
+        "spawn",
+        "coord",
+        2,
+        &retry_tx.clone().into(),
+    )
+    .await;
     assert!(replay.is_none(), "retry should replay persisted response");
 
     match client_rx.recv().await.expect("initial response") {
@@ -101,10 +116,25 @@ async fn swarm_mutation_concurrent_duplicates_share_final_done_response() {
     let (first_tx, mut first_rx) = tokio::sync::mpsc::unbounded_channel();
     let (retry_tx, mut retry_rx) = tokio::sync::mpsc::unbounded_channel();
 
-    let state = begin_or_replay(&runtime, &key, "assign_task", "coord", 1, &first_tx)
-        .await
-        .expect("first request should start execution");
-    let replay = begin_or_replay(&runtime, &key, "assign_task", "coord", 2, &retry_tx).await;
+    let state = begin_or_replay(
+        &runtime,
+        &key,
+        "assign_task",
+        "coord",
+        1,
+        &first_tx.clone().into(),
+    )
+    .await
+    .expect("first request should start execution");
+    let replay = begin_or_replay(
+        &runtime,
+        &key,
+        "assign_task",
+        "coord",
+        2,
+        &retry_tx.clone().into(),
+    )
+    .await;
     assert!(
         replay.is_none(),
         "second in-flight duplicate should wait for original completion"
@@ -143,9 +173,16 @@ async fn control_driven_begin_re_dispatches_despite_persisted_final_state() {
     );
 
     let (first_tx, mut first_rx) = tokio::sync::mpsc::unbounded_channel();
-    let state = begin_or_join_in_flight(&runtime, &key, "assign_task", "coord", 1, &first_tx)
-        .await
-        .expect("first attempt should start execution");
+    let state = begin_or_join_in_flight(
+        &runtime,
+        &key,
+        "assign_task",
+        "coord",
+        1,
+        &first_tx.clone().into(),
+    )
+    .await
+    .expect("first attempt should start execution");
     finish_request(
         &runtime,
         &state,
@@ -162,9 +199,16 @@ async fn control_driven_begin_re_dispatches_despite_persisted_final_state() {
 
     // Identical retry within the final-state TTL: must start a fresh attempt.
     let (retry_tx, _retry_rx) = tokio::sync::mpsc::unbounded_channel();
-    let retry_state = begin_or_join_in_flight(&runtime, &key, "assign_task", "coord", 2, &retry_tx)
-        .await
-        .expect("control-driven retry must re-dispatch instead of replaying the stale success");
+    let retry_state = begin_or_join_in_flight(
+        &runtime,
+        &key,
+        "assign_task",
+        "coord",
+        2,
+        &retry_tx.clone().into(),
+    )
+    .await
+    .expect("control-driven retry must re-dispatch instead of replaying the stale success");
     assert!(
         retry_state.final_response.is_none(),
         "fresh attempt must not carry the previous attempt's final response"
@@ -185,10 +229,25 @@ async fn control_driven_begin_coalesces_in_flight_duplicates() {
 
     let (first_tx, mut first_rx) = tokio::sync::mpsc::unbounded_channel();
     let (dup_tx, mut dup_rx) = tokio::sync::mpsc::unbounded_channel();
-    let state = begin_or_join_in_flight(&runtime, &key, "assign_task", "coord", 1, &first_tx)
-        .await
-        .expect("first attempt should start execution");
-    let dup = begin_or_join_in_flight(&runtime, &key, "assign_task", "coord", 2, &dup_tx).await;
+    let state = begin_or_join_in_flight(
+        &runtime,
+        &key,
+        "assign_task",
+        "coord",
+        1,
+        &first_tx.clone().into(),
+    )
+    .await
+    .expect("first attempt should start execution");
+    let dup = begin_or_join_in_flight(
+        &runtime,
+        &key,
+        "assign_task",
+        "coord",
+        2,
+        &dup_tx.clone().into(),
+    )
+    .await;
     assert!(
         dup.is_none(),
         "in-flight duplicate should join the active execution as a waiter"

@@ -146,7 +146,7 @@ async fn handle_resume_session_allows_attach_without_local_history() -> Result<(
         &writer,
         "test-server",
         "🌿",
-        &client_event_tx,
+        &client_event_tx.clone().into(),
         &mcp_pool,
         &event_history,
         &event_counter,

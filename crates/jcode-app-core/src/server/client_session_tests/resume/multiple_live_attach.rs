@@ -116,7 +116,7 @@ async fn handle_resume_session_allows_multiple_live_tui_attach() -> Result<()> {
         &writer,
         "test-server",
         "🌿",
-        &client_event_tx,
+        &client_event_tx.clone().into(),
         &mcp_pool,
         &event_history,
         &event_counter,

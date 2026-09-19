@@ -554,7 +554,7 @@ async fn cancellable_search_and_checked_event_bound_do_not_leak_oversized_conten
             lease_request_for(&editor, "session", "connection"),
             "plan".to_string(),
             None,
-            mpsc::unbounded_channel().0,
+            mpsc::unbounded_channel().0.into(),
         )
         .expect_err("per-connection search capacity must be bounded");
     assert_eq!(
@@ -566,7 +566,7 @@ async fn cancellable_search_and_checked_event_bound_do_not_leak_oversized_conten
     let (tx, mut rx) = mpsc::unbounded_channel();
 
     emit_checked(
-        &tx,
+        &tx.clone().into(),
         88,
         StartupContextOperation::PreviewFile,
         ServerEvent::StartupContextFilePreview {

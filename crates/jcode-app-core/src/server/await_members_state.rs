@@ -1,4 +1,4 @@
-use crate::protocol::{AwaitedMemberStatus, ServerEvent};
+use crate::protocol::AwaitedMemberStatus;
 use crate::server::durable_state::{
     hashed_request_key, load_json_state, now_unix_ms, save_json_state, state_dir,
 };
@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::RwLock;
 
 const AWAIT_MEMBERS_DIR: &str = "jcode-await-members";
 const FINAL_STATE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
@@ -64,7 +64,7 @@ impl PersistedAwaitMembersState {
 #[derive(Clone)]
 struct AwaitMembersWaiter {
     request_id: u64,
-    client_event_tx: mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: crate::client_delivery::ClientEventSender,
 }
 
 #[derive(Clone, Default)]
@@ -78,7 +78,7 @@ impl AwaitMembersRuntime {
         &self,
         key: &str,
         request_id: u64,
-        client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+        client_event_tx: &crate::client_delivery::ClientEventSender,
     ) {
         let mut waiters = self.waiters.write().await;
         waiters
@@ -115,7 +115,7 @@ impl AwaitMembersRuntime {
     pub(super) async fn take_waiters(
         &self,
         key: &str,
-    ) -> Vec<(u64, mpsc::UnboundedSender<ServerEvent>)> {
+    ) -> Vec<(u64, crate::client_delivery::ClientEventSender)> {
         self.waiters
             .write()
             .await

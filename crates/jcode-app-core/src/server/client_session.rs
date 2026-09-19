@@ -22,7 +22,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
+use tokio::sync::{Mutex, RwLock, broadcast};
 
 type SessionAgents = Arc<crate::primary::PrimaryHost>;
 type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
@@ -128,7 +128,7 @@ pub(super) async fn handle_clear_session(
     event_history: &Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
     event_counter: &Arc<std::sync::atomic::AtomicU64>,
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     let clear_start = Instant::now();
     let old_session_id = client_session_id.clone();
@@ -325,7 +325,7 @@ async fn ensure_client_swarm_member(
     client_session_id: &str,
     client_connection_id: &str,
     friendly_name: &Option<String>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
     agent: &Arc<Mutex<Agent>>,
     swarm_enabled: bool,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
@@ -334,6 +334,7 @@ async fn ensure_client_swarm_member(
     event_counter: &Arc<std::sync::atomic::AtomicU64>,
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
 ) -> bool {
+    let client_event_tx = &client_event_tx.for_session(client_session_id);
     let swarm_enabled = swarm_enabled && crate::config::config().features.swarm;
     let (working_dir, derived_swarm_id, fallback_name) = {
         // A target-aware subscribe can attach to an agent that is in the middle
@@ -514,7 +515,7 @@ pub(super) async fn handle_subscribe(
     channel_subscriptions_by_session: &ChannelSubscriptions,
     swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
     swarm_coordinators: &Arc<RwLock<HashMap<String, String>>>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
     mcp_pool: &Arc<crate::mcp::SharedMcpPool>,
     event_history: &Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
     event_counter: &Arc<std::sync::atomic::AtomicU64>,
@@ -821,7 +822,7 @@ pub(super) async fn handle_reload(
     client_session_id: &str,
     agent: &Arc<Mutex<Agent>>,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     // A non-forced reload (e.g. `jcode server reload`) is a graceful upgrade
     // request: only reload when this server is provably running older code than
@@ -1069,7 +1070,7 @@ pub(super) async fn handle_resume_session(
     writer: &Arc<Mutex<WriteHalf>>,
     server_name: &str,
     server_icon: &str,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
     mcp_pool: &Arc<crate::mcp::SharedMcpPool>,
     event_history: &Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
     event_counter: &Arc<std::sync::atomic::AtomicU64>,
@@ -1243,6 +1244,7 @@ pub(super) async fn handle_resume_session(
             }
         }
 
+        let client_event_tx = &client_event_tx.begin_snapshot(&session_id, writer).await;
         ensure_client_swarm_member(
             &session_id,
             client_connection_id,
@@ -1316,6 +1318,7 @@ pub(super) async fn handle_resume_session(
             was_interrupted,
         )
         .await?;
+        client_event_tx.finish_snapshot();
         let _ = client_event_tx.send(ServerEvent::Done { id });
         // Resolve project-local MCP config against the resumed session's
         // working dir, not the server process cwd (issue #420).

@@ -81,7 +81,7 @@ fn member(session_id: &str, swarm_id: &str, role: &str) -> SwarmMember {
     let (event_tx, _event_rx) = mpsc::unbounded_channel();
     SwarmMember {
         session_id: session_id.to_string(),
-        event_tx,
+        event_tx: event_tx.into(),
         event_txs: HashMap::new(),
         working_dir: None,
         swarm_id: Some(swarm_id.to_string()),
@@ -122,7 +122,7 @@ struct PlanFixture {
     swarm_id: String,
     coord: String,
     worker: String,
-    client_tx: mpsc::UnboundedSender<ServerEvent>,
+    client_tx: crate::client_delivery::ClientEventSender,
     client_rx: mpsc::UnboundedReceiver<ServerEvent>,
     sessions: crate::server::SessionAgents,
     soft_interrupt_queues: crate::server::SessionInterruptQueues,
@@ -162,7 +162,7 @@ fn plan_fixture(swarm_id: &str, coord: &str, worker: &str) -> PlanFixture {
         swarm_id,
         coord,
         worker,
-        client_tx,
+        client_tx: client_tx.into(),
         client_rx,
         sessions: Arc::new(crate::primary::PrimaryHost::default()),
         soft_interrupt_queues: Arc::new(RwLock::new(HashMap::new())),
@@ -488,8 +488,10 @@ async fn worker_proposal_is_lost_when_coordinator_cached_channel_is_closed() {
     {
         let mut members = fx.swarm_members.write().await;
         let member = members.get_mut(&coord).expect("coordinator member");
-        member.event_tx = closed_tx;
-        member.event_txs.insert("conn-live".to_string(), live_tx);
+        member.event_tx = closed_tx.into();
+        member
+            .event_txs
+            .insert("conn-live".to_string(), live_tx.into());
     }
 
     // Register a live soft-interrupt queue for the coordinator so the
@@ -626,8 +628,10 @@ async fn direct_update_notification_is_lost_on_stale_cached_event_tx() {
         let member = members.get_mut(&worker).expect("worker member");
         let (stale_tx, stale_rx) = mpsc::unbounded_channel::<ServerEvent>();
         drop(stale_rx);
-        member.event_tx = stale_tx;
-        member.event_txs.insert("conn-live".to_string(), live_tx);
+        member.event_tx = stale_tx.into();
+        member
+            .event_txs
+            .insert("conn-live".to_string(), live_tx.into());
     }
 
     // Register a soft-interrupt queue for the worker so the fallback this

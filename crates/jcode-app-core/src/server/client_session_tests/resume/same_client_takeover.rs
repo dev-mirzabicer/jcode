@@ -127,7 +127,7 @@ async fn handle_resume_session_allows_same_client_instance_takeover_without_loca
         &writer,
         "test-server",
         "🌿",
-        &client_event_tx,
+        &client_event_tx.clone().into(),
         &mcp_pool,
         &event_history,
         &event_counter,

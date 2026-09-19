@@ -12,7 +12,9 @@ use crate::protocol::{
 };
 use jcode_session_types::{StoredContextAuthorization, StoredContextEmergencyPolicy};
 use std::sync::Arc;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::Mutex;
+#[cfg(test)]
+use tokio::sync::mpsc;
 
 pub(super) fn handle_get_context_editor_snapshot(
     id: u64,
@@ -21,7 +23,7 @@ pub(super) fn handle_get_context_editor_snapshot(
     agent: &Arc<Mutex<Agent>>,
     service: &Arc<ContextTransactionService>,
     processing: bool,
-    event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     let result = (|| {
         let page_size = bounded_value(
@@ -60,7 +62,7 @@ pub(super) fn handle_get_context_message_detail(
     max_chars: Option<usize>,
     agent: &Arc<Mutex<Agent>>,
     service: &Arc<ContextTransactionService>,
-    event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     let result = (|| {
         validate_identifier(&message_id, "message ID")?;
@@ -101,7 +103,7 @@ pub(super) fn handle_preview_context_ranges(
     ranges: Vec<ContextMessageRangeSelection>,
     agent: &Arc<Mutex<Agent>>,
     service: &Arc<ContextTransactionService>,
-    event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     let result = (|| {
         if ranges.is_empty() || ranges.len() > CONTEXT_MAX_SUMMARY_RANGES {
@@ -147,7 +149,7 @@ pub(super) fn handle_preview_context_curator_plan(
     agent: &Arc<Mutex<Agent>>,
     service: &Arc<ContextTransactionService>,
     processing: bool,
-    event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     let result = validate_draft_request(&request).and_then(|()| {
         let mut agent = agent
@@ -178,7 +180,7 @@ pub(super) fn handle_save_context_curator_default(
     selection: ContextCuratorSelection,
     agent: &Arc<Mutex<Agent>>,
     processing: bool,
-    event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     let result = (|| {
         if processing {
@@ -230,7 +232,7 @@ pub(super) fn handle_prepare_context_draft(
     agent: &Arc<Mutex<Agent>>,
     service: &Arc<ContextTransactionService>,
     processing: bool,
-    event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     let result = validate_draft_request(&request)
         .and_then(|()| service.prepare_draft(Arc::clone(agent), request, processing));
@@ -259,7 +261,7 @@ pub(super) fn handle_cancel_context_draft(
     draft_id: String,
     session_id: &str,
     service: &Arc<ContextTransactionService>,
-    event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     let result = validate_identifier(&draft_id, "draft ID")
         .and_then(|()| draft_status_for_session(service, &draft_id, session_id).map(|_| ()))
@@ -283,7 +285,7 @@ pub(super) fn handle_get_context_draft_status(
     draft_id: String,
     session_id: &str,
     service: &Arc<ContextTransactionService>,
-    event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     if let Err(error) = validate_identifier(&draft_id, "draft ID") {
         emit_rejection(
@@ -312,7 +314,7 @@ pub(super) fn handle_preview_context_draft_selection(
     selected_distillation_ids: Vec<String>,
     agent: &Arc<Mutex<Agent>>,
     service: &Arc<ContextTransactionService>,
-    event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     let result = validate_identifier(&draft_id, "draft ID")
         .and_then(|()| validate_distillation_ids(Some(&selected_distillation_ids)))
@@ -335,7 +337,7 @@ pub(super) fn handle_apply_context_draft(
     agent: &Arc<Mutex<Agent>>,
     service: &Arc<ContextTransactionService>,
     processing: bool,
-    event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     let result = validate_identifier(&draft_id, "draft ID")
         .and_then(|()| validate_distillation_ids(selected_distillation_ids.as_deref()))
@@ -371,7 +373,7 @@ pub(super) fn handle_list_context_transactions(
     offset: usize,
     limit: Option<usize>,
     agent: &Arc<Mutex<Agent>>,
-    event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     let result = (|| {
         let limit = bounded_value(
@@ -416,7 +418,7 @@ pub(super) fn handle_get_context_transaction_detail(
     expected_context_revision: u64,
     transaction_id: String,
     agent: &Arc<Mutex<Agent>>,
-    event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     let result = (|| {
         validate_identifier(&transaction_id, "transaction ID")?;
@@ -461,7 +463,7 @@ pub(super) fn handle_revert_context_transaction(
     agent: &Arc<Mutex<Agent>>,
     service: &Arc<ContextTransactionService>,
     processing: bool,
-    event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     let result = validate_identifier(&transaction_id, "transaction ID")
         .and_then(|()| service.revert_transaction(agent, &transaction_id, processing));
@@ -495,7 +497,7 @@ pub(super) fn handle_reapply_context_transaction(
     agent: &Arc<Mutex<Agent>>,
     service: &Arc<ContextTransactionService>,
     processing: bool,
-    event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     let result = validate_identifier(&transaction_id, "transaction ID")
         .and_then(|()| service.reapply_transaction(agent, &transaction_id, processing));
@@ -529,7 +531,7 @@ pub(super) fn handle_set_context_emergency_policy(
     agent: &Arc<Mutex<Agent>>,
     service: &Arc<ContextTransactionService>,
     processing: bool,
-    event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     match service.set_emergency_policy(agent, policy, processing) {
         Ok((session_id, policy)) => {
@@ -560,7 +562,7 @@ pub(super) fn handle_set_context_emergency_policy(
 pub(super) fn reject_legacy_context_request(
     id: u64,
     request: ContextRequestKind,
-    event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     emit_rejection(
         event_tx,
@@ -581,7 +583,7 @@ fn attach_draft_monitor(
     draft_id: String,
     expected_session_id: String,
     service: &Arc<ContextTransactionService>,
-    event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     let service = Arc::clone(service);
     let event_tx = event_tx.clone();
@@ -633,7 +635,7 @@ fn draft_status_for_session(
 }
 
 fn emit_draft_status(
-    event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    event_tx: &crate::client_delivery::ClientEventSender,
     id: u64,
     request: ContextRequestKind,
     status: ContextDraftStatus,
@@ -794,7 +796,7 @@ fn bounded_value(value: usize, maximum: usize, label: &str) -> Result<usize, Con
 }
 
 fn emit_result(
-    event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    event_tx: &crate::client_delivery::ClientEventSender,
     result: Result<ServerEvent, ContextServiceError>,
     id: u64,
     request: ContextRequestKind,
@@ -808,7 +810,7 @@ fn emit_result(
 }
 
 fn emit_checked(
-    event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    event_tx: &crate::client_delivery::ClientEventSender,
     event: ServerEvent,
     id: u64,
     request: ContextRequestKind,
@@ -845,7 +847,7 @@ fn emit_checked(
 }
 
 fn emit_rejection(
-    event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    event_tx: &crate::client_delivery::ClientEventSender,
     id: u64,
     request: ContextRequestKind,
     draft_id: Option<String>,
@@ -903,7 +905,7 @@ pub(super) fn dispatch_editor_request(
     agent: &Arc<Mutex<Agent>>,
     service: &Arc<ContextTransactionService>,
     processing: bool,
-    event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    event_tx: &crate::client_delivery::ClientEventSender,
 ) -> bool {
     match request {
         Request::GetContextEditorSnapshot {
@@ -1295,7 +1297,7 @@ mod tests {
         let Fixture { agent, service, .. } = fixture();
         let (tx, mut rx) = mpsc::unbounded_channel();
 
-        handle_get_context_editor_snapshot(1, 0, None, &agent, &service, false, &tx);
+        handle_get_context_editor_snapshot(1, 0, None, &agent, &service, false, &tx.clone().into());
         let snapshot = match receive_now(&mut rx) {
             ServerEvent::ContextEditorSnapshot { id, snapshot } => {
                 assert_eq!(id, 1);
@@ -1319,7 +1321,7 @@ mod tests {
             &agent,
             &service,
             false,
-            &tx,
+            &tx.clone().into(),
         );
         assert!(matches!(
             receive_now(&mut rx),
@@ -1331,7 +1333,13 @@ mod tests {
             (5, snapshot.raw_message_count + 1, None),
         ] {
             handle_get_context_editor_snapshot(
-                id, page_start, page_size, &agent, &service, false, &tx,
+                id,
+                page_start,
+                page_size,
+                &agent,
+                &service,
+                false,
+                &tx.clone().into(),
             );
             assert!(matches!(
                 receive_now(&mut rx),
@@ -1361,7 +1369,7 @@ mod tests {
             Some(2),
             &agent,
             &service,
-            &tx,
+            &tx.clone().into(),
         );
         match receive_now(&mut rx) {
             ServerEvent::ContextMessageDetail { id, detail } => {
@@ -1383,7 +1391,7 @@ mod tests {
             None,
             &agent,
             &service,
-            &tx,
+            &tx.clone().into(),
         );
         match receive_now(&mut rx) {
             ServerEvent::ContextMessageDetail { detail, .. } => {
@@ -1420,7 +1428,7 @@ mod tests {
             None,
             &agent,
             &service,
-            &tx,
+            &tx.clone().into(),
         );
         match receive_now(&mut rx) {
             ServerEvent::ContextMessageDetail { detail, .. } => {
@@ -1470,7 +1478,7 @@ mod tests {
                 None,
                 &agent,
                 &service,
-                &tx,
+                &tx.clone().into(),
             );
             let event = receive_now(&mut rx);
             assert!(matches!(
@@ -1506,7 +1514,7 @@ mod tests {
                 max_chars,
                 &agent,
                 &service,
-                &tx,
+                &tx.clone().into(),
             );
             assert!(matches!(
                 receive_now(&mut rx),
@@ -1542,7 +1550,7 @@ mod tests {
             &agent,
             &service,
             false,
-            &tx,
+            &tx.clone().into(),
         );
         let (draft_id, ready) = loop {
             match receive_async(&mut rx).await {
@@ -1560,8 +1568,20 @@ mod tests {
 
         let (status_a_tx, mut status_a_rx) = mpsc::unbounded_channel();
         let (status_b_tx, mut status_b_rx) = mpsc::unbounded_channel();
-        handle_get_context_draft_status(21, draft_id.clone(), &session_id, &service, &status_a_tx);
-        handle_get_context_draft_status(22, draft_id.clone(), &session_id, &service, &status_b_tx);
+        handle_get_context_draft_status(
+            21,
+            draft_id.clone(),
+            &session_id,
+            &service,
+            &status_a_tx.clone().into(),
+        );
+        handle_get_context_draft_status(
+            22,
+            draft_id.clone(),
+            &session_id,
+            &service,
+            &status_b_tx.clone().into(),
+        );
         for (expected_id, event) in [
             (21, receive_async(&mut status_a_rx).await),
             (22, receive_async(&mut status_b_rx).await),
@@ -1613,7 +1633,13 @@ mod tests {
         assert_ne!(owner_session_id, other_session_id);
 
         let (tx, mut rx) = mpsc::unbounded_channel();
-        handle_get_context_draft_status(26, draft_id.clone(), &other_session_id, &service, &tx);
+        handle_get_context_draft_status(
+            26,
+            draft_id.clone(),
+            &other_session_id,
+            &service,
+            &tx.clone().into(),
+        );
         assert!(matches!(
             receive_async(&mut rx).await,
             ServerEvent::ContextRequestRejected {
@@ -1624,7 +1650,13 @@ mod tests {
             }
         ));
 
-        handle_cancel_context_draft(27, draft_id.clone(), &other_session_id, &service, &tx);
+        handle_cancel_context_draft(
+            27,
+            draft_id.clone(),
+            &other_session_id,
+            &service,
+            &tx.clone().into(),
+        );
         assert!(matches!(
             receive_now(&mut rx),
             ServerEvent::ContextRequestRejected {
@@ -1642,7 +1674,7 @@ mod tests {
             &other_agent,
             &service,
             false,
-            &tx,
+            &tx.clone().into(),
         );
         assert!(matches!(
             receive_now(&mut rx),
@@ -1658,7 +1690,13 @@ mod tests {
             Ok(ContextDraftStatus::Ready { .. })
         ));
 
-        handle_get_context_draft_status(29, draft_id, &owner_session_id, &service, &tx);
+        handle_get_context_draft_status(
+            29,
+            draft_id,
+            &owner_session_id,
+            &service,
+            &tx.clone().into(),
+        );
         assert!(matches!(
             receive_async(&mut rx).await,
             ServerEvent::ContextDraftReady { id: 29, .. }
@@ -1698,7 +1736,7 @@ mod tests {
             identity.draft_id.clone(),
             session_id.clone(),
             &service,
-            &monitor_a_tx,
+            &monitor_a_tx.clone().into(),
         );
         attach_draft_monitor(
             31,
@@ -1706,7 +1744,7 @@ mod tests {
             identity.draft_id.clone(),
             session_id.clone(),
             &service,
-            &monitor_b_tx,
+            &monitor_b_tx.clone().into(),
         );
         assert!(matches!(
             receive_async(&mut monitor_a_rx).await,
@@ -1723,7 +1761,7 @@ mod tests {
             identity.draft_id.clone(),
             &session_id,
             &service,
-            &cancel_tx,
+            &cancel_tx.clone().into(),
         );
         assert!(matches!(
             receive_async(&mut cancel_rx).await,
@@ -1788,7 +1826,15 @@ mod tests {
                 let draft_id = draft_id.clone();
                 scope.spawn(move || {
                     barrier.wait();
-                    handle_apply_context_draft(id, draft_id, None, &agent, &service, false, &tx);
+                    handle_apply_context_draft(
+                        id,
+                        draft_id,
+                        None,
+                        &agent,
+                        &service,
+                        false,
+                        &tx.clone().into(),
+                    );
                 });
             }
         });
@@ -1833,7 +1879,7 @@ mod tests {
         assert_eq!(provider.invalidation_count(), 1);
 
         let (tx, mut rx) = mpsc::unbounded_channel();
-        handle_list_context_transactions(42, 0, None, &agent, &tx);
+        handle_list_context_transactions(42, 0, None, &agent, &tx.clone().into());
         match receive_now(&mut rx) {
             ServerEvent::ContextTransactionHistory {
                 id,
@@ -1849,7 +1895,7 @@ mod tests {
             }
             other => panic!("expected transaction history, got {other:?}"),
         }
-        handle_list_context_transactions(43, 2, None, &agent, &tx);
+        handle_list_context_transactions(43, 2, None, &agent, &tx.clone().into());
         assert!(matches!(
             receive_now(&mut rx),
             ServerEvent::ContextRequestRejected {
@@ -1866,7 +1912,7 @@ mod tests {
             &agent,
             &service,
             false,
-            &tx,
+            &tx.clone().into(),
         );
         assert!(matches!(
             receive_now(&mut rx),
@@ -1879,7 +1925,7 @@ mod tests {
             &agent,
             &service,
             false,
-            &tx,
+            &tx.clone().into(),
         );
         assert!(matches!(
             receive_now(&mut rx),
@@ -1902,7 +1948,14 @@ mod tests {
             allow_oldest_range_summary: true,
             authorization_source: "explicit server test authorization".to_string(),
         };
-        handle_set_context_emergency_policy(46, policy.clone(), &agent, &service, false, &tx);
+        handle_set_context_emergency_policy(
+            46,
+            policy.clone(),
+            &agent,
+            &service,
+            false,
+            &tx.clone().into(),
+        );
         assert!(matches!(
             receive_now(&mut rx),
             ServerEvent::ContextEmergencyPolicyChanged {
@@ -1940,7 +1993,7 @@ mod tests {
             expires_at: Utc::now() + chrono::Duration::minutes(30),
         };
         emit_checked(
-            &tx,
+            &tx.clone().into(),
             ServerEvent::ContextDraftFailed {
                 id: 50,
                 identity,
@@ -1965,7 +2018,7 @@ mod tests {
         ));
 
         emit_rejection(
-            &tx,
+            &tx.clone().into(),
             53,
             ContextRequestKind::DraftStatus,
             Some("oversized-draft".to_string()),
@@ -1991,7 +2044,7 @@ mod tests {
         );
 
         emit_rejection(
-            &tx,
+            &tx.clone().into(),
             54,
             ContextRequestKind::ApplyDraft,
             Some("x".repeat(CONTEXT_IDENTIFIER_MAX_CHARS + 1)),
@@ -2022,7 +2075,7 @@ mod tests {
             "missing-prepare".to_string(),
             "session".to_string(),
             &service,
-            &tx,
+            &tx.clone().into(),
         );
         assert!(matches!(
             receive_async(&mut rx).await,
@@ -2040,7 +2093,7 @@ mod tests {
             "missing-status".to_string(),
             "session".to_string(),
             &service,
-            &tx,
+            &tx.clone().into(),
         );
         assert!(matches!(
             receive_async(&mut rx).await,
@@ -2070,7 +2123,7 @@ mod tests {
             (60, ContextRequestKind::LegacyCompact),
             (61, ContextRequestKind::LegacySetCompactionMode),
         ] {
-            reject_legacy_context_request(id, request, &tx);
+            reject_legacy_context_request(id, request, &tx.clone().into());
             match receive_now(&mut rx) {
                 ServerEvent::ContextRequestRejected {
                     id: event_id,
@@ -2229,7 +2282,15 @@ mod tests {
         });
         for (index, request) in invalid_cases.into_iter().enumerate() {
             let id = 70 + index as u64;
-            handle_prepare_context_draft(id, request, &session_id, &agent, &service, false, &tx);
+            handle_prepare_context_draft(
+                id,
+                request,
+                &session_id,
+                &agent,
+                &service,
+                false,
+                &tx.clone().into(),
+            );
             assert!(matches!(
                 receive_now(&mut rx),
                 ServerEvent::ContextRequestRejected {

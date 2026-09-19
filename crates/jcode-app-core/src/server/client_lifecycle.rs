@@ -1,9 +1,8 @@
 use super::available_models_dedup::available_models_dedup_key;
 use super::client_actions::{
-    AgentTaskContext, NotifySessionContext, handle_agent_task, handle_input_shell,
-    handle_notify_session, handle_rename_session, handle_run_subagent, handle_set_feature,
-    handle_set_subagent_model, handle_split, handle_stdin_response, handle_transfer,
-    handle_trigger_memory_extraction,
+    NotifySessionContext, handle_input_shell, handle_notify_session, handle_rename_session,
+    handle_run_subagent, handle_set_feature, handle_set_subagent_model, handle_split,
+    handle_stdin_response, handle_transfer, handle_trigger_memory_extraction,
 };
 use super::client_comm::{
     handle_comm_channel_members, handle_comm_list, handle_comm_list_channels, handle_comm_message,
@@ -71,7 +70,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
 type SessionAgents = Arc<crate::primary::PrimaryHost>;
@@ -289,7 +288,7 @@ fn reject_if_agent_busy_for_request(
     client_session_id: &str,
     client_is_processing: bool,
     agent: &Arc<Mutex<Agent>>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
 ) -> bool {
     if agent.try_lock().is_ok() {
         return false;
@@ -310,7 +309,7 @@ fn send_agent_busy_error(
     request_kind: &'static str,
     client_session_id: &str,
     client_is_processing: bool,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     crate::logging::event_warn(
         "SERVER_REQUEST_BUSY_AGENT_REJECTED",
@@ -337,7 +336,7 @@ fn try_lock_idle_agent_for_request<'a>(
     client_session_id: &str,
     client_is_processing: bool,
     agent: &'a Arc<Mutex<Agent>>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
 ) -> Option<tokio::sync::MutexGuard<'a, Agent>> {
     if client_is_processing {
         send_agent_busy_error(
@@ -622,7 +621,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
                                 *request,
                                 service,
                                 repositories,
-                                tx.clone(),
+                                tx.clone().into(),
                             )
                             .await
                         };
@@ -984,53 +983,67 @@ pub(super) async fn handle_client_with_instruction_repositories(
         .force_attribution(),
     );
 
-    // Per-client event channel (not shared with other clients)
-    let (client_event_tx, mut client_event_rx) =
-        tokio::sync::mpsc::unbounded_channel::<ServerEvent>();
+    let (client_event_tx, mut client_event_rx, delivery_cancelled) =
+        crate::client_delivery::ClientEventSender::bounded_client();
+    let _delivery_owner = delivery_cancelled.clone().drop_guard();
+    client_event_tx.retarget(&client_session_id);
 
-    // Spawn event forwarder for this client only
     let writer_clone = Arc::clone(&writer);
     let client_connection_id_for_events = client_connection_id.clone();
     let client_connections_for_events = Arc::clone(&client_connections);
+    let delivery_stop = delivery_cancelled.clone();
     let event_handle = tokio::spawn(async move {
-        while let Some(event) = client_event_rx.recv().await {
-            {
-                let mut connections = client_connections_for_events.write().await;
-                if let Some(info) = connections.get_mut(&client_connection_id_for_events) {
-                    match &event {
-                        ServerEvent::ToolStart { name, .. } => {
-                            info.is_processing = true;
-                            info.current_tool_name = Some(name.clone());
-                        }
-                        ServerEvent::ToolDone { .. } => {
-                            info.current_tool_name = None;
-                        }
-                        ServerEvent::Done { .. }
-                        | ServerEvent::Error { .. }
-                        | ServerEvent::Interrupted => {
-                            info.is_processing = false;
-                            info.current_tool_name = None;
-                        }
-                        _ => {}
+        loop {
+            let frame = tokio::select! {
+                biased;
+                _ = delivery_stop.cancelled() => break,
+                frame = client_event_rx.recv() => match frame { Some(frame) => frame, None => break },
+            };
+            let result = tokio::select! {
+                biased;
+                _ = delivery_stop.cancelled() => break,
+                result = async {
+                    loop {
+                        frame.ready().await;
+                        let mut writer = writer_clone.lock().await;
+                        if !frame.is_current() { return Ok(false); }
+                        if frame.paused() { continue; }
+                        return super::client_writer::write_bytes(&mut *writer,frame.json.as_bytes()).await.map(|_| true);
                     }
+                } => result,
+            };
+            match result {
+                Ok(false) => continue,
+                Ok(true) => {}
+                Err(_) => {
+                    crate::logging::warn(&format!(
+                        "Client delivery disconnected: connection={} type={} bytes={}",
+                        client_connection_id_for_events,
+                        protocol_type_from_line(&frame.json),
+                        frame.json.len()
+                    ));
+                    delivery_stop.cancel();
+                    break;
                 }
             }
-            let json = encode_event(&event);
-            let mut w = writer_clone.lock().await;
-            if let Err(error) = w.write_all(json.as_bytes()).await {
-                // A broken pipe here is routine (client reload/disconnect mid
-                // broadcast). Log only type and size: context events may contain
-                // raw detail, generated summaries, distilled output, curator
-                // rationale, or provider-opaque state.
-                let event_type = protocol_type_from_line(&json);
-                crate::logging::warn(&format!(
-                    "event_forwarder write failed for connection {} while sending type={} bytes={}: {}",
-                    client_connection_id_for_events,
-                    event_type,
-                    json.len(),
-                    error
-                ));
-                break;
+            let mut connections = client_connections_for_events.write().await;
+            if frame.is_current()
+                && let Some(info) = connections.get_mut(&client_connection_id_for_events)
+            {
+                match &frame.event {
+                    ServerEvent::ToolStart { name, .. } => {
+                        info.is_processing = true;
+                        info.current_tool_name = Some(name.clone());
+                    }
+                    ServerEvent::ToolDone { .. } => info.current_tool_name = None,
+                    ServerEvent::Done { .. }
+                    | ServerEvent::Error { .. }
+                    | ServerEvent::Interrupted => {
+                        info.is_processing = false;
+                        info.current_tool_name = None;
+                    }
+                    _ => {}
+                }
             }
         }
     });
@@ -1099,6 +1112,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
         crate::instruction::management::InstructionManagementWorker::default();
     let mut inspection_requests = tokio::task::JoinSet::new();
 
+    let client_result: Result<()> = async {
     loop {
         while let Some(result) = inspection_requests.try_join_next() {
             if let Err(error) = result {
@@ -1141,6 +1155,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
                 }
                 continue;
             }
+            _ = delivery_cancelled.cancelled() => { break; }
             disconnect_signal = disconnect_rx.recv() => {
                 if disconnect_signal.is_some() {
                     crate::logging::info(&format!(
@@ -1251,7 +1266,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
                     };
                     let json = encode_event(&event);
                     let mut w = writer.lock().await;
-                    if w.write_all(json.as_bytes()).await.is_err() {
+                    if super::client_writer::write_bytes(&mut *w,json.as_bytes()).await.is_err() {
                         break;
                     }
                     continue;
@@ -1385,7 +1400,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
         {
             let ack_start = Instant::now();
             let mut w = writer.lock().await;
-            if w.write_all(json.as_bytes()).await.is_err() {
+            if super::client_writer::write_bytes(&mut *w,json.as_bytes()).await.is_err() {
                 if request_lifecycle_logged {
                     let mut fields =
                         server_request_lifecycle_fields(ServerRequestLifecycleFields {
@@ -1795,7 +1810,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
             Request::Ping { id } => {
                 let json = encode_event(&ServerEvent::Pong { id });
                 let mut w = writer.lock().await;
-                if w.write_all(json.as_bytes()).await.is_err() {
+                if super::client_writer::write_bytes(&mut *w,json.as_bytes()).await.is_err() {
                     break;
                 }
             }
@@ -3493,7 +3508,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
                             *request,
                             service,
                             repositories,
-                            tx.clone(),
+                            tx.clone().into(),
                         )
                         .await
                     };
@@ -3634,18 +3649,33 @@ pub(super) async fn handle_client_with_instruction_repositories(
             }
 
             Request::AgentTask { id, task, .. } => {
-                handle_agent_task(
-                    id,
-                    task,
+                start_processing_message(
+                    ProcessingMessage {
+                        queued_messages: None,
+                        id,
+                        content: task,
+                        images: Vec::new(),
+                        system_reminder: None,
+                        observe_startup_context: true,
+                        activate_skill: None,
+                    },
                     &client_session_id,
+                    &mut ProcessingState {
+                        client_is_processing: &mut client_is_processing,
+                        message_id: &mut processing_message_id,
+                        session_id: &mut processing_session_id,
+                    },
                     &agent,
-                    &AgentTaskContext {
-                        client_event_tx: &client_event_tx,
-                        swarm_members: &swarm_members,
+                    &client_event_tx,
+                    &sessions,
+                    active_terminal_env.clone(),
+                    &startup_context,
+                    &SwarmStatusRefs {
+                        members: &swarm_members,
                         swarms_by_id: &swarms_by_id,
                         event_history: &event_history,
                         event_counter: &event_counter,
-                        swarm_event_tx: &swarm_event_tx,
+                        event_tx: &swarm_event_tx,
                     },
                 )
                 .await;
@@ -4446,6 +4476,9 @@ pub(super) async fn handle_client_with_instruction_repositories(
         }
     }
 
+    Ok(())
+    }.await;
+
     // Dropping an inspection waiter requests Stop through the common execution
     // owner. Confirmed cleanup remains a durable transaction if the client leaves.
     drop(inspection_requests);
@@ -4465,7 +4498,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
         ),
     )
     .await?;
-    Ok(())
+    client_result
 }
 
 fn startup_context_session_snapshot(
@@ -4563,7 +4596,7 @@ async fn append_context_message(
     client_session_id: &str,
     client_is_processing: bool,
     agent: &Arc<Mutex<Agent>>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     let Ok(mut agent) = agent.try_lock() else {
         send_agent_busy_error(
@@ -4593,7 +4626,7 @@ async fn start_processing_message(
     client_session_id: &str,
     state: &mut ProcessingState<'_>,
     agent: &Arc<Mutex<Agent>>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
     host: &SessionAgents,
     client_terminal_env: Vec<(String, String)>,
     startup_context: &Arc<super::startup_context::StartupContextCoordinator>,
@@ -4695,7 +4728,7 @@ async fn start_processing_message(
 async fn cancel_processing_message(
     state: &mut ProcessingState<'_>,
     session_control: &SessionControlHandle,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
     host: &SessionAgents,
     _swarm: &SwarmStatusRefs<'_>,
     request_id: Option<u64>,
@@ -4767,7 +4800,7 @@ fn queue_soft_interrupt(
     urgent: bool,
     source: SoftInterruptSource,
     session_control: &SessionControlHandle,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     let content_bytes = content.len();
     let content_chars = content.chars().count();
@@ -4787,7 +4820,7 @@ fn clear_soft_interrupts(
     id: u64,
     session_id: &str,
     session_control: &SessionControlHandle,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     crate::logging::info(&format!(
         "SERVER_SOFT_INTERRUPT_CLEAR_REQUEST id={} session={} control_session={}",
@@ -4814,7 +4847,7 @@ fn clear_soft_interrupts(
 fn move_tool_to_background(
     id: u64,
     session_control: &SessionControlHandle,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     crate::logging::info(&format!(
         "SERVER_BACKGROUND_TOOL_REQUEST id={} session={}",
@@ -4950,7 +4983,7 @@ async fn process_admitted_message(
             )
             .await;
         super::startup_context::emit_checked(
-            &event_tx,
+            &event_tx.clone().into(),
             request_id,
             crate::protocol::StartupContextOperation::Status,
             ServerEvent::StartupContextStatus {
@@ -4984,7 +5017,7 @@ fn emit_startup_apply_drain_events(
 ) {
     for status in startup_context.drain_pending_for_agent(agent) {
         super::startup_context::emit_checked(
-            event_tx,
+            &event_tx.clone().into(),
             0,
             crate::protocol::StartupContextOperation::ApplySelection,
             ServerEvent::StartupContextApplyStatus { id: 0, status },

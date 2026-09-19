@@ -71,7 +71,7 @@ async fn assign_next_prefers_worker_with_dependency_context() {
         None,
         None,
         None,
-        &client_tx,
+        &client_tx.clone().into(),
         &sessions,
         &global_session_id,
         &provider,

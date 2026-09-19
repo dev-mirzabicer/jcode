@@ -1,5 +1,4 @@
 use super::{SwarmMember, SwarmTaskProgress, VersionedPlan};
-use crate::protocol::ServerEvent;
 use crate::storage;
 use jcode_swarm_core::{SwarmLifecycleStatus, SwarmMemberRecord};
 use std::collections::{HashMap, HashSet};
@@ -396,10 +395,10 @@ fn recover_member_status(
     (status, detail)
 }
 
-fn recovered_member_event_tx() -> mpsc::UnboundedSender<ServerEvent> {
+fn recovered_member_event_tx() -> crate::client_delivery::ClientEventSender {
     let (tx, rx) = mpsc::unbounded_channel();
     drop(rx);
-    tx
+    tx.into()
 }
 
 fn from_persisted_member(

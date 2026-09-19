@@ -89,7 +89,7 @@ async fn assign_task_to_client_attached_session_skips_server_side_run() {
         Some(worker.to_string()),
         Some("solo".to_string()),
         None,
-        &client_tx,
+        &client_tx.clone().into(),
         &sessions,
         &soft_interrupt_queues,
         &client_connections,

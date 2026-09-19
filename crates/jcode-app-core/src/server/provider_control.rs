@@ -9,7 +9,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Instant;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::Mutex;
+#[cfg(test)]
+use tokio::sync::mpsc;
 
 type SessionAgents = Arc<crate::primary::PrimaryHost>;
 static AUTH_REFRESH_GENERATIONS: OnceLock<StdMutex<HashMap<String, u64>>> = OnceLock::new();
@@ -162,10 +164,10 @@ fn spawn_deferred_agent_mutation<F>(
     operation: &'static str,
     id: u64,
     agent: Arc<Mutex<Agent>>,
-    client_event_tx: mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: crate::client_delivery::ClientEventSender,
     apply: F,
 ) where
-    F: FnOnce(&mut Agent, &mpsc::UnboundedSender<ServerEvent>) + Send + 'static,
+    F: FnOnce(&mut Agent, &crate::client_delivery::ClientEventSender) + Send + 'static,
 {
     let queued_at = log_provider_control_deferred(operation, id);
     tokio::spawn(async move {
@@ -180,10 +182,10 @@ fn spawn_deferred_provider_operation<F>(
     operation: &'static str,
     id: u64,
     agent: Arc<Mutex<Agent>>,
-    client_event_tx: mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: crate::client_delivery::ClientEventSender,
     apply: F,
 ) where
-    F: FnOnce(Arc<dyn Provider>, &mpsc::UnboundedSender<ServerEvent>) + Send + 'static,
+    F: FnOnce(Arc<dyn Provider>, &crate::client_delivery::ClientEventSender) + Send + 'static,
 {
     let queued_at = log_provider_control_deferred(operation, id);
     tokio::spawn(async move {
@@ -383,7 +385,7 @@ fn send_model_changed_result(
     id: u64,
     result: anyhow::Result<(String, String)>,
     fallback_model: String,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     match result {
         Ok((updated, provider_name)) => {
@@ -427,7 +429,7 @@ fn apply_cycle_model(
     direction: i8,
     agent: &mut Agent,
     context_transactions: &crate::context::ContextTransactionService,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     let models = agent.available_models_for_switching();
     if models.is_empty() {
@@ -472,7 +474,7 @@ pub(super) async fn handle_cycle_model(
     direction: i8,
     agent: &Arc<Mutex<Agent>>,
     context_transactions: &Arc<crate::context::ContextTransactionService>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     if let Ok(mut agent_guard) = agent.try_lock() {
         apply_cycle_model(
@@ -516,7 +518,7 @@ fn apply_set_premium_mode(
     mode: u8,
     premium_mode: crate::provider::copilot::PremiumMode,
     agent: &Agent,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     agent.set_premium_mode(premium_mode);
     crate::logging::info(&format!(
@@ -531,7 +533,7 @@ pub(super) async fn handle_set_premium_mode(
     id: u64,
     mode: u8,
     agent: &Arc<Mutex<Agent>>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     use crate::provider::copilot::PremiumMode;
 
@@ -560,7 +562,7 @@ fn apply_set_model(
     model: String,
     agent: &mut Agent,
     context_transactions: &crate::context::ContextTransactionService,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     crate::logging::event_info(
         "server_set_model_request",
@@ -604,7 +606,7 @@ fn apply_set_route(
     selection: crate::provider::RouteSelection,
     agent: &mut Agent,
     context_transactions: &crate::context::ContextTransactionService,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     crate::logging::event_info(
         "server_set_route_request",
@@ -651,7 +653,7 @@ pub(super) async fn handle_set_model(
     model: String,
     agent: &Arc<Mutex<Agent>>,
     context_transactions: &Arc<crate::context::ContextTransactionService>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     if let Ok(mut agent_guard) = agent.try_lock() {
         apply_set_model(
@@ -686,7 +688,7 @@ pub(super) async fn handle_set_route(
     selection: crate::provider::RouteSelection,
     agent: &Arc<Mutex<Agent>>,
     context_transactions: &Arc<crate::context::ContextTransactionService>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     if let Ok(mut agent_guard) = agent.try_lock() {
         apply_set_route(
@@ -720,7 +722,7 @@ pub(super) async fn handle_refresh_models(
     id: u64,
     provider: &Arc<dyn Provider>,
     agent: &Arc<Mutex<Agent>>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     let provider_clone = provider.clone();
     let agent_clone = agent.clone();
@@ -796,7 +798,10 @@ pub(super) async fn handle_refresh_models(
     let _ = client_event_tx.send(ServerEvent::Done { id });
 }
 
-fn send_catalog_activity(client_event_tx: &mpsc::UnboundedSender<ServerEvent>, message: &str) {
+fn send_catalog_activity(
+    client_event_tx: &crate::client_delivery::ClientEventSender,
+    message: &str,
+) {
     let _ = client_event_tx.send(ServerEvent::Notification {
         from_session: "jcode".to_string(),
         from_name: Some("Jcode".to_string()),
@@ -813,7 +818,7 @@ pub(super) async fn handle_set_reasoning_effort(
     id: u64,
     effort: String,
     agent: &Arc<Mutex<Agent>>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     let result = if let Ok(mut agent_guard) = agent.try_lock() {
         agent_guard.set_reasoning_effort(&effort)
@@ -833,7 +838,7 @@ pub(super) async fn handle_set_reasoning_effort(
 fn send_reasoning_effort_result(
     id: u64,
     result: anyhow::Result<Option<String>>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     match result {
         Ok(effort) => {
@@ -857,7 +862,7 @@ fn spawn_deferred_reasoning_effort_change(
     id: u64,
     effort: String,
     agent: Arc<Mutex<Agent>>,
-    client_event_tx: mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: crate::client_delivery::ClientEventSender,
 ) {
     let queued_at = log_provider_control_deferred("set_reasoning_effort", id);
     tokio::spawn(async move {
@@ -879,10 +884,10 @@ pub(super) async fn handle_set_service_tier(
     id: u64,
     service_tier: String,
     agent: &Arc<Mutex<Agent>>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     let apply = move |provider: Arc<dyn Provider>,
-                      client_event_tx: &mpsc::UnboundedSender<ServerEvent>| {
+                      client_event_tx: &crate::client_delivery::ClientEventSender| {
         match provider.set_service_tier(&service_tier) {
             Ok(()) => {
                 let _ = client_event_tx.send(ServerEvent::ServiceTierChanged {
@@ -918,10 +923,10 @@ pub(super) async fn handle_set_transport(
     id: u64,
     transport: String,
     agent: &Arc<Mutex<Agent>>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     let apply = move |provider: Arc<dyn Provider>,
-                      client_event_tx: &mpsc::UnboundedSender<ServerEvent>| {
+                      client_event_tx: &crate::client_delivery::ClientEventSender| {
         match provider.set_transport(&transport) {
             Ok(()) => {
                 let _ = client_event_tx.send(ServerEvent::TransportChanged {
@@ -964,7 +969,7 @@ pub(super) async fn handle_notify_auth_changed(
     sessions: &SessionAgents,
     client_session_id: &str,
     agent: &Arc<Mutex<Agent>>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     let refresh_started = Instant::now();
     crate::auth::AuthStatus::invalidate_cache();
@@ -1222,7 +1227,7 @@ pub(super) async fn handle_switch_anthropic_account(
     id: u64,
     label: String,
     agent: &Arc<Mutex<Agent>>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     match crate::auth::claude::set_active_account(&label) {
         Ok(()) => {
@@ -1248,7 +1253,7 @@ pub(super) async fn handle_switch_openai_account(
     id: u64,
     label: String,
     agent: &Arc<Mutex<Agent>>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     match crate::auth::codex::set_active_account(&label) {
         Ok(()) => {
@@ -1269,7 +1274,7 @@ fn spawn_account_switch_refresh(
     id: u64,
     provider_kind: &'static str,
     agent: Arc<Mutex<Agent>>,
-    client_event_tx: mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: crate::client_delivery::ClientEventSender,
 ) {
     tokio::spawn(async move {
         let started = Instant::now();
@@ -1449,7 +1454,7 @@ mod tests {
     ) -> (
         Arc<TestEffortProvider>,
         Arc<Mutex<Agent>>,
-        mpsc::UnboundedSender<ServerEvent>,
+        crate::client_delivery::ClientEventSender,
         mpsc::UnboundedReceiver<ServerEvent>,
     ) {
         let provider = Arc::new(TestEffortProvider::default());
@@ -1465,7 +1470,7 @@ mod tests {
             None,
         )));
         let (client_event_tx, client_event_rx) = mpsc::unbounded_channel();
-        (provider, agent, client_event_tx, client_event_rx)
+        (provider, agent, client_event_tx.into(), client_event_rx)
     }
 
     #[tokio::test]

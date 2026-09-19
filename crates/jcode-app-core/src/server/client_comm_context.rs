@@ -7,7 +7,7 @@ use crate::protocol::{AgentInfo, ContextEntry, NotificationType, ServerEvent};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::{RwLock, broadcast, mpsc};
+use tokio::sync::{RwLock, broadcast};
 
 async fn swarm_id_for_session(
     session_id: &str,
@@ -37,7 +37,7 @@ pub(super) async fn handle_comm_share(
     key: String,
     value: String,
     append: bool,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
     shared_context: &Arc<RwLock<HashMap<String, HashMap<String, SharedContext>>>>,
@@ -167,7 +167,7 @@ pub(super) async fn handle_comm_read(
     id: u64,
     req_session_id: String,
     key: Option<String>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     shared_context: &Arc<RwLock<HashMap<String, HashMap<String, SharedContext>>>>,
 ) {
@@ -216,7 +216,7 @@ pub(super) async fn handle_comm_read(
 pub(super) async fn handle_comm_list(
     id: u64,
     req_session_id: String,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
     file_touch: &FileTouchService,

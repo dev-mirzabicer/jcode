@@ -609,7 +609,7 @@ async fn human_child_context_reuses_curator_apply_undo_and_rejects_stale_followu
         let service=Arc::new(crate::context::ContextTransactionService::default());
         async fn action(child:&str,request:Request,service:&Arc<crate::context::ContextTransactionService>)->Vec<ServerEvent>{
             let (tx,mut rx)=mpsc::unbounded_channel();
-            crate::server::child_context::handle(child.into(),request,service.clone(),InstructionRepositoryService::new(),tx).await.unwrap();
+            crate::server::child_context::handle(child.into(),request,service.clone(),InstructionRepositoryService::new(),tx.into()).await.unwrap();
             let mut events=vec![];
             while let Some(event)=tokio::time::timeout(std::time::Duration::from_secs(20),rx.recv()).await.unwrap(){events.push(event);}
             events
@@ -651,7 +651,7 @@ async fn human_child_context_reuses_curator_apply_undo_and_rejects_stale_followu
         assert_eq!(serde_json::to_value(Session::load(&child).unwrap()).unwrap(),serde_json::to_value(changed).unwrap());
         assert_eq!(f.http.requests.lock().unwrap().len(),calls+1,"Context apply must not restart child inference");
         assert_eq!(serde_json::to_value(Session::load(&f.parent.id).unwrap()).unwrap(),parent);
-        let (tx,_)=mpsc::unbounded_channel();assert!(crate::server::child_context::handle(child,Request::Cancel{id:7},service,InstructionRepositoryService::new(),tx).await.is_err());
+        let (tx,_)=mpsc::unbounded_channel();assert!(crate::server::child_context::handle(child,Request::Cancel{id:7},service,InstructionRepositoryService::new(),tx.into()).await.is_err());
     }).catch_unwind().await;
     f.cleanup().await;
     if let Err(error) = result {
@@ -681,7 +681,7 @@ async fn human_child_context_rejects_busy_without_borrowing_parent_or_dispatchin
                 },
                 Arc::new(crate::context::ContextTransactionService::default()),
                 InstructionRepositoryService::new(),
-                tx,
+                tx.into(),
             ),
         )
         .await

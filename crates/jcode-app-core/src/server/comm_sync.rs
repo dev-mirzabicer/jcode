@@ -7,12 +7,12 @@ use crate::protocol::{
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::{RwLock, broadcast, mpsc};
+use tokio::sync::{RwLock, broadcast};
 
 type SessionAgents = Arc<crate::primary::PrimaryHost>;
 
 pub(super) struct CommResyncPlanContext<'a> {
-    pub(super) client_event_tx: &'a mpsc::UnboundedSender<ServerEvent>,
+    pub(super) client_event_tx: &'a crate::client_delivery::ClientEventSender,
     pub(super) swarm_members: &'a Arc<RwLock<HashMap<String, SwarmMember>>>,
     pub(super) swarms_by_id: &'a Arc<RwLock<HashMap<String, HashSet<String>>>>,
     pub(super) swarm_plans: &'a Arc<RwLock<HashMap<String, VersionedPlan>>>,
@@ -145,7 +145,7 @@ async fn ensure_same_swarm_access(
     req_session_id: &str,
     target_session: &str,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
 ) -> bool {
     let (req_swarm, target_swarm) = {
         let members = swarm_members.read().await;
@@ -197,7 +197,7 @@ pub(super) async fn handle_comm_summary(
     limit: Option<usize>,
     sessions: &SessionAgents,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     if !ensure_same_swarm_access(
         id,
@@ -253,7 +253,7 @@ pub(super) async fn handle_comm_status(
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     client_connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
     file_touch: &FileTouchService,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     if !ensure_same_swarm_access(
         id,
@@ -328,7 +328,7 @@ pub(super) async fn handle_comm_read_context(
     target_session: String,
     sessions: &SessionAgents,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     if !ensure_same_swarm_access(
         id,
@@ -385,7 +385,7 @@ pub(super) async fn handle_comm_plan_status(
     req_session_id: String,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     let swarm_id = {
         let members = swarm_members.read().await;

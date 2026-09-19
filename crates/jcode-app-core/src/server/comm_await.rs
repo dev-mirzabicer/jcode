@@ -8,7 +8,7 @@ use crate::protocol::{AwaitedMemberStatus, ServerEvent, format_comm_awaited_memb
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::sync::{RwLock, broadcast, mpsc};
+use tokio::sync::{RwLock, broadcast};
 
 pub(super) async fn awaited_member_statuses(
     req_session_id: &str,
@@ -306,7 +306,7 @@ pub(super) async fn spawn_or_resume_await_members(
 }
 
 pub(super) struct CommAwaitMembersContext<'a> {
-    pub client_event_tx: &'a mpsc::UnboundedSender<ServerEvent>,
+    pub client_event_tx: &'a crate::client_delivery::ClientEventSender,
     pub swarm_members: &'a Arc<RwLock<HashMap<String, SwarmMember>>>,
     pub swarms_by_id: &'a Arc<RwLock<HashMap<String, HashSet<String>>>>,
     pub swarm_event_tx: &'a broadcast::Sender<SwarmEvent>,

@@ -19,7 +19,6 @@ use jcode_plan::bridge::{apply_task_graph, parse_kind, to_task_graph};
 use jcode_plan::dag::{self, HandoffArtifact, NodeSpec, NodeStatus, TaskGraph};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::mpsc;
 use tokio::sync::{RwLock, broadcast};
 
 fn spec_from_wire(spec: TaskGraphNodeSpec) -> NodeSpec {
@@ -148,7 +147,7 @@ fn claim_queued_node_for_actor(graph: &mut TaskGraph, node_id: &str, actor: &str
     }
 }
 
-fn err(client_event_tx: &mpsc::UnboundedSender<ServerEvent>, id: u64, message: String) {
+fn err(client_event_tx: &crate::client_delivery::ClientEventSender, id: u64, message: String) {
     let _ = client_event_tx.send(ServerEvent::Error {
         id,
         message,
@@ -167,7 +166,7 @@ async fn finalize(
     req_session_id: &str,
     reason: &str,
     item_count: usize,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
     swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
@@ -223,7 +222,7 @@ pub(super) async fn handle_comm_seed_graph(
     req_session_id: String,
     mode: Option<String>,
     nodes: Vec<TaskGraphNodeSpec>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
     swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
@@ -341,7 +340,7 @@ pub(super) async fn handle_comm_expand_node(
     req_session_id: String,
     node_id: String,
     children: Vec<TaskGraphNodeSpec>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
     swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
@@ -411,7 +410,7 @@ pub(super) async fn handle_comm_complete_node(
     req_session_id: String,
     node_id: String,
     artifact_json: String,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
     swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
@@ -484,7 +483,7 @@ pub(super) async fn handle_comm_inject_gap(
     req_session_id: String,
     gate_id: String,
     nodes: Vec<TaskGraphNodeSpec>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
     swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,

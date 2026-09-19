@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::RwLock;
 
 const SWARM_MUTATION_DIR: &str = "jcode-swarm-mutations";
 const FINAL_STATE_TTL: Duration = Duration::from_secs(30);
@@ -71,7 +71,7 @@ pub(crate) struct PersistedSwarmMutationState {
 #[derive(Clone)]
 struct SwarmMutationWaiter {
     request_id: u64,
-    client_event_tx: mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: crate::client_delivery::ClientEventSender,
 }
 
 /// In-memory coordination for in-flight swarm mutations.
@@ -163,7 +163,7 @@ pub(super) async fn begin_or_replay(
     action: &str,
     session_id: &str,
     request_id: u64,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
 ) -> Option<PersistedSwarmMutationState> {
     begin_with_mode(
         runtime,
@@ -190,7 +190,7 @@ pub(super) async fn begin_or_join_in_flight(
     action: &str,
     session_id: &str,
     request_id: u64,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
 ) -> Option<PersistedSwarmMutationState> {
     begin_with_mode(
         runtime,
@@ -210,7 +210,7 @@ async fn begin_with_mode(
     action: &str,
     session_id: &str,
     request_id: u64,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
     replay_final: bool,
 ) -> Option<PersistedSwarmMutationState> {
     if !crate::config::config().features.swarm {

@@ -29,7 +29,7 @@ fn worker_owned_by_requester_is_drivable_even_with_live_client() {
     m.report_back_to_session_id = Some("coord".to_string());
     // Simulate a live client attachment; ownership still makes it reusable.
     let (tx, _rx) = mpsc::unbounded_channel();
-    m.event_txs.insert("conn-1".to_string(), tx);
+    m.event_txs.insert("conn-1".to_string(), tx.into());
     assert!(is_drivable_auto_worker(&m, "coord"));
 }
 
@@ -39,7 +39,7 @@ fn unowned_session_with_live_client_is_not_drivable() {
     m.is_headless = false;
     m.report_back_to_session_id = None; // independent user session
     let (tx, _rx) = mpsc::unbounded_channel();
-    m.event_txs.insert("conn-1".to_string(), tx);
+    m.event_txs.insert("conn-1".to_string(), tx.into());
     assert!(!is_drivable_auto_worker(&m, "coord"));
 }
 
@@ -67,14 +67,14 @@ async fn auto_candidate_filter_excludes_foreign_client_attached_session() {
     let mut owned_member = agent_member(owned, swarm_id);
     owned_member.report_back_to_session_id = Some(coord.to_string());
     let (otx, _orx) = mpsc::unbounded_channel();
-    owned_member.event_txs.insert("c".to_string(), otx); // owned + attached, still ok
+    owned_member.event_txs.insert("c".to_string(), otx.into()); // owned + attached, still ok
 
     let mut headless_member = agent_member(headless, swarm_id);
     headless_member.is_headless = true;
 
     let mut foreign_member = agent_member(foreign, swarm_id);
     let (ftx, _frx) = mpsc::unbounded_channel();
-    foreign_member.event_txs.insert("c".to_string(), ftx); // unowned + attached -> excluded
+    foreign_member.event_txs.insert("c".to_string(), ftx.into()); // unowned + attached -> excluded
 
     let members: HashMap<String, SwarmMember> = HashMap::from([
         (coord.to_string(), {

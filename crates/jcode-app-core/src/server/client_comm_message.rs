@@ -9,7 +9,7 @@ use jcode_agent_runtime::SoftInterruptSource;
 use jcode_swarm_core::ChannelIndex;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::{RwLock, broadcast, mpsc};
+use tokio::sync::{RwLock, broadcast};
 
 type SessionAgents = Arc<crate::primary::PrimaryHost>;
 type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
@@ -109,7 +109,7 @@ pub(super) async fn handle_comm_message(
     delivery: Option<CommDeliveryMode>,
     wake: Option<bool>,
     tldr: Option<String>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
     sessions: &SessionAgents,
     soft_interrupt_queues: &SessionInterruptQueues,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,

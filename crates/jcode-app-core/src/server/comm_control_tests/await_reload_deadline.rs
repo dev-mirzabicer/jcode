@@ -55,7 +55,7 @@ async fn await_members_reuses_persisted_deadline_after_reload_retry() {
         false,
         false,
         CommAwaitMembersContext {
-            client_event_tx: &client_tx,
+            client_event_tx: &client_tx.clone().into(),
             swarm_members: &swarm_members,
             swarms_by_id: &swarms_by_id,
             swarm_event_tx: &swarm_event_tx,

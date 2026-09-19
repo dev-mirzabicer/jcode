@@ -311,7 +311,7 @@ async fn notify_auth_changed_emits_available_models_updated_after_provider_updat
         &sessions,
         session_id.as_str(),
         &agent,
-        &client_event_tx,
+        &client_event_tx.clone().into(),
     )
     .await;
 
@@ -400,7 +400,7 @@ async fn notify_auth_changed_finishes_when_provider_work_finishes_without_deboun
         &sessions,
         session_id.as_str(),
         &agent,
-        &client_event_tx,
+        &client_event_tx.clone().into(),
     )
     .await;
 
@@ -448,7 +448,7 @@ async fn newer_auth_refresh_supersedes_older_final_completion_for_the_same_sessi
         &sessions,
         session_id.as_str(),
         &agent,
-        &first_tx,
+        &first_tx.clone().into(),
     )
     .await;
     handle_notify_auth_changed(
@@ -461,7 +461,7 @@ async fn newer_auth_refresh_supersedes_older_final_completion_for_the_same_sessi
         &sessions,
         session_id.as_str(),
         &agent,
-        &second_tx,
+        &second_tx.clone().into(),
     )
     .await;
 
@@ -514,7 +514,7 @@ async fn notify_auth_changed_defers_busy_session_refresh_until_idle() {
         &sessions,
         current_session_id.as_str(),
         &current_agent,
-        &client_event_tx,
+        &client_event_tx.clone().into(),
     )
     .await;
 
@@ -592,7 +592,7 @@ async fn notify_auth_changed_with_azure_hint_applies_runtime_model_without_compl
         &sessions,
         session_id.as_str(),
         &agent,
-        &client_event_tx,
+        &client_event_tx.clone().into(),
     )
     .await;
 
@@ -747,7 +747,7 @@ async fn notify_auth_changed_typed_cerebras_event_controls_user_visible_catalog_
         &sessions,
         session_id.as_str(),
         &agent,
-        &client_event_tx,
+        &client_event_tx.clone().into(),
     )
     .await;
 
@@ -831,7 +831,7 @@ async fn notify_auth_changed_switches_from_stale_model_to_matching_provider_rout
         &sessions,
         session_id.as_str(),
         &agent,
-        &client_event_tx,
+        &client_event_tx.clone().into(),
     )
     .await;
 
@@ -911,7 +911,7 @@ async fn onboarding_auth_refresh_prefers_global_gpt_5_6_route_over_fable() {
         &sessions,
         session_id.as_str(),
         &agent,
-        &client_event_tx,
+        &client_event_tx.clone().into(),
     )
     .await;
 
@@ -980,7 +980,7 @@ async fn notify_auth_changed_does_not_override_manual_model_selected_during_refr
         &sessions,
         session_id.as_str(),
         &agent,
-        &client_event_tx,
+        &client_event_tx.clone().into(),
     )
     .await;
 
@@ -1109,7 +1109,7 @@ async fn auth_model_first_prompt_e2e_state_space_is_bounded_by_selection_source(
             &sessions,
             session_id.as_str(),
             &agent,
-            &client_event_tx,
+            &client_event_tx.clone().into(),
         )
         .await;
 
@@ -1143,7 +1143,7 @@ async fn auth_model_first_prompt_e2e_state_space_is_bounded_by_selection_source(
                 model.to_string(),
                 &agent,
                 &context_transactions,
-                &client_event_tx,
+                &client_event_tx.clone().into(),
             )
             .await;
             loop {
@@ -1291,7 +1291,7 @@ async fn notify_auth_changed_switches_only_current_session_model() {
         &sessions,
         current_session_id.as_str(),
         &current_agent,
-        &client_event_tx,
+        &client_event_tx.clone().into(),
     )
     .await;
 
@@ -1355,7 +1355,7 @@ async fn refresh_models_emits_available_models_updated_after_prefetch() {
     let agent = Arc::new(Mutex::new(Agent::new(provider.clone(), registry)));
     let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
 
-    handle_refresh_models(7, &provider, &agent, &client_event_tx).await;
+    handle_refresh_models(7, &provider, &agent, &client_event_tx.clone().into()).await;
 
     let mut saw_done = false;
     let mut saw_models = None;

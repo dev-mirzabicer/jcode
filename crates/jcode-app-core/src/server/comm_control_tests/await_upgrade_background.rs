@@ -31,7 +31,7 @@ async fn await_members_blocking_to_background_upgrade_survives_waiter_disconnect
         false,
         false,
         CommAwaitMembersContext {
-            client_event_tx: &blocking_tx,
+            client_event_tx: &blocking_tx.clone().into(),
             swarm_members: &swarm_members,
             swarms_by_id: &swarms_by_id,
             swarm_event_tx: &swarm_event_tx,
@@ -55,7 +55,7 @@ async fn await_members_blocking_to_background_upgrade_survives_waiter_disconnect
         true,
         true,
         CommAwaitMembersContext {
-            client_event_tx: &bg_tx,
+            client_event_tx: &bg_tx.clone().into(),
             swarm_members: &swarm_members,
             swarms_by_id: &swarms_by_id,
             swarm_event_tx: &swarm_event_tx,

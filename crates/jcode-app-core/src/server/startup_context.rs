@@ -46,6 +46,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
+#[cfg(test)]
 use tokio::sync::mpsc;
 
 const DEFAULT_EDITOR_LEASE_SECS: u64 = 90;
@@ -743,7 +744,7 @@ impl StartupContextCoordinator {
         request: LeaseRequest,
         query: String,
         max_results: Option<usize>,
-        event_tx: mpsc::UnboundedSender<ServerEvent>,
+        event_tx: crate::client_delivery::ClientEventSender,
     ) -> Result<(), StartupContextFailure> {
         validate_bounded_text(
             &query,
@@ -2248,7 +2249,7 @@ pub(super) fn lease_request(
 }
 
 pub(super) fn emit_checked(
-    event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    event_tx: &crate::client_delivery::ClientEventSender,
     id: u64,
     operation: StartupContextOperation,
     event: ServerEvent,

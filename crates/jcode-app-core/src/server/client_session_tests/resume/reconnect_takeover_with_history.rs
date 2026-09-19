@@ -125,7 +125,7 @@ async fn handle_resume_session_allows_reconnect_takeover_with_local_history() ->
         &writer,
         "test-server",
         "🌿",
-        &client_event_tx,
+        &client_event_tx.clone().into(),
         &mcp_pool,
         &event_history,
         &event_counter,

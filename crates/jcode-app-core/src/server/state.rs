@@ -120,7 +120,7 @@ impl SwarmRuntime {
 #[derive(Clone, Debug)]
 pub struct LiveSessionAttachment {
     pub connection_id: String,
-    pub event_tx: mpsc::UnboundedSender<ServerEvent>,
+    pub event_tx: crate::client_delivery::ClientEventSender,
 }
 
 impl SwarmState {
@@ -179,9 +179,9 @@ pub struct SwarmMember {
     ///
     /// This remains for backward-compatible single-sender call sites and for
     /// headless sessions that do not maintain a live attachment map.
-    pub event_tx: mpsc::UnboundedSender<ServerEvent>,
+    pub event_tx: crate::client_delivery::ClientEventSender,
     /// Live client attachments for this session keyed by connection id.
-    pub event_txs: HashMap<String, mpsc::UnboundedSender<ServerEvent>>,
+    pub event_txs: HashMap<String, crate::client_delivery::ClientEventSender>,
     /// Working directory (used to derive swarm id)
     pub working_dir: Option<PathBuf>,
     /// Swarm identifier (shared across worktrees)
@@ -257,7 +257,7 @@ impl SwarmMember {
 
     pub fn from_record(
         record: SwarmMemberRecord,
-        event_tx: mpsc::UnboundedSender<ServerEvent>,
+        event_tx: crate::client_delivery::ClientEventSender,
     ) -> Self {
         Self {
             session_id: record.session_id,
@@ -358,10 +358,11 @@ pub(super) async fn register_session_event_sender(
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     session_id: &str,
     connection_id: &str,
-    event_tx: mpsc::UnboundedSender<ServerEvent>,
+    event_tx: crate::client_delivery::ClientEventSender,
 ) {
     let mut members = swarm_members.write().await;
     if let Some(member) = members.get_mut(session_id) {
+        let event_tx = event_tx.for_session(session_id);
         member.event_tx = event_tx.clone();
         member.event_txs.insert(connection_id.to_string(), event_tx);
     }
@@ -382,7 +383,7 @@ pub(super) async fn unregister_session_event_sender(
             // Retaining it as the legacy sender would cross session boundaries.
             let (closed, receiver) = mpsc::unbounded_channel();
             drop(receiver);
-            member.event_tx = closed;
+            member.event_tx = closed.into();
         }
     }
 }
@@ -459,7 +460,7 @@ pub(super) fn session_event_fanout_sender(
 pub(super) fn session_event_fanout_sender_with_fallback(
     session_id: String,
     swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
-    fallback_tx: mpsc::UnboundedSender<ServerEvent>,
+    fallback_tx: crate::client_delivery::ClientEventSender,
 ) -> mpsc::UnboundedSender<ServerEvent> {
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerEvent>();
     tokio::spawn(async move {

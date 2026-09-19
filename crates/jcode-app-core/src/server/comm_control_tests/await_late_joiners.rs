@@ -32,7 +32,7 @@ async fn await_members_includes_late_joiners_when_watching_swarm() {
         false,
         false,
         CommAwaitMembersContext {
-            client_event_tx: &client_tx,
+            client_event_tx: &client_tx.clone().into(),
             swarm_members: &swarm_members,
             swarms_by_id: &swarms_by_id,
             swarm_event_tx: &swarm_event_tx,

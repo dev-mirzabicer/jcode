@@ -1,23 +1,21 @@
 #![cfg_attr(test, allow(clippy::items_after_test_module))]
 
-use super::client_lifecycle::process_message_streaming_mpsc;
 use super::{
     ClientConnectionInfo, SessionInterruptQueues, SwarmEvent, SwarmMember, SwarmState,
     VersionedPlan, broadcast_swarm_status, fanout_session_event, persist_swarm_state_for,
     remove_session_channel_subscriptions, remove_session_from_swarm, swarm_id_for_session,
-    truncate_detail, update_member_status,
 };
 use crate::agent::Agent;
 use crate::protocol::{FeatureToggle, NotificationType, ServerEvent};
 use crate::session::Session;
 use crate::util::truncate_str;
-use jcode_agent_runtime::{SoftInterruptSource, StreamError};
+use jcode_agent_runtime::SoftInterruptSource;
 use std::collections::{HashMap, HashSet};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::process::Command;
-use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
+use tokio::sync::{Mutex, RwLock, broadcast};
 
 type SessionAgents = Arc<crate::primary::PrimaryHost>;
 type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
@@ -88,7 +86,7 @@ pub(super) struct NotifySessionContext<'a> {
     pub event_history: &'a Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
     pub event_counter: &'a Arc<std::sync::atomic::AtomicU64>,
     pub swarm_event_tx: &'a broadcast::Sender<SwarmEvent>,
-    pub client_event_tx: &'a mpsc::UnboundedSender<ServerEvent>,
+    pub client_event_tx: &'a crate::client_delivery::ClientEventSender,
 }
 
 pub(super) async fn handle_notify_session(
@@ -181,7 +179,7 @@ pub(super) fn handle_input_shell(
     id: u64,
     command: String,
     agent: &Arc<Mutex<Agent>>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     let agent = Arc::clone(agent);
     let tx = client_event_tx.clone();
@@ -235,7 +233,7 @@ pub(super) async fn handle_set_subagent_model(
     id: u64,
     model: Option<String>,
     agent: &Arc<Mutex<Agent>>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     let mut agent_guard = agent.lock().await;
     match agent_guard.set_subagent_model(model) {
@@ -259,7 +257,7 @@ pub(super) fn handle_run_subagent(
     model: Option<String>,
     session_id: Option<String>,
     agent: &Arc<Mutex<Agent>>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     let agent = Arc::clone(agent);
     let tx = client_event_tx.clone();
@@ -407,7 +405,7 @@ pub(super) async fn handle_set_feature(
     channel_subscriptions: &ChannelSubscriptions,
     channel_subscriptions_by_session: &ChannelSubscriptions,
     swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     match feature {
         FeatureToggle::Memory => {
@@ -569,7 +567,7 @@ pub(super) async fn handle_rename_session(
     agent: &Arc<Mutex<Agent>>,
     client_session_id: &str,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     let started = Instant::now();
     let normalized_title = title
@@ -649,7 +647,7 @@ pub(super) async fn handle_rename_session(
 pub(super) async fn handle_trigger_memory_extraction(
     id: u64,
     agent: &Arc<Mutex<Agent>>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     let extraction = {
         let agent_guard = agent.lock().await;
@@ -841,7 +839,7 @@ pub(super) async fn handle_split(
     client_session_id: &str,
     instruction_repositories: &crate::instruction::InstructionRepositoryService,
     workflow: Option<&jcode_task_types::WorkflowPromptRequest>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     if workflow.is_some_and(|workflow| workflow.requires_swarm())
         && !crate::config::config().features.swarm
@@ -933,7 +931,7 @@ pub(super) async fn handle_transfer(
     client_session_id: &str,
     agent: &Arc<Mutex<Agent>>,
     instruction_repositories: &crate::instruction::InstructionRepositoryService,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     let started = Instant::now();
     crate::logging::event_info(
@@ -1109,7 +1107,7 @@ pub(super) async fn handle_resume_all_sessions(
     event_history: &Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
     event_counter: &Arc<std::sync::atomic::AtomicU64>,
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     // Runtime ownership, not attachment count, determines which primaries can
     // receive an explicit human resume operation.
@@ -1224,85 +1222,10 @@ pub(super) async fn handle_stdin_response(
     request_id: String,
     input: String,
     stdin_responses: &Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<String>>>>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     if let Some(tx) = stdin_responses.lock().await.remove(&request_id) {
         let _ = tx.send(input);
     }
     let _ = client_event_tx.send(ServerEvent::Done { id });
-}
-
-pub(super) struct AgentTaskContext<'a> {
-    pub(super) client_event_tx: &'a mpsc::UnboundedSender<ServerEvent>,
-    pub(super) swarm_members: &'a Arc<RwLock<HashMap<String, SwarmMember>>>,
-    pub(super) swarms_by_id: &'a Arc<RwLock<HashMap<String, HashSet<String>>>>,
-    pub(super) event_history: &'a Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
-    pub(super) event_counter: &'a Arc<std::sync::atomic::AtomicU64>,
-    pub(super) swarm_event_tx: &'a broadcast::Sender<SwarmEvent>,
-}
-
-pub(super) async fn handle_agent_task(
-    id: u64,
-    task: String,
-    client_session_id: &str,
-    agent: &Arc<Mutex<Agent>>,
-    ctx: &AgentTaskContext<'_>,
-) {
-    update_member_status(
-        client_session_id,
-        "running",
-        Some(truncate_detail(&task, 120)),
-        ctx.swarm_members,
-        ctx.swarms_by_id,
-        Some(ctx.event_history),
-        Some(ctx.event_counter),
-        Some(ctx.swarm_event_tx),
-    )
-    .await;
-
-    let result = process_message_streaming_mpsc(
-        Arc::clone(agent),
-        &task,
-        vec![],
-        None,
-        ctx.client_event_tx.clone(),
-    )
-    .await;
-    match result {
-        Ok(()) => {
-            update_member_status(
-                client_session_id,
-                "completed",
-                None,
-                ctx.swarm_members,
-                ctx.swarms_by_id,
-                Some(ctx.event_history),
-                Some(ctx.event_counter),
-                Some(ctx.swarm_event_tx),
-            )
-            .await;
-            let _ = ctx.client_event_tx.send(ServerEvent::Done { id });
-        }
-        Err(e) => {
-            update_member_status(
-                client_session_id,
-                "failed",
-                Some(truncate_detail(&e.to_string(), 120)),
-                ctx.swarm_members,
-                ctx.swarms_by_id,
-                Some(ctx.event_history),
-                Some(ctx.event_counter),
-                Some(ctx.swarm_event_tx),
-            )
-            .await;
-            let retry_after_secs = e
-                .downcast_ref::<StreamError>()
-                .and_then(|stream_error| stream_error.retry_after_secs);
-            let _ = ctx.client_event_tx.send(ServerEvent::Error {
-                id,
-                message: crate::util::format_error_chain(&e),
-                retry_after_secs,
-            });
-        }
-    }
 }

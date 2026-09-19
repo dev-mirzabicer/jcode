@@ -7,14 +7,14 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use std::sync::Arc;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::Mutex;
 
 pub async fn handle(
     child_id: String,
     request: Request,
     service: Arc<ContextTransactionService>,
     repositories: crate::instruction::InstructionRepositoryService,
-    event_tx: mpsc::UnboundedSender<ServerEvent>,
+    event_tx: crate::client_delivery::ClientEventSender,
 ) -> Result<()> {
     jcode_tool_types::delegation::ChildSessionId::parse(child_id.clone())
         .map_err(anyhow::Error::msg)?;
@@ -115,7 +115,7 @@ pub async fn handle(
 pub async fn forward(
     child_id: String,
     request: Request,
-    output: mpsc::UnboundedSender<ServerEvent>,
+    output: crate::client_delivery::ClientEventSender,
 ) -> Result<()> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     let id = request.id();

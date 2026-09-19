@@ -807,7 +807,7 @@ impl App {
                 if let Err(error) = crate::server::forward_child_context(
                     child_id.clone(),
                     *request,
-                    destination.clone(),
+                    destination.clone().into(),
                 )
                 .await
                 {

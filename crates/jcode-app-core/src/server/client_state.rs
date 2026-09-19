@@ -19,7 +19,6 @@ type SessionAgents = Arc<crate::primary::PrimaryHost>;
 pub(super) enum HistoryPayloadMode {
     Full,
 }
-use tokio::io::AsyncWriteExt;
 use tokio::sync::{Mutex, RwLock};
 
 const ATTACH_MODEL_PREFETCH_DEBOUNCE_SECS: u64 = 15;
@@ -295,7 +294,7 @@ pub(super) async fn handle_get_model_catalog(
     let write_started = Instant::now();
     let mut writer_guard = writer.lock().await;
     let writer_lock_ms = write_started.elapsed().as_millis();
-    writer_guard.write_all(json.as_bytes()).await?;
+    super::client_writer::write_bytes(&mut *writer_guard, json.as_bytes()).await?;
     let write_ms = write_started
         .elapsed()
         .as_millis()
@@ -822,7 +821,7 @@ pub(super) async fn send_history(
     let mut writer_guard = writer.lock().await;
     let writer_lock_ms = writer_lock_start.elapsed().as_millis();
     let write_start = Instant::now();
-    let result = writer_guard.write_all(json.as_bytes()).await;
+    let result = super::client_writer::write_bytes(&mut *writer_guard, json.as_bytes()).await;
     drop(writer_guard);
     // Release the serialized payload before any further work (logging below
     // only needs the captured length).
@@ -891,7 +890,7 @@ async fn write_event(writer: &Arc<Mutex<WriteHalf>>, event: &ServerEvent) -> Res
     let mut buf = serde_json::to_vec(event).unwrap_or_else(|_| b"{}".to_vec());
     buf.push(b'\n');
     let mut writer = writer.lock().await;
-    writer.write_all(&buf).await?;
+    super::client_writer::write_bytes(&mut *writer, &buf).await?;
     drop(buf);
     Ok(())
 }

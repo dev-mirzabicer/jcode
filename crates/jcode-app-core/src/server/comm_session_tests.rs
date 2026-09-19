@@ -52,7 +52,7 @@ fn member(
     (
         SwarmMember {
             session_id: session_id.to_string(),
-            event_tx,
+            event_tx: event_tx.into(),
             event_txs: HashMap::new(),
             working_dir: None,
             swarm_id: swarm_id.map(|id| id.to_string()),
@@ -781,7 +781,7 @@ async fn spawn_bootstraps_coordinator_when_swarm_has_none() {
     let swarm_id = ensure_spawn_coordinator_swarm(
         1,
         "req",
-        &client_event_tx,
+        &client_event_tx.clone().into(),
         &swarm_members,
         &swarms_by_id,
         &swarm_coordinators,
@@ -851,7 +851,7 @@ async fn nested_agent_cannot_spawn_when_root_is_light_or_normal() {
         let refused = ensure_spawn_coordinator_swarm(
             2,
             &child_id,
-            &client_event_tx,
+            &client_event_tx.clone().into(),
             &swarm_members,
             &swarms_by_id,
             &swarm_coordinators,
@@ -914,7 +914,7 @@ async fn nested_agent_can_spawn_when_root_is_deep() {
     let allowed = ensure_spawn_coordinator_swarm(
         3,
         "deep-child",
-        &client_event_tx,
+        &client_event_tx.clone().into(),
         &swarm_members,
         &swarms_by_id,
         &swarm_coordinators,
@@ -965,7 +965,7 @@ async fn spawn_allowed_at_arbitrary_depth_without_depth_cap() {
     let allowed = ensure_spawn_coordinator_swarm(
         7,
         "f",
-        &client_event_tx,
+        &client_event_tx.clone().into(),
         &swarm_members,
         &swarms_by_id,
         &swarm_coordinators,
@@ -1006,7 +1006,7 @@ async fn spawn_rejected_when_member_limit_reached() {
     let refused = ensure_spawn_coordinator_swarm(
         7,
         "root",
-        &client_event_tx,
+        &client_event_tx.clone().into(),
         &swarm_members,
         &swarms_by_id,
         &swarm_coordinators,
@@ -1055,7 +1055,7 @@ async fn terminal_members_do_not_consume_spawn_capacity() {
     let allowed = ensure_spawn_coordinator_swarm(
         7,
         "root",
-        &client_event_tx,
+        &client_event_tx.clone().into(),
         &swarm_members,
         &swarms_by_id,
         &swarm_coordinators,
@@ -1092,7 +1092,7 @@ async fn spawn_rejected_at_configured_live_agent_limit() {
     let refused = ensure_spawn_coordinator_swarm(
         7,
         "root",
-        &client_event_tx,
+        &client_event_tx.clone().into(),
         &swarm_members,
         &swarms_by_id,
         &swarm_coordinators,

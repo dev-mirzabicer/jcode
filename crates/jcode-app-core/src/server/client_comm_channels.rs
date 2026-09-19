@@ -6,7 +6,7 @@ use crate::protocol::{AgentInfo, ServerEvent, SwarmChannelInfo};
 use jcode_swarm_core::ChannelIndex;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::{RwLock, broadcast, mpsc};
+use tokio::sync::{RwLock, broadcast};
 
 type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
 
@@ -21,7 +21,7 @@ async fn swarm_id_for_session(
 pub(super) async fn handle_comm_list_channels(
     id: u64,
     req_session_id: String,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     channel_subscriptions: &ChannelSubscriptions,
 ) {
@@ -61,7 +61,7 @@ pub(super) async fn handle_comm_channel_members(
     id: u64,
     req_session_id: String,
     channel: String,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     channel_subscriptions: &ChannelSubscriptions,
 ) {
@@ -120,7 +120,7 @@ pub(super) async fn handle_comm_subscribe_channel(
     id: u64,
     req_session_id: String,
     channel: String,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     channel_subscriptions: &ChannelSubscriptions,
     channel_subscriptions_by_session: &ChannelSubscriptions,
@@ -205,7 +205,7 @@ pub(super) async fn handle_comm_unsubscribe_channel(
     id: u64,
     req_session_id: String,
     channel: String,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     channel_subscriptions: &ChannelSubscriptions,
     channel_subscriptions_by_session: &ChannelSubscriptions,

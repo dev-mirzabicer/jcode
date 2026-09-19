@@ -487,7 +487,7 @@ async fn enabling_swarm_does_not_auto_elect_coordinator() {
         session_id.to_string(),
         crate::server::SwarmMember {
             session_id: session_id.to_string(),
-            event_tx: member_event_tx,
+            event_tx: member_event_tx.into(),
             event_txs: HashMap::new(),
             working_dir: Some(PathBuf::from("/tmp/jcode-passive-swarm")),
             swarm_id: None,
@@ -536,7 +536,7 @@ async fn enabling_swarm_does_not_auto_elect_coordinator() {
         &channel_subscriptions,
         &channel_subscriptions_by_session,
         &swarm_plans,
-        &client_event_tx,
+        &client_event_tx.clone().into(),
     )
     .await;
 
@@ -608,7 +608,7 @@ async fn remote_memory_enable_is_rejected_when_globally_disabled() {
         &channel_subscriptions,
         &channel_subscriptions_by_session,
         &swarm_plans,
-        &client_event_tx,
+        &client_event_tx.clone().into(),
     )
     .await;
 
@@ -645,7 +645,7 @@ async fn rename_session_event_uses_agent_session_id_even_when_client_id_is_stale
         stale_client_session_id.to_string(),
         SwarmMember {
             session_id: stale_client_session_id.to_string(),
-            event_tx: member_event_tx,
+            event_tx: member_event_tx.into(),
             event_txs: HashMap::new(),
             working_dir: None,
             swarm_id: None,
@@ -674,7 +674,7 @@ async fn rename_session_event_uses_agent_session_id_even_when_client_id_is_stale
         &agent,
         stale_client_session_id,
         &swarm_members,
-        &client_event_tx,
+        &client_event_tx.clone().into(),
     )
     .await;
 
@@ -752,7 +752,7 @@ async fn notify_session_runs_scheduled_task_immediately_for_idle_live_session() 
         session_id.clone(),
         SwarmMember {
             session_id: session_id.clone(),
-            event_tx: member_event_tx,
+            event_tx: member_event_tx.into(),
             event_txs: HashMap::new(),
             working_dir: None,
             swarm_id: None,
@@ -790,7 +790,7 @@ async fn notify_session_runs_scheduled_task_immediately_for_idle_live_session() 
             event_history: &event_history,
             event_counter: &event_counter,
             swarm_event_tx: &swarm_event_tx,
-            client_event_tx: &client_event_tx,
+            client_event_tx: &client_event_tx.clone().into(),
         },
     )
     .await;
@@ -874,7 +874,7 @@ async fn notify_session_queues_soft_interrupt_when_live_session_is_busy() {
         session_id.clone(),
         SwarmMember {
             session_id: session_id.clone(),
-            event_tx: member_event_tx,
+            event_tx: member_event_tx.into(),
             event_txs: HashMap::new(),
             working_dir: None,
             swarm_id: None,
@@ -914,7 +914,7 @@ async fn notify_session_queues_soft_interrupt_when_live_session_is_busy() {
             event_history: &event_history,
             event_counter: &event_counter,
             swarm_event_tx: &swarm_event_tx,
-            client_event_tx: &client_event_tx,
+            client_event_tx: &client_event_tx.clone().into(),
         },
     )
     .await;
@@ -965,8 +965,8 @@ fn live_member(session_id: &str) -> (SwarmMember, mpsc::UnboundedReceiver<Server
     let (attach_tx, attach_rx) = mpsc::unbounded_channel();
     let member = SwarmMember {
         session_id: session_id.to_string(),
-        event_tx: mpsc::unbounded_channel().0,
-        event_txs: HashMap::from([("client-1".to_string(), attach_tx)]),
+        event_tx: mpsc::unbounded_channel().0.into(),
+        event_txs: HashMap::from([("client-1".to_string(), attach_tx.into())]),
         working_dir: None,
         swarm_id: None,
         swarm_enabled: false,
@@ -1037,7 +1037,7 @@ async fn resume_all_continues_interrupted_idle_live_session() {
         &event_history,
         &event_counter,
         &swarm_event_tx,
-        &client_event_tx,
+        &client_event_tx.clone().into(),
     )
     .await;
 
@@ -1147,7 +1147,7 @@ async fn resume_all_skips_session_with_completed_turn() {
         &event_history,
         &event_counter,
         &swarm_event_tx,
-        &client_event_tx,
+        &client_event_tx.clone().into(),
     )
     .await;
 
@@ -1228,7 +1228,7 @@ fn workflow_split_renders_before_creation_and_uses_one_parent_snapshot() {
         &parent.id,
         &repositories,
         Some(&request),
-        &tx,
+        &tx.clone().into(),
     ));
     assert!(matches!(
         rx.try_recv().unwrap(),
@@ -1250,7 +1250,7 @@ fn workflow_split_renders_before_creation_and_uses_one_parent_snapshot() {
         &parent.id,
         &repositories,
         Some(&request),
-        &tx,
+        &tx.clone().into(),
     ));
     assert!(matches!(
         rx.try_recv().unwrap(),
@@ -1263,7 +1263,7 @@ fn workflow_split_renders_before_creation_and_uses_one_parent_snapshot() {
         &parent.id,
         &repositories,
         Some(&request),
-        &tx,
+        &tx.clone().into(),
     ));
     let ServerEvent::WorkflowSplitResponse {
         id: 92,

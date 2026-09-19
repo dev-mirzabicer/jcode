@@ -62,7 +62,7 @@ fn member(session_id: &str, swarm_id: &str, status: &str) -> SwarmMember {
     let (event_tx, _event_rx) = mpsc::unbounded_channel();
     SwarmMember {
         session_id: session_id.to_string(),
-        event_tx,
+        event_tx: event_tx.into(),
         event_txs: HashMap::new(),
         working_dir: None,
         swarm_id: Some(swarm_id.to_string()),

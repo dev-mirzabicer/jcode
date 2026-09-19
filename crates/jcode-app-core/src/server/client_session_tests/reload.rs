@@ -325,8 +325,8 @@ fn handle_reload_queues_signal_for_canary_session() -> Result<()> {
                 "session_test_reload".to_string(),
                 SwarmMember {
                     session_id: "session_test_reload".to_string(),
-                    event_tx: tx.clone(),
-                    event_txs: HashMap::from([("conn-trigger".to_string(), tx.clone())]),
+                    event_tx: tx.clone().into(),
+                    event_txs: HashMap::from([("conn-trigger".to_string(), tx.clone().into())]),
                     working_dir: None,
                     swarm_id: None,
                     swarm_enabled: false,
@@ -350,8 +350,8 @@ fn handle_reload_queues_signal_for_canary_session() -> Result<()> {
                 "session_peer".to_string(),
                 SwarmMember {
                     session_id: "session_peer".to_string(),
-                    event_tx: peer_tx.clone(),
-                    event_txs: HashMap::from([("conn-peer".to_string(), peer_tx.clone())]),
+                    event_tx: peer_tx.clone().into(),
+                    event_txs: HashMap::from([("conn-peer".to_string(), peer_tx.clone().into())]),
                     working_dir: None,
                     swarm_id: None,
                     swarm_enabled: false,
@@ -373,7 +373,15 @@ fn handle_reload_queues_signal_for_canary_session() -> Result<()> {
             ),
         ])));
 
-        handle_reload(7, true, "session_test_reload", &agent, &swarm_members, &tx).await;
+        handle_reload(
+            7,
+            true,
+            "session_test_reload",
+            &agent,
+            &swarm_members,
+            &tx.clone().into(),
+        )
+        .await;
 
         let reloading = events
             .recv()
@@ -443,7 +451,7 @@ async fn handle_reload_does_not_wait_for_busy_agent_lock() -> Result<()> {
             "session_fallback_reload",
             &agent,
             &swarm_members,
-            &tx,
+            &tx.clone().into(),
         ),
     )
     .await

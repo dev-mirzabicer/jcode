@@ -1134,7 +1134,7 @@ impl Registry {
     /// If `shared_pool` is provided, shared servers reuse processes from the pool.
     pub async fn register_mcp_tools(
         &self,
-        event_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::protocol::ServerEvent>>,
+        event_tx: Option<crate::client_delivery::ClientEventSender>,
         shared_pool: Option<std::sync::Arc<crate::mcp::SharedMcpPool>>,
         session_id: Option<String>,
     ) {
@@ -1148,7 +1148,7 @@ impl Registry {
     /// must pass their session working directory here (issue #420).
     pub async fn register_mcp_tools_for_dir(
         &self,
-        event_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::protocol::ServerEvent>>,
+        event_tx: Option<crate::client_delivery::ClientEventSender>,
         shared_pool: Option<std::sync::Arc<crate::mcp::SharedMcpPool>>,
         session_id: Option<String>,
         working_dir: Option<std::path::PathBuf>,

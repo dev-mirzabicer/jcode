@@ -120,7 +120,7 @@ fn persisted_swarm_state_round_trips_and_marks_running_stale() {
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
     let members = vec![SwarmMember {
         session_id: "session-1".to_string(),
-        event_tx,
+        event_tx: event_tx.into(),
         event_txs: HashMap::new(),
         working_dir: Some(PathBuf::from("/tmp/swarm-alpha")),
         swarm_id: Some("swarm-alpha".to_string()),
@@ -195,7 +195,7 @@ fn ready_headless_member_with_report_stops_without_losing_report() {
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
     let members = vec![SwarmMember {
         session_id: "session-ready".to_string(),
-        event_tx,
+        event_tx: event_tx.into(),
         event_txs: HashMap::new(),
         working_dir: Some(PathBuf::from("/tmp/swarm-gamma")),
         swarm_id: Some("swarm-gamma".to_string()),
@@ -239,7 +239,7 @@ fn ready_detached_client_stops_on_reload_until_it_reattaches() {
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
     let members = vec![SwarmMember {
         session_id: "session-detached".to_string(),
-        event_tx,
+        event_tx: event_tx.into(),
         event_txs: HashMap::new(),
         working_dir: Some(PathBuf::from("/tmp/swarm-client")),
         swarm_id: Some("swarm-client".to_string()),
@@ -325,7 +325,7 @@ fn terminal_member_retention_preserves_recent_reports_and_prunes_expired_records
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
     let member = SwarmMember {
         session_id: "session-terminal".to_string(),
-        event_tx,
+        event_tx: event_tx.into(),
         event_txs: HashMap::new(),
         working_dir: Some(PathBuf::from("/tmp/swarm-terminal")),
         swarm_id: Some("swarm-terminal".to_string()),
@@ -373,7 +373,7 @@ fn legacy_terminal_member_uses_snapshot_time_as_retention_fallback() {
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
     let member = SwarmMember {
         session_id: "session-legacy-terminal".to_string(),
-        event_tx,
+        event_tx: event_tx.into(),
         event_txs: HashMap::new(),
         working_dir: None,
         swarm_id: Some("swarm-legacy".to_string()),
@@ -414,7 +414,7 @@ fn recovery_induced_terminal_status_starts_retention_at_load_time() {
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
     let member = SwarmMember {
         session_id: "session-ready-recovery".to_string(),
-        event_tx,
+        event_tx: event_tx.into(),
         event_txs: HashMap::new(),
         working_dir: None,
         swarm_id: Some("swarm-recovery".to_string()),
@@ -456,7 +456,7 @@ fn startup_gc_removes_expired_terminal_members_from_durable_snapshot() {
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
     let members = vec![SwarmMember {
         session_id: "session-expired".to_string(),
-        event_tx,
+        event_tx: event_tx.into(),
         event_txs: HashMap::new(),
         working_dir: None,
         swarm_id: Some("swarm-expired".to_string()),
@@ -1091,7 +1091,7 @@ fn persisted_swarm_state_without_plan_still_restores_coordinator_and_members() {
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
     let members = vec![SwarmMember {
         session_id: "coord-1".to_string(),
-        event_tx,
+        event_tx: event_tx.into(),
         event_txs: HashMap::new(),
         working_dir: Some(PathBuf::from("/tmp/swarm-gamma")),
         swarm_id: Some("swarm-gamma".to_string()),

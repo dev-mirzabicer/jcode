@@ -84,7 +84,7 @@ async fn profile_mutation_guard_rejects_busy_without_check_to_lock_race() {
             "session-profile-busy",
             false,
             &agent,
-            &event_tx,
+            &event_tx.clone().into(),
         )
         .is_none()
     );
@@ -101,7 +101,7 @@ async fn profile_mutation_guard_rejects_busy_without_check_to_lock_race() {
         "session-profile-idle",
         false,
         &agent,
-        &event_tx,
+        &event_tx.clone().into(),
     )
     .expect("idle mutation guard");
     assert!(
@@ -117,7 +117,7 @@ async fn profile_mutation_guard_rejects_busy_without_check_to_lock_race() {
             "session-profile-processing",
             true,
             &agent,
-            &event_tx,
+            &event_tx.clone().into(),
         )
         .is_none()
     );
@@ -236,7 +236,7 @@ async fn busy_agent_request_rejection_does_not_wait_for_agent_lock() {
             "session_busy_reject",
             true,
             &agent,
-            &client_event_tx,
+            &client_event_tx.clone().into(),
         )
     })
     .await
@@ -258,7 +258,7 @@ async fn busy_agent_request_rejection_does_not_wait_for_agent_lock() {
         "session_busy_reject",
         false,
         &agent,
-        &client_event_tx,
+        &client_event_tx.clone().into(),
     ));
     assert!(client_event_rx.try_recv().is_err());
 }
@@ -296,7 +296,7 @@ async fn context_message_persists_without_starting_turn_async() {
         session_id,
         false,
         &agent,
-        &client_event_tx,
+        &client_event_tx.clone().into(),
     )
     .await;
 
@@ -340,7 +340,7 @@ async fn context_message_rejects_while_busy_without_waiting_for_agent_lock() {
             "session_context_busy",
             true,
             &agent,
-            &client_event_tx,
+            &client_event_tx.clone().into(),
         )
         .await;
     })
@@ -391,7 +391,7 @@ async fn cancel_without_local_task_still_signals_session_control() {
             session_id: &mut session_id,
         },
         &control,
-        &client_event_tx,
+        &client_event_tx.clone().into(),
         &Arc::new(crate::primary::PrimaryHost::default()),
         &SwarmStatusRefs {
             members: &swarm_members,
@@ -458,7 +458,7 @@ async fn deferred_cancel_reset_does_not_erase_newer_cancel() {
                 session_id: &mut session_id,
             },
             &control,
-            &client_event_tx,
+            &client_event_tx.clone().into(),
             &Arc::new(crate::primary::PrimaryHost::default()),
             &SwarmStatusRefs {
                 members: &swarm_members,
@@ -634,7 +634,7 @@ fn cancel_aborts_detached_streaming_turn_with_stale_stop_signal() -> anyhow::Res
                 session_id: &mut cancel_session_id,
             },
             &control,
-            &client_event_tx,
+            &client_event_tx.clone().into(),
             &Arc::new(crate::primary::PrimaryHost::default()),
             &SwarmStatusRefs {
                 members: &swarm_members,
@@ -720,7 +720,7 @@ fn idle_cancel_does_not_arm_the_signal_for_the_next_turn() -> anyhow::Result<()>
                 session_id: &mut cancel_session_id,
             },
             &control,
-            &client_event_tx,
+            &client_event_tx.clone().into(),
             &Arc::new(crate::primary::PrimaryHost::default()),
             &SwarmStatusRefs {
                 members: &swarm_members,
@@ -2266,7 +2266,7 @@ fn reload_starting_rejects_new_turn_without_spawning_processing_task() {
                 session_id: &mut processing_session_id,
             },
             &agent,
-            &client_event_tx,
+            &client_event_tx.clone().into(),
             &host,
             Vec::new(),
             &crate::server::startup_context::test_coordinator(),
@@ -2360,7 +2360,7 @@ fn turn_coupled_skill_activation_persists_before_shared_server_processing() {
                 session_id: &mut processing_session_id,
             },
             &agent,
-            &client_event_tx,
+            &client_event_tx.clone().into(),
             &host,
             Vec::new(),
             &crate::server::startup_context::test_coordinator(),
@@ -2428,8 +2428,8 @@ async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attac
         session_id.to_string(),
         SwarmMember {
             session_id: session_id.to_string(),
-            event_tx: origin_tx.clone(),
-            event_txs: HashMap::from([("origin".to_string(), origin_tx.clone())]),
+            event_tx: origin_tx.clone().into(),
+            event_txs: HashMap::from([("origin".to_string(), origin_tx.clone().into())]),
             working_dir: None,
             swarm_id: None,
             swarm_enabled: false,
@@ -2475,7 +2475,7 @@ async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attac
             session_id: &mut processing_session_id,
         },
         &agent,
-        &origin_tx,
+        &origin_tx.clone().into(),
         &host,
         Vec::new(),
         &crate::server::startup_context::test_coordinator(),
@@ -2503,7 +2503,7 @@ async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attac
         &swarm_members,
         session_id,
         "attached",
-        attached_tx,
+        attached_tx.into(),
     )
     .await;
 
@@ -2600,7 +2600,7 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
                 session_id: &mut processing_session_id,
             },
             &agent,
-            &client_event_tx,
+            &client_event_tx.clone().into(),
             &host,
             Vec::new(),
             &crate::server::startup_context::test_coordinator(),
@@ -2693,7 +2693,7 @@ fn reload_starting_rejects_new_turns_for_multiple_sessions() {
                     session_id: &mut processing_session_id,
                 },
                 &agent,
-                &client_event_tx,
+                &client_event_tx.clone().into(),
                 &host,
                 Vec::new(),
                 &crate::server::startup_context::test_coordinator(),

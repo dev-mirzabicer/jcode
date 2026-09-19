@@ -156,7 +156,7 @@ async fn assign_task_does_not_stack_on_busy_worker() {
         None,
         None,
         Some("Do not stack this onto the busy worker".to_string()),
-        &client_tx,
+        &client_tx.clone().into(),
         &sessions,
         &soft_interrupt_queues,
         &client_connections,

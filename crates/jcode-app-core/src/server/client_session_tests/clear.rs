@@ -158,7 +158,7 @@ async fn handle_clear_session_replaces_runtime_handles_and_updates_shutdown_regi
         &event_history,
         &event_counter,
         &swarm_event_tx,
-        &client_event_tx,
+        &client_event_tx.clone().into(),
     )
     .await;
 

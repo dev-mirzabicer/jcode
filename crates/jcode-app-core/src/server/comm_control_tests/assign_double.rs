@@ -222,7 +222,7 @@ async fn assign_task_rejects_double_assignment_of_actively_worked_task() {
         Some(intruder.to_string()),
         Some("contested".to_string()),
         None,
-        &client_tx,
+        &client_tx.clone().into(),
         &sessions,
         &soft_interrupt_queues,
         &client_connections,
@@ -306,7 +306,7 @@ async fn assign_task_allows_taking_over_stale_assignment() {
         Some(intruder.to_string()),
         Some("stalled".to_string()),
         None,
-        &client_tx,
+        &client_tx.clone().into(),
         &sessions,
         &soft_interrupt_queues,
         &client_connections,
@@ -372,7 +372,7 @@ async fn task_control_reassign_tells_displaced_worker_to_stand_down() {
         .await
         .get_mut(holder)
         .expect("holder member")
-        .event_tx = holder_tx;
+        .event_tx = holder_tx.into();
     sessions
         .write()
         .await
@@ -399,7 +399,7 @@ async fn task_control_reassign_tells_displaced_worker_to_stand_down() {
         "contested".to_string(),
         Some(intruder.to_string()),
         None,
-        &client_tx,
+        &client_tx.clone().into(),
         &sessions,
         &soft_interrupt_queues,
         &client_connections,
@@ -424,7 +424,7 @@ async fn task_control_reassign_tells_displaced_worker_to_stand_down() {
         "contested".to_string(),
         Some(intruder.to_string()),
         None,
-        &client_tx,
+        &client_tx.clone().into(),
         &sessions,
         &soft_interrupt_queues,
         &client_connections,

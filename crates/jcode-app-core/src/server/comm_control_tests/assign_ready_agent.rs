@@ -72,7 +72,7 @@ async fn assign_task_without_target_picks_ready_agent() {
         None,
         None,
         Some("Pick a task and worker".to_string()),
-        &client_tx,
+        &client_tx.clone().into(),
         &sessions,
         &soft_interrupt_queues,
         &client_connections,

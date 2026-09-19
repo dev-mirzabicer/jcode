@@ -68,7 +68,7 @@ async fn assign_task_without_target_prefers_less_loaded_ready_agent() {
         None,
         None,
         Some("Pick the least-loaded worker".to_string()),
-        &client_tx,
+        &client_tx.clone().into(),
         &sessions,
         &soft_interrupt_queues,
         &client_connections,

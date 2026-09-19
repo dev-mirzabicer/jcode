@@ -64,7 +64,7 @@ async fn subscribe_preserves_cwd_and_history_when_idle_and_busy() -> Result<()> 
                 &session_channels,
                 &plans,
                 &coordinators,
-                &events,
+                &events.clone().into(),
                 &pool,
                 &history,
                 &counter,

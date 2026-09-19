@@ -48,7 +48,7 @@ async fn managed_wake_turn_renders_recipient_scope_and_fails_visibly_before_disp
     let (tx, mut rx) = mpsc::unbounded_channel();
     let members = Arc::new(RwLock::new(HashMap::from([(
         session_id.clone(),
-        attached_swarm_member(&session_id, tx),
+        attached_swarm_member(&session_id, tx.into()),
     )])));
     let (swarms, history, counter, events) = empty_swarm_status_state();
     let context = || LiveTurnSwarmContext::new(&members, &swarms, &history, &counter, &events);

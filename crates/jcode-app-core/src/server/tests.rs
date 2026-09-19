@@ -281,7 +281,7 @@ fn empty_swarm_status_state() -> (
 
 fn attached_swarm_member(
     session_id: &str,
-    event_tx: mpsc::UnboundedSender<ServerEvent>,
+    event_tx: crate::client_delivery::ClientEventSender,
 ) -> SwarmMember {
     SwarmMember {
         session_id: session_id.to_string(),
@@ -316,7 +316,7 @@ fn persisted_headless_member(
     let (event_tx, _event_rx) = mpsc::unbounded_channel();
     SwarmMember {
         session_id: session_id.to_string(),
-        event_tx,
+        event_tx: event_tx.into(),
         event_txs: HashMap::new(),
         working_dir: None,
         swarm_id: Some(swarm_id.to_string()),
@@ -356,7 +356,7 @@ async fn background_task_wake_runs_live_session_immediately_when_idle() {
     let (member_event_tx, mut member_event_rx) = mpsc::unbounded_channel();
     let swarm_members = Arc::new(RwLock::new(HashMap::from([(
         session_id.clone(),
-        attached_swarm_member(&session_id, member_event_tx),
+        attached_swarm_member(&session_id, member_event_tx.into()),
     )])));
     let task = BackgroundTaskCompleted {
         task_id: "bgwake".to_string(),
@@ -451,7 +451,7 @@ async fn wake_turn_tracks_member_status_and_emits_terminal_done() {
         agent.clone(),
     )])));
     let (member_event_tx, mut member_event_rx) = mpsc::unbounded_channel();
-    let mut member = attached_swarm_member(&session_id, member_event_tx);
+    let mut member = attached_swarm_member(&session_id, member_event_tx.into());
     member.swarm_id = Some("test-swarm".to_string());
     let swarm_members = Arc::new(RwLock::new(HashMap::from([(session_id.clone(), member)])));
     let (swarms_by_id, event_history, event_counter, swarm_event_tx) = empty_swarm_status_state();
@@ -560,7 +560,7 @@ async fn background_task_notify_without_wake_does_not_queue_soft_interrupt() {
     let (member_event_tx, mut member_event_rx) = mpsc::unbounded_channel();
     let swarm_members = Arc::new(RwLock::new(HashMap::from([(
         session_id.clone(),
-        attached_swarm_member(&session_id, member_event_tx),
+        attached_swarm_member(&session_id, member_event_tx.into()),
     )])));
     let task = BackgroundTaskCompleted {
         task_id: "bgnotify".to_string(),
@@ -664,10 +664,10 @@ async fn managed_completion_is_pending_without_parent_and_notifies_once_after_at
         );
         assert!(sessions.read().await.is_empty());
         let (tx, mut rx) = mpsc::unbounded_channel();
-        members
-            .write()
-            .await
-            .insert(session_id.clone(), attached_swarm_member(&session_id, tx));
+        members.write().await.insert(
+            session_id.clone(),
+            attached_swarm_member(&session_id, tx.into()),
+        );
         dispatch_background_task_completion(
             &task, &sessions, &queues, &members, &swarms, &history, &counter, &events,
         )
@@ -702,7 +702,7 @@ async fn background_task_progress_notifies_attached_clients() {
     let (member_event_tx, mut member_event_rx) = mpsc::unbounded_channel();
     let swarm_members = Arc::new(RwLock::new(HashMap::from([(
         session_id.clone(),
-        attached_swarm_member(&session_id, member_event_tx),
+        attached_swarm_member(&session_id, member_event_tx.into()),
     )])));
     let task = BackgroundTaskProgressEvent {
         task_id: "bgprogress".to_string(),

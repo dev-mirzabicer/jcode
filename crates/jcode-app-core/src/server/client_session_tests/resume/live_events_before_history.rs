@@ -51,7 +51,7 @@ async fn handle_resume_session_registers_live_events_before_history_replay() -> 
         temp_session_id.to_string(),
         SwarmMember {
             session_id: temp_session_id.to_string(),
-            event_tx: placeholder_event_tx,
+            event_tx: placeholder_event_tx.into(),
             event_txs: HashMap::new(),
             working_dir: None,
             swarm_id: None,
@@ -148,7 +148,7 @@ async fn handle_resume_session_registers_live_events_before_history_replay() -> 
                 &writer,
                 "test-server",
                 "🌿",
-                &client_event_tx,
+                &client_event_tx.clone().into(),
                 &mcp_pool,
                 &event_history,
                 &event_counter,

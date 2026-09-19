@@ -31,6 +31,7 @@ pub mod ambient_scheduler;
 pub mod build;
 pub mod catchup;
 pub mod channel;
+pub mod client_delivery;
 pub mod context;
 pub mod delegation;
 pub mod execution;

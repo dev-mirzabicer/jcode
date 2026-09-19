@@ -1,5 +1,68 @@
 use super::*;
 
+#[derive(Clone, Default)]
+struct GatedClientProvider {
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl Provider for GatedClientProvider {
+    async fn complete(
+        &self,
+        _: &[Message],
+        _: &[ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<EventStream> {
+        let control = self.clone();
+        Ok(Box::pin(async_stream::stream! {
+            yield Ok(StreamEvent::TextDelta("fixture prefix ".into()));
+            control.entered.notify_one();
+            control.release.notified().await;
+            yield Ok(StreamEvent::TextDelta("fixture suffix".into()));
+            yield Ok(StreamEvent::MessageEnd { stop_reason: None });
+        }))
+    }
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+#[test]
+fn slow_client_overflow_does_not_stop_the_primary() -> Result<()> {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    crate::instruction::SystemPromptComposer::new().ensure_global_store()?;
+    tokio::runtime::Runtime::new()?.block_on(async {
+        let control = GatedClientProvider::default();
+        let provider: Arc<dyn Provider> = Arc::new(control.clone());
+        let registry = Registry::new(provider.clone()).await;
+        let agent = Arc::new(Mutex::new(Agent::new(provider,registry)));
+        let session = agent.lock().await.session_id().to_string();
+        let host = Arc::new(crate::primary::PrimaryHost::new(HashMap::from([(session.clone(),agent.clone())])));
+        let status = status_fixture(&session);
+        let members = status.members.clone();
+        let (observer,_receiver,disconnected) = crate::client_delivery::ClientEventSender::bounded_client();
+        observer.retarget(&session);
+        crate::server::register_session_event_sender(&members,&session,"slow",observer.clone()).await;
+        assert!(crate::server::live_turn::run_live_turn_if_idle(&session,"fixture input",None,&host,status).await);
+        tokio::time::timeout(Duration::from_secs(5),control.entered.notified()).await?;
+        for id in 0..1024 { if observer.send(ServerEvent::Done{id}).is_err() { break; } }
+        assert!(disconnected.is_cancelled());
+        assert!(host.processing(&session).is_some());
+        control.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(10),host.wait_idle(&session)).await??;
+        let stored = Session::load(&session)?;
+        assert!(stored.messages.iter().flat_map(|m| &m.content).any(|block| matches!(block,ContentBlock::Text{text,..} if text == "fixture prefix fixture suffix")));
+        assert_eq!(members.read().await[&session].status,"ready");
+        host.shutdown().await
+    })
+}
+
 #[test]
 fn resume_all_rejected_admission_preserves_recovery_intent() -> Result<()> {
     let _lock = crate::storage::lock_test_env();
@@ -53,7 +116,7 @@ fn resume_all_rejected_admission_preserves_recovery_intent() -> Result<()> {
             &status.event_history,
             &status.event_counter,
             &status.event_tx,
-            &tx,
+            &tx.clone().into(),
         )
         .await;
         assert!(matches!(
@@ -83,7 +146,7 @@ async fn departed_origin_cannot_receive_detached_primary_events() -> Result<()> 
         &status.members,
         session,
         "client",
-        origin.clone(),
+        origin.clone().into(),
     )
     .await;
     assert_eq!(
@@ -104,7 +167,7 @@ async fn departed_origin_cannot_receive_detached_primary_events() -> Result<()> 
     let stream = crate::server::state::session_event_fanout_sender_with_fallback(
         session.into(),
         status.members.clone(),
-        origin,
+        origin.into(),
     );
     stream.send(ServerEvent::Done { id: 3 })?;
     assert!(
@@ -210,7 +273,7 @@ fn status_fixture(session: &str) -> crate::server::live_turn::LiveTurnSwarmConte
         session.to_string(),
         SwarmMember {
             session_id: session.to_string(),
-            event_tx: tx,
+            event_tx: tx.into(),
             event_txs: HashMap::new(),
             working_dir: None,
             swarm_id: None,
@@ -307,7 +370,8 @@ fn detached_host_stop_reaches_real_stream_and_clears_only_its_turn() -> Result<(
         let status = status_fixture(&session);
         let members = status.members.clone();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        crate::server::register_session_event_sender(&members, &session, "observer", tx).await;
+        crate::server::register_session_event_sender(&members, &session, "observer", tx.into())
+            .await;
         assert!(
             crate::server::live_turn::run_live_turn_if_idle(
                 &session,

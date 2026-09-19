@@ -29,7 +29,7 @@ use crate::provider::Provider;
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
+use tokio::sync::{Mutex, RwLock, broadcast};
 
 pub(super) fn unavailable_swarm_response(request: &Request) -> Option<ServerEvent> {
     if crate::config::config().features.swarm {
@@ -80,7 +80,7 @@ pub(super) fn unavailable_swarm_response(request: &Request) -> Option<ServerEven
 pub(super) fn parse_swarm_spawn_mode(
     id: u64,
     spawn_mode: Option<String>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
 ) -> Option<Option<SwarmSpawnMode>> {
     match spawn_mode {
         Some(value) => match SwarmSpawnMode::parse(&value) {
@@ -160,7 +160,7 @@ pub(super) async fn handle_lightweight_control_request(
         return Ok(());
     }
 
-    let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
+    let (client_event_tx, mut client_event_rx) = crate::client_delivery::local_event_channel();
     let writer_clone = Arc::clone(&writer);
     let event_handle = tokio::spawn(async move {
         while let Some(event) = client_event_rx.recv().await {

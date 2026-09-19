@@ -14,7 +14,7 @@ use jcode_agent_runtime::SoftInterruptSource;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::{RwLock, broadcast, mpsc};
+use tokio::sync::{RwLock, broadcast};
 
 type SessionAgents = Arc<crate::primary::PrimaryHost>;
 
@@ -44,7 +44,7 @@ pub(super) async fn handle_comm_propose_plan(
     id: u64,
     req_session_id: String,
     items: Vec<PlanItem>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
     shared_context: &Arc<RwLock<HashMap<String, HashMap<String, SharedContext>>>>,
@@ -330,7 +330,7 @@ pub(super) async fn handle_comm_approve_plan(
     id: u64,
     req_session_id: String,
     proposer_session: String,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
     shared_context: &Arc<RwLock<HashMap<String, HashMap<String, SharedContext>>>>,
@@ -561,7 +561,7 @@ pub(super) async fn handle_comm_reject_plan(
     req_session_id: String,
     proposer_session: String,
     reason: Option<String>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     shared_context: &Arc<RwLock<HashMap<String, HashMap<String, SharedContext>>>>,
     swarm_coordinators: &Arc<RwLock<HashMap<String, String>>>,
@@ -706,7 +706,7 @@ async fn require_coordinator_swarm(
     id: u64,
     req_session_id: &str,
     permission_error: &str,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     swarm_coordinators: &Arc<RwLock<HashMap<String, String>>>,
 ) -> Option<String> {

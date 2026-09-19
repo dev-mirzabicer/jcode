@@ -161,12 +161,10 @@ async fn swarm_retirement_stale_await_completion_cannot_notify_or_wake() {
         .await
         .insert(session_id.clone(), agent.clone());
     let (tx, mut rx) = mpsc::unbounded_channel();
-    server
-        .swarm_state
-        .members
-        .write()
-        .await
-        .insert(session_id.clone(), attached_swarm_member(&session_id, tx));
+    server.swarm_state.members.write().await.insert(
+        session_id.clone(),
+        attached_swarm_member(&session_id, tx.into()),
+    );
     crate::server::background_tasks::dispatch_swarm_await_completion(
         &crate::bus::SwarmAwaitCompleted {
             session_id,
@@ -245,7 +243,7 @@ async fn swarm_retirement_await_and_mutation_files_do_not_expire_migrate_or_resu
             "spawn",
             "fixture",
             1,
-            &tx
+            &tx.clone().into()
         )
         .await
         .is_none()

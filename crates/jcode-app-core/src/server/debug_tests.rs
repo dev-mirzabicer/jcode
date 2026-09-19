@@ -115,8 +115,8 @@ mod transcript_routing_tests {
         let now = Instant::now();
         SwarmMember {
             session_id: session_id.to_string(),
-            event_tx: event_tx.clone(),
-            event_txs: HashMap::from([(connection_id.to_string(), event_tx)]),
+            event_tx: event_tx.clone().into(),
+            event_txs: HashMap::from([(connection_id.to_string(), event_tx.into())]),
             working_dir: None,
             swarm_id: None,
             swarm_enabled: false,

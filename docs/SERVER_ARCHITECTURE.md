@@ -98,6 +98,22 @@ Run/REPL inference remains process-owned. This change does not install a login
 service or give standalone callers detached execution guarantees. Managed
 workspace launch and its human controls remain separately gated.
 
+### Client delivery
+
+Primary output fans out through per-connection queues rather than awaiting a
+client socket. A queue admits at most 256 events with an 8 MiB ordinary serialized
+byte budget. One larger complete response can occupy an otherwise empty queue.
+Responses are never truncated to fit that budget. Overflow disconnects that
+client, not its primary. Authoritative conversation and execution output stay
+with their existing storage owners.
+
+Socket writes have a 30-second **no-progress** deadline, renewed after each
+successful write. There is no total-duration or response-size deadline. Session
+bindings also carry an internal generation: queued or late events for a departed
+target cannot follow the connection to another session. Attachment snapshot
+publication precedes that target's queued output. In-process observers use their
+existing local channels and do not own primary lifetime.
+
 ### Remote Client Working Directory
 
 For a fresh session, the client supplies its command working directory to the

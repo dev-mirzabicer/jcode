@@ -67,7 +67,7 @@ async fn await_members_returns_persisted_final_response_after_reload_retry() {
         false,
         false,
         CommAwaitMembersContext {
-            client_event_tx: &client_tx,
+            client_event_tx: &client_tx.clone().into(),
             swarm_members: &swarm_members,
             swarms_by_id: &swarms_by_id,
             swarm_event_tx: &swarm_event_tx,
@@ -164,7 +164,7 @@ async fn await_members_ignores_persisted_final_when_requested_member_is_queued_a
         false,
         false,
         CommAwaitMembersContext {
-            client_event_tx: &client_tx,
+            client_event_tx: &client_tx.clone().into(),
             swarm_members: &swarm_members,
             swarms_by_id: &swarms_by_id,
             swarm_event_tx: &swarm_event_tx,
