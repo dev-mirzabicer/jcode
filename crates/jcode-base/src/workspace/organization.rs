@@ -20,10 +20,32 @@ impl WorkspaceService {
         let _lease = self.lease(false)?;
         let mut connection = self.connection()?;
         // External observations precede a short metadata transaction.
-        let binding = if let OrganizationChange::RegisterLocation { path, .. } = &change {
-            Some(self.resolver.bind_directory(path).map_err(io)?)
-        } else {
-            None
+        let binding = match &change {
+            OrganizationChange::RegisterLocation { path, .. } => {
+                Some(self.resolver.bind_directory(path).map_err(io)?)
+            }
+            OrganizationChange::AdoptStandalone { location, .. } => {
+                let body: String = connection
+                    .query_row(
+                        "SELECT body FROM bindings WHERE location=?1",
+                        [location.to_string()],
+                        |r| r.get(0),
+                    )
+                    .map_err(corrupt)?;
+                let bound: BoundLocation = decode(&body)?;
+                let resolved = self
+                    .resolver
+                    .resolve_directory(&bound.binding)
+                    .map_err(|e| issue(IssueCode::ReplacedRoot, e.to_string()))?;
+                if resolved.relocated {
+                    return Err(issue(
+                        IssueCode::RecoveryRequired,
+                        "Location moved physically. Review its rebind before organizational adoption",
+                    ));
+                }
+                Some(bound.binding)
+            }
+            _ => None,
         };
         let default = if let OrganizationChange::SetVolumeDefault { path, volume_uuid } = &change {
             let bound = self.resolver.bind_path(path).map_err(io)?;
@@ -69,6 +91,46 @@ impl WorkspaceService {
             self.resolver
                 .resolve_directory(binding)
                 .map_err(|e| issue(IssueCode::ReplacedRoot, e.to_string()))?;
+            for value in &prepared.entities {
+                if let Entity::Location(location) = value {
+                    match &location.kind {
+                        LocationKind::Checkout { repository, .. } => {
+                            if checkout_kind(binding.observed_path(), *repository)? != location.kind
+                            {
+                                return Err(issue(
+                                    IssueCode::ReplacedRoot,
+                                    "Git layout changed after review",
+                                ));
+                            }
+                        }
+                        LocationKind::Directory => {
+                            if resolve_project(binding.observed_path())
+                                .map_err(io)?
+                                .key()
+                                .is_git()
+                            {
+                                return Err(issue(
+                                    IssueCode::ReplacedRoot,
+                                    "Directory became a Git location after review",
+                                ));
+                            }
+                        }
+                        LocationKind::Standalone { git } => {
+                            if resolve_project(binding.observed_path())
+                                .map_err(io)?
+                                .key()
+                                .is_git()
+                                != *git
+                            {
+                                return Err(issue(
+                                    IssueCode::ReplacedRoot,
+                                    "Standalone physical kind changed after review",
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
         }
         if let Some(default) = &prepared.default {
             self.resolver.resolve_path(default).map_err(io)?;
@@ -270,7 +332,7 @@ fn location(connection: &Connection, id: LocationId) -> Result<Location> {
         _ => unreachable!(),
     }
 }
-fn checkout_kind(path: &Path, repository: RepositoryId) -> Result<LocationKind> {
+pub(super) fn checkout_kind(path: &Path, repository: RepositoryId) -> Result<LocationKind> {
     let facts = resolve_project(path).map_err(io)?;
     match facts.key() {
         ProjectKey::Git {
@@ -620,19 +682,24 @@ fn apply(connection: &Connection, prepared: &PreparedChange) -> Result<()> {
         _ => {}
     }
     for value in &prepared.entities {
-        if let Entity::Location(loc) = value {
-            if let (Some(home), LocationKind::Checkout { repository, .. }) = (loc.home, &loc.kind) {
-                let project = home_project(connection, home)?;
-                connection
-                    .execute(
-                        "INSERT OR IGNORE INTO associations VALUES(?1,?2)",
-                        params![project.to_string(), repository.to_string()],
-                    )
-                    .map_err(io)?;
-            }
+        if let Entity::Location(loc) = value
+            && let (Some(home), LocationKind::Checkout { repository, .. }) = (loc.home, &loc.kind)
+        {
+            let project = home_project(connection, home)?;
+            connection
+                .execute(
+                    "INSERT OR IGNORE INTO associations VALUES(?1,?2)",
+                    params![project.to_string(), repository.to_string()],
+                )
+                .map_err(io)?;
         }
         save_entity(connection, value)?;
-        if let (Entity::Location(loc), Some(binding)) = (value, &prepared.binding) {
+        if let (Entity::Location(loc), Some(binding)) = (value, &prepared.binding)
+            && matches!(
+                prepared.review.change,
+                OrganizationChange::RegisterLocation { .. }
+            )
+        {
             connection
                 .execute(
                     "INSERT INTO bindings VALUES(?1,?2,?3)",

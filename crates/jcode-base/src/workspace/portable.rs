@@ -13,8 +13,16 @@ pub(super) struct PortableCatalog {
     pub bindings: Vec<(LocationId, BoundLocation)>,
     pub grants: Vec<GrantDefinition>,
     pub session_references: Vec<SessionIndex>,
+    pub inherited_session_references: Vec<SessionReferenceSet>,
     pub closed: Vec<ClosedReference>,
     pub external_content: Vec<String>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SessionReferenceSet {
+    projects: Vec<ProjectId>,
+    installation: InstallationId,
+    sessions: Vec<SessionIndex>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -87,6 +95,23 @@ pub(super) fn validate_graph(connection: &Connection) -> Result<()> {
                     )
                     .map_err(corrupt)?;
                 let bound: BoundLocation = decode(&body)?;
+                let live_key: Option<String> = connection
+                    .query_row(
+                        "SELECT live_key FROM bindings WHERE location=?1",
+                        [loc.id.to_string()],
+                        |r| r.get(0),
+                    )
+                    .map_err(corrupt)?;
+                let expected_key = if loc.lifecycle == LocationLifecycle::Closed {
+                    None
+                } else {
+                    Some(storage::physical_key(&bound.binding)?)
+                };
+                if live_key != expected_key {
+                    return Err(corrupt(
+                        "Physical-root uniqueness index disagrees with binding",
+                    ));
+                }
                 if bound.binding.observed_path() != loc.observed_path
                     || bound.binding.volume().as_str() != loc.volume_uuid
                     || bound.binding.generation() != loc.binding_generation
@@ -114,6 +139,22 @@ pub(super) fn validate_graph(connection: &Connection) -> Result<()> {
     }
     for grant in grants(connection)? {
         validate_grant(connection, &grant)?;
+    }
+    let mut stmt = connection
+        .prepare("SELECT body,target FROM session_index")
+        .map_err(io)?;
+    for row in stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .map_err(io)?
+    {
+        let (body, target) = row.map_err(io)?;
+        let index: SessionIndex = decode(&body)?;
+        query::validate_placement(connection, index.placement)?;
+        if query::placement_target(index.placement).to_string() != target {
+            return Err(corrupt(
+                "Session index target disagrees with its checkpoint projection",
+            ));
+        }
     }
     Ok(())
 }
@@ -147,16 +188,16 @@ pub(super) fn validate_grant(connection: &Connection, grant: &GrantDefinition) -
     for id in grant_targets(grant) {
         entity(connection, id)?;
     }
-    if let Audience::Checkout(id) = grant.audience {
-        if !matches!(
+    if let Audience::Checkout(id) = grant.audience
+        && !matches!(
             entity(connection, EntityId::Location(id))?,
             Entity::Location(Location {
                 kind: LocationKind::Checkout { .. },
                 ..
             })
-        ) {
-            return Err(corrupt("Checkout grant audience is not a checkout"));
-        }
+        )
+    {
+        return Err(corrupt("Checkout grant audience is not a checkout"));
     }
     Ok(())
 }
@@ -285,6 +326,19 @@ impl WorkspaceService {
                 session_references.push(decode(&body)?);
             }
         }
+        let mut inherited_session_references = vec![];
+        let mut references = tx
+            .prepare("SELECT body FROM imported_references ORDER BY id")
+            .map_err(io)?;
+        for body in references
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(io)?
+        {
+            let record: SessionReferenceSet = decode(&body.map_err(io)?)?;
+            if record.projects.contains(&project) {
+                inherited_session_references.push(record);
+            }
+        }
         let catalog = PortableCatalog {
             schema: 1,
             installation: status.installation,
@@ -294,6 +348,7 @@ impl WorkspaceService {
             bindings,
             grants,
             session_references,
+            inherited_session_references,
             closed,
             external_content,
         };
@@ -322,6 +377,7 @@ impl WorkspaceService {
         organization::require_revision(&connection, expected)?;
         let mut payload = envelope.catalog;
         let mut collisions = vec![];
+        let mut revision_differences = vec![];
         for value in &payload.entities {
             let exists: bool = connection
                 .query_row(
@@ -332,6 +388,11 @@ impl WorkspaceService {
                 .map_err(io)?;
             if exists {
                 collisions.push(value.id());
+                revision_differences.push(ImportRevisionDifference {
+                    identity: value.id(),
+                    current: entity(&connection, value.id())?.revision(),
+                    incoming: value.revision(),
+                });
             }
         }
         let mut remapped = vec![];
@@ -375,18 +436,23 @@ impl WorkspaceService {
                 ));
             }
             for value in &mut payload.entities {
-                if let Entity::Location(loc) = value {
-                    if loc.id == *id {
-                        loc.observed_path = bound.binding.observed_path().into();
-                        loc.volume_uuid = bound.binding.volume().as_str().into();
-                        loc.binding_generation = bound.binding.generation();
-                        if loc.lifecycle != LocationLifecycle::Closed {
-                            loc.lifecycle = if available {
-                                LocationLifecycle::Ready
-                            } else {
-                                LocationLifecycle::Unavailable
-                            };
-                        }
+                if let Entity::Location(loc) = value
+                    && loc.id == *id
+                {
+                    loc.observed_path = bound.binding.observed_path().into();
+                    loc.volume_uuid = bound.binding.volume().as_str().into();
+                    loc.binding_generation = bound.binding.generation();
+                    if remapped.contains(id)
+                        && let LocationKind::Checkout { repository, .. } = loc.kind
+                    {
+                        loc.kind = organization::checkout_kind(&loc.observed_path, repository)?;
+                    }
+                    if loc.lifecycle != LocationLifecycle::Closed {
+                        loc.lifecycle = if available && loc.lifecycle == LocationLifecycle::Ready {
+                            LocationLifecycle::Ready
+                        } else {
+                            LocationLifecycle::Unavailable
+                        };
                     }
                 }
             }
@@ -397,6 +463,20 @@ impl WorkspaceService {
         }
         if policy == ImportCollisionPolicy::NewIdentities {
             remap_identities(&mut payload)?;
+        }
+        let local_revision = expected
+            .checked_add(1)
+            .ok_or_else(|| corrupt("Revision exhausted"))?;
+        for value in &mut payload.entities {
+            match value {
+                Entity::Project(v) => v.revision = local_revision,
+                Entity::Repository(v) => v.revision = local_revision,
+                Entity::WorkArea(v) => v.revision = local_revision,
+                Entity::Location(v) => v.revision = local_revision,
+            }
+        }
+        for grant in &mut payload.grants {
+            grant.revision = local_revision;
         }
         let issues = if !collisions.is_empty() && policy == ImportCollisionPolicy::Reject {
             vec![issue(
@@ -411,6 +491,8 @@ impl WorkspaceService {
             revision: expected,
             source_installation: payload.installation,
             collisions,
+            revision_differences,
+            entities: payload.entities.clone(),
             remapped,
             unavailable,
             disabled_grants,
@@ -447,7 +529,7 @@ impl WorkspaceService {
         }
         organization::require_revision(&connection, prepared.review.revision)?;
         for (id, bound) in &prepared.payload.bindings {
-            if !prepared.review.unavailable.contains(id) {
+            if prepared.payload.entities.iter().any(|v|matches!(v,Entity::Location(loc) if loc.id==*id && loc.lifecycle==LocationLifecycle::Ready)) {
                 self.resolver
                     .resolve_directory(&bound.binding)
                     .map_err(|e| issue(IssueCode::ReplacedRoot, e.to_string()))?;
@@ -467,6 +549,7 @@ impl WorkspaceService {
             prepared.payload.entities.iter().map(Entity::id).collect(),
         )?;
         tx.commit().map_err(io)?;
+        self.checkpoint("import_after_commit")?;
         self.after_mutation(receipt)
     }
 }
@@ -571,15 +654,29 @@ fn install_portable(
     }
     if !validate_only {
         // Foreign Session rows stay external references, never the live derived index.
-        connection
-            .execute(
-                "INSERT INTO imported_references VALUES(?1,?2)",
-                params![
-                    OperationId::new().to_string(),
-                    encode(&payload.session_references)?
-                ],
-            )
-            .map_err(io)?;
+        let own = SessionReferenceSet {
+            projects: payload
+                .entities
+                .iter()
+                .filter_map(|v| match v {
+                    Entity::Project(p) => Some(p.id),
+                    _ => None,
+                })
+                .collect(),
+            installation: payload.installation,
+            sessions: payload.session_references.clone(),
+        };
+        for record in std::iter::once(&own).chain(payload.inherited_session_references.iter()) {
+            for project in &record.projects {
+                entity(connection, EntityId::Project(*project))?;
+            }
+            connection
+                .execute(
+                    "INSERT INTO imported_references VALUES(?1,?2)",
+                    params![OperationId::new().to_string(), encode(record)?],
+                )
+                .map_err(io)?;
+        }
     }
     Ok(())
 }
@@ -656,6 +753,11 @@ fn remap_identities(payload: &mut PortableCatalog) -> Result<()> {
     }
     for closed in &mut payload.closed {
         closed.location = id(closed.location, &mapping)?;
+    }
+    for record in &mut payload.inherited_session_references {
+        for project in &mut record.projects {
+            *project = id(*project, &mapping)?;
+        }
     }
     // Session references deliberately retain their original installation-local placement.
     Ok(())

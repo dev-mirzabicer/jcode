@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 mod backup;
 mod organization;
 mod portable;
+#[cfg(test)]
+mod process_tests;
 mod query;
 mod restore;
 mod storage;
@@ -41,12 +43,15 @@ pub(crate) fn digest(value: &[u8]) -> String {
 }
 
 /// Cheap handle. Constructing or inspecting it does not initialize a catalog.
+#[cfg(test)]
+type FaultCheckpoint = std::sync::Arc<dyn Fn(&str) -> Result<()> + Send + Sync>;
+
 #[derive(Clone)]
 pub struct WorkspaceService {
     root: PathBuf,
     resolver: LocationResolver,
     #[cfg(test)]
-    fault: Option<std::sync::Arc<dyn Fn(&str) -> Result<()> + Send + Sync>>,
+    fault: Option<FaultCheckpoint>,
 }
 impl WorkspaceService {
     pub fn new(state_root: &Path) -> Self {

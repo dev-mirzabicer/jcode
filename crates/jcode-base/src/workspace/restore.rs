@@ -16,6 +16,7 @@ struct RestoreJournal {
     snapshot: SnapshotId,
     installation: InstallationId,
     originals: Vec<(String, String)>,
+    staged_file: String,
     staged_digest: String,
     receipt: Receipt,
 }
@@ -37,6 +38,7 @@ impl WorkspaceService {
         portable::validate_graph(&saved)?;
         let installation = storage::installation(&self.root)?;
         storage::validate(&saved, installation)?;
+        let grants = portable::grants(&saved)?;
         drop(saved);
         let current_revision = match self.connection() {
             Ok(connection) => {
@@ -57,6 +59,7 @@ impl WorkspaceService {
             id: ReviewId::new(),
             snapshot: selected,
             current_revision,
+            grants,
             issues: vec![],
         };
         let review = ReviewedRestore {
@@ -149,10 +152,24 @@ impl WorkspaceService {
             }
             let recovery = self.root.join("recovery").join(request.to_string());
             storage::private_dir(&recovery)?;
-            let staged = recovery.join("replacement.sqlite3");
-            // A failed preparation has no publication intent. Its stage is retained,
-            // and a fresh reviewed request is required rather than overwriting it.
+            let attempt = recovery.join("review.json");
+            if attempt.try_exists().map_err(io)? {
+                let original: ReviewId = storage::read_json(&attempt)?;
+                if original != review {
+                    return Err(issue(
+                        IssueCode::Conflict,
+                        "Restore request was already prepared against another review",
+                    ));
+                }
+            } else {
+                storage::atomic_json(&attempt, &review)?;
+            }
+            // An incomplete attempt is retained. Retry prepares a distinct owned
+            // stage under the same request instead of overwriting uncertain bytes.
+            let staged_file = format!("{}.sqlite3", SnapshotId::new());
+            let staged = recovery.join(&staged_file);
             backup::copy_database(&source, &staged)?;
+            self.checkpoint("restore_staged")?;
             drop(source);
             let mut candidate = storage::raw_connection(&staged, false)?;
             let revision = current_revision
@@ -211,6 +228,7 @@ impl WorkspaceService {
                 snapshot: approved.public.snapshot.id,
                 installation: approved.installation,
                 originals: originals(&self.root)?,
+                staged_file,
                 staged_digest: backup::file_digest(&staged)?,
                 receipt: Receipt {
                     operation: OperationId::new(),
@@ -248,11 +266,10 @@ impl WorkspaceService {
             if let Err(error) = self.resolver.resolve_directory(&bound.binding) {
                 unavailable.insert(id);
                 if let Entity::Location(mut location) = entity(connection, EntityId::Location(id))?
+                    && location.lifecycle != LocationLifecycle::Closed
                 {
-                    if location.lifecycle != LocationLifecycle::Closed {
-                        location.lifecycle = LocationLifecycle::Unavailable;
-                        organization::save_entity(connection, &Entity::Location(location))?;
-                    }
+                    location.lifecycle = LocationLifecycle::Unavailable;
+                    organization::save_entity(connection, &Entity::Location(location))?;
                 }
                 issues.push(issue(
                     IssueCode::OfflineVolume,
@@ -278,7 +295,12 @@ impl WorkspaceService {
 
     fn finish_restore(&self, journal: &RestoreJournal) -> Result<()> {
         let recovery = self.root.join("recovery").join(journal.request.to_string());
-        let staged = recovery.join("replacement.sqlite3");
+        let stem = journal
+            .staged_file
+            .strip_suffix(".sqlite3")
+            .ok_or_else(|| corrupt("Invalid restore stage identity"))?;
+        let _: SnapshotId = stem.parse().map_err(corrupt)?;
+        let staged = recovery.join(&journal.staged_file);
         let destination = self.root.join("catalog.sqlite3");
         if !staged.try_exists().map_err(io)? {
             if backup::file_digest(&destination)? != journal.staged_digest {

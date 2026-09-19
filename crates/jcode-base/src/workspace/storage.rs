@@ -155,7 +155,10 @@ impl WorkspaceService {
             if known.request != request {
                 return Err(issue(
                     IssueCode::RecoveryRequired,
-                    "Interrupted initialization belongs to a different request",
+                    format!(
+                        "Interrupted initialization belongs to request {}. Resume that request",
+                        known.request
+                    ),
                 ));
             }
             known
@@ -175,6 +178,7 @@ impl WorkspaceService {
             new
         };
         private_dir(&self.root)?;
+        self.checkpoint("initialize_marker")?;
         for child in ["snapshots", "exports", "reviews", "leases", "recovery"] {
             private_dir(&self.root.join(child))?;
         }
@@ -210,6 +214,7 @@ impl WorkspaceService {
             transaction.commit().map_err(io)?;
         }
         validate(&connection, installation.installation)?;
+        self.checkpoint("initialize_schema")?;
         sync_dir(&self.root)?;
         installation.ready = true;
         atomic_json(&marker, &installation)?;
@@ -302,16 +307,28 @@ pub(crate) fn raw_connection(path: &Path, create: bool) -> Result<Connection> {
 }
 pub(crate) fn connect(root: &Path) -> Result<Connection> {
     if root.join("restore-pending.json").try_exists().map_err(io)? {
+        #[derive(Deserialize)]
+        struct Pending {
+            request: RequestId,
+            review: ReviewId,
+        }
+        let pending: Pending = read_json(&root.join("restore-pending.json"))?;
         return Err(issue(
             IssueCode::RecoveryRequired,
-            "Catalog replacement is pending. Resume the exact reviewed restore request",
+            format!(
+                "Catalog replacement is pending. Resume apply_restore request {} with review {}",
+                pending.request, pending.review
+            ),
         ));
     }
     let marker: Installation = read_json(&root.with_file_name("workspace-installation.json"))?;
     if !marker.ready {
         return Err(issue(
             IssueCode::RecoveryRequired,
-            "Initialization is incomplete",
+            format!(
+                "Initialization is incomplete. Resume initialize request {}",
+                marker.request
+            ),
         ));
     }
     let meta = std::fs::symlink_metadata(root).map_err(corrupt)?;

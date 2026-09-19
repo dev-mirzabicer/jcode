@@ -22,13 +22,13 @@ impl WorkspaceService {
         let transaction = connection.transaction().map_err(io)?;
         let revision = storage::status(&transaction)?.revision;
         let query_digest = digest(encode(&query)?.as_bytes());
-        if let Some(cursor) = &after {
-            if cursor.revision != revision || cursor.query_digest != query_digest {
-                return Err(issue(
-                    IssueCode::Conflict,
-                    "List changed or continuation belongs to another query; refresh from the first page",
-                ));
-            }
+        if let Some(cursor) = &after
+            && (cursor.revision != revision || cursor.query_digest != query_digest)
+        {
+            return Err(issue(
+                IssueCode::Conflict,
+                "List changed or continuation belongs to another query; refresh from the first page",
+            ));
         }
         let kind = query.kind.map(|v| match v {
             EntityKind::Project => "project",

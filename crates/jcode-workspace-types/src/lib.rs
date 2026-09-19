@@ -414,11 +414,19 @@ pub struct ImportReview {
     pub revision: Revision,
     pub source_installation: InstallationId,
     pub collisions: Vec<EntityId>,
+    pub revision_differences: Vec<ImportRevisionDifference>,
+    pub entities: Vec<Entity>,
     pub remapped: Vec<LocationId>,
     pub unavailable: Vec<LocationId>,
     pub disabled_grants: Vec<GrantId>,
     pub external_content: Vec<String>,
     pub issues: Vec<Issue>,
+}
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ImportRevisionDifference {
+    pub identity: EntityId,
+    pub current: Revision,
+    pub incoming: Revision,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
@@ -434,6 +442,7 @@ pub struct RestoreReview {
     pub id: ReviewId,
     pub snapshot: Snapshot,
     pub current_revision: Option<Revision>,
+    pub grants: Vec<GrantDefinition>,
     pub issues: Vec<Issue>,
 }
 

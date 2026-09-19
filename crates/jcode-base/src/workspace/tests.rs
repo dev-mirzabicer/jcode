@@ -1,5 +1,396 @@
 use super::*;
 
+#[cfg(target_os = "macos")]
+#[test]
+fn replaced_standalone_cannot_be_adopted_under_old_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    std::fs::create_dir(&state).unwrap();
+    let service = WorkspaceService::new(&state);
+    service.initialize(RequestId::new()).unwrap();
+    let p = project(&service, "project");
+    let root = dir.path().join("root");
+    std::fs::create_dir(&root).unwrap();
+    let EntityId::Location(id) = change(
+        &service,
+        OrganizationChange::RegisterLocation {
+            name: "root".into(),
+            path: root.clone(),
+            registration: Registration::Standalone,
+        },
+    )
+    .targets[0] else {
+        panic!()
+    };
+    let review = service
+        .review_organization_change(
+            service.status().unwrap().revision,
+            OrganizationChange::AdoptStandalone {
+                location: id,
+                home: Home::Project(p),
+                repository: None,
+                associate_repository: false,
+            },
+        )
+        .unwrap();
+    std::fs::rename(&root, dir.path().join("original")).unwrap();
+    std::fs::create_dir(&root).unwrap();
+    assert_eq!(
+        service
+            .apply_organization_change(RequestId::new(), review.id)
+            .unwrap_err()
+            .code,
+        IssueCode::ReplacedRoot
+    );
+    assert!(
+        service
+            .review_organization_change(
+                service.status().unwrap().revision,
+                OrganizationChange::AdoptStandalone {
+                    location: id,
+                    home: Home::Project(p),
+                    repository: None,
+                    associate_repository: false
+                }
+            )
+            .is_err()
+    );
+    let Entity::Location(loc) = service.inspect(EntityId::Location(id)).unwrap() else {
+        panic!()
+    };
+    assert!(loc.home.is_none());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn closed_catalog_history_survives_export_without_resurrecting_roots() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    std::fs::create_dir(&state).unwrap();
+    let service = WorkspaceService::new(&state);
+    service.initialize(RequestId::new()).unwrap();
+    let p = project(&service, "project");
+    let r = repository(&service, "repo");
+    change(
+        &service,
+        OrganizationChange::AssociateRepository {
+            project: p,
+            repository: r,
+        },
+    );
+    let root = dir.path().join("repo");
+    assert!(
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .arg(&root)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let EntityId::Location(id) = change(
+        &service,
+        OrganizationChange::RegisterLocation {
+            name: "repo".into(),
+            path: root.clone(),
+            registration: Registration::Checkout {
+                home: Home::Project(p),
+                repository: r,
+            },
+        },
+    )
+    .targets[0] else {
+        panic!()
+    };
+    // Synthetic completed-closeout metadata, not a claim of a removal executor.
+    let connection = service.connection().unwrap();
+    let Entity::Location(mut loc) = entity(&connection, EntityId::Location(id)).unwrap() else {
+        panic!()
+    };
+    loc.lifecycle = LocationLifecycle::Closed;
+    organization::save_entity(&connection, &Entity::Location(loc)).unwrap();
+    connection
+        .execute(
+            "UPDATE bindings SET live_key=NULL WHERE location=?1",
+            [id.to_string()],
+        )
+        .unwrap();
+    let history = portable::ClosedReference {
+        location: id,
+        operation: OperationId::new(),
+        preservation_paths: vec![],
+        report: None,
+    };
+    connection
+        .execute(
+            "INSERT INTO closed_history VALUES(?1,?2)",
+            rusqlite::params![id.to_string(), encode(&history).unwrap()],
+        )
+        .unwrap();
+    drop(connection);
+    assert_eq!(
+        service
+            .list(
+                Query {
+                    visibility: Visibility::Closed,
+                    ..Query::default()
+                },
+                None,
+                20
+            )
+            .unwrap()
+            .total,
+        1
+    );
+    assert_eq!(
+        service
+            .list(
+                Query {
+                    kind: Some(EntityKind::Location),
+                    ..Query::default()
+                },
+                None,
+                20
+            )
+            .unwrap()
+            .total,
+        0
+    );
+    let export = service
+        .export_project(RequestId::new(), p, "closed".into())
+        .unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let target = WorkspaceService::new(other.path());
+    target.initialize(RequestId::new()).unwrap();
+    let review = target
+        .review_import(export, 0, ImportCollisionPolicy::Reject, vec![])
+        .unwrap();
+    target.apply_import(RequestId::new(), review.id).unwrap();
+    assert_eq!(
+        target
+            .list(
+                Query {
+                    visibility: Visibility::Closed,
+                    ..Query::default()
+                },
+                None,
+                20
+            )
+            .unwrap()
+            .total,
+        1
+    );
+    assert!(root.join(".git").is_dir());
+}
+
+#[test]
+fn interrupted_initialization_resumes_only_its_recorded_request() {
+    for stage in ["initialize_marker", "initialize_schema"] {
+        let dir = tempfile::tempdir().unwrap();
+        let service = WorkspaceService::new(dir.path());
+        let request = RequestId::new();
+        assert!(fault(&service, stage).initialize(request).is_err());
+        assert_eq!(
+            service.initialize(RequestId::new()).unwrap_err().code,
+            IssueCode::RecoveryRequired
+        );
+        assert!(service.status().is_err());
+        let state = service.initialize(request).unwrap();
+        assert_eq!(state.revision, 0);
+    }
+}
+
+#[test]
+fn failed_automatic_backup_reports_committed_mutation_without_replay() {
+    let dir = tempfile::tempdir().unwrap();
+    let service = WorkspaceService::new(dir.path());
+    service.initialize(RequestId::new()).unwrap();
+    let snapshots = service.root.join("snapshots");
+    std::fs::rename(&snapshots, service.root.join("retained-snapshots")).unwrap();
+    std::fs::write(&snapshots, b"owned fixture obstruction").unwrap();
+    let review = service
+        .review_organization_change(
+            0,
+            OrganizationChange::CreateProject {
+                name: "committed".into(),
+            },
+        )
+        .unwrap();
+    let request = RequestId::new();
+    let receipt = service
+        .apply_organization_change(request, review.id)
+        .unwrap();
+    assert_eq!(receipt.issues[0].code, IssueCode::BackupFailed);
+    assert_eq!(service.status().unwrap().revision, 1);
+    assert_eq!(
+        service
+            .apply_organization_change(request, review.id)
+            .unwrap(),
+        receipt
+    );
+    assert_eq!(service.list(Query::default(), None, 20).unwrap().total, 1);
+}
+
+#[test]
+fn named_backup_retries_preserve_one_snapshot_after_interruption() {
+    for stage in ["backup_prepared", "backup_published", "backup_receipt"] {
+        let dir = tempfile::tempdir().unwrap();
+        let service = WorkspaceService::new(dir.path());
+        service.initialize(RequestId::new()).unwrap();
+        let request = RequestId::new();
+        assert!(
+            fault(&service, stage)
+                .backup(request, "named".into())
+                .is_err()
+        );
+        let saved = service.backup(request, "named".into()).unwrap();
+        assert_eq!(service.backup(request, "named".into()).unwrap(), saved);
+        assert_eq!(
+            service
+                .snapshots()
+                .unwrap()
+                .iter()
+                .filter(|s| !s.automatic)
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn foreign_snapshot_and_unrecognized_schema_leave_original_state_untouched() {
+    let a = tempfile::tempdir().unwrap();
+    let source = WorkspaceService::new(a.path());
+    source.initialize(RequestId::new()).unwrap();
+    project(&source, "foreign");
+    let mut snapshot = source.backup(RequestId::new(), "foreign".into()).unwrap();
+    let b = tempfile::tempdir().unwrap();
+    let target = WorkspaceService::new(b.path());
+    target.initialize(RequestId::new()).unwrap();
+    let p = project(&target, "local");
+    let old = target.inspect(EntityId::Project(p)).unwrap();
+    let destination = target
+        .root
+        .join("snapshots")
+        .join(format!("{}.sqlite3", snapshot.id));
+    std::fs::copy(&snapshot.path, &destination).unwrap();
+    snapshot.path = destination;
+    storage::atomic_json(
+        &target
+            .root
+            .join("snapshots")
+            .join(format!("snapshot-{}.json", snapshot.id)),
+        &snapshot,
+    )
+    .unwrap();
+    assert_eq!(
+        target.review_restore(snapshot.id).unwrap_err().code,
+        IssueCode::CorruptState
+    );
+    assert_eq!(target.inspect(EntityId::Project(p)).unwrap(), old);
+    let own = target.backup(RequestId::new(), "own".into()).unwrap();
+    let connection = storage::raw_connection(&own.path, false).unwrap();
+    connection
+        .execute_batch("CREATE TABLE unknown_authority(value TEXT);")
+        .unwrap();
+    drop(connection);
+    let mut forged = own.clone();
+    forged.sha256 = backup::file_digest(&own.path).unwrap();
+    storage::atomic_json(
+        &target
+            .root
+            .join("snapshots")
+            .join(format!("snapshot-{}.json", own.id)),
+        &forged,
+    )
+    .unwrap();
+    assert_eq!(
+        target.review_restore(own.id).unwrap_err().code,
+        IssueCode::CorruptState
+    );
+    assert_eq!(target.inspect(EntityId::Project(p)).unwrap(), old);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn portable_offline_locations_and_reviewed_remap_do_not_create_paths_or_activate_grants() {
+    let a = tempfile::tempdir().unwrap();
+    let state = a.path().join("state");
+    std::fs::create_dir(&state).unwrap();
+    let source = WorkspaceService::new(&state);
+    source.initialize(RequestId::new()).unwrap();
+    let p = project(&source, "project");
+    let root = a.path().join("directory");
+    std::fs::create_dir(&root).unwrap();
+    let EntityId::Location(location) = change(
+        &source,
+        OrganizationChange::RegisterLocation {
+            name: "directory".into(),
+            path: root.clone(),
+            registration: Registration::Directory {
+                home: Home::Project(p),
+            },
+        },
+    )
+    .targets[0] else {
+        panic!()
+    };
+    let grant = GrantDefinition {
+        id: GrantId::new(),
+        audience: Audience::Project(p),
+        target: WriteTarget::Root(location),
+        state: GrantState::Active,
+        revision: 1,
+        copied_from: None,
+    };
+    portable::save_grant(&source.connection().unwrap(), &grant).unwrap();
+    let export = source
+        .export_project(RequestId::new(), p, "fixture".into())
+        .unwrap();
+    std::fs::rename(&root, a.path().join("moved-outside-jcode")).unwrap();
+    let b = tempfile::tempdir().unwrap();
+    let target = WorkspaceService::new(b.path());
+    target.initialize(RequestId::new()).unwrap();
+    let review = target
+        .review_import(export.clone(), 0, ImportCollisionPolicy::Reject, vec![])
+        .unwrap();
+    assert_eq!(review.unavailable, vec![location]);
+    target.apply_import(RequestId::new(), review.id).unwrap();
+    let Entity::Location(imported) = target.inspect(EntityId::Location(location)).unwrap() else {
+        panic!()
+    };
+    assert_eq!(imported.lifecycle, LocationLifecycle::Unavailable);
+    assert!(!root.exists());
+    assert_eq!(
+        portable::grants(&target.connection().unwrap()).unwrap()[0].state,
+        GrantState::Disabled
+    );
+    let replacement = a.path().join("explicit-new-root");
+    std::fs::create_dir(&replacement).unwrap();
+    let review = target
+        .review_import(
+            export,
+            target.status().unwrap().revision,
+            ImportCollisionPolicy::NewIdentities,
+            vec![LocationRemap {
+                location,
+                path: replacement.clone(),
+            }],
+        )
+        .unwrap();
+    let receipt = target.apply_import(RequestId::new(), review.id).unwrap();
+    let id = *receipt
+        .targets
+        .iter()
+        .find(|id| matches!(id, EntityId::Location(_)))
+        .unwrap();
+    let Entity::Location(imported) = target.inspect(id).unwrap() else {
+        panic!()
+    };
+    assert_ne!(imported.id, location);
+    assert_eq!(imported.lifecycle, LocationLifecycle::Ready);
+    assert_eq!(imported.observed_path, replacement.canonicalize().unwrap());
+}
+
 fn fault(service: &WorkspaceService, stage: &'static str) -> WorkspaceService {
     let mut service = service.clone();
     service.fault = Some(std::sync::Arc::new(move |point| {
@@ -82,6 +473,7 @@ fn verified_wal_snapshot_restore_and_corruption_repair() {
 #[test]
 fn restore_interruption_is_recoverable_at_each_publication_boundary() {
     for stage in [
+        "restore_staged",
         "restore_intent",
         "restore_original_moved",
         "restore_published",
@@ -174,6 +566,15 @@ fn portable_import_collision_new_identity_and_atomic_rollback() {
         GrantState::Disabled
     );
     assert!(dest.sessions(None, None, 20).unwrap().is_empty());
+    let reexport = dest
+        .export_project(RequestId::new(), p, "roundtrip".into())
+        .unwrap();
+    let reexport: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(reexport).unwrap()).unwrap();
+    assert_eq!(
+        reexport["catalog"]["inherited_session_references"][0]["sessions"][0]["session"],
+        "foreign-session"
+    );
     let collision = dest
         .review_import(
             export.clone(),

@@ -3,6 +3,17 @@ use std::fs::File;
 use std::io::Read;
 use std::time::Duration;
 
+#[derive(Serialize, Deserialize)]
+struct BackupIntent {
+    name: String,
+    id: SnapshotId,
+}
+#[derive(Serialize, Deserialize)]
+struct SnapshotPublication {
+    snapshot: Snapshot,
+    stage: PathBuf,
+}
+
 pub(super) fn file_digest(path: &Path) -> Result<String> {
     let mut file = File::open(path).map_err(io)?;
     let mut hash = Sha256::new();
@@ -17,6 +28,7 @@ pub(super) fn file_digest(path: &Path) -> Result<String> {
     Ok(format!("{:x}", hash.finalize()))
 }
 pub(super) fn integrity(connection: &Connection) -> Result<()> {
+    validate_schema(connection)?;
     let check: String = connection
         .query_row("PRAGMA integrity_check", [], |r| r.get(0))
         .map_err(corrupt)?;
@@ -32,6 +44,27 @@ pub(super) fn integrity(connection: &Connection) -> Result<()> {
         return Err(corrupt("Catalog foreign-key references are broken"));
     }
     storage::status(connection)?;
+    Ok(())
+}
+
+fn validate_schema(connection: &Connection) -> Result<()> {
+    fn definitions(connection: &Connection) -> Result<Vec<(String, String, String)>> {
+        let mut statement=connection.prepare("SELECT type,name,sql FROM sqlite_schema WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY type,name").map_err(corrupt)?;
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .map_err(corrupt)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(corrupt)
+    }
+    let reference = Connection::open_in_memory().map_err(io)?;
+    reference
+        .execute_batch(include_str!("schema.sql"))
+        .map_err(io)?;
+    if definitions(connection)? != definitions(&reference)? {
+        return Err(corrupt(
+            "Catalog schema definitions differ from the supported version",
+        ));
+    }
     Ok(())
 }
 pub(super) fn copy_database(source: &Connection, destination: &Path) -> Result<()> {
@@ -73,15 +106,14 @@ impl WorkspaceService {
             .join("snapshots")
             .join(format!("request-{request}.json"));
         if receipt.try_exists().map_err(io)? {
-            let existing: Snapshot = storage::read_json(&receipt)?;
+            let existing: BackupIntent = storage::read_json(&receipt)?;
             if existing.name != name {
                 return Err(issue(
                     IssueCode::Conflict,
                     "Backup request already used with another name",
                 ));
             }
-            self.verify_snapshot(&existing)?;
-            return Ok(existing);
+            return self.publish_snapshot(&self.connection()?, existing.id, name, false);
         }
         if name.trim().is_empty() || name.chars().any(char::is_control) {
             return Err(issue(
@@ -89,9 +121,15 @@ impl WorkspaceService {
                 "Backup name must be nonempty text",
             ));
         }
-        let snapshot = self.snapshot_locked(&self.connection()?, name, false)?;
-        storage::atomic_json(&receipt, &snapshot)?;
-        Ok(snapshot)
+        let id = SnapshotId::new();
+        storage::atomic_json(
+            &receipt,
+            &BackupIntent {
+                name: name.clone(),
+                id,
+            },
+        )?;
+        self.publish_snapshot(&self.connection()?, id, name, false)
     }
     pub fn snapshots(&self) -> Result<Vec<Snapshot>> {
         let _lease = self.lease(false)?;
@@ -119,27 +157,74 @@ impl WorkspaceService {
         automatic: bool,
     ) -> Result<Snapshot> {
         let id = SnapshotId::new();
+        self.publish_snapshot(connection, id, name, automatic)
+    }
+    fn publish_snapshot(
+        &self,
+        connection: &Connection,
+        id: SnapshotId,
+        name: String,
+        automatic: bool,
+    ) -> Result<Snapshot> {
+        let manifest = self
+            .root
+            .join("snapshots")
+            .join(format!("snapshot-{id}.json"));
+        if manifest.try_exists().map_err(io)? {
+            let snapshot: Snapshot = storage::read_json(&manifest)?;
+            drop(self.verify_snapshot(&snapshot)?);
+            return Ok(snapshot);
+        }
         let path = self.root.join("snapshots").join(format!("{id}.sqlite3"));
-        copy_database(connection, &path)?;
-        let saved = storage::raw_connection(&path, false)?;
-        let state = storage::status(&saved)?;
-        drop(saved);
-        let snapshot = Snapshot {
-            id,
-            name,
-            path: path.clone(),
-            sha256: file_digest(&path)?,
-            revision: state.revision,
-            automatic,
-        };
-        storage::atomic_json(
-            &self
+        let pending = self
+            .root
+            .join("snapshots")
+            .join(format!("pending-{id}.json"));
+        let publication = if pending.try_exists().map_err(io)? {
+            storage::read_json::<SnapshotPublication>(&pending)?
+        } else {
+            let stage = self
                 .root
                 .join("snapshots")
-                .join(format!("snapshot-{id}.json")),
-            &snapshot,
-        )?;
-        Ok(snapshot)
+                .join(format!("stage-{}.sqlite3", SnapshotId::new()));
+            copy_database(connection, &stage)?;
+            let saved = storage::raw_connection(&stage, false)?;
+            let state = storage::status(&saved)?;
+            drop(saved);
+            let snapshot = Snapshot {
+                id,
+                name: name.clone(),
+                path: path.clone(),
+                sha256: file_digest(&stage)?,
+                revision: state.revision,
+                automatic,
+            };
+            let publication = SnapshotPublication { snapshot, stage };
+            storage::atomic_json(&pending, &publication)?;
+            self.checkpoint("backup_prepared")?;
+            publication
+        };
+        if publication.snapshot.id != id
+            || publication.snapshot.name != name
+            || publication.snapshot.path != path
+            || publication.stage.parent() != path.parent()
+        {
+            return Err(corrupt("Snapshot publication identity mismatch"));
+        }
+        if !path.try_exists().map_err(io)? {
+            if file_digest(&publication.stage)? != publication.snapshot.sha256 {
+                return Err(corrupt("Snapshot stage checksum mismatch"));
+            }
+            std::fs::rename(&publication.stage, &path).map_err(io)?;
+            storage::sync_dir(path.parent().ok_or_else(|| io("Snapshot has no parent"))?)?;
+        }
+        self.checkpoint("backup_published")?;
+        drop(self.verify_snapshot(&publication.snapshot)?);
+        storage::atomic_json(&manifest, &publication.snapshot)?;
+        self.checkpoint("backup_receipt")?;
+        std::fs::remove_file(&pending).map_err(io)?;
+        storage::sync_dir(path.parent().ok_or_else(|| io("Snapshot has no parent"))?)?;
+        Ok(publication.snapshot)
     }
     pub(super) fn verify_snapshot(&self, snapshot: &Snapshot) -> Result<Connection> {
         let expected = self
