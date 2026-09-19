@@ -35,6 +35,11 @@ A project can explicitly configure either:
 
 A non-Git project can use a standalone project-scoped Git repository, conventionally under `.jcode/instructions`. This does not make the whole project a Git repository.
 
+Physical project identity comes from `jcode-base::location`, shared with Startup
+Context through its compatibility adapter. Canonical common-directory/directory keys,
+active-root specificity and `project-<digest>` IDs are unchanged. Resolution itself
+loads no Startup Context plan. See [physical locations](dev/PHYSICAL_LOCATIONS.md).
+
 ## Project configuration
 
 Explicit configuration lives at:

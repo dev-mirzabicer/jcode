@@ -82,6 +82,10 @@ lives under `output.storage`, with local/archive reserve bytes and an optional
 archive mount, volume UUID and relative dedicated directory. Reserves default
 to 1 GiB each. No archive is silently selected by the library default.
 
+The shared [physical-location boundary](PHYSICAL_LOCATIONS.md) now owns native
+volume UUID/mount verification and available-byte inspection. Archive configuration,
+serialized directory witnesses, descriptor-relative I/O and recovery remain here.
+
 The configured mount must already exist and its identity must match. Native
 macOS verification uses the volume UUID, not just `/Volumes/Active`. Verified
 directory handles pin filesystem identity. Unix creation, append, publication

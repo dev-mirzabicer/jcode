@@ -423,8 +423,10 @@ The implementation deliberately has one owner per invariant:
 
 - `jcode-session-types::startup_context`: stable persisted receipt, plan-path, issue,
   delivery, observation, and pending-operation data contracts.
-- `jcode-base::startup_context`: project identity, plan storage, selection normalization,
-  browsing, complete capture, external-target policy, and observation.
+- `jcode-base::location`: shared physical Git/directory identity with exact legacy key
+  compatibility. See [physical locations](dev/PHYSICAL_LOCATIONS.md).
+- `jcode-base::startup_context`: the identity compatibility adapter, plan storage,
+  selection normalization, browsing, complete capture, external-target policy, and observation.
 - `jcode-base::session::startup_context`: authoritative message construction, receipt
   installation, dispatch, acceptance, late apply, observation transaction, and persistence
   rollback.
