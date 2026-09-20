@@ -1891,3 +1891,49 @@ fn primary_launch_is_session_independent_and_correlates_exact_replies() {
     assert_eq!(bridge.session_id.as_deref(), Some("unrelated-attachment"));
     assert!(bridge.pending_attach.is_none());
 }
+
+#[test]
+fn primary_controls_preserve_identity_and_ignore_transport_ack_without_attachment() {
+    let mut bridge = BridgeState::default();
+    let id = "12a99e11-e967-4a1e-a47c-000000000004";
+    let cases = [
+        (
+            json!({"req":"primary_control_probe"}),
+            json!({"type":"primary_control_capabilities","input_version":1,"location_version":1,"location_enabled":false}),
+        ),
+        (
+            json!({"req":"primary_input","input":{"id":id,"session":"fixture","delivery":"safe_boundary","content":"original Ω","images":[["image/png","ZmFrZQ=="]]}}),
+            json!({"type":"primary_input_receipt","receipt":{"id":id,"session":"fixture","state":"accepted","messages":[],"issue":null}}),
+        ),
+        (
+            json!({"req":"primary_input_read","session":"fixture","input":id}),
+            json!({"type":"primary_input_detail","receipt":{"id":id,"session":"fixture","state":"committed","messages":["message"],"issue":null},"input":{"id":id,"session":"fixture","delivery":"safe_boundary","content":"original Ω"}}),
+        ),
+        (
+            json!({"req":"primary_location","command":{"action":"inspect","operation":id}}),
+            json!({"type":"primary_location_response","response":{"status":"rejected","issue":{"code":"invalid_identity","detail":"synthetic"}}}),
+        ),
+    ];
+    for (mut request, mut response) in cases {
+        request["id"] = json!(44);
+        let out = bridge.api_request_to_legacy(&request);
+        let Outbound::Legacy(wire) = &out[0] else {
+            panic!("control must reach daemon")
+        };
+        assert!(bridge.pending_attach.is_none() && bridge.session_id.is_none());
+        assert!(
+            bridge
+                .legacy_event_to_api(&json!({"type":"ack","id":wire["id"]}))
+                .is_empty()
+        );
+        response["id"] = wire["id"].clone();
+        let replies = bridge.legacy_event_to_api(&response);
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0].reply_to, Some(44));
+        assert!(!matches!(
+            replies[0].event,
+            ApiEvent::Error { .. } | ApiEvent::Unknown
+        ));
+        assert!(bridge.legacy_event_to_api(&response).is_empty());
+    }
+}

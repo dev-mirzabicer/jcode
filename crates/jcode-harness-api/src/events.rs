@@ -6,6 +6,21 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "ev", rename_all = "snake_case")]
 pub enum ApiEvent {
+    PrimaryControlCapabilities {
+        input_version: u32,
+        location_version: u32,
+        location_enabled: bool,
+    },
+    PrimaryInputReceipt {
+        receipt: crate::PrimaryInputReceipt,
+    },
+    PrimaryInputDetail {
+        receipt: crate::PrimaryInputReceipt,
+        input: Box<crate::PrimaryInputEnvelope>,
+    },
+    PrimaryLocation {
+        response: crate::PrimaryLocationResponse,
+    },
     PrimaryLaunchCapabilities {
         version: u32,
         enabled: bool,

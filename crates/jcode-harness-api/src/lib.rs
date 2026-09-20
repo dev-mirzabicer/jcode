@@ -22,6 +22,9 @@ mod sockets;
 
 pub use client::{FrameError, HarnessClient, read_frame, write_frame};
 pub use events::*;
+pub use jcode_session_types::{
+    PrimaryInputDelivery, PrimaryInputEnvelope, PrimaryInputReceipt, PrimaryInputState,
+};
 pub use jcode_task_types::{
     CommandWorkflow, ReviewWorkflowKind, WorkflowLoopMode, WorkflowPromptRequest, WorkflowTodo,
 };
@@ -38,7 +41,8 @@ pub use jcode_tool_types::inspection::{
     TranscriptRange,
 };
 pub use jcode_workspace_types::{
-    Issue as WorkspaceIssue, PrimaryLaunchRecord, PrimaryLaunchRequest, PrimaryLaunchResponse,
+    Issue as WorkspaceIssue, LocationChangeRecord, PrimaryLaunchRecord, PrimaryLaunchRequest,
+    PrimaryLaunchResponse, PrimaryLocationCommand, PrimaryLocationResponse, RequestId,
 };
 pub use requests::*;
 pub use sockets::{api_socket_path, legacy_socket_path, runtime_dir};
@@ -54,7 +58,7 @@ mod capability_coverage_tests;
 /// Protocol major version. Breaking changes only.
 pub const API_VERSION_MAJOR: u32 = 1;
 /// Protocol minor version. Additive changes.
-pub const API_VERSION_MINOR: u32 = 7;
+pub const API_VERSION_MINOR: u32 = 8;
 
 /// Envelope wrapping every client-to-server frame.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

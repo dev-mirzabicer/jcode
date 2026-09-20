@@ -665,6 +665,144 @@ impl JcodeClient {
         }
     }
 
+    fn require_primary_control(&self, location: Option<bool>) -> Result<()> {
+        if !self.supports("primary_control_v1") {
+            return Err(Error::new(
+                ErrorKind::UnsupportedCapability,
+                "Primary controls require primary_control_v1",
+            ));
+        }
+        match self.request_ok(ApiRequest::PrimaryControlProbe)?.event {
+            ApiEvent::PrimaryControlCapabilities {
+                input_version,
+                location_version,
+                location_enabled,
+            } if match location {
+                None => input_version == 1,
+                Some(change) => location_version == 1 && (!change || location_enabled),
+            } =>
+            {
+                Ok(())
+            }
+            _ => Err(Error::new(
+                ErrorKind::UnsupportedCapability,
+                "Requested primary control is unsupported or staged",
+            )),
+        }
+    }
+
+    /// Caller retains the UUID across uncertain transport replies. This does
+    /// not promise exact-once provider execution or semantic consumption.
+    pub fn submit_primary_input(
+        &self,
+        input: jcode_harness_api::PrimaryInputEnvelope,
+    ) -> Result<jcode_harness_api::PrimaryInputReceipt> {
+        self.require_primary_control(None)?;
+        let expected = (input.session.clone(), input.id);
+        match self
+            .request_ok(ApiRequest::PrimaryInput {
+                input: Box::new(input),
+            })?
+            .event
+        {
+            ApiEvent::PrimaryInputReceipt { receipt }
+                if (receipt.session.clone(), receipt.id) == expected =>
+            {
+                Ok(receipt)
+            }
+            other => Err(unexpected("primary_input_receipt", &other)),
+        }
+    }
+
+    pub fn inspect_primary_input(
+        &self,
+        session: String,
+        input: jcode_harness_api::RequestId,
+    ) -> Result<jcode_harness_api::PrimaryInputReceipt> {
+        self.require_primary_control(None)?;
+        match self
+            .request_ok(ApiRequest::PrimaryInputInspect {
+                session: session.clone(),
+                input,
+            })?
+            .event
+        {
+            ApiEvent::PrimaryInputReceipt { receipt }
+                if receipt.session == session && receipt.id == input =>
+            {
+                Ok(receipt)
+            }
+            other => Err(unexpected("primary_input_receipt", &other)),
+        }
+    }
+
+    pub fn read_primary_input(
+        &self,
+        session: String,
+        input: jcode_harness_api::RequestId,
+    ) -> Result<(
+        jcode_harness_api::PrimaryInputReceipt,
+        jcode_harness_api::PrimaryInputEnvelope,
+    )> {
+        self.require_primary_control(None)?;
+        match self
+            .request_ok(ApiRequest::PrimaryInputRead {
+                session: session.clone(),
+                input,
+            })?
+            .event
+        {
+            ApiEvent::PrimaryInputDetail {
+                receipt,
+                input: original,
+            } if receipt.session == session
+                && receipt.id == input
+                && original.session == session
+                && original.id == input =>
+            {
+                Ok((receipt, *original))
+            }
+            other => Err(unexpected("primary_input_detail", &other)),
+        }
+    }
+
+    pub fn primary_location(
+        &self,
+        command: jcode_harness_api::PrimaryLocationCommand,
+    ) -> Result<jcode_harness_api::PrimaryLocationResponse> {
+        self.require_primary_control(Some(matches!(
+            command,
+            jcode_harness_api::PrimaryLocationCommand::Change { .. }
+        )))?;
+        let expected = match &command {
+            jcode_harness_api::PrimaryLocationCommand::Change { request } => {
+                request.request.to_string()
+            }
+            jcode_harness_api::PrimaryLocationCommand::Inspect { operation }
+            | jcode_harness_api::PrimaryLocationCommand::Cancel { operation } => {
+                operation.to_string()
+            }
+        };
+        match self
+            .request_ok(ApiRequest::PrimaryLocation {
+                command: Box::new(command),
+            })?
+            .event
+        {
+            ApiEvent::PrimaryLocation { response }
+                if match &response {
+                    jcode_harness_api::PrimaryLocationResponse::State { record } => {
+                        record.operation.to_string() == expected
+                    }
+                    jcode_harness_api::PrimaryLocationResponse::Rejected { .. } => true,
+                } =>
+            {
+                Ok(response)
+            }
+            other => Err(unexpected("primary_location", &other)),
+        }
+    }
+
     pub fn create_session(&self, working_dir: Option<String>) -> Result<SessionInfo> {
         self.create_session_with_agent(working_dir, None)
     }

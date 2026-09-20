@@ -463,6 +463,41 @@ export class JcodeClient extends EventEmitter {
   }
 
   /** Publish one prepared primary. Retain the request identity for retry, then attach explicitly. */
+  private async requirePrimaryControl(location?: boolean): Promise<void> {
+    if (!this.supports("primary_control_v1")) throw new HarnessError("unsupported_capability", "Primary controls require primary_control_v1");
+    const reply = await this.expectReply({req:"primary_control_probe"},"primary_control_capabilities");
+    if (reply.ev !== "primary_control_capabilities" || (location === undefined ? reply.input_version !== 1 : reply.location_version !== 1 || (location && !reply.location_enabled))) throw new HarnessError("unsupported_capability", "Requested primary control is unsupported or staged");
+  }
+
+  async submitPrimaryInput(input: import("./protocol.js").PrimaryInputEnvelope): Promise<import("./protocol.js").PrimaryInputReceipt> {
+    await this.requirePrimaryControl();
+    const reply = await this.expectReply({req:"primary_input",input},"primary_input_receipt");
+    if (reply.ev !== "primary_input_receipt" || reply.receipt.id !== input.id || reply.receipt.session !== input.session) throw new HarnessError("unexpected_reply","Primary input receipt identity mismatch");
+    return reply.receipt;
+  }
+
+  async inspectPrimaryInput(session: string, input: string): Promise<import("./protocol.js").PrimaryInputReceipt> {
+    await this.requirePrimaryControl();
+    const reply = await this.expectReply({req:"primary_input_inspect",session,input},"primary_input_receipt");
+    if (reply.ev !== "primary_input_receipt" || reply.receipt.id !== input || reply.receipt.session !== session) throw new HarnessError("unexpected_reply","Primary input receipt identity mismatch");
+    return reply.receipt;
+  }
+
+  async readPrimaryInput(session: string, input: string): Promise<{receipt:import("./protocol.js").PrimaryInputReceipt; input:import("./protocol.js").PrimaryInputEnvelope}> {
+    await this.requirePrimaryControl();
+    const reply = await this.expectReply({req:"primary_input_read",session,input},"primary_input_detail");
+    if (reply.ev !== "primary_input_detail" || reply.receipt.id !== input || reply.receipt.session !== session || reply.input.id !== input || reply.input.session !== session) throw new HarnessError("unexpected_reply","Primary input detail identity mismatch");
+    return {receipt:reply.receipt,input:reply.input};
+  }
+
+  async primaryLocation(command: import("./protocol.js").PrimaryLocationCommand): Promise<import("./protocol.js").PrimaryLocationResponse> {
+    await this.requirePrimaryControl(command.action === "change");
+    const expected = command.action === "change" ? command.request.request : command.operation;
+    const reply = await this.expectReply({req:"primary_location",command},"primary_location");
+    if (reply.ev !== "primary_location" || (reply.response.status === "state" && reply.response.record.operation !== expected)) throw new HarnessError("unexpected_reply","Primary location identity mismatch");
+    return reply.response;
+  }
+
   async launchPrimary(request: import("./protocol.js").PrimaryLaunchRequest): Promise<import("./protocol.js").PrimaryLaunchRecord> {
     if (!this.supports("primary_launch_v1")) throw new HarnessError("unsupported_capability", "Managed primary launch requires primary_launch_v1");
     const capability = await this.expectReply({req: "primary_launch_probe"}, "primary_launch_capabilities");

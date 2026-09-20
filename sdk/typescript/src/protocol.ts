@@ -8,7 +8,7 @@
  */
 
 export const API_VERSION_MAJOR = 1;
-export const API_VERSION_MINOR = 7;
+export const API_VERSION_MINOR = 8;
 
 export type WorkspacePlacement = { kind: "project" | "work_area" | "checkout" | "directory" | "standalone"; id: string };
 export type WorkspaceHome = { kind: "project" | "work_area"; id: string };
@@ -26,6 +26,19 @@ export interface PrimaryLaunchRecord {
 }
 export type WorkspaceIssueCode = "needs_cwd" | "permission_required" | "invalid_identity" | "conflict" | "busy" | "offline_volume" | "replaced_root" | "corrupt_state" | "recovery_required" | "unsupported_capability" | "invalid_input" | "referenced" | "backup_failed" | "io";
 export type PrimaryLaunchResponse = {status: "launched"; record: PrimaryLaunchRecord} | {status: "rejected"; request: string; issue: {code: WorkspaceIssueCode; detail: string}};
+
+export interface PrimaryInputEnvelope {
+  id: string; session: string; delivery: "safe_boundary" | "next_turn" | "context_only"; content: string;
+  images?: [string, string][]; urgent?: boolean; display_role?: "system" | "background_task" | null;
+  origin?: {kind: "human"} | {kind: "composed"; parts: {start:number; end:number; notice:"long_review"|"intent"|"feedback_loop"|"ownership"|"completion"|"confidence"|"digest"|"incomplete"|null; incomplete_count?:number}[]} | null;
+  system_reminder?: string | null;
+  unattended_context?: {policy: {mode:"block"} | {mode:"authorized"; protected_recent_assistant_turns:number; target_headroom_percent:number; allow_reasoning_suppression:boolean; allow_tool_distillation:boolean; allow_oldest_range_summary:boolean; authorization_source:string}; authorization_source:string; scheduled_item_id?:string} | null;
+}
+export interface PrimaryInputReceipt { id:string; session:string; state:"accepted"|"committed"|"failed"|"cancelled"; messages:string[]; issue:string|null }
+export interface LocationChangeRequest { request:string; session:string; expected_session_revision:number; expected_catalog_revision:number; placement:WorkspacePlacement; cwd:string }
+export type PrimaryLocationCommand = {action:"change"; request:LocationChangeRequest} | {action:"inspect"|"cancel"; operation:string};
+export interface LocationChangeRecord { operation:string; input:LocationChangeRequest; state:"pending"|"complete"|"cancelled"|"failed"|"recovery_required"; effective_revision:number|null; notice_message:string|null; issue:{code:WorkspaceIssueCode; detail:string}|null }
+export type PrimaryLocationResponse = {status:"state"; record:LocationChangeRecord} | {status:"rejected"; issue:{code:WorkspaceIssueCode; detail:string}};
 
 export type ExecutionState = "prepared" | "queued" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
 export type OutputSize = number | "very_small" | "small" | "medium" | "large" | "very_large";
@@ -166,6 +179,10 @@ export type WorkflowPromptRequest =
   | { kind: "structured_correction"; schema: string; error_lines: string; previous_response: string };
 
 export type ApiRequest =
+  | {req: "primary_control_probe"}
+  | {req: "primary_input"; input:PrimaryInputEnvelope}
+  | {req: "primary_input_inspect" | "primary_input_read"; session:string; input:string}
+  | {req: "primary_location"; command:PrimaryLocationCommand}
   | {req: "primary_launch_probe"}
   | {req: "primary_launch"; request: PrimaryLaunchRequest}
   | {req: "execution"; session_id: string; request: ExecutionRequest}
@@ -223,6 +240,10 @@ export type ApiRequest =
   | { req: "ping" };
 
 export type ApiEvent =
+  | {ev: "primary_control_capabilities"; input_version:number; location_version:number; location_enabled:boolean}
+  | {ev: "primary_input_receipt"; receipt:PrimaryInputReceipt}
+  | {ev: "primary_input_detail"; receipt:PrimaryInputReceipt; input:PrimaryInputEnvelope}
+  | {ev: "primary_location"; response:PrimaryLocationResponse}
   | {ev: "primary_launch_capabilities"; version: number; enabled: boolean}
   | {ev: "primary_launch"; response: PrimaryLaunchResponse}
   | {ev: "execution"; session_id: string; response: ExecutionResponse}
@@ -369,6 +390,10 @@ export const KNOWN_EVENT_KINDS = [
   "session_inspection",
   "output_cleanup",
   "execution",
+  "primary_control_capabilities",
+  "primary_input_receipt",
+  "primary_input_detail",
+  "primary_location",
   "primary_launch_capabilities",
   "primary_launch",
   "hello_ok",
@@ -417,6 +442,11 @@ export const KNOWN_REQUEST_KINDS = [
   "archive_session",
   "restore_session",
   "set_retention_policy",
+  "primary_control_probe",
+  "primary_input",
+  "primary_input_inspect",
+  "primary_input_read",
+  "primary_location",
   "primary_launch_probe",
   "primary_launch",
   "create_session",

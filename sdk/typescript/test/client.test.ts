@@ -819,3 +819,29 @@ test("managed launch negotiates runtime readiness and preserves typed rejection"
     assert.equal(mutations, 1);
   } finally {client.close(); await server.close();}
 });
+
+test("durable primary controls negotiate and preserve original identity", async () => {
+  const input: import("../src/protocol.js").PrimaryInputEnvelope = {id:"12a99e11-e967-4a1e-a47c-000000000004",session:"fixture",delivery:"safe_boundary",content:"original Ω",images:[["image/png","ZmFrZQ=="]]};
+  const old = await startMockHarness({onRequest(){assert.fail("old runtime must not receive controls");}});
+  const oldClient = await JcodeClient.connect({socketPath:old.socketPath});
+  try { await assert.rejects(()=>oldClient.submitPrimaryInput(input),(error:unknown)=>error instanceof HarnessError && error.code === "unsupported_capability"); }
+  finally {oldClient.close();await old.close();}
+  const receipt: import("../src/protocol.js").PrimaryInputReceipt={id:input.id,session:input.session,state:"committed",messages:["message"],issue:null};
+  const server=await startMockHarness({capabilities:["primary_control_v1"],onRequest(frame,send){
+    const header={v:1,reply_to:frame.id};
+    if(frame.req==="primary_control_probe")send({...header,ev:"primary_control_capabilities",input_version:1,location_version:1,location_enabled:false});
+    else if(frame.req==="primary_input" || frame.req==="primary_input_inspect") {if(frame.req==="primary_input")assert.deepEqual(frame.input,input);send({...header,ev:"primary_input_receipt",receipt});}
+    else if(frame.req==="primary_input_read")send({...header,ev:"primary_input_detail",receipt,input});
+    else if(frame.req==="primary_location")send({...header,ev:"primary_location",response:{status:"rejected",issue:{code:"invalid_identity",detail:"synthetic"}}});
+    else assert.fail("unexpected primary control");
+  }});
+  const client=await JcodeClient.connect({socketPath:server.socketPath});
+  try {
+    assert.deepEqual(await client.submitPrimaryInput(input),receipt);
+    assert.deepEqual(await client.inspectPrimaryInput(input.session,input.id),receipt);
+    assert.deepEqual(await client.readPrimaryInput(input.session,input.id),{receipt,input});
+    await assert.rejects(()=>client.inspectPrimaryInput("wrong",input.id),(error:unknown)=>error instanceof HarnessError && error.code === "unexpected_reply");
+    assert.equal((await client.primaryLocation({action:"inspect",operation:input.id})).status,"rejected");
+    await assert.rejects(()=>client.primaryLocation({action:"change",request:{request:input.id,session:input.session,expected_session_revision:1,expected_catalog_revision:1,placement:{kind:"standalone",id:input.id},cwd:"/fixture"}}),(error:unknown)=>error instanceof HarnessError && error.code === "unsupported_capability");
+  } finally {client.close();await server.close();}
+});

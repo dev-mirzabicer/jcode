@@ -6,6 +6,7 @@ publish = false
 description = "Stable, versioned client API for the jcode harness (agent runtime)"
 
 [dependencies]
+jcode-session-types = { path = "../jcode-session-types" }
 jcode-workspace-types = { path = "../jcode-workspace-types" }
 jcode-tool-types = { path = "../jcode-tool-types" }
 jcode-task-types = { path = "../jcode-task-types" }

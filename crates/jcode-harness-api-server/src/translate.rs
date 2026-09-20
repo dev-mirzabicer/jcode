@@ -152,6 +152,7 @@ struct ArchiveState {
 #[derive(Debug, Clone, PartialEq)]
 enum SimpleKind {
     PrimaryLaunchProbe,
+    PrimaryControl(&'static str),
     PrimaryLaunch,
     Ping,
     History,
@@ -565,6 +566,41 @@ impl BridgeState {
                     "id": id,
                     "include_instructions": request["include_instructions"].as_bool().unwrap_or(false),
                 }))]
+            }
+            "primary_control_probe"
+            | "primary_input"
+            | "primary_input_inspect"
+            | "primary_input_read"
+            | "primary_location" => {
+                let typed = match serde_json::from_value::<jcode_harness_api::ApiRequest>(
+                    request.clone(),
+                ) {
+                    Ok(typed) => typed,
+                    Err(error) => {
+                        return Self::error_reply(
+                            api_id,
+                            ErrorCode::InvalidRequest,
+                            &format!("Invalid primary control: {error}"),
+                        );
+                    }
+                };
+                let mut wire = serde_json::to_value(typed).expect("typed primary control");
+                let kind = wire["req"].as_str().expect("typed control tag").to_owned();
+                let response = match kind.as_str() {
+                    "primary_control_probe" => "primary_control_capabilities",
+                    "primary_input" | "primary_input_inspect" => "primary_input_receipt",
+                    "primary_input_read" => "primary_input_detail",
+                    "primary_location" => "primary_location_response",
+                    _ => unreachable!(),
+                };
+                let id = self.legacy_id();
+                let body = wire.as_object_mut().expect("typed request object");
+                body.remove("req");
+                body.insert("type".into(), json!(kind));
+                body.insert("id".into(), json!(id));
+                self.pending_simple
+                    .push((id, api_id, SimpleKind::PrimaryControl(response)));
+                vec![Outbound::Legacy(wire)]
             }
             "primary_launch_probe" => {
                 let id = self.legacy_id();
@@ -1386,6 +1422,29 @@ impl BridgeState {
                         active_skill: event["active_skill"].as_str().map(str::to_string),
                     },
                 )]
+            }
+            "primary_control_capabilities"
+            | "primary_input_receipt"
+            | "primary_input_detail"
+            | "primary_location_response" => {
+                let id = event["id"].as_u64().unwrap_or(0);
+                let Some(index) = self.pending_simple.iter().position(|(legacy,_,kind)| *legacy == id && matches!(kind,SimpleKind::PrimaryControl(expected) if Some(*expected) == event["type"].as_str())) else { return vec![]; };
+                let (_, api_id, _) = self.pending_simple.remove(index);
+                let mut wire = event.clone();
+                let kind = if event["type"] == "primary_location_response" {
+                    "primary_location"
+                } else {
+                    event["type"].as_str().unwrap_or_default()
+                };
+                wire.as_object_mut().expect("event object").remove("type");
+                wire["ev"] = json!(kind);
+                let reply = serde_json::from_value::<ApiEvent>(wire).unwrap_or_else(|error| {
+                    ApiEvent::Error {
+                        code: ErrorCode::Internal,
+                        message: format!("Invalid primary control reply: {error}"),
+                    }
+                });
+                vec![ServerFrame::reply(api_id, reply)]
             }
             "primary_launch_capabilities" | "primary_launch_response" => {
                 let id = event["id"].as_u64().unwrap_or(0);

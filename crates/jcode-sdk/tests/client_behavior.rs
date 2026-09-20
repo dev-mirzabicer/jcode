@@ -1055,3 +1055,77 @@ fn primary_launch_checks_bridge_and_runtime_capabilities_before_mutation() {
     assert_eq!(error.code(), "primary_launch");
     assert!(matches!(error.kind, ErrorKind::PrimaryLaunch(_)));
 }
+
+#[test]
+fn durable_primary_controls_negotiate_and_validate_receipt_identity() {
+    use jcode_harness_api::{
+        PrimaryInputDelivery, PrimaryInputEnvelope, PrimaryInputReceipt, PrimaryInputState,
+        PrimaryLocationCommand,
+    };
+    let input = PrimaryInputEnvelope::new(
+        "fixture".into(),
+        "original Ω".into(),
+        PrimaryInputDelivery::SafeBoundary,
+    );
+    let old = fake_harness_with_capabilities(vec![], |_, _| {
+        panic!("old runtime must not receive mutation")
+    });
+    assert_eq!(
+        old.submit_primary_input(input.clone()).unwrap_err().kind,
+        ErrorKind::UnsupportedCapability
+    );
+    let original = input.clone();
+    let client = fake_harness_with_capabilities(
+        vec!["primary_control_v1".into()],
+        move |frame, writer| {
+            let receipt = PrimaryInputReceipt {
+                id: original.id,
+                session: original.session.clone(),
+                state: PrimaryInputState::Committed,
+                messages: vec!["message".into()],
+                issue: None,
+            };
+            let event=match &frame.request {
+            ApiRequest::PrimaryControlProbe=>ApiEvent::PrimaryControlCapabilities{input_version:1,location_version:1,location_enabled:false},
+            ApiRequest::PrimaryInput{input}=>{assert_eq!(**input,original);ApiEvent::PrimaryInputReceipt{receipt}},
+            ApiRequest::PrimaryInputInspect{..}=>ApiEvent::PrimaryInputReceipt{receipt},
+            ApiRequest::PrimaryInputRead{..}=>ApiEvent::PrimaryInputDetail{receipt,input:Box::new(original.clone())},
+            ApiRequest::PrimaryLocation{..}=>ApiEvent::PrimaryLocation{response:serde_json::from_value(serde_json::json!({"status":"rejected","issue":{"code":"invalid_identity","detail":"synthetic"}})).unwrap()},
+            _=>panic!("unexpected control"),
+        };
+            reply(frame, event, writer);
+        },
+    );
+    assert_eq!(
+        client.submit_primary_input(input.clone()).unwrap().state,
+        PrimaryInputState::Committed
+    );
+    assert_eq!(
+        client
+            .inspect_primary_input(input.session.clone(), input.id)
+            .unwrap()
+            .messages,
+        vec!["message"]
+    );
+    assert_eq!(
+        client
+            .read_primary_input(input.session.clone(), input.id)
+            .unwrap()
+            .1,
+        input
+    );
+    assert_eq!(
+        client
+            .inspect_primary_input("wrong".into(), input.id)
+            .unwrap_err()
+            .kind,
+        ErrorKind::UnexpectedReply
+    );
+    assert!(
+        client
+            .primary_location(PrimaryLocationCommand::Inspect {
+                operation: input.id.to_string().parse().unwrap()
+            })
+            .is_ok()
+    );
+}

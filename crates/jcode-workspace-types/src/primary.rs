@@ -119,7 +119,7 @@ pub struct LocationChangeRecord {
     pub issue: Option<crate::Issue>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PrimaryLocationCommand {
     Change { request: LocationChangeRequest },
@@ -127,7 +127,7 @@ pub enum PrimaryLocationCommand {
     Inspect { operation: OperationId },
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum PrimaryLocationResponse {
     State { record: Box<LocationChangeRecord> },

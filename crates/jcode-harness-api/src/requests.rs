@@ -6,6 +6,21 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "req", rename_all = "snake_case")]
 pub enum ApiRequest {
+    PrimaryControlProbe,
+    PrimaryInput {
+        input: Box<crate::PrimaryInputEnvelope>,
+    },
+    PrimaryInputInspect {
+        session: String,
+        input: crate::RequestId,
+    },
+    PrimaryInputRead {
+        session: String,
+        input: crate::RequestId,
+    },
+    PrimaryLocation {
+        command: Box<crate::PrimaryLocationCommand>,
+    },
     PrimaryLaunchProbe,
     PrimaryLaunch {
         request: crate::PrimaryLaunchRequest,
