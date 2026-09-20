@@ -32,6 +32,7 @@ pub struct PrimaryHost {
     resources: StdMutex<HashMap<String, PrimaryResources>>,
     accepting: AtomicBool,
     input_drains: StdMutex<HashSet<String>>,
+    input_events: StdMutex<Option<crate::server::LiveTurnSwarmContext>>,
     stdin: StdMutex<HashMap<String, Arc<crate::server::primary_stdin::PrimaryStdin>>>,
     presentations: StdMutex<HashMap<String, Arc<presentation::Presentation>>>,
 }
@@ -132,6 +133,7 @@ impl PrimaryHost {
             resources: StdMutex::new(resources),
             accepting: AtomicBool::new(true),
             input_drains: StdMutex::new(HashSet::new()),
+            input_events: StdMutex::new(None),
             stdin: StdMutex::new(HashMap::new()),
             presentations: StdMutex::new(HashMap::new()),
         }
@@ -325,6 +327,21 @@ impl PrimaryHost {
 
     pub(crate) fn accepts_input(&self) -> bool {
         self.accepting.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn configure_input_delivery(&self, context: crate::server::LiveTurnSwarmContext) {
+        self.input_events
+            .lock()
+            .expect("primary input event context")
+            .get_or_insert(context);
+    }
+
+    pub(crate) fn input_delivery_context(&self) -> Result<crate::server::LiveTurnSwarmContext> {
+        self.input_events
+            .lock()
+            .expect("primary input event context")
+            .clone()
+            .context("Primary input delivery is not attached to a runtime")
     }
 
     pub(crate) fn input_drain(self: &Arc<Self>, session: &str) -> Option<PrimaryInputDrain> {

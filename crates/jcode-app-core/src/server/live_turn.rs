@@ -56,7 +56,7 @@ impl LiveTurnReminder {
 /// Swarm bookkeeping handles needed to keep member status accurate around a
 /// server-initiated turn.
 #[derive(Clone)]
-pub(super) struct LiveTurnSwarmContext {
+pub(crate) struct LiveTurnSwarmContext {
     pub members: Arc<RwLock<HashMap<String, SwarmMember>>>,
     pub swarms_by_id: Arc<RwLock<HashMap<String, HashSet<String>>>>,
     pub event_history: Arc<RwLock<VecDeque<SwarmEvent>>>,
@@ -284,6 +284,7 @@ pub(super) async fn submit_primary_input(
     input: jcode_session_types::PrimaryInputEnvelope,
     swarm: LiveTurnSwarmContext,
 ) -> anyhow::Result<jcode_session_types::PrimaryInputReceipt> {
+    sessions.configure_input_delivery(swarm.clone());
     let session = input.session.clone();
     anyhow::ensure!(
         sessions.read().await.contains_key(&session),

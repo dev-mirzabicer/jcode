@@ -1,7 +1,5 @@
-use super::client_lifecycle::process_message_streaming_mpsc;
 use super::state::{
     SessionControlHandle, SessionInterruptQueues, queue_soft_interrupt_for_session,
-    session_event_fanout_sender,
 };
 use super::{SessionAgents, SwarmMember};
 use crate::config::SafetyConfig;
@@ -419,6 +417,10 @@ impl RelayClient {
 
         match deliver_to_session(
             &self.config.session_id,
+            crate::primary_input::correlated_input_id(
+                "jade-relay",
+                &format!("{}:{}", self.config.api.api_base, event.seq),
+            ),
             text,
             sessions,
             soft_interrupt_queues,
@@ -882,6 +884,10 @@ impl RelayLauncherClient {
 
         let after = match deliver_to_launched_session(
             &session_id,
+            crate::primary_input::correlated_input_id(
+                "jade-launch",
+                &format!("{}:{prompt_seq}", self.config.api.api_base),
+            ),
             &request.text,
             sessions,
             Arc::clone(&swarm_members),
@@ -1185,77 +1191,93 @@ async fn wait_for_live_session(
 
 async fn deliver_to_session(
     session_id: &str,
+    input_id: crate::workspace::RequestId,
     text: &str,
     sessions: &SessionAgents,
-    soft_interrupt_queues: &SessionInterruptQueues,
+    _soft_interrupt_queues: &SessionInterruptQueues,
     swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
 ) -> Result<String> {
-    let agent = {
-        let guard = sessions.read().await;
-        guard.get(session_id).cloned()
-    };
-    let Some(agent) = agent else {
-        anyhow::bail!("session '{session_id}' is not live in this Jcode server")
-    };
-
-    if agent.try_lock().is_err() {
-        let queued = queue_soft_interrupt_for_session(
-            session_id,
-            format!("[jade relay message from user]\n{text}"),
-            false,
-            SoftInterruptSource::User,
-            soft_interrupt_queues,
-            sessions,
-        )
-        .await;
-        if queued {
-            return Ok("Message queued for the running session.".to_string());
-        }
-        anyhow::bail!("session '{session_id}' is busy and could not accept a queued interrupt")
-    }
-
-    let start_message_index = {
-        let agent_guard = agent.lock().await;
-        agent_guard.message_count()
-    };
-    let event_tx = session_event_fanout_sender(session_id.to_string(), swarm_members);
-    process_message_streaming_mpsc(Arc::clone(&agent), text, Vec::new(), None, event_tx).await?;
-    let reply = {
-        let agent_guard = agent.lock().await;
-        agent_guard.latest_assistant_text_after(start_message_index)
-    };
-    Ok(reply.unwrap_or_else(|| "Message processed; no assistant text was produced.".to_string()))
+    deliver_primary_relay(session_id, input_id, text, sessions, swarm_members, false).await
 }
 
 async fn deliver_to_launched_session(
     session_id: &str,
+    input_id: crate::workspace::RequestId,
     text: &str,
     sessions: &SessionAgents,
     swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
 ) -> Result<String> {
-    let agent = {
-        let guard = sessions.read().await;
-        guard.get(session_id).cloned()
-    };
-    let Some(agent) = agent else {
-        anyhow::bail!("session '{session_id}' is not live in this Jcode server")
-    };
+    deliver_primary_relay(session_id, input_id, text, sessions, swarm_members, true).await
+}
 
-    // A just-spawned headed TUI briefly owns the agent lock while it subscribes
-    // and restores history. For launch commands, wait for that startup work and
-    // run the first prompt as a normal turn instead of falling back to a soft
-    // interrupt queue that may not be processed until a later turn.
-    let start_message_index = {
-        let agent_guard = agent.lock().await;
-        agent_guard.message_count()
-    };
-    let event_tx = session_event_fanout_sender(session_id.to_string(), swarm_members);
-    process_message_streaming_mpsc(Arc::clone(&agent), text, Vec::new(), None, event_tx).await?;
-    let reply = {
-        let agent_guard = agent.lock().await;
-        agent_guard.latest_assistant_text_after(start_message_index)
-    };
-    Ok(reply.unwrap_or_else(|| "Message processed; no assistant text was produced.".to_string()))
+async fn deliver_primary_relay(
+    session_id: &str,
+    input_id: crate::workspace::RequestId,
+    text: &str,
+    sessions: &SessionAgents,
+    swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
+    wait_for_reply: bool,
+) -> Result<String> {
+    let agent = sessions
+        .read()
+        .await
+        .get(session_id)
+        .cloned()
+        .context("Relay primary is not hosted")?;
+    let busy = sessions.processing(session_id).is_some() || agent.try_lock().is_err();
+    let context = sessions.input_delivery_context()?;
+    anyhow::ensure!(
+        Arc::ptr_eq(&context.members, &swarm_members),
+        "Relay event context belongs to another runtime"
+    );
+    let mut input = jcode_session_types::PrimaryInputEnvelope::new(
+        session_id.into(),
+        text.into(),
+        if wait_for_reply {
+            jcode_session_types::PrimaryInputDelivery::NextTurn
+        } else {
+            jcode_session_types::PrimaryInputDelivery::SafeBoundary
+        },
+    );
+    input.id = input_id;
+    input.origin = Some(jcode_session_types::StoredMessageOrigin::Human);
+    let mut changes = sessions.subscribe();
+    super::live_turn::submit_primary_input(sessions, input, context).await?;
+    if busy && !wait_for_reply {
+        return Ok("Message queued for the running session.".into());
+    }
+    loop {
+        let receipt =
+            crate::primary_input::PrimaryInputStore::current().inspect(session_id, input_id)?;
+        anyhow::ensure!(
+            !matches!(
+                receipt.state,
+                jcode_session_types::PrimaryInputState::Failed
+                    | jcode_session_types::PrimaryInputState::Cancelled
+            ),
+            "Relay input needs review: {:?}",
+            receipt.issue
+        );
+        if receipt.state == jcode_session_types::PrimaryInputState::Committed
+            && sessions.processing(session_id).is_none()
+            && let Ok(agent) = agent.try_lock()
+        {
+            if let Some(issue) = receipt.issue {
+                anyhow::bail!(issue);
+            }
+            let source = agent.startup_context_session();
+            let start = source
+                .messages
+                .iter()
+                .position(|message| receipt.messages.contains(&message.id))
+                .context("Committed relay input is no longer in current history")?
+                + 1;
+            return Ok(agent
+                .latest_assistant_text_after(start)
+                .unwrap_or_else(|| "Message processed; no assistant text was produced.".into()));
+        }
+        changes.changed().await?;
+    }
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1317,6 +1339,59 @@ fn urlencoding_encode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Clone, Default)]
+    struct RelayProvider(Arc<std::sync::atomic::AtomicUsize>);
+    #[async_trait::async_trait]
+    impl crate::provider::Provider for RelayProvider {
+        async fn complete(&self, _: &[crate::message::Message], _: &[crate::message::ToolDefinition], _: &str, _: Option<&str>) -> Result<crate::provider::EventStream> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Box::pin(futures::stream::iter(vec![
+                Ok(crate::message::StreamEvent::TextDelta("synthetic relay reply".into())),
+                Ok(crate::message::StreamEvent::MessageEnd { stop_reason: Some("end_turn".into()) }),
+            ])))
+        }
+        fn name(&self) -> &str { "relay-fixture" }
+        fn fork(&self) -> Arc<dyn crate::provider::Provider> { Arc::new(self.clone()) }
+    }
+
+    #[test]
+    fn relay_input_replay_and_busy_delivery_use_the_primary_host() -> Result<()> {
+        let _environment = crate::auth::test_sandbox::AuthTestSandbox::new()?;
+        crate::instruction::SystemPromptComposer::new().ensure_global_store()?;
+        tokio::runtime::Runtime::new()?.block_on(async {
+            let provider = RelayProvider::default();
+            let source: Arc<dyn crate::provider::Provider> = Arc::new(provider.clone());
+            let registry = crate::tool::Registry::new(source.clone()).await;
+            let agent = Arc::new(tokio::sync::Mutex::new(crate::agent::Agent::new(source.clone(),registry)));
+            let session = agent.lock().await.session_id().to_owned();
+            let server = crate::server::Server::new(source);
+            server.sessions.write().await.insert(session.clone(),agent.clone());
+            let queues = Arc::new(RwLock::new(HashMap::new()));
+            let input = crate::primary_input::correlated_input_id("relay-test","one");
+            let reply = deliver_to_session(&session,input,"synthetic input",&server.sessions,&queues,server.swarm_state.members.clone()).await?;
+            assert_eq!(reply,"synthetic relay reply");
+            assert_eq!(deliver_to_session(&session,input,"synthetic input",&server.sessions,&queues,server.swarm_state.members.clone()).await?,reply);
+            assert!(deliver_to_session(&session,input,"conflicting input",&server.sessions,&queues,server.swarm_state.members.clone()).await.is_err());
+            assert_eq!(provider.0.load(std::sync::atomic::Ordering::SeqCst),1);
+            let busy = agent.lock().await;
+            let mut changes = server.sessions.subscribe();
+            let queued = crate::workspace::RequestId::new();
+            deliver_to_session(&session,queued,"busy input",&server.sessions,&queues,server.swarm_state.members.clone()).await?;
+            assert_eq!(crate::primary_input::PrimaryInputStore::current().pending(&session)?.len(),1);
+            drop(busy);
+            tokio::time::timeout(Duration::from_secs(10),async {
+                loop {
+                    let receipt = crate::primary_input::PrimaryInputStore::current().inspect(&session,queued)?;
+                    if receipt.state == jcode_session_types::PrimaryInputState::Committed && server.sessions.processing(&session).is_none() { break; }
+                    changes.changed().await?;
+                }
+                Ok::<_,anyhow::Error>(())
+            }).await??;
+            assert_eq!(provider.0.load(std::sync::atomic::Ordering::SeqCst),2);
+            server.sessions.shutdown().await
+        })
+    }
 
     #[test]
     fn relay_listener_config_is_opt_in_and_requires_credentials() {

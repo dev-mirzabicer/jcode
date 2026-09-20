@@ -40,6 +40,7 @@ mod headless;
 mod jade_relay;
 mod lifecycle;
 mod live_turn;
+pub(crate) use live_turn::LiveTurnSwarmContext;
 mod notification;
 mod primary_output;
 pub(crate) mod primary_stdin;
@@ -767,7 +768,7 @@ impl Server {
             swarms_by_id: restored_swarms_by_id,
         } = load_persisted_swarm_runtime_state();
 
-        Self {
+        let server = Self {
             provider,
             context_transactions: Arc::new(crate::context::ContextTransactionService::new()),
             startup_context: Arc::new(startup_context::StartupContextCoordinator::new(&identity)),
@@ -806,7 +807,17 @@ impl Server {
             soft_interrupt_queues: Arc::new(RwLock::new(HashMap::new())),
             await_members_runtime: AwaitMembersRuntime::default(),
             swarm_mutation_runtime: SwarmMutationRuntime::default(),
-        }
+        };
+        server
+            .sessions
+            .configure_input_delivery(LiveTurnSwarmContext::new(
+                &server.swarm_state.members,
+                &server.swarm_state.swarms_by_id,
+                &server.event_history,
+                &server.event_counter,
+                &server.swarm_event_tx,
+            ));
+        server
     }
 
     pub fn new_with_paths(
