@@ -154,6 +154,14 @@ try:
     wait_state(tid, lambda s: s.get('processing') is False)
     final = frame(tid, 'completed-return')
     assert 'UI fixture prefix' in final and 'UI fixture suffix' in final, final
+    command(tid, 'set_input:/clear')
+    command(tid, 'keys:enter')
+    cleared = wait_state(tid, lambda state: state.get('session_id') and state['session_id'] != first, 'startup-context-state')['session_id']
+    assert json.loads((f.home / 'sessions' / (cleared + '.json')).read_text())['location']['placement'] == source['location']['placement']
+    navigate(tid, first)
+    wait_state(tid, lambda state: state.get('processing') is False)
+    restored_source = frame(tid, 'original-after-clear')
+    assert 'UI fixture prefix' in restored_source and 'UI fixture suffix' in restored_source
     f.debug(f'tester:{tid}:stop')
     testers.remove(tid)
     wrapper.write_text('#!/bin/sh\nexec ' + ' '.join((shlex.quote(v) for v in [f.BIN, '--no-update', '--no-selfdev', '--provider-profile', 'wp09-fixture', '--model', 'fixture', '--socket', str(f.sockpath), '--resume', first])) + ' "$@"\n')
@@ -165,7 +173,7 @@ try:
     assert 'UI fixture prefix' in narrow and 'UI fixture suffix' in narrow, narrow
     assert json.loads((f.home / 'sessions' / (first + '.json')).read_text())['working_dir'] == str(f.project.resolve())
     assert len(f.posts) == 1
-    result = {'binary': f.BIN, 'root': str(f.ROOT), 'session': first, 'target': target, 'physical_input': True, 'busy_navigation': True, 'cwd_preserved': True, 'reconnect': True, 'frames': frames, 'provider_calls': len(f.posts)}
+    result = {'binary': f.BIN, 'root': str(f.ROOT), 'session': first, 'target': target, 'physical_input': True, 'busy_navigation': True, 'independent_clear': True, 'cwd_preserved': True, 'reconnect': True, 'frames': frames, 'provider_calls': len(f.posts)}
     (f.ROOT / 'primary-tui-result.json').write_text(json.dumps(result, indent=2))
     print(json.dumps(result))
 finally:

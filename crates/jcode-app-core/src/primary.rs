@@ -11,6 +11,7 @@ use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, RwLockReadGuard, RwLockWriteGu
 use tokio::task::{AbortHandle, JoinSet};
 
 mod launch;
+mod new_context;
 mod transport;
 pub use transport::{configured_launch, launch_enabled, launch_local_request};
 pub(crate) mod presentation;
@@ -280,6 +281,16 @@ impl PrimaryHost {
                 Err(error)
             }
         }
+    }
+
+    pub(crate) fn accepts_input(&self) -> bool {
+        self.accepting.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn retain_delivery(&self, task: impl Future<Output = ()> + Send + 'static) {
+        let mut tasks = self.tasks.lock().expect("primary tasks");
+        while tasks.try_join_next().is_some() {}
+        tasks.spawn(task);
     }
 
     pub(crate) fn processing(&self, session: &str) -> Option<u64> {

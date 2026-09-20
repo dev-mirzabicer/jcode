@@ -305,3 +305,107 @@ pub(super) async fn run_live_system_turn_if_idle(
     )
     .await
 }
+
+/// Complete delivery queued behind an active turn, including the race after
+/// that turn's final interrupt check. The queue remains the existing owner.
+pub(super) fn ensure_queued_notification_delivery(
+    sessions: &SessionAgents,
+    session_id: &str,
+    swarm: LiveTurnSwarmContext,
+) {
+    let weak = Arc::downgrade(sessions);
+    let session = session_id.to_owned();
+    sessions.retain_delivery(async move {
+        loop {
+            let Some(host) = weak.upgrade() else {
+                return;
+            };
+            if !host.accepts_input() {
+                return;
+            }
+            if host.wait_idle(&session).await.is_err() {
+                return;
+            }
+            let Some(agent) = host.read().await.get(&session).cloned() else {
+                return;
+            };
+            // A metadata operation may own the Agent without owning a turn.
+            let guard = agent.lock().await;
+            let pending = guard.has_soft_interrupts();
+            drop(guard);
+            if !pending || !host.accepts_input() {
+                return;
+            }
+            let Ok(mut admission) = host.admit(&session, 0, agent.clone()) else {
+                tokio::task::yield_now().await;
+                continue;
+            };
+            let queue = admission.agent.soft_interrupt_queue();
+            let message = match queue.lock() {
+                Ok(mut pending) if !pending.is_empty() => pending.remove(0),
+                _ => return,
+            };
+            admission.agent.persist_soft_interrupt_snapshot();
+            let target = admission.agent.session_id().to_owned();
+            admission.agent.primary_presentation = Some(host.presentation(&target));
+            let stdin = host.stdin(&target, || {
+                super::primary_stdin::PrimaryStdin::new(target.clone(), swarm.members.clone())
+            });
+            admission.agent.set_stdin_request_tx(stdin.sender());
+            let output = super::primary_output::PrimaryOutput::new(
+                target.clone(),
+                host.presentation(&target),
+                swarm.members.clone(),
+                None,
+            );
+            let tx = output.tx.clone();
+            let terminal = tx.clone();
+            let finished = swarm.clone();
+            update_member_status(
+                &target,
+                "running",
+                None,
+                &swarm.members,
+                &swarm.swarms_by_id,
+                Some(&swarm.event_history),
+                Some(&swarm.event_counter),
+                Some(&swarm.event_tx),
+            )
+            .await;
+            let output_agent = agent;
+            host.start(
+                admission,
+                move |mut agent| async move {
+                    let start = agent.message_count();
+                    let display = match message.source {
+                        jcode_agent_runtime::SoftInterruptSource::User => None,
+                        jcode_agent_runtime::SoftInterruptSource::System => {
+                            Some(crate::session::StoredDisplayRole::System)
+                        }
+                        jcode_agent_runtime::SoftInterruptSource::BackgroundTask => {
+                            Some(crate::session::StoredDisplayRole::BackgroundTask)
+                        }
+                    };
+                    agent
+                        .run_once_streaming_mpsc_with_display_role_and_unattended(
+                            &message.content,
+                            message.images,
+                            None,
+                            tx,
+                            display,
+                            message.unattended_context,
+                        )
+                        .await?;
+                    Ok(agent.latest_assistant_text_after(start))
+                },
+                move |outcome| async move {
+                    finished.complete(&target, 0, outcome, &terminal).await;
+                    drop(terminal);
+                    output.finish(&output_agent).await;
+                },
+            );
+            // A later differently authorized group may remain. Inspect only
+            // after the same host has settled this turn and its output.
+        }
+    });
+}

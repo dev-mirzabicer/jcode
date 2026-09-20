@@ -643,3 +643,97 @@ fn primary_admission_and_kernel_owner_exclude_second_writer() -> Result<()> {
         Ok(())
     })
 }
+
+#[test]
+fn notify_session_terminal_race_starts_only_unconsumed_detached_input() -> Result<()> {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    crate::instruction::SystemPromptComposer::new().ensure_global_store()?;
+    tokio::runtime::Runtime::new()?.block_on(async {
+        let gate = GatedClientProvider::default();
+        let provider: Arc<dyn Provider> = Arc::new(gate.clone());
+        let registry = Registry::new(provider.clone()).await;
+        let agent = Arc::new(Mutex::new(Agent::new(provider, registry)));
+        let session = agent.lock().await.session_id().to_owned();
+        let host = Arc::new(crate::primary::PrimaryHost::new(HashMap::from([(
+            session.clone(),
+            agent.clone(),
+        )])));
+        let status = status_fixture(&session);
+        let admission = host.admit(&session, 9, agent.clone())?;
+        let (at_terminal, terminal) = tokio::sync::oneshot::channel();
+        let (release, finish) = tokio::sync::oneshot::channel();
+        host.start(
+            admission,
+            |_| async { Ok(None) },
+            move |_| async move {
+                let _ = at_terminal.send(());
+                let _ = finish.await;
+            },
+        );
+        terminal.await?;
+        let queues = Arc::new(RwLock::new(HashMap::new()));
+        let (tx, mut rx) = crate::client_delivery::local_event_channel();
+        crate::server::client_actions::handle_notify_session(
+            81,
+            session.clone(),
+            "terminal notification fixture".into(),
+            None,
+            crate::server::client_actions::NotifySessionContext {
+                sessions: &host,
+                soft_interrupt_queues: &queues,
+                swarm_members: &status.members,
+                swarms_by_id: &status.swarms_by_id,
+                event_history: &status.event_history,
+                event_counter: &status.event_counter,
+                swarm_event_tx: &status.event_tx,
+                client_event_tx: &tx,
+            },
+        )
+        .await;
+        assert!(matches!(
+            rx.recv().await,
+            Some(ServerEvent::Done { id: 81 })
+        ));
+        assert_eq!(agent.lock().await.soft_interrupt_count(), 1);
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(30), gate.entered.notified()).await?;
+        gate.release.notify_one();
+        host.wait_idle(&session).await?;
+        let guard = agent.lock().await;
+        assert_eq!(
+            guard
+                .messages()
+                .iter()
+                .filter(|message| message
+                    .content_preview()
+                    .contains("terminal notification fixture"))
+                .count(),
+            1
+        );
+        assert!(!guard.has_soft_interrupts());
+        drop(guard);
+        crate::server::client_actions::handle_notify_session(
+            82,
+            "missing-notification-target".into(),
+            "must not be accepted".into(),
+            None,
+            crate::server::client_actions::NotifySessionContext {
+                sessions: &host,
+                soft_interrupt_queues: &queues,
+                swarm_members: &status.members,
+                swarms_by_id: &status.swarms_by_id,
+                event_history: &status.event_history,
+                event_counter: &status.event_counter,
+                swarm_event_tx: &status.event_tx,
+                client_event_tx: &tx,
+            },
+        )
+        .await;
+        assert!(matches!(
+            rx.recv().await,
+            Some(ServerEvent::Error { id: 82, .. })
+        ));
+        host.shutdown().await
+    })
+}

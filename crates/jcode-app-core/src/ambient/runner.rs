@@ -439,8 +439,7 @@ impl AmbientRunnerHandle {
         }
     }
 
-    async fn notify_live_session(
-        &self,
+    pub(crate) async fn notify_live_session(
         session_id: &str,
         message: &str,
         unattended_context: Option<jcode_session_types::StoredUnattendedContextAuthorization>,
@@ -586,13 +585,12 @@ impl AmbientRunnerHandle {
             ScheduleTarget::Ambient => Ok(()),
             ScheduleTarget::Session { session_id } => {
                 let reminder = ambient::format_scheduled_session_message(item)?;
-                match self
-                    .notify_live_session(
-                        session_id,
-                        &reminder,
-                        Self::scheduled_unattended_context(item),
-                    )
-                    .await
+                match Self::notify_live_session(
+                    session_id,
+                    &reminder,
+                    Self::scheduled_unattended_context(item),
+                )
+                .await
                 {
                     Ok(()) => {
                         logging::info(&format!(

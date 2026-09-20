@@ -107,218 +107,88 @@ fn mark_remote_reload_started(request_id: &str) {
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_clear_session(
     id: u64,
-    client_selfdev: bool,
     client_session_id: &mut String,
     client_connection_id: &str,
     agent: &Arc<Mutex<Agent>>,
-    provider: &Arc<dyn Provider>,
-    registry: &Registry,
-    context_transactions: &crate::context::ContextTransactionService,
     instruction_repositories: &crate::instruction::InstructionRepositoryService,
     sessions: &SessionAgents,
+    startup_context: &super::startup_context::StartupContextCoordinator,
+    mcp_pool: &Arc<crate::mcp::SharedMcpPool>,
     shutdown_signals: &Arc<RwLock<HashMap<String, InterruptSignal>>>,
     soft_interrupt_queues: &SessionInterruptQueues,
     client_connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
-    file_touch: &FileTouchService,
-    channel_subscriptions: &ChannelSubscriptions,
-    channel_subscriptions_by_session: &ChannelSubscriptions,
-    swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
     event_history: &Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
     event_counter: &Arc<std::sync::atomic::AtomicU64>,
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
     client_event_tx: &crate::client_delivery::ClientEventSender,
-) {
-    let clear_start = Instant::now();
-    let old_session_id = client_session_id.clone();
-    crate::logging::event_info(
-        "SESSION_LIFECYCLE",
-        vec![
-            ("phase", "clear_start".to_string()),
-            ("request_id", id.to_string()),
-            ("session_id", old_session_id.clone()),
-            ("client_connection_id", client_connection_id.to_string()),
-            ("client_selfdev", client_selfdev.to_string()),
-        ],
-    );
-    let (preserve_debug, working_dir, retained_agent) = {
-        let agent_guard = agent.lock().await;
-        (
-            agent_guard.is_debug(),
-            agent_guard.working_dir().map(str::to_string),
-            agent_guard.active_agent().cloned(),
-        )
-    };
-
-    let clear_activation = if preserve_debug {
-        crate::agent::StartupContextActivation::Disabled
-    } else {
-        crate::agent::StartupContextActivation::primary(crate::agent::StartupContextCaller::Clear)
-    };
-    let selection = match retained_agent.as_ref() {
-        Some(agent) => match crate::instruction::AgentSelection::from_stored(agent) {
-            Ok(selection) => selection,
-            Err(error) => {
+) -> Arc<Mutex<Agent>> {
+    let old_session = client_session_id.clone();
+    let fresh = match sessions
+        .clear_context(agent, &old_session, instruction_repositories, mcp_pool)
+        .await
+    {
+        Ok(fresh) => fresh,
+        Err(error) => {
+            if let Some(activation) =
+                error.downcast_ref::<crate::agent::StartupContextActivationError>()
+            {
+                let _ = client_event_tx.send(ServerEvent::StartupContextFailed {
+                    id,
+                    failure: super::startup_context::primary_activation_failure(activation),
+                });
+            } else {
                 let _ = client_event_tx.send(ServerEvent::Error {
                     id,
-                    message: format!("Clear could not retain the active agent identity: {error}"),
+                    message: format!("Clear was not applied: {error:#}"),
                     retry_after_secs: None,
                 });
-                return;
             }
-        },
-        None => crate::instruction::AgentSelection::Default,
-    };
-    let (mut new_agent, _) = match Agent::new_with_startup_context_and_agent_with_repositories(
-        Arc::clone(provider),
-        registry.clone(),
-        working_dir.as_deref(),
-        clear_activation,
-        selection,
-        client_selfdev,
-        instruction_repositories.clone(),
-    ) {
-        Ok(result) => result,
-        Err(error) => {
-            let _ = client_event_tx.send(ServerEvent::StartupContextFailed {
-                id,
-                failure: super::startup_context::primary_activation_failure(&error),
-            });
-            crate::logging::event_warn(
-                "SESSION_LIFECYCLE",
-                vec![
-                    ("phase", "clear_startup_context_failed".to_string()),
-                    ("request_id", id.to_string()),
-                    ("session_id", old_session_id),
-                    ("error", error.to_string()),
-                    ("elapsed_ms", clear_start.elapsed().as_millis().to_string()),
-                ],
-            );
-            return;
+            return agent.clone();
         }
     };
-    let new_id = new_agent.session_id().to_string();
-
-    if client_selfdev {
-        new_agent.set_canary("self-dev");
-    }
-    if preserve_debug {
-        new_agent.set_debug(true);
-    }
-
-    {
-        let mut agent_guard = agent.lock().await;
-        agent_guard.mark_closed();
-        crate::tool::clear_session_tool_policy(&old_session_id);
-    }
-
-    let mut agent_guard = agent.lock().await;
-    *agent_guard = new_agent;
-    drop(agent_guard);
-    context_transactions.invalidate_session_drafts(
-        &old_session_id,
-        "session clear discarded authoritative history",
-    );
-
-    {
-        let mut sessions_guard = sessions.write().await;
-        sessions_guard.remove(client_session_id);
-        sessions_guard.insert(new_id.clone(), Arc::clone(agent));
-    }
-    crate::runtime_memory_log::emit_event(
-        crate::runtime_memory_log::RuntimeMemoryLogEvent::new(
-            "session_cleared",
-            "session_replaced_with_fresh_agent",
-        )
-        .with_session_id(new_id.clone())
-        .force_attribution(),
-    );
-    {
-        let agent_guard = agent.lock().await;
-        register_session_interrupt_queue(
-            soft_interrupt_queues,
-            &new_id,
-            agent_guard.soft_interrupt_queue(),
-        )
-        .await;
-
-        let mut signals = shutdown_signals.write().await;
-        signals.remove(client_session_id);
-        signals.insert(new_id.clone(), agent_guard.graceful_shutdown_signal());
-        drop(signals);
-        remove_background_tool_signal(client_session_id);
-        register_background_tool_signal(&new_id, agent_guard.background_tool_signal());
-    }
-    remove_session_interrupt_queue(soft_interrupt_queues, client_session_id).await;
-
-    // `/clear` creates a genuinely fresh session. Do not migrate the old
-    // session's swarm membership or plan participation to the replacement:
-    // doing so lets a subsequent plan snapshot repopulate the cleared UI.
-    let swarm_id_for_update = {
-        let mut members = swarm_members.write().await;
-        members
-            .remove(client_session_id)
-            .and_then(|member| member.swarm_id)
-    };
-    if let Some(ref swarm_id) = swarm_id_for_update {
-        let mut swarms = swarms_by_id.write().await;
-        if let Some(swarm) = swarms.get_mut(swarm_id) {
-            swarm.remove(client_session_id);
-            if swarm.is_empty() {
-                swarms.remove(swarm_id);
-            }
-        }
-    }
-    file_touch.clear_session(client_session_id).await;
-    remove_session_channel_subscriptions(
-        client_session_id,
-        channel_subscriptions,
-        channel_subscriptions_by_session,
-    )
-    .await;
-    update_member_status(
-        &new_id,
-        "ready",
-        None,
-        swarm_members,
-        swarms_by_id,
-        Some(event_history),
-        Some(event_counter),
-        Some(swarm_event_tx),
-    )
-    .await;
-    if let Some(ref swarm_id) = swarm_id_for_update {
-        remove_plan_participant(swarm_id, client_session_id, swarm_plans).await;
-    }
-
+    let new_id = fresh.lock().await.session_id().to_owned();
+    let resources = sessions
+        .resources(&new_id, &fresh)
+        .expect("published primary resources");
+    register_session_interrupt_queue(soft_interrupt_queues, &new_id, resources.interrupts).await;
+    shutdown_signals
+        .write()
+        .await
+        .insert(new_id.clone(), resources.shutdown);
+    register_background_tool_signal(&new_id, resources.background);
+    unregister_session_event_sender(swarm_members, &old_session, client_connection_id).await;
+    startup_context.release_connection(client_connection_id);
     *client_session_id = new_id.clone();
     client_event_tx.retarget(&new_id);
+    ensure_client_swarm_member(
+        &new_id,
+        client_connection_id,
+        &None,
+        client_event_tx,
+        &fresh,
+        false,
+        swarm_members,
+        swarms_by_id,
+        event_history,
+        event_counter,
+        swarm_event_tx,
+    )
+    .await;
+    if let Some(connection) = client_connections
+        .write()
+        .await
+        .get_mut(client_connection_id)
     {
-        let mut connections = client_connections.write().await;
-        if let Some(info) = connections.get_mut(client_connection_id) {
-            info.session_id = new_id.clone();
-            info.last_seen = Instant::now();
-        }
+        connection.session_id = new_id.clone();
+        connection.is_processing = false;
+        connection.current_tool_name = None;
+        connection.last_seen = Instant::now();
     }
     let _ = client_event_tx.send(ServerEvent::SessionId { session_id: new_id });
     let _ = client_event_tx.send(ServerEvent::Done { id });
-    crate::logging::event_info(
-        "SESSION_LIFECYCLE",
-        vec![
-            ("phase", "clear_done".to_string()),
-            ("request_id", id.to_string()),
-            ("old_session_id", old_session_id),
-            ("new_session_id", client_session_id.clone()),
-            ("client_connection_id", client_connection_id.to_string()),
-            ("preserve_debug", preserve_debug.to_string()),
-            (
-                "swarm_id_updated",
-                swarm_id_for_update.is_some().to_string(),
-            ),
-            ("elapsed_ms", clear_start.elapsed().as_millis().to_string()),
-        ],
-    );
+    fresh
 }
 
 #[allow(clippy::too_many_arguments)]

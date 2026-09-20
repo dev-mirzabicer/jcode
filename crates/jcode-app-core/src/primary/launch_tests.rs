@@ -209,8 +209,39 @@ fn launch_service_prepares_all_placements_replays_once_and_retains_exclusive_own
             );
             assert!(saved.primary_creation.as_ref().unwrap().ready);
             assert!(PrimaryLease::acquire(&record.session).is_err());
+            let source = host.read().await[&record.session].clone();
+            let source_bytes = serde_json::to_vec(source.lock().await.startup_context_session())?;
+            let pool = Arc::new(crate::mcp::SharedMcpPool::from_default_config());
+            let cleared = host
+                .clear_context(&source, &record.session, &launcher.repositories, &pool)
+                .await?;
+            let guard = cleared.lock().await;
+            let replacement = Session::load(guard.session_id())?;
+            assert_eq!(replacement.location.as_ref().unwrap().placement, placement);
+            assert_eq!(
+                replacement.location.as_ref().unwrap().cwd,
+                saved.location.as_ref().unwrap().cwd
+            );
+            assert_eq!(replacement.active_agent(), saved.active_agent());
+            assert_eq!(replacement.model, saved.model);
+            assert_eq!(replacement.reasoning_effort, saved.reasoning_effort);
+            assert_ne!(
+                replacement.primary_creation.as_ref().unwrap().request,
+                record.request
+            );
+            replacement.require_published_primary()?;
+            assert!(!Arc::ptr_eq(
+                &source.lock().await.provider_handle(),
+                &guard.provider_handle()
+            ));
+            drop(guard);
+            assert_eq!(
+                serde_json::to_vec(source.lock().await.startup_context_session())?,
+                source_bytes
+            );
+            assert!(host.read().await.contains_key(&record.session));
         }
-        assert_eq!(host.read().await.len(), 5);
+        assert_eq!(host.read().await.len(), 10);
         let path = temp.path().join("new-local");
         let request = RequestId::new();
         let revision = service.status()?.revision;

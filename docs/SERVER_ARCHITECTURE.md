@@ -301,3 +301,26 @@ Managed hosted launch prepares those tools before first attachment; explicit
 MCP configuration reload remains owned by the management tool. Navigation also
 releases that connection's Startup Context editor lease and derives selfdev
 state from the target, rather than carrying authority from the prior session.
+
+### Notification and Clear entry-point integration
+
+`NotifySession` is available on an authenticated same-user control connection
+before Subscribe. It does not create a notifier Session or require a client on
+the target. An idle hosted primary starts the existing system-turn path. Busy
+work uses its existing soft-interrupt queue with the supplied unattended scope.
+A runtime-owned drain checks only unconsumed queued input after settlement, so
+a notification arriving after the last interrupt check is not stranded. Unknown
+or non-admitting targets return an error. UI notification fanout is not delivery
+acceptance. Durable input IDs and crash/ack deduplication remain the separate
+input-transaction work package.
+
+Server Clear creates and publishes an independently owned primary, then moves
+only the initiating attachment. It never overwrites the Agent Arc held by peer
+clients or closes the source merely because one observer cleared its view.
+The source guard is retained throughout preparation, excluding racing turn
+admission. Failed preparation leaves the source and peers unchanged. Provider,
+Registry, controls and initial instruction/Startup Context capture are fresh.
+Managed Clear uses the existing complete launch transaction with the current
+placement and witnessed cwd, a new creation receipt, and a reconciled Session
+index. It does not copy the source's launch identity or extra grants. Grant-carry
+review remains gated with its later owner.

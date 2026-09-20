@@ -281,3 +281,51 @@ async fn spawn_target_creates_one_child_session_and_runs_task() {
                 .contains("Spawned session handled task.")
     }));
 }
+
+#[test]
+#[cfg(unix)]
+fn scheduled_live_delivery_uses_notify_without_a_provisional_subscription() -> Result<()> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    let _lock = crate::storage::lock_test_env();
+    let root = tempfile::tempdir()?;
+    let endpoint = root.path().join("notify.sock");
+    let _socket = EnvVarGuard::set_path("JCODE_SOCKET", &endpoint);
+    tokio::runtime::Runtime::new()?.block_on(async {
+        let listener = tokio::net::UnixListener::bind(&endpoint)?;
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut reader = tokio::io::BufReader::new(read);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let request = crate::protocol::decode_request(&line).unwrap();
+            let crate::protocol::Request::NotifySession {
+                id,
+                session_id,
+                message,
+                unattended_context,
+            } = request
+            else {
+                panic!("scheduled delivery must not construct a notifier Session")
+            };
+            assert_eq!(session_id, "detached-synthetic");
+            assert_eq!(message, "scheduled adapter fixture");
+            assert!(unattended_context.is_none());
+            write
+                .write_all(
+                    crate::protocol::encode_event(&crate::protocol::ServerEvent::Done { id })
+                        .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+        AmbientRunnerHandle::notify_live_session(
+            "detached-synthetic",
+            "scheduled adapter fixture",
+            None,
+        )
+        .await?;
+        peer.await?;
+        Ok(())
+    })
+}

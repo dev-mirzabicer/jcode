@@ -609,6 +609,37 @@ pub(super) async fn handle_client_with_instruction_repositories(
                     .await?;
                     continue;
                 }
+                if let Request::NotifySession {
+                    id,
+                    session_id,
+                    message,
+                    unattended_context,
+                } = &request
+                {
+                    let (tx, mut rx) = crate::client_delivery::local_event_channel();
+                    handle_notify_session(
+                        *id,
+                        session_id.clone(),
+                        message.clone(),
+                        unattended_context.clone(),
+                        NotifySessionContext {
+                            sessions: &sessions,
+                            soft_interrupt_queues: &soft_interrupt_queues,
+                            swarm_members: &swarm_members,
+                            swarms_by_id: &swarms_by_id,
+                            event_history: &event_history,
+                            event_counter: &event_counter,
+                            swarm_event_tx: &swarm_event_tx,
+                            client_event_tx: &tx,
+                        },
+                    )
+                    .await;
+                    drop(tx);
+                    while let Some(event) = rx.recv().await {
+                        write_direct_event(&writer, &event).await?;
+                    }
+                    continue;
+                }
                 if let Request::WorkspaceProbe { id } = &request {
                     write_direct_event(
                         &writer,
@@ -1618,35 +1649,10 @@ pub(super) async fn handle_client_with_instruction_repositories(
                 ) {
                     continue;
                 }
-                crate::hooks::with_client_terminal_env(
+                agent = crate::hooks::with_client_terminal_env(
                     active_terminal_env.clone(),
-                    handle_clear_session(
-                        id,
-                        client_selfdev,
-                        &mut client_session_id,
-                        &client_connection_id,
-                        &agent,
-                        &provider,
-                        &registry,
-                        &context_transactions,
-                        &instruction_repositories,
-                        &sessions,
-                        &shutdown_signals,
-                        &soft_interrupt_queues,
-                        &client_connections,
-                        &swarm_members,
-                        &swarms_by_id,
-                        &file_touch,
-                        &channel_subscriptions,
-                        &channel_subscriptions_by_session,
-                        &swarm_plans,
-                        &event_history,
-                        &event_counter,
-                        &swarm_event_tx,
-                        &client_event_tx,
-                    ),
-                )
-                .await;
+                    handle_clear_session(id,&mut client_session_id,&client_connection_id,&agent,&instruction_repositories,&sessions,&startup_context,&mcp_pool,&shutdown_signals,&soft_interrupt_queues,&client_connections,&swarm_members,&swarms_by_id,&event_history,&event_counter,&swarm_event_tx,&client_event_tx),
+                ).await;
                 session_control = refresh_session_control_handle(
                     &client_session_id,
                     &agent,
@@ -3730,7 +3736,6 @@ pub(super) async fn handle_client_with_instruction_repositories(
                     NotifySessionContext {
                         sessions: &sessions,
                         soft_interrupt_queues: &soft_interrupt_queues,
-                        client_connections: &client_connections,
                         swarm_members: &swarm_members,
                         swarms_by_id: &swarms_by_id,
                         event_history: &event_history,

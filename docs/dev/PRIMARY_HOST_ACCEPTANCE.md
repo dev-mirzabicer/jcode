@@ -99,3 +99,20 @@ fabricated into history or promised durable after process loss. Planned reload,
 crash continuation, supervision and final shutdown policies retain their later
 package ownership. Final acceptance records must separately state source HEAD,
 activated implementation, channels/canary and any documentation-only tail.
+
+## Independent-review repair checks
+
+`verify_primary_review.py` exercises detached NotifySession both before any
+target attachment and after last-client detach, unknown-target rejection,
+managed and legacy two-client Clear, isolated model changes, persisted location
+and index, and restart/reattach. Run it with `run_isolated_test.py`, `--binary`
+and `--artifact-dir` like the public launch fixture. It creates no real schedule
+and calls only a local scripted provider. The TUI fixture also clears through
+actual input and returns to the retained source.
+
+Focused regressions include `notify_session_terminal_race_`,
+`scheduled_live_delivery_uses_notify_`, `clear_failure_and_concurrent_peer_`,
+`handle_clear_session_`, and the all-placements launch service test. The race
+fixtures coordinate exact admission/terminal boundaries instead of weakening
+assertions with timing retries. Clear's source and replacement are distinct
+owners; identity-mismatch checks remain enforced.

@@ -107,12 +107,12 @@ async fn handle_clear_session_replaces_runtime_handles_and_updates_shutdown_regi
         "swarm-test".to_string(),
         HashSet::from([old_session_id.to_string()]),
     )])));
-    let file_touch = FileTouchService::new();
-    let channel_subscriptions = Arc::new(RwLock::new(HashMap::<
+    let _file_touch = FileTouchService::new();
+    let _channel_subscriptions = Arc::new(RwLock::new(HashMap::<
         String,
         HashMap<String, HashSet<String>>,
     >::new()));
-    let channel_subscriptions_by_session = Arc::new(RwLock::new(HashMap::<
+    let _channel_subscriptions_by_session = Arc::new(RwLock::new(HashMap::<
         String,
         HashMap<String, HashSet<String>>,
     >::new()));
@@ -131,36 +131,42 @@ async fn handle_clear_session_replaces_runtime_handles_and_updates_shutdown_regi
     let event_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let (swarm_event_tx, _swarm_event_rx) = broadcast::channel::<SwarmEvent>(8);
     let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
-    let context_transactions = crate::context::ContextTransactionService::new();
+    let _context_transactions = crate::context::ContextTransactionService::new();
     let instruction_repositories = crate::instruction::InstructionRepositoryService::new();
 
     let mut client_session_id = old_session_id.to_string();
-    handle_clear_session(
+    let source = agent.clone();
+    let source_before = serde_json::to_vec(source.lock().await.messages())?;
+    let agent = handle_clear_session(
         7,
-        false,
         &mut client_session_id,
         "conn_clear",
-        &agent,
-        &provider,
-        &registry,
-        &context_transactions,
+        &source,
         &instruction_repositories,
         &sessions,
+        &crate::server::startup_context::test_coordinator(),
+        &Arc::new(crate::mcp::SharedMcpPool::from_default_config()),
         &shutdown_signals,
         &soft_interrupt_queues,
         &client_connections,
         &swarm_members,
         &swarms_by_id,
-        &file_touch,
-        &channel_subscriptions,
-        &channel_subscriptions_by_session,
-        &swarm_plans,
         &event_history,
         &event_counter,
         &swarm_event_tx,
         &client_event_tx.clone().into(),
     )
     .await;
+    assert_eq!(source.lock().await.session_id(), old_session_id);
+    assert_eq!(
+        serde_json::to_vec(source.lock().await.messages())?,
+        source_before
+    );
+    assert!(!Arc::ptr_eq(&source, &agent));
+    assert!(!Arc::ptr_eq(
+        &source.lock().await.provider_handle(),
+        &agent.lock().await.provider_handle()
+    ));
 
     assert_ne!(client_session_id, old_session_id);
     let cleared = crate::session::Session::load(&client_session_id)?;
@@ -171,17 +177,18 @@ async fn handle_clear_session_replaces_runtime_handles_and_updates_shutdown_regi
             .expect("cleared system prompt")
             .contains("CLEAR_CURRENT_SOURCE")
     );
-    assert!(swarm_members.read().await.is_empty());
-    assert!(swarm_members.read().await.get(&client_session_id).is_none());
-    assert!(swarms_by_id.read().await.get("swarm-test").is_none());
-    let plans = swarm_plans.read().await;
-    assert!(!plans["swarm-test"].participants.contains(old_session_id));
+    assert!(swarm_members.read().await.contains_key(old_session_id));
+    assert!(swarm_members.read().await.contains_key(&client_session_id));
     assert!(
-        !plans["swarm-test"]
+        swarm_plans.read().await["swarm-test"]
+            .participants
+            .contains(old_session_id)
+    );
+    assert!(
+        !swarm_plans.read().await["swarm-test"]
             .participants
             .contains(&client_session_id)
     );
-    drop(plans);
 
     old_queue
         .lock()
@@ -219,12 +226,12 @@ async fn handle_clear_session_replaces_runtime_handles_and_updates_shutdown_regi
     assert_eq!(startup_receipt.batches[0].files.len(), 1);
 
     let queue_map = soft_interrupt_queues.read().await;
-    assert!(!queue_map.contains_key(old_session_id));
+    assert!(queue_map.contains_key(old_session_id));
     assert!(queue_map.contains_key(&client_session_id));
     drop(queue_map);
 
     let signals = shutdown_signals.read().await;
-    assert!(!signals.contains_key(old_session_id));
+    assert!(signals.contains_key(old_session_id));
     let registered_signal = signals
         .get(&client_session_id)
         .ok_or_else(|| anyhow!("new session should have shutdown signal"))?

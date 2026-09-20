@@ -776,6 +776,7 @@ async fn notify_session_runs_scheduled_task_immediately_for_idle_live_session() 
     let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
 
     let (swarms_by_id, event_history, event_counter, swarm_event_tx) = empty_swarm_status_state();
+    client_connections.write().await.clear();
     handle_notify_session(
         77,
         session_id.clone(),
@@ -784,7 +785,6 @@ async fn notify_session_runs_scheduled_task_immediately_for_idle_live_session() 
         NotifySessionContext {
             sessions: &sessions,
             soft_interrupt_queues: &soft_interrupt_queues,
-            client_connections: &client_connections,
             swarm_members: &swarm_members,
             swarms_by_id: &swarms_by_id,
             event_history: &event_history,
@@ -819,6 +819,7 @@ async fn notify_session_runs_scheduled_task_immediately_for_idle_live_session() 
             .any(|event| matches!(event, ServerEvent::Done { id } if *id == 77))
     );
 
+    sessions.wait_idle(&session_id).await.unwrap();
     let guard = agent.lock().await;
     assert!(guard.messages().iter().any(|message| {
         message.role == Role::User
@@ -854,7 +855,7 @@ async fn notify_session_queues_soft_interrupt_when_live_session_is_busy() {
         session_id.clone(),
         queue.clone(),
     )])));
-    let client_connections = Arc::new(RwLock::new(HashMap::from([(
+    let _client_connections = Arc::new(RwLock::new(HashMap::from([(
         "client-1".to_string(),
         ClientConnectionInfo {
             client_id: "client-1".to_string(),
@@ -908,7 +909,6 @@ async fn notify_session_queues_soft_interrupt_when_live_session_is_busy() {
         NotifySessionContext {
             sessions: &sessions,
             soft_interrupt_queues: &soft_interrupt_queues,
-            client_connections: &client_connections,
             swarm_members: &swarm_members,
             swarms_by_id: &swarms_by_id,
             event_history: &event_history,
