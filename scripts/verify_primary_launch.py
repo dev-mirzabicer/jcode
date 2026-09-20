@@ -124,6 +124,15 @@ try:
     assert empty.is_dir() and (not list(empty.iterdir()))
     assert len({record['session'] for record in records}) == 5 and (not f.posts)
     cli = [f.BIN, '--no-update', '--no-selfdev', '--provider-profile', 'wp09-fixture', '--model', 'fixture', '--socket', str(f.sockpath)]
+    original = records[0]
+    conflict_file = f.ROOT / 'owned-launch.json'
+    conflict_file.write_text(json.dumps({'request': original['request'], 'expected_revision': original['reviewed_revision'], 'input': original['input']}))
+    source_file = f.home / 'sessions' / (original['session'] + '.json')
+    before = source_file.read_bytes()
+    conflict = subprocess.run(cli + ['--primary-launch', str(conflict_file), 'repl'], input='quit\n', text=True, capture_output=True, env=f.env, timeout=120)
+    (f.ROOT / 'owned-rejection.stderr').write_text(conflict.stderr)
+    assert conflict.returncode != 0 and 'owned by another runtime' in conflict.stderr, conflict.stderr
+    assert source_file.read_bytes() == before and (not f.posts)
     for mode in ['repl', 'run']:
         root = f.ROOT / f'{mode}-cwd'
         root.mkdir()
@@ -183,7 +192,7 @@ try:
     assert acp_created['sessionId']
     acp.stdin.close()
     assert len(f.posts) == 1, f.posts
-    result = {'source_binary': f.BIN, 'all_placements': True, 'two_client_replay': True, 'empty_cwd': True, 'run': True, 'repl': True, 'harness': True, 'acp': True, 'provider_requests': len(f.posts), 'records': records, 'root': str(f.ROOT)}
+    result = {'source_binary': f.BIN, 'all_placements': True, 'two_client_replay': True, 'cross_process_owner_exclusion': True, 'empty_cwd': True, 'run': True, 'repl': True, 'harness': True, 'acp': True, 'provider_requests': len(f.posts), 'records': records, 'root': str(f.ROOT)}
     (f.ROOT / 'primary-launch-result.json').write_text(json.dumps(result, indent=2))
     print(json.dumps(result))
 finally:

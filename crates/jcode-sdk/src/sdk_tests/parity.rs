@@ -33,6 +33,7 @@ const CAPABILITIES: &[Capability] = &[
     cap("restore_session", "restoreSession"),
     cap("set_retention_policy", "setRetentionPolicy"),
     cap("create_session", "createSession"),
+    cap("launch_primary", "launchPrimary"),
     cap("attach_session", "attachSession"),
     cap("detach_session", "detachSession"),
     cap("send_message", "sendMessage"),
