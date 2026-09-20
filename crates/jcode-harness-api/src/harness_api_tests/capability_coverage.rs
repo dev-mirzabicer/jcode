@@ -44,6 +44,9 @@ const LEDGER: &[(&str, Disposition)] = &[
         ),
     ),
     ("ApplyContextDraft", ClientInternal),
+    // Legacy task delivery is the ordinary message operation, not a separate
+    // agent authority. Public clients use send_message or primary_input.
+    ("AgentTask", Covered),
     ("ApplyStartupContextSelection", ClientInternal),
     ("BackgroundTool", ClientInternal),
     ("Cancel", Covered),
@@ -89,6 +92,10 @@ const LEDGER: &[(&str, Disposition)] = &[
     // durable input is separately exposed by primary_control_v1.
     ("PrimaryClientInput", ClientInternal),
     ("PrimaryClientInputsCancel", ClientInternal),
+    ("PrimaryInputInspect", Covered),
+    ("PrimaryLaunch", Covered),
+    ("PrimaryLaunchProbe", Covered),
+    ("PrimaryStreamSubscribe", ClientInternal),
     ("RefreshModels", ClientInternal),
     ("ReapplyContextTransaction", ClientInternal),
     ("Reload", ClientInternal),

@@ -182,7 +182,8 @@ export type WorkflowPromptRequest =
 export type ApiRequest =
   | {req: "primary_control_probe"}
   | {req: "primary_input"; input:PrimaryInputEnvelope}
-  | {req: "primary_input_inspect" | "primary_input_read"; session:string; input:string}
+  | {req: "primary_input_inspect"; session:string; input:string}
+  | {req: "primary_input_read"; session:string; input:string}
   | {req: "primary_location"; command:PrimaryLocationCommand}
   | {req: "primary_launch_probe"}
   | {req: "primary_launch"; request: PrimaryLaunchRequest}

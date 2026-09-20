@@ -217,3 +217,6 @@ protected-state checks, strict lint, final source and activated runtime,
 remaining caller boundaries, native results and Mirza's implementation approval.
 No prompt wording snapshot, prose-quality assertion or paid model benchmark is
 part of this contract.
+
+Requirement-specific verification and native reproduction are mapped in
+[the acceptance guide](dev/PRIMARY_INPUT_LOCATION_ACCEPTANCE.md).

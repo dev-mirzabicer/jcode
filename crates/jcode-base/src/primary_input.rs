@@ -104,6 +104,12 @@ impl PrimaryInputStore {
                     .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'),
             "Invalid primary input Session identity"
         );
+        if let Ok(metadata) = std::fs::symlink_metadata(&self.root) {
+            ensure!(
+                metadata.is_dir() && !metadata.file_type().is_symlink(),
+                "Primary input store is not a private directory"
+            );
+        }
         crate::storage::ensure_dir(&self.root)?;
         let metadata = std::fs::symlink_metadata(&self.root)?;
         ensure!(
@@ -145,7 +151,19 @@ impl PrimaryInputStore {
                 );
                 // Generic read_json may recover an older .bak. That could
                 // resurrect cancelled input or forget accepted identities.
-                serde_json::from_slice::<Inbox>(&std::fs::read(&path)?)?
+                let mut options = OpenOptions::new();
+                options.read(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+                }
+                let file = options.open(&path)?;
+                ensure!(
+                    file.metadata()?.is_file(),
+                    "Primary input journal identity changed"
+                );
+                serde_json::from_reader::<_, Inbox>(file)?
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound && !initialized => Inbox {
                 version: 1,
@@ -638,6 +656,24 @@ mod tests {
         );
         std::fs::write(store.root.join(format!("{}.json", session.id)), "corrupt")?;
         assert!(store.pending(&session.id).is_err());
+        let path = store.root.join(format!("{}.json", session.id));
+        std::fs::write(
+            &path,
+            serde_json::to_vec(
+                &serde_json::json!({"version":999,"session":session.id,"records":[]}),
+            )?,
+        )?;
+        assert!(store.pending(&session.id).is_err());
+        std::fs::remove_file(&path)?;
+        assert!(store.pending(&session.id).is_err());
+        #[cfg(unix)]
+        {
+            let unrelated = temp.path().join("retained-source");
+            std::fs::write(&unrelated, b"retained")?;
+            std::os::unix::fs::symlink(&unrelated, &path)?;
+            assert!(store.pending(&session.id).is_err());
+            assert_eq!(std::fs::read(unrelated)?, b"retained");
+        }
         Ok(())
     }
 }
