@@ -1370,3 +1370,26 @@ fn run_startup_context_failure_preserves_plain_json_and_ndjson_contracts() {
     assert_eq!(event["type"], "error");
     assert_eq!(event["error"]["code"], "startup_context");
 }
+
+#[test]
+fn run_mcp_cold_cache_selection_uses_selected_cwd_and_ignores_disabled_servers() {
+    let _lock = crate::storage::lock_test_env();
+    let selected = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    std::fs::write(selected.path().join(".mcp.json"),r#"{"mcpServers":{"selected-fixture":{"command":"never-executed-fixture"},"disabled-fixture":{"command":"never-executed-fixture","enabled":false}}}"#).unwrap();
+    std::fs::write(
+        other.path().join(".mcp.json"),
+        r#"{"mcpServers":{"other-fixture":{"command":"never-executed-fixture"}}}"#,
+    )
+    .unwrap();
+    let selected_names = cold_cache_mcp_servers(Some(selected.path()));
+    assert!(selected_names.iter().any(|name| name == "selected-fixture"));
+    assert!(
+        !selected_names
+            .iter()
+            .any(|name| name == "other-fixture" || name == "disabled-fixture")
+    );
+    let other_names = cold_cache_mcp_servers(Some(other.path()));
+    assert!(other_names.iter().any(|name| name == "other-fixture"));
+    assert!(!other_names.iter().any(|name| name == "selected-fixture"));
+}

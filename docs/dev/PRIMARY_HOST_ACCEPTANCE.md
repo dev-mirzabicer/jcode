@@ -69,7 +69,7 @@ python3 scripts/run_isolated_test.py python3 scripts/verify_primary_tui.py \
 python3 scripts/run_isolated_test.py python3 scripts/verify_primary_stream.py \
   --binary /absolute/candidate/jcode --artifact-dir /private/stream-evidence
 python3 scripts/run_isolated_test.py python3 scripts/verify_primary_host.py \
-  --binary /absolute/candidate/jcode --artifact-dir /private/host-evidence
+  --binary /absolute/candidate/jcode --evidence-parent /private/host-evidence
 ```
 
 The scripts use localhost scripted providers, owned directories, sockets and
