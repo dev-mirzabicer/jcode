@@ -46,7 +46,7 @@ fn durable_primary_input_detached_replay_and_busy_boundary() -> Result<()> {
         let input = jcode_session_types::PrimaryInputEnvelope {
             id: crate::workspace::RequestId::new(), session: session.clone(), delivery: jcode_session_types::PrimaryInputDelivery::SafeBoundary,
             content: "durable synthetic input".into(), images: vec![("image/png".into(), "ZmFrZQ==".into())], display_role: None,
-            origin: Some(jcode_session_types::StoredMessageOrigin::Human), system_reminder: None, unattended_context: None, urgent: false,
+            origin: Some(jcode_session_types::StoredMessageOrigin::Human), system_reminder: None, unattended_context: None, urgent: false, activate_skill: None, observe_startup_context: None, client_request_digest: None,
         };
         let accepted = crate::server::live_turn::submit_primary_input(&host, input.clone(), status.clone()).await?;
         assert_eq!(accepted.state, jcode_session_types::PrimaryInputState::Accepted);

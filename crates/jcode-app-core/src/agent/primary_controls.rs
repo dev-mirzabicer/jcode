@@ -44,8 +44,10 @@ impl Agent {
         input: jcode_session_types::PrimaryInputEnvelope,
         event_tx: mpsc::UnboundedSender<ServerEvent>,
     ) -> Result<()> {
-        let observe = input.display_role.is_none()
-            && input.delivery != jcode_session_types::PrimaryInputDelivery::ContextOnly;
+        let observe = input.observe_startup_context.unwrap_or(
+            input.display_role.is_none()
+                && input.delivery != jcode_session_types::PrimaryInputDelivery::ContextOnly,
+        );
         self.run_primary_input_correlated(input, None, observe, event_tx)
             .await
     }
@@ -77,6 +79,19 @@ impl Agent {
             crate::logging::warn(&format!(
                 "Primary input continues without a new Startup Context observation: {error}"
             ));
+        }
+        if let Some(skill) = &input.activate_skill {
+            ensure!(
+                input.delivery == jcode_session_types::PrimaryInputDelivery::NextTurn,
+                "Skill activation requires a new primary turn"
+            );
+            let activation = self.activate_skill(skill)?;
+            let _ = event_tx.send(ServerEvent::SkillActivated {
+                id: request_id.unwrap_or(0),
+                skill_id: activation.skill_id,
+                description: activation.description,
+                source: activation.source.kind.to_string(),
+            });
         }
         self.pending_primary_input = Some(input.clone());
         let result = if input.delivery == jcode_session_types::PrimaryInputDelivery::ContextOnly {
@@ -157,6 +172,7 @@ impl Agent {
                 context.pending_input = None;
             }
             injected.push(super::interrupts::InjectedSoftInterrupt {
+                receipt: Some(store.inspect(self.session_id(), input.id)?),
                 content: input.content,
                 source,
             });

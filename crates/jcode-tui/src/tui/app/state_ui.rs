@@ -5,6 +5,8 @@ use crate::tui::{TuiState, backend};
 
 #[derive(Default)]
 pub(super) struct RestoredReloadInput {
+    pub primary_input_journaled: bool,
+    pub primary_retry_id: Option<crate::workspace::RequestId>,
     pub input: String,
     pub cursor: usize,
     pub pending_images: Vec<(String, String)>,
@@ -203,7 +205,8 @@ impl App {
     pub(super) fn save_input_for_reload(&self, session_id: &str) {
         self.flush_instruction_recovery();
         let resume_prompt = self.rate_limit_pending_message.as_ref().filter(|pending| {
-            !pending.auto_retry
+            (!self.primary_input_journaled || self.rate_limit_reset.is_some())
+                && !pending.auto_retry
                 && !pending.is_system
                 && (!pending.content.trim().is_empty() || !pending.images.is_empty())
         });
@@ -214,7 +217,8 @@ impl App {
         // the queued/hidden lists instead; the restored queue re-sends it once
         // the turn is proven idle (issue #391).
         let inflight_continuation = self.rate_limit_pending_message.as_ref().filter(|pending| {
-            pending.is_system
+            !self.primary_input_journaled
+                && pending.is_system
                 && self.rate_limit_reset.is_none()
                 && (!pending.content.trim().is_empty()
                     || pending.system_reminder.is_some()
@@ -320,8 +324,10 @@ impl App {
                 "pending_workflow_commands": self.pending_workflow_commands,
                 "hidden_queued_system_messages": hidden_queued_system_messages,
                 "interleave_message": self.interleave_message,
-                "pending_soft_interrupts": self.pending_soft_interrupts,
-                "pending_soft_interrupt_resend": pending_soft_interrupt_resend,
+                "primary_input_journaled": self.primary_input_journaled,
+                "primary_retry_id": self.primary_retry_id,
+                "pending_soft_interrupts": if self.primary_input_journaled { Vec::<String>::new() } else { self.pending_soft_interrupts.clone() },
+                "pending_soft_interrupt_resend": if self.primary_input_journaled { Vec::<String>::new() } else { pending_soft_interrupt_resend },
                 "rate_limit_pending_message": rate_limit_pending_message,
                 "rate_limit_reset_in_ms": rate_limit_reset_in_ms,
                 "observe_mode_enabled": self.observe_mode_enabled,
@@ -331,7 +337,9 @@ impl App {
                 "todos_view_enabled": self.todos_view_enabled,
                 "todo_confidence_spike_challenged": self.todo_confidence_spike_challenged,
             });
-            let _ = std::fs::write(&path, data.to_string());
+            if let Err(error) = crate::storage::write_json_secret(&path, &data) {
+                crate::logging::warn(&format!("Could not checkpoint client input state: {error}"));
+            }
         }
     }
 
@@ -352,6 +360,7 @@ impl App {
             let startup_hints =
                 hints.map(|(mode, parent)| spawned_session_startup_hints(mode, parent));
             let data = serde_json::json!({
+                "submission_kind": "new_startup",
                 "cursor": 0,
                 "input": "",
                 "pending_images": [],
@@ -393,7 +402,7 @@ impl App {
         }
         let data = std::fs::read_to_string(&path).ok()?;
 
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) {
+        if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&data) {
             // Legacy review launch receipts have dedicated startup-hint fields.
             // Overnight uses its existing code-owned queue marker. Neither check
             // interprets editable instruction prose or conversation titles.
@@ -444,6 +453,57 @@ impl App {
                     startup_display_message: Some(("Retained pending workflow".into(), message)),
                     ..Default::default()
                 });
+            }
+            let legacy_uncertain = value
+                .get("primary_input_journaled")
+                .and_then(|v| v.as_bool())
+                != Some(true)
+                && value.get("submission_kind").and_then(|v| v.as_str()) != Some("new_startup")
+                && (value.get("submit_on_restore").and_then(|v| v.as_bool()) == Some(true)
+                    || value
+                        .get("rate_limit_pending_message")
+                        .is_some_and(|v| !v.is_null())
+                    || [
+                        "pending_soft_interrupts",
+                        "pending_soft_interrupt_resend",
+                        "queued_messages",
+                        "hidden_queued_system_messages",
+                    ]
+                    .iter()
+                    .any(|key| {
+                        value
+                            .get(key)
+                            .and_then(|v| v.as_array())
+                            .is_some_and(|v| !v.is_empty())
+                    }));
+            if legacy_uncertain {
+                let retained =
+                    path.with_extension(format!("legacy-{}", crate::id::new_id("input")));
+                if let Err(error) = std::fs::rename(&path, &retained) {
+                    crate::logging::error(&format!(
+                        "Legacy input was not replayed and could not be retained separately: {error}"
+                    ));
+                    return None;
+                }
+                value["submit_on_restore"] = serde_json::json!(false);
+                value["rate_limit_pending_message"] = serde_json::Value::Null;
+                value["rate_limit_reset_in_ms"] = serde_json::Value::Null;
+                for key in [
+                    "queued_messages",
+                    "hidden_queued_system_messages",
+                    "pending_soft_interrupts",
+                    "pending_soft_interrupt_resend",
+                ] {
+                    value[key] = serde_json::json!([]);
+                }
+                value["interleave_message"] = serde_json::Value::Null;
+                value["startup_status_notice"] =
+                    serde_json::json!("Legacy pending input retained for review, not replayed");
+                value["startup_display_message_title"] = serde_json::json!("Input recovery");
+                value["startup_display_message"] = serde_json::json!(format!(
+                    "This older input snapshot has no stable delivery identity. Its complete original is retained at {}. Inspect the session before explicitly submitting any uncertain input again.",
+                    retained.display()
+                ));
             }
             let input = value
                 .get("input")
@@ -651,6 +711,14 @@ impl App {
             let cursor = cursor.min(input.len());
             let _ = std::fs::remove_file(&path);
             return Some(RestoredReloadInput {
+                primary_input_journaled: value
+                    .get("primary_input_journaled")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                primary_retry_id: value
+                    .get("primary_retry_id")
+                    .and_then(|v| v.as_str())
+                    .and_then(|v| v.parse().ok()),
                 input,
                 cursor,
                 pending_images,
@@ -679,6 +747,8 @@ impl App {
         let cursor = cursor.min(input.len());
         let _ = std::fs::remove_file(&path);
         Some(RestoredReloadInput {
+            primary_input_journaled: false,
+            primary_retry_id: None,
             input: input.to_string(),
             cursor,
             pending_images: Vec::new(),

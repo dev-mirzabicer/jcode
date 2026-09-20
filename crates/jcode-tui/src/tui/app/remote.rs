@@ -226,6 +226,12 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
                 )
             };
             app.push_display_message(DisplayMessage::system(status));
+            if let Err(error) = remote.prepare_known_input_retry(app.primary_retry_id) {
+                app.push_display_message(DisplayMessage::error(format!(
+                    "Retry was not submitted: {error}"
+                )));
+                return true;
+            }
             let _ = if let Some(entries) = pending.queued_messages {
                 input_dispatch::begin_remote_queued_send(
                     app,
@@ -951,6 +957,14 @@ pub(super) fn handle_disconnect(
     app.finish_auth_catalog_refresh();
     state.last_disconnect_reason = Some(detail.clone());
 
+    if app.primary_input_journaled {
+        // The exact outgoing request lives in the client journal, or was
+        // durably accepted by the server. Do not re-create it from display text.
+        if app.rate_limit_reset.is_none() {
+            app.clear_pending_remote_retry();
+        }
+        app.clear_pending_soft_interrupt_tracking();
+    }
     let scheduled_retry =
         app.schedule_pending_remote_retry(&format!("⚡ Connection lost ({detail})."));
     if !scheduled_retry {
@@ -1311,6 +1325,17 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
         }
         app.last_submitted_input = payload.raw_input.clone();
         crate::logging::info("Resending failed turn after accepted fallback route switch");
+        if let Err(error) = remote.prepare_known_input_retry(app.primary_retry_id) {
+            if app.input.is_empty() {
+                app.input = payload.raw_input.unwrap_or(payload.content);
+                app.pending_images = payload.images;
+                app.cursor_pos = app.input.len();
+            }
+            app.push_display_message(DisplayMessage::error(format!(
+                "Fallback input was not submitted: {error}"
+            )));
+            return;
+        }
         let queued_retry = payload.queued_messages.clone();
         let result = if let Some(entries) = payload.queued_messages {
             input_dispatch::begin_remote_queued_send(
@@ -1724,6 +1749,16 @@ async fn detect_and_cancel_stall(app: &mut App, remote: &mut RemoteConnection) {
                 };
                 return;
             }
+            if app.primary_input_journaled {
+                // Silence at an observer is not proof that the runtime lost its
+                // accepted input or that executing work may be replayed.
+                let _ = remote.request_history().await;
+                app.last_stream_activity = Some(Instant::now());
+                app.set_status_notice(
+                    "Checking runtime state; accepted input is not being replayed",
+                );
+                return;
+            }
             crate::logging::warn(&format!(
                 "Stream stall detected: no server events for {:?}, cancelling",
                 app.last_stream_activity
@@ -1906,6 +1941,38 @@ fn queue_message_for_reconnect(app: &mut App) {
     }
 
     let prepared = input::take_prepared_input(app);
+    if app.primary_input_journaled {
+        let result = app
+            .remote_session_id
+            .as_deref()
+            .or(app.resume_session_id.as_deref())
+            .ok_or_else(|| anyhow::anyhow!("No verified Session target is available"))
+            .and_then(|session| {
+                crate::tui::backend::queue_offline_primary_input(
+                    session,
+                    &app.remote_client_instance_id,
+                    prepared.expanded.clone(),
+                    prepared.images.clone(),
+                )
+            });
+        match result {
+            Ok(()) => app.set_status_notice("Input saved for exact delivery after reconnect"),
+            Err(error) => {
+                input_dispatch::restore_prepared_remote_input(app, prepared);
+                app.push_display_message(DisplayMessage::error(format!(
+                    "Offline input was not queued; draft preserved: {error}"
+                )));
+            }
+        }
+        return;
+    }
+    if !prepared.images.is_empty() {
+        input_dispatch::restore_prepared_remote_input(app, prepared);
+        app.set_status_notice(
+            "Image draft preserved; reconnect before sending on this older runtime",
+        );
+        return;
+    }
     app.queued_messages.push(prepared.expanded);
 
     let queued_count = app.queued_messages.len();

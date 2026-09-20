@@ -29,6 +29,7 @@ fn soft_interrupt_protocol_display_role(source: SoftInterruptSource) -> Option<S
 pub(super) struct InjectedSoftInterrupt {
     pub(super) content: String,
     pub(super) source: SoftInterruptSource,
+    pub(super) receipt: Option<jcode_session_types::PrimaryInputReceipt>,
 }
 
 pub(super) enum NoToolCallOutcome {
@@ -424,7 +425,11 @@ impl Agent {
                 blocks,
                 soft_interrupt_session_display_role(source),
             );
-            injected.push(InjectedSoftInterrupt { content, source });
+            injected.push(InjectedSoftInterrupt {
+                content,
+                source,
+                receipt: None,
+            });
         };
 
         for message in messages {
@@ -553,11 +558,18 @@ impl Agent {
         injected
             .into_iter()
             .enumerate()
-            .map(|(idx, interrupt)| ServerEvent::SoftInterruptInjected {
-                content: interrupt.content,
-                display_role: soft_interrupt_protocol_display_role(interrupt.source),
-                point: point.to_string(),
-                tools_skipped: if idx == 0 { tools_skipped } else { None },
+            .flat_map(|(idx, interrupt)| {
+                let mut events = Vec::new();
+                if let Some(receipt) = interrupt.receipt {
+                    events.push(ServerEvent::PrimaryInputFinished { receipt });
+                }
+                events.push(ServerEvent::SoftInterruptInjected {
+                    content: interrupt.content,
+                    display_role: soft_interrupt_protocol_display_role(interrupt.source),
+                    point: point.to_string(),
+                    tools_skipped: if idx == 0 { tools_skipped } else { None },
+                });
+                events
             })
             .collect()
     }

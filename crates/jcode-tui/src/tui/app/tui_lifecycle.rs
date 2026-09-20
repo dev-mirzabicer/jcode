@@ -4,6 +4,8 @@ use crate::tui::{backend, keybind};
 
 impl App {
     pub(super) fn apply_restored_reload_input(&mut self, restored: RestoredReloadInput) {
+        self.primary_input_journaled = restored.primary_input_journaled;
+        self.primary_retry_id = restored.primary_retry_id;
         self.pending_workflow_commands = restored.pending_workflow_commands;
         // A prior process may have handed the prepared command to the normal
         // turn path before its last snapshot. Never replay such work blindly.
@@ -563,6 +565,10 @@ impl App {
             copy_selection_edge_autoscroll: None,
             debug_tx: None,
             remote_client_instance_id: crate::id::new_id("client"),
+            primary_input_journaled: false,
+            pending_primary_next: Vec::new(),
+            pending_primary_soft: Default::default(),
+            primary_retry_id: None,
             remote_provider_name: None,
             remote_provider_model: None,
             remote_model_catalog_generation: 0,
@@ -1027,6 +1033,10 @@ impl App {
             copy_selection_edge_autoscroll: None,
             debug_tx: None,
             remote_client_instance_id: crate::id::new_id("client"),
+            primary_input_journaled: false,
+            pending_primary_next: Vec::new(),
+            pending_primary_soft: Default::default(),
+            primary_retry_id: None,
             remote_provider_name: None,
             remote_provider_model: None,
             remote_model_catalog_generation: 0,

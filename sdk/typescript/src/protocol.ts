@@ -28,6 +28,7 @@ export type WorkspaceIssueCode = "needs_cwd" | "permission_required" | "invalid_
 export type PrimaryLaunchResponse = {status: "launched"; record: PrimaryLaunchRecord} | {status: "rejected"; request: string; issue: {code: WorkspaceIssueCode; detail: string}};
 
 export interface PrimaryInputEnvelope {
+  activate_skill?:string|null; observe_startup_context?:boolean|null; client_request_digest?:string|null;
   id: string; session: string; delivery: "safe_boundary" | "next_turn" | "context_only"; content: string;
   images?: [string, string][]; urgent?: boolean; display_role?: "system" | "background_task" | null;
   origin?: {kind: "human"} | {kind: "composed"; parts: {start:number; end:number; notice:"long_review"|"intent"|"feedback_loop"|"ownership"|"completion"|"confidence"|"digest"|"incomplete"|null; incomplete_count?:number}[]} | null;

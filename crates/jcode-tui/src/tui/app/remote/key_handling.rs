@@ -792,6 +792,17 @@ async fn handle_remote_key_internal(
                 return Ok(());
             }
             KeyCode::Up => {
+                if app.primary_input_journaled
+                    && app.input.is_empty()
+                    && (!app.pending_soft_interrupts.is_empty()
+                        || !app.pending_primary_next.is_empty())
+                {
+                    match remote.cancel_soft_interrupts().await {
+                        Ok(())=>app.set_status_notice("Cancellation requested; confirmed pending input will be restored for editing"),
+                        Err(error)=>app.push_display_message(DisplayMessage::error(format!("Input was not withdrawn: {error}"))),
+                    }
+                    return Ok(());
+                }
                 let had_pending = app.retrieve_pending_message_for_edit();
                 if had_pending {
                     let _ = remote.cancel_soft_interrupts().await;
@@ -824,7 +835,7 @@ async fn handle_remote_key_internal(
             match app.send_action(true) {
                 SendAction::Submit => submit_prepared_remote_input(app, remote, prepared).await?,
                 SendAction::Queue => {
-                    app.queued_messages.push(prepared.expanded);
+                    input_dispatch::queue_prepared_remote_input(app, remote, prepared).await;
                 }
                 SendAction::Interleave => {
                     app.send_interleave_now(prepared.expanded, prepared.images, remote)
@@ -2219,7 +2230,7 @@ async fn handle_remote_key_internal(
                         submit_prepared_remote_input(app, remote, prepared).await?
                     }
                     SendAction::Queue => {
-                        app.queued_messages.push(prepared.expanded);
+                        input_dispatch::queue_prepared_remote_input(app, remote, prepared).await;
                     }
                     SendAction::Interleave => {
                         app.send_interleave_now(prepared.expanded, prepared.images, remote)

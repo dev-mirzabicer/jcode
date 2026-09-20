@@ -21,6 +21,7 @@ pub fn save_startup_submission_for_session(
     if let Ok(jcode_dir) = crate::storage::jcode_dir() {
         let path = jcode_dir.join(format!("client-input-{}", session_id));
         let data = serde_json::json!({
+            "submission_kind": "new_startup",
             "cursor": input.len(),
             "input": input,
             "pending_images": pending_images.iter().map(|(media_type, data)| serde_json::json!({

@@ -85,6 +85,10 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("PreviewStartupContextFile", ClientInternal),
     ("PreviewStartupContextSelection", ClientInternal),
     ("QueuedMessages", ClientInternal),
+    // TUI original-intent preparation and local-journal cancellation. General
+    // durable input is separately exposed by primary_control_v1.
+    ("PrimaryClientInput", ClientInternal),
+    ("PrimaryClientInputsCancel", ClientInternal),
     ("RefreshModels", ClientInternal),
     ("ReapplyContextTransaction", ClientInternal),
     ("Reload", ClientInternal),

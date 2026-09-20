@@ -306,6 +306,79 @@ pub(super) async fn submit_primary_input(
     Ok(receipt)
 }
 
+pub(super) async fn submit_client_input(
+    sessions: &SessionAgents,
+    request: crate::protocol::PrimaryClientInput,
+    swarm: LiveTurnSwarmContext,
+) -> anyhow::Result<jcode_session_types::PrimaryInputReceipt> {
+    use sha2::{Digest, Sha256};
+    anyhow::ensure!(
+        sessions.read().await.contains_key(&request.input.session),
+        "Client input recipient is not hosted"
+    );
+    let session = crate::session::Session::load_startup_stub(&request.input.session)?;
+    anyhow::ensure!(
+        session.isolated_child.is_none(),
+        "Isolated children cannot receive primary client input"
+    );
+    let _owner = sessions.claim(&request.input.session)?;
+    anyhow::ensure!(
+        request.input.client_request_digest.is_none(),
+        "Client cannot supply a prepared input digest"
+    );
+    anyhow::ensure!(
+        request.input.activate_skill.is_none()
+            || request.input.delivery == jcode_session_types::PrimaryInputDelivery::NextTurn,
+        "Skill activation requires a new primary turn"
+    );
+    let source = format!("{:x}", Sha256::digest(serde_json::to_vec(&request)?));
+    let store = crate::primary_input::PrimaryInputStore::current();
+    let input = store.accept_prepared(&request.input.session, request.input.id, &source, || {
+        let mut input = request.input.clone();
+        if let Some(entries) = &request.queued_messages {
+            let session = crate::session::Session::load_startup_stub(&input.session)?;
+            let (content, origin) = crate::todo::render_queued_messages(
+                entries,
+                session.working_dir.as_deref().map(std::path::Path::new),
+            )?;
+            input.content = content;
+            input.origin = Some(origin);
+        }
+        Ok(input)
+    })?;
+    submit_primary_input(sessions, input, swarm).await
+}
+
+pub(super) fn cancel_client_inputs(
+    sessions: &SessionAgents,
+    session: &str,
+    requests: Vec<crate::protocol::PrimaryClientInput>,
+) -> anyhow::Result<Vec<jcode_session_types::PrimaryInputReceipt>> {
+    use sha2::{Digest, Sha256};
+    let source = crate::session::Session::load_startup_stub(session)?;
+    anyhow::ensure!(
+        source.isolated_child.is_none(),
+        "Isolated children cannot receive primary controls"
+    );
+    let _owner = sessions.claim(session)?;
+    let inputs = requests
+        .into_iter()
+        .map(|request| {
+            anyhow::ensure!(
+                request.input.session == session && request.input.client_request_digest.is_none(),
+                "Client cancellation target changed"
+            );
+            let digest = format!("{:x}", Sha256::digest(serde_json::to_vec(&request)?));
+            Ok(crate::primary_input::ClientInputCancellation {
+                input: request.input,
+                source_digest: digest,
+                queued_messages: request.queued_messages,
+            })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    crate::primary_input::PrimaryInputStore::current().cancel_client_inputs(session, inputs)
+}
+
 pub(super) fn ensure_primary_input_delivery(
     sessions: &SessionAgents,
     session: &str,
@@ -380,13 +453,23 @@ pub(super) fn ensure_primary_input_delivery(
                 admission,
                 move |mut agent| async move {
                     let start = agent.message_count();
-                    let result = agent.run_primary_input(input, tx).await;
+                    let _ = tx.send(ServerEvent::PrimaryInputStarted {
+                        session: agent.session_id().into(),
+                        input: input_id,
+                        delivery: input.delivery,
+                    });
+                    let result = agent.run_primary_input(input, tx.clone()).await;
                     if let Err(error) = &result {
                         crate::primary_input::PrimaryInputStore::current().fail(
                             agent.session_id(),
                             input_id,
                             format!("{error:#}"),
                         )?;
+                    }
+                    if let Ok(receipt) = crate::primary_input::PrimaryInputStore::current()
+                        .inspect(agent.session_id(), input_id)
+                    {
+                        let _ = tx.send(ServerEvent::PrimaryInputFinished { receipt });
                     }
                     result?;
                     Ok(agent.latest_assistant_text_after(start))

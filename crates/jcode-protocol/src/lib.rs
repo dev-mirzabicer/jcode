@@ -208,7 +208,7 @@ mod wire;
 #[cfg(test)]
 mod workspace_tests;
 pub use wire::TaskGraphNodeSpec;
-pub use wire::{LegacyContextCommand, Request, ServerEvent};
+pub use wire::{LegacyContextCommand, PrimaryClientInput, Request, ServerEvent};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallSummary {
@@ -633,6 +633,8 @@ impl Request {
             | Request::PrimaryLocation { id, .. }
             | Request::PrimaryControlProbe { id }
             | Request::PrimaryInputRead { id, .. }
+            | Request::PrimaryClientInput { id, .. }
+            | Request::PrimaryClientInputsCancel { id, .. }
             | Request::PrimaryLaunchProbe { id }
             | Request::PrimaryLaunch { id, .. } => *id,
             Request::Subscribe { id, .. } => *id,

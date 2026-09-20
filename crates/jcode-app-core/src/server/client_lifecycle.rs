@@ -587,6 +587,65 @@ pub(super) async fn handle_client_with_instruction_repositories(
                     write_direct_event(&writer, &event).await?;
                     continue;
                 }
+                if let Request::PrimaryClientInputsCancel {
+                    id,
+                    session,
+                    requests,
+                } = &request
+                {
+                    let event = match super::live_turn::cancel_client_inputs(
+                        &sessions,
+                        session,
+                        requests.clone(),
+                    ) {
+                        Ok(receipts) => {
+                            ServerEvent::PrimaryClientInputsCancelled { id: *id, receipts }
+                        }
+                        Err(error) => ServerEvent::Error {
+                            id: *id,
+                            message: format!("{error:#}"),
+                            retry_after_secs: None,
+                        },
+                    };
+                    write_direct_event(&writer, &event).await?;
+                    continue;
+                }
+                if let Request::PrimaryClientInput { id, request } = &request {
+                    let result = async {
+                        sessions
+                            .restore(
+                                &request.input.session,
+                                &provider_template,
+                                &mcp_pool,
+                                &instruction_repositories,
+                            )
+                            .await?;
+                        super::live_turn::submit_client_input(
+                            &sessions,
+                            *request.clone(),
+                            super::live_turn::LiveTurnSwarmContext::new(
+                                &swarm_members,
+                                &swarms_by_id,
+                                &event_history,
+                                &event_counter,
+                                &swarm_event_tx,
+                            ),
+                        )
+                        .await
+                    }
+                    .await;
+                    let event = match result {
+                        Ok(receipt) => ServerEvent::PrimaryInputReceipt { id: *id, receipt },
+                        Err(error) => ServerEvent::PrimaryClientInputRejected {
+                            id: *id,
+                            message: format!("{error:#}"),
+                            session: request.input.session.clone(),
+                            input: request.input.id,
+                        },
+                    };
+                    write_direct_event(&writer, &event).await?;
+                    continue;
+                }
                 if let Request::PrimaryInput { id, input } = &request {
                     let result = async {
                         sessions
@@ -648,6 +707,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
                         &ServerEvent::PrimaryStreamCapabilities {
                             id: *id,
                             version: 1,
+                            client_input_version: Some(1),
                         },
                     )
                     .await?;
@@ -1594,7 +1654,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
             }
             Request::PrimaryStreamSubscribe{id} => {
                 client_event_tx.enable_primary_stream();
-                let _=client_event_tx.send(ServerEvent::PrimaryStreamCapabilities{id,version:1});
+                let _=client_event_tx.send(ServerEvent::PrimaryStreamCapabilities{id,version:1,client_input_version:Some(1)});
             },
             Request::QueuedMessages { .. } => unreachable!("queued request normalized above"),
             Request::DelegationProbe { id } | Request::DelegationExecute { id, .. } => {
@@ -3563,6 +3623,23 @@ pub(super) async fn handle_client_with_instruction_repositories(
                     let response = host.request_location_restoring(*command, &provider, &pool, &repositories).await;
                     let _ = tx.send(ServerEvent::PrimaryLocationResponse { id, response: Box::new(response) });
                 });
+            }
+            Request::PrimaryClientInputsCancel {id,session,requests} => {
+                let event=match super::live_turn::cancel_client_inputs(&sessions,&session,requests) {
+                    Ok(receipts)=>ServerEvent::PrimaryClientInputsCancelled{id,receipts},
+                    Err(error)=>ServerEvent::Error{id,message:format!("{error:#}"),retry_after_secs:None},
+                };
+                let _=client_event_tx.send(event);
+            }
+            Request::PrimaryClientInput { id, request } => {
+                let session = request.input.session.clone();
+                let input = request.input.id;
+                let result = async {
+                    Box::pin(sessions.restore(&request.input.session,&provider_template,&mcp_pool,&instruction_repositories)).await?;
+                    super::live_turn::submit_client_input(&sessions,*request,super::live_turn::LiveTurnSwarmContext::new(&swarm_members,&swarms_by_id,&event_history,&event_counter,&swarm_event_tx)).await
+                }.await;
+                let event = match result { Ok(receipt)=>ServerEvent::PrimaryInputReceipt{id,receipt}, Err(error)=>ServerEvent::PrimaryClientInputRejected{id,session,input,message:format!("{error:#}")} };
+                let _=client_event_tx.send(event);
             }
             Request::PrimaryInput { id, input } => {
                 let result = async {

@@ -25,10 +25,17 @@ struct Inbox {
 struct Record {
     input: PrimaryInputEnvelope,
     receipt: PrimaryInputReceipt,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cancelled_queue: Option<Vec<crate::todo::QueuedMessage>>,
 }
 
 pub struct PrimaryInputStore {
     root: PathBuf,
+}
+pub struct ClientInputCancellation {
+    pub input: PrimaryInputEnvelope,
+    pub source_digest: String,
+    pub queued_messages: Option<Vec<crate::todo::QueuedMessage>>,
 }
 pub struct InputLease {
     path: PathBuf,
@@ -188,9 +195,52 @@ impl PrimaryInputStore {
         lease.inbox.records.push(Record {
             input,
             receipt: receipt.clone(),
+            cancelled_queue: None,
         });
         lease.save()?;
         Ok(receipt)
+    }
+
+    pub fn accept_prepared(
+        &self,
+        session: &str,
+        id: RequestId,
+        source_digest: &str,
+        prepare: impl FnOnce() -> Result<PrimaryInputEnvelope>,
+    ) -> Result<PrimaryInputEnvelope> {
+        let mut lease = self.lock(session)?;
+        if let Some(record) = lease
+            .inbox
+            .records
+            .iter()
+            .find(|record| record.input.id == id)
+        {
+            ensure!(
+                record.input.client_request_digest.as_deref() == Some(source_digest),
+                "Primary input ID already has different client intent"
+            );
+            return Ok(record.input.clone());
+        }
+        let mut input = prepare()?;
+        ensure!(
+            input.id == id && input.session == session,
+            "Prepared input identity changed"
+        );
+        input.client_request_digest = Some(source_digest.into());
+        let receipt = PrimaryInputReceipt {
+            id,
+            session: session.into(),
+            state: PrimaryInputState::Accepted,
+            messages: Vec::new(),
+            issue: None,
+        };
+        lease.inbox.records.push(Record {
+            input: input.clone(),
+            receipt,
+            cancelled_queue: None,
+        });
+        lease.save()?;
+        Ok(input)
     }
 
     pub fn inspect(&self, session: &str, id: RequestId) -> Result<PrimaryInputReceipt> {
@@ -251,6 +301,75 @@ impl PrimaryInputStore {
             }
         }
         lease.save()
+    }
+
+    /// A cancellation received before the original transport creates a
+    /// tombstone atomically, never a temporarily runnable accepted input.
+    pub fn cancel_client_inputs(
+        &self,
+        session: &str,
+        inputs: Vec<ClientInputCancellation>,
+    ) -> Result<Vec<PrimaryInputReceipt>> {
+        let mut lease = self.lock(session)?;
+        lease.reconcile(&crate::session::Session::load_startup_stub(session)?)?;
+        for ClientInputCancellation {
+            input,
+            source_digest: digest,
+            ..
+        } in &inputs
+        {
+            ensure!(
+                input.session == session && input.delivery != PrimaryInputDelivery::ContextOnly,
+                "Cancellation is not scoped to pending conversational input"
+            );
+            if let Some(record) = lease
+                .inbox
+                .records
+                .iter()
+                .find(|record| record.input.id == input.id)
+            {
+                ensure!(
+                    record.input.client_request_digest.as_deref() == Some(digest),
+                    "Cancellation refers to different client intent"
+                );
+            }
+        }
+        let mut receipts = Vec::new();
+        for ClientInputCancellation {
+            mut input,
+            source_digest: digest,
+            queued_messages: queue,
+        } in inputs
+        {
+            if let Some(record) = lease
+                .inbox
+                .records
+                .iter_mut()
+                .find(|record| record.input.id == input.id)
+            {
+                if record.receipt.state == PrimaryInputState::Accepted {
+                    record.receipt.state = PrimaryInputState::Cancelled;
+                }
+                receipts.push(record.receipt.clone());
+            } else {
+                input.client_request_digest = Some(digest);
+                let receipt = PrimaryInputReceipt {
+                    id: input.id,
+                    session: session.into(),
+                    state: PrimaryInputState::Cancelled,
+                    messages: Vec::new(),
+                    issue: None,
+                };
+                receipts.push(receipt.clone());
+                lease.inbox.records.push(Record {
+                    input,
+                    receipt,
+                    cancelled_queue: queue,
+                });
+            }
+        }
+        lease.save()?;
+        Ok(receipts)
     }
 }
 
@@ -378,6 +497,9 @@ mod tests {
             system_reminder: None,
             unattended_context: None,
             urgent: false,
+            activate_skill: None,
+            observe_startup_context: None,
+            client_request_digest: None,
         };
         let accepted = store.accept(input.clone())?;
         assert_eq!(accepted.state, PrimaryInputState::Accepted);
@@ -433,6 +555,54 @@ mod tests {
         drop(lease);
         assert!(store.pending(&session.id)?.is_empty());
         assert!(store.lock("../foreign").is_err());
+        let mut prepared_input = input.clone();
+        prepared_input.id = RequestId::new();
+        let prepared = store.accept_prepared(&session.id, prepared_input.id, "source-a", || {
+            Ok(prepared_input.clone())
+        })?;
+        assert_eq!(
+            store.accept_prepared(&session.id, prepared_input.id, "source-a", || panic!(
+                "replay must not render again"
+            ))?,
+            prepared
+        );
+        assert!(
+            store
+                .accept_prepared(&session.id, prepared_input.id, "source-b", || panic!(
+                    "conflict must not render"
+                ))
+                .is_err()
+        );
+        let mut early = input.clone();
+        early.id = RequestId::new();
+        let receipts = store.cancel_client_inputs(
+            &session.id,
+            vec![
+                ClientInputCancellation {
+                    input: prepared_input,
+                    source_digest: "source-a".into(),
+                    queued_messages: None,
+                },
+                ClientInputCancellation {
+                    input: early.clone(),
+                    source_digest: "source-early".into(),
+                    queued_messages: Some(vec!["queued before transport".into()]),
+                },
+            ],
+        )?;
+        assert!(
+            receipts
+                .iter()
+                .all(|receipt| receipt.state == PrimaryInputState::Cancelled)
+        );
+        store.accept_prepared(&session.id, early.id, "source-early", || {
+            panic!("cancelled transport must not render or run")
+        })?;
+        assert!(store.pending(&session.id)?.is_empty());
+        assert_eq!(
+            Session::load(&session.id)?.messages.len(),
+            session.messages.len()
+        );
         std::fs::write(store.root.join(format!("{}.json", session.id)), "corrupt")?;
         assert!(store.pending(&session.id).is_err());
         Ok(())

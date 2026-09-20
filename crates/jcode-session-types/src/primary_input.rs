@@ -31,6 +31,13 @@ pub struct PrimaryInputEnvelope {
     pub unattended_context: Option<StoredUnattendedContextAuthorization>,
     #[serde(default)]
     pub urgent: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activate_skill: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observe_startup_context: Option<bool>,
+    /// Binds a server-rendered queued occurrence to its original client intent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_request_digest: Option<String>,
 }
 
 impl PrimaryInputEnvelope {
@@ -46,6 +53,9 @@ impl PrimaryInputEnvelope {
             system_reminder: None,
             unattended_context: None,
             urgent: false,
+            activate_skill: None,
+            observe_startup_context: None,
+            client_request_digest: None,
         }
     }
 }

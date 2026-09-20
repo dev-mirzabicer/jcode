@@ -47,6 +47,17 @@ pub enum LegacyContextCommand {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Request {
+    #[serde(rename = "primary_client_inputs_cancel")]
+    PrimaryClientInputsCancel {
+        id: u64,
+        session: String,
+        requests: Vec<PrimaryClientInput>,
+    },
+    #[serde(rename = "primary_client_input")]
+    PrimaryClientInput {
+        id: u64,
+        request: Box<PrimaryClientInput>,
+    },
     #[serde(rename = "primary_control_probe")]
     PrimaryControlProbe { id: u64 },
     #[serde(rename = "primary_input_read")]
@@ -1141,10 +1152,48 @@ pub enum Request {
     },
 }
 
+/// Complete client-selected input. Managed queue prose is rendered once by the
+/// receiving runtime before durable acceptance, never by the TUI.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PrimaryClientInput {
+    pub input: jcode_session_types::PrimaryInputEnvelope,
+    #[serde(default)]
+    pub queued_messages: Option<Vec<jcode_task_types::QueuedMessage>>,
+    #[serde(default)]
+    pub is_system: bool,
+    #[serde(default)]
+    pub retry_attempts: u8,
+    #[serde(default)]
+    pub auto_retry: bool,
+}
+
 /// Server event sent to client
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ServerEvent {
+    #[serde(rename = "primary_client_inputs_cancelled")]
+    PrimaryClientInputsCancelled {
+        id: u64,
+        receipts: Vec<jcode_session_types::PrimaryInputReceipt>,
+    },
+    #[serde(rename = "primary_client_input_rejected")]
+    PrimaryClientInputRejected {
+        id: u64,
+        session: String,
+        input: jcode_workspace_types::RequestId,
+        message: String,
+    },
+    #[serde(rename = "primary_input_started")]
+    PrimaryInputStarted {
+        session: String,
+        input: jcode_workspace_types::RequestId,
+        delivery: jcode_session_types::PrimaryInputDelivery,
+    },
+    #[serde(rename = "primary_input_finished")]
+    PrimaryInputFinished {
+        receipt: jcode_session_types::PrimaryInputReceipt,
+    },
     #[serde(rename = "primary_control_capabilities")]
     PrimaryControlCapabilities {
         id: u64,
@@ -1180,7 +1229,12 @@ pub enum ServerEvent {
         response: Box<jcode_workspace_types::PrimaryLaunchResponse>,
     },
     #[serde(rename = "primary_stream_capabilities")]
-    PrimaryStreamCapabilities { id: u64, version: u32 },
+    PrimaryStreamCapabilities {
+        id: u64,
+        version: u32,
+        #[serde(default)]
+        client_input_version: Option<u32>,
+    },
     /// Internal ordered primary checkpoint. The primary host consumes it before client delivery.
     #[serde(rename = "primary_checkpoint")]
     PrimaryCheckpoint { token: String, terminal: bool },

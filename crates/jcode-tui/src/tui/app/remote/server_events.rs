@@ -1100,6 +1100,192 @@ pub(in crate::tui::app) fn handle_server_event(
             app.upstream_provider = Some(provider);
             false
         }
+        ServerEvent::PrimaryInputStarted {
+            session,
+            input,
+            delivery,
+        } => {
+            if delivery == crate::primary_input::PrimaryInputDelivery::ContextOnly {
+                return false;
+            }
+            if app.remote_session_id.as_deref() != Some(session.as_str()) {
+                return false;
+            }
+            app.pending_primary_next.retain(|(id, _)| *id != input);
+            app.primary_retry_id = None;
+            app.rate_limit_pending_message = match remote.primary_input_source(&session, input) {
+                Ok(Some(source)) => {
+                    app.primary_retry_id = Some(input);
+                    Some(app_mod::PendingRemoteMessage {
+                        content: source.input.content,
+                        images: source.input.images,
+                        is_system: source.is_system,
+                        system_reminder: source.input.system_reminder,
+                        auto_retry: source.auto_retry,
+                        retry_attempts: source.retry_attempts,
+                        retry_at: None,
+                        queued_messages: source.queued_messages.map(Into::into),
+                    })
+                }
+                Ok(None) => None,
+                Err(error) => {
+                    app.push_display_message(DisplayMessage::error(format!(
+                        "Input retry metadata is unavailable: {error}"
+                    )));
+                    None
+                }
+            };
+            app.current_message_id = Some(0);
+            app.is_processing = true;
+            app.status = ProcessingStatus::Sending;
+            app.processing_started.get_or_insert_with(Instant::now);
+            app.last_stream_activity = Some(Instant::now());
+            true
+        }
+        ServerEvent::PrimaryClientInputRejected {
+            session,
+            input,
+            message,
+            ..
+        } => {
+            if app.remote_session_id.as_deref() != Some(session.as_str()) {
+                return false;
+            }
+            match remote.primary_input_source(&session, input) {
+                Ok(Some(source)) => {
+                    if source.input.delivery == crate::primary_input::PrimaryInputDelivery::NextTurn
+                    {
+                        app.is_processing = false;
+                        app.status = ProcessingStatus::Idle;
+                        app.current_message_id = None;
+                        app.clear_pending_remote_retry();
+                    }
+                    if let Some(entries) = source.queued_messages {
+                        let mut queue: crate::todo::QueuedMessages = entries.into();
+                        queue.extend(std::mem::take(&mut app.queued_messages));
+                        app.queued_messages = queue;
+                        if let Some(reminder) = source.input.system_reminder {
+                            app.hidden_queued_system_messages.insert(0, reminder);
+                        }
+                        app.queued_instruction_error = Some(message.clone());
+                        app.pending_queued_dispatch = false;
+                    } else {
+                        if source.input.delivery
+                            == crate::primary_input::PrimaryInputDelivery::NextTurn
+                            && app.input.is_empty()
+                            && app.pending_composer_input.as_ref().is_some_and(|pending| {
+                                pending.request_id == Some(0) && !pending.output_started
+                            })
+                        {
+                            let pending = app
+                                .pending_composer_input
+                                .take()
+                                .expect("checked pending input");
+                            app.input = pending.raw_input;
+                            app.cursor_pos = pending.cursor_pos;
+                            app.pasted_contents = pending.pasted_contents;
+                            app.pending_images = source.input.images.clone();
+                            app.reset_tab_completion();
+                        }
+                        if app.input.is_empty() {
+                            app.input = source.input.content;
+                            app.pending_images = source.input.images;
+                            app.cursor_pos = app.input.len();
+                        }
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => app.push_display_message(DisplayMessage::error(format!(
+                    "Rejected input remains in its client journal: {error}"
+                ))),
+            }
+            app.push_display_message(DisplayMessage::error(format!(
+                "Input was not accepted: {message}"
+            )));
+            true
+        }
+        ServerEvent::PrimaryClientInputsCancelled { receipts, .. } => {
+            let mut restored = Vec::new();
+            let mut images = Vec::new();
+            for receipt in &receipts {
+                app.pending_primary_next.retain(|(id, _)| *id != receipt.id);
+                app.pending_primary_soft.remove(&receipt.id);
+                if receipt.state == crate::primary_input::PrimaryInputState::Cancelled
+                    && app.remote_session_id.as_deref() == Some(receipt.session.as_str())
+                    && let Ok(Some(source)) =
+                        remote.primary_input_source(&receipt.session, receipt.id)
+                {
+                    restored.push(source.input.content);
+                    images.extend(source.input.images);
+                }
+            }
+            if app.input.is_empty() && !restored.is_empty() {
+                app.clear_pending_soft_interrupt_tracking();
+                app.retrieve_pending_message_for_edit();
+                if !app.input.is_empty() {
+                    restored.push(std::mem::take(&mut app.input));
+                }
+                app.input = restored.join("\n\n");
+                app.cursor_pos = app.input.len();
+                app.pending_images.extend(images);
+                app.set_status_notice("Cancelled input restored for editing");
+            } else if !restored.is_empty() {
+                app.set_status_notice("Input cancelled; existing draft preserved and original input retained in the client journal");
+            }
+            if receipts
+                .iter()
+                .any(|receipt| receipt.state == crate::primary_input::PrimaryInputState::Committed)
+            {
+                app.set_status_notice("Some input was already delivered and cannot be withdrawn");
+            }
+            true
+        }
+        ServerEvent::PrimaryInputFinished { receipt } => {
+            app.pending_primary_next.retain(|(id, _)| *id != receipt.id);
+            app.pending_primary_soft.remove(&receipt.id);
+            false
+        }
+        ServerEvent::PrimaryInputReceipt { id, receipt } => {
+            let tracked = app.acknowledge_pending_soft_interrupt(id);
+            if receipt.state == crate::primary_input::PrimaryInputState::Accepted
+                && app.primary_retry_id != Some(receipt.id)
+                && !app
+                    .pending_primary_next
+                    .iter()
+                    .any(|(id, _)| *id == receipt.id)
+                && let Ok(Some(source)) = remote.primary_input_source(&receipt.session, receipt.id)
+                && source.input.delivery == crate::primary_input::PrimaryInputDelivery::NextTurn
+            {
+                let preview = source
+                    .queued_messages
+                    .map(|entries| {
+                        entries
+                            .iter()
+                            .map(crate::todo::queued_message_preview)
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+                    .unwrap_or(source.input.content);
+                app.pending_primary_next.push((receipt.id, preview));
+            }
+
+            if receipt.state == crate::primary_input::PrimaryInputState::Accepted
+                && app.remote_session_id.as_deref() == Some(receipt.session.as_str())
+                && let Ok(Some(source)) = remote.primary_input_source(&receipt.session, receipt.id)
+                && source.input.delivery == crate::primary_input::PrimaryInputDelivery::SafeBoundary
+                && app
+                    .pending_primary_soft
+                    .insert(receipt.id, source.input.content.clone())
+                    .is_none()
+                && !tracked
+            {
+                app.pending_soft_interrupts.push(source.input.content);
+            }
+            if let Some(issue) = receipt.issue {
+                app.push_display_message(DisplayMessage::error(issue));
+            }
+            false
+        }
         ServerEvent::Ack { id } => {
             let _ = app.acknowledge_pending_soft_interrupt(id);
             false
@@ -1562,6 +1748,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.begin_remote_startup_context_session(&session_id);
             }
             remote.set_session_id(session_id.clone());
+            app.primary_input_journaled = remote.durable_primary_input();
             app.remote_session_id = Some(session_id.clone());
             crate::set_current_session(&session_id);
             app.note_client_focus(true);
@@ -1942,6 +2129,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.remote_resume_activity = None;
             }
             remote.set_session_id(session_id.clone());
+            app.primary_input_journaled = remote.durable_primary_input();
             app.remote_session_id = Some(session_id.clone());
             crate::set_current_session(&session_id);
             app.note_client_focus(true);

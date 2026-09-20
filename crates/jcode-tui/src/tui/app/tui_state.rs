@@ -713,10 +713,7 @@ impl crate::tui::TuiState for App {
     }
 
     fn queued_messages(&self) -> Vec<String> {
-        self.queued_messages
-            .iter()
-            .map(crate::todo::queued_message_preview)
-            .collect()
+        App::queued_messages(self)
     }
 
     fn interleave_message(&self) -> Option<&str> {

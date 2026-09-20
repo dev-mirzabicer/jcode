@@ -96,6 +96,38 @@ pub(in crate::tui::app) async fn begin_remote_queued_send(
     Ok(id)
 }
 
+pub(in crate::tui::app) async fn queue_prepared_remote_input(
+    app: &mut App,
+    remote: &mut RemoteConnection,
+    prepared: input::PreparedInput,
+) {
+    if remote.durable_primary_input() {
+        match remote
+            .queue_primary_message(
+                prepared.expanded.clone(),
+                prepared.images.clone(),
+                prepared.activate_skill.clone(),
+            )
+            .await
+        {
+            Ok(_) => app.set_status_notice("Input queued durably for the next turn"),
+            Err(error) => {
+                restore_prepared_remote_input(app, prepared);
+                app.push_display_message(DisplayMessage::error(format!(
+                    "Input was not queued; draft preserved: {error}"
+                )));
+            }
+        }
+    } else if prepared.images.is_empty() {
+        app.queued_messages.push(prepared.expanded);
+    } else {
+        restore_prepared_remote_input(app, prepared);
+        app.set_status_notice(
+            "Image draft preserved; this older runtime requires an immediate send",
+        );
+    }
+}
+
 fn adopt_remote_send(
     app: &mut App,
     remote: &mut RemoteConnection,
@@ -556,7 +588,10 @@ async fn submit_remote_transcript_input(
             app.begin_remote_send(remote, prepared.expanded, prepared.images, false)
                 .await?;
         }
-        SendAction::Queue => queue_transcript_input(app),
+        SendAction::Queue => {
+            let prepared = input::take_prepared_input(app);
+            queue_prepared_remote_input(app, remote, prepared).await;
+        }
         SendAction::Interleave => {
             let prepared = input::take_prepared_input(app);
             app.send_interleave_now(prepared.expanded, prepared.images, remote)

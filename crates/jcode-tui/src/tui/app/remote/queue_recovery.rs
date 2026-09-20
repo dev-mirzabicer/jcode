@@ -54,6 +54,8 @@ impl App {
             self.pending_soft_interrupt_requests.len(),
             self.pending_soft_interrupts.len()
         ));
+        self.pending_primary_next.clear();
+        self.pending_primary_soft.clear();
         self.pending_soft_interrupts.clear();
         self.pending_soft_interrupt_requests.clear();
     }
@@ -132,6 +134,9 @@ impl App {
 /// is re-sent once the turn is proven idle after reconnect, which is the
 /// queue's contract.
 pub(super) fn recover_undelivered_queued_continuation(app: &mut App, reason: &str) -> bool {
+    if app.primary_input_journaled {
+        return false;
+    }
     let is_recoverable = app
         .rate_limit_pending_message
         .as_ref()
@@ -187,7 +192,7 @@ pub(super) async fn recover_stranded_soft_interrupts(
     app: &mut App,
     remote: &mut RemoteConnection,
 ) -> bool {
-    if app.is_processing || app.pending_soft_interrupts.is_empty() {
+    if app.primary_input_journaled || app.is_processing || app.pending_soft_interrupts.is_empty() {
         return false;
     }
 

@@ -2929,7 +2929,7 @@ async fn lightweight_comm_request_skips_full_session_initialization() {
             .unwrap()
             .unwrap();
         assert!(
-            matches!(decode_request_or_event(&line),ServerEvent::PrimaryStreamCapabilities{id:reply,version:1} if reply==id)
+            matches!(decode_request_or_event(&line),ServerEvent::PrimaryStreamCapabilities{id:reply,version:1,..} if reply==id)
         );
         assert!(!forked.load(Ordering::SeqCst));
         assert!(sessions.read().await.is_empty());

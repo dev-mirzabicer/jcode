@@ -584,6 +584,12 @@ pub(in crate::tui::app) async fn handle_post_connect<B: ratatui::backend::Backen
         "Reload check: session_to_resume={:?}, remote_session_id={:?}, reconnect_attempts={}",
         session_to_resume, app.remote_session_id, state.reconnect_attempts
     ));
+    if app.primary_input_journaled && !remote.durable_primary_input() {
+        anyhow::bail!(
+            "This runtime cannot recover durable pending input. Start a compatible runtime; original input is retained."
+        );
+    }
+    app.primary_input_journaled = remote.durable_primary_input();
     let hints = load_reload_reconnect_hints(app, session_to_resume);
     let has_reload_ctx_for_session = hints.reload_ctx_for_session.is_some();
     if state.reconnect_attempts > 0 {

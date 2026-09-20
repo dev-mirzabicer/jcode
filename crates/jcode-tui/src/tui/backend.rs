@@ -5,6 +5,7 @@
 //!
 //! Also provides debug socket events for exposing full TUI state.
 
+mod client_input;
 use crate::message::ToolCall;
 use crate::protocol::{AuthChanged, FeatureToggle, Request, ServerEvent};
 use crate::server;
@@ -270,10 +271,40 @@ pub struct RemoteConnection {
     has_loaded_history: bool,
     call_output_tokens_seen: u64,
     next_message_skill: Option<String>,
+    client_inputs: std::sync::Mutex<Option<client_input::ClientInputs>>,
+    recovered_input_session: Option<String>,
 }
 
 const DETACHED_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_STRAY_REMOTE_PROTOCOL_LINES: usize = 32;
+
+pub(crate) fn queue_offline_primary_input(
+    session: &str,
+    owner: &str,
+    content: String,
+    images: Vec<(String, String)>,
+) -> Result<()> {
+    let mut journal = client_input::ClientInputs::new(&server::socket_path(), Some(owner))?;
+    let mut input = crate::primary_input::PrimaryInputEnvelope::new(
+        session.into(),
+        content,
+        crate::primary_input::PrimaryInputDelivery::NextTurn,
+    );
+    input.images = images;
+    input.origin = Some(jcode_session_types::StoredMessageOrigin::Human);
+    input.observe_startup_context = Some(true);
+    journal.stage(
+        crate::protocol::PrimaryClientInput {
+            input,
+            queued_messages: None,
+            is_system: false,
+            retry_attempts: 0,
+            auto_retry: false,
+        },
+        0,
+    )?;
+    Ok(())
+}
 /// Hard cap for one newline-delimited server event. History events can be large
 /// because they may contain images, but an authenticated or compromised peer
 /// must not be able to grow the client process without bound.
@@ -322,6 +353,16 @@ pub(crate) trait RemoteEventState {
     fn reset_call_output_tokens_seen(&mut self);
     fn set_session_id(&mut self, id: String);
     fn has_loaded_history(&self) -> bool;
+    fn durable_primary_input(&self) -> bool {
+        false
+    }
+    fn primary_input_source(
+        &self,
+        _session: &str,
+        _id: crate::workspace::RequestId,
+    ) -> Result<Option<crate::protocol::PrimaryClientInput>> {
+        Ok(None)
+    }
     fn mark_history_loaded(&mut self);
     fn take_primary_snapshot(&mut self, _id: u64) -> bool {
         false
@@ -400,6 +441,8 @@ impl RemoteConnection {
             has_loaded_history: false,
             call_output_tokens_seen: 0,
             next_message_skill: None,
+            client_inputs: std::sync::Mutex::new(None),
+            recovered_input_session: None,
         };
 
         let capability_id = conn.next_request_id;
@@ -407,8 +450,19 @@ impl RemoteConnection {
         conn.send_request(Request::PrimaryStreamSubscribe { id: capability_id })
             .await?;
         match tokio::time::timeout(std::time::Duration::from_secs(10), conn.next_event()).await? {
-            RemoteRead::Event(ServerEvent::PrimaryStreamCapabilities { id, version: 1 })
-                if id == capability_id => {}
+            RemoteRead::Event(ServerEvent::PrimaryStreamCapabilities {
+                id,
+                version: 1,
+                client_input_version,
+            }) if id == capability_id => {
+                if client_input_version == Some(1) {
+                    *conn.client_inputs.lock().expect("client inputs") =
+                        Some(client_input::ClientInputs::new(
+                            &server::socket_path(),
+                            conn.client_instance_id.as_deref(),
+                        )?);
+                }
+            }
             RemoteRead::Event(ServerEvent::Error { .. }) => crate::logging::info(
                 "Server uses legacy presentation; sequenced primary snapshots unavailable",
             ),
@@ -604,6 +658,34 @@ impl RemoteConnection {
                 presentation.outgoing.insert(request.id());
             }
         }
+        let mut staged = false;
+        let request = if let Request::CancelSoftInterrupts { id } = &request
+            && let Some(session) = self.session_id.as_deref()
+            && let Some(client) = self.client_inputs.lock().expect("client inputs").as_ref()
+        {
+            staged = true;
+            Request::PrimaryClientInputsCancel {
+                id: *id,
+                session: session.into(),
+                requests: client.cancellations(session, true)?,
+            }
+        } else {
+            request
+        };
+        let request = if let Some(session) = self.session_id.as_deref()
+            && let Some(client) = self.client_inputs.lock().expect("client inputs").as_mut()
+            && let Some(input) = Self::client_submission(&request, session)
+        {
+            let id = request.id();
+            let request = client.stage(input, id)?;
+            staged = true;
+            Request::PrimaryClientInput {
+                id,
+                request: Box::new(request),
+            }
+        } else {
+            request
+        };
         let json = serde_json::to_string(&request)? + "\n";
         let interrupt_log = self.interrupt_request_log_fields(&request, interrupt_trigger);
         if let Some(fields) = &interrupt_log {
@@ -639,8 +721,262 @@ impl RemoteConnection {
                 )),
             }
         }
+        if staged && result.is_err() {
+            crate::logging::warn("Primary input is retained locally for exact reconnect delivery");
+            return Ok(());
+        }
         result?;
         Ok(())
+    }
+
+    pub fn durable_primary_input(&self) -> bool {
+        self.client_inputs.lock().expect("client inputs").is_some()
+    }
+
+    fn client_submission(
+        request: &Request,
+        session: &str,
+    ) -> Option<crate::protocol::PrimaryClientInput> {
+        use crate::primary_input::{PrimaryInputDelivery, PrimaryInputEnvelope};
+        let mut input = PrimaryInputEnvelope::new(
+            session.into(),
+            String::new(),
+            PrimaryInputDelivery::NextTurn,
+        );
+        let mut queued_messages = None;
+        match request {
+            Request::Message {
+                content,
+                images,
+                system_reminder,
+                no_reply,
+                observe_startup_context,
+                activate_skill,
+                ..
+            } => {
+                input.content = content.clone();
+                input.images = images.clone();
+                input.system_reminder = system_reminder.clone();
+                input.observe_startup_context = Some(*observe_startup_context);
+                input.activate_skill = activate_skill.clone();
+                input.origin = Some(jcode_session_types::StoredMessageOrigin::Human);
+                if *no_reply {
+                    input.delivery = PrimaryInputDelivery::ContextOnly;
+                }
+            }
+            Request::QueuedMessages {
+                entries,
+                system_reminder,
+                observe_startup_context,
+                ..
+            } => {
+                queued_messages = Some(entries.clone());
+                input.system_reminder = system_reminder.clone();
+                input.observe_startup_context = Some(*observe_startup_context);
+            }
+            Request::SoftInterrupt {
+                content,
+                images,
+                urgent,
+                ..
+            } => {
+                input.content = content.clone();
+                input.images = images.clone();
+                input.urgent = *urgent;
+                input.delivery = PrimaryInputDelivery::SafeBoundary;
+                input.observe_startup_context = Some(false);
+                input.origin = Some(jcode_session_types::StoredMessageOrigin::Human);
+            }
+            _ => return None,
+        }
+        Some(crate::protocol::PrimaryClientInput {
+            is_system: input.observe_startup_context == Some(false),
+            retry_attempts: 0,
+            auto_retry: false,
+            input,
+            queued_messages,
+        })
+    }
+
+    pub async fn recover_primary_inputs(&mut self) -> Result<()> {
+        let Some(session) = self.session_id.clone() else {
+            return Ok(());
+        };
+        if self.recovered_input_session.as_ref() == Some(&session) {
+            return Ok(());
+        }
+        let requests = {
+            let guard = self.client_inputs.lock().expect("client inputs");
+            match guard.as_ref() {
+                Some(client) => client.recover(&session)?,
+                None => return Ok(()),
+            }
+        };
+        for request in requests {
+            let id = self.next_request_id;
+            self.next_request_id += 1;
+            self.client_inputs
+                .lock()
+                .expect("client inputs")
+                .as_mut()
+                .expect("supported")
+                .requests
+                .insert(id, (session.clone(), request.input.id));
+            self.send_request(Request::PrimaryClientInput {
+                id,
+                request: Box::new(request),
+            })
+            .await?;
+        }
+        let inspections = self
+            .client_inputs
+            .lock()
+            .expect("client inputs")
+            .as_ref()
+            .expect("supported")
+            .pending_inspections(&session)?;
+        for input in inspections {
+            let id = self.next_request_id;
+            self.next_request_id += 1;
+            self.client_inputs
+                .lock()
+                .expect("client inputs")
+                .as_mut()
+                .expect("supported")
+                .requests
+                .insert(id, (session.clone(), input));
+            self.send_request(Request::PrimaryInputInspect {
+                id,
+                session: session.clone(),
+                input,
+            })
+            .await?;
+        }
+        let cancellations = self
+            .client_inputs
+            .lock()
+            .expect("client inputs")
+            .as_ref()
+            .expect("supported")
+            .cancellations(&session, false)?;
+        if !cancellations.is_empty() {
+            let id = self.next_request_id;
+            self.next_request_id += 1;
+            self.send_request(Request::PrimaryClientInputsCancel {
+                id,
+                session: session.clone(),
+                requests: cancellations,
+            })
+            .await?;
+        }
+        self.recovered_input_session = Some(session);
+        Ok(())
+    }
+
+    pub fn primary_input_source(
+        &self,
+        session: &str,
+        id: crate::workspace::RequestId,
+    ) -> Result<Option<crate::protocol::PrimaryClientInput>> {
+        let mut guard = self.client_inputs.lock().expect("client inputs");
+        if let Some(client) = guard.as_mut() {
+            client.request(session, id)
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn prepare_known_input_retry(
+        &self,
+        input: Option<crate::workspace::RequestId>,
+    ) -> Result<()> {
+        if let Some(client) = self.client_inputs.lock().expect("client inputs").as_mut() {
+            client.active = input.or(client.active);
+            client.prepare_retry(
+                self.session_id
+                    .as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("No input Session"))?,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn record_input_event(&self, event: &ServerEvent) -> Result<()> {
+        let mut guard = self.client_inputs.lock().expect("client inputs");
+        let Some(client) = guard.as_mut() else {
+            return Ok(());
+        };
+        match event {
+            ServerEvent::PrimaryInputReceipt { id, receipt } => {
+                if let Some((session, input)) = client.requests.get(id) {
+                    anyhow::ensure!(
+                        session == &receipt.session && *input == receipt.id,
+                        "Primary input reply identity mismatch"
+                    );
+                    client.observe(receipt, false)?;
+                }
+            }
+            ServerEvent::PrimaryInputFinished { receipt } => client.observe(receipt, true)?,
+            ServerEvent::PrimaryClientInputsCancelled { receipts, .. } => {
+                for receipt in receipts {
+                    client.observe(receipt, true)?;
+                }
+            }
+
+            ServerEvent::PrimaryInputStarted { input, .. } => client.active = Some(*input),
+            ServerEvent::PrimaryClientInputRejected {
+                id,
+                session,
+                input,
+                message,
+            } => {
+                anyhow::ensure!(
+                    client.requests.get(id) == Some(&(session.clone(), *input)),
+                    "Client input rejection identity mismatch"
+                );
+                client.reject(session, *input, message)?;
+            }
+
+            ServerEvent::Error { id, message, .. } => {
+                if let Some((session, input)) = client.requests.get(id) {
+                    client.reject(session, *input, message)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn client_context_completion(&self, event: &ServerEvent) -> Result<Option<u64>> {
+        let receipt = match event {
+            ServerEvent::PrimaryInputReceipt { receipt, .. }
+            | ServerEvent::PrimaryInputFinished { receipt }
+                if receipt.state == crate::primary_input::PrimaryInputState::Committed =>
+            {
+                receipt
+            }
+            _ => return Ok(None),
+        };
+        let mut guard = self.client_inputs.lock().expect("client inputs");
+        let Some(client) = guard.as_mut() else {
+            return Ok(None);
+        };
+        let id = client.requests.iter().find_map(|(id, (session, input))| {
+            (session == &receipt.session && *input == receipt.id).then_some(*id)
+        });
+        let Some(id) = id else {
+            return Ok(None);
+        };
+        if client
+            .request(&receipt.session, receipt.id)?
+            .is_some_and(|request| {
+                request.input.delivery == crate::primary_input::PrimaryInputDelivery::ContextOnly
+            })
+        {
+            client.requests.remove(&id);
+            return Ok(Some(id));
+        }
+        Ok(None)
     }
 
     async fn send_request(&self, request: Request) -> Result<()> {
@@ -748,6 +1084,31 @@ impl RemoteConnection {
         };
         self.next_request_id += 1;
         self.send_request(request).await?;
+        Ok(if self.durable_primary_input() { 0 } else { id })
+    }
+
+    pub async fn queue_primary_message(
+        &mut self,
+        content: String,
+        images: Vec<(String, String)>,
+        activate_skill: Option<String>,
+    ) -> Result<u64> {
+        anyhow::ensure!(
+            self.durable_primary_input(),
+            "This runtime cannot durably queue complete input"
+        );
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::Message {
+            id,
+            content,
+            images,
+            system_reminder: None,
+            no_reply: false,
+            observe_startup_context: true,
+            activate_skill,
+        })
+        .await?;
         Ok(id)
     }
 
@@ -767,7 +1128,7 @@ impl RemoteConnection {
             observe_startup_context,
         })
         .await?;
-        Ok(id)
+        Ok(if self.durable_primary_input() { 0 } else { id })
     }
 
     /// Request server reload
@@ -1410,6 +1771,11 @@ impl RemoteConnection {
     /// protocol line" warnings, the real `History` was discarded, and the
     /// session stayed stuck on "loading session…" until a manual `/restart`.
     pub async fn next_event(&mut self) -> RemoteRead {
+        if let Err(error) = self.recover_primary_inputs().await {
+            return RemoteRead::Disconnected(RemoteDisconnectReason::Protocol(format!(
+                "Durable input recovery is blocked: {error:#}"
+            )));
+        }
         let mut stray_lines = 0usize;
         loop {
             // Serve any complete line already buffered before touching the
@@ -1558,7 +1924,21 @@ impl RemoteConnection {
             return LineOutcome::Skip;
         }
         match serde_json::from_str(&text) {
-            Ok(event) => {
+            Ok(mut event) => {
+                if let Err(error) = self.record_input_event(&event) {
+                    return LineOutcome::Disconnect(RemoteDisconnectReason::Protocol(format!(
+                        "Client input receipt could not be persisted: {error:#}"
+                    )));
+                }
+                match self.client_context_completion(&event) {
+                    Ok(Some(id)) => event = ServerEvent::ContextMessageAdded { id },
+                    Ok(None) => {}
+                    Err(error) => {
+                        return LineOutcome::Disconnect(RemoteDisconnectReason::Protocol(format!(
+                            "Input completion needs recovery: {error:#}"
+                        )));
+                    }
+                }
                 if matches!(event, ServerEvent::PrimaryCheckpoint { .. }) {
                     return LineOutcome::Disconnect(RemoteDisconnectReason::Protocol(
                         "Unexpected internal primary checkpoint".into(),
@@ -1687,6 +2067,8 @@ impl RemoteConnection {
             has_loaded_history: false,
             call_output_tokens_seen: 0,
             next_message_skill: None,
+            client_inputs: std::sync::Mutex::new(None),
+            recovered_input_session: None,
         }
     }
 
@@ -1760,6 +2142,17 @@ impl RemoteConnection {
 }
 
 impl RemoteEventState for RemoteConnection {
+    fn durable_primary_input(&self) -> bool {
+        Self::durable_primary_input(self)
+    }
+    fn primary_input_source(
+        &self,
+        session: &str,
+        id: crate::workspace::RequestId,
+    ) -> Result<Option<crate::protocol::PrimaryClientInput>> {
+        Self::primary_input_source(self, session, id)
+    }
+
     fn take_primary_snapshot(&mut self, id: u64) -> bool {
         let mut presentation = self.presentation.lock().expect("remote presentation");
         if let Some(count) = presentation.snapshots.get_mut(&id) {
@@ -1936,7 +2329,7 @@ mod tests {
                     read.read_line(&mut line).await.unwrap();
                     let probe:Request=serde_json::from_str(&line).unwrap();
                     assert!(matches!(probe,Request::PrimaryStreamSubscribe{..}));
-                    let reply=if supported {ServerEvent::PrimaryStreamCapabilities{id:probe.id(),version:1}} else {ServerEvent::Error{id:0,message:"unsupported fixture request".into(),retry_after_secs:None}};
+                    let reply=if supported {ServerEvent::PrimaryStreamCapabilities{id:probe.id(),version:1,client_input_version:None}} else {ServerEvent::Error{id:0,message:"unsupported fixture request".into(),retry_after_secs:None}};
                     write.write_all(crate::protocol::encode_event(&reply).as_bytes()).await.unwrap();
                     line.clear();
                     read.read_line(&mut line).await.unwrap();
