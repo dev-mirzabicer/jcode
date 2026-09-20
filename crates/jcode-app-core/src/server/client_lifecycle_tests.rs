@@ -306,6 +306,13 @@ async fn context_message_persists_without_starting_turn_async() {
 
     assert!(matches!(
         client_event_rx.recv().await,
+        Some(ServerEvent::Ack { id: 77 })
+    ));
+    let at_ack = crate::session::Session::load(session_id).unwrap();
+    assert_eq!(at_ack.primary_inputs.len(), 1);
+    assert_eq!(at_ack.messages.len(), before + 1);
+    assert!(matches!(
+        client_event_rx.recv().await,
         Some(ServerEvent::ContextMessageAdded { id: 77 })
     ));
     assert!(client_event_rx.try_recv().is_err());
@@ -2154,6 +2161,46 @@ async fn later_real_user_turn_observes_staleness_before_prompt_and_continues() {
         .expect("provider received later prompt");
     assert_eq!(provider_marker_index + 1, provider_prompt_index);
     assert!(client_connections.read().await.is_empty());
+    drop(snapshots);
+    sessions.wait_idle(&session_id).await.unwrap();
+    std::fs::write(&selected_path, "WP04_SYNTHETIC_SECOND_CHANGE").unwrap();
+    let input = jcode_session_types::PrimaryInputEnvelope::new(
+        session_id.clone(),
+        "typed later human input".into(),
+        jcode_session_types::PrimaryInputDelivery::NextTurn,
+    );
+    let input_id = input.id;
+    crate::primary_input::PrimaryInputStore::current()
+        .accept(input.clone())
+        .unwrap();
+    let agent = sessions.read().await.get(&session_id).cloned().unwrap();
+    let (events, _received) = mpsc::unbounded_channel();
+    agent
+        .lock()
+        .await
+        .run_primary_input(input, events)
+        .await
+        .unwrap();
+    let updated = Session::load(&session_id).unwrap();
+    let file = &updated.startup_context.as_ref().unwrap().batches[0].files[0];
+    assert_eq!(file.notification_count, 2);
+    assert_eq!(file.stale_marker_message_ids.len(), 2);
+    let marker = updated
+        .messages
+        .iter()
+        .position(|message| message.id == file.stale_marker_message_ids[1])
+        .unwrap();
+    let receipt = updated
+        .primary_inputs
+        .iter()
+        .find(|receipt| receipt.id == input_id)
+        .unwrap();
+    assert_eq!(updated.messages[marker + 1].id, receipt.messages[0]);
+    assert_eq!(
+        serde_json::to_value(&updated.messages[..persisted.messages.len()]).unwrap(),
+        serde_json::to_value(&persisted.messages).unwrap()
+    );
+    sessions.shutdown().await.unwrap();
 }
 
 #[test]
@@ -2348,9 +2395,10 @@ fn turn_coupled_skill_activation_persists_before_shared_server_processing() {
         let event_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let (swarm_event_tx, _) = broadcast::channel(8);
 
+        let input_id = crate::workspace::RequestId::new();
         start_processing_message(
             ProcessingMessage {
-                input_id: crate::workspace::RequestId::new(),
+                input_id,
                 queued_messages: None,
                 id: 84,
                 content: "use the active skill".to_string(),
@@ -2380,15 +2428,39 @@ fn turn_coupled_skill_activation_persists_before_shared_server_processing() {
         )
         .await;
 
-        let activation_event = client_event_rx.recv().await.expect("activation event");
-        assert!(matches!(
-            activation_event,
-            ServerEvent::SkillActivated {
-                id: 84,
-                ref skill_id,
-                ..
-            } if skill_id == "server-skill"
-        ));
+        let (mut acknowledged, mut activated) = (false, false);
+        while !acknowledged || !activated {
+            match client_event_rx
+                .recv()
+                .await
+                .expect("activation and durable acknowledgement")
+            {
+                ServerEvent::Ack { id: 84 } => {
+                    let receipt = crate::primary_input::PrimaryInputStore::current()
+                        .inspect("session_turn_coupled_skill", input_id)
+                        .unwrap();
+                    assert!(matches!(
+                        receipt.state,
+                        jcode_session_types::PrimaryInputState::Accepted
+                            | jcode_session_types::PrimaryInputState::Committed
+                    ));
+                    assert_eq!(
+                        Session::load("session_turn_coupled_skill")
+                            .unwrap()
+                            .active_skill_id(),
+                        Some("server-skill")
+                    );
+                    acknowledged = true;
+                }
+                ServerEvent::SkillActivated {
+                    id: 84, skill_id, ..
+                } => {
+                    assert_eq!(skill_id, "server-skill");
+                    activated = true;
+                }
+                event => panic!("Unexpected pre-dispatch event: {event:?}"),
+            }
+        }
         expect_turn_success(&mut client_event_rx, 84, Duration::from_secs(30)).await;
         host.wait_idle("session_turn_coupled_skill").await.unwrap();
         let agent = agent.lock().await;

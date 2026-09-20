@@ -29,7 +29,7 @@ impl PrimaryHost {
         self: &Arc<Self>,
         command: PrimaryLocationCommand,
     ) -> PrimaryLocationResponse {
-        if !launch_enabled() {
+        if !launch_enabled() && matches!(&command, PrimaryLocationCommand::Change { .. }) {
             return PrimaryLocationResponse::Rejected { issue: Issue { code: IssueCode::UnsupportedCapability, detail: "Managed location controls are staged until workspace management is available".into() } };
         }
         let result = self.location_command(command).await;

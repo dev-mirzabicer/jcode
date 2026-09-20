@@ -107,6 +107,12 @@ fn primary_location_idle_notice_prefix_and_missing_cwd_repair() -> Result<()> {
         assert!(matches!(again,PrimaryLocationResponse::State{record:ref replay} if **replay == *record));
         assert!(matches!(host.request_location(PrimaryLocationCommand::Cancel { operation:record.operation }).await,PrimaryLocationResponse::Rejected{..}));
         assert_eq!(Session::load(&launch.session)?.messages.len(),after.messages.len());
+        std::fs::write(crate::config::Config::path().unwrap(), "[features]\nmanaged_primary_launch = false\n")?;
+        crate::config::Config::invalidate_cache();
+        assert!(matches!(host.request_location(PrimaryLocationCommand::Inspect { operation:record.operation }).await,PrimaryLocationResponse::State{..}));
+        assert!(matches!(host.request_location(PrimaryLocationCommand::Cancel { operation:record.operation }).await,PrimaryLocationResponse::Rejected{issue} if issue.code == IssueCode::Conflict));
+        std::fs::write(crate::config::Config::path().unwrap(), "[features]\nmanaged_primary_launch = true\n")?;
+        crate::config::Config::invalidate_cache();
         // Actual invocation reads from the new cwd. There is no model call.
         let agent = host.read().await.get(&launch.session).cloned().unwrap();
         let output = agent.lock().await.execute_tool("read",serde_json::json!({"file_path":"sentinel.txt","intent":"Check bound cwd"})).await?;

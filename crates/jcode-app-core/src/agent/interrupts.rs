@@ -201,7 +201,7 @@ impl Agent {
             .is_ok_and(|pending| {
                 pending
                     .iter()
-                    .take_while(|input| {
+                    .filter(|input| {
                         input.delivery == jcode_session_types::PrimaryInputDelivery::SafeBoundary
                     })
                     .any(|input| input.urgent)

@@ -1507,7 +1507,8 @@ pub(super) async fn handle_client_with_instruction_repositories(
             continue;
         }
 
-        // Send ack
+        // Input acknowledgements follow persistence, not transport decoding.
+        if !matches!(&request, Request::Message { .. } | Request::QueuedMessages { .. } | Request::AgentTask { .. } | Request::SoftInterrupt { .. } | Request::CancelSoftInterrupts { .. }) {
         let ack = ServerEvent::Ack { id: request.id() };
         let json = encode_event(&ack);
         {
@@ -1561,6 +1562,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
             }
         }
 
+        }
         if let Some(error) = unavailable_swarm_response(&request) {
             let _ = client_event_tx.send(error);
             continue;
@@ -3563,7 +3565,10 @@ pub(super) async fn handle_client_with_instruction_repositories(
                 });
             }
             Request::PrimaryInput { id, input } => {
-                let result = super::live_turn::submit_primary_input(&sessions, *input, super::live_turn::LiveTurnSwarmContext::new(&swarm_members, &swarms_by_id, &event_history, &event_counter, &swarm_event_tx)).await;
+                let result = async {
+                    Box::pin(sessions.restore(&input.session, &provider_template, &mcp_pool, &instruction_repositories)).await?;
+                    super::live_turn::submit_primary_input(&sessions, *input, super::live_turn::LiveTurnSwarmContext::new(&swarm_members, &swarms_by_id, &event_history, &event_counter, &swarm_event_tx)).await
+                }.await;
                 let event = match result {
                     Ok(receipt) => ServerEvent::PrimaryInputReceipt { id, receipt },
                     Err(error) => ServerEvent::Error { id, message: format!("{error:#}"), retry_after_secs: None },
@@ -4787,7 +4792,10 @@ async fn append_context_message(
     };
     let result = agent.append_user_context_message(content, images);
     let event = match result {
-        Ok(()) => ServerEvent::ContextMessageAdded { id },
+        Ok(()) => {
+            let _ = client_event_tx.send(ServerEvent::Ack { id });
+            ServerEvent::ContextMessageAdded { id }
+        }
         Err(error) => ServerEvent::Error {
             id,
             message: crate::util::format_error_chain(&error),
@@ -4893,6 +4901,7 @@ async fn start_processing_message(
         });
         return;
     }
+    let _ = client_event_tx.send(ServerEvent::Ack { id });
     *state.client_is_processing = true;
     *state.message_id = Some(id);
     *state.session_id = Some(client_session_id.to_string());
@@ -5160,7 +5169,7 @@ async fn process_admitted_message(
         .original(&session_id, input_id)?
         .context("Accepted primary input disappeared")?;
     let result = agent
-        .run_primary_input_correlated(input, Some(request_id), event_tx.clone())
+        .run_primary_input_correlated(input, Some(request_id), false, event_tx.clone())
         .await;
     emit_startup_apply_drain_events(&startup_context, agent, &event_tx);
     let startup_action = result

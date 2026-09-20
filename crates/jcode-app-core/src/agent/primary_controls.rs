@@ -44,7 +44,9 @@ impl Agent {
         input: jcode_session_types::PrimaryInputEnvelope,
         event_tx: mpsc::UnboundedSender<ServerEvent>,
     ) -> Result<()> {
-        self.run_primary_input_correlated(input, None, event_tx)
+        let observe = input.display_role.is_none()
+            && input.delivery != jcode_session_types::PrimaryInputDelivery::ContextOnly;
+        self.run_primary_input_correlated(input, None, observe, event_tx)
             .await
     }
 
@@ -52,6 +54,7 @@ impl Agent {
         &mut self,
         input: jcode_session_types::PrimaryInputEnvelope,
         request_id: Option<u64>,
+        observe_startup: bool,
         event_tx: mpsc::UnboundedSender<ServerEvent>,
     ) -> Result<()> {
         ensure!(
@@ -69,6 +72,11 @@ impl Agent {
             != jcode_session_types::PrimaryInputState::Accepted
         {
             return Ok(());
+        }
+        if observe_startup && let Err(error) = self.observe_startup_context_before_user_turn() {
+            crate::logging::warn(&format!(
+                "Primary input continues without a new Startup Context observation: {error}"
+            ));
         }
         self.pending_primary_input = Some(input.clone());
         let result = if input.delivery == jcode_session_types::PrimaryInputDelivery::ContextOnly {
@@ -117,7 +125,7 @@ impl Agent {
         let mut reminder = None;
         for input in pending {
             if input.delivery != jcode_session_types::PrimaryInputDelivery::SafeBoundary {
-                break;
+                continue;
             }
             if let Some(scope) = &scope {
                 if scope != &input.unattended_context
@@ -251,5 +259,73 @@ impl Agent {
             workspace.reconcile_location_change(record.operation)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct NoInference;
+    #[async_trait::async_trait]
+    impl Provider for NoInference {
+        async fn complete(
+            &self,
+            _: &[Message],
+            _: &[ToolDefinition],
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<crate::provider::EventStream> {
+            anyhow::bail!("Input commitment must not call a provider")
+        }
+        fn name(&self) -> &str {
+            "input-commit-fixture"
+        }
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(NoInference)
+        }
+    }
+
+    #[test]
+    fn deferred_input_does_not_block_safe_boundary_or_urgent_delivery() -> Result<()> {
+        let _environment = crate::auth::test_sandbox::AuthTestSandbox::new()?;
+        tokio::runtime::Runtime::new()?.block_on(async {
+            let provider: Arc<dyn Provider> = Arc::new(NoInference);
+            let registry = Registry::new(provider.clone()).await;
+            let mut agent = Agent::new(provider, registry);
+            let store = crate::primary_input::PrimaryInputStore::current();
+            let deferred = jcode_session_types::PrimaryInputEnvelope::new(
+                agent.session_id().into(),
+                "future turn".into(),
+                jcode_session_types::PrimaryInputDelivery::NextTurn,
+            );
+            store.accept(deferred.clone())?;
+            let current = jcode_session_types::PrimaryInputEnvelope::new(
+                agent.session_id().into(),
+                "current boundary".into(),
+                jcode_session_types::PrimaryInputDelivery::SafeBoundary,
+            );
+            store.accept(current)?;
+            let mut urgent = jcode_session_types::PrimaryInputEnvelope::new(
+                agent.session_id().into(),
+                "urgent current boundary".into(),
+                jcode_session_types::PrimaryInputDelivery::SafeBoundary,
+            );
+            urgent.urgent = true;
+            store.accept(urgent)?;
+            assert!(agent.has_urgent_interrupt());
+            let injected = agent.inject_primary_inputs()?;
+            assert_eq!(
+                injected
+                    .iter()
+                    .map(|item| item.content.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["current boundary", "urgent current boundary"]
+            );
+            assert_eq!(store.pending(agent.session_id())?, vec![deferred]);
+            assert_eq!(agent.session.primary_inputs.len(), 2);
+            assert!(!agent.has_urgent_interrupt());
+            Ok(())
+        })
     }
 }

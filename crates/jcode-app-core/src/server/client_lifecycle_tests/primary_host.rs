@@ -45,7 +45,7 @@ fn durable_primary_input_detached_replay_and_busy_boundary() -> Result<()> {
         let status = status_fixture(&session);
         let input = jcode_session_types::PrimaryInputEnvelope {
             id: crate::workspace::RequestId::new(), session: session.clone(), delivery: jcode_session_types::PrimaryInputDelivery::SafeBoundary,
-            content: "durable synthetic input".into(), images: vec![], display_role: None,
+            content: "durable synthetic input".into(), images: vec![("image/png".into(), "ZmFrZQ==".into())], display_role: None,
             origin: Some(jcode_session_types::StoredMessageOrigin::Human), system_reminder: None, unattended_context: None, urgent: false,
         };
         let accepted = crate::server::live_turn::submit_primary_input(&host, input.clone(), status.clone()).await?;
@@ -62,6 +62,7 @@ fn durable_primary_input_detached_replay_and_busy_boundary() -> Result<()> {
         let committed = crate::server::live_turn::submit_primary_input(&host, input.clone(), status.clone()).await?;
         assert_eq!(committed.state, jcode_session_types::PrimaryInputState::Committed);
         assert_eq!(recorder.snapshots.lock().unwrap().len(), 1);
+        assert!(recorder.snapshots.lock().unwrap()[0].iter().flat_map(|message| &message.content).any(|block| matches!(block, ContentBlock::Image { media_type, data } if media_type == "image/png" && data == "ZmFrZQ==")));
         let mut conflict = input.clone(); conflict.content.push('!');
         assert!(crate::server::live_turn::submit_primary_input(&host, conflict, status.clone()).await.is_err());
         // Reserve a real host turn while accepting another input. It remains

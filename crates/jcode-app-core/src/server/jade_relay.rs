@@ -1344,15 +1344,29 @@ mod tests {
     struct RelayProvider(Arc<std::sync::atomic::AtomicUsize>);
     #[async_trait::async_trait]
     impl crate::provider::Provider for RelayProvider {
-        async fn complete(&self, _: &[crate::message::Message], _: &[crate::message::ToolDefinition], _: &str, _: Option<&str>) -> Result<crate::provider::EventStream> {
+        async fn complete(
+            &self,
+            _: &[crate::message::Message],
+            _: &[crate::message::ToolDefinition],
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<crate::provider::EventStream> {
             self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(Box::pin(futures::stream::iter(vec![
-                Ok(crate::message::StreamEvent::TextDelta("synthetic relay reply".into())),
-                Ok(crate::message::StreamEvent::MessageEnd { stop_reason: Some("end_turn".into()) }),
+                Ok(crate::message::StreamEvent::TextDelta(
+                    "synthetic relay reply".into(),
+                )),
+                Ok(crate::message::StreamEvent::MessageEnd {
+                    stop_reason: Some("end_turn".into()),
+                }),
             ])))
         }
-        fn name(&self) -> &str { "relay-fixture" }
-        fn fork(&self) -> Arc<dyn crate::provider::Provider> { Arc::new(self.clone()) }
+        fn name(&self) -> &str {
+            "relay-fixture"
+        }
+        fn fork(&self) -> Arc<dyn crate::provider::Provider> {
+            Arc::new(self.clone())
+        }
     }
 
     #[test]
@@ -1363,32 +1377,88 @@ mod tests {
             let provider = RelayProvider::default();
             let source: Arc<dyn crate::provider::Provider> = Arc::new(provider.clone());
             let registry = crate::tool::Registry::new(source.clone()).await;
-            let agent = Arc::new(tokio::sync::Mutex::new(crate::agent::Agent::new(source.clone(),registry)));
+            let agent = Arc::new(tokio::sync::Mutex::new(crate::agent::Agent::new(
+                source.clone(),
+                registry,
+            )));
             let session = agent.lock().await.session_id().to_owned();
             let server = crate::server::Server::new(source);
-            server.sessions.write().await.insert(session.clone(),agent.clone());
+            server
+                .sessions
+                .write()
+                .await
+                .insert(session.clone(), agent.clone());
             let queues = Arc::new(RwLock::new(HashMap::new()));
-            let input = crate::primary_input::correlated_input_id("relay-test","one");
-            let reply = deliver_to_session(&session,input,"synthetic input",&server.sessions,&queues,server.swarm_state.members.clone()).await?;
-            assert_eq!(reply,"synthetic relay reply");
-            assert_eq!(deliver_to_session(&session,input,"synthetic input",&server.sessions,&queues,server.swarm_state.members.clone()).await?,reply);
-            assert!(deliver_to_session(&session,input,"conflicting input",&server.sessions,&queues,server.swarm_state.members.clone()).await.is_err());
-            assert_eq!(provider.0.load(std::sync::atomic::Ordering::SeqCst),1);
+            let input = crate::primary_input::correlated_input_id("relay-test", "one");
+            let reply = deliver_to_session(
+                &session,
+                input,
+                "synthetic input",
+                &server.sessions,
+                &queues,
+                server.swarm_state.members.clone(),
+            )
+            .await?;
+            assert_eq!(reply, "synthetic relay reply");
+            assert_eq!(
+                deliver_to_session(
+                    &session,
+                    input,
+                    "synthetic input",
+                    &server.sessions,
+                    &queues,
+                    server.swarm_state.members.clone()
+                )
+                .await?,
+                reply
+            );
+            assert!(
+                deliver_to_session(
+                    &session,
+                    input,
+                    "conflicting input",
+                    &server.sessions,
+                    &queues,
+                    server.swarm_state.members.clone()
+                )
+                .await
+                .is_err()
+            );
+            assert_eq!(provider.0.load(std::sync::atomic::Ordering::SeqCst), 1);
             let busy = agent.lock().await;
             let mut changes = server.sessions.subscribe();
             let queued = crate::workspace::RequestId::new();
-            deliver_to_session(&session,queued,"busy input",&server.sessions,&queues,server.swarm_state.members.clone()).await?;
-            assert_eq!(crate::primary_input::PrimaryInputStore::current().pending(&session)?.len(),1);
+            deliver_to_session(
+                &session,
+                queued,
+                "busy input",
+                &server.sessions,
+                &queues,
+                server.swarm_state.members.clone(),
+            )
+            .await?;
+            assert_eq!(
+                crate::primary_input::PrimaryInputStore::current()
+                    .pending(&session)?
+                    .len(),
+                1
+            );
             drop(busy);
-            tokio::time::timeout(Duration::from_secs(10),async {
+            tokio::time::timeout(Duration::from_secs(10), async {
                 loop {
-                    let receipt = crate::primary_input::PrimaryInputStore::current().inspect(&session,queued)?;
-                    if receipt.state == jcode_session_types::PrimaryInputState::Committed && server.sessions.processing(&session).is_none() { break; }
+                    let receipt = crate::primary_input::PrimaryInputStore::current()
+                        .inspect(&session, queued)?;
+                    if receipt.state == jcode_session_types::PrimaryInputState::Committed
+                        && server.sessions.processing(&session).is_none()
+                    {
+                        break;
+                    }
                     changes.changed().await?;
                 }
-                Ok::<_,anyhow::Error>(())
-            }).await??;
-            assert_eq!(provider.0.load(std::sync::atomic::Ordering::SeqCst),2);
+                Ok::<_, anyhow::Error>(())
+            })
+            .await??;
+            assert_eq!(provider.0.load(std::sync::atomic::Ordering::SeqCst), 2);
             server.sessions.shutdown().await
         })
     }
