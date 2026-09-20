@@ -7,7 +7,7 @@ not a behavioral model evaluation. Run through run_isolated_test.py.
 import os
 if not os.environ.get('JCODE_TEST_STATE_ROOT'):
     raise SystemExit('Run through scripts/run_isolated_test.py')
-import base64, json, shlex, socket, subprocess, tempfile, threading, time, traceback, uuid
+import base64, json, shlex, socket, sqlite3, subprocess, tempfile, threading, time, traceback, uuid
 from pathlib import Path
 import test_instruction_manager as f
 ipc=Path(tempfile.mkdtemp(prefix='pi-',dir=os.environ['JCODE_RUNTIME_DIR']))
@@ -130,7 +130,13 @@ def state(tid, test):
         except ValueError:return False
     wait(check,'TUI state')
 def frame(tid,name):
-    raw=command(tid,'screen-json'); (f.ROOT/(name+'.json')).write_text(raw); frames.append(name); return raw
+    found=[]
+    def capture():
+        raw=command(tid,'screen-json')
+        if raw.lstrip().startswith('{'): found.append(raw); return True
+        return False
+    wait(capture,'valid frame '+name,15)
+    raw=found[-1]; (f.ROOT/(name+'.json')).write_text(raw); frames.append(name); return raw
 
 def spawn(session,cols):
     wrapper=f.ROOT/('client-'+str(cols)+'.sh')
@@ -183,6 +189,9 @@ try:
     stored=json.loads((f.home/'sessions'/f'{session}.json').read_text())
     assert len(stored['primary_inputs'])==3
     assert len({receipt['id'] for receipt in stored['primary_inputs']})==3
+    with sqlite3.connect(f.home/'execution/index.sqlite') as database:
+        rows=database.execute("SELECT state FROM runs WHERE tool='bash'").fetchall()
+    assert rows==[('completed',),('completed',)],rows
     assert not errors,errors
     result.update(status='passed',session=session,exact_transport_replay=True,client_replacement=True,complete_soft_image=True,one_effect_each=True,provider_calls=len(captures),frames=frames)
 except Exception:

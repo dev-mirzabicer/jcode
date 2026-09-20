@@ -947,6 +947,24 @@ impl RemoteConnection {
         Ok(())
     }
 
+    fn normalize_input_event(&self, event: &mut ServerEvent) -> Result<bool> {
+        let mut guard = self.client_inputs.lock().expect("client inputs");
+        let Some(client) = guard.as_mut() else {
+            return Ok(true);
+        };
+        match event {
+            ServerEvent::PrimaryInputReceipt { receipt, .. } => {
+                if let Some(current) = client.receipt(&receipt.session, receipt.id)? {
+                    *receipt = current;
+                }
+            }
+            ServerEvent::PrimaryClientInputsCancelled { id, .. } => {
+                return Ok(client.cancelled_replies.insert(*id));
+            }
+            _ => {}
+        }
+        Ok(true)
+    }
     fn client_context_completion(&self, event: &ServerEvent) -> Result<Option<u64>> {
         let receipt = match event {
             ServerEvent::PrimaryInputReceipt { receipt, .. }
@@ -1930,6 +1948,15 @@ impl RemoteConnection {
                         "Client input receipt could not be persisted: {error:#}"
                     )));
                 }
+                match self.normalize_input_event(&mut event) {
+                    Ok(true) => {}
+                    Ok(false) => return LineOutcome::Skip,
+                    Err(error) => {
+                        return LineOutcome::Disconnect(RemoteDisconnectReason::Protocol(format!(
+                            "Input receipt needs recovery: {error:#}"
+                        )));
+                    }
+                }
                 match self.client_context_completion(&event) {
                     Ok(Some(id)) => event = ServerEvent::ContextMessageAdded { id },
                     Ok(None) => {}
@@ -2079,6 +2106,12 @@ impl RemoteConnection {
 
     /// Set session ID
     pub fn set_session_id(&mut self, id: String) {
+        if self.session_id.as_ref() != Some(&id) {
+            self.recovered_input_session = None;
+            if let Some(client) = self.client_inputs.lock().expect("client inputs").as_mut() {
+                client.active = None;
+            }
+        }
         self.session_id = Some(id);
     }
 

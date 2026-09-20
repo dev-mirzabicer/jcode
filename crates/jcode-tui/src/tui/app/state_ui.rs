@@ -313,6 +313,8 @@ impl App {
                 .map(|(_, content)| content.clone())
                 .collect::<Vec<_>>();
             let data = serde_json::json!({
+                "input_snapshot_version": 2,
+                "unidentified_delivery": !self.primary_input_journaled && (resume_prompt.is_some() || inflight_continuation.is_some() || !self.pending_soft_interrupts.is_empty() || self.rate_limit_pending_message.is_some()),
                 "cursor": resume_input.map(|input| input.len()).unwrap_or(self.cursor_pos),
                 "input": resume_input.unwrap_or(self.input.as_str()),
                 "pending_images": resume_images.unwrap_or(self.pending_images.as_slice()).iter().map(|(media_type, data)| serde_json::json!({
@@ -454,10 +456,19 @@ impl App {
                     ..Default::default()
                 });
             }
-            let legacy_uncertain = value
-                .get("primary_input_journaled")
-                .and_then(|v| v.as_bool())
-                != Some(true)
+            if let Some(queue) = value.get("queued_messages")
+                && serde_json::from_value::<crate::todo::QueuedMessages>(queue.clone()).is_err()
+            {
+                crate::logging::error("Invalid saved queue retained without replay");
+                return None;
+            }
+            let legacy_uncertain = (value.get("input_snapshot_version").and_then(|v| v.as_u64())
+                != Some(2)
+                || value.get("unidentified_delivery").and_then(|v| v.as_bool()) != Some(false))
+                && value
+                    .get("primary_input_journaled")
+                    .and_then(|v| v.as_bool())
+                    != Some(true)
                 && value.get("submission_kind").and_then(|v| v.as_str()) != Some("new_startup")
                 && (value.get("submit_on_restore").and_then(|v| v.as_bool()) == Some(true)
                     || value

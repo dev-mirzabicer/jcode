@@ -53,3 +53,23 @@ fn typed_remote_queue_preserves_intent_without_reading_client_instruction_source
     assert!(crate::tui::app::App::restore_input_for_reload("invalid-queue-fixture").is_none());
     assert!(damaged.exists());
 }
+
+#[test]
+fn durable_legacy_input_recovery_preserves_original_without_automatic_replay() {
+    let _environment=crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let home=crate::storage::jcode_dir().unwrap();
+    let original=serde_json::json!({"input":"uncertain Ω", "cursor":5,"pending_images":[{"media_type":"image/png","data":"complete"}],"submit_on_restore":true,"queued_messages":["also uncertain"],"rate_limit_reset_in_ms":0});
+    let bytes=serde_json::to_vec(&original).unwrap();
+    let path=home.join("client-input-legacy-fixture");
+    std::fs::write(&path,&bytes).unwrap();
+    let restored=crate::tui::app::App::restore_input_for_reload("legacy-fixture").unwrap();
+    assert!(!restored.submit_on_restore && restored.queued_messages.is_empty());
+    assert_eq!(restored.input,"uncertain Ω");
+    assert_eq!(restored.pending_images,vec![("image/png".into(),"complete".into())]);
+    let retained=std::fs::read_dir(&home).unwrap().filter_map(Result::ok).map(|entry|entry.path()).find(|path|path.file_name().unwrap().to_string_lossy().starts_with("client-input-legacy-fixture.legacy-")).unwrap();
+    assert_eq!(std::fs::read(retained).unwrap(),bytes);
+    crate::client_input::save_startup_submission_for_session("fresh-fixture","new intent".into(),vec![("image/png".into(),"image".into())]);
+    let fresh=crate::tui::app::App::restore_input_for_reload("fresh-fixture").unwrap();
+    assert!(fresh.submit_on_restore);
+    assert_eq!(fresh.pending_images.len(),1);
+}

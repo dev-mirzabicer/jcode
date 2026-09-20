@@ -1205,6 +1205,16 @@ pub(in crate::tui::app) fn handle_server_event(
             true
         }
         ServerEvent::PrimaryClientInputsCancelled { receipts, .. } => {
+            let receipts = receipts
+                .into_iter()
+                .filter(|receipt| {
+                    app.remote_session_id.as_deref() == Some(receipt.session.as_str())
+                })
+                .collect::<Vec<_>>();
+            if receipts.is_empty() {
+                return false;
+            }
+            let mut controls = crate::todo::QueuedMessages::default();
             let mut restored = Vec::new();
             let mut images = Vec::new();
             for receipt in &receipts {
@@ -1215,11 +1225,21 @@ pub(in crate::tui::app) fn handle_server_event(
                     && let Ok(Some(source)) =
                         remote.primary_input_source(&receipt.session, receipt.id)
                 {
-                    restored.push(source.input.content);
+                    if let Some(entries) = source.queued_messages {
+                        for entry in entries {
+                            match entry.human_text() {
+                                Some(text) => restored.push(text.into()),
+                                None => controls.push(entry),
+                            }
+                        }
+                    } else if !source.input.content.is_empty() {
+                        restored.push(source.input.content);
+                    }
                     images.extend(source.input.images);
                 }
             }
-            if app.input.is_empty() && !restored.is_empty() {
+            app.queued_messages.extend(controls);
+            if app.input.is_empty() && (!restored.is_empty() || !images.is_empty()) {
                 app.clear_pending_soft_interrupt_tracking();
                 app.retrieve_pending_message_for_edit();
                 if !app.input.is_empty() {
@@ -1241,11 +1261,17 @@ pub(in crate::tui::app) fn handle_server_event(
             true
         }
         ServerEvent::PrimaryInputFinished { receipt } => {
+            if app.remote_session_id.as_deref() != Some(receipt.session.as_str()) {
+                return false;
+            }
             app.pending_primary_next.retain(|(id, _)| *id != receipt.id);
             app.pending_primary_soft.remove(&receipt.id);
             false
         }
         ServerEvent::PrimaryInputReceipt { id, receipt } => {
+            if app.remote_session_id.as_deref() != Some(receipt.session.as_str()) {
+                return false;
+            }
             let tracked = app.acknowledge_pending_soft_interrupt(id);
             if receipt.state == crate::primary_input::PrimaryInputState::Accepted
                 && app.primary_retry_id != Some(receipt.id)
@@ -1747,6 +1773,11 @@ pub(in crate::tui::app) fn handle_server_event(
             {
                 app.begin_remote_startup_context_session(&session_id);
             }
+            if app.remote_session_id.as_deref() != Some(session_id.as_str()) {
+                app.pending_primary_next.clear();
+                app.pending_primary_soft.clear();
+                app.primary_retry_id = None;
+            }
             remote.set_session_id(session_id.clone());
             app.primary_input_journaled = remote.durable_primary_input();
             app.remote_session_id = Some(session_id.clone());
@@ -2127,6 +2158,11 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.status = ProcessingStatus::Idle;
                 app.processing_started = None;
                 app.remote_resume_activity = None;
+            }
+            if app.remote_session_id.as_deref() != Some(session_id.as_str()) {
+                app.pending_primary_next.clear();
+                app.pending_primary_soft.clear();
+                app.primary_retry_id = None;
             }
             remote.set_session_id(session_id.clone());
             app.primary_input_journaled = remote.durable_primary_input();

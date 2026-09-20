@@ -30,6 +30,7 @@ pub(super) struct ClientInputs {
     pub active: Option<RequestId>,
     pub requests: std::collections::HashMap<u64, (String, RequestId)>,
     retry: Option<PrimaryClientInput>,
+    pub cancelled_replies: std::collections::HashSet<u64>,
 }
 
 fn private_dir(path: &Path) -> Result<()> {
@@ -91,6 +92,7 @@ impl ClientInputs {
             active: None,
             requests: Default::default(),
             retry: None,
+            cancelled_replies: Default::default(),
         })
     }
     fn directory(&self, session: &str) -> Result<PathBuf> {
@@ -301,6 +303,23 @@ impl ClientInputs {
             "Client input target mismatch"
         );
         Ok((record.owner == self.owner).then_some(record.request))
+    }
+    pub fn receipt(&self, session: &str, id: RequestId) -> Result<Option<PrimaryInputReceipt>> {
+        let (directory, _lease) = self.lease(session)?;
+        let path = directory.join(format!("{id}.json"));
+        if !path.try_exists()? {
+            return Ok(None);
+        }
+        let record = Self::read(&path)?;
+        ensure!(
+            record.request.input.session == session,
+            "Receipt target mismatch"
+        );
+        Ok(if record.owner == self.owner {
+            record.receipt
+        } else {
+            None
+        })
     }
     pub fn observe(&mut self, receipt: &PrimaryInputReceipt, terminal: bool) -> Result<()> {
         let (directory, _lease) = self.lease(&receipt.session)?;

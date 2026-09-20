@@ -88,9 +88,40 @@ They preserve UUID/session/operation correlation and reject unsupported or
 mismatched replies. Location rejection stays a structured domain result.
 These controls do not attach the client or construct an inference Session.
 
-Existing TUI transport-recovery adoption is under explicit WP-04 review. The
-UUID API provides cross-connection deduplication; legacy resends using a new
-transport identity are new submissions, not an exact-once guarantee.
+## TUI delivery and recovery
+
+The current TUI negotiates `client_input_version=1` on the existing primary
+stream handshake. Before transport, it writes the complete input, images,
+queued instruction intent and launch settings to a private per-input journal
+under `client-primary-inputs/<endpoint-digest>/<session>/`. A kernel-held client
+lease prevents another live client taking over its pending inputs. After client
+replacement, abandoned records can be reconciled for the same endpoint/Session.
+The journal is not another transcript or workflow store.
+
+Reconnect reuses the original UUID and payload when acceptance is uncertain.
+Acknowledged input is inspected instead of being resubmitted. Queue mode sends
+complete `next_turn` input to the runtime, while ordinary interleave keeps its
+safe-boundary semantics. Offline input retains images too. The UI stall guard
+requests runtime state rather than cancelling and replaying accepted work.
+A known failed provider attempt can use the existing retry/fallback policy with
+a new UUID, preserving the complete original settings and retry budget. This
+remains distinct from transport recovery and does not promise exactly-once
+provider execution.
+
+Ctrl-Up requests exact pending-input cancellation before restoring the cancelled
+text/images for editing. Already committed input cannot be withdrawn. Cancellation
+received before the original request creates a non-runnable tombstone. If queued
+prose was never prepared, its original typed intent remains retained in the
+client journal and the server's cancellation record, not fabricated as rendered
+provider text. The generic input-read API returns the accepted envelope.
+
+New explicit startup submissions have a structural `new_startup` marker.
+Unidentifiable older in-flight reload snapshots are retained in a `.legacy-*`
+file for human review and are not automatically resent. Known unsent current
+snapshots remain usable. Historical bytes that an older client never saved,
+such as some old text-only queue attachments, cannot be reconstructed. New
+journaled submissions preserve their complete payload. Unsupported older
+runtimes retain legacy protocol behavior but cannot claim UUID-based recovery.
 
 ## Input persistence and recovery
 
