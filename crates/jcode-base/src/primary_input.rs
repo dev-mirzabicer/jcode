@@ -10,6 +10,7 @@ use jcode_workspace_types::RequestId;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{File, OpenOptions};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 #[derive(Serialize, Deserialize)]
@@ -32,11 +33,28 @@ pub struct PrimaryInputStore {
 pub struct InputLease {
     path: PathBuf,
     inbox: Inbox,
-    _file: File,
+    file: File,
+    initialized: bool,
 }
+const INPUT_INITIALIZED: &[u8] = b"jcode-primary-input-v1\n";
 
 pub fn input_digest(input: &PrimaryInputEnvelope) -> Result<String> {
     Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(input)?)))
+}
+
+/// Stable domain correlation for legacy transport scopes and producer-owned
+/// execution IDs. Content is validated independently, never part of the ID.
+pub fn correlated_input_id(producer: &str, identity: &str) -> RequestId {
+    let mut hash = Sha256::new();
+    hash.update(producer.as_bytes());
+    hash.update([0]);
+    hash.update(identity.as_bytes());
+    let bytes = hash.finalize();
+    uuid::Uuid::from_slice(&bytes[..16])
+        .expect("sixteen digest bytes")
+        .to_string()
+        .parse()
+        .expect("UUID input identity")
 }
 
 impl PrimaryInputStore {
@@ -47,6 +65,28 @@ impl PrimaryInputStore {
     }
     pub fn current() -> Self {
         Self::new(&crate::storage::durable_state_dir())
+    }
+
+    /// Names only. Callers inspect each independently so a damaged inbox does
+    /// not suppress delivery or diagnostics for unrelated primaries.
+    pub fn sessions(&self) -> Result<Vec<String>> {
+        let entries = match std::fs::read_dir(&self.root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+        let mut sessions = std::collections::BTreeSet::new();
+        for entry in entries {
+            let path = entry?.path();
+            if matches!(
+                path.extension().and_then(|value| value.to_str()),
+                Some("json" | "lock")
+            ) && let Some(name) = path.file_stem().and_then(|value| value.to_str())
+            {
+                sessions.insert(name.to_owned());
+            }
+        }
+        Ok(sessions.into_iter().collect())
     }
 
     pub fn lock(&self, session: &str) -> Result<InputLease> {
@@ -72,12 +112,23 @@ impl PrimaryInputStore {
                 .mode(0o600)
                 .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
         }
-        let file = options.open(self.root.join(format!("{session}.lock")))?;
+        let mut file = options.open(self.root.join(format!("{session}.lock")))?;
         ensure!(
             file.metadata()?.is_file(),
             "Primary input lease is not a regular file"
         );
-        file.try_lock().context("Primary input admission is busy")?;
+        // This lease spans only synchronous persistence, never a provider or
+        // async wait. An inspection racing admission must not strand delivery.
+        file.lock().context("Acquire primary input admission")?;
+        let mut marker = Vec::new();
+        std::io::Read::by_ref(&mut file)
+            .take(128)
+            .read_to_end(&mut marker)?;
+        ensure!(
+            marker.is_empty() || marker == INPUT_INITIALIZED,
+            "Primary input initialization record is damaged"
+        );
+        let initialized = !marker.is_empty();
         let path = self.root.join(format!("{session}.json"));
         let inbox = match std::fs::symlink_metadata(&path) {
             Ok(metadata) => {
@@ -89,7 +140,7 @@ impl PrimaryInputStore {
                 // resurrect cancelled input or forget accepted identities.
                 serde_json::from_slice::<Inbox>(&std::fs::read(&path)?)?
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Inbox {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && !initialized => Inbox {
                 version: 1,
                 session: session.into(),
                 records: Vec::new(),
@@ -113,7 +164,8 @@ impl PrimaryInputStore {
         Ok(InputLease {
             path,
             inbox,
-            _file: file,
+            file,
+            initialized,
         })
     }
 
@@ -148,8 +200,20 @@ impl PrimaryInputStore {
         Ok(lease.record(id)?.receipt.clone())
     }
 
+    pub fn original(&self, session: &str, id: RequestId) -> Result<Option<PrimaryInputEnvelope>> {
+        let lease = self.lock(session)?;
+        Ok(lease
+            .inbox
+            .records
+            .iter()
+            .find(|record| record.input.id == id)
+            .map(|record| record.input.clone()))
+    }
+
     pub fn pending(&self, session: &str) -> Result<Vec<PrimaryInputEnvelope>> {
-        if !self.root.join(format!("{session}.json")).try_exists()? {
+        if !self.root.join(format!("{session}.json")).try_exists()?
+            && !self.root.join(format!("{session}.lock")).try_exists()?
+        {
             return Ok(Vec::new());
         }
         let mut lease = self.lock(session)?;
@@ -175,11 +239,30 @@ impl PrimaryInputStore {
         record.receipt.issue = Some(detail);
         lease.save()
     }
+
+    pub fn cancel_pending_interrupts(&self, session: &str) -> Result<()> {
+        let mut lease = self.lock(session)?;
+        lease.reconcile(&crate::session::Session::load_startup_stub(session)?)?;
+        for record in &mut lease.inbox.records {
+            if record.input.delivery == PrimaryInputDelivery::SafeBoundary
+                && record.receipt.state == PrimaryInputState::Accepted
+            {
+                record.receipt.state = PrimaryInputState::Cancelled;
+            }
+        }
+        lease.save()
+    }
 }
 
 impl InputLease {
-    fn save(&self) -> Result<()> {
-        crate::storage::write_json_secret(&self.path, &self.inbox)
+    fn save(&mut self) -> Result<()> {
+        crate::storage::write_json_secret(&self.path, &self.inbox)?;
+        if !self.initialized {
+            self.file.write_all(INPUT_INITIALIZED)?;
+            self.file.sync_all()?;
+            self.initialized = true;
+        }
+        Ok(())
     }
     fn record(&self, id: RequestId) -> Result<&Record> {
         self.inbox
@@ -294,6 +377,7 @@ mod tests {
             origin: Some(jcode_session_types::StoredMessageOrigin::Human),
             system_reminder: None,
             unattended_context: None,
+            urgent: false,
         };
         let accepted = store.accept(input.clone())?;
         assert_eq!(accepted.state, PrimaryInputState::Accepted);
@@ -336,7 +420,11 @@ mod tests {
         pending.id = RequestId::new();
         store.accept(pending.clone())?;
         let mut lease = store.lock(&session.id)?;
-        assert!(store.lock(&session.id).is_err());
+        let contender = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(store.root.join(format!("{}.lock", session.id)))?;
+        assert!(contender.try_lock().is_err());
         assert!(lease.cancel(&session, input.id).is_err());
         assert_eq!(
             lease.cancel(&session, pending.id)?.state,

@@ -203,12 +203,51 @@ fn primary_launch_journal_reconciles_checkpoint_without_duplicate_publication() 
             1
         );
         // A launch retry is a historical receipt, not a later location rewrite.
+        let published_snapshot = service
+            .backup(RequestId::new(), format!("published-{stage}"))
+            .unwrap();
         session.location.as_mut().unwrap().revision += 1;
         session.location.as_mut().unwrap().last_operation = Some(OperationId::new());
         session.save().unwrap();
         assert_eq!(
             service.reconcile_primary_launch(request).unwrap(),
             completed
+        );
+        let moved_source =
+            std::fs::read(crate::session::session_path(&session.id).unwrap()).unwrap();
+        let restore = service.review_restore(published_snapshot.id).unwrap();
+        service.apply_restore(RequestId::new(), restore.id).unwrap();
+        assert_eq!(
+            service.inspect_primary_launch(request).unwrap().state,
+            PrimaryLaunchState::Complete
+        );
+        assert!(
+            !service
+                .sessions(None, None, 100)
+                .unwrap()
+                .into_iter()
+                .find(|index| index.session == session.id)
+                .unwrap()
+                .reconciled
+        );
+        session.require_published_primary().unwrap();
+        let index = service
+            .sessions(None, None, 100)
+            .unwrap()
+            .into_iter()
+            .find(|index| index.session == session.id)
+            .unwrap();
+        assert_eq!(
+            index.session_revision,
+            session.location.as_ref().unwrap().revision
+        );
+        assert_eq!(
+            Some(index.operation),
+            session.location.as_ref().unwrap().last_operation
+        );
+        assert_eq!(
+            std::fs::read(crate::session::session_path(&session.id).unwrap()).unwrap(),
+            moved_source
         );
     }
 }

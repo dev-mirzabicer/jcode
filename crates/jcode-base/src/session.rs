@@ -943,6 +943,13 @@ impl Session {
                 "Primary cwd differs from its authoritative binding"
             );
         }
+        self.require_primary_publication()
+    }
+
+    /// Inspection and an explicit location repair may retain an unavailable
+    /// cwd. Publication integrity still applies; dispatch separately requires
+    /// the witnessed location to be available.
+    pub fn require_primary_publication(&self) -> anyhow::Result<()> {
         if let Some(creation) = &self.primary_creation {
             anyhow::ensure!(
                 creation.ready,
@@ -959,6 +966,18 @@ impl Session {
                 "Primary publication needs reconciliation; resume launch request {}",
                 creation.request
             );
+            if let Some(location) = &self.location {
+                service.reconcile_session_index(&jcode_workspace_types::SessionIndex {
+                    session: self.id.clone(),
+                    placement: location.placement,
+                    session_revision: location.revision,
+                    operation: location
+                        .last_operation
+                        .context("Primary location has no operation")?,
+                    active: true,
+                    reconciled: true,
+                })?;
+            }
         }
         Ok(())
     }

@@ -29,6 +29,25 @@ pub struct PrimaryInputEnvelope {
     pub system_reminder: Option<String>,
     #[serde(default)]
     pub unattended_context: Option<StoredUnattendedContextAuthorization>,
+    #[serde(default)]
+    pub urgent: bool,
+}
+
+impl PrimaryInputEnvelope {
+    pub fn new(session: String, content: String, delivery: PrimaryInputDelivery) -> Self {
+        Self {
+            id: RequestId::new(),
+            session,
+            delivery,
+            content,
+            images: Vec::new(),
+            display_role: None,
+            origin: None,
+            system_reminder: None,
+            unattended_context: None,
+            urgent: false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
