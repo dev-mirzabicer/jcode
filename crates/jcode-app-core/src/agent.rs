@@ -11,6 +11,7 @@ mod interrupts;
 mod isolated;
 mod messages;
 mod preflight;
+mod primary_controls;
 mod prompting;
 mod provider;
 mod response_recovery;
@@ -339,6 +340,7 @@ impl From<crate::instruction::SystemPromptActivationError> for PrimaryInstructio
 pub struct Agent {
     pub(crate) primary_owner: Option<Arc<crate::primary::PrimaryLease>>,
     pub(crate) primary_presentation: Option<Arc<crate::primary::presentation::Presentation>>,
+    pub(crate) pending_primary_input: Option<jcode_session_types::PrimaryInputEnvelope>,
     provider: Arc<dyn Provider>,
     registry: Registry,
     skills: Arc<SkillRegistry>,
@@ -439,6 +441,7 @@ impl Agent {
         let agent = Self {
             primary_owner: None,
             primary_presentation: None,
+            pending_primary_input: None,
             provider,
             registry,
             skills,
@@ -976,6 +979,7 @@ impl Agent {
     }
 
     fn reset_runtime_state_for_session_change(&mut self) {
+        self.pending_primary_input = None;
         self.last_upstream_provider = None;
         self.last_connection_type = None;
         self.last_status_detail = None;

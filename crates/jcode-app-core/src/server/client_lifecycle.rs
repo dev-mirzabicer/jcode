@@ -62,7 +62,9 @@ use crate::session::Session;
 use crate::tool::Registry;
 use crate::transport::Stream;
 use anyhow::{Context, Result};
-use jcode_agent_runtime::{InterruptSignal, SoftInterruptSource};
+use jcode_agent_runtime::InterruptSignal;
+#[cfg(test)]
+use jcode_agent_runtime::SoftInterruptSource;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{
@@ -167,6 +169,7 @@ fn initial_subscribe_allows_fresh_fallback(request: &Request) -> bool {
 }
 
 struct ProcessingMessage {
+    input_id: crate::workspace::RequestId,
     queued_messages: Option<Vec<crate::todo::QueuedMessage>>,
     id: u64,
     content: String,
@@ -566,6 +569,78 @@ pub(super) async fn handle_client_with_instruction_repositories(
 
         match decode_request(&line) {
             Ok(request) => {
+                if let Some(event) = primary_control_read(&request) {
+                    write_direct_event(&writer, &event).await?;
+                    continue;
+                }
+                if let Request::PrimaryInputInspect { id, session, input } = &request {
+                    let event = match crate::primary_input::PrimaryInputStore::current()
+                        .inspect(session, *input)
+                    {
+                        Ok(receipt) => ServerEvent::PrimaryInputReceipt { id: *id, receipt },
+                        Err(error) => ServerEvent::Error {
+                            id: *id,
+                            message: format!("{error:#}"),
+                            retry_after_secs: None,
+                        },
+                    };
+                    write_direct_event(&writer, &event).await?;
+                    continue;
+                }
+                if let Request::PrimaryInput { id, input } = &request {
+                    let result = async {
+                        sessions
+                            .restore(
+                                &input.session,
+                                &provider_template,
+                                &mcp_pool,
+                                &instruction_repositories,
+                            )
+                            .await?;
+                        super::live_turn::submit_primary_input(
+                            &sessions,
+                            *input.clone(),
+                            super::live_turn::LiveTurnSwarmContext::new(
+                                &swarm_members,
+                                &swarms_by_id,
+                                &event_history,
+                                &event_counter,
+                                &swarm_event_tx,
+                            ),
+                        )
+                        .await
+                    }
+                    .await;
+                    let event = match result {
+                        Ok(receipt) => ServerEvent::PrimaryInputReceipt { id: *id, receipt },
+                        Err(error) => ServerEvent::Error {
+                            id: *id,
+                            message: format!("{error:#}"),
+                            retry_after_secs: None,
+                        },
+                    };
+                    write_direct_event(&writer, &event).await?;
+                    continue;
+                }
+                if let Request::PrimaryLocation { id, command } = &request {
+                    let response = sessions
+                        .request_location_restoring(
+                            *command.clone(),
+                            &provider_template,
+                            &mcp_pool,
+                            &instruction_repositories,
+                        )
+                        .await;
+                    write_direct_event(
+                        &writer,
+                        &ServerEvent::PrimaryLocationResponse {
+                            id: *id,
+                            response: Box::new(response),
+                        },
+                    )
+                    .await?;
+                    continue;
+                }
                 if let Request::PrimaryStreamSubscribe { id } = &request {
                     primary_stream_enabled = true;
                     write_direct_event(
@@ -624,7 +699,6 @@ pub(super) async fn handle_client_with_instruction_repositories(
                         unattended_context.clone(),
                         NotifySessionContext {
                             sessions: &sessions,
-                            soft_interrupt_queues: &soft_interrupt_queues,
                             swarm_members: &swarm_members,
                             swarms_by_id: &swarms_by_id,
                             event_history: &event_history,
@@ -1513,6 +1587,9 @@ pub(super) async fn handle_client_with_instruction_repositories(
             request => (request, None),
         };
         match request {
+            Request::PrimaryControlProbe { .. } | Request::PrimaryInputRead { .. } => {
+                if let Some(event) = primary_control_read(&request) { let _ = client_event_tx.send(event); }
+            }
             Request::PrimaryStreamSubscribe{id} => {
                 client_event_tx.enable_primary_stream();
                 let _=client_event_tx.send(ServerEvent::PrimaryStreamCapabilities{id,version:1});
@@ -1553,6 +1630,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
                 }
                 start_processing_message(
                     ProcessingMessage {
+                        input_id: crate::primary_input::correlated_input_id("message", &format!("{client_connection_id}:{client_session_id}:{id}")),
                         queued_messages,
                         id,
                         content,
@@ -1619,15 +1697,16 @@ pub(super) async fn handle_client_with_instruction_repositories(
                 images,
                 urgent,
             } => {
-                queue_soft_interrupt(
-                    id,
-                    content,
-                    images,
-                    urgent,
-                    SoftInterruptSource::User,
-                    &session_control,
-                    &client_event_tx,
-                );
+                let mut input = jcode_session_types::PrimaryInputEnvelope::new(client_session_id.clone(), content, jcode_session_types::PrimaryInputDelivery::SafeBoundary);
+                input.id = crate::primary_input::correlated_input_id("soft-interrupt", &format!("{}:{client_session_id}:{id}", client_connection_id.as_str()));
+                input.images = images;
+                input.urgent = urgent;
+                input.origin = Some(jcode_session_types::StoredMessageOrigin::Human);
+                let swarm = super::live_turn::LiveTurnSwarmContext::new(&swarm_members,&swarms_by_id,&event_history,&event_counter,&swarm_event_tx);
+                match super::live_turn::submit_primary_input(&sessions,input,swarm).await {
+                    Ok(_) => { let _ = client_event_tx.send(ServerEvent::Ack{id}); }
+                    Err(error) => { let _ = client_event_tx.send(ServerEvent::Error{id,message:format!("{error:#}"),retry_after_secs:None}); }
+                }
             }
 
             Request::CancelSoftInterrupts { id } => {
@@ -3472,6 +3551,32 @@ pub(super) async fn handle_client_with_instruction_repositories(
             Request::PrimaryLaunchProbe{id}=>{
                 let _=client_event_tx.send(ServerEvent::PrimaryLaunchCapabilities{id,version:1,enabled:crate::primary::launch_enabled()});
             }
+            Request::PrimaryLocation { id, command } => {
+                let host = sessions.clone();
+                let tx = client_event_tx.clone();
+                let provider = provider_template.clone();
+                let pool = mcp_pool.clone();
+                let repositories = instruction_repositories.clone();
+                sessions.retain_delivery(async move {
+                    let response = host.request_location_restoring(*command, &provider, &pool, &repositories).await;
+                    let _ = tx.send(ServerEvent::PrimaryLocationResponse { id, response: Box::new(response) });
+                });
+            }
+            Request::PrimaryInput { id, input } => {
+                let result = super::live_turn::submit_primary_input(&sessions, *input, super::live_turn::LiveTurnSwarmContext::new(&swarm_members, &swarms_by_id, &event_history, &event_counter, &swarm_event_tx)).await;
+                let event = match result {
+                    Ok(receipt) => ServerEvent::PrimaryInputReceipt { id, receipt },
+                    Err(error) => ServerEvent::Error { id, message: format!("{error:#}"), retry_after_secs: None },
+                };
+                let _ = client_event_tx.send(event);
+            }
+            Request::PrimaryInputInspect { id, session, input } => {
+                let event = match crate::primary_input::PrimaryInputStore::current().inspect(&session, input) {
+                    Ok(receipt) => ServerEvent::PrimaryInputReceipt { id, receipt },
+                    Err(error) => ServerEvent::Error { id, message: format!("{error:#}"), retry_after_secs: None },
+                };
+                let _ = client_event_tx.send(event);
+            }
             Request::PrimaryLaunch{id,request}=>{
                 let host=sessions.clone();let provider=provider_template.clone();let pool=mcp_pool.clone();let repositories=(*instruction_repositories).clone();let tx=client_event_tx.clone();
                 inspection_requests.spawn(async move {
@@ -3693,6 +3798,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
             Request::AgentTask { id, task, .. } => {
                 start_processing_message(
                     ProcessingMessage {
+                        input_id: crate::primary_input::correlated_input_id("agent-task", &format!("{client_connection_id}:{client_session_id}:{id}")),
                         queued_messages: None,
                         id,
                         content: task,
@@ -3744,7 +3850,6 @@ pub(super) async fn handle_client_with_instruction_repositories(
                     unattended_context,
                     NotifySessionContext {
                         sessions: &sessions,
-                        soft_interrupt_queues: &soft_interrupt_queues,
                         swarm_members: &swarm_members,
                         swarms_by_id: &swarms_by_id,
                         event_history: &event_history,
@@ -4567,6 +4672,37 @@ fn startup_context_session_snapshot(
     Ok(super::startup_context::StartupContextSessionSnapshot::from_session(&session))
 }
 
+fn primary_control_read(request: &Request) -> Option<ServerEvent> {
+    match request {
+        Request::PrimaryControlProbe { id } => Some(ServerEvent::PrimaryControlCapabilities {
+            id: *id,
+            input_version: 1,
+            location_version: 1,
+            location_enabled: crate::primary::launch_enabled(),
+        }),
+        Request::PrimaryInputRead { id, session, input } => {
+            let result = (|| -> Result<_> {
+                let store = crate::primary_input::PrimaryInputStore::current();
+                let receipt = store.inspect(session, *input)?;
+                let input = store
+                    .original(session, *input)?
+                    .context("Original primary input is unavailable")?;
+                Ok(ServerEvent::PrimaryInputDetail {
+                    id: *id,
+                    receipt,
+                    input: Box::new(input),
+                })
+            })();
+            Some(result.unwrap_or_else(|error| ServerEvent::Error {
+                id: *id,
+                message: format!("{error:#}"),
+                retry_after_secs: None,
+            }))
+        }
+        _ => None,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn startup_context_file_detail(
     coordinator: &super::startup_context::StartupContextCoordinator,
@@ -4661,6 +4797,33 @@ async fn append_context_message(
     let _ = client_event_tx.send(event);
 }
 
+fn accept_processing_input(agent: &Agent, message: &ProcessingMessage) -> Result<()> {
+    let (content, origin) = match &message.queued_messages {
+        Some(entries) => {
+            let (text, origin) = crate::todo::render_queued_messages(
+                entries,
+                agent.working_dir().map(std::path::Path::new),
+            )?;
+            (text, Some(origin))
+        }
+        None => (
+            message.content.clone(),
+            Some(jcode_session_types::StoredMessageOrigin::Human),
+        ),
+    };
+    let mut input = jcode_session_types::PrimaryInputEnvelope::new(
+        agent.session_id().into(),
+        content,
+        jcode_session_types::PrimaryInputDelivery::NextTurn,
+    );
+    input.id = message.input_id;
+    input.origin = origin;
+    input.images = message.images.clone();
+    input.system_reminder = message.system_reminder.clone();
+    crate::primary_input::PrimaryInputStore::current().accept(input)?;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn start_processing_message(
     message: ProcessingMessage,
@@ -4715,6 +4878,20 @@ async fn start_processing_message(
                 return;
             }
         }
+    }
+    if let Err(error) = accept_processing_input(&admission.agent, &message) {
+        if message.queued_messages.is_some() {
+            let _ = client_event_tx.send(ServerEvent::QueuedMessagesRejected {
+                id,
+                message: format!("{error:#}"),
+            });
+        }
+        let _ = client_event_tx.send(ServerEvent::Error {
+            id,
+            message: format!("{error:#}"),
+            retry_after_secs: None,
+        });
+        return;
     }
     *state.client_is_processing = true;
     *state.message_id = Some(id);
@@ -4843,35 +5020,22 @@ fn names_only_available_models_event(event: &ServerEvent) -> Option<ServerEvent>
     })
 }
 
-fn queue_soft_interrupt(
-    id: u64,
-    content: String,
-    images: Vec<(String, String)>,
-    urgent: bool,
-    source: SoftInterruptSource,
-    session_control: &SessionControlHandle,
-    client_event_tx: &crate::client_delivery::ClientEventSender,
-) {
-    let content_bytes = content.len();
-    let content_chars = content.chars().count();
-    crate::logging::info(&format!(
-        "SERVER_SOFT_INTERRUPT_QUEUE_REQUEST id={} session={} source={:?} urgent={} content_bytes={} content_chars={}",
-        id, session_control.session_id, source, urgent, content_bytes, content_chars
-    ));
-    let queued = session_control.queue_soft_interrupt(content, images, urgent, source);
-    let ack_queued = client_event_tx.send(ServerEvent::Ack { id }).is_ok();
-    crate::logging::info(&format!(
-        "SERVER_SOFT_INTERRUPT_QUEUE_RESULT id={} session={} queued={} ack_queued={}",
-        id, session_control.session_id, queued, ack_queued
-    ));
-}
-
 fn clear_soft_interrupts(
     id: u64,
     session_id: &str,
     session_control: &SessionControlHandle,
     client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
+    if let Err(error) =
+        crate::primary_input::PrimaryInputStore::current().cancel_pending_interrupts(session_id)
+    {
+        let _ = client_event_tx.send(ServerEvent::Error {
+            id,
+            message: format!("Could not cancel durable pending input: {error:#}"),
+            retry_after_secs: None,
+        });
+        return;
+    }
     crate::logging::info(&format!(
         "SERVER_SOFT_INTERRUPT_CLEAR_REQUEST id={} session={} control_session={}",
         id, session_id, session_control.session_id
@@ -4948,11 +5112,12 @@ async fn process_admitted_message(
     event_tx: tokio::sync::mpsc::UnboundedSender<ServerEvent>,
 ) -> Result<()> {
     let ProcessingMessage {
+        input_id,
         id: request_id,
-        queued_messages,
-        content,
-        images,
-        system_reminder,
+        queued_messages: _,
+        content: _,
+        images: _,
+        system_reminder: _,
         observe_startup_context,
         activate_skill: _,
     } = message;
@@ -4991,26 +5156,12 @@ async fn process_admitted_message(
             });
         }
     }
-    let result = if let Some(entries) = queued_messages {
-        agent
-            .run_queued_streaming_mpsc(
-                Some(request_id),
-                &entries,
-                system_reminder,
-                event_tx.clone(),
-            )
-            .await
-    } else {
-        agent
-            .run_once_streaming_mpsc_correlated(
-                request_id,
-                &content,
-                images,
-                system_reminder,
-                event_tx.clone(),
-            )
-            .await
-    };
+    let input = crate::primary_input::PrimaryInputStore::current()
+        .original(&session_id, input_id)?
+        .context("Accepted primary input disappeared")?;
+    let result = agent
+        .run_primary_input_correlated(input, Some(request_id), event_tx.clone())
+        .await;
     emit_startup_apply_drain_events(&startup_context, agent, &event_tx);
     let startup_action = result
         .as_ref()

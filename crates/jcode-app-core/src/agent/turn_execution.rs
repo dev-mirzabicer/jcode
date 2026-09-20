@@ -1,11 +1,12 @@
 use super::*;
 use crate::{terminal_eprintln as eprintln, terminal_println as println};
 
-struct StreamingTurnContext {
-    request_id: Option<u64>,
-    display_role: Option<crate::session::StoredDisplayRole>,
-    unattended_context: Option<jcode_session_types::StoredUnattendedContextAuthorization>,
-    origin: Option<jcode_session_types::StoredMessageOrigin>,
+pub(super) struct StreamingTurnContext {
+    pub(super) request_id: Option<u64>,
+    pub(super) display_role: Option<crate::session::StoredDisplayRole>,
+    pub(super) unattended_context:
+        Option<jcode_session_types::StoredUnattendedContextAuthorization>,
+    pub(super) origin: Option<jcode_session_types::StoredMessageOrigin>,
 }
 
 impl Agent {
@@ -85,7 +86,8 @@ impl Agent {
             self.message_count(),
             PendingTurnOptions::default(),
         );
-        if let Err(error) = self.add_user_message_with_origin(blocks, None, Some(origin)) {
+        if let Err(error) = self.append_user_context_blocks_with_origin(blocks, None, Some(origin))
+        {
             self.abort_pending_turn_setup();
             return Err(error);
         }
@@ -164,7 +166,7 @@ impl Agent {
             .await
     }
 
-    async fn run_capture_context(
+    pub(super) async fn run_capture_context(
         &mut self,
         user_message: &str,
         display_role: Option<crate::session::StoredDisplayRole>,
@@ -184,7 +186,9 @@ impl Agent {
                 unattended_context,
             },
         );
-        if let Err(error) = self.add_user_message_with_origin(blocks, display_role, origin) {
+        if let Err(error) =
+            self.append_user_context_blocks_with_origin(blocks, display_role, origin)
+        {
             self.abort_pending_turn_setup();
             return Err(error);
         }
@@ -234,6 +238,7 @@ impl Agent {
         .await
     }
 
+    #[cfg(test)]
     pub(crate) async fn run_once_streaming_mpsc_correlated(
         &mut self,
         request_id: u64,
@@ -281,7 +286,7 @@ impl Agent {
         .await
     }
 
-    async fn run_once_streaming_mpsc_with_request_context(
+    pub(super) async fn run_once_streaming_mpsc_with_request_context(
         &mut self,
         user_message: &str,
         images: Vec<(String, String)>,
@@ -398,12 +403,41 @@ impl Agent {
         self.append_user_context_blocks_with_origin(blocks, display_role, None)
     }
 
-    fn append_user_context_blocks_with_origin(
+    pub(super) fn append_user_context_blocks_with_origin(
         &mut self,
         blocks: Vec<ContentBlock>,
         display_role: Option<crate::session::StoredDisplayRole>,
         origin: Option<jcode_session_types::StoredMessageOrigin>,
     ) -> Result<()> {
+        if self.pending_primary_input.is_none() && self.session.isolated_child.is_none() {
+            let mut input = jcode_session_types::PrimaryInputEnvelope::new(
+                self.session_id().into(),
+                String::new(),
+                if self.active_turn_context.is_some() {
+                    jcode_session_types::PrimaryInputDelivery::NextTurn
+                } else {
+                    jcode_session_types::PrimaryInputDelivery::ContextOnly
+                },
+            );
+            for block in &blocks {
+                match block {
+                    ContentBlock::Text { text, .. } => input.content.push_str(text),
+                    ContentBlock::Image { media_type, data } => {
+                        input.images.push((media_type.clone(), data.clone()))
+                    }
+                    _ => anyhow::bail!("Primary input contains unsupported source blocks"),
+                }
+            }
+            input.display_role = display_role;
+            input.origin = origin.clone();
+            input.system_reminder = self.current_turn_system_reminder.clone();
+            input.unattended_context = self
+                .active_turn_context
+                .as_ref()
+                .and_then(|context| context.unattended_context.clone());
+            crate::primary_input::PrimaryInputStore::current().accept(input.clone())?;
+            self.pending_primary_input = Some(input);
+        }
         if blocks.len() > 1 {
             crate::logging::info(&format!(
                 "Agent received message with {} image(s)",
@@ -411,8 +445,33 @@ impl Agent {
             ));
         }
 
-        self.add_user_message_with_origin(blocks, display_role, origin)?;
-        self.session.save()
+        if let Some(input) = self.pending_primary_input.take() {
+            let mut lease =
+                crate::primary_input::PrimaryInputStore::current().lock(self.session_id())?;
+            lease.reconcile(&self.session)?;
+            lease.require_pending(&input)?;
+            let before = self.session.clone();
+            let start = self.message_count();
+            let result = (|| {
+                self.add_user_message_with_origin(blocks, display_role, origin)?;
+                self.session.record_primary_input(&input, start)?;
+                self.session.save()
+            })();
+            if let Err(error) = result {
+                let durable = Session::load(self.session_id())?;
+                if durable.primary_inputs.iter().any(|r| r.id == input.id) {
+                    self.session = durable;
+                } else {
+                    self.session = before;
+                    return Err(error);
+                }
+            }
+            lease.reconcile(&self.session)?;
+            Ok(())
+        } else {
+            self.add_user_message_with_origin(blocks, display_role, origin)?;
+            self.session.save()
+        }
     }
 
     /// Fire the `turn_start` observer hook when a turn begins, before the model
@@ -1005,7 +1064,14 @@ impl Agent {
 
     /// Get full tool definitions for debug introspection (bypasses lock)
     pub async fn tool_definitions_for_debug(&self) -> Result<Vec<crate::message::ToolDefinition>> {
-        if self.session.is_canary {
+        self.tool_definitions_for_session(&self.session).await
+    }
+
+    pub(super) async fn tool_definitions_for_session(
+        &self,
+        session: &Session,
+    ) -> Result<Vec<crate::message::ToolDefinition>> {
+        if session.is_canary {
             self.registry.register_selfdev_tools().await;
         }
         let mut tools = self.registry.definitions(self.allowed_tools.as_ref()).await;
@@ -1014,8 +1080,8 @@ impl Agent {
                 !crate::tool::tool_name_is_disabled(&self.disabled_tools, &tool.name)
             });
         }
-        Self::apply_selfdev_tool_surface(&mut tools, self.session.is_canary);
-        crate::tool::instruction_guidance::preview(&self.session, &mut tools)?;
+        Self::apply_selfdev_tool_surface(&mut tools, session.is_canary);
+        crate::tool::instruction_guidance::preview(session, &mut tools)?;
         Ok(tools)
     }
 
@@ -1113,6 +1179,27 @@ impl Agent {
         repositories: crate::instruction::InstructionRepositoryService,
         owner: Arc<crate::primary::PrimaryLease>,
     ) -> Result<Self> {
+        Self::restore_primary_mode(session_id, provider, registry, repositories, owner, false)
+    }
+
+    pub(crate) fn restore_primary_for_location_repair(
+        session_id: &str,
+        provider: Arc<dyn Provider>,
+        registry: Registry,
+        repositories: crate::instruction::InstructionRepositoryService,
+        owner: Arc<crate::primary::PrimaryLease>,
+    ) -> Result<Self> {
+        Self::restore_primary_mode(session_id, provider, registry, repositories, owner, true)
+    }
+
+    fn restore_primary_mode(
+        session_id: &str,
+        provider: Arc<dyn Provider>,
+        registry: Registry,
+        repositories: crate::instruction::InstructionRepositoryService,
+        owner: Arc<crate::primary::PrimaryLease>,
+        location_repair: bool,
+    ) -> Result<Self> {
         let session = Session::load(session_id)?;
         anyhow::ensure!(
             session.isolated_child.is_none(),
@@ -1128,12 +1215,20 @@ impl Agent {
         );
         candidate.primary_owner = Some(owner);
         candidate.instruction_repositories = repositories;
-        candidate.restore_session(session_id)?;
+        candidate.restore_session_mode(session_id, location_repair)?;
         Ok(candidate)
     }
 
     /// Restore a session by ID (loads from disk)
     pub fn restore_session(&mut self, session_id: &str) -> Result<SessionStatus> {
+        self.restore_session_mode(session_id, false)
+    }
+
+    fn restore_session_mode(
+        &mut self,
+        session_id: &str,
+        location_repair: bool,
+    ) -> Result<SessionStatus> {
         let owner = match &self.primary_owner {
             Some(owner) if owner.session == session_id => owner.clone(),
             _ => Arc::new(crate::primary::PrimaryLease::acquire(session_id)?),
@@ -1141,7 +1236,11 @@ impl Agent {
         let restore_start = Instant::now();
         let load_start = Instant::now();
         let mut session = Session::load(session_id)?;
-        session.require_published_primary()?;
+        if location_repair {
+            session.require_primary_publication()?;
+        } else {
+            session.require_published_primary()?;
+        }
         anyhow::ensure!(
             session.isolated_child.is_none(),
             "Isolated children are controlled by their original parent. Inspect their transcript instead of opening direct chat."

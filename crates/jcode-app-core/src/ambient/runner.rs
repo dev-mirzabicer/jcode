@@ -424,31 +424,49 @@ impl AmbientRunnerHandle {
         serde_json::to_string_pretty(&entries).unwrap_or_else(|_| "[]".to_string())
     }
 
-    async fn wait_for_request_done(
-        client: &mut crate::server::Client,
-        request_id: u64,
-    ) -> anyhow::Result<()> {
-        loop {
-            match client.read_event().await? {
-                crate::protocol::ServerEvent::Done { id } if id == request_id => return Ok(()),
-                crate::protocol::ServerEvent::Error { id, message, .. } if id == request_id => {
-                    anyhow::bail!(message)
-                }
-                _ => continue,
-            }
-        }
-    }
-
     pub(crate) async fn notify_live_session(
+        delivery_id: &str,
         session_id: &str,
         message: &str,
         unattended_context: Option<jcode_session_types::StoredUnattendedContextAuthorization>,
     ) -> anyhow::Result<()> {
         let mut client = crate::server::Client::connect().await?;
-        let request_id = client
-            .notify_session_with_unattended(session_id, message, unattended_context)
-            .await?;
-        Self::wait_for_request_done(&mut client, request_id).await
+        let mut input = jcode_session_types::PrimaryInputEnvelope::new(
+            session_id.into(),
+            message.into(),
+            jcode_session_types::PrimaryInputDelivery::SafeBoundary,
+        );
+        input.id = crate::primary_input::correlated_input_id("scheduled-item", delivery_id);
+        input.display_role = Some(crate::session::StoredDisplayRole::System);
+        input.unattended_context = unattended_context;
+        let input_id = input.id;
+        let request_id = client.submit_primary_input(input).await?;
+        loop {
+            match client.read_event().await? {
+                crate::protocol::ServerEvent::PrimaryInputReceipt { id, receipt }
+                    if id == request_id =>
+                {
+                    anyhow::ensure!(
+                        receipt.id == input_id && receipt.session == session_id,
+                        "Scheduled input receipt identity changed"
+                    );
+                    anyhow::ensure!(
+                        matches!(
+                            receipt.state,
+                            jcode_session_types::PrimaryInputState::Accepted
+                                | jcode_session_types::PrimaryInputState::Committed
+                        ),
+                        "Scheduled delivery needs review: {:?}",
+                        receipt.issue
+                    );
+                    return Ok(());
+                }
+                crate::protocol::ServerEvent::Error { id, message, .. } if id == request_id => {
+                    anyhow::bail!(message)
+                }
+                _ => {}
+            }
+        }
     }
 
     async fn resume_dead_session_with_reminder(
@@ -470,13 +488,15 @@ impl AmbientRunnerHandle {
         agent.restore_session(session_id)?;
 
         let unattended_context = Self::scheduled_unattended_context(item);
-        let turn_result = agent
-            .run_once_capture_with_display_role_and_unattended(
-                reminder,
-                Some(crate::session::StoredDisplayRole::System),
-                unattended_context,
-            )
-            .await;
+        let mut input = jcode_session_types::PrimaryInputEnvelope::new(
+            session_id.into(),
+            reminder.into(),
+            jcode_session_types::PrimaryInputDelivery::SafeBoundary,
+        );
+        input.id = crate::primary_input::correlated_input_id("scheduled-item", &item.id);
+        input.display_role = Some(crate::session::StoredDisplayRole::System);
+        input.unattended_context = unattended_context;
+        let turn_result = agent.run_primary_input_capture(input).await;
         Self::log_scheduled_emergency_outcome(item, &agent);
         agent.mark_closed();
         turn_result?;
@@ -586,6 +606,7 @@ impl AmbientRunnerHandle {
             ScheduleTarget::Session { session_id } => {
                 let reminder = ambient::format_scheduled_session_message(item)?;
                 match Self::notify_live_session(
+                    &item.id,
                     session_id,
                     &reminder,
                     Self::scheduled_unattended_context(item),

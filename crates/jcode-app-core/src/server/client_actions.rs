@@ -1,15 +1,14 @@
 #![cfg_attr(test, allow(clippy::items_after_test_module))]
 
 use super::{
-    SessionInterruptQueues, SwarmEvent, SwarmMember, SwarmState, VersionedPlan,
-    broadcast_swarm_status, fanout_session_event, persist_swarm_state_for,
-    remove_session_channel_subscriptions, remove_session_from_swarm, swarm_id_for_session,
+    SwarmEvent, SwarmMember, SwarmState, VersionedPlan, broadcast_swarm_status,
+    fanout_session_event, persist_swarm_state_for, remove_session_channel_subscriptions,
+    remove_session_from_swarm, swarm_id_for_session,
 };
 use crate::agent::Agent;
 use crate::protocol::{FeatureToggle, NotificationType, ServerEvent};
 use crate::session::Session;
 use crate::util::truncate_str;
-use jcode_agent_runtime::SoftInterruptSource;
 use std::collections::{HashMap, HashSet};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -79,7 +78,6 @@ fn combine_input_shell_output(stdout: &[u8], stderr: &[u8]) -> (String, bool) {
 
 pub(super) struct NotifySessionContext<'a> {
     pub sessions: &'a SessionAgents,
-    pub soft_interrupt_queues: &'a SessionInterruptQueues,
     pub swarm_members: &'a Arc<RwLock<HashMap<String, SwarmMember>>>,
     pub swarms_by_id: &'a Arc<RwLock<HashMap<String, HashSet<String>>>>,
     pub event_history: &'a Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
@@ -95,35 +93,13 @@ pub(super) async fn handle_notify_session(
     unattended_context: Option<jcode_session_types::StoredUnattendedContextAuthorization>,
     ctx: NotifySessionContext<'_>,
 ) {
-    let target = ctx.sessions.read().await.get(&session_id).cloned();
-    if target.is_none() || !ctx.sessions.accepts_input() {
-        let _ = ctx.client_event_tx.send(ServerEvent::Error {
-            id,
-            message: format!("Session '{session_id}' is unavailable for delivery"),
-            retry_after_secs: None,
-        });
-        return;
-    }
-    let resources = match ctx
-        .sessions
-        .resources(&session_id, target.as_ref().expect("live target"))
-    {
-        Ok(resources) => resources,
-        Err(error) => {
-            let _ = ctx.client_event_tx.send(ServerEvent::Error {
-                id,
-                message: format!("Notification target is unavailable: {error:#}"),
-                retry_after_secs: None,
-            });
-            return;
-        }
-    };
-    super::register_session_interrupt_queue(
-        ctx.soft_interrupt_queues,
-        &session_id,
-        resources.interrupts,
-    )
-    .await;
+    let mut input = jcode_session_types::PrimaryInputEnvelope::new(
+        session_id.clone(),
+        message.clone(),
+        jcode_session_types::PrimaryInputDelivery::SafeBoundary,
+    );
+    input.display_role = Some(crate::session::StoredDisplayRole::System);
+    input.unattended_context = unattended_context;
     let swarm = super::live_turn::LiveTurnSwarmContext::new(
         ctx.swarm_members,
         ctx.swarms_by_id,
@@ -131,16 +107,15 @@ pub(super) async fn handle_notify_session(
         ctx.event_counter,
         ctx.swarm_event_tx,
     );
-    let ran_immediately = super::live_turn::run_live_system_turn_if_idle(
-        &session_id,
-        &message,
-        unattended_context.clone(),
-        ctx.sessions,
-        swarm.clone(),
-    )
-    .await;
-
-    if !ran_immediately {
+    let busy = ctx.sessions.processing(&session_id).is_some()
+        || ctx
+            .sessions
+            .read()
+            .await
+            .get(&session_id)
+            .is_some_and(|agent| agent.try_lock().is_err());
+    let result = super::live_turn::submit_primary_input(ctx.sessions, input, swarm).await;
+    if result.is_ok() && busy {
         fanout_session_event(
             ctx.swarm_members,
             &session_id,
@@ -152,42 +127,20 @@ pub(super) async fn handle_notify_session(
                     channel: None,
                     tldr: None,
                 },
-                message: message.clone(),
+                message,
             },
         )
         .await;
     }
-
-    let queued_interrupt = if ran_immediately {
-        false
-    } else {
-        super::state::queue_soft_interrupt_for_session_with_unattended(
-            &session_id,
-            message.clone(),
-            false,
-            SoftInterruptSource::System,
-            unattended_context,
-            ctx.soft_interrupt_queues,
-            ctx.sessions,
-        )
-        .await
-    };
-
-    if queued_interrupt {
-        // The active loop may already have passed its last queue-consumption
-        // point. A runtime-owned drain observes terminal admission and starts
-        // only still-pending input, never a duplicate of consumed input.
-        super::live_turn::ensure_queued_notification_delivery(ctx.sessions, &session_id, swarm);
-    }
-    if ran_immediately || queued_interrupt {
-        let _ = ctx.client_event_tx.send(ServerEvent::Done { id });
-    } else {
-        let _ = ctx.client_event_tx.send(ServerEvent::Error {
+    let event = match result {
+        Ok(_) => ServerEvent::Done { id },
+        Err(error) => ServerEvent::Error {
             id,
-            message: format!("Session '{}' is not currently live", session_id),
+            message: format!("Notification was not accepted: {error:#}"),
             retry_after_secs: None,
-        });
-    }
+        },
+    };
+    let _ = ctx.client_event_tx.send(event);
 }
 
 pub(super) fn handle_input_shell(

@@ -1,5 +1,92 @@
 use super::*;
 
+#[derive(Clone, Default)]
+struct DurableInputProvider {
+    snapshots: Arc<std::sync::Mutex<Vec<Vec<Message>>>>,
+}
+#[async_trait]
+impl Provider for DurableInputProvider {
+    async fn complete(
+        &self,
+        messages: &[Message],
+        _: &[ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<EventStream> {
+        self.snapshots.lock().unwrap().push(messages.to_vec());
+        Ok(Box::pin(stream::iter(vec![
+            Ok(StreamEvent::TextDelta("synthetic completion".into())),
+            Ok(StreamEvent::MessageEnd {
+                stop_reason: Some("end_turn".into()),
+            }),
+        ])))
+    }
+    fn name(&self) -> &str {
+        "durable-input-fixture"
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+#[test]
+fn durable_primary_input_detached_replay_and_busy_boundary() -> Result<()> {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    crate::instruction::SystemPromptComposer::new().ensure_global_store()?;
+    tokio::runtime::Runtime::new()?.block_on(async {
+        let recorder = Arc::new(DurableInputProvider::default());
+        let provider: Arc<dyn Provider> = recorder.clone();
+        let registry = Registry::new(provider.clone()).await;
+        let agent = Arc::new(Mutex::new(Agent::new(provider, registry)));
+        let session = agent.lock().await.session_id().to_owned();
+        agent.lock().await.startup_context_session_mut().save()?;
+        let host = Arc::new(crate::primary::PrimaryHost::new(HashMap::from([(session.clone(), agent.clone())])));
+        let status = status_fixture(&session);
+        let input = jcode_session_types::PrimaryInputEnvelope {
+            id: crate::workspace::RequestId::new(), session: session.clone(), delivery: jcode_session_types::PrimaryInputDelivery::SafeBoundary,
+            content: "durable synthetic input".into(), images: vec![], display_role: None,
+            origin: Some(jcode_session_types::StoredMessageOrigin::Human), system_reminder: None, unattended_context: None, urgent: false,
+        };
+        let accepted = crate::server::live_turn::submit_primary_input(&host, input.clone(), status.clone()).await?;
+        assert_eq!(accepted.state, jcode_session_types::PrimaryInputState::Accepted);
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let receipt = crate::primary_input::PrimaryInputStore::current().inspect(&session, input.id)?;
+                anyhow::ensure!(receipt.state != jcode_session_types::PrimaryInputState::Failed, "delivery failed: {receipt:?}");
+                if receipt.state == jcode_session_types::PrimaryInputState::Committed && host.processing(&session).is_none() { break; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Ok::<_, anyhow::Error>(())
+        }).await.map_err(|error| anyhow::anyhow!("first delivery deadline: {error}; receipt={:?}; processing={:?}; calls={}", crate::primary_input::PrimaryInputStore::current().inspect(&session, input.id), host.processing(&session), recorder.snapshots.lock().unwrap().len()))??;
+        let committed = crate::server::live_turn::submit_primary_input(&host, input.clone(), status.clone()).await?;
+        assert_eq!(committed.state, jcode_session_types::PrimaryInputState::Committed);
+        assert_eq!(recorder.snapshots.lock().unwrap().len(), 1);
+        let mut conflict = input.clone(); conflict.content.push('!');
+        assert!(crate::server::live_turn::submit_primary_input(&host, conflict, status.clone()).await.is_err());
+        // Reserve a real host turn while accepting another input. It remains
+        // durable even though no observer or client owns its delivery.
+        let (release, wait) = tokio::sync::oneshot::channel();
+        host.start(host.admit(&session, 44, agent.clone())?, move |_| async move { wait.await?; Ok(None) }, |_| async {});
+        let mut busy = input.clone(); busy.id = crate::workspace::RequestId::new(); busy.content = "queued durable input".into();
+        crate::server::live_turn::submit_primary_input(&host, busy.clone(), status.clone()).await?;
+        assert_eq!(crate::primary_input::PrimaryInputStore::current().inspect(&session, busy.id)?.state, jcode_session_types::PrimaryInputState::Accepted);
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if crate::primary_input::PrimaryInputStore::current().inspect(&session, busy.id)?.state == jcode_session_types::PrimaryInputState::Committed && host.processing(&session).is_none() { break; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Ok::<_, anyhow::Error>(())
+        }).await??;
+        assert_eq!(recorder.snapshots.lock().unwrap().len(), 2);
+        let saved = Session::load(&session)?;
+        assert_eq!(saved.primary_inputs.len(), 2);
+        assert_eq!(saved.messages.iter().flat_map(|m| &m.content).filter(|block| matches!(block,ContentBlock::Text{text,..} if text == "durable synthetic input")).count(), 1);
+        host.shutdown().await
+    })
+}
+
 #[tokio::test]
 async fn primary_stdin_survives_observer_loss_and_rejects_foreign_or_duplicate_answers()
 -> Result<()> {
@@ -672,7 +759,6 @@ fn notify_session_terminal_race_starts_only_unconsumed_detached_input() -> Resul
             },
         );
         terminal.await?;
-        let queues = Arc::new(RwLock::new(HashMap::new()));
         let (tx, mut rx) = crate::client_delivery::local_event_channel();
         crate::server::client_actions::handle_notify_session(
             81,
@@ -681,7 +767,6 @@ fn notify_session_terminal_race_starts_only_unconsumed_detached_input() -> Resul
             None,
             crate::server::client_actions::NotifySessionContext {
                 sessions: &host,
-                soft_interrupt_queues: &queues,
                 swarm_members: &status.members,
                 swarms_by_id: &status.swarms_by_id,
                 event_history: &status.event_history,
@@ -695,7 +780,12 @@ fn notify_session_terminal_race_starts_only_unconsumed_detached_input() -> Resul
             rx.recv().await,
             Some(ServerEvent::Done { id: 81 })
         ));
-        assert_eq!(agent.lock().await.soft_interrupt_count(), 1);
+        assert_eq!(
+            crate::primary_input::PrimaryInputStore::current()
+                .pending(&session)?
+                .len(),
+            1
+        );
         release.send(()).unwrap();
         tokio::time::timeout(Duration::from_secs(30), gate.entered.notified()).await?;
         gate.release.notify_one();
@@ -711,7 +801,11 @@ fn notify_session_terminal_race_starts_only_unconsumed_detached_input() -> Resul
                 .count(),
             1
         );
-        assert!(!guard.has_soft_interrupts());
+        assert!(
+            crate::primary_input::PrimaryInputStore::current()
+                .pending(&session)?
+                .is_empty()
+        );
         drop(guard);
         crate::server::client_actions::handle_notify_session(
             82,
@@ -720,7 +814,6 @@ fn notify_session_terminal_race_starts_only_unconsumed_detached_input() -> Resul
             None,
             crate::server::client_actions::NotifySessionContext {
                 sessions: &host,
-                soft_interrupt_queues: &queues,
                 swarm_members: &status.members,
                 swarms_by_id: &status.swarms_by_id,
                 event_history: &status.event_history,

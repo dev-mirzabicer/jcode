@@ -227,6 +227,39 @@ impl Client {
             .await
     }
 
+    pub async fn submit_primary_input(
+        &mut self,
+        input: jcode_session_types::PrimaryInputEnvelope,
+    ) -> Result<u64> {
+        let probe = self.next_id;
+        self.next_id += 1;
+        self.writer
+            .write_all(
+                (serde_json::to_string(&Request::PrimaryControlProbe { id: probe })? + "\n")
+                    .as_bytes(),
+            )
+            .await?;
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                match self.read_event().await? {
+                    ServerEvent::PrimaryControlCapabilities { id, input_version: 1, .. } if id == probe => return Ok::<_, anyhow::Error>(()),
+                    ServerEvent::Ack { id } if id == probe => {},
+                    _ => anyhow::bail!("Durable primary delivery is unsupported on this control connection; upgrade the runtime"),
+                }
+            }
+        }).await.map_err(|_| anyhow::anyhow!("Runtime did not negotiate durable primary input"))??;
+        let id = self.next_id;
+        self.next_id += 1;
+        let request = Request::PrimaryInput {
+            id,
+            input: Box::new(input),
+        };
+        self.writer
+            .write_all((serde_json::to_string(&request)? + "\n").as_bytes())
+            .await?;
+        Ok(id)
+    }
+
     pub async fn notify_session_with_unattended(
         &mut self,
         session_id: &str,

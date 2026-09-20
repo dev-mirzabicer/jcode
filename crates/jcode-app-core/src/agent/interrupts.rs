@@ -196,10 +196,21 @@ impl Agent {
 
     /// Check if there's an urgent soft interrupt that should skip remaining tools
     pub fn has_urgent_interrupt(&self) -> bool {
-        self.soft_interrupt_queue
-            .lock()
-            .map(|q| q.iter().any(|m| m.urgent))
-            .unwrap_or(false)
+        crate::primary_input::PrimaryInputStore::current()
+            .pending(self.session_id())
+            .is_ok_and(|pending| {
+                pending
+                    .iter()
+                    .take_while(|input| {
+                        input.delivery == jcode_session_types::PrimaryInputDelivery::SafeBoundary
+                    })
+                    .any(|input| input.urgent)
+            })
+            || self
+                .soft_interrupt_queue
+                .lock()
+                .map(|q| q.iter().any(|m| m.urgent))
+                .unwrap_or(false)
     }
 
     /// Get count of queued soft interrupts
@@ -488,6 +499,13 @@ impl Agent {
             return Ok(NoToolCallOutcome::ContinueWithoutEvent);
         }
         logging::info("Turn complete - no tool calls");
+        let durable = self.inject_primary_inputs()?;
+        if !durable.is_empty() {
+            return Ok(NoToolCallOutcome::ContinueWithSoftInterrupt {
+                injected: durable,
+                point: "B",
+            });
+        }
         let injected = self.inject_soft_interrupts();
         if !injected.is_empty() {
             return Ok(NoToolCallOutcome::ContinueWithSoftInterrupt {
@@ -498,16 +516,23 @@ impl Agent {
         Ok(NoToolCallOutcome::Break)
     }
 
-    pub(super) fn take_post_tool_soft_interrupt(&mut self) -> PostToolInterruptOutcome {
+    pub(super) fn take_post_tool_soft_interrupt(&mut self) -> Result<PostToolInterruptOutcome> {
+        let durable = self.inject_primary_inputs()?;
+        if !durable.is_empty() {
+            return Ok(PostToolInterruptOutcome::SoftInterrupt {
+                injected: durable,
+                point: "D",
+            });
+        }
         let injected = self.inject_soft_interrupts();
-        if !injected.is_empty() {
+        Ok(if !injected.is_empty() {
             PostToolInterruptOutcome::SoftInterrupt {
                 injected,
                 point: "D",
             }
         } else {
             PostToolInterruptOutcome::NoInterrupt
-        }
+        })
     }
 
     pub(super) fn build_soft_interrupt_events(

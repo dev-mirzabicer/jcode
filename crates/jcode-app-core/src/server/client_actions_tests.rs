@@ -731,7 +731,6 @@ async fn notify_session_runs_scheduled_task_immediately_for_idle_live_session() 
         session_id.clone(),
         agent.clone(),
     )])));
-    let soft_interrupt_queues = Arc::new(RwLock::new(HashMap::new()));
     let client_connections = Arc::new(RwLock::new(HashMap::from([(
         "client-1".to_string(),
         ClientConnectionInfo {
@@ -784,7 +783,6 @@ async fn notify_session_runs_scheduled_task_immediately_for_idle_live_session() 
         Some(scheduled_authorization("sched-live")),
         NotifySessionContext {
             sessions: &sessions,
-            soft_interrupt_queues: &soft_interrupt_queues,
             swarm_members: &swarm_members,
             swarms_by_id: &swarms_by_id,
             event_history: &event_history,
@@ -842,7 +840,6 @@ async fn notify_session_queues_soft_interrupt_when_live_session_is_busy() {
     let registry = Registry::new(provider.clone()).await;
     let agent = Arc::new(Mutex::new(Agent::new(provider, registry)));
     let session_id = agent.lock().await.session_id().to_string();
-    let queue = agent.lock().await.soft_interrupt_queue();
 
     let sessions = Arc::new(crate::primary::PrimaryHost::new(HashMap::<
         String,
@@ -850,10 +847,6 @@ async fn notify_session_queues_soft_interrupt_when_live_session_is_busy() {
     >::from([(
         session_id.clone(),
         agent.clone(),
-    )])));
-    let soft_interrupt_queues = Arc::new(RwLock::new(HashMap::from([(
-        session_id.clone(),
-        queue.clone(),
     )])));
     let _client_connections = Arc::new(RwLock::new(HashMap::from([(
         "client-1".to_string(),
@@ -908,7 +901,6 @@ async fn notify_session_queues_soft_interrupt_when_live_session_is_busy() {
         Some(scheduled_authorization("sched-busy")),
         NotifySessionContext {
             sessions: &sessions,
-            soft_interrupt_queues: &soft_interrupt_queues,
             swarm_members: &swarm_members,
             swarms_by_id: &swarms_by_id,
             event_history: &event_history,
@@ -937,7 +929,9 @@ async fn notify_session_queues_soft_interrupt_when_live_session_is_busy() {
         other => panic!("expected notification event, got {other:?}"),
     }
 
-    let queued = queue.lock().unwrap();
+    let queued = crate::primary_input::PrimaryInputStore::current()
+        .pending(&session_id)
+        .unwrap();
     assert_eq!(
         queued.len(),
         1,

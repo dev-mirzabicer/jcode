@@ -628,6 +628,11 @@ impl Request {
             Request::ClientDebugCommand { id, .. } => *id,
             Request::ClientDebugResponse { id, .. } => *id,
             Request::PrimaryStreamSubscribe { id }
+            | Request::PrimaryInput { id, .. }
+            | Request::PrimaryInputInspect { id, .. }
+            | Request::PrimaryLocation { id, .. }
+            | Request::PrimaryControlProbe { id }
+            | Request::PrimaryInputRead { id, .. }
             | Request::PrimaryLaunchProbe { id }
             | Request::PrimaryLaunch { id, .. } => *id,
             Request::Subscribe { id, .. } => *id,

@@ -125,6 +125,8 @@ impl Agent {
                     repaired
                 ));
             }
+            self.apply_primary_location_changes().await?;
+            self.session.require_published_primary()?;
             let messages = self.messages_for_provider()?;
 
             let tools = self.tool_definitions().await?;
@@ -1239,6 +1241,7 @@ impl Agent {
                 {
                     continue;
                 }
+                self.apply_primary_location_changes().await?;
                 match self.handle_streaming_no_tool_calls(
                     stop_reason.as_deref(),
                     &mut incomplete_continuations,
@@ -1324,7 +1327,8 @@ impl Agent {
                 tool_calls.retain(|tc| self.provider_leaves_tool_to_host(&tc.name));
                 if tool_calls.is_empty() {
                     // === INJECTION POINT D: After provider-handled tools, before next API call ===
-                    let injected = self.inject_soft_interrupts();
+                    let mut injected = self.inject_primary_inputs()?;
+                    injected.extend(self.inject_soft_interrupts());
                     if !injected.is_empty() {
                         for event in Self::build_soft_interrupt_events(injected, "D", None) {
                             let _ = event_tx.send(event);
@@ -1355,7 +1359,8 @@ impl Agent {
                         );
                     }
                     let tools_remaining = tool_count - tool_index;
-                    let injected = self.inject_soft_interrupts();
+                    let mut injected = self.inject_primary_inputs()?;
+                    injected.extend(self.inject_soft_interrupts());
                     if !injected.is_empty() {
                         for event in
                             Self::build_soft_interrupt_events(injected, "C", Some(tools_remaining))
@@ -1755,7 +1760,7 @@ impl Agent {
             // This is the safest point for non-urgent injection since all tool_results
             // have been added and the conversation is in a valid state.
             if let PostToolInterruptOutcome::SoftInterrupt { injected, point } =
-                self.take_post_tool_soft_interrupt()
+                self.take_post_tool_soft_interrupt()?
             {
                 for event in Self::build_soft_interrupt_events(injected, point, None) {
                     let _ = event_tx.send(event);

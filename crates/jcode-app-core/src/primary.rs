@@ -11,6 +11,7 @@ use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, RwLockReadGuard, RwLockWriteGu
 use tokio::task::{AbortHandle, JoinSet};
 
 mod launch;
+mod location;
 mod new_context;
 mod transport;
 pub use transport::{configured_launch, launch_enabled, launch_local_request};
@@ -30,6 +31,7 @@ pub struct PrimaryHost {
     provisional: StdMutex<HashSet<String>>,
     resources: StdMutex<HashMap<String, PrimaryResources>>,
     accepting: AtomicBool,
+    input_drains: StdMutex<HashSet<String>>,
     stdin: StdMutex<HashMap<String, Arc<crate::server::primary_stdin::PrimaryStdin>>>,
     presentations: StdMutex<HashMap<String, Arc<presentation::Presentation>>>,
 }
@@ -129,6 +131,7 @@ impl PrimaryHost {
             provisional: StdMutex::new(HashSet::new()),
             resources: StdMutex::new(resources),
             accepting: AtomicBool::new(true),
+            input_drains: StdMutex::new(HashSet::new()),
             stdin: StdMutex::new(HashMap::new()),
             presentations: StdMutex::new(HashMap::new()),
         }
@@ -238,6 +241,29 @@ impl PrimaryHost {
         pool: &Arc<crate::mcp::SharedMcpPool>,
         repositories: &crate::instruction::InstructionRepositoryService,
     ) -> Result<Option<crate::session::SessionStatus>> {
+        self.restore_mode(session, provider, pool, repositories, false)
+            .await
+    }
+
+    pub(crate) async fn restore_for_location_repair(
+        &self,
+        session: &str,
+        provider: &Arc<dyn crate::provider::Provider>,
+        pool: &Arc<crate::mcp::SharedMcpPool>,
+        repositories: &crate::instruction::InstructionRepositoryService,
+    ) -> Result<Option<crate::session::SessionStatus>> {
+        self.restore_mode(session, provider, pool, repositories, true)
+            .await
+    }
+
+    async fn restore_mode(
+        &self,
+        session: &str,
+        provider: &Arc<dyn crate::provider::Provider>,
+        pool: &Arc<crate::mcp::SharedMcpPool>,
+        repositories: &crate::instruction::InstructionRepositoryService,
+        location_repair: bool,
+    ) -> Result<Option<crate::session::SessionStatus>> {
         let gate = self
             .restoring
             .lock()
@@ -250,9 +276,13 @@ impl PrimaryHost {
             return Ok(None);
         }
         let owner = self.claim(session)?;
-        let result = async {
+        let result: Result<_> = async {
             let stored = crate::session::Session::load_startup_stub(session)?;
-            stored.require_published_primary()?;
+            if location_repair {
+                stored.require_primary_publication()?;
+            } else {
+                stored.require_published_primary()?;
+            }
             let previous = stored.status;
             let provider = provider.fork_for_new_session();
             let registry = crate::tool::Registry::new_for_shared_session(
@@ -261,8 +291,18 @@ impl PrimaryHost {
                 repositories.clone(),
             )
             .await?;
-            Agent::restore_primary(session, provider, registry, repositories.clone(), owner)
-                .map(|agent| (agent, previous))
+            let agent = if location_repair {
+                Agent::restore_primary_for_location_repair(
+                    session,
+                    provider,
+                    registry,
+                    repositories.clone(),
+                    owner,
+                )
+            } else {
+                Agent::restore_primary(session, provider, registry, repositories.clone(), owner)
+            }?;
+            Ok((agent, previous))
         }
         .await;
         match result {
@@ -285,6 +325,18 @@ impl PrimaryHost {
 
     pub(crate) fn accepts_input(&self) -> bool {
         self.accepting.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn input_drain(self: &Arc<Self>, session: &str) -> Option<PrimaryInputDrain> {
+        self.input_drains
+            .lock()
+            .expect("primary input drains")
+            .insert(session.into())
+            .then(|| PrimaryInputDrain {
+                host: Arc::downgrade(self),
+                session: session.into(),
+                finished: false,
+            })
     }
 
     pub(crate) fn retain_delivery(&self, task: impl Future<Output = ()> + Send + 'static) {
@@ -528,6 +580,44 @@ impl PrimaryHost {
             input.shutdown().await;
         }
         Ok(())
+    }
+}
+
+pub(crate) struct PrimaryInputDrain {
+    host: std::sync::Weak<PrimaryHost>,
+    session: String,
+    finished: bool,
+}
+impl PrimaryInputDrain {
+    /// Admission persists before checking this same gate. Recheck durable
+    /// emptiness while retiring the worker so a concurrent acceptance cannot
+    /// mistake a departing worker for an active delivery owner.
+    pub(crate) fn finish_if_empty(&mut self) -> Result<bool> {
+        let Some(host) = self.host.upgrade() else {
+            return Ok(true);
+        };
+        let mut drains = host.input_drains.lock().expect("primary input drains");
+        if !crate::primary_input::PrimaryInputStore::current()
+            .pending(&self.session)?
+            .is_empty()
+        {
+            return Ok(false);
+        }
+        drains.remove(&self.session);
+        self.finished = true;
+        Ok(true)
+    }
+}
+impl Drop for PrimaryInputDrain {
+    fn drop(&mut self) {
+        if !self.finished
+            && let Some(host) = self.host.upgrade()
+        {
+            host.input_drains
+                .lock()
+                .expect("primary input drains")
+                .remove(&self.session);
+        }
     }
 }
 

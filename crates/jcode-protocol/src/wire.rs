@@ -47,6 +47,30 @@ pub enum LegacyContextCommand {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Request {
+    #[serde(rename = "primary_control_probe")]
+    PrimaryControlProbe { id: u64 },
+    #[serde(rename = "primary_input_read")]
+    PrimaryInputRead {
+        id: u64,
+        session: String,
+        input: jcode_workspace_types::RequestId,
+    },
+    #[serde(rename = "primary_input")]
+    PrimaryInput {
+        id: u64,
+        input: Box<jcode_session_types::PrimaryInputEnvelope>,
+    },
+    #[serde(rename = "primary_input_inspect")]
+    PrimaryInputInspect {
+        id: u64,
+        session: String,
+        input: jcode_workspace_types::RequestId,
+    },
+    #[serde(rename = "primary_location")]
+    PrimaryLocation {
+        id: u64,
+        command: Box<jcode_workspace_types::PrimaryLocationCommand>,
+    },
     /// Negotiate ordered presentation before Subscribe, without creating a Session.
     #[serde(rename = "primary_stream_subscribe")]
     PrimaryStreamSubscribe { id: u64 },
@@ -1121,6 +1145,29 @@ pub enum Request {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ServerEvent {
+    #[serde(rename = "primary_control_capabilities")]
+    PrimaryControlCapabilities {
+        id: u64,
+        input_version: u32,
+        location_version: u32,
+        location_enabled: bool,
+    },
+    #[serde(rename = "primary_input_detail")]
+    PrimaryInputDetail {
+        id: u64,
+        receipt: jcode_session_types::PrimaryInputReceipt,
+        input: Box<jcode_session_types::PrimaryInputEnvelope>,
+    },
+    #[serde(rename = "primary_input_receipt")]
+    PrimaryInputReceipt {
+        id: u64,
+        receipt: jcode_session_types::PrimaryInputReceipt,
+    },
+    #[serde(rename = "primary_location_response")]
+    PrimaryLocationResponse {
+        id: u64,
+        response: Box<jcode_workspace_types::PrimaryLocationResponse>,
+    },
     #[serde(rename = "primary_launch_capabilities")]
     PrimaryLaunchCapabilities {
         id: u64,

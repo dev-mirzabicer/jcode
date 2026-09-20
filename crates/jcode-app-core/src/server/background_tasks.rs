@@ -72,7 +72,7 @@ async fn finish_completion(permit: CompletionPermit, delivered: bool) {
 pub(super) async fn dispatch_background_task_completion(
     task: &crate::bus::BackgroundTaskCompleted,
     sessions: &SessionAgents,
-    soft_interrupt_queues: &SessionInterruptQueues,
+    _soft_interrupt_queues: &SessionInterruptQueues,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
     event_history: &Arc<RwLock<VecDeque<SwarmEvent>>>,
@@ -82,11 +82,15 @@ pub(super) async fn dispatch_background_task_completion(
     if !task.notify && !task.wake {
         return;
     }
-    let working_dir = swarm_members
-        .read()
-        .await
-        .get(&task.session_id)
-        .and_then(|member| member.working_dir.clone());
+    let working_dir = match crate::session::Session::load_startup_stub(&task.session_id) {
+        Ok(session) => session.working_dir.map(std::path::PathBuf::from),
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "Completion recipient location is unavailable: {error:#}"
+            ));
+            return;
+        }
+    };
     let notification = format_background_task_notification_markdown(task, working_dir.as_deref());
 
     if task.notify {
@@ -117,31 +121,41 @@ pub(super) async fn dispatch_background_task_completion(
         if matches!(permit, CompletionPermit::Skip) {
             return;
         }
-        let delivered = run_live_turn_if_idle(
-            &task.session_id,
-            &notification,
-            Some(LiveTurnReminder::Managed(
-                Notification::BackgroundTaskCompleted,
-            )),
-            sessions,
-            LiveTurnSwarmContext::new(
-                swarm_members,
-                swarms_by_id,
-                event_history,
-                event_counter,
-                swarm_event_tx,
-            ),
-        )
-        .await
-            || queue_soft_interrupt_for_session(
-                &task.session_id,
+        let swarm = LiveTurnSwarmContext::new(
+            swarm_members,
+            swarms_by_id,
+            event_history,
+            event_counter,
+            swarm_event_tx,
+        );
+        let input_id =
+            crate::primary_input::correlated_input_id("background-completion", &task.task_id);
+        let input = (|| -> anyhow::Result<_> {
+            if let Some(input) = crate::primary_input::PrimaryInputStore::current()
+                .original(&task.session_id, input_id)?
+            {
+                return Ok(input);
+            }
+            let mut input = jcode_session_types::PrimaryInputEnvelope::new(
+                task.session_id.clone(),
                 notification.clone(),
-                false,
-                SoftInterruptSource::BackgroundTask,
-                soft_interrupt_queues,
-                sessions,
-            )
-            .await;
+                jcode_session_types::PrimaryInputDelivery::SafeBoundary,
+            );
+            input.id = input_id;
+            input.display_role = Some(crate::session::StoredDisplayRole::BackgroundTask);
+            input.system_reminder =
+                Some(Notification::BackgroundTaskCompleted.render(working_dir.as_deref())?);
+            Ok(input)
+        })();
+        let delivered = match input {
+            Ok(input) => super::live_turn::submit_primary_input(sessions, input, swarm)
+                .await
+                .is_ok(),
+            Err(error) => {
+                crate::logging::warn(&format!("Background input remains pending: {error:#}"));
+                false
+            }
+        };
         finish_completion(permit, delivered).await;
     }
 }

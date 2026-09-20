@@ -298,28 +298,59 @@ fn scheduled_live_delivery_uses_notify_without_a_provisional_subscription() -> R
             let mut reader = tokio::io::BufReader::new(read);
             let mut line = String::new();
             reader.read_line(&mut line).await.unwrap();
-            let request = crate::protocol::decode_request(&line).unwrap();
-            let crate::protocol::Request::NotifySession {
-                id,
-                session_id,
-                message,
-                unattended_context,
-            } = request
+            let crate::protocol::Request::PrimaryControlProbe { id } =
+                crate::protocol::decode_request(&line).unwrap()
             else {
-                panic!("scheduled delivery must not construct a notifier Session")
+                panic!("delivery must negotiate its capability");
             };
-            assert_eq!(session_id, "detached-synthetic");
-            assert_eq!(message, "scheduled adapter fixture");
-            assert!(unattended_context.is_none());
             write
                 .write_all(
-                    crate::protocol::encode_event(&crate::protocol::ServerEvent::Done { id })
-                        .as_bytes(),
+                    crate::protocol::encode_event(
+                        &crate::protocol::ServerEvent::PrimaryControlCapabilities {
+                            id,
+                            input_version: 1,
+                            location_version: 1,
+                            location_enabled: false,
+                        },
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            line.clear();
+            reader.read_line(&mut line).await.unwrap();
+            let request = crate::protocol::decode_request(&line).unwrap();
+            let crate::protocol::Request::PrimaryInput { id, input } = request else {
+                panic!("scheduled delivery must not construct a notifier Session")
+            };
+            assert_eq!(input.session, "detached-synthetic");
+            assert_eq!(input.content, "scheduled adapter fixture");
+            assert!(input.unattended_context.is_none());
+            assert_eq!(
+                input.id,
+                crate::primary_input::correlated_input_id("scheduled-item", "fixture-schedule")
+            );
+            write
+                .write_all(
+                    crate::protocol::encode_event(
+                        &crate::protocol::ServerEvent::PrimaryInputReceipt {
+                            id,
+                            receipt: jcode_session_types::PrimaryInputReceipt {
+                                id: input.id,
+                                session: input.session,
+                                state: jcode_session_types::PrimaryInputState::Accepted,
+                                messages: Vec::new(),
+                                issue: None,
+                            },
+                        },
+                    )
+                    .as_bytes(),
                 )
                 .await
                 .unwrap();
         });
         AmbientRunnerHandle::notify_live_session(
+            "fixture-schedule",
             "detached-synthetic",
             "scheduled adapter fixture",
             None,

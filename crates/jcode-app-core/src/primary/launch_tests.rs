@@ -57,7 +57,77 @@ impl Drop for Env {
                 None => crate::env::remove_var(key),
             }
         }
+        crate::config::Config::invalidate_cache();
     }
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn primary_location_idle_notice_prefix_and_missing_cwd_repair() -> Result<()> {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir()?;
+    let _env = Env::new(temp.path());
+    crate::instruction::SystemPromptComposer::new().ensure_global_store()?;
+    std::fs::write(
+        crate::config::Config::path().unwrap(),
+        "[features]\nmanaged_primary_launch = true\n",
+    )?;
+    crate::config::Config::invalidate_cache();
+    tokio::runtime::Runtime::new()?.block_on(async {
+        let service = WorkspaceService::new(&crate::storage::durable_state_dir());
+        service.initialize(RequestId::new())?;
+        let mut roots = Vec::new();
+        for name in ["initial", "destination", "repair"] {
+            let path = temp.path().join(name);
+            std::fs::create_dir(&path)?;
+            std::fs::write(path.join("sentinel.txt"), name)?;
+            let path = path.canonicalize()?;
+            let EntityId::Location(id) = change(&service,OrganizationChange::RegisterLocation { name: name.into(), path:path.clone(), registration:Registration::Standalone })?.targets[0] else { panic!("location"); };
+            roots.push((id,path));
+        }
+        let provider = FixtureProvider::default();
+        let launcher = PrimaryLauncher { workspace:service.clone(), repositories:InstructionRepositoryService::new(), provider:Arc::new(provider.clone()), registry:PrimaryRegistryMode::Process };
+        let host = Arc::new(PrimaryHost::default());
+        let launch = launcher.launch_hosted(&host,RequestId::new(),service.status()?.revision,PrimaryLaunchInput { placement:PrimaryPlacement::Existing { placement:Placement::Standalone(roots[0].0) }, cwd:Some(PrimaryCwd::Existing { path:roots[0].1.clone() }), agent:None,model:None,selfdev:false },StartupContextCaller::HarnessApi).await?;
+        let before = Session::load(&launch.session)?;
+        let request = LocationChangeRequest { request:RequestId::new(), session:launch.session.clone(), expected_session_revision:1, expected_catalog_revision:service.status()?.revision, placement:Placement::Standalone(roots[1].0), cwd:roots[1].1.clone() };
+        let result = host.request_location(PrimaryLocationCommand::Change { request:request.clone() }).await;
+        let PrimaryLocationResponse::State { record } = result else { anyhow::bail!("move failed: {result:?}"); };
+        assert_eq!(record.state,LocationChangeState::Complete);
+        assert_eq!(provider.0.load(Ordering::SeqCst),0);
+        assert!(host.processing(&launch.session).is_none());
+        let after = Session::load(&launch.session)?;
+        assert_eq!(after.working_dir.as_deref(),roots[1].1.to_str());
+        assert_eq!(after.location.as_ref().unwrap().initial_cwd,before.location.as_ref().unwrap().initial_cwd);
+        assert_eq!(after.system_prompt,before.system_prompt);
+        assert_eq!(after.active_skill,before.active_skill);
+        assert_eq!(serde_json::to_value(&after.messages[..before.messages.len()])?,serde_json::to_value(&before.messages)?);
+        assert_eq!(after.messages.len(),before.messages.len()+1);
+        let again = host.request_location(PrimaryLocationCommand::Change { request }).await;
+        assert!(matches!(again,PrimaryLocationResponse::State{record:ref replay} if **replay == *record));
+        assert!(matches!(host.request_location(PrimaryLocationCommand::Cancel { operation:record.operation }).await,PrimaryLocationResponse::Rejected{..}));
+        assert_eq!(Session::load(&launch.session)?.messages.len(),after.messages.len());
+        // Actual invocation reads from the new cwd. There is no model call.
+        let agent = host.read().await.get(&launch.session).cloned().unwrap();
+        let output = agent.lock().await.execute_tool("read",serde_json::json!({"file_path":"sentinel.txt","intent":"Check bound cwd"})).await?;
+        assert!(output.output.contains("destination"));
+        drop(agent);
+        host.shutdown().await?;
+        drop(host);
+        std::fs::rename(&roots[1].1,temp.path().join("unavailable-old-cwd"))?;
+        let host = Arc::new(PrimaryHost::default());
+        let pool = Arc::new(crate::mcp::SharedMcpPool::new(Default::default()));
+        let source: Arc<dyn Provider> = Arc::new(provider.clone());
+        assert!(host.restore(&launch.session,&source,&pool,&InstructionRepositoryService::new()).await.is_err());
+        let repair = LocationChangeRequest { request:RequestId::new(),session:launch.session.clone(),expected_session_revision:2,expected_catalog_revision:service.status()?.revision,placement:Placement::Standalone(roots[2].0),cwd:roots[2].1.clone() };
+        let repaired = host.request_location_restoring(PrimaryLocationCommand::Change{request:repair},&source,&pool,&InstructionRepositoryService::new()).await;
+        assert!(matches!(repaired,PrimaryLocationResponse::State{ref record} if record.state==LocationChangeState::Complete),"{repaired:?}");
+        let repaired = Session::load(&launch.session)?;
+        assert_eq!(repaired.working_dir.as_deref(),roots[2].1.to_str());
+        assert_eq!(repaired.system_prompt,before.system_prompt);
+        assert_eq!(provider.0.load(Ordering::SeqCst),0);
+        host.shutdown().await
+    })
 }
 fn change(service: &WorkspaceService, change: OrganizationChange) -> Result<Receipt> {
     let review = service.review_organization_change(service.status()?.revision, change)?;

@@ -1220,6 +1220,54 @@ impl Server {
         let registry_info = self.build_registry_info();
 
         let runtime = self.runtime();
+        let input_host = self.sessions.clone();
+        let input_provider = self.provider.clone();
+        let input_pool = self.mcp_pool.clone();
+        let input_repositories = self.instruction_repositories.clone();
+        let input_events = self::live_turn::LiveTurnSwarmContext::new(
+            &self.swarm_state.members,
+            &self.swarm_state.swarms_by_id,
+            &self.event_history,
+            &self.event_counter,
+            &self.swarm_event_tx,
+        );
+        runtime
+            .spawn_background_task(async move {
+                let store = crate::primary_input::PrimaryInputStore::current();
+                let sessions = match store.sessions() {
+                    Ok(sessions) => sessions,
+                    Err(error) => {
+                        crate::logging::warn(&format!(
+                            "Primary input recovery inventory failed: {error:#}"
+                        ));
+                        return;
+                    }
+                };
+                for session in sessions {
+                    let result = async {
+                        if store.pending(&session)?.is_empty() {
+                            return Ok::<_, anyhow::Error>(());
+                        }
+                        let pool = get_shared_mcp_pool(&input_pool).await;
+                        input_host
+                            .restore(&session, &input_provider, &pool, &input_repositories)
+                            .await?;
+                        self::live_turn::ensure_primary_input_delivery(
+                            &input_host,
+                            &session,
+                            input_events.clone(),
+                        );
+                        Ok(())
+                    }
+                    .await;
+                    if let Err(error) = result {
+                        crate::logging::warn(&format!(
+                            "Pending primary input for {session} needs recovery: {error:#}"
+                        ));
+                    }
+                }
+            })
+            .await;
         let startup_context = Arc::clone(&self.startup_context);
         runtime
             .spawn_background_task(async move {

@@ -60,6 +60,8 @@ impl Agent {
                     repaired
                 ));
             }
+            self.apply_primary_location_changes().await?;
+            self.session.require_published_primary()?;
             let messages = self.messages_for_provider()?;
 
             let tools = self.tool_definitions().await?;
@@ -949,6 +951,7 @@ impl Agent {
 
             // If no tool calls, we're done
             if tool_calls.is_empty() {
+                self.apply_primary_location_changes().await?;
                 if self.maybe_reconsider_fable_guardrail(
                     stop_reason.as_deref(),
                     &mut fable_guardrail_reconsiderations,
@@ -1280,7 +1283,8 @@ impl Agent {
             }
 
             // Check for soft interrupts (e.g. Telegram messages) and inject them for the next turn
-            let injected = self.inject_soft_interrupts();
+            let mut injected = self.inject_primary_inputs()?;
+            injected.extend(self.inject_soft_interrupts());
             if !injected.is_empty() {
                 let total_chars: usize = injected.iter().map(|item| item.content.len()).sum();
                 logging::info(&format!(

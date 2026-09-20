@@ -14,7 +14,9 @@ async fn process_message_streaming_mpsc_with_request_id(
     message: ProcessingMessage,
     events: mpsc::UnboundedSender<ServerEvent>,
 ) -> Result<()> {
-    process_admitted_message(&mut *agent.lock().await, coordinator, message, events).await
+    let mut agent = agent.lock().await;
+    accept_processing_input(&agent, &message)?;
+    process_admitted_message(&mut agent, coordinator, message, events).await
 }
 
 struct IsolatedRuntimeDir {
@@ -2253,6 +2255,7 @@ fn reload_starting_rejects_new_turn_without_spawning_processing_task() {
 
         start_processing_message(
             ProcessingMessage {
+                input_id: crate::workspace::RequestId::new(),
                 queued_messages: None,
                 id: 42,
                 content: "do not start during reload".to_string(),
@@ -2347,6 +2350,7 @@ fn turn_coupled_skill_activation_persists_before_shared_server_processing() {
 
         start_processing_message(
             ProcessingMessage {
+                input_id: crate::workspace::RequestId::new(),
                 queued_messages: None,
                 id: 84,
                 content: "use the active skill".to_string(),
@@ -2462,6 +2466,7 @@ async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attac
 
     start_processing_message(
         ProcessingMessage {
+            input_id: crate::workspace::RequestId::new(),
             queued_messages: None,
             id: 479,
             content: "stream to every attachment".to_string(),
@@ -2587,6 +2592,7 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
 
         start_processing_message(
             ProcessingMessage {
+                input_id: crate::workspace::RequestId::new(),
                 queued_messages: None,
                 id: 77,
                 content: "continue after reload".to_string(),
@@ -2680,6 +2686,7 @@ fn reload_starting_rejects_new_turns_for_multiple_sessions() {
 
             start_processing_message(
                 ProcessingMessage {
+                    input_id: crate::workspace::RequestId::new(),
                     queued_messages: None,
                     id: message_id,
                     content: format!("do not start {session_id} during reload"),
@@ -3509,6 +3516,7 @@ async fn busy_startup_apply_drains_after_active_turn_before_next_user_prompt() {
         Arc::clone(&agent),
         Arc::clone(&coordinator),
         ProcessingMessage {
+            input_id: crate::workspace::RequestId::new(),
             queued_messages: None,
             id: 41,
             content: "first prompt".to_string(),
@@ -3586,6 +3594,7 @@ async fn busy_startup_apply_drains_after_active_turn_before_next_user_prompt() {
         Arc::clone(&agent),
         Arc::clone(&coordinator),
         ProcessingMessage {
+            input_id: crate::workspace::RequestId::new(),
             queued_messages: None,
             id: 42,
             content: "second prompt".to_string(),

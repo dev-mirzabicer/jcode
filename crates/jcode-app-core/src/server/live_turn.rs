@@ -279,90 +279,93 @@ pub(super) async fn run_live_turn_if_idle(
     .await
 }
 
-pub(super) async fn run_live_system_turn_if_idle(
-    session_id: &str,
-    message: &str,
-    unattended_context: Option<jcode_session_types::StoredUnattendedContextAuthorization>,
+pub(super) async fn submit_primary_input(
     sessions: &SessionAgents,
+    input: jcode_session_types::PrimaryInputEnvelope,
     swarm: LiveTurnSwarmContext,
-) -> bool {
-    let Some(agent) = idle_live_agent(session_id, sessions, &swarm.members).await else {
-        return false;
-    };
-    let detail = Some(truncate_detail(message, 120)).filter(|detail| !detail.is_empty());
-    spawn_tracked_live_turn(
-        session_id,
-        agent,
-        sessions,
-        TrackedLiveTurn {
-            message: message.to_string(),
-            system_reminder: None,
-            display_role: Some(crate::session::StoredDisplayRole::System),
-            unattended_context,
-            status_detail: detail,
-        },
-        swarm,
-    )
-    .await
+) -> anyhow::Result<jcode_session_types::PrimaryInputReceipt> {
+    let session = input.session.clone();
+    anyhow::ensure!(
+        sessions.read().await.contains_key(&session),
+        "Primary input recipient is not hosted; restore its exact Session first"
+    );
+    let stored = crate::session::Session::load_startup_stub(&session)?;
+    anyhow::ensure!(
+        stored.isolated_child.is_none(),
+        "Isolated children cannot receive primary input"
+    );
+    let _owner = sessions.claim(&session)?;
+    let store = crate::primary_input::PrimaryInputStore::current();
+    store.accept(input.clone())?;
+    let receipt = store.inspect(&session, input.id)?;
+    if receipt.state == jcode_session_types::PrimaryInputState::Accepted && sessions.accepts_input()
+    {
+        ensure_primary_input_delivery(sessions, &session, swarm);
+    }
+    Ok(receipt)
 }
 
-/// Complete delivery queued behind an active turn, including the race after
-/// that turn's final interrupt check. The queue remains the existing owner.
-pub(super) fn ensure_queued_notification_delivery(
+pub(super) fn ensure_primary_input_delivery(
     sessions: &SessionAgents,
-    session_id: &str,
+    session: &str,
     swarm: LiveTurnSwarmContext,
 ) {
+    let Some(mut drain) = sessions.input_drain(session) else {
+        return;
+    };
     let weak = Arc::downgrade(sessions);
-    let session = session_id.to_owned();
+    let session = session.to_owned();
     sessions.retain_delivery(async move {
         loop {
             let Some(host) = weak.upgrade() else {
                 return;
             };
-            if !host.accepts_input() {
-                return;
-            }
-            if host.wait_idle(&session).await.is_err() {
+            if !host.accepts_input() || host.wait_idle(&session).await.is_err() {
                 return;
             }
             let Some(agent) = host.read().await.get(&session).cloned() else {
                 return;
             };
-            // A metadata operation may own the Agent without owning a turn.
-            let guard = agent.lock().await;
-            let pending = guard.has_soft_interrupts();
-            drop(guard);
-            if !pending || !host.accepts_input() {
-                return;
-            }
+            let store = crate::primary_input::PrimaryInputStore::current();
+            let input = match store.pending(&session) {
+                Ok(pending) => match pending.into_iter().next() {
+                    Some(input) => input,
+                    None => match drain.finish_if_empty() {
+                        Ok(false) => continue,
+                        _ => return,
+                    },
+                },
+                Err(error) => {
+                    crate::logging::warn(&format!(
+                        "Primary input recovery is blocked for {session}: {error:#}"
+                    ));
+                    return;
+                }
+            };
+            // Metadata locks are short and are not a reason to lose input.
+            drop(agent.lock().await);
             let Ok(mut admission) = host.admit(&session, 0, agent.clone()) else {
                 tokio::task::yield_now().await;
                 continue;
             };
-            let queue = admission.agent.soft_interrupt_queue();
-            let message = match queue.lock() {
-                Ok(mut pending) if !pending.is_empty() => pending.remove(0),
-                _ => return,
-            };
-            admission.agent.persist_soft_interrupt_snapshot();
-            let target = admission.agent.session_id().to_owned();
-            admission.agent.primary_presentation = Some(host.presentation(&target));
-            let stdin = host.stdin(&target, || {
-                super::primary_stdin::PrimaryStdin::new(target.clone(), swarm.members.clone())
+            admission.agent.primary_presentation = Some(host.presentation(&session));
+            let stdin = host.stdin(&session, || {
+                super::primary_stdin::PrimaryStdin::new(session.clone(), swarm.members.clone())
             });
             admission.agent.set_stdin_request_tx(stdin.sender());
             let output = super::primary_output::PrimaryOutput::new(
-                target.clone(),
-                host.presentation(&target),
+                session.clone(),
+                host.presentation(&session),
                 swarm.members.clone(),
                 None,
             );
             let tx = output.tx.clone();
             let terminal = tx.clone();
             let finished = swarm.clone();
+            let target = session.clone();
+            let input_id = input.id;
             update_member_status(
-                &target,
+                &session,
                 "running",
                 None,
                 &swarm.members,
@@ -372,40 +375,27 @@ pub(super) fn ensure_queued_notification_delivery(
                 Some(&swarm.event_tx),
             )
             .await;
-            let output_agent = agent;
             host.start(
                 admission,
                 move |mut agent| async move {
                     let start = agent.message_count();
-                    let display = match message.source {
-                        jcode_agent_runtime::SoftInterruptSource::User => None,
-                        jcode_agent_runtime::SoftInterruptSource::System => {
-                            Some(crate::session::StoredDisplayRole::System)
-                        }
-                        jcode_agent_runtime::SoftInterruptSource::BackgroundTask => {
-                            Some(crate::session::StoredDisplayRole::BackgroundTask)
-                        }
-                    };
-                    agent
-                        .run_once_streaming_mpsc_with_display_role_and_unattended(
-                            &message.content,
-                            message.images,
-                            None,
-                            tx,
-                            display,
-                            message.unattended_context,
-                        )
-                        .await?;
+                    let result = agent.run_primary_input(input, tx).await;
+                    if let Err(error) = &result {
+                        crate::primary_input::PrimaryInputStore::current().fail(
+                            agent.session_id(),
+                            input_id,
+                            format!("{error:#}"),
+                        )?;
+                    }
+                    result?;
                     Ok(agent.latest_assistant_text_after(start))
                 },
                 move |outcome| async move {
                     finished.complete(&target, 0, outcome, &terminal).await;
                     drop(terminal);
-                    output.finish(&output_agent).await;
+                    output.finish(&agent).await;
                 },
             );
-            // A later differently authorized group may remain. Inspect only
-            // after the same host has settled this turn and its output.
         }
     });
 }
