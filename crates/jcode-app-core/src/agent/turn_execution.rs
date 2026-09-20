@@ -508,9 +508,25 @@ impl Agent {
         };
 
         let mut new_session = Session::create(None, None);
+        let new_owner = Arc::new(
+            crate::primary::PrimaryLease::acquire(&new_session.id).map_err(|source| {
+                crate::agent::StartupContextActivationError::Ownership { caller, source }
+            })?,
+        );
         new_session.mark_active();
         new_session.model = Some(self.provider_model());
         new_session.provider_key = self.provider_key_for_new_session();
+        if self.session.provider_key.is_some() {
+            new_session.provider_key = self.session.provider_key.clone();
+        }
+        new_session.route_api_method = self.session.route_api_method.clone();
+        new_session.reasoning_effort = self.provider.reasoning_effort();
+        new_session.location = self.session.location.clone().map(|mut location| {
+            location.initial_cwd = location.cwd.observed_path().into();
+            location.revision = 1;
+            location.last_operation = None;
+            location
+        });
         new_session.is_canary = preserve_canary;
         new_session.testing_build = preserve_testing_build;
         new_session.is_debug = preserve_debug;
@@ -587,6 +603,7 @@ impl Agent {
         self.persist_session_best_effort("pre-clear session close state");
         crate::tool::clear_session_tool_policy(&previous_session_id);
         self.session = new_session;
+        self.primary_owner = Some(new_owner);
         crate::tool::set_session_tool_policy(
             &self.session.id,
             self.allowed_tools.clone(),
@@ -1094,6 +1111,7 @@ impl Agent {
         provider: Arc<dyn Provider>,
         registry: Registry,
         repositories: crate::instruction::InstructionRepositoryService,
+        owner: Arc<crate::primary::PrimaryLease>,
     ) -> Result<Self> {
         let session = Session::load(session_id)?;
         anyhow::ensure!(
@@ -1108,6 +1126,7 @@ impl Agent {
             selection.allowed_tools,
             selection.disabled_tools,
         );
+        candidate.primary_owner = Some(owner);
         candidate.instruction_repositories = repositories;
         candidate.restore_session(session_id)?;
         Ok(candidate)
@@ -1115,6 +1134,10 @@ impl Agent {
 
     /// Restore a session by ID (loads from disk)
     pub fn restore_session(&mut self, session_id: &str) -> Result<SessionStatus> {
+        let owner = match &self.primary_owner {
+            Some(owner) if owner.session == session_id => owner.clone(),
+            _ => Arc::new(crate::primary::PrimaryLease::acquire(session_id)?),
+        };
         let restore_start = Instant::now();
         let load_start = Instant::now();
         let mut session = Session::load(session_id)?;
@@ -1184,6 +1207,7 @@ impl Agent {
         let previous_session_id = self.session.id.clone();
         // Restore provider_session_id for Claude CLI session resume
         self.provider_session_id = session.provider_session_id.clone();
+        self.primary_owner = Some(owner);
         self.session = session;
         crate::tool::clear_session_tool_policy(&previous_session_id);
         crate::tool::set_session_tool_policy(

@@ -83,4 +83,14 @@ fn location_survives_checkpoint_journal_stub_and_continuation() {
         serde_json::to_vec(&session.messages).unwrap()
     );
     assert_eq!(messages, b"[]");
+    session.require_published_primary().unwrap();
+    let saved = std::fs::read(session_path(&session.id).unwrap()).unwrap();
+    std::fs::rename(&cwd, temp.path().join("moved-work")).unwrap();
+    assert!(session.require_published_primary().is_err());
+    std::fs::create_dir(&cwd).unwrap();
+    assert!(session.require_published_primary().is_err());
+    assert_eq!(
+        std::fs::read(session_path(&session.id).unwrap()).unwrap(),
+        saved
+    );
 }

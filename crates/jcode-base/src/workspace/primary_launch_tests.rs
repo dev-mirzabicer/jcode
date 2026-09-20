@@ -46,7 +46,7 @@ fn primary_launch_journal_reconciles_checkpoint_without_duplicate_publication() 
         placement: PrimaryPlacement::Existing {
             placement: Placement::Standalone(root),
         },
-        cwd: Some(PrimaryCwd::Existing(work.clone())),
+        cwd: Some(PrimaryCwd::Existing { path: work.clone() }),
         agent: None,
         model: None,
         selfdev: false,

@@ -337,6 +337,7 @@ impl From<crate::instruction::SystemPromptActivationError> for PrimaryInstructio
 }
 
 pub struct Agent {
+    pub(crate) primary_owner: Option<Arc<crate::primary::PrimaryLease>>,
     pub(crate) primary_presentation: Option<Arc<crate::primary::presentation::Presentation>>,
     provider: Arc<dyn Provider>,
     registry: Registry,
@@ -436,6 +437,7 @@ impl Agent {
         let skills = SkillRegistry::shared_snapshot();
         let initial_provider_model = provider.model();
         let agent = Self {
+            primary_owner: None,
             primary_presentation: None,
             provider,
             registry,
@@ -677,7 +679,16 @@ impl Agent {
         instruction_repositories: crate::instruction::InstructionRepositoryService,
     ) -> std::result::Result<(Self, StartupContextActivationOutcome), StartupContextActivationError>
     {
-        let agent = Self::new_with_initial_session(provider, registry, session);
+        let owner = match activation {
+            StartupContextActivation::Primary { caller, .. } => Some(Arc::new(
+                crate::primary::PrimaryLease::acquire(&session.id).map_err(|source| {
+                    StartupContextActivationError::Ownership { caller, source }
+                })?,
+            )),
+            _ => None,
+        };
+        let mut agent = Self::new_with_initial_session(provider, registry, session);
+        agent.primary_owner = owner;
         Self::prepare_primary_agent(
             agent,
             activation,

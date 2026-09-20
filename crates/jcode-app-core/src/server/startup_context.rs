@@ -1748,7 +1748,8 @@ pub(super) fn primary_activation_failure(
     use crate::agent::StartupContextActivationError;
 
     let (kind, retryable) = match error {
-        StartupContextActivationError::Instruction { .. } => {
+        StartupContextActivationError::Instruction { .. }
+        | StartupContextActivationError::Ownership { .. } => {
             (StartupContextFailureKind::Internal, true)
         }
         StartupContextActivationError::Domain { source, .. } => match source {

@@ -1,5 +1,5 @@
 //! Primary launch intent. These types describe choices, not permission grants.
-use crate::{OperationId, Placement, RequestId, Revision};
+use crate::{Home, OperationId, Placement, RequestId, Revision};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -10,20 +10,15 @@ pub enum PrimaryPlacement {
     Standalone { root: PathBuf },
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(
-    tag = "kind",
-    content = "path",
-    rename_all = "snake_case",
-    deny_unknown_fields
-)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PrimaryCwd {
-    Existing(PathBuf),
-    CreateEmpty(PathBuf),
+    Existing { path: PathBuf },
+    CreateEmpty { path: PathBuf, home: Option<Home> },
 }
 impl PrimaryCwd {
     pub fn path(&self) -> &std::path::Path {
         match self {
-            Self::Existing(path) | Self::CreateEmpty(path) => path,
+            Self::Existing { path } | Self::CreateEmpty { path, .. } => path,
         }
     }
 }

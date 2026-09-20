@@ -36,16 +36,7 @@ impl WorkspaceService {
         let connection = self.connection()?;
         let connection = connection.unchecked_transaction().map_err(io)?;
         let revision = storage::status(&connection)?.revision;
-        query::validate_placement(&connection, placement)?;
-        match entity(&connection, query::placement_target(placement))? {
-            Entity::Project(p) if p.state == OrganizationState::Retired => {
-                return Err(issue(IssueCode::InvalidIdentity, "Project is retired"));
-            }
-            Entity::WorkArea(a) if a.state == OrganizationState::Retired => {
-                return Err(issue(IssueCode::InvalidIdentity, "Work area is retired"));
-            }
-            _ => {}
-        }
+        validate_primary_placement(&connection, placement)?;
         let binding = self.resolver.bind_directory(cwd).map_err(location_issue)?;
         let mut statement=connection.prepare("SELECT e.body,b.body FROM entities e JOIN bindings b ON b.location=e.id WHERE e.kind='location'").map_err(io)?;
         let rows = statement
@@ -148,4 +139,28 @@ fn location_issue(error: crate::location::volume::LocationError) -> Issue {
         _ => IssueCode::Io,
     };
     issue(code, error.to_string())
+}
+
+pub(super) fn validate_primary_placement(
+    connection: &Connection,
+    placement: Placement,
+) -> Result<()> {
+    query::validate_placement(connection, placement)?;
+    match entity(connection, query::placement_target(placement))? {
+        Entity::Project(p) if p.state == OrganizationState::Retired => {
+            Err(issue(IssueCode::InvalidIdentity, "Project is retired"))
+        }
+        Entity::WorkArea(a) if a.state == OrganizationState::Retired => {
+            Err(issue(IssueCode::InvalidIdentity, "Work area is retired"))
+        }
+        Entity::Location(location)
+            if location.retired || location.lifecycle != LocationLifecycle::Ready =>
+        {
+            Err(issue(
+                IssueCode::RecoveryRequired,
+                "Placement is not ready for primary work",
+            ))
+        }
+        _ => Ok(()),
+    }
 }

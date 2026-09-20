@@ -215,3 +215,29 @@ Foreign-primary, closed and duplicate responses fail rather than reporting false
 success. Input bodies are not stored in the pending-prompt view. The current TUI's
 limited interactive-terminal notice is unchanged; this does not introduce a new
 stdin UI or the later questionnaire framework.
+
+### Primary launch preparation
+
+`primary::PrimaryLauncher` owns complete local and hosted preparation over the
+existing workspace journal, physical resolver, provider constructor, instruction
+composer and Startup Context engine. A launch ID allocates one Session identity.
+Only a ready Session checkpoint can publish the derived catalog index. Replays
+retain the concrete model/effort and never replace later Session location state.
+Invalid preparation leaves no published Session. Directory effects have separate
+witnessed receipts, so a failed launch never deletes newly arrived user files.
+This is a service contract, not activation of the managed-workspace rollout.
+
+Hosted and process-owned primaries retain the same kernel writer lease under the
+Session namespace's `.writers/primary-<session>.lock`. These coordination files
+are not conversation artifacts and are not unlinked while competing users may
+hold a descriptor. A second live writer cannot restore the same primary. Clear
+obtains ownership for its fresh identity without copying the old launch receipt.
+
+Explicit empty-cwd creation stages on the selected existing parent's volume,
+then publishes with an exclusive directory-relative rename. The parent is pinned
+and revalidated against its witness and volume before effects. Existing targets,
+symlink substitutions, replaced roots and retired placements reject. Interrupted
+publication can reconcile an exact witnessed directory; an unwitnessed stage is
+retained for inspection instead of being deleted or adopted by name. Exclusive
+publication is currently supported on macOS. Project/work-area association of a
+new directory is an explicit input, never inferred from navigation or cwd alone.

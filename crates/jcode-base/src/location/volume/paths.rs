@@ -155,6 +155,159 @@ pub enum CheckoutDestination<'a> {
 }
 
 impl LocationResolver {
+    /// Create one explicit child under an existing witnessed parent. No missing
+    /// ancestor or mount directory is manufactured, and no existing entry is reused.
+    pub fn create_empty_child(
+        &self,
+        parent: &PhysicalBinding,
+        leaf: &std::ffi::OsStr,
+    ) -> Result<PhysicalBinding> {
+        let resolved = self.resolve_directory(parent)?;
+        if resolved.relocated {
+            return Err(LocationError::new(
+                LocationIssue::ReplacedRoot,
+                &resolved.path,
+                "parent moved; review the destination again",
+            ));
+        }
+        if !resolved.volume.writable {
+            return Err(LocationError::new(
+                LocationIssue::ReadOnlyVolume,
+                &resolved.path,
+                "selected volume is read-only",
+            ));
+        }
+        validate_child(leaf, &resolved.path)?;
+        #[cfg(target_os = "macos")]
+        if std::fs::canonicalize("/Volumes").ok().as_deref() == Some(resolved.path.as_path()) {
+            return Err(LocationError::new(
+                LocationIssue::InvalidPath,
+                &resolved.path,
+                "creating a mount-point directory is not a cwd operation",
+            ));
+        }
+        let pinned = PinnedDirectory::open(&resolved.path)?;
+        self.verify_effect_parent(parent, &pinned)?;
+        #[cfg(unix)]
+        {
+            use std::os::{fd::AsRawFd, unix::ffi::OsStrExt};
+            let leaf = std::ffi::CString::new(leaf.as_bytes())
+                .map_err(|e| LocationError::io(&resolved.path, e))?;
+            // SAFETY: the directory descriptor remains owned, and leaf is one
+            // validated NUL-terminated component. mkdirat refuses existing entries.
+            if unsafe { libc::mkdirat(pinned.file.as_raw_fd(), leaf.as_ptr(), 0o700) } != 0 {
+                return Err(LocationError::io(
+                    &resolved.path,
+                    std::io::Error::last_os_error(),
+                ));
+            }
+            pinned
+                .file
+                .sync_all()
+                .map_err(|e| LocationError::io(&resolved.path, e))?;
+        }
+        #[cfg(not(unix))]
+        return Err(LocationError::new(
+            LocationIssue::Unsupported,
+            &resolved.path,
+            "pinned directory creation is unavailable",
+        ));
+        pinned.verify()?;
+        self.bind_directory(&resolved.path.join(leaf))
+    }
+
+    /// Publish an owned staged directory without replacing a concurrently created
+    /// destination. Both names remain relative to the same pinned parent.
+    pub fn publish_empty_child(
+        &self,
+        parent: &PhysicalBinding,
+        stage: &PhysicalBinding,
+        leaf: &std::ffi::OsStr,
+    ) -> Result<PhysicalBinding> {
+        let resolved = self.resolve_directory(parent)?;
+        let source = self.resolve_directory(stage)?;
+        validate_child(leaf, &resolved.path)?;
+        if resolved.relocated
+            || source.relocated
+            || source.path.parent() != Some(resolved.path.as_path())
+        {
+            return Err(LocationError::new(
+                LocationIssue::ReplacedRoot,
+                &resolved.path,
+                "staged directory or parent moved",
+            ));
+        }
+        let pinned = PinnedDirectory::open(&resolved.path)?;
+        self.verify_effect_parent(parent, &pinned)?;
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::{fd::AsRawFd, unix::ffi::OsStrExt};
+            let from = std::ffi::CString::new(source.path.file_name().unwrap().as_bytes())
+                .map_err(|e| LocationError::io(&source.path, e))?;
+            let to = std::ffi::CString::new(leaf.as_bytes())
+                .map_err(|e| LocationError::io(&resolved.path, e))?;
+            // SAFETY: owned directory descriptor and validated component names.
+            // RENAME_EXCL makes a newly arrived destination an error, never deletion.
+            if unsafe {
+                libc::renameatx_np(
+                    pinned.file.as_raw_fd(),
+                    from.as_ptr(),
+                    pinned.file.as_raw_fd(),
+                    to.as_ptr(),
+                    libc::RENAME_EXCL,
+                )
+            } != 0
+            {
+                return Err(LocationError::io(
+                    &resolved.path,
+                    std::io::Error::last_os_error(),
+                ));
+            }
+            pinned
+                .file
+                .sync_all()
+                .map_err(|e| LocationError::io(&resolved.path, e))?;
+        }
+        #[cfg(not(target_os = "macos"))]
+        return Err(LocationError::new(
+            LocationIssue::Unsupported,
+            &resolved.path,
+            "exclusive directory publication is not supported on this platform",
+        ));
+        pinned.verify()?;
+        let binding = self.bind_directory(&resolved.path.join(leaf))?;
+        if binding.volume() != stage.volume() || binding.root_witness() != stage.root_witness() {
+            return Err(LocationError::new(
+                LocationIssue::ReplacedRoot,
+                binding.observed_path(),
+                "published directory identity changed",
+            ));
+        }
+        Ok(binding)
+    }
+
+    fn verify_effect_parent(
+        &self,
+        binding: &PhysicalBinding,
+        pinned: &PinnedDirectory,
+    ) -> Result<()> {
+        if &pinned.witness != binding.root_witness() {
+            return Err(LocationError::new(
+                LocationIssue::ReplacedRoot,
+                &pinned.path,
+                "parent changed before filesystem effect",
+            ));
+        }
+        if &self.containing_volume(&pinned.path)?.identity != binding.volume() {
+            return Err(LocationError::new(
+                LocationIssue::WrongVolume,
+                &pinned.path,
+                "parent volume changed before filesystem effect",
+            ));
+        }
+        pinned.verify()
+    }
+
     pub fn bind_directory(&self, path: &Path) -> Result<PhysicalBinding> {
         validate_absolute(path)?;
         let path = path
@@ -318,6 +471,23 @@ impl LocationResolver {
     }
 }
 
+fn validate_child(leaf: &std::ffi::OsStr, parent: &Path) -> Result<()> {
+    let path = Path::new(leaf);
+    if path.components().count() != 1
+        || !matches!(
+            path.components().next(),
+            Some(std::path::Component::Normal(_))
+        )
+    {
+        return Err(LocationError::new(
+            LocationIssue::InvalidPath,
+            parent,
+            "expected one directory component",
+        ));
+    }
+    Ok(())
+}
+
 fn require_volume(expected: &VolumeIdentity, actual: &VolumeInfo, path: &Path) -> Result<()> {
     if expected != &actual.identity {
         return Err(LocationError::new(
@@ -401,4 +571,28 @@ fn relative_to_volume(path: &Path, mount: &Path, witness: &DirectoryWitness) -> 
         ));
     }
     Ok(relative.into())
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod effect_tests {
+    use super::*;
+    #[test]
+    fn effect_parent_rejects_a_new_directory_opened_after_resolution() {
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path().join("parent");
+        std::fs::create_dir(&parent).unwrap();
+        let resolver = LocationResolver::new();
+        let bound = resolver.bind_directory(&parent).unwrap();
+        std::fs::rename(&parent, temp.path().join("original")).unwrap();
+        std::fs::create_dir(&parent).unwrap();
+        let replacement = PinnedDirectory::open(&parent.canonicalize().unwrap()).unwrap();
+        assert_eq!(
+            resolver
+                .verify_effect_parent(&bound, &replacement)
+                .unwrap_err()
+                .kind,
+            LocationIssue::ReplacedRoot
+        );
+        assert_eq!(std::fs::read_dir(&parent).unwrap().count(), 0);
+    }
 }

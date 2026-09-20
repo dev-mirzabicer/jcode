@@ -911,7 +911,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
             prepared.set_memory_enabled(crate::config::config().features.memory);
             let id = prepared.session_id().to_string();
             let name = prepared.session_short_name().map(str::to_string);
-            if let Err(error) = sessions.own(&id) {
+            if let Err(error) = sessions.adopt_owner(&prepared) {
                 prepared.mark_closed();
                 crate::tool::clear_session_tool_policy(&id);
                 crate::session::remove_unpublished_session(&id)?;

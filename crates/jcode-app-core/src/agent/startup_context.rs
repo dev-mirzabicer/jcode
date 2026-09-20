@@ -175,6 +175,10 @@ impl StartupContextActivationOutcome {
 
 #[derive(Debug)]
 pub enum StartupContextActivationError {
+    Ownership {
+        caller: StartupContextCaller,
+        source: anyhow::Error,
+    },
     Instruction {
         caller: StartupContextCaller,
         source: PrimaryInstructionActivationError,
@@ -201,7 +205,8 @@ pub enum StartupContextActivationError {
 impl StartupContextActivationError {
     pub fn caller(&self) -> StartupContextCaller {
         match self {
-            Self::Instruction { caller, .. }
+            Self::Ownership { caller, .. }
+            | Self::Instruction { caller, .. }
             | Self::Domain { caller, .. }
             | Self::Blocked { caller, .. }
             | Self::Install { caller, .. }
@@ -212,7 +217,8 @@ impl StartupContextActivationError {
     pub fn issues(&self) -> Vec<&StartupFileIssue> {
         match self {
             Self::Blocked { preparation, .. } => preparation.issues().collect(),
-            Self::Instruction { .. }
+            Self::Ownership { .. }
+            | Self::Instruction { .. }
             | Self::Domain { .. }
             | Self::Install { .. }
             | Self::Cleanup { .. } => Vec::new(),
@@ -222,7 +228,8 @@ impl StartupContextActivationError {
     pub fn preparation(&self) -> Option<&StartupPreparation> {
         match self {
             Self::Blocked { preparation, .. } => Some(preparation.as_ref()),
-            Self::Instruction { .. }
+            Self::Ownership { .. }
+            | Self::Instruction { .. }
             | Self::Domain { .. }
             | Self::Install { .. }
             | Self::Cleanup { .. } => None,
@@ -233,6 +240,11 @@ impl StartupContextActivationError {
 impl fmt::Display for StartupContextActivationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Ownership { caller, source } => write!(
+                formatter,
+                "Primary ownership unavailable for {}: {source}",
+                caller.label()
+            ),
             Self::Instruction { caller, source } => write!(
                 formatter,
                 "instruction activation failed for {}: {source}",
@@ -276,7 +288,7 @@ impl Error for StartupContextActivationError {
             Self::Instruction { source, .. } => Some(source),
             Self::Domain { source, .. } => Some(source),
             Self::Install { source, .. } => Some(source),
-            Self::Cleanup { source, .. } => Some(source.as_ref()),
+            Self::Cleanup { source, .. } | Self::Ownership { source, .. } => Some(source.as_ref()),
             Self::Blocked { .. } => None,
         }
     }
@@ -943,6 +955,11 @@ mod tests {
             crate::tool::Registry::empty(),
             None,
         );
+        assert!(
+            restored.restore_session(&session_id).is_err(),
+            "a second writer cannot restore a live primary"
+        );
+        drop(agent);
         restored.restore_session(&session_id).expect("restore");
         assert_eq!(restored.system_prompt_text(), Some(frozen.as_str()));
         restored

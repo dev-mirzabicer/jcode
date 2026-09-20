@@ -925,6 +925,19 @@ impl Session {
     /// An interrupted preparation remains inspectable, but cannot become a live
     /// primary merely because a partial Session file is present.
     pub fn require_published_primary(&self) -> anyhow::Result<()> {
+        if let Some(location) = &self.location {
+            let resolved = crate::location::volume::LocationResolver::new()
+                .resolve_directory(&location.cwd)?;
+            anyhow::ensure!(
+                !resolved.relocated,
+                "Primary cwd moved; review its binding before continuing"
+            );
+            anyhow::ensure!(
+                self.working_dir.as_deref().map(std::path::Path::new)
+                    == Some(location.cwd.observed_path()),
+                "Primary cwd differs from its authoritative binding"
+            );
+        }
         if let Some(creation) = &self.primary_creation {
             anyhow::ensure!(
                 creation.ready,

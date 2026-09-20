@@ -10,6 +10,9 @@ use std::path::{Path, PathBuf};
 mod backup;
 mod organization;
 mod portable;
+mod primary_filesystem;
+#[cfg(test)]
+mod primary_filesystem_tests;
 mod primary_launch;
 #[cfg(test)]
 mod primary_launch_tests;
