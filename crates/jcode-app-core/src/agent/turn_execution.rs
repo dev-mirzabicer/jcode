@@ -1118,6 +1118,7 @@ impl Agent {
         let restore_start = Instant::now();
         let load_start = Instant::now();
         let mut session = Session::load(session_id)?;
+        session.require_published_primary()?;
         anyhow::ensure!(
             session.isolated_child.is_none(),
             "Isolated children are controlled by their original parent. Inspect their transcript instead of opening direct chat."

@@ -1,4 +1,6 @@
 //! Workspace contracts contain no storage, filesystem execution or UI policy.
+mod primary;
+pub use primary::*;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 

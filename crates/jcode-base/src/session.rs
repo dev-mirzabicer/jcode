@@ -262,6 +262,7 @@ impl std::error::Error for SystemPromptDispatchError {
     }
 }
 
+pub use jcode_session_types::StoredPrimaryCreation;
 pub type StoredSessionLocation =
     jcode_session_types::StoredSessionLocation<crate::location::volume::PhysicalBinding>;
 
@@ -361,6 +362,8 @@ pub struct Session {
     pub working_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub location: Option<StoredSessionLocation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_creation: Option<StoredPrimaryCreation>,
     /// Memorable short name (e.g., "fox", "oak")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub short_name: Option<String>,
@@ -472,6 +475,8 @@ struct SessionStartupStub {
     working_dir: Option<String>,
     #[serde(default)]
     location: Option<StoredSessionLocation>,
+    #[serde(default)]
+    primary_creation: Option<StoredPrimaryCreation>,
     #[serde(default)]
     short_name: Option<String>,
     #[serde(default)]
@@ -917,6 +922,29 @@ impl Session {
         Ok(startup_outcome)
     }
 
+    /// An interrupted preparation remains inspectable, but cannot become a live
+    /// primary merely because a partial Session file is present.
+    pub fn require_published_primary(&self) -> anyhow::Result<()> {
+        if let Some(creation) = &self.primary_creation {
+            anyhow::ensure!(
+                creation.ready,
+                "Primary preparation is incomplete; resume launch request {}",
+                creation.request
+            );
+            let service =
+                crate::workspace::WorkspaceService::new(&crate::storage::durable_state_dir());
+            let record = service.inspect_primary_launch(creation.request)?;
+            anyhow::ensure!(
+                record.operation == creation.operation
+                    && record.session == self.id
+                    && record.state == jcode_workspace_types::PrimaryLaunchState::Complete,
+                "Primary publication needs reconciliation; resume launch request {}",
+                creation.request
+            );
+        }
+        Ok(())
+    }
+
     /// Clone the persisted state that defines a true continuation child.
     ///
     /// The child retains stable message IDs and an independent clone of the complete context-view
@@ -982,6 +1010,7 @@ impl Session {
         session.testing_build = stub.testing_build;
         session.working_dir = stub.working_dir;
         session.location = stub.location;
+        session.primary_creation = stub.primary_creation;
         session.short_name = stub.short_name;
         session.status = stub.status;
         session.last_pid = stub.last_pid;
@@ -1206,6 +1235,7 @@ impl Session {
             testing_build: self.testing_build.clone(),
             working_dir: self.working_dir.clone(),
             location: self.location.clone(),
+            primary_creation: self.primary_creation.clone(),
             short_name: self.short_name.clone(),
             status: self.status.clone(),
             last_pid: self.last_pid,
@@ -1521,6 +1551,7 @@ impl Session {
         self.testing_build = meta.testing_build;
         self.working_dir = meta.working_dir;
         self.location = meta.location;
+        self.primary_creation = meta.primary_creation;
         self.short_name = meta.short_name;
         self.status = meta.status;
         self.last_pid = meta.last_pid;
@@ -1770,6 +1801,7 @@ impl Session {
             testing_build: None,
             working_dir: current_working_dir_string(),
             location: None,
+            primary_creation: None,
             short_name,
             status: SessionStatus::Active,
             last_pid: Some(std::process::id()),
@@ -1844,6 +1876,7 @@ impl Session {
             testing_build: None,
             working_dir: current_working_dir_string(),
             location: None,
+            primary_creation: None,
             short_name: Some(short_name),
             status: SessionStatus::Active,
             last_pid: Some(std::process::id()),

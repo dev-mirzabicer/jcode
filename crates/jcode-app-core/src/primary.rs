@@ -243,7 +243,9 @@ impl PrimaryHost {
         }
         self.own(session)?;
         let result = async {
-            let previous = crate::session::Session::load_startup_stub(session)?.status;
+            let stored = crate::session::Session::load_startup_stub(session)?;
+            stored.require_published_primary()?;
+            let previous = stored.status;
             let provider = provider.fork_for_new_session();
             let registry = crate::tool::Registry::new_for_shared_session(
                 provider.clone(),

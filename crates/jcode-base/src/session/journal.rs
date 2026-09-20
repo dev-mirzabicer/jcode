@@ -41,6 +41,8 @@ pub(super) struct SessionJournalMeta {
     pub(super) working_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) location: Option<super::StoredSessionLocation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) primary_creation: Option<super::StoredPrimaryCreation>,
     pub(super) short_name: Option<String>,
     pub(super) status: SessionStatus,
     pub(super) last_pid: Option<u32>,
@@ -118,6 +120,7 @@ pub(super) fn metadata_requires_snapshot(
         || prev.testing_build != current.testing_build
         || prev.working_dir != current.working_dir
         || prev.location != current.location
+        || prev.primary_creation != current.primary_creation
         || prev.short_name != current.short_name
         || prev.status != current.status
         || prev.is_debug != current.is_debug

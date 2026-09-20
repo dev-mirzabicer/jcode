@@ -15,3 +15,12 @@ pub struct StoredSessionLocation<Binding> {
     pub revision: Revision,
     pub last_operation: Option<OperationId>,
 }
+
+/// A ready checkpoint is written only after complete primary preparation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoredPrimaryCreation {
+    pub request: jcode_workspace_types::RequestId,
+    pub operation: OperationId,
+    pub ready: bool,
+}
