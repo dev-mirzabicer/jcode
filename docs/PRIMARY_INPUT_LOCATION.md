@@ -1,0 +1,173 @@
+# Primary input and location controls
+
+This is the C01 backend contract for durable primary input and explicit location
+changes. It does not expose the later workspace management TUI, scope/grant
+policy, runtime service supervision, or the C04/C05 final interface and corpus.
+
+## Owners and availability
+
+`PrimaryHost` retains admission and delivery independently of client sockets.
+The ordinary Agent loop owns inference. `Session` owns conversation history,
+input commit receipts, current location and historical initial cwd. The private
+workspace catalog owns location-change intents and its derived Session index.
+No new scheduler, conversation store or permission authority is introduced.
+
+A dedicated authenticated control connection can send `primary_control_probe`.
+Version 1 advertises durable input separately from `location_enabled`. Location
+changes require the existing, default-off `features.managed_primary_launch`
+rollout gate. Inspection and cancellation of existing requests remain available
+when new changes are disabled. They are exercised with isolated fixture configuration until the
+required human management surface is available. An unknown or unsupported
+capability is not a successful operation.
+
+On the current runtime, ordinary message and soft-input Ack follows durable
+intake, which also makes the public MessageAccepted event truthful. Other Ack
+events remain transport/control acknowledgements. No Ack proves provider dispatch
+or task completion. Typed callers use the explicit receipts below.
+Legacy message IDs are scoped to their connection. Callers needing retry across
+connections retain a UUID and use `primary_input`.
+
+## Durable input
+
+`primary_input` accepts an envelope containing its UUID, exact target Session,
+content, images, delivery choice and applicable original authority/reminder
+metadata. It returns `primary_input_receipt`. Same Session/UUID and identical
+input returns the retained state. Different content or policy under that UUID
+is a conflict. Input is persisted before acceptance is reported.
+
+Delivery choices:
+
+- `safe_boundary`: an idle primary starts a turn. Busy input enters at the
+  existing safe boundary without splitting a tool-result batch. Explicit urgent
+  input retains the existing tool-skipping boundary, not location-control
+  authority.
+- `next_turn`: preserve FIFO deferred input until the active turn finishes.
+  Deferred entries do not block eligible safe-boundary input for that active turn.
+- `context_only`: append input without requesting inference.
+
+The receipt distinguishes `accepted`, `committed`, `failed` and `cancelled`.
+`committed` means that the input identity and appended message IDs reached one
+Session checkpoint. It does not mean the provider executed exactly once or
+that an agent read, understood or completed the input. A later explicit rewind
+or prompt-safe rollback can remove conversation messages without authorizing
+re-delivery of a previously committed input. The original envelope remains
+available independently of that history projection or edit.
+
+`primary_input_inspect` returns receipt metadata. `primary_input_read` explicitly
+returns the original envelope and receipt, including retained images and failure
+information. Ordinary status views should not fetch those bodies. Failure does
+not discard the original. A deliberate new submission uses a new UUID rather
+than replaying provider or tool effects under a completed receipt.
+
+Ordinary hosted and process-owned user appends use the same Session commitment
+mechanism. Hosted soft input, NotifySession and background/scheduled delivery
+use durable primary admission. Enabled relay prompts also use this host, with
+stable relay-event identity and their existing queued/waited response behavior.
+Idle typed human input uses the existing bounded Startup Context observation
+owner. Synthetic notifications and within-turn injection do not become new
+observation triggers. Scheduled items and execution-completion wakes
+carry stable producer correlation. The dedicated scheduled control connection
+negotiates input capability before sending content. Existing notification and
+execution owners still decide whether an occurrence should notify or wake.
+
+One retained delivery worker drains each hosted primary. Its final empty check
+is synchronized with new admission. A dropped client cannot stop that worker.
+On runtime startup, pending inboxes reconcile against Session receipts before
+restoration. Only still-uncommitted input is eligible for dispatch. Committed
+messages and completed tools are never replayed to repair a lost reply.
+Unavailable physical roots or damaged state preserve the envelope for repair.
+This is not the later configurable crash-inference recovery policy.
+
+## Public clients
+
+Harness API v1.8 advertises `primary_control_v1`. Both SDKs negotiate the actual
+daemon capabilities before dispatch: Rust `submit_primary_input`,
+`inspect_primary_input`, `read_primary_input`, `primary_location` and TypeScript
+`submitPrimaryInput`, `inspectPrimaryInput`, `readPrimaryInput`, `primaryLocation`.
+They preserve UUID/session/operation correlation and reject unsupported or
+mismatched replies. Location rejection stays a structured domain result.
+These controls do not attach the client or construct an inference Session.
+
+Existing TUI transport-recovery adoption is under explicit WP-04 review. The
+UUID API provides cross-connection deduplication; legacy resends using a new
+transport identity are new submissions, not an exact-once guarantee.
+
+## Input persistence and recovery
+
+Private state lives under `durable-state/primary-inputs/`. Original envelopes
+and metadata are serialized per Session under a kernel-held transaction lease.
+The initialized marker distinguishes a new inbox from a missing established
+journal. Corrupt or unknown state is an error, not an empty queue or an implicit
+restore of an older `.bak` that could resurrect cancelled work.
+
+At commitment, the Agent appends messages and a digest-bound input receipt in
+one Session checkpoint. Inbox state is derived from that receipt afterward.
+Crash before the checkpoint leaves the original input pending. Crash after it,
+before inbox acknowledgement or transport delivery, reconciles to committed
+without appending again. An uncertain post-write error is checked against the
+actual persisted Session before live authority is adopted or restored.
+
+Short synchronous inbox transactions serialize admission, inspection and
+commitment. No inbox lease is held while awaiting a provider or another async
+operation. Session writer ownership remains the existing primary lease.
+
+## Typed location changes
+
+`primary_location` accepts `change`, `inspect` or `cancel`. A change names the
+Session, request UUID, expected Session-location and catalog revisions, explicit
+placement and absolute cwd. It does not create a clone, infer a project, relocate
+files, grant access or select a different model.
+
+The catalog records the intent and reviewed physical witness before effects.
+Idle application makes no model call. During a turn, application waits until
+all tool results are present, before the next provider request, or the safe
+no-tool completion boundary. A failed turn also leaves a runtime-owned idle
+reconciliation path. Cancellation is allowed only before commitment.
+
+Application validates current revisions and physical identity, renders the
+approved managed notice in the target location, and checks the complete
+candidate provider budget. It atomically checkpoints the new `Session.location`,
+`working_dir` and a structurally identified notice before adopting live state.
+The catalog index/receipt then reconcile from that committed Session. Lost
+index or reply acknowledgement cannot append another notice. Missing, replaced,
+offline, stale or cancelled targets do not change the effective binding.
+
+Notice rendering uses the existing managed notification resource
+`session-location-changed`. It is occurrence-time text, not a system-prompt
+refresh or a template read on every tool call. If source or complete-budget
+validation blocks the notice, the pending control remains inspectable rather
+than silently dropping the notice or partially changing cwd.
+
+Subsequent tool invocations use the new cwd. Already started native/background
+work keeps its recorded cwd. Initial environment messages, prior tool results,
+Startup Context captures, current system text and active-skill snapshots remain
+historical and unchanged. Explicit agent replacement still uses its established
+owner and cannot rewrite the original cwd message.
+
+A trusted location control can restore an unavailable primary specifically for
+repair without admitting inference at the old cwd. Normal tool-enabled provider
+dispatch still requires a verified current binding. Repair never recreates a
+removed directory or substitutes the home directory. Exact frozen instructions
+are retained while candidate tool-guidance validation uses the chosen new
+execution location.
+
+Catalog restore preserves completed operation receipts and marks derived Session
+rows unreconciled. Primary publication validation refreshes that index through
+its existing revisioned owner from current Session state. Pending operations
+invalidated by restore are not permission to repeat a historical move.
+
+## Verification boundary
+
+Mechanism tests use synthetic input and real isolated Session/catalog storage.
+The native route is `scripts/verify_primary_input_location.py`, invoked through
+`scripts/run_isolated_test.py` with an explicit immutable binary and private
+artifact directory. It uses a localhost scripted provider, real native tools,
+lost acknowledgement, full-batch movement, original background cwd, restart,
+missing-cwd repair and primary context operations. Its result and cleanup files
+are evidence only after that exact run passes.
+
+The acceptance ledger must separately record focused tests, failure attempts,
+protected-state checks, strict lint, final source and activated runtime,
+remaining caller boundaries, native results and Mirza's implementation approval.
+No prompt wording snapshot, prose-quality assertion or paid model benchmark is
+part of this contract.
