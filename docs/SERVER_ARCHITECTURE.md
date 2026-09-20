@@ -294,3 +294,10 @@ by `primary_launch_v1`. Rust `launch_primary` and TypeScript `launchPrimary`
 check both bridge support and runtime readiness, preserve structured failures,
 and return a receipt without silently replacing the current attachment. Older
 clients retain their existing create/attach behavior while the rollout is off.
+
+Primary MCP initialization is retained with the shared Registry tool map.
+Attaching another observer does not replace its stateful MCP manager or leases.
+Managed hosted launch prepares those tools before first attachment; explicit
+MCP configuration reload remains owned by the management tool. Navigation also
+releases that connection's Startup Context editor lease and derives selfdev
+state from the target, rather than carrying authority from the prior session.

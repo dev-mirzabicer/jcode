@@ -49,6 +49,17 @@ impl PrimaryLauncher {
             "Primary runtime is stopping"
         );
         let (agent, record) = self.prepare(request, expected, input, caller).await?;
+        if let PrimaryRegistryMode::Shared(pool) = &self.registry {
+            agent
+                .registry()
+                .register_mcp_tools_for_dir(
+                    None,
+                    Some(pool.clone()),
+                    Some(record.session.clone()),
+                    agent.working_dir().map(std::path::PathBuf::from),
+                )
+                .await;
+        }
         let mut agents = host.write().await;
         ensure!(
             host.accepting.load(std::sync::atomic::Ordering::Acquire),

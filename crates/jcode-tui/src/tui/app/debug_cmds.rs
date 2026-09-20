@@ -143,6 +143,12 @@ impl App {
             return serde_json::to_string_pretty(&self.startup_context_debug_summary())
                 .unwrap_or_else(|_| "{}".to_string());
         }
+        if cmd == "session-picker-state" {
+            return self.session_picker_overlay.as_ref().map_or_else(
+                || serde_json::json!({"visible":false}),
+                |picker| serde_json::json!({"visible":true,"sessions":picker.borrow().visible_session_iter().map(|session|session.id.clone()).collect::<Vec<_>>()})
+            ).to_string();
+        }
         if cmd == "instruction-manager" {
             return self.instruction_debug().to_string();
         }

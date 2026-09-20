@@ -1296,11 +1296,14 @@ pub(super) async fn handle_resume_session(
                     .map(|session| session.is_canary)
             })
             .unwrap_or(false);
+        *client_selfdev = is_canary;
         if is_canary {
-            *client_selfdev = true;
             registry.register_selfdev_tools().await;
         }
 
+        if *client_session_id != session_id {
+            startup_context.release_connection(client_connection_id);
+        }
         *client_session_id = session_id.clone();
 
         handle_get_history(

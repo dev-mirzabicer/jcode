@@ -67,6 +67,7 @@ fn registry_with_context_budget_and_observation(
         skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
         context_budget: Arc::new(RwLock::new(context_budget)),
         bindings: Default::default(),
+        mcp_registration: Default::default(),
     }
 }
 
@@ -1687,4 +1688,49 @@ async fn only_the_known_open_world_tools_are_ineligible_for_openai_strict_mode()
         "the set of strict-ineligible built-in tools changed; a new name means an \
          eligibility rule is too aggressive, a missing name means this list is stale"
     );
+}
+
+#[test]
+fn primary_mcp_registration_is_retained_across_observer_and_registry_clones() {
+    let _environment = crate::storage::lock_test_env();
+    let root = tempfile::tempdir().unwrap();
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let registry = Registry::empty();
+        registry
+            .register_mcp_tools_for_dir(
+                None,
+                None,
+                Some("fixture-primary".into()),
+                Some(root.path().into()),
+            )
+            .await;
+        let first = registry.tools.read().await.get("mcp").unwrap().clone();
+        let observer = registry.clone();
+        observer
+            .register_mcp_tools_for_dir(
+                None,
+                None,
+                Some("fixture-primary".into()),
+                Some(root.path().into()),
+            )
+            .await;
+        let second = observer.tools.read().await.get("mcp").unwrap().clone();
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "attachment must not replace the stateful MCP owner"
+        );
+        let upgraded = registry.downgrade().upgrade().unwrap();
+        upgraded
+            .register_mcp_tools_for_dir(
+                None,
+                None,
+                Some("fixture-primary".into()),
+                Some(root.path().into()),
+            )
+            .await;
+        assert!(Arc::ptr_eq(
+            &first,
+            upgraded.tools.read().await.get("mcp").unwrap()
+        ));
+    });
 }

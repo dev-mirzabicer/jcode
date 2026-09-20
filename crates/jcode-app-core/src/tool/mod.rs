@@ -138,6 +138,7 @@ pub fn tool_is_globally_available(name: &str) -> bool {
 pub struct Registry {
     child_policy: Option<Arc<child_policy::ChildToolPolicy>>,
     tools: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
+    mcp_registration: Arc<tokio::sync::OnceCell<()>>,
     skills: Arc<RwLock<SkillRegistry>>,
     context_budget: Arc<RwLock<ContextBudgetTracker>>,
     bindings: Arc<StdRwLock<HashMap<String, BoundTool>>>,
@@ -154,6 +155,7 @@ struct BoundTool {
 pub(crate) struct WeakRegistry {
     child_policy: Option<Arc<child_policy::ChildToolPolicy>>,
     tools: std::sync::Weak<RwLock<HashMap<String, Arc<dyn Tool>>>>,
+    mcp_registration: Arc<tokio::sync::OnceCell<()>>,
     skills: Arc<RwLock<SkillRegistry>>,
     context_budget: Arc<RwLock<ContextBudgetTracker>>,
 }
@@ -163,6 +165,7 @@ impl WeakRegistry {
             tools: self.tools.upgrade().ok_or_else(|| {
                 anyhow::anyhow!("Originating tool registry is no longer available")
             })?,
+            mcp_registration: self.mcp_registration.clone(),
             skills: self.skills.clone(),
             context_budget: self.context_budget.clone(),
             // Management changes the tool map, not a provider's frozen input bindings.
@@ -176,6 +179,7 @@ impl Clone for Registry {
     fn clone(&self) -> Self {
         Self {
             tools: self.tools.clone(),
+            mcp_registration: self.mcp_registration.clone(),
             skills: self.skills.clone(),
             // Each clone gets fresh session-local accounting so parallel
             // subagents cannot corrupt one another.
@@ -207,6 +211,7 @@ impl Registry {
         WeakRegistry {
             child_policy: self.child_policy.clone(),
             tools: Arc::downgrade(&self.tools),
+            mcp_registration: self.mcp_registration.clone(),
             skills: self.skills.clone(),
             context_budget: self.context_budget.clone(),
         }
@@ -309,6 +314,7 @@ impl Registry {
     pub fn clone_with_shared_context_runtime(&self) -> Self {
         Self {
             tools: self.tools.clone(),
+            mcp_registration: self.mcp_registration.clone(),
             skills: self.skills.clone(),
             context_budget: self.context_budget.clone(),
             child_policy: self.child_policy.clone(),
@@ -374,6 +380,7 @@ impl Registry {
     pub fn empty() -> Self {
         Self {
             tools: Arc::new(RwLock::new(HashMap::new())),
+            mcp_registration: Default::default(),
             skills: Arc::new(RwLock::new(SkillRegistry::default())),
             context_budget: Arc::new(RwLock::new(ContextBudgetTracker::new())),
             child_policy: None,
@@ -517,6 +524,7 @@ impl Registry {
         let registry_struct_start = std::time::Instant::now();
         let registry = Self {
             tools: Arc::new(RwLock::new(HashMap::new())),
+            mcp_registration: Default::default(),
             skills: skills.clone(),
             context_budget: context_budget.clone(),
             child_policy: None,
@@ -1147,6 +1155,23 @@ impl Registry {
     /// `working_dir` instead of the server process cwd. Remote/client sessions
     /// must pass their session working directory here (issue #420).
     pub async fn register_mcp_tools_for_dir(
+        &self,
+        event_tx: Option<crate::client_delivery::ClientEventSender>,
+        shared_pool: Option<std::sync::Arc<crate::mcp::SharedMcpPool>>,
+        session_id: Option<String>,
+        working_dir: Option<std::path::PathBuf>,
+    ) {
+        self.mcp_registration
+            .get_or_init(|| async {
+                self.initialize_mcp_tools_for_dir(event_tx, shared_pool, session_id, working_dir)
+                    .await;
+            })
+            .await;
+    }
+
+    // Reattaching an observer must not replace stateful clients or their leases.
+    // Explicit MCP reload stays with the existing management tool owner.
+    async fn initialize_mcp_tools_for_dir(
         &self,
         event_tx: Option<crate::client_delivery::ClientEventSender>,
         shared_pool: Option<std::sync::Arc<crate::mcp::SharedMcpPool>>,

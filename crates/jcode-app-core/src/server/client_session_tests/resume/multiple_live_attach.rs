@@ -84,7 +84,12 @@ async fn handle_resume_session_allows_multiple_live_tui_attach() -> Result<()> {
     let (swarm_event_tx, _swarm_event_rx) = broadcast::channel::<SwarmEvent>(8);
     let mcp_pool = Arc::new(crate::mcp::SharedMcpPool::from_default_config());
 
-    let mut client_selfdev = false;
+    let coordinator=crate::server::startup_context::test_coordinator();
+    let editor_root=tempfile::tempdir()?;
+    let cwd=editor_root.path().to_string_lossy().into_owned();
+    new_agent.lock().await.startup_context_session_mut().working_dir=Some(cwd.clone());
+    assert!(matches!(coordinator.open_editor(temp_session_id.into(),"conn_new".into(),cwd.clone()).await.expect("source editor"),crate::server::startup_context::OpenEditorOutcome::Opened(_)));
+    let mut client_selfdev = true;
     let mut client_session_id = temp_session_id.to_string();
 
     handle_resume_session(
@@ -97,7 +102,7 @@ async fn handle_resume_session_allows_multiple_live_tui_attach() -> Result<()> {
         &mut client_session_id,
         "conn_new",
         &new_agent,
-        &crate::server::startup_context::test_coordinator(),
+        &coordinator,
         &provider,
         &crate::instruction::InstructionRepositoryService::new(),
         None,
@@ -140,6 +145,9 @@ async fn handle_resume_session_allows_multiple_live_tui_attach() -> Result<()> {
     );
 
     assert_eq!(client_session_id, target_session_id);
+    assert!(!client_selfdev,"source selfdev state must not follow navigation");
+    assert!(matches!(coordinator.open_editor(target_session_id.into(),"conn_existing".into(),cwd).await.expect("released source editor"),crate::server::startup_context::OpenEditorOutcome::Opened(_)));
+    assert_eq!(coordinator.release_connection("conn_existing"),1);
     let sessions_guard = sessions.read().await;
     let mapped_agent = sessions_guard
         .get(target_session_id)

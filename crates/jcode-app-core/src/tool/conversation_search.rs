@@ -564,6 +564,7 @@ mod tests {
             skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
             context_budget: template_budget,
             bindings: Default::default(),
+            mcp_registration: Default::default(),
         };
         let registry = template.clone();
         {
