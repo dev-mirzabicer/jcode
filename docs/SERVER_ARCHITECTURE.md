@@ -324,3 +324,12 @@ Managed Clear uses the existing complete launch transaction with the current
 placement and witnessed cwd, a new creation receipt, and a reconciled Session
 index. It does not copy the source's launch identity or extra grants. Grant-carry
 review remains gated with its later owner.
+
+Primary Stop settlement waits for retained foreground execution supervisors to
+publish terminal metadata and captured output after the Agent waiter ends.
+Process disappearance or aborting a waiter is not a durable-completion receipt.
+Already-backgrounded work, including work promoted while waiting, retains its
+independent lifetime. Reload uses its existing explicit handoff/quiescence path
+rather than waiting on the selfdev tool initiating replacement. If foreground
+terminal persistence cannot be verified, the primary reports an error instead
+of a successful Stop completion.

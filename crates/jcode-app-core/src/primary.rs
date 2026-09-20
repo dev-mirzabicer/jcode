@@ -425,12 +425,25 @@ impl PrimaryHost {
         let mut tasks = self.tasks.lock().expect("primary tasks");
         while tasks.try_join_next().is_some() {}
         tasks.spawn(async move {
-            let result = match (&mut task.0).await {
+            let mut result = match (&mut task.0).await {
                 Ok(result) => result,
                 Err(error) => Err(anyhow::anyhow!("Primary turn ended: {error}")),
             };
-            let interrupted = control.stopping.load(Ordering::Acquire) || control.cancel.is_set();
+            let mut interrupted =
+                control.stopping.load(Ordering::Acquire) || control.cancel.is_set();
             let epoch = control.cancel.epoch();
+            // Aborting the Agent only ends its waiter. The shared execution
+            // owner still has to drain and seal foreground results. Reload
+            // has its existing handoff/quiescence owner (including selfdev).
+            if interrupted
+                && control.cancel.stop_cause()
+                    != Some(jcode_tool_types::StopCause::ReloadQuiescence)
+                && let Err(error) = crate::execution::await_primary_foreground(&session).await
+            {
+                interrupted = false;
+                result = Err(error.context("Primary Stop could not verify foreground completion"));
+            }
+
             complete(TurnOutcome {
                 result,
                 interrupted,

@@ -203,6 +203,7 @@ try:
     with sqlite3.connect(root / 'state/execution/index.sqlite') as db:
         runs = db.execute("SELECT state,output_path FROM runs WHERE tool='bash' ORDER BY rowid").fetchall()
     assert len(runs) == 2, runs
+    assert [state for state, _ in runs] == ['completed', 'cancelled'], runs
     outputs = [pathlib.Path(path).read_text() for _, path in runs]
     assert any(('OWNED_TAIL_detach' in text for text in outputs))
     assert any(('OWNED_PREFIX_stop' in text for text in outputs))

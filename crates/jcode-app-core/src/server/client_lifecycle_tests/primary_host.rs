@@ -737,3 +737,91 @@ fn notify_session_terminal_race_starts_only_unconsumed_detached_input() -> Resul
         host.shutdown().await
     })
 }
+
+#[test]
+fn primary_stop_waits_for_owned_foreground_terminal_publication() -> Result<()> {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    tokio::runtime::Runtime::new()?.block_on(async {
+        let provider: Arc<dyn Provider> = Arc::new(CompleteImmediatelyProvider);
+        let registry = Registry::new(provider.clone()).await;
+        let agent = Arc::new(Mutex::new(Agent::new(provider, registry)));
+        let session = agent.lock().await.session_id().to_owned();
+        let host = Arc::new(crate::primary::PrimaryHost::new(HashMap::from([(
+            session.clone(),
+            agent.clone(),
+        )])));
+        let admission = host.admit(&session, 71, agent.clone())?;
+        let mut ctx = crate::tool::ToolContext {
+            session_id: session.clone(),
+            message_id: "seal-fixture".into(),
+            tool_call_id: "slow-seal".into(),
+            working_dir: None,
+            stdin_request_tx: None,
+            graceful_shutdown_signal: Some(admission.agent.graceful_shutdown_signal()),
+            execution_mode: jcode_tool_core::ToolExecutionMode::AgentTurn,
+            invocation: Default::default(),
+        };
+        ctx.invocation.policy.cooperative_stop = true;
+        let invocation = crate::execution::invocation(&ctx, "seal-fixture", serde_json::json!({}));
+        let run = invocation.id();
+        let (ready, started) = tokio::sync::oneshot::channel();
+        let (cancelled, cancel) = tokio::sync::oneshot::channel();
+        let (release, finish) = tokio::sync::oneshot::channel();
+        let (done, mut completed) = tokio::sync::oneshot::channel();
+        host.start(
+            admission,
+            move |agent| async move {
+                let _guard = agent;
+                crate::execution::execute(
+                    invocation,
+                    ctx,
+                    std::num::NonZeroUsize::new(4096).unwrap(),
+                    Box::new(move |ctx| {
+                        Box::pin(async move {
+                            let _ = ready.send(());
+                            ctx.graceful_shutdown_signal
+                                .as_ref()
+                                .unwrap()
+                                .notified()
+                                .await;
+                            let _ = cancelled.send(());
+                            let _ = finish.await;
+                            Ok(crate::tool::ToolOutput::new("retained partial fixture"))
+                        })
+                    }),
+                )
+                .await?;
+                Ok(None)
+            },
+            move |outcome| async move {
+                let _ = done.send(outcome.interrupted);
+            },
+        );
+        started.await?;
+        let owner = host.clone();
+        let target = session.clone();
+        let stop = tokio::spawn(async move { owner.stop(&target).await });
+        cancel.await?;
+        let premature = tokio::time::timeout(Duration::from_secs(1), &mut completed).await;
+        release.send(()).unwrap();
+        stop.await??;
+        let settled_store = crate::execution::ExecutionStore::open(&crate::storage::jcode_dir()?)?;
+        crate::execution::await_terminal(
+            &settled_store,
+            &run,
+            &jcode_agent_runtime::InterruptSignal::new(),
+        )
+        .await?;
+        assert!(
+            premature.is_err(),
+            "primary completion was emitted before its foreground result was sealed"
+        );
+        assert!(completed.await?);
+        let store = crate::execution::ExecutionStore::open(&crate::storage::jcode_dir()?)?;
+        let record = store.inspect(&run)?.unwrap();
+        assert_eq!(record.state, crate::execution::RunState::Cancelled);
+        assert!(record.result_path.is_some());
+        host.shutdown().await
+    })
+}

@@ -708,6 +708,56 @@ pub async fn promote(id: &str) -> Result<bool> {
         .map_err(anyhow::Error::msg)
 }
 
+/// A primary may stop waiting on a foreground tool before the retained execution
+/// supervisor has sealed its result. Join those owners before reporting Stop
+/// complete. Background work and observers of another owner's work stay distinct.
+pub(crate) async fn await_primary_foreground(session: &str) -> Result<()> {
+    let root = crate::storage::jcode_dir()?.join("execution");
+    let mut seen = std::collections::HashSet::new();
+    loop {
+        let runs = LIVE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .values()
+            .filter(|run| {
+                run.store.root() == root
+                    && run.invocation.session_id == session
+                    && !run.background.load(Ordering::SeqCst)
+                    && !seen.contains(&run.invocation.id())
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if runs.is_empty() {
+            return Ok(());
+        }
+        for run in runs {
+            let id = run.invocation.id();
+            seen.insert(id.clone());
+            let mut result = run.result.clone();
+            loop {
+                let promoted = run.promoted.notified();
+                tokio::pin!(promoted);
+                promoted.as_mut().enable();
+                if run.background.load(Ordering::SeqCst) || result.borrow_and_update().is_some() {
+                    break;
+                }
+                tokio::select! {
+                    changed=result.changed()=> { changed.context("Foreground execution closed before publishing its result")?; }
+                    _=&mut promoted=> {}
+                }
+            }
+            if run.owns_execution.load(Ordering::SeqCst) && !run.background.load(Ordering::SeqCst) {
+                let store = run.store.clone();
+                tokio::task::spawn_blocking(move || {
+                    ensure!(store.inspect(&id)?.is_some_and(|record| record.state.terminal() || record.background),
+                        "Foreground work {id} stopped without a durable terminal receipt; inspect retained work before continuing");
+                    Ok::<_, anyhow::Error>(())
+                }).await??;
+            }
+        }
+    }
+}
+
 /// Acceptance of a stop request is not a terminal-completion claim.
 pub fn request_stop(id: &str, cause: StopCause) -> Result<bool> {
     let root = crate::storage::jcode_dir()?.join("execution");

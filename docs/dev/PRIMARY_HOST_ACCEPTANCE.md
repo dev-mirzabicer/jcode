@@ -116,3 +116,9 @@ Focused regressions include `notify_session_terminal_race_`,
 fixtures coordinate exact admission/terminal boundaries instead of weakening
 assertions with timing retries. Clear's source and replacement are distinct
 owners; identity-mismatch checks remain enforced.
+
+`primary_stop_waits_for_owned_foreground_terminal_publication` coordinates a
+retained producer beyond the Agent abort grace and rejects primary completion
+until its cancelled result is sealed. The native host script requires actual
+`completed` and `cancelled` execution rows immediately after primary completion,
+not merely a dead process and retained stdout prefix.
