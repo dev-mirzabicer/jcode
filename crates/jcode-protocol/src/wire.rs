@@ -50,6 +50,13 @@ pub enum Request {
     /// Negotiate ordered presentation before Subscribe, without creating a Session.
     #[serde(rename = "primary_stream_subscribe")]
     PrimaryStreamSubscribe { id: u64 },
+    #[serde(rename = "primary_launch_probe")]
+    PrimaryLaunchProbe { id: u64 },
+    #[serde(rename = "primary_launch")]
+    PrimaryLaunch {
+        id: u64,
+        request: Box<jcode_workspace_types::PrimaryLaunchRequest>,
+    },
     #[serde(rename = "workspace_probe")]
     WorkspaceProbe { id: u64 },
     #[serde(rename = "workspace")]
@@ -1114,6 +1121,17 @@ pub enum Request {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ServerEvent {
+    #[serde(rename = "primary_launch_capabilities")]
+    PrimaryLaunchCapabilities {
+        id: u64,
+        version: u32,
+        enabled: bool,
+    },
+    #[serde(rename = "primary_launch_response")]
+    PrimaryLaunchResponse {
+        id: u64,
+        response: Box<jcode_workspace_types::PrimaryLaunchResponse>,
+    },
     #[serde(rename = "primary_stream_capabilities")]
     PrimaryStreamCapabilities { id: u64, version: u32 },
     /// Internal ordered primary checkpoint. The primary host consumes it before client delivery.

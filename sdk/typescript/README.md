@@ -444,6 +444,7 @@ try {
 | `unknown_session` | The session no longer exists, is not available to this instance, or the connection is not attached where attachment is required. | Refresh `listSessions()`, use the right private/shared instance, and attach when the method requires it. |
 | `invalid_request` | Arguments or current state violate the operation's contract (for example an invalid model, retry count, path, or route selection). | Correct the caller input. The message contains the rejected constraint; do not blindly retry. |
 | `invalid_option` | A client-only option is outside its allowed range. | Correct the named option, such as `discoveryIntervalMs` or `maxBufferedEvents`. |
+| `primary_launch` | Managed primary preparation or publication was rejected. `HarnessError.details` carries the workspace issue code and detail. | Inspect the original request and issue before retrying. Preserve the request UUID for unchanged settings. Do not assume a failed reply undoes an already-published Session or directory effect. |
 | `startup_context` | `createSession()` could not establish mandatory Startup Context, or the connected server predates typed Startup Context creation support. `HarnessError.details` contains the structured creation failure and per-file issues when available. | Repair the listed project plan or required files, choose a supported server, then create a new session. The rejected creation leaves no attached session to reuse. |
 | `internal` | The bridge or daemon failed unexpectedly while handling a valid request. | Preserve the message and jcode logs, retry once if safe, then report it if reproducible. |
 
@@ -544,3 +545,15 @@ classification, ownership and recovery.
 advertised `execution_force_stop_v1` capability. It targets only a verified owned
 native process. Acceptance is not terminal completion, and the shared Jcode server
 is never killed to stop a task. Ordinary `stop` remains available for older owners.
+
+### Explicit managed primary preparation (staged)
+
+Harness API v1.7 adds `launchPrimary(request)` with the `primary_launch_v1`
+capability. The runtime must also report version-1 launch readiness. Ordinary
+rollout remains disabled until workspace controls are available. This method
+returns the durable primary receipt, then `attachSession(receipt.session)` uses
+the normal attachment path. It does not silently switch the caller's attachment.
+Retain the request UUID and unchanged settings for safe retry. Placement and cwd
+are explicit, and session creation never implicitly provisions a clone. See
+[`docs/SERVER_ARCHITECTURE.md`](../../docs/SERVER_ARCHITECTURE.md) for request
+shape, lifecycle, staging and local versus hosted execution boundaries.

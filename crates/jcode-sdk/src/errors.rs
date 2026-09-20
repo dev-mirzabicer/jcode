@@ -9,6 +9,8 @@ use std::fmt;
 /// What went wrong, in a form a caller can branch on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ErrorKind {
+    /// Structured managed-primary preparation or publication failure.
+    PrimaryLaunch(jcode_harness_api::WorkspaceIssue),
     /// The socket could not be dialed. Usually: the harness is not running.
     ConnectFailed,
     /// The version handshake was refused or answered with the wrong frame.
@@ -67,6 +69,7 @@ impl ErrorKind {
             Self::UnsupportedCapability => "unsupported_capability",
             Self::EventBufferOverflow => "event_buffer_overflow",
             Self::StartupContext(_) => "startup_context",
+            Self::PrimaryLaunch(_) => "primary_launch",
             Self::Harness(code) => match code {
                 jcode_harness_api::ErrorCode::UnsupportedVersion => "unsupported_version",
                 jcode_harness_api::ErrorCode::UnknownRequest => "unknown_request",

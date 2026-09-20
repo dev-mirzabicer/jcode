@@ -64,3 +64,23 @@ pub struct PrimaryLaunchRecord {
     #[serde(default)]
     pub backup_pending: bool,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrimaryLaunchRequest {
+    pub request: RequestId,
+    pub expected_revision: Revision,
+    pub input: PrimaryLaunchInput,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum PrimaryLaunchResponse {
+    Launched {
+        record: Box<PrimaryLaunchRecord>,
+    },
+    Rejected {
+        request: RequestId,
+        issue: crate::Issue,
+    },
+}

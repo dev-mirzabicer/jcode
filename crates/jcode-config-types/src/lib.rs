@@ -1004,6 +1004,9 @@ fn default_true() -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FeatureConfig {
+    /// Managed primary creation rollout. Enable only with usable workspace controls.
+    /// Existing attachment/runtime lifetime is independent of this gate.
+    pub managed_primary_launch: bool,
     /// Globally enable memory retrieval, extraction, tools, and maintenance (default: false)
     pub memory: bool,
     /// Globally enable Swarm coordination, tools, and restoration (default: false).
@@ -1034,6 +1037,7 @@ pub struct FeatureConfig {
 impl Default for FeatureConfig {
     fn default() -> Self {
         Self {
+            managed_primary_launch: false,
             memory: false,
             swarm: false,
             mermaid: true,

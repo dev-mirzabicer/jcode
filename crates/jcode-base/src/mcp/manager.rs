@@ -65,7 +65,11 @@ pub struct McpManager {
 impl McpManager {
     /// Create a new manager in owned in-process mode (used by tests and local harnesses).
     pub fn new() -> Self {
-        let project_dir = std::env::current_dir().ok();
+        Self::new_for_dir(std::env::current_dir().ok())
+    }
+
+    /// Owned clients use the selected primary cwd, never another caller's process cwd.
+    pub fn new_for_dir(project_dir: Option<std::path::PathBuf>) -> Self {
         Self {
             pool: None,
             access_policy: None,

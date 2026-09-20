@@ -11,6 +11,8 @@ use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, RwLockReadGuard, RwLockWriteGu
 use tokio::task::{AbortHandle, JoinSet};
 
 mod launch;
+mod transport;
+pub use transport::{configured_launch, launch_enabled, launch_local_request};
 pub(crate) mod presentation;
 pub use launch::{PrimaryLauncher, PrimaryRegistryMode};
 

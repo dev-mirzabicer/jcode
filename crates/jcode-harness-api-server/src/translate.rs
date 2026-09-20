@@ -151,6 +151,8 @@ struct ArchiveState {
 
 #[derive(Debug, Clone, PartialEq)]
 enum SimpleKind {
+    PrimaryLaunchProbe,
+    PrimaryLaunch,
     Ping,
     History,
     Ok,
@@ -563,6 +565,34 @@ impl BridgeState {
                     "id": id,
                     "include_instructions": request["include_instructions"].as_bool().unwrap_or(false),
                 }))]
+            }
+            "primary_launch_probe" => {
+                let id = self.legacy_id();
+                self.pending_simple
+                    .push((id, api_id, SimpleKind::PrimaryLaunchProbe));
+                vec![Outbound::Legacy(
+                    json!({"type":"primary_launch_probe","id":id}),
+                )]
+            }
+            "primary_launch" => {
+                let request = match serde_json::from_value::<jcode_harness_api::PrimaryLaunchRequest>(
+                    request["request"].clone(),
+                ) {
+                    Ok(request) => request,
+                    Err(error) => {
+                        return Self::error_reply(
+                            api_id,
+                            ErrorCode::InvalidRequest,
+                            &format!("Invalid primary launch: {error}"),
+                        );
+                    }
+                };
+                let id = self.legacy_id();
+                self.pending_simple
+                    .push((id, api_id, SimpleKind::PrimaryLaunch));
+                vec![Outbound::Legacy(
+                    json!({"type":"primary_launch","id":id,"request":request}),
+                )]
             }
             "execution" => {
                 let Some(session_id) = self.session_id.clone() else {
@@ -1356,6 +1386,48 @@ impl BridgeState {
                         active_skill: event["active_skill"].as_str().map(str::to_string),
                     },
                 )]
+            }
+            "primary_launch_capabilities" | "primary_launch_response" => {
+                let id = event["id"].as_u64().unwrap_or(0);
+                let probe = event["type"].as_str() == Some("primary_launch_capabilities");
+                let Some(index) = self.pending_simple.iter().position(|(legacy, _, kind)| {
+                    *legacy == id
+                        && if probe {
+                            matches!(kind, SimpleKind::PrimaryLaunchProbe)
+                        } else {
+                            matches!(kind, SimpleKind::PrimaryLaunch)
+                        }
+                }) else {
+                    return vec![];
+                };
+                let (_, api_id, _) = self.pending_simple.remove(index);
+                let reply = if probe {
+                    match (
+                        event["version"]
+                            .as_u64()
+                            .and_then(|v| u32::try_from(v).ok()),
+                        event["enabled"].as_bool(),
+                    ) {
+                        (Some(version), Some(enabled)) => {
+                            ApiEvent::PrimaryLaunchCapabilities { version, enabled }
+                        }
+                        _ => ApiEvent::Error {
+                            code: ErrorCode::Internal,
+                            message: "Invalid launch capability reply".into(),
+                        },
+                    }
+                } else {
+                    match serde_json::from_value::<jcode_harness_api::PrimaryLaunchResponse>(
+                        event["response"].clone(),
+                    ) {
+                        Ok(response) => ApiEvent::PrimaryLaunch { response },
+                        Err(error) => ApiEvent::Error {
+                            code: ErrorCode::Internal,
+                            message: format!("Invalid launch reply: {error}"),
+                        },
+                    }
+                };
+                vec![ServerFrame::reply(api_id, reply)]
             }
             "execution_response" => {
                 let id = event["id"].as_u64().unwrap_or(0);

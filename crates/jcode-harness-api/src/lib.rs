@@ -37,6 +37,9 @@ pub use jcode_tool_types::inspection::{
     CAPABILITY as INSPECTION_CAPABILITY, CLEANUP_CAPABILITY, InspectionRequest, InspectionResponse,
     TranscriptRange,
 };
+pub use jcode_workspace_types::{
+    Issue as WorkspaceIssue, PrimaryLaunchRecord, PrimaryLaunchRequest, PrimaryLaunchResponse,
+};
 pub use requests::*;
 pub use sockets::{api_socket_path, legacy_socket_path, runtime_dir};
 
@@ -51,7 +54,7 @@ mod capability_coverage_tests;
 /// Protocol major version. Breaking changes only.
 pub const API_VERSION_MAJOR: u32 = 1;
 /// Protocol minor version. Additive changes.
-pub const API_VERSION_MINOR: u32 = 6;
+pub const API_VERSION_MINOR: u32 = 7;
 
 /// Envelope wrapping every client-to-server frame.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

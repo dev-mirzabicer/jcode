@@ -143,49 +143,48 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
 
     needs_redraw |= check_debug_command(app, remote).await.is_some();
 
-    if !app.is_processing {
-        if let Some(request) = app.take_pending_catchup_resume() {
-            match remote.resume_session(&request.target_session_id).await {
-                Ok(()) => {
-                    let label = crate::id::extract_session_name(&request.target_session_id)
-                        .map(|name| name.to_string())
-                        .unwrap_or_else(|| request.target_session_id.clone());
-                    let show_brief = request.show_brief;
-                    app.begin_in_flight_catchup_resume(request);
-                    app.set_status_notice(if show_brief {
-                        format!("Catch Up → {}", label)
-                    } else {
-                        format!("Back → {}", label)
-                    });
-                    return true;
-                }
-                Err(err) => {
-                    app.clear_in_flight_catchup_resume();
-                    app.push_display_message(DisplayMessage::error(format!(
-                        "Failed to switch Catch Up session: {}",
-                        err
-                    )));
-                    needs_redraw = true;
-                }
+    // Navigation changes an attachment, never the runtime-owned turn.
+    if let Some(request) = app.take_pending_catchup_resume() {
+        match remote.resume_session(&request.target_session_id).await {
+            Ok(()) => {
+                let label = crate::id::extract_session_name(&request.target_session_id)
+                    .map(|name| name.to_string())
+                    .unwrap_or_else(|| request.target_session_id.clone());
+                let show_brief = request.show_brief;
+                app.begin_in_flight_catchup_resume(request);
+                app.set_status_notice(if show_brief {
+                    format!("Catch Up → {}", label)
+                } else {
+                    format!("Back → {}", label)
+                });
+                return true;
+            }
+            Err(err) => {
+                app.clear_in_flight_catchup_resume();
+                app.push_display_message(DisplayMessage::error(format!(
+                    "Failed to switch Catch Up session: {}",
+                    err
+                )));
+                needs_redraw = true;
             }
         }
+    }
 
-        if let Some(target_session) = app.workspace_client.take_pending_resume_session() {
-            match remote.resume_session(&target_session).await {
-                Ok(()) => {
-                    let label = crate::id::extract_session_name(&target_session)
-                        .map(|name| name.to_string())
-                        .unwrap_or(target_session);
-                    app.set_status_notice(format!("Workspace → {}", label));
-                    return true;
-                }
-                Err(err) => {
-                    app.push_display_message(DisplayMessage::error(format!(
-                        "Failed to switch workspace session: {}",
-                        err
-                    )));
-                    needs_redraw = true;
-                }
+    if let Some(target_session) = app.workspace_client.take_pending_resume_session() {
+        match remote.resume_session(&target_session).await {
+            Ok(()) => {
+                let label = crate::id::extract_session_name(&target_session)
+                    .map(|name| name.to_string())
+                    .unwrap_or(target_session);
+                app.set_status_notice(format!("Workspace → {}", label));
+                return true;
+            }
+            Err(err) => {
+                app.push_display_message(DisplayMessage::error(format!(
+                    "Failed to switch workspace session: {}",
+                    err
+                )));
+                needs_redraw = true;
             }
         }
     }

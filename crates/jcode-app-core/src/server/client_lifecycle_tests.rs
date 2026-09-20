@@ -2810,6 +2810,34 @@ async fn lightweight_comm_request_skips_full_session_initialization() {
 
     let (client_reader, mut client_writer) = client_stream.into_split();
     let mut client_reader = BufReader::new(client_reader);
+    client_writer
+        .write_all(b"{\"type\":\"primary_launch_probe\",\"id\":3}\n")
+        .await
+        .unwrap();
+    let mut probe_line = String::new();
+    client_reader.read_line(&mut probe_line).await.unwrap();
+    assert!(matches!(
+        decode_request_or_event(&probe_line),
+        ServerEvent::PrimaryLaunchCapabilities {
+            id: 3,
+            version: 1,
+            enabled: false
+        }
+    ));
+    let launch:crate::workspace::PrimaryLaunchRequest=serde_json::from_value(serde_json::json!({"request":"12a99e11-e967-4a1e-a47c-000000000001","expected_revision":0,"input":{"placement":{"kind":"standalone","root":"/fixture"},"cwd":{"kind":"existing","path":"/fixture"},"agent":null,"model":null,"selfdev":false}})).unwrap();
+    let payload = serde_json::to_string(&Request::PrimaryLaunch {
+        id: 4,
+        request: Box::new(launch),
+    })
+    .unwrap()
+        + "\n";
+    client_writer.write_all(payload.as_bytes()).await.unwrap();
+    probe_line.clear();
+    client_reader.read_line(&mut probe_line).await.unwrap();
+    assert!(
+        matches!(decode_request_or_event(&probe_line),ServerEvent::PrimaryLaunchResponse{id:4,response} if matches!(*response,crate::workspace::PrimaryLaunchResponse::Rejected{issue:crate::workspace::Issue{code:crate::workspace::IssueCode::UnsupportedCapability,..},..}))
+    );
+
     for id in [5, 6] {
         let request = Request::PrimaryStreamSubscribe { id };
         client_writer

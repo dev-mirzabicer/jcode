@@ -241,3 +241,56 @@ publication can reconcile an exact witnessed directory; an unwitnessed stage is
 retained for inspection instead of being deleted or adopted by name. Exclusive
 publication is currently supported on macOS. Project/work-area association of a
 new directory is an explicit input, never inferred from navigation or cwd alone.
+
+### Staged public launch adapters
+
+`features.managed_primary_launch` defaults to false. It controls only the new
+creation route, not attachment-independent primary lifetime or the broader
+workspace rollout. Leave it disabled in ordinary operation until workspace
+management and permission controls are available. Isolated acceptance fixtures
+can exercise the production route with the flag enabled.
+
+Before Subscribe, `primary_launch_probe` reports version 1 and enabled state.
+`primary_launch` accepts a `PrimaryLaunchRequest` and returns its durable receipt
+or a structured issue. Neither probe nor a rejected disabled launch allocates a
+provisional Session. Accepted preparation runs under the runtime's owned task
+set, not the client's response waiter. Creation does not change an existing
+attachment. Attach to the returned Session identity through the normal protocol.
+
+TUI, Run and REPL accept `--primary-launch FILE`, a JSON request containing a
+caller-retained UUID, the observed catalog revision and explicit launch settings:
+
+```json
+{
+  "request": "12a99e11-e967-4a1e-a47c-000000000001",
+  "expected_revision": 0,
+  "input": {
+    "placement": { "kind": "standalone", "root": "/absolute/project" },
+    "cwd": { "kind": "existing", "path": "/absolute/project" },
+    "agent": null,
+    "model": null,
+    "selfdev": false
+  }
+}
+```
+
+Use the real catalog revision, not the example value. Catalog initialization is
+explicit and separate. Existing placements use stable IDs. `create_empty` cwd
+choices include an explicit `home` when adding a project/work-area directory.
+A null model captures the current concrete route and actual effort, not an alias.
+A repeated unchanged request retains its identity; changed settings require a
+new request. Incomplete replies require inspection, not a fresh request that
+could duplicate already completed effects.
+
+The TUI retains its initial request across connection retries, then switches to
+ordinary attachment recovery once the published Session ID is known. Busy
+workspace navigation sends Resume without Cancel. Run and REPL retain local
+process ownership and make no detached-survival promise. ACP uses per-request
+`_meta.jcode_primary_launch` in `session/new`, with matching explicit `cwd`.
+Launch-file options are not inherited as defaults by daemon/tool subprocesses.
+
+Harness API v1.7 exposes `primary_launch_probe` and `primary_launch`, advertised
+by `primary_launch_v1`. Rust `launch_primary` and TypeScript `launchPrimary`
+check both bridge support and runtime readiness, preserve structured failures,
+and return a receipt without silently replacing the current attachment. Older
+clients retain their existing create/attach behavior while the rollout is off.

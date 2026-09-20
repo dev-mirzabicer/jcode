@@ -622,6 +622,49 @@ impl JcodeClient {
             .map(drop)
     }
 
+    /// Publish one prepared primary without changing this client's attachment.
+    /// Request identity is caller-owned and must be retained across retries.
+    pub fn launch_primary(
+        &self,
+        request: jcode_harness_api::PrimaryLaunchRequest,
+    ) -> Result<jcode_harness_api::PrimaryLaunchRecord> {
+        if !self.supports("primary_launch_v1") {
+            return Err(Error::new(
+                ErrorKind::UnsupportedCapability,
+                "Managed primary launch requires primary_launch_v1",
+            ));
+        }
+        let probe = self.request_ok(ApiRequest::PrimaryLaunchProbe)?;
+        if !matches!(
+            probe.event,
+            ApiEvent::PrimaryLaunchCapabilities {
+                version: 1,
+                enabled: true
+            }
+        ) {
+            return Err(Error::new(
+                ErrorKind::UnsupportedCapability,
+                "Managed primary launch is unavailable or staged on this runtime",
+            ));
+        }
+        let expected = request.request;
+        match self
+            .request_ok(ApiRequest::PrimaryLaunch { request })?
+            .event
+        {
+            ApiEvent::PrimaryLaunch {
+                response: jcode_harness_api::PrimaryLaunchResponse::Launched { record },
+            } if record.request == expected => Ok(*record),
+            ApiEvent::PrimaryLaunch {
+                response: jcode_harness_api::PrimaryLaunchResponse::Rejected { issue, .. },
+            } => Err(Error::new(
+                ErrorKind::PrimaryLaunch(issue.clone()),
+                issue.to_string(),
+            )),
+            other => Err(unexpected("primary_launch", &other)),
+        }
+    }
+
     pub fn create_session(&self, working_dir: Option<String>) -> Result<SessionInfo> {
         self.create_session_with_agent(working_dir, None)
     }

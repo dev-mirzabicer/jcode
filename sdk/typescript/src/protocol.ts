@@ -8,7 +8,24 @@
  */
 
 export const API_VERSION_MAJOR = 1;
-export const API_VERSION_MINOR = 6;
+export const API_VERSION_MINOR = 7;
+
+export type WorkspacePlacement = { kind: "project" | "work_area" | "checkout" | "directory" | "standalone"; id: string };
+export type WorkspaceHome = { kind: "project" | "work_area"; id: string };
+export interface PrimaryModel { model: string; provider: string; api_method: string; effort: string | null }
+export interface PrimaryLaunchInput {
+  placement: { kind: "existing"; placement: WorkspacePlacement } | { kind: "standalone"; root: string };
+  cwd: {kind: "existing"; path: string} | {kind: "create_empty"; path: string; home: WorkspaceHome | null} | null;
+  agent: string | null; model: PrimaryModel | null; selfdev?: boolean;
+}
+export interface PrimaryLaunchRequest { request: string; expected_revision: number; input: PrimaryLaunchInput }
+export interface PrimaryLaunchRecord {
+  request: string; operation: string; session: string; input: PrimaryLaunchInput; concrete_model: PrimaryModel;
+  registration_request: string; state: "pending" | "complete" | "failed" | "recovery_required";
+  reviewed_revision: number; published_revision: number | null; issue: string | null; backup_pending: boolean;
+}
+export type WorkspaceIssueCode = "needs_cwd" | "permission_required" | "invalid_identity" | "conflict" | "busy" | "offline_volume" | "replaced_root" | "corrupt_state" | "recovery_required" | "unsupported_capability" | "invalid_input" | "referenced" | "backup_failed" | "io";
+export type PrimaryLaunchResponse = {status: "launched"; record: PrimaryLaunchRecord} | {status: "rejected"; request: string; issue: {code: WorkspaceIssueCode; detail: string}};
 
 export type ExecutionState = "prepared" | "queued" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
 export type OutputSize = number | "very_small" | "small" | "medium" | "large" | "very_large";
@@ -149,6 +166,8 @@ export type WorkflowPromptRequest =
   | { kind: "structured_correction"; schema: string; error_lines: string; previous_response: string };
 
 export type ApiRequest =
+  | {req: "primary_launch_probe"}
+  | {req: "primary_launch"; request: PrimaryLaunchRequest}
   | {req: "execution"; session_id: string; request: ExecutionRequest}
   | {req: "session_inspection"; session_id: string; request: InspectionRequest}
   | {req: "output_cleanup"; session_id: string; request: CleanupRequest}
@@ -204,6 +223,8 @@ export type ApiRequest =
   | { req: "ping" };
 
 export type ApiEvent =
+  | {ev: "primary_launch_capabilities"; version: number; enabled: boolean}
+  | {ev: "primary_launch"; response: PrimaryLaunchResponse}
   | {ev: "execution"; session_id: string; response: ExecutionResponse}
   | {ev: "session_inspection"; session_id: string; response: InspectionResponse}
   | {ev: "output_cleanup"; session_id: string; response: CleanupResponse}
@@ -348,6 +369,8 @@ export const KNOWN_EVENT_KINDS = [
   "session_inspection",
   "output_cleanup",
   "execution",
+  "primary_launch_capabilities",
+  "primary_launch",
   "hello_ok",
   "ok",
   "error",
@@ -394,6 +417,8 @@ export const KNOWN_REQUEST_KINDS = [
   "archive_session",
   "restore_session",
   "set_retention_policy",
+  "primary_launch_probe",
+  "primary_launch",
   "create_session",
   "attach_session",
   "detach_session",

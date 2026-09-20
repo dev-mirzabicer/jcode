@@ -1165,7 +1165,10 @@ impl Registry {
                 working_dir,
             )))
         } else {
-            Arc::new(RwLock::new(McpManager::new()))
+            Arc::new(RwLock::new(match working_dir {
+                Some(path) => McpManager::new_for_dir(Some(path)),
+                None => McpManager::new(),
+            }))
         };
 
         // Register MCP management tool immediately (with registry for dynamic tool registration)

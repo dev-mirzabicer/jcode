@@ -324,7 +324,24 @@ impl AcpRuntime {
             return Ok(());
         }
 
-        match self.create_new_session(cwd).await {
+        let launch = match message
+            .params
+            .get("_meta")
+            .and_then(|meta| meta.get("jcode_primary_launch"))
+        {
+            Some(value) => match serde_json::from_value::<crate::workspace::PrimaryLaunchRequest>(
+                value.clone(),
+            ) {
+                Ok(request) => Some(request),
+                Err(error) => {
+                    self.write_error_value(id, JSONRPC_INVALID_PARAMS, error.to_string())
+                        .await?;
+                    return Ok(());
+                }
+            },
+            None => None,
+        };
+        match self.create_new_session(cwd, launch).await {
             Ok(session) => {
                 let session_id = session.session_id.clone();
                 let state = session.ui_state.lock().await.clone();
@@ -692,16 +709,77 @@ impl AcpRuntime {
         Ok(stream.into_split())
     }
 
-    async fn create_new_session(&self, cwd: PathBuf) -> Result<DaemonSession> {
+    async fn create_new_session(
+        &self,
+        cwd: PathBuf,
+        launch: Option<crate::workspace::PrimaryLaunchRequest>,
+    ) -> Result<DaemonSession> {
         let (reader, writer) = self.connect_daemon().await?;
         let session = DaemonSession::new(String::new(), reader, writer, 2);
+        let target = if let Some(request) = launch {
+            anyhow::ensure!(
+                request
+                    .input
+                    .cwd
+                    .as_ref()
+                    .is_some_and(|chosen| chosen.path() == cwd),
+                "ACP cwd must equal the explicit launch cwd"
+            );
+            let probe = session.next_id();
+            session
+                .send(&Request::PrimaryLaunchProbe { id: probe })
+                .await?;
+            loop {
+                match session.read_event().await? {
+                    ServerEvent::Ack { .. } => continue,
+                    ServerEvent::PrimaryLaunchCapabilities {
+                        id,
+                        version: 1,
+                        enabled: true,
+                    } if id == probe => break,
+                    _ => anyhow::bail!("Managed launch is unsupported or staged on the daemon"),
+                }
+            }
+            let id = session.next_id();
+            let expected = request.request;
+            session
+                .send(&Request::PrimaryLaunch {
+                    id,
+                    request: Box::new(request),
+                })
+                .await?;
+            loop {
+                match session.read_event().await? {
+                    ServerEvent::Ack { .. } => continue,
+                    ServerEvent::PrimaryLaunchResponse {
+                        id: reply,
+                        response,
+                    } if reply == id => match *response {
+                        crate::workspace::PrimaryLaunchResponse::Launched { record }
+                            if record.request == expected =>
+                        {
+                            break Some(record.session);
+                        }
+                        crate::workspace::PrimaryLaunchResponse::Rejected { issue, .. } => {
+                            return Err(issue.into());
+                        }
+                        _ => anyhow::bail!("Primary launch reply identity mismatch"),
+                    },
+                    _ => anyhow::bail!(
+                        "Primary launch reply missing; retry the same request identity"
+                    ),
+                }
+            }
+        } else {
+            None
+        };
         let subscribe_id = 1;
         session
             .send(&Request::Subscribe {
                 id: subscribe_id,
                 working_dir: Some(cwd.display().to_string()),
                 selfdev: None,
-                target_session_id: None,
+                target_session_id: target,
                 agent: std::env::var("JCODE_AGENT_SELECTION")
                     .ok()
                     .map(|value| value.trim().to_string())

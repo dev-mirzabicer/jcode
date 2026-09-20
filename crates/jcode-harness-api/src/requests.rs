@@ -6,6 +6,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "req", rename_all = "snake_case")]
 pub enum ApiRequest {
+    PrimaryLaunchProbe,
+    PrimaryLaunch {
+        request: crate::PrimaryLaunchRequest,
+    },
     /// Version negotiation. Must be the first frame on a connection.
     Hello {
         min_version: u32,
@@ -23,10 +27,14 @@ pub enum ApiRequest {
 
     /// Reversibly hide a session from the default list. Its transcript remains
     /// on disk and can be restored at any time.
-    ArchiveSession { session_id: String },
+    ArchiveSession {
+        session_id: String,
+    },
 
     /// Put an archived session back in the default list.
-    RestoreSession { session_id: String },
+    RestoreSession {
+        session_id: String,
+    },
 
     /// Configure automatic archival of inactive sessions. `None` disables it.
     SetRetentionPolicy {
@@ -43,10 +51,14 @@ pub enum ApiRequest {
     },
 
     /// Attach to an existing session and subscribe to its event stream.
-    AttachSession { session_id: String },
+    AttachSession {
+        session_id: String,
+    },
 
     /// Detach from the currently attached session.
-    DetachSession { session_id: String },
+    DetachSession {
+        session_id: String,
+    },
 
     /// Send a user message to the attached session.
     SendMessage {
@@ -61,7 +73,9 @@ pub enum ApiRequest {
     },
 
     /// Cancel the in-flight generation.
-    Cancel { session_id: String },
+    Cancel {
+        session_id: String,
+    },
 
     /// Inject a message at the next safe point without cancelling.
     SoftInterrupt {
@@ -79,7 +93,9 @@ pub enum ApiRequest {
     },
 
     /// Fetch conversation history.
-    GetHistory { session_id: String },
+    GetHistory {
+        session_id: String,
+    },
 
     /// Requires shared_execution_v1. Paths in replies are server-owned.
     Execution {
@@ -97,7 +113,9 @@ pub enum ApiRequest {
     },
 
     /// List valid primary agents for the attached session's project.
-    ListAgents { session_id: String },
+    ListAgents {
+        session_id: String,
+    },
 
     /// Select a primary agent. Ordinary post-dispatch selection appends the
     /// complete profile; `replace` explicitly replaces the true system prompt.
@@ -131,7 +149,9 @@ pub enum ApiRequest {
     },
 
     /// Clear conversation history.
-    Clear { session_id: String },
+    Clear {
+        session_id: String,
+    },
 
     /// Rewind history to the given 1-based message index.
     Rewind {
@@ -151,17 +171,26 @@ pub enum ApiRequest {
     /// A client that cannot enumerate models cannot offer a model picker, so
     /// it is stuck on whatever the daemon defaulted to. Served from the
     /// catalog the daemon already reports on attach.
-    ListModels { session_id: String },
+    ListModels {
+        session_id: String,
+    },
 
     /// Provider routes and active runtime identity for the attached session.
-    GetRuntimeInfo { session_id: String },
+    GetRuntimeInfo {
+        session_id: String,
+    },
 
     /// Persist an API-key credential in jcode's owner-only provider store and
     /// notify the daemon to reload it. OAuth tokens are intentionally excluded.
-    SetApiKey { provider: String, api_key: String },
+    SetApiKey {
+        provider: String,
+        api_key: String,
+    },
 
     /// Remove a previously persisted API-key credential.
-    ClearApiKey { provider: String },
+    ClearApiKey {
+        provider: String,
+    },
 
     /// Read one UTF-8 file under the session working directory.
     ReadFile {
@@ -190,20 +219,29 @@ pub enum ApiRequest {
     },
 
     /// Read safe filesystem metadata for a path under the session root.
-    FileStatus { session_id: String, path: String },
+    FileStatus {
+        session_id: String,
+        path: String,
+    },
 
     /// Switch the session to a different model.
     ///
     /// `model` is an id from `ListModels`, e.g. `claude-opus-5`. A route
     /// suffix like `claude-opus-4-6[1m]` selects a specific context variant.
-    SetModel { session_id: String, model: String },
+    SetModel {
+        session_id: String,
+        model: String,
+    },
 
     /// Set how much the model deliberates before answering.
     ///
     /// The cost/quality dial: `minimal`, `low`, `medium`, `high`, `xhigh`, or
     /// `max`, depending on what the provider supports. Providers that do not
     /// support it answer with an error rather than silently ignoring it.
-    SetReasoningEffort { session_id: String, effort: String },
+    SetReasoningEffort {
+        session_id: String,
+        effort: String,
+    },
 
     /// Set a session's title, or clear it to restore the generated one.
     RenameSession {
@@ -216,13 +254,17 @@ pub enum ApiRequest {
     ///
     /// `Rewind` is destructive, so without an undo a client cannot offer it
     /// safely: a mis-click costs the user their conversation.
-    RewindUndo { session_id: String },
+    RewindUndo {
+        session_id: String,
+    },
 
     /// Drop soft interrupts that have been queued but not yet delivered.
     ///
     /// The counterpart to `SoftInterrupt`: a client that lets a user queue a
     /// follow-up must also let them take it back before it lands.
-    CancelSoftInterrupts { session_id: String },
+    CancelSoftInterrupts {
+        session_id: String,
+    },
 
     /// Liveness check.
     Ping,

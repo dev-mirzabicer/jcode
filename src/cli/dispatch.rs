@@ -1,6 +1,6 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::io::IsTerminal;
 use std::process::{Command as ProcessCommand, Stdio};
 use std::time::Instant;
@@ -79,8 +79,23 @@ fn arm_debug_client_parent_death_signal() {
 fn arm_debug_client_parent_death_signal() {}
 
 pub(crate) async fn run_main(mut args: Args) -> Result<()> {
+    // This is internal startup handoff, not an inherited child execution default.
+    crate::env::remove_var("JCODE_PRIMARY_LAUNCH_FILE");
     arm_debug_client_parent_death_signal();
     resolve_resume_arg(&mut args)?;
+    if let Some(path) = &args.primary_launch {
+        anyhow::ensure!(
+            matches!(
+                &args.command,
+                None | Some(Command::Connect) | Some(Command::Repl) | Some(Command::Run { .. })
+            ),
+            "--primary-launch applies to TUI, Run or REPL. ACP uses per-request _meta.jcode_primary_launch"
+        );
+        let bytes = std::fs::read(path).context("Read --primary-launch request")?;
+        let _: crate::workspace::PrimaryLaunchRequest =
+            serde_json::from_slice(&bytes).context("Invalid --primary-launch request")?;
+        crate::env::set_var("JCODE_PRIMARY_LAUNCH_FILE", path.canonicalize()?);
+    }
 
     // One-time config migration: users whose config.toml still carries the old
     // baked-in `swarm_spawn_mode = "visible"` default get flipped to the
@@ -306,17 +321,30 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                 provider_init::init_provider_and_registry(&args.provider, args.model.as_deref())
                     .await?;
             let selection = crate::instruction::AgentSelection::parse(args.agent.as_deref())?;
-            let (mut agent, outcome) = agent::Agent::new_with_startup_context_and_agent(
-                provider,
-                registry,
-                None,
-                agent::StartupContextActivation::primary(
-                    agent::StartupContextCaller::InteractiveRepl,
-                ),
-                selection,
-                false,
-            )?;
-            if outcome.is_blocked() {
+            let (mut agent, outcome) = if let Some(request) = crate::primary::configured_launch()? {
+                (
+                    crate::primary::launch_local_request(
+                        provider,
+                        request,
+                        agent::StartupContextCaller::InteractiveRepl,
+                    )
+                    .await?,
+                    None,
+                )
+            } else {
+                let (agent, outcome) = agent::Agent::new_with_startup_context_and_agent(
+                    provider,
+                    registry,
+                    None,
+                    agent::StartupContextActivation::primary(
+                        agent::StartupContextCaller::InteractiveRepl,
+                    ),
+                    selection,
+                    false,
+                )?;
+                (agent, Some(outcome))
+            };
+            if let Some(outcome) = outcome.filter(|outcome| outcome.is_blocked()) {
                 if let Some(block) = agent.startup_context_preparation_block() {
                     eprintln!(
                         "Startup Context could not be prepared: {}. Repair the project state, then type `clear` to recapture before sending work.",

@@ -1853,3 +1853,41 @@ fn workflow_rendering_translates_typed_requests_and_correlated_complete_replies(
         matches!(&malformed[..], [Outbound::Reply(frame)] if matches!(frame.event, ApiEvent::Error { code: ErrorCode::InvalidRequest, .. }))
     );
 }
+
+#[test]
+fn primary_launch_is_session_independent_and_correlates_exact_replies() {
+    let mut bridge = BridgeState::default();
+    let outbound = bridge.api_request_to_legacy(&json!({"req":"primary_launch_probe","id":901}));
+    let Outbound::Legacy(probe) = &outbound[0] else {
+        panic!("probe transport")
+    };
+    assert_eq!(probe["type"], "primary_launch_probe");
+    let replies = bridge.legacy_event_to_api(
+        &json!({"type":"primary_launch_capabilities","id":probe["id"],"version":1,"enabled":false}),
+    );
+    assert_eq!(replies[0].reply_to, Some(901));
+    assert!(matches!(
+        replies[0].event,
+        ApiEvent::PrimaryLaunchCapabilities {
+            version: 1,
+            enabled: false
+        }
+    ));
+    assert!(bridge.session_id.is_none());
+    let identity = "12a99e11-e967-4a1e-a47c-000000000001";
+    let request = json!({"request":identity,"expected_revision":0,"input":{"placement":{"kind":"standalone","root":"/fixture"},"cwd":{"kind":"existing","path":"/fixture"},"agent":null,"model":null,"selfdev":false}});
+    let outbound =
+        bridge.api_request_to_legacy(&json!({"req":"primary_launch","id":902,"request":request}));
+    let Outbound::Legacy(launch) = &outbound[0] else {
+        panic!("launch transport")
+    };
+    assert_eq!(launch["request"], request);
+    bridge.session_id = Some("unrelated-attachment".into());
+    let event = json!({"type":"primary_launch_response","id":launch["id"],"response":{"status":"rejected","request":identity,"issue":{"code":"unsupported_capability","detail":"synthetic staged boundary"}}});
+    let replies = bridge.legacy_event_to_api(&event);
+    assert_eq!(replies[0].reply_to, Some(902));
+    assert!(matches!(replies[0].event, ApiEvent::PrimaryLaunch { .. }));
+    assert!(bridge.legacy_event_to_api(&event).is_empty());
+    assert_eq!(bridge.session_id.as_deref(), Some("unrelated-attachment"));
+    assert!(bridge.pending_attach.is_none());
+}

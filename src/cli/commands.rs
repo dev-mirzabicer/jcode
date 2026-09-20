@@ -2379,53 +2379,98 @@ pub async fn run_single_message_command(
     } else {
         super::provider_init::init_provider_for_validation(choice, model).await?
     };
-    let registry = crate::tool::Registry::new(provider.clone()).await;
-    // Load MCP servers from ~/.jcode/mcp.json so headless `jcode run` has the
-    // same `mcp__*` tools as interactive/server sessions. This is non-blocking:
-    // `register_mcp_tools` advertises cached tool schemas synchronously (so the
-    // first locked tool snapshot already contains MCP tools, for zero
-    // prompt-cache miss) and connects in the background (connect-on-first-call).
-    // For a short single-message run, startup latency is unchanged.
-    // (#390, #206 Phase 2)
-    if run_command_mcp_enabled() {
-        registry.register_mcp_tools(None, None, None).await;
-        // Cold-cache gap: when a configured MCP server has no cached schema yet
-        // (first ever use, or reconfigured), advertise-early registers nothing
-        // for it, and a single-turn `jcode run` locks its tool snapshot before
-        // the background connection finishes, so the model would never see those
-        // tools. Long-lived sessions recover on a later turn, but `jcode run`
-        // has no later turn. So, only when the cache is cold for some configured
-        // server, briefly wait for the first connection to register tools before
-        // the agent runs. Warm runs skip this entirely and stay instant. (#390)
-        wait_for_cold_cache_mcp_tools(&registry).await;
-    }
-    let mut agent = if resume_session.is_some() {
-        let mut agent = crate::agent::Agent::new_with_disabled_startup_context(
+    let launch = crate::primary::configured_launch()?;
+    anyhow::ensure!(
+        launch.is_none() || resume_session.is_none(),
+        "Explicit launch cannot be combined with resume"
+    );
+    let mut agent = if let Some(request) = launch {
+        let request_id = request.request;
+        let prepared = crate::primary::launch_local_request(
             provider.clone(),
-            registry,
-            None,
-        );
-        restore_agent_session_if_requested(&mut agent, resume_session)?;
+            request,
+            crate::agent::StartupContextCaller::RunCommand,
+        )
+        .await;
+        let agent = match prepared {
+            Ok(agent) => agent,
+            Err(error) => {
+                if let Some(startup) =
+                    error.downcast_ref::<crate::agent::StartupContextActivationError>()
+                {
+                    emit_run_startup_context_error(startup, emit_json, emit_ndjson)?;
+                } else if emit_json || emit_ndjson {
+                    println!(
+                        "{}",
+                        serde_json::json!({"type":"error","kind":"primary_launch","request":request_id,"message":error.to_string()})
+                    );
+                }
+                return Err(error);
+            }
+        };
+        let registry = agent.registry();
+        if run_command_mcp_enabled() {
+            registry
+                .register_mcp_tools_for_dir(
+                    None,
+                    None,
+                    Some(agent.session_id().into()),
+                    agent.working_dir().map(std::path::PathBuf::from),
+                )
+                .await;
+            wait_for_cold_cache_mcp_tools(&registry).await;
+        }
         agent
     } else {
-        let selection = crate::instruction::AgentSelection::parse(agent_selection)?;
-        match crate::agent::Agent::new_with_startup_context_and_agent(
-            provider.clone(),
-            registry,
-            None,
-            crate::agent::StartupContextActivation::primary(
-                crate::agent::StartupContextCaller::RunCommand,
-            ),
-            selection,
-            false,
-        ) {
-            Ok((agent, _)) => agent,
-            Err(error) => {
-                emit_run_startup_context_error(&error, emit_json, emit_ndjson)?;
-                return Err(error.into());
+        let registry = crate::tool::Registry::new(provider.clone()).await;
+        // Load MCP servers from ~/.jcode/mcp.json so headless `jcode run` has the
+        // same `mcp__*` tools as interactive/server sessions. This is non-blocking:
+        // `register_mcp_tools` advertises cached tool schemas synchronously (so the
+        // first locked tool snapshot already contains MCP tools, for zero
+        // prompt-cache miss) and connects in the background (connect-on-first-call).
+        // For a short single-message run, startup latency is unchanged.
+        // (#390, #206 Phase 2)
+        if run_command_mcp_enabled() {
+            registry.register_mcp_tools(None, None, None).await;
+            // Cold-cache gap: when a configured MCP server has no cached schema yet
+            // (first ever use, or reconfigured), advertise-early registers nothing
+            // for it, and a single-turn `jcode run` locks its tool snapshot before
+            // the background connection finishes, so the model would never see those
+            // tools. Long-lived sessions recover on a later turn, but `jcode run`
+            // has no later turn. So, only when the cache is cold for some configured
+            // server, briefly wait for the first connection to register tools before
+            // the agent runs. Warm runs skip this entirely and stay instant. (#390)
+            wait_for_cold_cache_mcp_tools(&registry).await;
+        }
+        if resume_session.is_some() {
+            let mut agent = crate::agent::Agent::new_with_disabled_startup_context(
+                provider.clone(),
+                registry,
+                None,
+            );
+            restore_agent_session_if_requested(&mut agent, resume_session)?;
+            agent
+        } else {
+            let selection = crate::instruction::AgentSelection::parse(agent_selection)?;
+            match crate::agent::Agent::new_with_startup_context_and_agent(
+                provider.clone(),
+                registry,
+                None,
+                crate::agent::StartupContextActivation::primary(
+                    crate::agent::StartupContextCaller::RunCommand,
+                ),
+                selection,
+                false,
+            ) {
+                Ok((agent, _)) => agent,
+                Err(error) => {
+                    emit_run_startup_context_error(&error, emit_json, emit_ndjson)?;
+                    return Err(error.into());
+                }
             }
         }
     };
+    let provider = agent.provider_handle();
 
     if let Err(error) = agent.observe_startup_context_before_user_turn() {
         eprintln!(

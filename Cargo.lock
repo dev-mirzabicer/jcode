@@ -3696,6 +3696,7 @@ version = "0.1.0"
 dependencies = [
  "jcode-task-types",
  "jcode-tool-types",
+ "jcode-workspace-types",
  "serde",
  "serde_json",
 ]

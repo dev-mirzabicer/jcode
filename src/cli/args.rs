@@ -97,6 +97,11 @@ pub(crate) struct Args {
     #[arg(long, global = true)]
     pub(crate) agent: Option<String>,
 
+    /// Explicit typed primary launch request file (staged workspace capability).
+    /// The file contains a durable request UUID, catalog revision and launch choices.
+    #[arg(long, global=true, conflicts_with_all=["agent","resume"])]
+    pub(crate) primary_launch: Option<std::path::PathBuf>,
+
     /// Named provider profile from [providers.<name>] in config.toml.
     /// Implies --provider openai-compatible for OpenAI-compatible profiles.
     #[arg(long, global = true)]

@@ -776,7 +776,10 @@ impl App {
         let mut last_unfocused_draw: Option<std::time::Instant> = None;
         let mut handterm_native_scroll =
             super::handterm_native_scroll::HandtermNativeScrollClient::connect_from_env();
-        let mut remote_state = remote::RemoteRunState::default();
+        let mut remote_state = remote::RemoteRunState {
+            primary_launch: crate::primary::configured_launch()?,
+            ..Default::default()
+        };
 
         'outer: loop {
             if self.display_messages.is_empty() {
@@ -823,7 +826,13 @@ impl App {
             )
             .await?
             {
-                remote::ConnectOutcome::Connected(remote) => remote,
+                remote::ConnectOutcome::Connected(remote) => {
+                    if remote_state.primary_launch.is_some() && session_to_resume.is_none() {
+                        self.resume_session_id = remote.session_id().map(str::to_string);
+                        remote_state.primary_launch = None;
+                    }
+                    remote
+                }
                 remote::ConnectOutcome::Retry => continue,
                 remote::ConnectOutcome::Quit => break 'outer,
             };

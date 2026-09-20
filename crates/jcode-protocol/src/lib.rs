@@ -627,7 +627,9 @@ impl Request {
             Request::DebugCommand { id, .. } => *id,
             Request::ClientDebugCommand { id, .. } => *id,
             Request::ClientDebugResponse { id, .. } => *id,
-            Request::PrimaryStreamSubscribe { id } => *id,
+            Request::PrimaryStreamSubscribe { id }
+            | Request::PrimaryLaunchProbe { id }
+            | Request::PrimaryLaunch { id, .. } => *id,
             Request::Subscribe { id, .. } => *id,
             Request::GetHistory { id } => *id,
             Request::GetModelCatalog { id } => *id,

@@ -355,6 +355,29 @@ impl RemoteConnection {
         allow_session_takeover: bool,
         remote_working_dir: Option<&str>,
     ) -> Result<Self> {
+        Self::connect_with_launch_options(
+            resume_session,
+            client_instance_id,
+            client_has_local_history,
+            allow_session_takeover,
+            remote_working_dir,
+            None,
+        )
+        .await
+    }
+
+    pub async fn connect_with_launch_options(
+        resume_session: Option<&str>,
+        client_instance_id: Option<&str>,
+        client_has_local_history: bool,
+        allow_session_takeover: bool,
+        remote_working_dir: Option<&str>,
+        launch: Option<crate::workspace::PrimaryLaunchRequest>,
+    ) -> Result<Self> {
+        anyhow::ensure!(
+            resume_session.is_none() || launch.is_none(),
+            "Choose launch or resume, not both"
+        );
         let connect_start = Instant::now();
         let socket_connect_start = Instant::now();
         let stream = Stream::connect(server::socket_path()).await?;
@@ -397,7 +420,66 @@ impl RemoteConnection {
         let (working_dir, selfdev) = super::subscribe_metadata(remote_working_dir);
         // The target belongs to the server, which may use another state root
         // or host. Only that owner can decide whether it is missing.
-        let resume_target = resume_session.map(str::to_string);
+        let mut resume_target = resume_session.map(str::to_string);
+        let mut working_dir = working_dir;
+        let mut selfdev = selfdev;
+        if let Some(launch) = launch {
+            selfdev = Some(launch.input.selfdev);
+            let probe = conn.next_request_id;
+            conn.next_request_id += 1;
+            conn.send_request(Request::PrimaryLaunchProbe { id: probe })
+                .await?;
+            loop {
+                match conn.next_event().await {
+                    RemoteRead::Event(ServerEvent::Ack { .. }) => continue,
+                    RemoteRead::Event(ServerEvent::PrimaryLaunchCapabilities {
+                        id,
+                        version: 1,
+                        enabled: true,
+                    }) if id == probe => break,
+                    _ => anyhow::bail!(
+                        "Managed primary launch is unavailable or staged on this server"
+                    ),
+                }
+            }
+            let id = conn.next_request_id;
+            conn.next_request_id += 1;
+            let request_id = launch.request;
+            working_dir = launch
+                .input
+                .cwd
+                .as_ref()
+                .map(|cwd| cwd.path().to_string_lossy().into_owned());
+            conn.send_request(Request::PrimaryLaunch {
+                id,
+                request: Box::new(launch),
+            })
+            .await?;
+            loop {
+                match conn.next_event().await {
+                    RemoteRead::Event(ServerEvent::Ack { .. }) => continue,
+                    RemoteRead::Event(ServerEvent::PrimaryLaunchResponse {
+                        id: reply_id,
+                        response,
+                    }) if reply_id == id => match *response {
+                        crate::workspace::PrimaryLaunchResponse::Launched { record }
+                            if record.request == request_id =>
+                        {
+                            conn.session_id = Some(record.session.clone());
+                            resume_target = Some(record.session);
+                            break;
+                        }
+                        crate::workspace::PrimaryLaunchResponse::Rejected { issue, .. } => {
+                            return Err(issue.into());
+                        }
+                        _ => anyhow::bail!("Launch response identity mismatch"),
+                    },
+                    _ => anyhow::bail!(
+                        "Launch reply was not received; retry the original request identity"
+                    ),
+                }
+            }
+        }
         conn.send_request(Request::Subscribe {
             id: conn.next_request_id,
             working_dir,

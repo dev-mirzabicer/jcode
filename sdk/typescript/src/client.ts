@@ -462,6 +462,18 @@ export class JcodeClient extends EventEmitter {
     await this.requestOk({ req: "set_retention_policy", archive_after_days: archiveAfterDays });
   }
 
+  /** Publish one prepared primary. Retain the request identity for retry, then attach explicitly. */
+  async launchPrimary(request: import("./protocol.js").PrimaryLaunchRequest): Promise<import("./protocol.js").PrimaryLaunchRecord> {
+    if (!this.supports("primary_launch_v1")) throw new HarnessError("unsupported_capability", "Managed primary launch requires primary_launch_v1");
+    const capability = await this.expectReply({req: "primary_launch_probe"}, "primary_launch_capabilities");
+    if (capability.ev !== "primary_launch_capabilities" || capability.version !== 1 || !capability.enabled) throw new HarnessError("unsupported_capability", "Managed primary launch is unavailable or staged on this runtime");
+    const reply = await this.expectReply({req: "primary_launch", request}, "primary_launch");
+    if (reply.ev !== "primary_launch") throw new HarnessError("unexpected_reply", `expected primary_launch, got ${reply.ev}`);
+    if (reply.response.status === "rejected") throw new HarnessError("primary_launch", reply.response.issue.detail, reply.response.issue);
+    if (reply.response.record.request !== request.request) throw new HarnessError("unexpected_reply", "Primary launch request identity mismatch");
+    return reply.response.record;
+  }
+
   async createSession(workingDir?: string, agent?: string): Promise<SessionInfo> {
     if (!this.supports("startup_context_creation_errors")) {
       throw new HarnessError(

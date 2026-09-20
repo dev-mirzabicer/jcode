@@ -16,6 +16,7 @@ const RELOAD_MARKER_MAX_AGE: Duration = Duration::from_secs(30);
 
 #[derive(Default)]
 pub(in crate::tui::app) struct RemoteRunState {
+    pub primary_launch: Option<crate::workspace::PrimaryLaunchRequest>,
     pub reconnect_attempts: u32,
     pub disconnect_msg_idx: Option<usize>,
     pub disconnect_start: Option<Instant>,
@@ -369,12 +370,17 @@ pub(in crate::tui::app) async fn connect_with_retry(
         session_to_resume.is_some() && !app.display_messages().is_empty();
     let client_instance_id = app.remote_client_instance_id.clone();
     let allow_session_takeover = should_allow_reconnect_takeover(app, state, session_to_resume);
-    let connect = RemoteConnection::connect_with_session(
+    let connect = RemoteConnection::connect_with_launch_options(
         session_to_resume,
         Some(client_instance_id.as_str()),
         client_has_local_history,
         allow_session_takeover,
         remote_working_dir,
+        if session_to_resume.is_none() {
+            state.primary_launch.clone()
+        } else {
+            None
+        },
     );
     crate::logging::info(&format!(
         "Remote reconnect attempt: resume={:?}, reconnect_attempts={}, client_instance_id={}, local_history={}, allow_takeover={}",

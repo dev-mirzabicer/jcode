@@ -786,3 +786,36 @@ test("force stop rejects unsupported servers before transport", async () => {
     assert.equal(sent,0);
   } finally {client.close();await server.close();}
 });
+
+test("managed launch negotiates runtime readiness and preserves typed rejection", async () => {
+  const request: import("../src/protocol.js").PrimaryLaunchRequest = {request: "12a99e11-e967-4a1e-a47c-000000000001", expected_revision: 0, input: {placement: {kind: "standalone", root: "/fixture"}, cwd: {kind: "existing", path: "/fixture"}, agent: null, model: null}};
+  let mutations = 0;
+  const old = await startMockHarness({onRequest() { mutations += 1; }});
+  const oldClient = await JcodeClient.connect({socketPath: old.socketPath});
+  try {
+    await assert.rejects(() => oldClient.launchPrimary(request), (error: unknown) => error instanceof HarnessError && error.code === "unsupported_capability");
+    assert.equal(mutations, 0);
+  } finally {oldClient.close(); await old.close();}
+  let enabled = false;
+  const server = await startMockHarness({capabilities: ["primary_launch_v1"], onRequest(frame, send) {
+    if (frame.req === "primary_launch_probe") send({v: 1, reply_to: frame.id, ev: "primary_launch_capabilities", version: 1, enabled});
+    else if (frame.req === "primary_launch") {
+      mutations += 1;
+      assert.deepEqual(frame.request, request);
+      send({v: 1, reply_to: frame.id, ev: "primary_launch", response: {status: "rejected", request: request.request, issue: {code: "needs_cwd", detail: "synthetic unresolved choice"}}});
+    } else assert.fail("unexpected launch operation");
+  }});
+  const client = await JcodeClient.connect({socketPath: server.socketPath});
+  try {
+    await assert.rejects(() => client.launchPrimary(request), (error: unknown) => error instanceof HarnessError && error.code === "unsupported_capability");
+    assert.equal(mutations, 0);
+    enabled = true;
+    await assert.rejects(() => client.launchPrimary(request), (error: unknown) => {
+      assert.ok(error instanceof HarnessError);
+      assert.equal(error.code, "primary_launch");
+      assert.deepEqual(error.details, {code: "needs_cwd", detail: "synthetic unresolved choice"});
+      return true;
+    });
+    assert.equal(mutations, 1);
+  } finally {client.close(); await server.close();}
+});

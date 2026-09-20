@@ -2148,3 +2148,23 @@ fn primary_snapshot_replay_replaces_inflight_display_without_duplicate_text() {
     );
     assert!(!app.is_processing);
 }
+
+#[test]
+fn busy_workspace_navigation_dispatches_resume_without_cancelling_primary() {
+    use tokio::io::AsyncBufReadExt;
+    let mut app=create_test_app();let rt=tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut remote=crate::tui::backend::RemoteConnection::dummy();let peer=remote.take_dummy_peer().unwrap();
+        let mut reader=tokio::io::BufReader::new(peer);
+        app.is_remote=true;app.is_processing=true;app.remote_session_id=Some("source-fixture".into());
+        app.workspace_client.queue_resume_session("target-fixture".into());
+        super::remote::handle_tick(&mut app,&mut remote).await;
+        let mut line=String::new();
+        tokio::time::timeout(std::time::Duration::from_secs(3),reader.read_line(&mut line)).await.unwrap().unwrap();
+        assert!(matches!(crate::protocol::decode_request(&line).unwrap(),crate::protocol::Request::ResumeSession{session_id,..} if session_id=="target-fixture"));
+        assert!(app.is_processing,"navigation does not declare the source turn complete");
+        assert!(app.workspace_client.take_pending_resume_session().is_none());
+        line.clear();
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(25),reader.read_line(&mut line)).await.is_err(),"navigation must not issue Cancel or a replacement turn");
+    });
+}

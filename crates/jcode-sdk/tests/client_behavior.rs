@@ -1004,3 +1004,54 @@ fn execution_force_stop_requires_explicit_capability_before_transport() {
         ExecutionResponse::Control { accepted: true, .. }
     ));
 }
+
+#[test]
+fn primary_launch_checks_bridge_and_runtime_capabilities_before_mutation() {
+    let request:jcode_harness_api::PrimaryLaunchRequest=serde_json::from_value(serde_json::json!({"request":"12a99e11-e967-4a1e-a47c-000000000001","expected_revision":0,"input":{"placement":{"kind":"standalone","root":"/fixture"},"cwd":{"kind":"existing","path":"/fixture"},"agent":null,"model":null,"selfdev":false}})).unwrap();
+    let old = fake_harness_with_capabilities(vec!["sessions".into()], |_, _| {
+        panic!("Old server must not receive a managed launch")
+    });
+    assert_eq!(
+        old.launch_primary(request.clone()).unwrap_err().kind,
+        ErrorKind::UnsupportedCapability
+    );
+    let staged = fake_harness_with_capabilities(
+        vec!["primary_launch_v1".into()],
+        |frame, writer| match frame.request {
+            ApiRequest::PrimaryLaunchProbe => reply(
+                frame,
+                ApiEvent::PrimaryLaunchCapabilities {
+                    version: 1,
+                    enabled: false,
+                },
+                writer,
+            ),
+            _ => panic!("Staged runtime must not receive a creation request"),
+        },
+    );
+    assert_eq!(
+        staged.launch_primary(request.clone()).unwrap_err().kind,
+        ErrorKind::UnsupportedCapability
+    );
+    let supported = fake_harness_with_capabilities(
+        vec!["primary_launch_v1".into()],
+        |frame, writer| match &frame.request {
+            ApiRequest::PrimaryLaunchProbe => reply(
+                frame,
+                ApiEvent::PrimaryLaunchCapabilities {
+                    version: 1,
+                    enabled: true,
+                },
+                writer,
+            ),
+            ApiRequest::PrimaryLaunch { request } => {
+                let response=serde_json::from_value(serde_json::json!({"status":"rejected","request":request.request,"issue":{"code":"needs_cwd","detail":"synthetic unresolved cwd"}})).unwrap();
+                reply(frame, ApiEvent::PrimaryLaunch { response }, writer);
+            }
+            _ => panic!("Unexpected launch operation"),
+        },
+    );
+    let error = supported.launch_primary(request).unwrap_err();
+    assert_eq!(error.code(), "primary_launch");
+    assert!(matches!(error.kind, ErrorKind::PrimaryLaunch(_)));
+}

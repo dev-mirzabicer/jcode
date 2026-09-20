@@ -578,6 +578,37 @@ pub(super) async fn handle_client_with_instruction_repositories(
                     .await?;
                     continue;
                 }
+                if let Request::PrimaryLaunchProbe { id } = &request {
+                    write_direct_event(
+                        &writer,
+                        &ServerEvent::PrimaryLaunchCapabilities {
+                            id: *id,
+                            version: 1,
+                            enabled: crate::primary::launch_enabled(),
+                        },
+                    )
+                    .await?;
+                    continue;
+                }
+                if let Request::PrimaryLaunch { id, request } = &request {
+                    let response = sessions
+                        .request_launch(
+                            *request.clone(),
+                            provider_template.clone(),
+                            mcp_pool.clone(),
+                            (*instruction_repositories).clone(),
+                        )
+                        .await;
+                    write_direct_event(
+                        &writer,
+                        &ServerEvent::PrimaryLaunchResponse {
+                            id: *id,
+                            response: Box::new(response),
+                        },
+                    )
+                    .await?;
+                    continue;
+                }
                 if let Request::WorkspaceProbe { id } = &request {
                     write_direct_event(
                         &writer,
@@ -3421,6 +3452,16 @@ pub(super) async fn handle_client_with_instruction_repositories(
                     id,
                     version: 1,
                     child_context: true,
+                });
+            }
+            Request::PrimaryLaunchProbe{id}=>{
+                let _=client_event_tx.send(ServerEvent::PrimaryLaunchCapabilities{id,version:1,enabled:crate::primary::launch_enabled()});
+            }
+            Request::PrimaryLaunch{id,request}=>{
+                let host=sessions.clone();let provider=provider_template.clone();let pool=mcp_pool.clone();let repositories=(*instruction_repositories).clone();let tx=client_event_tx.clone();
+                inspection_requests.spawn(async move {
+                    let response=host.request_launch(*request,provider,pool,repositories).await;
+                    let _=tx.send(ServerEvent::PrimaryLaunchResponse{id,response:Box::new(response)});
                 });
             }
             Request::WorkspaceProbe { id } => {
