@@ -997,6 +997,8 @@ fn test_save_and_restore_startup_submission_preserves_pending_images() {
 #[test]
 fn test_save_and_restore_reload_state_preserves_interleave_and_pending_retry() {
     let mut app = create_test_app();
+    app.primary_input_journaled=true;
+    app.primary_retry_id=Some(crate::workspace::RequestId::new());
     let session_id = format!("test-reload-pending-{}", std::process::id());
 
     app.input = "draft".to_string();
@@ -1022,14 +1024,10 @@ fn test_save_and_restore_reload_state_preserves_interleave_and_pending_retry() {
 
     let restored = App::restore_input_for_reload(&session_id).expect("reload state should exist");
     assert_eq!(restored.interleave_message.as_deref(), Some("urgent now"));
-    assert_eq!(
-        restored.pending_soft_interrupts,
-        vec!["already sent one", "already sent two"]
-    );
-    assert_eq!(
-        restored.pending_soft_interrupt_resend,
-        Some(vec!["already sent two".to_string()])
-    );
+    assert!(restored.pending_soft_interrupts.is_empty());
+    assert_eq!(restored.pending_soft_interrupt_resend,Some(Vec::new()));
+    assert_eq!(restored.primary_retry_id,app.primary_retry_id);
+    assert!(!restored.submit_on_restore);
 
     let pending = restored
         .rate_limit_pending_message
@@ -1051,7 +1049,7 @@ fn test_save_and_restore_reload_state_preserves_interleave_and_pending_retry() {
 }
 
 #[test]
-fn test_save_and_restore_reload_state_promotes_inflight_prompt_to_startup_submission() {
+fn test_save_and_restore_reload_state_retains_unidentified_inflight_prompt_for_review() {
     let mut app = create_test_app();
     let session_id = format!("test-reload-inflight-prompt-{}", std::process::id());
 
@@ -1072,8 +1070,8 @@ fn test_save_and_restore_reload_state_promotes_inflight_prompt_to_startup_submis
     assert_eq!(restored.input, "finish the refactor");
     assert_eq!(restored.cursor, "finish the refactor".len());
     assert!(
-        restored.submit_on_restore,
-        "in-flight prompt should resume automatically"
+        !restored.submit_on_restore,
+        "unidentified in-flight input must be reviewed, not replayed"
     );
     assert_eq!(restored.pending_images.len(), 1);
     assert!(

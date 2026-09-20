@@ -170,7 +170,7 @@ try:
     image=f.project/'fixture.png'
     image.write_bytes(base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aV3sAAAAASUVORK5CYII='))
     proxy_state['blocked']=True
-    command(tid,'set_input:TUI-SOFT '+str(image)); command(tid,'keys:enter')
+    command(tid,'set_input:'+str(image)); command(tid,'keys:enter')
     assert dropped.wait(60),'soft input acceptance was not exercised'
     soft=next(request for request in submissions if request['input']['delivery']=='safe_boundary')
     assert soft['input']['images'],soft

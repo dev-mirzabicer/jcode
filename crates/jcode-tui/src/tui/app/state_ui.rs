@@ -205,7 +205,7 @@ impl App {
     pub(super) fn save_input_for_reload(&self, session_id: &str) {
         self.flush_instruction_recovery();
         let resume_prompt = self.rate_limit_pending_message.as_ref().filter(|pending| {
-            (!self.primary_input_journaled || self.rate_limit_reset.is_some())
+            !self.primary_input_journaled
                 && !pending.auto_retry
                 && !pending.is_system
                 && (!pending.content.trim().is_empty() || !pending.images.is_empty())

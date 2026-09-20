@@ -819,6 +819,11 @@ async fn handle_remote_key_internal(
         }
     }
 
+    if code == KeyCode::Enter
+        && !crate::tui::app::input::newline::enter_inserts_newline(app, code, modifiers)
+    {
+        input::promote_dropped_images(app);
+    }
     if input::is_alternate_enter(code, modifiers) && !app.input.trim().starts_with('/') {
         if app.activate_picker_from_preview() {
             return Ok(());

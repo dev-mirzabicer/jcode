@@ -73,3 +73,24 @@ fn durable_legacy_input_recovery_preserves_original_without_automatic_replay() {
     assert!(fresh.submit_on_restore);
     assert_eq!(fresh.pending_images.len(),1);
 }
+
+#[test]
+fn durable_remote_image_path_enters_interleave_before_slash_routing() {
+    let _environment=crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let image=crate::storage::jcode_dir().unwrap().join("fixture.png");
+    std::fs::write(&image,b"synthetic image bytes").unwrap();
+    let mut app=create_test_app(); app.is_remote=true; app.is_processing=true;
+    let runtime=tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        app.input=image.to_string_lossy().into_owned(); app.cursor_pos=app.input.len();
+        let mut remote=crate::tui::backend::RemoteConnection::dummy();
+        let peer=remote.take_dummy_peer().unwrap(); remote.mark_history_loaded();
+        super::handle_remote_key(&mut app,crossterm::event::KeyCode::Enter,crossterm::event::KeyModifiers::NONE,&mut remote).await.unwrap();
+        use tokio::io::AsyncBufReadExt;
+        let mut reader=tokio::io::BufReader::new(peer); let mut line=String::new();
+        tokio::time::timeout(std::time::Duration::from_secs(2),reader.read_line(&mut line)).await.unwrap().unwrap();
+        let request:crate::protocol::Request=serde_json::from_str(&line).unwrap();
+        let crate::protocol::Request::SoftInterrupt{images,..}=request else {panic!("image path must not be a slash command");};
+        assert_eq!(images.len(),1); assert_eq!(images[0].0,"image/png");
+    });
+}
