@@ -13,6 +13,36 @@ impl PrimaryHost {
         repositories: &InstructionRepositoryService,
         pool: &Arc<crate::mcp::SharedMcpPool>,
     ) -> Result<Arc<Mutex<Agent>>> {
+        let (send, receive) = tokio::sync::oneshot::channel();
+        let host = Arc::downgrade(self);
+        let source = source.clone();
+        let source_id = source_id.to_owned();
+        let repositories = repositories.clone();
+        let pool = pool.clone();
+        self.retain_delivery(async move {
+            let result = match host.upgrade() {
+                Some(host) => {
+                    Box::pin(host.clear_context_owned(&source, &source_id, &repositories, &pool))
+                        .await
+                }
+                None => Err(anyhow::anyhow!(
+                    "Primary runtime ended before Clear preparation"
+                )),
+            };
+            let _ = send.send(result);
+        });
+        receive
+            .await
+            .context("Clear outcome requires runtime reconciliation")?
+    }
+
+    async fn clear_context_owned(
+        self: &Arc<Self>,
+        source: &Arc<Mutex<Agent>>,
+        source_id: &str,
+        repositories: &InstructionRepositoryService,
+        pool: &Arc<crate::mcp::SharedMcpPool>,
+    ) -> Result<Arc<Mutex<Agent>>> {
         // Retain this guard through preparation/publication. A busy check followed
         // by a later lock would let a peer admit work in the middle of Clear.
         let mut source = source
