@@ -53,6 +53,7 @@ macro_rules! notifications {
 }
 
 notifications! {
+    SessionLocationChanged { old_placement: &'a str, new_placement: &'a str, old_cwd: &'a str, new_cwd: &'a str, scope_summary: &'a str } => ("session-location-changed", "primary location change", Handlebars),
     TodoLongReview => ("todo-long-session-review", "todo notification", Plain),
     TodoIntent => ("todo-intent-review", "todo notification", Plain),
     TodoFeedbackLoop => ("todo-feedback-loop-review", "todo notification", Plain),

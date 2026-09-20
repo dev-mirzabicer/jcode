@@ -84,3 +84,52 @@ pub enum PrimaryLaunchResponse {
         issue: crate::Issue,
     },
 }
+
+/// A trusted, explicit change. Revisions refer to Session authority and the
+/// reviewed catalog, not a client's currently selected row or command cwd.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocationChangeRequest {
+    pub request: RequestId,
+    pub session: String,
+    pub expected_session_revision: Revision,
+    pub expected_catalog_revision: Revision,
+    pub placement: Placement,
+    pub cwd: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocationChangeState {
+    Pending,
+    Complete,
+    Cancelled,
+    Failed,
+    RecoveryRequired,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocationChangeRecord {
+    pub operation: OperationId,
+    pub input: LocationChangeRequest,
+    pub state: LocationChangeState,
+    pub effective_revision: Option<Revision>,
+    pub notice_message: Option<String>,
+    pub issue: Option<crate::Issue>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PrimaryLocationCommand {
+    Change { request: LocationChangeRequest },
+    Cancel { operation: OperationId },
+    Inspect { operation: OperationId },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum PrimaryLocationResponse {
+    State { record: Box<LocationChangeRecord> },
+    Rejected { issue: crate::Issue },
+}

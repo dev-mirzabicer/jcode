@@ -5,6 +5,8 @@ use std::collections::HashSet;
 
 mod location;
 pub use location::*;
+mod primary_input;
+pub use primary_input::*;
 mod context;
 pub use context::*;
 mod startup_context;

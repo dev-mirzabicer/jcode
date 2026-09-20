@@ -1,0 +1,1 @@
+Session location changed. Placement: {{old_placement}} -> {{new_placement}}. Command working directory: {{old_cwd}} -> {{new_cwd}}. Effective write scope: {{scope_summary}}. This change applies to subsequent work. Earlier context describes the prior location. Already running tasks retain their original working directories.

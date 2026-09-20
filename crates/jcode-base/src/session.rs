@@ -34,6 +34,7 @@ impl StreamingGuard {
         })
     }
 }
+use anyhow::Context;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -364,6 +365,8 @@ pub struct Session {
     pub location: Option<StoredSessionLocation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub primary_creation: Option<StoredPrimaryCreation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub primary_inputs: Vec<jcode_session_types::StoredPrimaryInputReceipt>,
     /// Memorable short name (e.g., "fox", "oak")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub short_name: Option<String>,
@@ -477,6 +480,8 @@ struct SessionStartupStub {
     location: Option<StoredSessionLocation>,
     #[serde(default)]
     primary_creation: Option<StoredPrimaryCreation>,
+    #[serde(default)]
+    primary_inputs: Vec<jcode_session_types::StoredPrimaryInputReceipt>,
     #[serde(default)]
     short_name: Option<String>,
     #[serde(default)]
@@ -958,6 +963,120 @@ impl Session {
         Ok(())
     }
 
+    /// Stage an append-only control without rewriting initial environment or
+    /// instruction snapshots. The caller validates provider representation
+    /// before checkpointing this candidate.
+    pub fn stage_location_change(
+        &self,
+        location: StoredSessionLocation,
+        notice: String,
+    ) -> anyhow::Result<Self> {
+        let previous = self
+            .location
+            .as_ref()
+            .context("Session has no managed location")?;
+        anyhow::ensure!(
+            location.revision
+                == previous
+                    .revision
+                    .checked_add(1)
+                    .context("Location revision exhausted")?,
+            "Location revision conflict"
+        );
+        anyhow::ensure!(
+            location.initial_cwd == previous.initial_cwd,
+            "Initial cwd must remain historical"
+        );
+        let operation = location
+            .last_operation
+            .context("Location change has no operation identity")?;
+        let id = format!("location_{operation}");
+        anyhow::ensure!(
+            !self.messages.iter().any(|message| message.id == id),
+            "Location operation already has a notice"
+        );
+        let mut candidate = self.clone();
+        candidate.working_dir = Some(location.cwd.observed_path().to_string_lossy().into_owned());
+        candidate.location = Some(location);
+        candidate.append_stored_message(StoredMessage {
+            id,
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: notice,
+                cache_control: None,
+            }],
+            display_role: Some(StoredDisplayRole::System),
+            origin: None,
+            timestamp: None,
+            tool_duration_ms: None,
+            token_usage: None,
+        });
+        candidate.persist_state.force_snapshot = true;
+        Ok(candidate)
+    }
+
+    pub fn record_primary_input(
+        &mut self,
+        input: &jcode_session_types::PrimaryInputEnvelope,
+        first_message: usize,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(input.session == self.id, "Input belongs to another Session");
+        anyhow::ensure!(
+            !self.primary_inputs.iter().any(|r| r.id == input.id),
+            "Input already committed"
+        );
+        anyhow::ensure!(
+            first_message < self.messages.len(),
+            "Input append has no authoritative message"
+        );
+        let messages = self.messages[first_message..]
+            .iter()
+            .map(|m| m.id.clone())
+            .collect();
+        self.primary_inputs
+            .push(jcode_session_types::StoredPrimaryInputReceipt {
+                id: input.id,
+                digest: crate::primary_input::input_digest(input)?,
+                messages,
+            });
+        self.persist_state.force_snapshot = true;
+        Ok(())
+    }
+
+    /// A failed post-rename journal cleanup may still have committed. Read the
+    /// actual checkpoint before deciding whether live authority stays old.
+    pub fn commit_location_candidate(&mut self, mut candidate: Self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            candidate.id == self.id,
+            "Location candidate belongs to another Session"
+        );
+        let operation = candidate
+            .location
+            .as_ref()
+            .and_then(|location| location.last_operation)
+            .context("Location candidate has no operation")?;
+        if let Err(error) = candidate.save() {
+            let committed = Self::load(&self.id)?;
+            if committed
+                .location
+                .as_ref()
+                .and_then(|location| location.last_operation)
+                != Some(operation)
+            {
+                return Err(error);
+            }
+            anyhow::ensure!(
+                committed.location == candidate.location
+                    && serde_json::to_value(&committed.messages)?
+                        == serde_json::to_value(&candidate.messages)?,
+                "Location checkpoint outcome needs recovery"
+            );
+            candidate = committed;
+        }
+        *self = candidate;
+        Ok(())
+    }
+
     /// Clone the persisted state that defines a true continuation child.
     ///
     /// The child retains stable message IDs and an independent clone of the complete context-view
@@ -1024,6 +1143,7 @@ impl Session {
         session.working_dir = stub.working_dir;
         session.location = stub.location;
         session.primary_creation = stub.primary_creation;
+        session.primary_inputs = stub.primary_inputs;
         session.short_name = stub.short_name;
         session.status = stub.status;
         session.last_pid = stub.last_pid;
@@ -1249,6 +1369,7 @@ impl Session {
             working_dir: self.working_dir.clone(),
             location: self.location.clone(),
             primary_creation: self.primary_creation.clone(),
+            primary_inputs: self.primary_inputs.clone(),
             short_name: self.short_name.clone(),
             status: self.status.clone(),
             last_pid: self.last_pid,
@@ -1565,6 +1686,7 @@ impl Session {
         self.working_dir = meta.working_dir;
         self.location = meta.location;
         self.primary_creation = meta.primary_creation;
+        self.primary_inputs = meta.primary_inputs;
         self.short_name = meta.short_name;
         self.status = meta.status;
         self.last_pid = meta.last_pid;
@@ -1815,6 +1937,7 @@ impl Session {
             working_dir: current_working_dir_string(),
             location: None,
             primary_creation: None,
+            primary_inputs: Vec::new(),
             short_name,
             status: SessionStatus::Active,
             last_pid: Some(std::process::id()),
@@ -1890,6 +2013,7 @@ impl Session {
             working_dir: current_working_dir_string(),
             location: None,
             primary_creation: None,
+            primary_inputs: Vec::new(),
             short_name: Some(short_name),
             status: SessionStatus::Active,
             last_pid: Some(std::process::id()),
