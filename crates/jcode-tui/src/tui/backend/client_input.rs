@@ -28,6 +28,7 @@ pub(super) struct ClientInputs {
     owner: String,
     _owner: File,
     pub active: Option<RequestId>,
+    pub last_submission: Option<RequestId>,
     pub requests: std::collections::HashMap<u64, (String, RequestId)>,
     retry: Option<PrimaryClientInput>,
     pub cancelled_replies: std::collections::HashSet<u64>,
@@ -90,6 +91,7 @@ impl ClientInputs {
             owner,
             _owner: owner_file,
             active: None,
+            last_submission: None,
             requests: Default::default(),
             retry: None,
             cancelled_replies: Default::default(),
@@ -160,6 +162,7 @@ impl ClientInputs {
                 retry.input.session == request.input.session,
                 "Retry belongs to another Session"
             );
+            retry.retry_of = Some(retry.input.id);
             retry.input.id = request.input.id;
             retry.input.observe_startup_context = Some(false);
             retry.retry_attempts = retry.retry_attempts.saturating_add(1);
@@ -206,6 +209,7 @@ impl ClientInputs {
                 cancel_requested: false,
             },
         )?;
+        self.last_submission = Some(request.input.id);
         self.requests
             .insert(transport, (request.input.session.clone(), request.input.id));
         Ok(request)
@@ -322,6 +326,17 @@ impl ClientInputs {
         })
     }
     pub fn observe(&mut self, receipt: &PrimaryInputReceipt, terminal: bool) -> Result<()> {
+        self.observe_receipt(receipt, terminal, false)
+    }
+    pub fn observe_cancellation(&mut self, receipt: &PrimaryInputReceipt) -> Result<()> {
+        self.observe_receipt(receipt, false, true)
+    }
+    fn observe_receipt(
+        &mut self,
+        receipt: &PrimaryInputReceipt,
+        terminal: bool,
+        cancellation: bool,
+    ) -> Result<()> {
         let (directory, _lease) = self.lease(&receipt.session)?;
         let path = directory.join(format!("{}.json", receipt.id));
         if !path.try_exists()? {
@@ -335,7 +350,11 @@ impl ClientInputs {
         if record.owner != self.owner {
             return Ok(());
         }
-        if terminal || !record.terminal {
+        let update = terminal || !record.terminal;
+        if cancellation {
+            record.cancel_requested = false;
+        }
+        if update {
             if !matches!(
                 record.receipt.as_ref().map(|r| r.state),
                 Some(PrimaryInputState::Committed)
@@ -348,6 +367,8 @@ impl ClientInputs {
                     receipt.state,
                     PrimaryInputState::Failed | PrimaryInputState::Cancelled
                 );
+        }
+        if update || cancellation {
             Self::save(&path, &record)?;
         }
         Ok(())
@@ -413,6 +434,7 @@ mod tests {
         input.activate_skill = Some("synthetic-skill".into());
         input.observe_startup_context = Some(true);
         PrimaryClientInput {
+            retry_of: None,
             input,
             queued_messages: None,
             is_system: false,
@@ -458,12 +480,31 @@ mod tests {
             issue: Some("synthetic provider failure".into()),
             ..accepted.clone()
         };
+        peer.active = Some(original.input.id);
+        let committed_only = PrimaryInputReceipt {
+            issue: None,
+            ..terminal.clone()
+        };
+        peer.observe_cancellation(&committed_only)?;
+        assert!(peer.prepare_retry("session_fixture").is_err());
+        assert!(
+            peer.pending_inspections("session_fixture")?
+                .contains(&original.input.id)
+        );
         peer.observe(&terminal, true)?;
+        peer.observe_cancellation(&committed_only)?;
+        assert_eq!(
+            peer.receipt("session_fixture", original.input.id)?
+                .unwrap()
+                .issue,
+            terminal.issue
+        );
         peer.observe(&accepted, false)?; // a late acceptance cannot erase terminal truth
         peer.active = Some(original.input.id);
         peer.prepare_retry("session_fixture")?;
         let retry = peer.stage(input("session_fixture", "unused retry placeholder"), 9)?;
         assert_ne!(retry.input.id, original.input.id);
+        assert_eq!(retry.retry_of, Some(original.input.id));
         assert_eq!(retry.input.content, original.input.content);
         assert_eq!(retry.input.images, original.input.images);
         assert_eq!(retry.input.activate_skill, None); // the previous committed turn activated it

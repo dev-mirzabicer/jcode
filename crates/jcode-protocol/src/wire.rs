@@ -1157,6 +1157,8 @@ pub enum Request {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PrimaryClientInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_of: Option<jcode_workspace_types::RequestId>,
     pub input: jcode_session_types::PrimaryInputEnvelope,
     #[serde(default)]
     pub queued_messages: Option<Vec<jcode_task_types::QueuedMessage>>,
@@ -1193,6 +1195,8 @@ pub enum ServerEvent {
     #[serde(rename = "primary_input_finished")]
     PrimaryInputFinished {
         receipt: jcode_session_types::PrimaryInputReceipt,
+        #[serde(default)]
+        delivery: Option<jcode_session_types::PrimaryInputDelivery>,
     },
     #[serde(rename = "primary_control_capabilities")]
     PrimaryControlCapabilities {

@@ -3863,6 +3863,7 @@ impl App {
         let pending_image_count = self.pending_images.len();
         let pending_request_id = (!self.is_remote).then(|| self.next_local_context_request_id());
         self.pending_composer_input = Some(super::PendingComposerInput {
+            primary_input: None,
             request_id: pending_request_id,
             raw_input: raw_input.clone(),
             cursor_pos: submitted_cursor_pos,
@@ -4015,6 +4016,7 @@ impl App {
 
             self.commit_pending_streaming_assistant_message();
             self.pending_composer_input = Some(PendingComposerInput {
+                primary_input: None,
                 request_id: Some(self.next_local_context_request_id()),
                 raw_input: combined.clone(),
                 cursor_pos: combined.len(),

@@ -63,6 +63,8 @@ impl PrimaryInputEnvelope {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoredPrimaryInputReceipt {
+    #[serde(default)]
+    pub rolled_back: bool,
     pub id: RequestId,
     pub digest: String,
     pub messages: Vec<String>,

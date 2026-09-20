@@ -787,6 +787,7 @@ fn context_protocol_events_reduce_with_exact_correlation_and_prompt_safe_action_
             reason: crate::protocol::ContextActionRequiredReason::PreflightLimit,
             required_reduction_tokens: 1_024,
             pending_input: Some(crate::protocol::ContextPendingInputMetadata {
+                primary_input: None,
                 request_id: 900,
                 content_chars: input_before.chars().count(),
                 content_digest: 123,

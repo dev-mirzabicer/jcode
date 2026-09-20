@@ -2061,6 +2061,7 @@ fn primary_snapshot_replay_replaces_inflight_display_without_duplicate_text() {
         startup_context: None,
     };
     let mut cursor = PrimaryStreamCursor {
+        input:None,
         session_id: "session_primary_snapshot".into(),
         stream_id: "fixture-stream".into(),
         sequence: 0,

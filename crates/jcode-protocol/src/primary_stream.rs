@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrimaryStreamCursor {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<jcode_workspace_types::RequestId>,
     pub session_id: String,
     pub stream_id: String,
     pub sequence: u64,
@@ -96,6 +98,7 @@ mod tests {
     fn gaps_duplicates_and_missing_replay_require_a_new_snapshot() {
         let mut tracker = PrimaryStreamTracker::default();
         let mut cursor = PrimaryStreamCursor {
+            input: None,
             session_id: "session".into(),
             stream_id: "stream".into(),
             sequence: 8,
@@ -176,6 +179,7 @@ mod tests {
         let event = ServerEvent::TextDelta { text: text.clone() };
         let position = PrimaryStreamPosition::Live {
             cursor: PrimaryStreamCursor {
+                input: None,
                 session_id: "session".into(),
                 stream_id: "stream".into(),
                 sequence: 7,

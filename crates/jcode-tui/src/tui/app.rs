@@ -150,6 +150,7 @@ struct PendingRemoteMessage {
 
 #[derive(Debug, Clone)]
 struct PendingComposerInput {
+    primary_input: Option<crate::workspace::RequestId>,
     request_id: Option<u64>,
     raw_input: String,
     cursor_pos: usize,

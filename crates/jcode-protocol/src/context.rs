@@ -709,6 +709,8 @@ pub const CONTEXT_PARTIAL_OUTPUT_NOT_REPLAYABLE: &str = "Provider output began, 
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextPendingInputMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_input: Option<jcode_workspace_types::RequestId>,
     pub request_id: u64,
     pub content_chars: usize,
     pub content_digest: u64,
@@ -720,6 +722,7 @@ pub struct ContextPendingInputMetadata {
 impl ContextPendingInputMetadata {
     pub fn new(request_id: u64, content: &str, image_count: usize) -> Self {
         Self {
+            primary_input: None,
             request_id,
             content_chars: content.chars().count(),
             content_digest: pending_input_digest(content),

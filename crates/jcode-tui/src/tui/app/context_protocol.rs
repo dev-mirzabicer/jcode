@@ -1521,6 +1521,7 @@ mod tests {
         ));
 
         let pending = ContextPendingInputMetadata {
+            primary_input: None,
             request_id: 77,
             content_chars: 25,
             content_digest: 123,

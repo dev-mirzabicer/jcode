@@ -1054,6 +1054,7 @@ impl Session {
             .collect();
         self.primary_inputs
             .push(jcode_session_types::StoredPrimaryInputReceipt {
+                rolled_back: false,
                 id: input.id,
                 digest: crate::primary_input::input_digest(input)?,
                 messages,

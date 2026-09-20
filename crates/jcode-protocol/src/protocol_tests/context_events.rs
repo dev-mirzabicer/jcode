@@ -702,6 +702,7 @@ fn context_events_roundtrip_preserve_request_and_draft_correlation() -> Result<(
             reason: ContextActionRequiredReason::PreflightLimit,
             required_reduction_tokens: 1_024,
             pending_input: Some(ContextPendingInputMetadata {
+                primary_input: None,
                 request_id: 77,
                 content_chars: 12,
                 content_digest: 123,
@@ -792,6 +793,7 @@ fn context_action_required_contains_metadata_not_raw_prompt_content() {
         reason: ContextActionRequiredReason::ProviderContextLimit,
         required_reduction_tokens: 512,
         pending_input: Some(ContextPendingInputMetadata {
+                primary_input: None,
             request_id: 41,
             content_chars: 25,
             content_digest: 0xfeed,

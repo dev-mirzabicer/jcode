@@ -5249,37 +5249,9 @@ async fn process_admitted_message(
         .run_primary_input_correlated(input, Some(request_id), false, event_tx.clone())
         .await;
     emit_startup_apply_drain_events(&startup_context, agent, &event_tx);
-    let startup_action = result
-        .as_ref()
-        .err()
-        .and_then(|error| error.downcast_ref::<crate::agent::StartupContextActionRequiredError>())
-        .map(|error| error.action.clone());
-    let startup_session = startup_action.as_ref().map(|_| {
-        super::startup_context::StartupContextSessionSnapshot::from_session(
-            agent.startup_context_session(),
-        )
-    });
-    if let (Some(action_required), Some(session)) = (startup_action, startup_session) {
-        let snapshot = startup_context
-            .status_snapshot(
-                session,
-                0,
-                Some(crate::protocol::STARTUP_CONTEXT_STATUS_MAX_PAGE_SIZE),
-                0,
-                Some(crate::protocol::STARTUP_CONTEXT_STATUS_MAX_PAGE_SIZE),
-            )
-            .await;
-        super::startup_context::emit_checked(
-            &event_tx.clone().into(),
-            request_id,
-            crate::protocol::StartupContextOperation::Status,
-            ServerEvent::StartupContextStatus {
-                id: request_id,
-                snapshot,
-                action_required: Some(action_required),
-            },
-        );
-    }
+    startup_context
+        .emit_input_action(agent, &result, request_id, &event_tx)
+        .await;
     if result.is_ok() {
         crate::runtime_memory_log::emit_event(
             crate::runtime_memory_log::RuntimeMemoryLogEvent::new(

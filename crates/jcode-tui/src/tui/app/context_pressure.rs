@@ -146,6 +146,12 @@ impl App {
         let pending = self.pending_composer_input.as_ref();
         let mut exact_pending_match = false;
         if let Some(pending) = pending {
+            if self.primary_input_journaled
+                && pending_input.and_then(|metadata| metadata.primary_input)
+                    != pending.primary_input
+            {
+                return false;
+            }
             if pending.request_id.or(self.current_message_id) != Some(request_id) {
                 return false;
             }

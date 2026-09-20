@@ -60,7 +60,7 @@ const OWNER_METADATA_SCHEMA_VERSION: u32 = 1;
 pub(super) mod apply;
 
 #[derive(Clone)]
-pub(super) struct StartupContextCoordinator {
+pub(crate) struct StartupContextCoordinator {
     inner: Arc<CoordinatorInner>,
 }
 
@@ -378,6 +378,39 @@ impl StartupContextCoordinator {
             .pending_update_count
             .saturating_add(pending_apply_count);
         status
+    }
+
+    pub(super) async fn emit_input_action(
+        &self,
+        agent: &Agent,
+        result: &anyhow::Result<()>,
+        id: u64,
+        tx: &tokio::sync::mpsc::UnboundedSender<ServerEvent>,
+    ) {
+        let Some(error) = result.as_ref().err().and_then(|error| {
+            error.downcast_ref::<crate::agent::StartupContextActionRequiredError>()
+        }) else {
+            return;
+        };
+        let snapshot = self
+            .status_snapshot(
+                StartupContextSessionSnapshot::from_session(agent.startup_context_session()),
+                0,
+                Some(crate::protocol::STARTUP_CONTEXT_STATUS_MAX_PAGE_SIZE),
+                0,
+                Some(crate::protocol::STARTUP_CONTEXT_STATUS_MAX_PAGE_SIZE),
+            )
+            .await;
+        emit_checked(
+            &tx.clone().into(),
+            id,
+            crate::protocol::StartupContextOperation::Status,
+            ServerEvent::StartupContextStatus {
+                id,
+                snapshot,
+                action_required: Some(error.action.clone()),
+            },
+        );
     }
 
     pub(super) async fn status_snapshot(

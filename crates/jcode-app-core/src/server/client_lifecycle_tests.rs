@@ -1765,13 +1765,16 @@ async fn blocked_shared_startup_emits_prompt_safe_action_and_rolls_back_unanswer
     let (debug_response_tx, _) = broadcast::channel(8);
     let (swarm_event_tx, _) = broadcast::channel(8);
     let (global_event_tx, _) = broadcast::channel(8);
+    let coordinator = crate::server::startup_context::test_coordinator();
+    sessions.configure_startup_context(coordinator.clone());
+    let recorder = Arc::new(RecordingImmediateProvider::default());
     let server_task = tokio::spawn(handle_client(
         server_stream,
         Arc::clone(&sessions),
         global_event_tx,
-        Arc::new(CompleteImmediatelyProvider),
+        recorder.clone(),
         Arc::new(crate::context::ContextTransactionService::new()),
-        crate::server::startup_context::test_coordinator(),
+        coordinator,
         Arc::new(RwLock::new(false)),
         Arc::new(RwLock::new(String::new())),
         Arc::new(RwLock::new(1usize)),
@@ -1898,6 +1901,70 @@ async fn blocked_shared_startup_emits_prompt_safe_action_and_rolls_back_unanswer
         jcode_session_types::StoredStartupContextState::Blocked
     );
 
+    sessions.wait_idle(&session_id).await.unwrap();
+    let mut input = jcode_session_types::PrimaryInputEnvelope::new(
+        session_id.clone(),
+        prompt.into(),
+        jcode_session_types::PrimaryInputDelivery::NextTurn,
+    );
+    input
+        .images
+        .push(("image/png".into(), "synthetic-image".into()));
+    let request = Request::PrimaryInput {
+        id: 4,
+        input: Box::new(input.clone()),
+    };
+    client_writer
+        .write_all((serde_json::to_string(&request).unwrap() + "\n").as_bytes())
+        .await
+        .unwrap();
+    let mut typed_action = false;
+    loop {
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(10), reader.read_line(&mut line))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!line.is_empty());
+        match decode_request_or_event(&line) {
+            ServerEvent::StartupContextStatus {
+                id: 0,
+                action_required: Some(action),
+                ..
+            } => {
+                assert_eq!(
+                    action.prompt_disposition,
+                    crate::protocol::StartupContextPromptDisposition::RolledBack
+                );
+                assert!(
+                    action
+                        .pending_input
+                        .as_ref()
+                        .is_some_and(|metadata| metadata.primary_input == Some(input.id)
+                            && metadata.matches(0, prompt, 1))
+                );
+                typed_action = true;
+            }
+            ServerEvent::Error { id: 0, .. } => {
+                assert!(typed_action);
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert!(recorder.snapshots.lock().unwrap().is_empty());
+    assert_eq!(
+        crate::primary_input::PrimaryInputStore::current()
+            .inspect(&session_id, input.id)
+            .unwrap()
+            .state,
+        jcode_session_types::PrimaryInputState::Failed
+    );
+    assert_eq!(
+        serde_json::to_value(crate::session::Session::load(&session_id).unwrap().messages).unwrap(),
+        serde_json::to_value(persisted.messages).unwrap()
+    );
+    sessions.wait_idle(&session_id).await.unwrap();
     drop(client_writer);
     server_task
         .await

@@ -48,7 +48,7 @@ impl Agent {
             input.display_role.is_none()
                 && input.delivery != jcode_session_types::PrimaryInputDelivery::ContextOnly,
         );
-        self.run_primary_input_correlated(input, None, observe, event_tx)
+        self.run_primary_input_correlated(input, Some(0), observe, event_tx)
             .await
     }
 
@@ -164,7 +164,11 @@ impl Agent {
                 Some(StoredDisplayRole::System) => SoftInterruptSource::System,
                 Some(StoredDisplayRole::BackgroundTask) => SoftInterruptSource::BackgroundTask,
             };
+            let committed_len = self.session.messages.len();
             if let Some(context) = self.active_turn_context.as_mut() {
+                // Earlier tool effects and committed safe-boundary input stay
+                // authoritative if the following request exceeds its budget.
+                context.transcript_len_before_pending = committed_len;
                 context.unattended_context = input.unattended_context;
                 context.emergency_attempted = false;
                 context.emergency_transaction_id = None;

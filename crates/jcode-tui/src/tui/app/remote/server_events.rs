@@ -1116,6 +1116,13 @@ pub(in crate::tui::app) fn handle_server_event(
             app.rate_limit_pending_message = match remote.primary_input_source(&session, input) {
                 Ok(Some(source)) => {
                     app.primary_retry_id = Some(input);
+                    if let Some(pending) = app.pending_composer_input.as_mut()
+                        && source.retry_of.is_some()
+                        && pending.primary_input == source.retry_of
+                    {
+                        pending.primary_input = Some(input);
+                        pending.request_id = Some(0);
+                    }
                     Some(app_mod::PendingRemoteMessage {
                         content: source.input.content,
                         images: source.input.images,
@@ -1260,12 +1267,23 @@ pub(in crate::tui::app) fn handle_server_event(
             }
             true
         }
-        ServerEvent::PrimaryInputFinished { receipt } => {
+        ServerEvent::PrimaryInputFinished { receipt, delivery } => {
             if app.remote_session_id.as_deref() != Some(receipt.session.as_str()) {
                 return false;
             }
             app.pending_primary_next.retain(|(id, _)| *id != receipt.id);
             app.pending_primary_soft.remove(&receipt.id);
+            if delivery.is_some_and(|delivery| {
+                delivery != crate::primary_input::PrimaryInputDelivery::ContextOnly
+            }) && remote
+                .primary_input_source(&receipt.session, receipt.id)
+                .ok()
+                .flatten()
+                .is_none()
+            {
+                app.primary_retry_id = None;
+                app.rate_limit_pending_message = None;
+            }
             false
         }
         ServerEvent::PrimaryInputReceipt { id, receipt } => {
@@ -1575,6 +1593,43 @@ pub(in crate::tui::app) fn handle_server_event(
                 remote.clear_pending();
                 remote.reset_call_output_tokens_seen();
                 return true;
+            }
+            if app.primary_input_journaled && remote.event_primary_input().is_some() {
+                let owned = remote
+                    .event_primary_input()
+                    .filter(|(session, _)| {
+                        app.remote_session_id.as_deref() == Some(session.as_str())
+                    })
+                    .and_then(|(session, input)| {
+                        remote
+                            .primary_input_source(&session, input)
+                            .ok()
+                            .flatten()
+                            .map(|source| (input, source))
+                    });
+                if let Some((input, source)) = owned {
+                    app.primary_retry_id = Some(input);
+                    app.rate_limit_pending_message = Some(app_mod::PendingRemoteMessage {
+                        content: source.input.content,
+                        images: source.input.images,
+                        is_system: source.is_system,
+                        system_reminder: source.input.system_reminder,
+                        auto_retry: source.auto_retry,
+                        retry_attempts: source.retry_attempts,
+                        retry_at: None,
+                        queued_messages: source.queued_messages.map(Into::into),
+                    });
+                } else {
+                    // A peer or administrative error has no authority to retry
+                    // this client's independently queued input.
+                    app.push_display_message(DisplayMessage::error(message));
+                    if remote.event_primary_input().is_some() {
+                        app.is_processing = false;
+                        app.status = ProcessingStatus::Idle;
+                        app.current_message_id = None;
+                    }
+                    return true;
+                }
             }
             // The server rejects a Message request with this error while its
             // previous turn is still running. This typically happens when a

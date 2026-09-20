@@ -743,6 +743,7 @@ fn startup_context_blocked_action_restores_exact_composer_and_ignores_stale_stat
     app.current_message_id = Some(request_id);
     app.is_processing = true;
     app.pending_composer_input = Some(PendingComposerInput {
+            primary_input: None,
         request_id: Some(request_id),
         raw_input: raw.clone(),
         cursor_pos: 7,

@@ -1115,6 +1115,17 @@ impl App {
             return false;
         }
         let pending = self.pending_composer_input.as_ref();
+        if self.primary_input_journaled
+            && pending.is_some_and(|pending| {
+                action
+                    .pending_input
+                    .as_ref()
+                    .and_then(|metadata| metadata.primary_input)
+                    != pending.primary_input
+            })
+        {
+            return false;
+        }
         let exact_pending_match = pending.is_some_and(|pending| {
             pending.request_id == Some(request_id)
                 && action.pending_input.as_ref().is_some_and(|metadata| {

@@ -51,7 +51,7 @@ mod reload_state;
 mod reload_trace;
 mod runtime;
 mod socket;
-mod startup_context;
+pub(crate) mod startup_context;
 mod swarm;
 mod swarm_channels;
 mod swarm_mutation_state;
@@ -808,6 +808,9 @@ impl Server {
             await_members_runtime: AwaitMembersRuntime::default(),
             swarm_mutation_runtime: SwarmMutationRuntime::default(),
         };
+        server
+            .sessions
+            .configure_startup_context(server.startup_context.clone());
         server
             .sessions
             .configure_input_delivery(LiveTurnSwarmContext::new(

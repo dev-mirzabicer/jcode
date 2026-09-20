@@ -312,12 +312,17 @@ impl PrimaryInputStore {
     ) -> Result<Vec<PrimaryInputReceipt>> {
         let mut lease = self.lock(session)?;
         lease.reconcile(&crate::session::Session::load_startup_stub(session)?)?;
+        let mut unique = std::collections::HashSet::new();
         for ClientInputCancellation {
             input,
             source_digest: digest,
             ..
         } in &inputs
         {
+            ensure!(
+                unique.insert(input.id),
+                "Cancellation repeats an input identity"
+            );
             ensure!(
                 input.session == session && input.delivery != PrimaryInputDelivery::ContextOnly,
                 "Cancellation is not scoped to pending conversational input"
@@ -413,6 +418,14 @@ impl InputLease {
                     committed.digest == input_digest(&record.input)?,
                     "Committed input digest differs from accepted input"
                 );
+                if committed.rolled_back {
+                    if record.receipt.state != PrimaryInputState::Failed {
+                        record.receipt.state = PrimaryInputState::Failed;
+                        record.receipt.issue=Some("Input was rolled back before provider output; the complete original remains retained".into());
+                        changed = true;
+                    }
+                    continue;
+                }
                 if record.receipt.state != PrimaryInputState::Committed
                     || record.receipt.messages != committed.messages
                 {
@@ -575,6 +588,26 @@ mod tests {
         );
         let mut early = input.clone();
         early.id = RequestId::new();
+        assert!(
+            store
+                .cancel_client_inputs(
+                    &session.id,
+                    vec![
+                        ClientInputCancellation {
+                            input: early.clone(),
+                            source_digest: "same".into(),
+                            queued_messages: None
+                        },
+                        ClientInputCancellation {
+                            input: early.clone(),
+                            source_digest: "different".into(),
+                            queued_messages: None
+                        },
+                    ]
+                )
+                .is_err()
+        );
+        assert!(store.original(&session.id, early.id)?.is_none());
         let receipts = store.cancel_client_inputs(
             &session.id,
             vec![

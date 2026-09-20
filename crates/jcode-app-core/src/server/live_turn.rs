@@ -438,6 +438,7 @@ pub(super) fn ensure_primary_input_delivery(
             let finished = swarm.clone();
             let target = session.clone();
             let input_id = input.id;
+            let startup_context = host.startup_context();
             update_member_status(
                 &session,
                 "running",
@@ -458,7 +459,11 @@ pub(super) fn ensure_primary_input_delivery(
                         input: input_id,
                         delivery: input.delivery,
                     });
+                    let delivery = input.delivery;
                     let result = agent.run_primary_input(input, tx.clone()).await;
+                    if let Some(coordinator) = startup_context {
+                        coordinator.emit_input_action(&agent, &result, 0, &tx).await;
+                    }
                     if let Err(error) = &result {
                         crate::primary_input::PrimaryInputStore::current().fail(
                             agent.session_id(),
@@ -469,7 +474,10 @@ pub(super) fn ensure_primary_input_delivery(
                     if let Ok(receipt) = crate::primary_input::PrimaryInputStore::current()
                         .inspect(agent.session_id(), input_id)
                     {
-                        let _ = tx.send(ServerEvent::PrimaryInputFinished { receipt });
+                        let _ = tx.send(ServerEvent::PrimaryInputFinished {
+                            receipt,
+                            delivery: Some(delivery),
+                        });
                     }
                     result?;
                     Ok(agent.latest_assistant_text_after(start))

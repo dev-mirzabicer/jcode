@@ -7,7 +7,7 @@ not a behavioral model evaluation. Run through run_isolated_test.py.
 import os
 if not os.environ.get('JCODE_TEST_STATE_ROOT'):
     raise SystemExit('Run through scripts/run_isolated_test.py')
-import base64, json, shlex, socket, sqlite3, subprocess, tempfile, threading, time, traceback, uuid
+import base64, json, shlex, socket, sqlite3, struct, subprocess, tempfile, threading, time, traceback, uuid, zlib
 from pathlib import Path
 import test_instruction_manager as f
 ipc=Path(tempfile.mkdtemp(prefix='pi-',dir=os.environ['JCODE_RUNTIME_DIR']))
@@ -20,6 +20,7 @@ config=f.home/'config.toml'
 config.write_text(config.read_text().replace('[features]','[features]\nmanaged_primary_launch=true',1))
 first_release=threading.Event(); soft_release=threading.Event()
 first_entered=threading.Event(); soft_entered=threading.Event()
+cancel_entered=threading.Event(); cancel_release=threading.Event()
 closed=threading.Event(); dropped=threading.Event()
 lock=threading.Lock(); captures=[]; submissions=[]; errors=[]; testers=[]; frames=[]
 proxy_state={'drop':'next_turn','blocked':False}
@@ -36,11 +37,16 @@ def response(self):
     body=json.loads(self.rfile.read(int(self.headers.get('Content-Length','0'))))
     with lock:
         captures.append(body); number=len(captures)
+    if number==7:
+        self.send_response(413); self.send_header('Content-Type','application/json'); self.end_headers()
+        self.wfile.write(json.dumps({'error':{'message':'synthetic payload too large'}}).encode()); self.wfile.flush(); return
     self.send_response(200); self.send_header('Content-Type','text/event-stream'); self.end_headers()
     def event(delta,stop=None):
         value={'id':'fixture','object':'chat.completion.chunk','choices':[{'index':0,'delta':delta,'finish_reason':stop}]}
         self.wfile.write(('data: '+json.dumps(value)+'\n\n').encode()); self.wfile.flush()
     try:
+        if number==6:
+            cancel_entered.set(); assert cancel_release.wait(180),'owned cancellation gate not released'
         if number in (1,3):
             entered,release=(first_entered,first_release) if number==1 else (soft_entered,soft_release)
             entered.set(); assert release.wait(180),'owned provider gate not released'
@@ -51,7 +57,7 @@ def response(self):
             event({'role':'assistant','tool_calls':[{'index':0,'id':name+'-tool','type':'function','function':{'name':'bash','arguments':args}}]},'tool_calls')
         elif number==3:
             event({'content':'Held turn finished. '},'stop')
-        elif number in (2,5):
+        elif number in (2,5,6):
             event({'content':'DURABLE TUI RESULT '+str(number)},'stop')
         else:
             raise AssertionError('unexpected provider call '+str(number))
@@ -146,7 +152,8 @@ def spawn(session,cols):
     f.debug('tester:spawn '+json.dumps({'cwd':str(f.project),'binary':str(wrapper),'cols':cols,'rows':32 if cols==120 else 24}))
     tid=json.loads((f.home/'testers.json').read_text())[-1]['id'];testers.append(tid)
     wait(lambda:session in command(tid,'startup-context-state'),'attached tester')
-    command(tid,'keys:esc,esc'); frame(tid,'attached-'+str(cols)); return tid
+    if cols==120: command(tid,'keys:esc,esc')
+    frame(tid,'attached-'+str(cols)); return tid
 result={'status':'failed','binary':f.BIN,'root':str(f.ROOT)}
 try:
     f.start(); f.client.settimeout(120)
@@ -168,7 +175,8 @@ try:
     command(tid,'set_input:TUI-HOLD'); command(tid,'keys:enter')
     assert soft_entered.wait(60)
     image=f.project/'fixture.png'
-    image.write_bytes(base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aV3sAAAAASUVORK5CYII='))
+    def png_chunk(kind,data): return struct.pack('>I',len(data))+kind+data+struct.pack('>I',zlib.crc32(kind+data))
+    image.write_bytes(b'\x89PNG\r\n\x1a\n'+png_chunk(b'IHDR',struct.pack('>IIBBBBB',1,1,8,6,0,0,0))+png_chunk(b'IDAT',zlib.compress(bytes([0,255,255,255,255])))+png_chunk(b'IEND',b''))
     proxy_state['blocked']=True
     command(tid,'set_input:'+str(image)); command(tid,'keys:enter')
     assert dropped.wait(60),'soft input acceptance was not exercised'
@@ -186,18 +194,47 @@ try:
     assert (f.project/'soft-effect').read_text()=='x' and len(captures)==5
     assert 'image_url' in json.dumps(captures[3])
     assert 'DURABLE TUI RESULT 5' in frame(tid,'recovered-narrow')
+    command(tid,'set_input:TUI-CANCEL-HOLD'); command(tid,'keys:enter')
+    assert cancel_entered.wait(60)
+    command(tid,'keys:ctrl+t')
+    command(tid,'set_input:'+str(image)); command(tid,'keys:enter')
+    wait(lambda:submissions[-1]['input']['images'] and submissions[-1]['input']['delivery']=='next_turn','complete next-turn image')
+    queued=submissions[-1]
+    def queued_visible():
+        raw=command(tid,'screen-json')
+        return raw.lstrip().startswith('{') and bool(json.loads(raw)['rendered_text']['queued_messages'])
+    wait(queued_visible,'server-owned queue visible')
+    command(tid,'keys:ctrl+up')
+    wait(lambda:rpc('primary_input_inspect',session=session,input=queued['input']['id']).get('receipt',{}).get('state')=='cancelled','exact queued cancellation')
+    wait(lambda:json.loads(command(tid,'context-pressure-state')).get('pending_images')==1,'cancelled image restored')
+    assert len(captures)==6
+    cancel_release.set(); state(tid,lambda value:value.get('processing') is False)
+    frame(tid,'cancelled-image-draft')
+    # Tester stop sends SIGTERM, not the UI's saved-input reload operation.
+    # Do not claim unsaved-composer crash autosave. Exact saved image/retry
+    # restoration is exercised through the production snapshot owner in Rust.
+    assert len(captures)==6
+    command(tid,'set_input:OVERSIZE-TUI [image 1]'); command(tid,'keys:enter')
+    wait(lambda:len(captures)==7,'owned provider rejection')
+    wait(lambda:json.loads(command(tid,'context-pressure-state')).get('pending_images')==1,'blocked image restored')
+    state(tid,lambda value:value.get('input')=='OVERSIZE-TUI [image 1]' and value.get('processing') is False)
+    blocked=submissions[-1]
+    wait(lambda:rpc('primary_input_inspect',session=session,input=blocked['input']['id']).get('receipt',{}).get('state')=='failed','durable rollback receipt')
+    frame(tid,'blocked-input-restored')
     stored=json.loads((f.home/'sessions'/f'{session}.json').read_text())
-    assert len(stored['primary_inputs'])==3
-    assert len({receipt['id'] for receipt in stored['primary_inputs']})==3
+    assert len(stored['primary_inputs'])==5
+    assert len({receipt['id'] for receipt in stored['primary_inputs']})==5
     with sqlite3.connect(f.home/'execution/index.sqlite') as database:
         rows=database.execute("SELECT state FROM runs WHERE tool='bash'").fetchall()
     assert rows==[('completed',),('completed',)],rows
+    assert stored['primary_inputs'][-1]['rolled_back'] is True
+    assert 'OVERSIZE-TUI' not in json.dumps(stored['messages'])
     assert not errors,errors
-    result.update(status='passed',session=session,exact_transport_replay=True,client_replacement=True,complete_soft_image=True,one_effect_each=True,provider_calls=len(captures),frames=frames)
+    result.update(status='passed',session=session,exact_transport_replay=True,client_replacement=True,complete_soft_image=True,one_effect_each=True,queued_image=True,exact_cancellation=True,cancelled_image_restored=True,blocked_input_restored=True,provider_calls=len(captures),frames=frames)
 except Exception:
     result['error']=traceback.format_exc()
 finally:
-    first_release.set(); soft_release.set()
+    first_release.set(); soft_release.set(); cancel_release.set()
     cleanup={}
     for tid in list(testers):
         try:cleanup[tid]=f.debug('tester:'+tid+':stop')

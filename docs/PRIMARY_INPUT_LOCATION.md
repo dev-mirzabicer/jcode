@@ -138,6 +138,21 @@ before inbox acknowledgement or transport delivery, reconciles to committed
 without appending again. An uncertain post-write error is checked against the
 actual persisted Session before live authority is adopted or restored.
 
+The existing prompt-safe preflight/provider-rejection owner may roll back a new,
+unanswered input before provider output. That same checkpoint marks its input
+receipt rolled back, and inspection reports `failed` while retaining the complete
+original envelope. Replaying that UUID cannot append it again. Explicit repair
+and a new attempt use a new identity. A later budget failure after safe-boundary
+injection retains the earlier tool-result history and committed injected input;
+it cannot roll the whole working turn back past completed effects.
+
+Blocked-prompt metadata carries the full input UUID in addition to the existing
+request/content checks. The primary presentation cursor also identifies its
+input, so peer errors and reconnect replay cannot retry another client's pending
+message merely because numeric request IDs match. This adds correlation to the
+existing startup/context owners, not a new projection or automatic compaction
+policy.
+
 Short synchronous inbox transactions serialize admission, inspection and
 commitment. No inbox lease is held while awaiting a provider or another async
 operation. Session writer ownership remains the existing primary lease.

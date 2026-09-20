@@ -561,7 +561,10 @@ impl Agent {
             .flat_map(|(idx, interrupt)| {
                 let mut events = Vec::new();
                 if let Some(receipt) = interrupt.receipt {
-                    events.push(ServerEvent::PrimaryInputFinished { receipt });
+                    events.push(ServerEvent::PrimaryInputFinished {
+                        receipt,
+                        delivery: None,
+                    });
                 }
                 events.push(ServerEvent::SoftInterruptInjected {
                     content: interrupt.content,

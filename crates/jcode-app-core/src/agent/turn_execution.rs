@@ -467,6 +467,9 @@ impl Agent {
                 }
             }
             lease.reconcile(&self.session)?;
+            if let Some(presentation) = &self.primary_presentation {
+                presentation.bind_input(input.id);
+            }
             Ok(())
         } else {
             self.add_user_message_with_origin(blocks, display_role, origin)?;

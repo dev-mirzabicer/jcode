@@ -257,6 +257,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_input(
     } = prepared;
     app.last_submitted_input = Some(raw_input.clone());
     app.pending_composer_input = Some(super::super::PendingComposerInput {
+        primary_input: None,
         request_id: None,
         raw_input: raw_input.clone(),
         cursor_pos,
@@ -291,6 +292,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_input(
         Ok(request_id) => {
             if let Some(pending) = app.pending_composer_input.as_mut() {
                 pending.request_id = Some(request_id);
+                pending.primary_input = remote.last_submission_identity();
             }
             Ok(())
         }

@@ -361,6 +361,7 @@ fn phase10_remote_action_restores_exact_prompt_pastes_and_images_only_for_matchi
     let expanded = "review exact pasted body 🦀".to_string();
     let images = vec![("image/png".to_string(), "exact-image-data".to_string())];
     app.pending_composer_input = Some(PendingComposerInput {
+            primary_input: None,
         request_id: Some(700),
         raw_input: raw.clone(),
         cursor_pos: 7,
@@ -438,6 +439,7 @@ fn phase10_blocked_prompt_waits_for_an_occupied_composer_and_cannot_be_bypassed(
     app.current_message_id = Some(707);
     app.input = "newer unsent draft".to_string();
     app.pending_composer_input = Some(PendingComposerInput {
+            primary_input: None,
         request_id: Some(707),
         raw_input: "blocked [paste 1]".to_string(),
         cursor_pos: usize::MAX,
@@ -509,6 +511,7 @@ fn phase10_post_output_remote_action_preserves_turn_and_suppresses_terminal_erro
     app.current_message_id = Some(702);
     app.is_processing = true;
     app.pending_composer_input = Some(PendingComposerInput {
+            primary_input: None,
         request_id: Some(702),
         raw_input: "authoritative prompt".to_string(),
         cursor_pos: usize::MAX,
@@ -599,6 +602,7 @@ fn phase10_missing_pending_metadata_retains_authoritative_turn_without_composer_
     app.context_protocol.accepted_context_revision = Some(revision);
     app.current_message_id = Some(703);
     app.pending_composer_input = Some(PendingComposerInput {
+            primary_input: None,
         request_id: Some(703),
         raw_input: "retained authoritative prompt".to_string(),
         cursor_pos: usize::MAX,
@@ -717,6 +721,7 @@ fn phase10_legacy_pending_fingerprint_fails_closed_without_inexact_restoration()
     app.current_message_id = Some(706);
     app.is_processing = true;
     app.pending_composer_input = Some(PendingComposerInput {
+            primary_input: None,
         request_id: Some(706),
         raw_input: "legacy correlated prompt".to_string(),
         cursor_pos: usize::MAX,
@@ -772,6 +777,7 @@ fn phase10_legacy_pending_fingerprint_fails_closed_without_inexact_restoration()
 fn phase10_local_partial_output_persistence_failure_is_explicit_and_terminal() {
     let mut app = create_test_app();
     app.pending_composer_input = Some(PendingComposerInput {
+            primary_input: None,
         request_id: Some(705),
         raw_input: "authoritative local prompt".to_string(),
         cursor_pos: usize::MAX,
@@ -813,6 +819,7 @@ fn phase10_incomplete_remote_output_retains_authoritative_turn_without_false_pre
     app.context_protocol.accepted_context_revision = Some(revision);
     app.current_message_id = Some(708);
     app.pending_composer_input = Some(PendingComposerInput {
+            primary_input: None,
         request_id: Some(708),
         raw_input: "authoritative prompt".to_string(),
         cursor_pos: usize::MAX,
@@ -885,6 +892,7 @@ fn phase10_local_payload_rejection_restores_exact_turn_and_manual_resend_appends
     });
     app.push_display_message(DisplayMessage::user(raw.clone()));
     app.pending_composer_input = Some(PendingComposerInput {
+            primary_input: None,
         request_id: Some(704),
         raw_input: raw.clone(),
         cursor_pos: usize::MAX,
@@ -1968,4 +1976,91 @@ fn context_editor_debug_socket_command_returns_only_metadata_safe_summary() {
     assert!(unknown["error"].as_str().is_some_and(|error| {
         error.contains("unknown Context Editor fixture")
     }));
+}
+
+#[test]
+fn durable_context_action_restores_only_the_exact_primary_input() {
+    let mut app = create_test_app();
+    app.primary_input_journaled=true;
+    let input=crate::workspace::RequestId::new();
+    app.is_remote = true;
+    let session_id = app.session.id.clone();
+    let revision = app.session.context_view.revision;
+    app.context_protocol.accepted_session_id = Some(session_id.clone());
+    app.context_protocol.accepted_context_revision = Some(revision);
+    app.current_message_id = Some(700);
+    let raw = "review [paste 1]".to_string();
+    let expanded = "review exact pasted body 🦀".to_string();
+    let images = vec![("image/png".to_string(), "exact-image-data".to_string())];
+    app.pending_composer_input = Some(PendingComposerInput {
+            primary_input: Some(input),
+        request_id: Some(700),
+        raw_input: raw.clone(),
+        cursor_pos: 7,
+        expanded: expanded.clone(),
+        pasted_contents: vec!["exact pasted body 🦀".to_string()],
+        pending_input_tokens: 42,
+        image_count: images.len(),
+        local_session_len_before: None,
+        local_display_len_before: None,
+        local_provider_len_before: None,
+        restoration_images: None,
+        request_payload_pressure: None,
+        output_started: false,
+    });
+    app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        queued_messages: None,
+        content: expanded.clone(),
+        images: images.clone(),
+        is_system: false,
+        system_reminder: None,
+        auto_retry: true,
+        retry_attempts: 0,
+        retry_at: None,
+    });
+    app.push_display_message(DisplayMessage::user(raw.clone()));
+    let mut metadata = crate::protocol::ContextPendingInputMetadata::new(700, &expanded, images.len());
+    metadata.primary_input=Some(input);
+    let stale = crate::protocol::ServerEvent::ContextActionRequired {
+        id: 701,
+        session_id: session_id.clone(),
+        context_revision: revision,
+        reason: crate::protocol::ContextActionRequiredReason::PreflightLimit,
+        required_reduction_tokens: 1,
+        pending_input: Some(metadata.clone()),
+        preflight: None,
+        payload: None,
+        details: Vec::new(),
+        automatic_retry: false,
+    };
+    let mut peer=stale.clone();
+    if let crate::protocol::ServerEvent::ContextActionRequired{id,pending_input:Some(metadata),..}=&mut peer { *id=700; metadata.primary_input=Some(crate::workspace::RequestId::new()); }
+    assert!(!app.reduce_context_server_event(peer).unwrap());
+    assert_eq!(app.pending_composer_input.as_ref().unwrap().primary_input,Some(input));
+    assert!(!app.reduce_context_server_event(stale).unwrap());
+    assert!(app.input.is_empty());
+
+    let event = crate::protocol::ServerEvent::ContextActionRequired {
+        id: 700,
+        session_id,
+        context_revision: revision,
+        reason: crate::protocol::ContextActionRequiredReason::PreflightLimit,
+        required_reduction_tokens: 1,
+        pending_input: Some(metadata),
+        preflight: None,
+        payload: None,
+        details: Vec::new(),
+        automatic_retry: false,
+    };
+    assert!(app.reduce_context_server_event(event).unwrap());
+    assert_eq!(app.input, raw);
+    assert_eq!(app.cursor_pos, 7);
+    assert_eq!(app.pasted_contents, vec!["exact pasted body 🦀"]);
+    assert_eq!(app.pending_images, images);
+    assert!(app.rate_limit_pending_message.is_none());
+    assert!(app.pending_composer_input.is_none());
+    assert!(app
+        .display_messages()
+        .iter()
+        .all(|message| !(message.role == "user" && message.content == "review [paste 1]")));
 }

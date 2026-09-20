@@ -502,6 +502,7 @@ fn prepare_context_parity_app(app: &mut App, event: &crate::protocol::ServerEven
         ServerEvent::ContextActionRequired { id, .. } => {
             app.current_message_id = Some(*id);
             app.pending_composer_input = Some(PendingComposerInput {
+            primary_input: None,
                 request_id: Some(*id),
                 raw_input: "parity input".to_string(),
                 cursor_pos: usize::MAX,

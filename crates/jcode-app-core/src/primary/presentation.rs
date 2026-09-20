@@ -15,6 +15,7 @@ pub(crate) struct Presentation {
 
 #[derive(Default)]
 struct State {
+    input: Option<crate::workspace::RequestId>,
     sequence: u64,
     request_id: u64,
     origin: Option<String>,
@@ -45,10 +46,20 @@ impl Presentation {
     pub fn begin(&self, request_id: u64) {
         let mut state = self.state.lock().expect("primary presentation");
         state.request_id = request_id;
+        state.input = None;
         state.origin = None;
         state.ready = false;
         state.closed = false;
         state.failure = None;
+    }
+    /// The first committed input identifies this turn, including errors after
+    /// reconnect. Later safe-boundary input cannot take over its turn identity.
+    pub fn bind_input(&self, input: crate::workspace::RequestId) {
+        self.state
+            .lock()
+            .expect("primary presentation")
+            .input
+            .get_or_insert(input);
     }
     /// The marker travels in the same FIFO as its preceding and following
     /// deltas. Merely loading the latest Session beside an event cursor is racy.
@@ -88,6 +99,13 @@ impl Presentation {
     }
     pub fn record(&self, event: &ServerEvent) -> Result<Option<PrimaryStreamCursor>> {
         let mut state = self.state.lock().expect("primary presentation");
+        if let ServerEvent::PrimaryInputStarted { session, input, .. } = event {
+            ensure!(
+                session == &self.session && state.input.is_none_or(|current| current == *input),
+                "Primary input stream identity changed within a turn"
+            );
+            state.input = Some(*input);
+        }
         if let ServerEvent::PrimaryCheckpoint { token, terminal } = event {
             let checkpoint = state
                 .pending
@@ -127,6 +145,7 @@ impl Presentation {
             _ => state.events.push((sequence, event.clone())),
         }
         Ok(Some(PrimaryStreamCursor {
+            input: state.input,
             session_id: self.session.clone(),
             stream_id: self.stream.clone(),
             sequence: state.sequence,
@@ -144,6 +163,7 @@ impl Presentation {
     pub fn cursor(&self) -> PrimaryStreamCursor {
         let state = self.state.lock().expect("primary presentation");
         PrimaryStreamCursor {
+            input: state.input,
             session_id: self.session.clone(),
             stream_id: self.stream.clone(),
             sequence: state.sequence,
@@ -208,6 +228,7 @@ impl Presentation {
                             .map(|(_, event)| event.clone())
                             .collect(),
                         cursor: PrimaryStreamCursor {
+                            input: state.input,
                             session_id: self.session.clone(),
                             stream_id: self.stream.clone(),
                             sequence: state.sequence,
@@ -253,6 +274,36 @@ fn same_history(a: &Session, b: &Session) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn primary_stream_binds_one_input_and_resets_at_the_next_turn() {
+        let view = Presentation::new("session");
+        let first = crate::workspace::RequestId::new();
+        let second = crate::workspace::RequestId::new();
+        view.begin(0);
+        let cursor = view
+            .record(&ServerEvent::PrimaryInputStarted {
+                session: "session".into(),
+                input: first,
+                delivery: jcode_session_types::PrimaryInputDelivery::NextTurn,
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(cursor.input, Some(first));
+        view.bind_input(second);
+        assert_eq!(view.cursor().input, Some(first));
+        assert!(
+            view.record(&ServerEvent::PrimaryInputStarted {
+                session: "foreign".into(),
+                input: first,
+                delivery: jcode_session_types::PrimaryInputDelivery::NextTurn
+            })
+            .is_err()
+        );
+        view.begin(0);
+        view.bind_input(second);
+        assert_eq!(view.cursor().input, Some(second));
+    }
 
     #[tokio::test]
     async fn checkpoint_is_published_only_in_its_event_order() {

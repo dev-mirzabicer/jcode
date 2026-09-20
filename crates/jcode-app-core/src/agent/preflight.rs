@@ -133,8 +133,11 @@ impl Agent {
     ) {
         self.active_turn_context = Some(ActiveTurnContext {
             request_id,
-            pending_input: request_id
-                .map(|id| ContextPendingInputMetadata::new(id, user_message, image_count)),
+            pending_input: request_id.map(|id| {
+                let mut metadata = ContextPendingInputMetadata::new(id, user_message, image_count);
+                metadata.primary_input = self.pending_primary_input.as_ref().map(|input| input.id);
+                metadata
+            }),
             pending_input_tokens,
             transcript_len_before_pending,
             reserved_alerts: options.reserved_alerts,
@@ -604,6 +607,21 @@ impl Agent {
 
         let removed_messages =
             self.session.messages[context.transcript_len_before_pending..].to_vec();
+        let previous_receipts = self.session.primary_inputs.clone();
+        let removed_ids = removed_messages
+            .iter()
+            .map(|message| message.id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        for receipt in &mut self.session.primary_inputs {
+            if !receipt.messages.is_empty()
+                && receipt
+                    .messages
+                    .iter()
+                    .all(|id| removed_ids.contains(id.as_str()))
+            {
+                receipt.rolled_back = true;
+            }
+        }
         self.session
             .truncate_messages(context.transcript_len_before_pending);
         self.tool_output_scan_index = self.tool_output_scan_index.min(self.session.messages.len());
@@ -613,6 +631,7 @@ impl Agent {
             "prompt-safe pending-turn rollback",
         );
         if let Err(error) = self.session.save() {
+            self.session.primary_inputs = previous_receipts;
             let mut restored = self.session.messages.clone();
             restored.extend(removed_messages);
             self.session.replace_messages(restored);

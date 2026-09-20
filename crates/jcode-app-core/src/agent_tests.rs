@@ -1749,6 +1749,92 @@ async fn phase10_correlated_preflight_blocks_before_provider_call_and_rolls_back
 }
 
 #[tokio::test]
+async fn durable_primary_preflight_preserves_identity_and_reconciles_rollback() {
+    let provider = Arc::new(ScriptedSizeProvider::stream(128, Vec::new()));
+    let mut agent = Agent::new(provider.clone(), Registry::empty());
+    let original = serde_json::to_value(&agent.session.messages).unwrap();
+    let mut input = jcode_session_types::PrimaryInputEnvelope::new(
+        agent.session_id().into(),
+        "synthetic oversized input Ω".into(),
+        jcode_session_types::PrimaryInputDelivery::NextTurn,
+    );
+    input
+        .images
+        .push(("image/png".into(), "synthetic-image".into()));
+    let store = crate::primary_input::PrimaryInputStore::current();
+    store.accept(input.clone()).unwrap();
+    let (tx, mut rx) = tokio_mpsc::unbounded_channel();
+    assert!(agent.run_primary_input(input.clone(), tx).await.is_err());
+    assert_eq!(provider.request_count(), 0);
+    assert_eq!(
+        serde_json::to_value(&agent.session.messages).unwrap(),
+        original
+    );
+    assert!(drain_server_events(&mut rx).iter().any(|event|matches!(event,ServerEvent::ContextActionRequired{pending_input:Some(metadata),..} if metadata.primary_input==Some(input.id) && metadata.matches(0,&input.content,1))));
+    assert_eq!(
+        store.inspect(agent.session_id(), input.id).unwrap().state,
+        jcode_session_types::PrimaryInputState::Failed
+    );
+    assert!(store.pending(agent.session_id()).unwrap().is_empty());
+    assert_eq!(
+        store.original(agent.session_id(), input.id).unwrap(),
+        Some(input)
+    );
+}
+
+#[tokio::test]
+async fn durable_injected_preflight_retains_prior_tool_history_and_committed_input() {
+    let provider = Arc::new(ScriptedSizeProvider::stream(128, Vec::new()));
+    let mut agent = Agent::new(provider.clone(), Registry::empty());
+    agent.begin_pending_turn(
+        Some(7),
+        "earlier task",
+        0,
+        1,
+        agent.message_count(),
+        PendingTurnOptions::default(),
+    );
+    agent.add_message(
+        Role::Assistant,
+        vec![ContentBlock::ToolUse {
+            id: "completed-tool".into(),
+            name: "bash".into(),
+            input: serde_json::json!({"command":"synthetic prior effect"}),
+            thought_signature: None,
+        }],
+    );
+    agent.add_message(
+        Role::User,
+        vec![ContentBlock::ToolResult {
+            tool_use_id: "completed-tool".into(),
+            content: "retained earlier effect".into(),
+            is_error: Some(false),
+        }],
+    );
+    agent.session.save().unwrap();
+    let input = jcode_session_types::PrimaryInputEnvelope::new(
+        agent.session_id().into(),
+        "synthetic queued input".into(),
+        jcode_session_types::PrimaryInputDelivery::SafeBoundary,
+    );
+    let store = crate::primary_input::PrimaryInputStore::current();
+    store.accept(input.clone()).unwrap();
+    assert_eq!(agent.inject_primary_inputs().unwrap().len(), 1);
+    let committed = serde_json::to_value(&agent.session.messages).unwrap();
+    let (tx, _rx) = tokio_mpsc::unbounded_channel();
+    assert!(agent.run_turn_streaming_mpsc(tx).await.is_err());
+    assert_eq!(provider.request_count(), 0);
+    assert_eq!(
+        serde_json::to_value(&agent.session.messages).unwrap(),
+        committed
+    );
+    assert_eq!(
+        store.inspect(agent.session_id(), input.id).unwrap().state,
+        jcode_session_types::PrimaryInputState::Committed
+    );
+}
+
+#[tokio::test]
 async fn phase10_provider_payload_rejection_preserves_historical_images_and_never_retries() {
     let provider = Arc::new(ScriptedSizeProvider::open_error(
         1_000_000,

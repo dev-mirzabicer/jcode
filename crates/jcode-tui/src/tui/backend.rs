@@ -225,6 +225,7 @@ pub struct BackendInfo {
 
 #[derive(Default)]
 struct RemotePresentation {
+    event_input: Option<(String, crate::workspace::RequestId)>,
     tracker: crate::protocol::PrimaryStreamTracker,
     connection: Option<String>,
     attachments: std::collections::HashSet<u64>,
@@ -295,6 +296,7 @@ pub(crate) fn queue_offline_primary_input(
     input.observe_startup_context = Some(true);
     journal.stage(
         crate::protocol::PrimaryClientInput {
+            retry_of: None,
             input,
             queued_messages: None,
             is_system: false,
@@ -353,6 +355,9 @@ pub(crate) trait RemoteEventState {
     fn reset_call_output_tokens_seen(&mut self);
     fn set_session_id(&mut self, id: String);
     fn has_loaded_history(&self) -> bool;
+    fn event_primary_input(&self) -> Option<(String, crate::workspace::RequestId)> {
+        None
+    }
     fn durable_primary_input(&self) -> bool {
         false
     }
@@ -790,6 +795,7 @@ impl RemoteConnection {
             _ => return None,
         }
         Some(crate::protocol::PrimaryClientInput {
+            retry_of: None,
             is_system: input.observe_startup_context == Some(false),
             retry_attempts: 0,
             auto_retry: false,
@@ -873,6 +879,14 @@ impl RemoteConnection {
         Ok(())
     }
 
+    pub fn last_submission_identity(&self) -> Option<crate::workspace::RequestId> {
+        self.client_inputs
+            .lock()
+            .expect("client inputs")
+            .as_ref()
+            .and_then(|client| client.last_submission)
+    }
+
     pub fn primary_input_source(
         &self,
         session: &str,
@@ -916,10 +930,10 @@ impl RemoteConnection {
                     client.observe(receipt, false)?;
                 }
             }
-            ServerEvent::PrimaryInputFinished { receipt } => client.observe(receipt, true)?,
+            ServerEvent::PrimaryInputFinished { receipt, .. } => client.observe(receipt, true)?,
             ServerEvent::PrimaryClientInputsCancelled { receipts, .. } => {
                 for receipt in receipts {
-                    client.observe(receipt, true)?;
+                    client.observe_cancellation(receipt)?;
                 }
             }
 
@@ -968,7 +982,7 @@ impl RemoteConnection {
     fn client_context_completion(&self, event: &ServerEvent) -> Result<Option<u64>> {
         let receipt = match event {
             ServerEvent::PrimaryInputReceipt { receipt, .. }
-            | ServerEvent::PrimaryInputFinished { receipt }
+            | ServerEvent::PrimaryInputFinished { receipt, .. }
                 if receipt.state == crate::primary_input::PrimaryInputState::Committed =>
             {
                 receipt
@@ -1980,6 +1994,12 @@ impl RemoteConnection {
                     }
                 };
                 let mut presentation = self.presentation.lock().expect("remote presentation");
+                presentation.event_input = envelope.primary_stream.as_ref().and_then(|position| {
+                    let (crate::protocol::PrimaryStreamPosition::Live { cursor }
+                    | crate::protocol::PrimaryStreamPosition::Snapshot { cursor, .. }
+                    | crate::protocol::PrimaryStreamPosition::Replay { cursor, .. }) = position;
+                    cursor.input.map(|input| (cursor.session_id.clone(), input))
+                });
                 if let Some(connection) = envelope.client_connection_id {
                     presentation.connection = Some(connection);
                 }
@@ -2002,6 +2022,7 @@ impl RemoteConnection {
                     | crate::protocol::PrimaryStreamPosition::Replay { cursor, .. },
                 ) = &envelope.primary_stream
                     && presentation.outgoing.contains(&cursor.request_id)
+                    && cursor.input.is_none()
                     && cursor.origin != presentation.connection
                     && matches!(
                         event,
@@ -2175,6 +2196,14 @@ impl RemoteConnection {
 }
 
 impl RemoteEventState for RemoteConnection {
+    fn event_primary_input(&self) -> Option<(String, crate::workspace::RequestId)> {
+        self.presentation
+            .lock()
+            .expect("remote presentation")
+            .event_input
+            .clone()
+    }
+
     fn durable_primary_input(&self) -> bool {
         Self::durable_primary_input(self)
     }
@@ -2408,6 +2437,7 @@ mod tests {
             assert!(!remote.permit_turn_completion(9));
         }
         let mut cursor = crate::protocol::PrimaryStreamCursor {
+            input: None,
             session_id: "fixture".into(),
             stream_id: "stream".into(),
             sequence: 1,

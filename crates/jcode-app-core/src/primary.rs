@@ -21,6 +21,8 @@ pub use launch::{PrimaryLauncher, PrimaryRegistryMode};
 type Agents = HashMap<String, Arc<Mutex<Agent>>>;
 
 pub struct PrimaryHost {
+    startup_context:
+        std::sync::OnceLock<Arc<crate::server::startup_context::StartupContextCoordinator>>,
     ownership_id: u64,
     agents: RwLock<Agents>,
     owners: StdMutex<HashMap<String, Arc<PrimaryLease>>>,
@@ -122,6 +124,7 @@ impl PrimaryHost {
             })
             .collect();
         Self {
+            startup_context: std::sync::OnceLock::new(),
             ownership_id: NEXT_OWNER.fetch_add(1, Ordering::Relaxed),
             agents: RwLock::new(agents),
             owners: StdMutex::new(HashMap::new()),
@@ -327,6 +330,21 @@ impl PrimaryHost {
 
     pub(crate) fn accepts_input(&self) -> bool {
         self.accepting.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn configure_startup_context(
+        &self,
+        coordinator: Arc<crate::server::startup_context::StartupContextCoordinator>,
+    ) {
+        assert!(
+            self.startup_context.set(coordinator).is_ok(),
+            "Primary startup coordinator already configured"
+        );
+    }
+    pub(crate) fn startup_context(
+        &self,
+    ) -> Option<Arc<crate::server::startup_context::StartupContextCoordinator>> {
+        self.startup_context.get().cloned()
     }
 
     pub(crate) fn configure_input_delivery(&self, context: crate::server::LiveTurnSwarmContext) {
