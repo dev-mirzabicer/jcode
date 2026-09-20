@@ -1649,10 +1649,19 @@ pub(super) async fn handle_client_with_instruction_repositories(
                 ) {
                     continue;
                 }
+                let previous_session = client_session_id.clone();
                 agent = crate::hooks::with_client_terminal_env(
                     active_terminal_env.clone(),
                     handle_clear_session(id,&mut client_session_id,&client_connection_id,&agent,&instruction_repositories,&sessions,&startup_context,&mcp_pool,&shutdown_signals,&soft_interrupt_queues,&client_connections,&swarm_members,&swarms_by_id,&event_history,&event_counter,&swarm_event_tx,&client_event_tx),
                 ).await;
+                if client_session_id != previous_session {
+                    let resources = sessions.resources(&client_session_id, &agent)?;
+                    provider = resources.provider;
+                    registry = resources.registry;
+                    // Establish the replacement's canonical cursor before its
+                    // first turn. The old stream must not follow a Clear.
+                    handle_get_history(id,&client_session_id,false,&agent,&startup_context,&provider,&sessions,&client_connections,&client_count,&writer,&server_name,&server_icon,None,Some(&client_event_tx)).await?;
+                }
                 session_control = refresh_session_control_handle(
                     &client_session_id,
                     &agent,

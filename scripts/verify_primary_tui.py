@@ -158,6 +158,13 @@ try:
     command(tid, 'keys:enter')
     cleared = wait_state(tid, lambda state: state.get('session_id') and state['session_id'] != first, 'startup-context-state')['session_id']
     assert json.loads((f.home / 'sessions' / (cleared + '.json')).read_text())['location']['placement'] == source['location']['placement']
+    entered.clear()
+    command(tid, 'set_input:SYNTHETIC UI WAIT')
+    command(tid, 'keys:enter')
+    assert entered.wait(30), 'new Clear primary did not accept a turn'
+    wait_state(tid, lambda state: state.get('processing') is False)
+    clear_output = frame(tid, 'new-context-output')
+    assert 'UI fixture prefix' in clear_output and 'UI fixture suffix' in clear_output
     navigate(tid, first)
     wait_state(tid, lambda state: state.get('processing') is False)
     restored_source = frame(tid, 'original-after-clear')
@@ -172,7 +179,7 @@ try:
     narrow = frame(tid, 'reconnected-narrow')
     assert 'UI fixture prefix' in narrow and 'UI fixture suffix' in narrow, narrow
     assert json.loads((f.home / 'sessions' / (first + '.json')).read_text())['working_dir'] == str(f.project.resolve())
-    assert len(f.posts) == 1
+    assert len(f.posts) == 2
     result = {'binary': f.BIN, 'root': str(f.ROOT), 'session': first, 'target': target, 'physical_input': True, 'busy_navigation': True, 'independent_clear': True, 'cwd_preserved': True, 'reconnect': True, 'frames': frames, 'provider_calls': len(f.posts)}
     (f.ROOT / 'primary-tui-result.json').write_text(json.dumps(result, indent=2))
     print(json.dumps(result))

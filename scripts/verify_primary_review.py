@@ -59,7 +59,7 @@ def req(ch, kind, **fields):
         assert line, 'unexpected peer disconnect'
         event = json.loads(line)
         events[id(s)].append(event)
-        if event.get('id') == n and event.get('type') != 'ack' and (kind not in ('subscribe', 'clear', 'set_model') or event.get('type') in ('done', 'error', 'startup_context_failed')):
+        if event.get('id') == n and event.get('type') != 'ack' and (kind not in ('subscribe', 'clear', 'set_model') or event.get('type') in ('done', 'error', 'startup_context_failed', 'model_changed')):
             return event
 
 def attach(ch, session):
@@ -133,7 +133,7 @@ try:
     assert replacement['model'] == before['model'] and replacement.get('reasoning_effort') == before.get('reasoning_effort')
     assert req(b, 'state')['session_id'] == source
     assert req(a, 'state')['session_id'] == new
-    assert req(a, 'set_model', model='fixture-other')['type'] == 'done'
+    assert req(a, 'set_model', model='fixture-other')['type'] == 'model_changed'
     assert req(b, 'get_history')['provider_model'] == 'fixture'
     assert req(a, 'get_history')['provider_model'] == 'fixture-other'
     rows = ws('sessions', target=None, after=None, limit=200)
