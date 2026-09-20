@@ -106,6 +106,18 @@ fn primary_launch_journal_reconciles_checkpoint_without_duplicate_publication() 
             IssueCode::Conflict
         );
         assert!(!crate::session::session_exists(&record.session));
+        let pending_snapshot = service
+            .backup(RequestId::new(), format!("pending-{stage}"))
+            .unwrap();
+        service
+            .record_primary_launch_failure(request, "synthetic failure before restore".into())
+            .unwrap();
+        let restore = service.review_restore(pending_snapshot.id).unwrap();
+        service.apply_restore(RequestId::new(), restore.id).unwrap();
+        assert_eq!(
+            service.inspect_primary_launch(request).unwrap().state,
+            PrimaryLaunchState::RecoveryRequired
+        );
         let failed = service
             .record_primary_launch_failure(request, "synthetic preparation failure".into())
             .unwrap();

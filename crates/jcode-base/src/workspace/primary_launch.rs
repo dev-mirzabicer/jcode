@@ -359,13 +359,32 @@ impl WorkspaceService {
 }
 
 fn read_launch(connection: &Connection, request: RequestId) -> Result<Option<PrimaryLaunchRecord>> {
-    let value: Option<String> = connection
+    let value: Option<(String, String)> = connection
         .query_row(
-            "SELECT body FROM operations WHERE kind='primary_launch' AND id=?1",
+            "SELECT body,state FROM operations WHERE kind='primary_launch' AND id=?1",
             [request.to_string()],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()
         .map_err(io)?;
-    value.map(|body| decode(&body)).transpose()
+    value
+        .map(|(body, state)| {
+            let mut record: PrimaryLaunchRecord = decode(&body)?;
+            if record.request != request || record.operation.to_string() != request.to_string() {
+                return Err(corrupt(
+                    "Primary launch identity differs from its operation key",
+                ));
+            }
+            // Restore updates the operation state without interpreting each producer's
+            // payload. The payload's old state is never an execution authority.
+            record.state = match state.as_str() {
+                "pending" => PrimaryLaunchState::Pending,
+                "complete" => PrimaryLaunchState::Complete,
+                "failed" => PrimaryLaunchState::Failed,
+                "recovery_required" => PrimaryLaunchState::RecoveryRequired,
+                _ => return Err(corrupt("Unknown primary operation state")),
+            };
+            Ok(record)
+        })
+        .transpose()
 }
