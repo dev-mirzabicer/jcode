@@ -92,6 +92,48 @@ impl Tool for ApplyPatchTool {
         super::mutation_output::check_stop(&ctx)?;
         let params: ApplyPatchInput = serde_json::from_value(input)?;
         let hunks = parse_apply_patch(&params.patch_text)?;
+        let risk_ctx = jcode_command_risk::RiskContext::from_env(ctx.working_dir.clone());
+        for hunk in &hunks {
+            if let PatchHunk::DeleteFile { path } = hunk
+                && jcode_command_risk::is_catastrophic_target(
+                    &ctx.resolve_path(Path::new(path)),
+                    &risk_ctx,
+                )
+            {
+                let mut receipts = super::mutation_output::MutationOutput::new(&ctx);
+                receipts.append(format!("✗ {}: refused, this path is protected and must never be deleted by an agent\n", path)).await?;
+                return receipts.finish(true);
+            }
+        }
+        let mut removals = Vec::new();
+        for hunk in &hunks {
+            match hunk {
+                PatchHunk::DeleteFile { path } => removals.push(ctx.resolve_path(Path::new(path))),
+                PatchHunk::UpdateFile {
+                    path,
+                    move_to: Some(destination),
+                    ..
+                } => {
+                    let source = ctx.resolve_path(Path::new(path));
+                    let target = ctx.resolve_path(Path::new(destination));
+                    if jcode_base::location::native_files::resolve_target(&source)?
+                        != jcode_base::location::native_files::resolve_target(&target)?
+                    {
+                        removals.push(source);
+                    }
+                }
+                _ => (),
+            }
+        }
+        let files = super::native_files::NativeFiles::acquire_with_removals(
+            &ctx,
+            hunk_file_paths(&hunks)
+                .into_iter()
+                .map(|path| ctx.resolve_path(Path::new(&path)))
+                .collect(),
+            removals,
+        )
+        .await?;
 
         // A patch can reach config.toml through any hunk kind (add, update,
         // move), so watch the file across the whole invocation rather than
@@ -120,12 +162,8 @@ impl Tool for ApplyPatchTool {
             match hunk {
                 PatchHunk::AddFile { path, contents } => {
                     let resolved = ctx.resolve_path(Path::new(path));
-                    if let Some(parent) = resolved.parent() {
-                        super::mutation_output::check_stop(&ctx)?;
-                        tokio::fs::create_dir_all(parent).await?;
-                    }
                     super::mutation_output::check_stop(&ctx)?;
-                    tokio::fs::write(&resolved, contents).await?;
+                    files.write(&resolved, contents).await?;
                     let diff = generate_diff_summary("", contents);
                     publish_file_touch(
                         &ctx,
@@ -160,11 +198,11 @@ impl Tool for ApplyPatchTool {
                         ));
                         return Ok(());
                     }
-                    let old_contents = tokio::fs::read_to_string(&resolved)
+                    let old_contents = files.read(&resolved)
                         .await
                         .unwrap_or_default();
                     super::mutation_output::check_stop(&ctx)?;
-                    let removal=tokio::fs::remove_file(&resolved).await;
+                    let removal=files.remove(&resolved).await;
                     match removal {
                     Ok(())=>{
                         let diff = generate_diff_summary(&old_contents, "");
@@ -195,23 +233,20 @@ impl Tool for ApplyPatchTool {
                     chunks,
                 } => {
                     let resolved = ctx.resolve_path(Path::new(path));
-                    match apply_update_chunks(&resolved, chunks).await {
+                    match apply_update_chunks(&resolved, chunks, &files).await {
                         Ok((old_contents, new_contents)) => {
                             let diff = generate_diff_summary(&old_contents, &new_contents);
                             if let Some(dest) = move_to {
                                 let dest_resolved = ctx.resolve_path(Path::new(dest));
-                                if let Some(parent) = dest_resolved.parent() {
-                                    super::mutation_output::check_stop(&ctx)?;
-                                    tokio::fs::create_dir_all(parent).await?;
-                                }
                                 super::mutation_output::check_stop(&ctx)?;
-                                tokio::fs::write(&dest_resolved, &new_contents).await?;
+                                files.write(&dest_resolved, &new_contents).await?;
                                 touched_paths.push(dest.clone());
                                 results.push(format!("Destination written: {dest}"));
-                                let same_target=tokio::fs::canonicalize(&dest_resolved).await?==tokio::fs::canonicalize(&resolved).await?;
+                                let same_target=files.same_file(&dest_resolved, &resolved).await?;
                                 if !same_target {
+                                    files.copy_metadata(&resolved, &dest_resolved).await?;
                                     super::mutation_output::check_stop(&ctx)?;
-                                    tokio::fs::remove_file(&resolved).await.with_context(||format!("Partial move: destination {dest} was written but source {path} could not be removed"))?;
+                                    files.remove(&resolved).await.with_context(||format!("Partial move: destination {dest} was written but source {path} could not be removed"))?;
                                 }
                                 publish_file_touch(
                                     &ctx,
@@ -248,7 +283,7 @@ impl Tool for ApplyPatchTool {
                                 }
                             } else {
                                 super::mutation_output::check_stop(&ctx)?;
-                                tokio::fs::write(&resolved, &new_contents).await?;
+                                files.write(&resolved, &new_contents).await?;
                                 publish_file_touch(
                                     &ctx,
                                     &resolved,
@@ -366,8 +401,18 @@ fn build_file_touch_preview(diff: &str) -> Option<String> {
     Some(preview)
 }
 
-async fn apply_update_chunks(path: &Path, chunks: &[UpdateFileChunk]) -> Result<(String, String)> {
-    let original_contents = tokio::fs::read_to_string(path).await?;
+async fn apply_update_chunks(
+    path: &Path,
+    chunks: &[UpdateFileChunk],
+    files: &super::native_files::NativeFiles,
+) -> Result<(String, String)> {
+    update_contents(path, files.read(path).await?, chunks)
+}
+fn update_contents(
+    path: &Path,
+    original_contents: String,
+    chunks: &[UpdateFileChunk],
+) -> Result<(String, String)> {
     let mut original_lines: Vec<String> = original_contents.split('\n').map(String::from).collect();
 
     if original_lines.last().is_some_and(String::is_empty) {
@@ -686,19 +731,24 @@ fn parse_apply_patch(input: &str) -> Result<Vec<PatchHunk>> {
 }
 
 pub(super) fn parsed_file_paths(input: &str) -> Result<Vec<String>> {
+    Ok(hunk_file_paths(&parse_apply_patch(input)?))
+}
+fn hunk_file_paths(hunks: &[PatchHunk]) -> Vec<String> {
     let mut paths = Vec::new();
-    for hunk in parse_apply_patch(input)? {
+    for hunk in hunks {
         match hunk {
-            PatchHunk::AddFile { path, .. } | PatchHunk::DeleteFile { path } => paths.push(path),
+            PatchHunk::AddFile { path, .. } | PatchHunk::DeleteFile { path } => {
+                paths.push(path.clone())
+            }
             PatchHunk::UpdateFile { path, move_to, .. } => {
-                paths.push(path);
+                paths.push(path.clone());
                 if let Some(move_to) = move_to {
-                    paths.push(move_to);
+                    paths.push(move_to.clone());
                 }
             }
         }
     }
-    Ok(paths)
+    paths
 }
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 //! Shared physical location facts, separate from logical workspace ownership.
 //! Resolving a location never loads plans, initializes instruction stores, or
 //! changes a Session. Legacy keys keep their original path-based digest.
+pub mod native_files;
 mod project;
 mod resolve;
 pub mod volume;

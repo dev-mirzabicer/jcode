@@ -78,6 +78,19 @@ impl Tool for PatchTool {
         if patches.is_empty() {
             return Err(anyhow::anyhow!("No valid patches found in input"));
         }
+        let files = super::native_files::NativeFiles::acquire_with_removals(
+            &ctx,
+            patches
+                .iter()
+                .map(|patch| ctx.resolve_path(Path::new(&patch.path)))
+                .collect(),
+            patches
+                .iter()
+                .filter(|patch| patch.is_delete)
+                .map(|patch| ctx.resolve_path(Path::new(&patch.path)))
+                .collect(),
+        )
+        .await?;
 
         // Watch config.toml across the whole invocation so an edit that lands
         // on it is reported regardless of which patch produced it.
@@ -94,7 +107,7 @@ impl Tool for PatchTool {
             }
             let mut results = Vec::new();
             let resolved_path = ctx.resolve_path(Path::new(&patch.path));
-            let result = apply_patch_with_diff(&patch, &resolved_path).await;
+            let result = apply_patch_with_diff(&patch, &resolved_path, &files).await;
             match result {
                 Ok((msg, diff)) => {
                     if diff.is_empty() {
@@ -245,12 +258,16 @@ fn parse_hunk(lines: &[&str], i: &mut usize) -> Option<Hunk> {
 }
 
 /// Apply a patch and return (status_message, diff_output)
-async fn apply_patch_with_diff(patch: &FilePatch, path: &Path) -> Result<(String, String)> {
+async fn apply_patch_with_diff(
+    patch: &FilePatch,
+    path: &Path,
+    files: &super::native_files::NativeFiles,
+) -> Result<(String, String)> {
     // Handle deletion
     if patch.is_delete {
         if path.exists() {
-            let old_content = tokio::fs::read_to_string(path).await.unwrap_or_default();
-            tokio::fs::remove_file(path).await?;
+            let old_content = files.read(path).await.unwrap_or_default();
+            files.remove(path).await?;
             let diff = generate_diff(&old_content, "", 1);
             return Ok(("deleted".to_string(), diff));
         } else {
@@ -264,11 +281,6 @@ async fn apply_patch_with_diff(patch: &FilePatch, path: &Path) -> Result<(String
             return Err(anyhow::anyhow!("file already exists"));
         }
 
-        // Create parent directories
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-
         // Collect all new lines from hunks
         let content: String = patch
             .hunks
@@ -277,7 +289,7 @@ async fn apply_patch_with_diff(patch: &FilePatch, path: &Path) -> Result<(String
             .map(|l| format!("{}\n", l))
             .collect();
 
-        tokio::fs::write(path, &content).await?;
+        files.write(path, &content).await?;
         let diff = generate_diff("", &content, 1);
         return Ok(("created".to_string(), diff));
     }
@@ -287,7 +299,7 @@ async fn apply_patch_with_diff(patch: &FilePatch, path: &Path) -> Result<(String
         return Err(anyhow::anyhow!("file does not exist"));
     }
 
-    let old_content = tokio::fs::read_to_string(path).await?;
+    let old_content = files.read(path).await?;
     let mut lines: Vec<String> = old_content.lines().map(|s| s.to_string()).collect();
 
     // Find the first affected line for diff context
@@ -302,7 +314,7 @@ async fn apply_patch_with_diff(patch: &FilePatch, path: &Path) -> Result<(String
     }
 
     let new_content = lines.join("\n") + "\n";
-    tokio::fs::write(path, &new_content).await?;
+    files.write(path, &new_content).await?;
 
     let diff = generate_diff(&old_content, &new_content, 1);
     Ok((format!("modified ({} hunks)", patch.hunks.len()), diff))

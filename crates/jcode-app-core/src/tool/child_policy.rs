@@ -6,9 +6,10 @@ use std::path::{Component, Path, PathBuf};
 
 #[derive(Clone, Debug)]
 pub(crate) struct ChildToolPolicy {
-    session_id: String,
+    pub(super) session_id: String,
+    pub(super) original_parent: String,
     permission: Permission,
-    artifacts: PathBuf,
+    pub(super) artifacts: PathBuf,
     state_root: PathBuf,
 }
 
@@ -48,6 +49,7 @@ pub(crate) fn bind(session: &crate::session::Session) -> Result<Option<ChildTool
         .context("Child has no bound tool registry policy")?;
     let bound = ChildToolPolicy {
         session_id: session.id.clone(),
+        original_parent: child.identity.original_parent.clone(),
         permission: child.permission,
         artifacts,
         state_root,
@@ -166,7 +168,7 @@ pub(crate) fn authorize_task_control(
 }
 
 impl ChildToolPolicy {
-    fn check_path(&self, path: &Path) -> Result<()> {
+    pub(super) fn check_path(&self, path: &Path) -> Result<()> {
         ensure!(
             path.is_absolute(),
             "Child mutation requires a bound working directory"
@@ -233,6 +235,7 @@ mod tests {
         let artifacts = state.join("artifacts/child");
         std::fs::create_dir_all(&artifacts).unwrap();
         let policy = ChildToolPolicy {
+            original_parent: "parent_fixture".into(),
             session_id: "fixture".into(),
             permission: Permission::ReadOnly,
             artifacts: artifacts.canonicalize().unwrap(),

@@ -238,6 +238,16 @@ impl WorkspaceService {
         self.acquire_binding(&bound.binding)
     }
     pub(super) fn acquire_binding(&self, binding: &PhysicalBinding) -> Result<RootLease> {
+        self.acquire_binding_mode(binding, false)
+    }
+    pub(super) fn acquire_mutation_binding(&self, binding: &PhysicalBinding) -> Result<RootLease> {
+        self.acquire_binding_mode(binding, true)
+    }
+    fn acquire_binding_mode(
+        &self,
+        binding: &PhysicalBinding,
+        shared_mutation: bool,
+    ) -> Result<RootLease> {
         let catalog = self.lease(false)?;
         self.resolver
             .resolve_directory(binding)
@@ -262,7 +272,12 @@ impl WorkspaceService {
         let shared = std::env::temp_dir().join("jcode-workspace-root-leases");
         private_dir(&shared)?;
         let file = private_file(&shared.join(&key), false)?;
-        file.try_lock().map_err(|e| {
+        (if shared_mutation {
+            file.try_lock_shared()
+        } else {
+            file.try_lock()
+        })
+        .map_err(|e| {
             issue(
                 IssueCode::Busy,
                 format!("Physical root has a live owner: {e}"),

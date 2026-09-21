@@ -85,6 +85,7 @@ struct SessionToolPolicy {
 }
 
 pub(crate) mod child_policy;
+mod native_files;
 pub(crate) mod subagent;
 
 static SESSION_TOOL_POLICIES: LazyLock<StdRwLock<HashMap<String, SessionToolPolicy>>> =
@@ -871,6 +872,12 @@ impl Registry {
         let _in_flight =
             inflight::mark_tool_in_flight(&crate::execution::invocation(&ctx, name, Value::Null));
         let prepared: Result<_> = async {
+            if matches!(
+                resolved_name,
+                "write" | "edit" | "multiedit" | "patch" | "apply_patch" | "batch"
+            ) {
+                native_files::bind(&mut ctx, self.child_policy.clone())?;
+            }
             if !tool_is_globally_available(name) {
                 anyhow::bail!(crate::config::SWARM_UNAVAILABLE);
             }

@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 
 mod backup;
 mod grants;
+mod native_mutation;
 pub use grants::WorkspaceClientAuthority;
+pub use native_mutation::WorkspaceMutationPermit;
 mod organization;
 mod portable;
 mod primary_controls;

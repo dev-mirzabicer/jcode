@@ -189,6 +189,11 @@ through the existing snapshot owner without repeating the grant mutation.
 List cursors bind the complete filter and catalog revision and report totals.
 The 200-record transport page bound is not an organizational member limit.
 
+The [native write-scope boundary](NATIVE_WRITE_SCOPE.md) describes invocation-time
+consumption, complete destination admission, verified file effects and the explicit
+platform/external-effect limits. New-context migration and ordinary rollout remain
+separate from catalog availability.
+
 ## Verification
 
 Focused mechanism and real-store checks are in `workspace::tests` and

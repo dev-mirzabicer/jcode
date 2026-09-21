@@ -609,3 +609,41 @@ fn grants_do_not_chain_through_target_organization() {
     );
     assert!(!writable(&f.scope(), f.a));
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn native_admission_rejects_root_replacement_between_validation_and_pinning() {
+    let _lock = crate::storage::lock_test_env();
+    let f = Fixture::new();
+    let root = f
+        .session
+        .location
+        .as_ref()
+        .unwrap()
+        .cwd
+        .observed_path()
+        .to_path_buf();
+    let original = root.join("original");
+    std::fs::write(&original, "retained").unwrap();
+    let moved = root.with_file_name("moved-before-pin");
+    let mut service = f.service.clone();
+    let replace = root.clone();
+    let moved_target = moved.clone();
+    service.fault = Some(std::sync::Arc::new(move |stage| {
+        if stage == "native_before_root_pin" {
+            std::fs::rename(&replace, &moved_target).map_err(io)?;
+            std::fs::create_dir(&replace).map_err(io)?;
+        }
+        Ok(())
+    }));
+    assert!(
+        service
+            .acquire_native_mutation(&f.session, &[root.join("new")])
+            .is_err()
+    );
+    assert!(!root.join("new").exists());
+    assert_eq!(
+        std::fs::read_to_string(moved.join("original")).unwrap(),
+        "retained"
+    );
+}

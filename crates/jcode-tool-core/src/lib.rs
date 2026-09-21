@@ -7,6 +7,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 pub mod input;
+pub mod native_files;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputStream {
@@ -56,6 +57,7 @@ pub trait OwnedExecutionControl: Send + Sync {
 
 #[derive(Clone, Default)]
 pub struct InvocationContext {
+    pub native_files: Option<Arc<dyn native_files::NativeFilePolicy>>,
     /// Code-owned caller role, retained by nested/background execution.
     pub isolated_child: bool,
     /// Received SDK rejection for a tool structurally excluded by that SDK.
@@ -230,6 +232,7 @@ impl ToolContext {
     pub fn for_subcall(&self, tool_call_id: String) -> Self {
         let mut invocation = InvocationContext::default();
         invocation.isolated_child = self.invocation.isolated_child;
+        invocation.native_files = self.invocation.native_files.clone();
         invocation.ancestors.clone_from(&self.invocation.ancestors);
         invocation.ancestors.push(self.tool_call_id.clone());
         Self {

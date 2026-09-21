@@ -121,7 +121,12 @@ async fn test_apply_update_simple() {
         new_lines: vec!["foo".to_string(), "baz".to_string()],
         is_end_of_file: false,
     }];
-    let (old_result, new_result) = apply_update_chunks(f.path(), &chunks).await.unwrap();
+    let (old_result, new_result) = update_contents(
+        f.path(),
+        std::fs::read_to_string(f.path()).unwrap(),
+        &chunks,
+    )
+    .unwrap();
     assert_eq!(old_result, "foo\nbar\n");
     assert_eq!(new_result, "foo\nbaz\n");
 }
@@ -143,7 +148,12 @@ async fn test_apply_update_multiple_chunks() {
             is_end_of_file: false,
         },
     ];
-    let (old_result, new_result) = apply_update_chunks(f.path(), &chunks).await.unwrap();
+    let (old_result, new_result) = update_contents(
+        f.path(),
+        std::fs::read_to_string(f.path()).unwrap(),
+        &chunks,
+    )
+    .unwrap();
     assert_eq!(old_result, "foo\nbar\nbaz\nqux\n");
     assert_eq!(new_result, "foo\nBAR\nbaz\nQUX\n");
 }
@@ -159,7 +169,12 @@ async fn test_apply_update_with_context_header() {
         new_lines: vec!["        return 42".to_string()],
         is_end_of_file: false,
     }];
-    let (_old_result, new_result) = apply_update_chunks(f.path(), &chunks).await.unwrap();
+    let (_old_result, new_result) = update_contents(
+        f.path(),
+        std::fs::read_to_string(f.path()).unwrap(),
+        &chunks,
+    )
+    .unwrap();
     assert_eq!(
         new_result,
         "class Foo:\n    def bar(self):\n        pass\n    def baz(self):\n        return 42\n"
@@ -175,7 +190,12 @@ async fn test_apply_update_append_at_eof() {
         new_lines: vec!["quux".to_string()],
         is_end_of_file: false,
     }];
-    let (_old_result, new_result) = apply_update_chunks(f.path(), &chunks).await.unwrap();
+    let (_old_result, new_result) = update_contents(
+        f.path(),
+        std::fs::read_to_string(f.path()).unwrap(),
+        &chunks,
+    )
+    .unwrap();
     assert_eq!(new_result, "foo\nbar\nbaz\nquux\n");
 }
 
@@ -271,7 +291,7 @@ async fn apply_patch_refuses_to_delete_a_protected_path() {
     let result = ApplyPatchTool
         .execute(
             serde_json::json!({ "patch_text": patch }),
-            ToolContext {
+            super::super::native_files::fixture_context(ToolContext {
                 session_id: "patch-gate".to_string(),
                 message_id: "m".to_string(),
                 tool_call_id: "c".to_string(),
@@ -280,7 +300,7 @@ async fn apply_patch_refuses_to_delete_a_protected_path() {
                 graceful_shutdown_signal: None,
                 execution_mode: crate::tool::ToolExecutionMode::Direct,
                 invocation: Default::default(),
-            },
+            }),
         )
         .await;
 
@@ -314,7 +334,7 @@ async fn apply_patch_still_deletes_ordinary_files() {
     ApplyPatchTool
         .execute(
             serde_json::json!({ "patch_text": patch }),
-            ToolContext {
+            super::super::native_files::fixture_context(ToolContext {
                 session_id: "patch-ok".to_string(),
                 message_id: "m".to_string(),
                 tool_call_id: "c".to_string(),
@@ -323,7 +343,7 @@ async fn apply_patch_still_deletes_ordinary_files() {
                 graceful_shutdown_signal: None,
                 execution_mode: crate::tool::ToolExecutionMode::Direct,
                 invocation: Default::default(),
-            },
+            }),
         )
         .await
         .expect("ordinary delete should succeed");
@@ -383,6 +403,7 @@ async fn stop_between_patch_actions_preserves_completed_receipt_and_skips_remain
         execution_mode: crate::tool::ToolExecutionMode::Direct,
         invocation: Default::default(),
     };
+    ctx = super::super::native_files::fixture_context(ctx);
     let input = json!({"patch_text":"*** Begin Patch\n*** Add File: first\n+completed\n*** Add File: second\n+unstarted\n*** End Patch\n"});
     let invocation = crate::execution::invocation(&ctx, "apply_patch", input.clone());
     let crate::execution::PreparedInvocation::New(record) = store.prepare(&invocation, "owner")?

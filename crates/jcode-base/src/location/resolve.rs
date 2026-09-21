@@ -4,6 +4,39 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 impl ProjectFacts {
+    /// Git itself proves the recorded gitlink relationship. Merely finding a
+    /// gitfile under another checkout does not make it an ordinary submodule.
+    pub fn superproject_root(&self) -> Result<Option<PathBuf>, ProjectResolutionError> {
+        if !self.key().is_git() {
+            return Ok(None);
+        }
+        let output = run_git(
+            self.active_root(),
+            [
+                "-c",
+                "core.fsmonitor=false",
+                "rev-parse",
+                "--show-superproject-working-tree",
+            ],
+        )
+        .map_err(|e| git_identity_error(self.active_root(), e.to_string()))?;
+        if !output.status.success() {
+            return Err(git_command_error(
+                self.active_root(),
+                "superproject discovery",
+                &output,
+            ));
+        }
+        if output.stdout.is_empty() {
+            return Ok(None);
+        }
+        let path = parse_git_path(self.active_root(), &output.stdout, "superproject")?;
+        Ok(Some(canonical_git_path(
+            self.active_root(),
+            path,
+            "superproject",
+        )?))
+    }
     /// A gitfile also represents submodules and separate Git directories. Only
     /// distinct per-worktree and common metadata directories prove linked sharing.
     /// This additional observation never changes the legacy physical key.

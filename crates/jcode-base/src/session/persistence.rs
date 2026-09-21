@@ -451,12 +451,30 @@ impl Session {
     /// session restore + history bootstrap.
     pub fn load_startup_stub(session_id: &str) -> Result<Self> {
         let path = session_path(session_id)?;
-        let _lease = persistence_lease(&path)?;
-        let identity = PersistenceIdentity::read(&path)?;
-        let reader = BufReader::new(std::fs::File::open(&path)?);
+        Self::load_startup_stub_path(&path)
+    }
+
+    pub fn load_startup_stub_in(root: &Path, session_id: &str) -> Result<Self> {
+        anyhow::ensure!(
+            !session_id.is_empty()
+                && session_id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'),
+            "Invalid Session identity"
+        );
+        let path = super::storage_paths::session_path_in_dir(root, session_id);
+        let session = Self::load_startup_stub_path(&path)?;
+        anyhow::ensure!(session.id == session_id, "Session file identity mismatch");
+        Ok(session)
+    }
+
+    fn load_startup_stub_path(path: &Path) -> Result<Self> {
+        let _lease = persistence_lease(path)?;
+        let identity = PersistenceIdentity::read(path)?;
+        let reader = BufReader::new(std::fs::File::open(path)?);
         let stub: SessionStartupStub = serde_json::from_reader(reader)?;
         let mut session = Self::session_from_startup_stub(stub);
-        let journal_path = session_journal_path_from_snapshot(&path);
+        let journal_path = session_journal_path_from_snapshot(path);
         replay_journal_meta_lines(&journal_path, &identity, |meta| {
             session.apply_journal_meta(meta);
         })?;

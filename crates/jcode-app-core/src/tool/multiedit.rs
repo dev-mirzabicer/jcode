@@ -91,12 +91,13 @@ impl Tool for MultiEditTool {
         let params: MultiEditInput = serde_json::from_value(input)?;
 
         let path = ctx.resolve_path(Path::new(&params.file_path));
+        let files = super::native_files::NativeFiles::acquire(&ctx, vec![path.clone()]).await?;
 
         if !path.exists() {
             return Err(anyhow::anyhow!("File not found: {}", params.file_path));
         }
 
-        let original_content = tokio::fs::read_to_string(&path).await?;
+        let original_content = files.read(&path).await?;
         let mut content = original_content.clone();
         let mut applied = Vec::new();
         let mut failed = Vec::new();
@@ -140,7 +141,7 @@ impl Tool for MultiEditTool {
 
         // No edit reaches disk after a stop observed before the write.
         super::mutation_output::check_stop(&ctx)?;
-        tokio::fs::write(&path, &content).await?;
+        files.write(&path, &content).await?;
 
         // Format output
         let mut output = format!("Edited {}\n\n", params.file_path);

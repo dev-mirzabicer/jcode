@@ -24,6 +24,15 @@ impl WorkspaceService {
         session: &str,
         location: &StoredSessionLocation,
     ) -> Result<SessionWriteScope> {
+        self.scope_snapshot_mode(connection, session, location, true)
+    }
+    pub(super) fn scope_snapshot_mode(
+        &self,
+        connection: &Connection,
+        session: &str,
+        location: &StoredSessionLocation,
+        verify_physical: bool,
+    ) -> Result<SessionWriteScope> {
         query::validate_placement(connection, location.placement)?;
         let status = storage::status(connection)?;
         let grants = portable::grants(connection)?
@@ -54,7 +63,11 @@ impl WorkspaceService {
                 }
             }
             if ordinary || !sources.is_empty() {
-                let problem = self.verify_writable_root(connection, &root).err();
+                let problem = if verify_physical {
+                    self.verify_writable_root(connection, &root).err()
+                } else {
+                    None
+                };
                 roots.push(WritableRoot {
                     location: root,
                     ordinary,

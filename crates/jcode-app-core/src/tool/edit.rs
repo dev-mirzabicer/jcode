@@ -87,12 +87,13 @@ impl Tool for EditTool {
         }
 
         let path = ctx.resolve_path(Path::new(&params.file_path));
+        let files = super::native_files::NativeFiles::acquire(&ctx, vec![path.clone()]).await?;
 
         if !path.exists() {
             return Err(anyhow::anyhow!("File not found: {}", params.file_path));
         }
 
-        let content = tokio::fs::read_to_string(&path).await?;
+        let content = files.read(&path).await?;
 
         // Count occurrences
         let occurrences = content.matches(&params.old_string).count();
@@ -123,7 +124,7 @@ impl Tool for EditTool {
 
         // Write back
         super::mutation_output::check_stop(&ctx)?;
-        tokio::fs::write(&path, &new_content).await?;
+        files.write(&path, &new_content).await?;
 
         // Generate a diff with line numbers
         let diff = generate_diff(&params.old_string, &params.new_string, start_line);

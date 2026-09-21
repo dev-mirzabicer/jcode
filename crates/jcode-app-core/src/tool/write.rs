@@ -71,25 +71,14 @@ impl Tool for WriteTool {
 
         let path = ctx.resolve_path(Path::new(&params.file_path));
 
-        // Create parent directories if needed
-        if let Some(parent) = path.parent()
-            && !parent.exists()
-        {
-            super::mutation_output::check_stop(&ctx)?;
-            tokio::fs::create_dir_all(parent).await?;
-        }
-
-        // Check if file existed before and read old content for diff
-        let existed = path.exists();
-        let old_content = if existed {
-            tokio::fs::read_to_string(&path).await.ok()
-        } else {
-            None
-        };
+        let files = super::native_files::NativeFiles::acquire(&ctx, vec![path.clone()]).await?;
+        let old_bytes = files.read_optional(&path).await?;
+        let existed = old_bytes.is_some();
+        let old_content = old_bytes.and_then(|bytes| String::from_utf8(bytes).ok());
 
         // Write the file
         super::mutation_output::check_stop(&ctx)?;
-        tokio::fs::write(&path, &params.content).await?;
+        files.write(&path, &params.content).await?;
 
         let _new_len = params.content.len();
         let line_count = params.content.lines().count();

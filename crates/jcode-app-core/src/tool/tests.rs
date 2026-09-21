@@ -12,6 +12,10 @@ mod swarm_retirement;
 #[path = "execution_tests.rs"]
 mod reliable_execution;
 
+#[cfg(target_os = "macos")]
+#[path = "native_scope_tests.rs"]
+mod native_scope;
+
 struct MockProvider;
 
 #[tokio::test]
