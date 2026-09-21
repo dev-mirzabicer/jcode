@@ -10,7 +10,7 @@ use jcode_base::location::native_files::{resolve_removal_entry, resolve_target};
 #[cfg(not(target_os = "macos"))]
 #[path = "native_files_legacy.rs"]
 mod legacy;
-use jcode_tool_core::native_files::{NativeFilePermit, NativeFilePolicy};
+use jcode_tool_core::native_files::{NativeFilePermit, NativeFilePlan, NativeFilePolicy};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -39,11 +39,9 @@ impl NativeFilePolicy for BoundPolicy {
     fn session_id(&self) -> &str {
         &self.session
     }
-    fn acquire(
-        &self,
-        paths: &[PathBuf],
-        removals: &[PathBuf],
-    ) -> Result<Box<dyn NativeFilePermit>> {
+    fn acquire(&self, plan: &NativeFilePlan) -> Result<Box<dyn NativeFilePermit>> {
+        let paths = plan.paths();
+        let removals = plan.removals();
         let session = self.load(&self.session)?;
         let mut resolved = Vec::new();
         for path in paths {
@@ -116,9 +114,9 @@ impl NativeFilePolicy for BoundPolicy {
         let files: Box<dyn NativeFilePermit> = if managed && !artifacts_only {
             let workspace = WorkspaceService::new(&self.durable);
             let permit = if self.child.is_some() {
-                workspace.acquire_child_native_mutation(principal, &session, paths, removals)?
+                workspace.acquire_child_native_mutation(principal, &session, plan)?
             } else {
-                workspace.acquire_native_operation(principal, paths, removals)?
+                workspace.acquire_native_operation(principal, plan)?
             };
             let current = self.load(&principal.id)?;
             ensure!(
@@ -128,7 +126,7 @@ impl NativeFilePolicy for BoundPolicy {
             permit.confirm_admission()?;
             Box::new(permit)
         } else {
-            unmanaged_permit(&resolved, removals)?
+            unmanaged_permit(&resolved, plan)?
         };
         Ok(Box::new(RestrictedPermit {
             files,
@@ -221,17 +219,18 @@ pub(super) fn bind(ctx: &mut ToolContext, child: Option<Arc<ChildToolPolicy>>) -
 
 fn unmanaged_permit(
     paths: &[(PathBuf, PathBuf)],
-    removals: &[PathBuf],
+    plan: &NativeFilePlan,
 ) -> Result<Box<dyn NativeFilePermit>> {
     #[cfg(target_os = "macos")]
     {
-        Ok(Box::new(VerifiedFiles::acquire_with_removals(
-            paths, removals,
-        )?))
+        Ok(Box::new(VerifiedFiles::acquire_plan(paths, plan)?))
     }
     #[cfg(not(target_os = "macos"))]
     {
-        Ok(Box::new(legacy::LegacyFiles::acquire(paths, removals)))
+        Ok(Box::new(legacy::LegacyFiles::acquire(
+            paths,
+            plan.removals(),
+        )))
     }
 }
 
@@ -241,13 +240,9 @@ pub(super) struct NativeFiles {
 }
 impl NativeFiles {
     pub async fn acquire(ctx: &ToolContext, paths: Vec<PathBuf>) -> Result<Self> {
-        Self::acquire_with_removals(ctx, paths, Vec::new()).await
+        Self::acquire_plan(ctx, NativeFilePlan::new(paths, Vec::new())).await
     }
-    pub async fn acquire_with_removals(
-        ctx: &ToolContext,
-        paths: Vec<PathBuf>,
-        removals: Vec<PathBuf>,
-    ) -> Result<Self> {
+    pub async fn acquire_plan(ctx: &ToolContext, plan: NativeFilePlan) -> Result<Self> {
         super::mutation_output::check_stop(ctx)?;
         let mut context = ctx.clone();
         bind(&mut context, None)?;
@@ -259,7 +254,7 @@ impl NativeFiles {
         let worker_context = context.clone();
         let permit = tokio::task::spawn_blocking(move || {
             super::mutation_output::check_stop(&worker_context)?;
-            let permit = policy.acquire(&paths, &removals)?;
+            let permit = policy.acquire(&plan)?;
             super::mutation_output::check_stop(&worker_context)?;
             Ok::<_, anyhow::Error>(permit)
         })
@@ -325,16 +320,13 @@ pub(super) fn fixture_context(mut context: ToolContext) -> ToolContext {
         fn session_id(&self) -> &str {
             &self.0
         }
-        fn acquire(
-            &self,
-            paths: &[PathBuf],
-            removals: &[PathBuf],
-        ) -> Result<Box<dyn NativeFilePermit>> {
-            let resolved = paths
+        fn acquire(&self, plan: &NativeFilePlan) -> Result<Box<dyn NativeFilePermit>> {
+            let resolved = plan
+                .paths()
                 .iter()
                 .map(|p| Ok((p.clone(), resolve_target(p)?)))
                 .collect::<Result<Vec<_>>>()?;
-            unmanaged_permit(&resolved, removals)
+            unmanaged_permit(&resolved, plan)
         }
     }
     context.invocation.native_files = Some(Arc::new(FixturePolicy(context.session_id.clone())));

@@ -61,6 +61,9 @@ async fn fixture(
     std::fs::create_dir_all(&artifacts).unwrap();
     let work = home.root().join("project");
     std::fs::create_dir_all(&work).unwrap();
+    let mut parent = Session::create_with_id("session_parent_fixture".into(), None, None);
+    parent.working_dir = Some(work.canonicalize().unwrap().to_string_lossy().into());
+    parent.save().unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
     let provider: Arc<dyn Provider> = Arc::new(RecordingProvider {
         calls: calls.clone(),
@@ -109,6 +112,10 @@ async fn fixture(
             },
         )
         .unwrap();
+    // Production prepares and checkpoints the first turn before exposing tools.
+    // Direct Registry fixtures need that durable identity too, without adding
+    // an unrelated synthetic user turn to the history assertions below.
+    session.save().unwrap();
     let agent = Agent::from_isolated_session(
         provider,
         registry,

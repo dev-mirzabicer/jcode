@@ -45,11 +45,17 @@ regular expressions over patch prose. An invalid later destination prevents all
 patch writes. This does not promise rollback or patch-wide filesystem atomicity
 after an I/O failure. Existing partial-result and cooperative Stop reporting remain.
 
-A file-symlink write follows its verified, authorized referent. Deleting that symlink
-unlinks the entry and retains the referent. Removal admission therefore checks the
+A symlink write follows its verified, authorized file referent. A removal-only
+symlink may reference a file or directory. Unlinking removes the entry and retains
+the referent and its contents. Removal admission therefore checks the
 entry's directory as well as the resolved target policy. A move that resolves to
 the same data file does not remove its source entry. Links cannot confer authority
 to mutate an otherwise unauthorized entry directory.
+
+`NativeFilePlan` derives initial regular-file requirements and entry removals from
+the ordered parsed operations. This supports delete-then-create without accepting
+an initial directory write. A directory reference is pinned for inspection only,
+not converted into a generic directory-deletion capability.
 
 ## Physical effects
 
@@ -85,9 +91,11 @@ classification/blocklists remain separate, unchanged constraints.
 
 Shell, hooks, MCPs, browser/computer scripts and provider-internal tools do not
 become an OS sandbox through this mechanism. Same-user IPC is not physical-human
-attestation. Applicable provider-route rejection is a separate primary/delegation
-admission obligation. Arbitrary external concurrent writers and hardlink creation
-are not claimed adversarially contained.
+attestation. Managed primary creation and both primary provider loops reject
+internally executing tool routes before inference. This also covers a restored or
+switched provider without silently substituting a model. Existing unscoped legacy
+route behavior stays separate. Arbitrary external concurrent writers and hardlink
+creation are not claimed adversarially contained.
 
 Managed physical workspace support is platform-qualified. Non-macOS unscoped
 manual callers retain their compatibility file path and do not acquire a claim of
@@ -105,6 +113,11 @@ Use the isolated test runner and coordinated selfdev owner:
 - App-core `tool::tests::native_scope::` exercises actual Registry aliases, direct
   native tools, all five mutators, patch pre-admission, parallel batch calls,
   grants/revocation, in-flight leases, nested roots and protected state.
+- The same family covers actual recursive Git submodules, changed Git indirection,
+  an awaited external pre-tool hook across revocation, cross-root ordinary reads,
+  and frozen child permissions against current parent scope and artifact ownership.
+- App-core `agent::tools::scope_provider_tests::` exercises both actual provider
+  loops with an opaque tool route, zero inference and unchanged history.
 - App-core `tool::apply_patch::` preserves transformation, deletion protection,
   partial-output and Stop behavior.
 

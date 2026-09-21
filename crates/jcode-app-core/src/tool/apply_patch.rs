@@ -105,35 +105,27 @@ impl Tool for ApplyPatchTool {
                 return receipts.finish(true);
             }
         }
-        let mut removals = Vec::new();
+        let mut plan = jcode_tool_core::native_files::NativeFilePlan::default();
         for hunk in &hunks {
             match hunk {
-                PatchHunk::DeleteFile { path } => removals.push(ctx.resolve_path(Path::new(path))),
-                PatchHunk::UpdateFile {
-                    path,
-                    move_to: Some(destination),
-                    ..
-                } => {
+                PatchHunk::DeleteFile { path } => plan.remove(ctx.resolve_path(Path::new(path))),
+                PatchHunk::AddFile { path, .. } => plan.file(ctx.resolve_path(Path::new(path))),
+                PatchHunk::UpdateFile { path, move_to, .. } => {
                     let source = ctx.resolve_path(Path::new(path));
-                    let target = ctx.resolve_path(Path::new(destination));
-                    if jcode_base::location::native_files::resolve_target(&source)?
-                        != jcode_base::location::native_files::resolve_target(&target)?
-                    {
-                        removals.push(source);
+                    plan.file(source.clone());
+                    if let Some(destination) = move_to {
+                        let target = ctx.resolve_path(Path::new(destination));
+                        plan.file(target.clone());
+                        if jcode_base::location::native_files::resolve_target(&source)?
+                            != jcode_base::location::native_files::resolve_target(&target)?
+                        {
+                            plan.remove(source);
+                        }
                     }
                 }
-                _ => (),
             }
         }
-        let files = super::native_files::NativeFiles::acquire_with_removals(
-            &ctx,
-            hunk_file_paths(&hunks)
-                .into_iter()
-                .map(|path| ctx.resolve_path(Path::new(&path)))
-                .collect(),
-            removals,
-        )
-        .await?;
+        let files = super::native_files::NativeFiles::acquire_plan(&ctx, plan).await?;
 
         // A patch can reach config.toml through any hunk kind (add, update,
         // move), so watch the file across the whole invocation rather than

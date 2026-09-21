@@ -1,17 +1,12 @@
 //! Verified descriptor-relative native text mutations. This is not an OS sandbox.
 use anyhow::{Context, Result, ensure};
-use jcode_tool_core::native_files::NativeFilePermit;
+use jcode_tool_core::native_files::{NativeFilePermit, NativeFilePlan};
 use std::path::{Path, PathBuf};
 
 /// Resolve actual filesystem aliases before evaluating scope. Missing suffixes are
 /// appended only to a successfully canonicalized existing ancestor.
 pub fn resolve_target(path: &Path) -> Result<PathBuf> {
-    let resolved = resolve_inner(path, &mut std::collections::BTreeSet::new())?;
-    ensure!(
-        resolved.file_name().is_some(),
-        "A filesystem root is not a native file destination"
-    );
-    Ok(resolved)
+    resolve_inner(path, &mut std::collections::BTreeSet::new())
 }
 fn resolve_inner(path: &Path, links: &mut std::collections::BTreeSet<PathBuf>) -> Result<PathBuf> {
     ensure!(
@@ -387,6 +382,7 @@ mod platform {
         _file_leases: Vec<File>,
         removals: BTreeSet<PathBuf>,
         links: BTreeMap<PathBuf, LinkEntry>,
+        directory_references: BTreeMap<PathBuf, Directory>,
     }
     impl VerifiedFiles {
         /// Expected resolved targets come from the authorization owner. Resolution
@@ -404,6 +400,19 @@ mod platform {
             paths: &[(PathBuf, PathBuf)],
             removals: &[PathBuf],
         ) -> Result<Self> {
+            let plan = NativeFilePlan::new(
+                paths.iter().map(|(p, _)| p.clone()).collect(),
+                removals.to_vec(),
+            );
+            Self::acquire_plan(paths, &plan)
+        }
+        pub fn acquire_plan(paths: &[(PathBuf, PathBuf)], plan: &NativeFilePlan) -> Result<Self> {
+            let removals = plan.removals();
+            ensure!(
+                paths.iter().map(|(p, _)| p).collect::<BTreeSet<_>>()
+                    == plan.paths().iter().collect(),
+                "Native plan and admitted targets differ"
+            );
             let mut value = Self {
                 aliases: BTreeMap::new(),
                 targets: BTreeMap::new(),
@@ -411,13 +420,24 @@ mod platform {
                 _file_leases: Vec::new(),
                 removals: removals.iter().cloned().collect(),
                 links: BTreeMap::new(),
+                directory_references: BTreeMap::new(),
             };
             for (input, resolved) in paths {
                 ensure!(
                     resolve_target(input)? == *resolved,
                     "Mutation target changed during admission"
                 );
-                if !value.targets.contains_key(resolved) {
+                let link =
+                    std::fs::symlink_metadata(input).is_ok_and(|m| m.file_type().is_symlink());
+                if link
+                    && !plan.requires_file(input)
+                    && removals.contains(input)
+                    && resolved.is_dir()
+                {
+                    value
+                        .directory_references
+                        .insert(resolved.clone(), Directory::open(resolved.clone())?);
+                } else if !value.targets.contains_key(resolved) {
                     value
                         .targets
                         .insert(resolved.clone(), Target::prepare(resolved.clone())?);
@@ -430,6 +450,7 @@ mod platform {
                 }
             }
             let mut lock_paths: BTreeSet<_> = value.targets.keys().cloned().collect();
+            lock_paths.extend(value.directory_references.keys().cloned());
             for removal in removals {
                 ensure!(
                     value.aliases.contains_key(removal),
@@ -459,6 +480,9 @@ mod platform {
                     "Native mutation alias was retargeted: {}",
                     input.display()
                 );
+            }
+            for directory in self.directory_references.values() {
+                directory.verify()?;
             }
             for target in self.targets.values() {
                 target.verify()?;
@@ -674,6 +698,9 @@ impl VerifiedDirectory {
 }
 #[cfg(not(unix))]
 impl VerifiedFiles {
+    pub fn acquire_plan(_: &[(PathBuf, PathBuf)], _: &NativeFilePlan) -> Result<Self> {
+        anyhow::bail!("Verified native mutations are unsupported on this platform")
+    }
     pub fn acquire_with_removals(_: &[(PathBuf, PathBuf)], _: &[PathBuf]) -> Result<Self> {
         anyhow::bail!("Verified native mutations are unsupported on this platform")
     }

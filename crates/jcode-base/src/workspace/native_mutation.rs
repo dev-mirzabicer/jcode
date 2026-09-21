@@ -6,7 +6,7 @@ use crate::location::native_files::{
 };
 use crate::location::{ProjectFacts, resolve_project};
 use anyhow::{Context, ensure};
-use jcode_tool_core::native_files::NativeFilePermit;
+use jcode_tool_core::native_files::{NativeFilePermit, NativeFilePlan};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub struct WorkspaceMutationPermit {
@@ -52,6 +52,9 @@ impl RootGuard {
         Ok(())
     }
     fn validate_nested(&self, path: &Path) -> anyhow::Result<()> {
+        if path == self.path {
+            return self.directory.verify();
+        }
         let parent = path.parent().context("Native destination has no parent")?;
         let suffix = parent.strip_prefix(&self.path)?;
         let mut directory = self.path.clone();
@@ -102,22 +105,24 @@ impl WorkspaceService {
         session: &crate::session::Session,
         paths: &[PathBuf],
     ) -> anyhow::Result<WorkspaceMutationPermit> {
-        self.acquire_native_mutation_inner(session, paths, &[], None)
+        self.acquire_native_mutation_inner(
+            session,
+            &NativeFilePlan::new(paths.to_vec(), Vec::new()),
+            None,
+        )
     }
     pub fn acquire_native_operation(
         &self,
         session: &crate::session::Session,
-        paths: &[PathBuf],
-        removals: &[PathBuf],
+        plan: &NativeFilePlan,
     ) -> anyhow::Result<WorkspaceMutationPermit> {
-        self.acquire_native_mutation_inner(session, paths, removals, None)
+        self.acquire_native_mutation_inner(session, plan, None)
     }
     pub fn acquire_child_native_mutation(
         &self,
         parent: &crate::session::Session,
         child: &crate::session::Session,
-        paths: &[PathBuf],
-        removals: &[PathBuf],
+        plan: &NativeFilePlan,
     ) -> anyhow::Result<WorkspaceMutationPermit> {
         let identity = &child
             .isolated_child
@@ -136,15 +141,16 @@ impl WorkspaceService {
                     .is_symlink(),
             "Child artifact root changed"
         );
-        self.acquire_native_mutation_inner(parent, paths, removals, Some(artifacts))
+        self.acquire_native_mutation_inner(parent, plan, Some(artifacts))
     }
     fn acquire_native_mutation_inner(
         &self,
         session: &crate::session::Session,
-        paths: &[PathBuf],
-        removals: &[PathBuf],
+        plan: &NativeFilePlan,
         artifacts: Option<PathBuf>,
     ) -> anyhow::Result<WorkspaceMutationPermit> {
+        let paths = plan.paths();
+        let removals = plan.removals();
         let location = session
             .location
             .as_ref()
@@ -255,7 +261,7 @@ impl WorkspaceService {
             service: self.clone(),
             catalog_revision: scope.catalog_revision,
             session_revision: location.revision,
-            files: VerifiedFiles::acquire_with_removals(&resolved, removals)?,
+            files: VerifiedFiles::acquire_plan(&resolved, plan)?,
             roots,
             destinations,
             _leases: leases,

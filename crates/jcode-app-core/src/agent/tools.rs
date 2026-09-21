@@ -3,6 +3,13 @@ use crate::terminal_println as println;
 use crate::tool::ToolOutput;
 
 impl super::Agent {
+    pub(super) fn require_native_scope_provider(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.session.location.is_none() || !self.provider.handles_tools_internally(),
+            "Selected provider performs tools outside the native managed-primary boundary; select a host-enforced route explicitly"
+        );
+        Ok(())
+    }
     pub(super) fn provider_leaves_tool_to_host(&self, name: &str) -> bool {
         self.provider.handles_tools_internally()
             && self
@@ -216,5 +223,104 @@ mod tests {
         assert!(
             matches!(&blocks[0],ContentBlock::ToolResult{content,is_error:Some(true),..} if content==&text)
         );
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod scope_provider_tests {
+    use super::super::*;
+    use crate::workspace::{
+        EntityId, OperationId, OrganizationChange, Placement, Registration, RequestId,
+        WorkspaceService,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct OpaqueProvider(Arc<AtomicUsize>);
+    #[async_trait::async_trait]
+    impl Provider for OpaqueProvider {
+        fn name(&self) -> &str {
+            "scope-opaque-fixture"
+        }
+        fn handles_tools_internally(&self) -> bool {
+            true
+        }
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(Self(self.0.clone()))
+        }
+        async fn complete(
+            &self,
+            _: &[Message],
+            _: &[ToolDefinition],
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<crate::provider::EventStream> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            anyhow::bail!("Opaque inference must not start for a managed Session")
+        }
+    }
+    #[tokio::test]
+    async fn managed_scope_rejects_opaque_tools_at_both_actual_provider_loops() -> Result<()> {
+        let _home = crate::auth::test_sandbox::AuthTestSandbox::new()?;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider: Arc<dyn Provider> = Arc::new(OpaqueProvider(calls.clone()));
+        let registry = Registry::new(provider.clone()).await;
+        let mut agent = Agent::new(provider, registry);
+        agent.require_native_scope_provider()?; // Legacy unscoped behavior is unchanged.
+        let workspace = WorkspaceService::new(&crate::storage::durable_state_dir());
+        workspace.initialize(RequestId::new())?;
+        let root = _home.root().join("managed-scope");
+        std::fs::create_dir(&root)?;
+        let review = workspace.review_organization_change(
+            workspace.status()?.revision,
+            OrganizationChange::RegisterLocation {
+                name: "managed".into(),
+                path: root.clone(),
+                registration: Registration::Standalone,
+            },
+        )?;
+        let EntityId::Location(id) = workspace
+            .apply_organization_change(RequestId::new(), review.id)?
+            .targets[0]
+        else {
+            panic!()
+        };
+        let prepared = workspace.prepare_primary_location(
+            Placement::Standalone(id),
+            Some(&root),
+            OperationId::new(),
+        )?;
+        agent.session.working_dir = Some(
+            prepared
+                .location
+                .cwd
+                .observed_path()
+                .to_string_lossy()
+                .into(),
+        );
+        agent.session.location = Some(prepared.location.clone());
+        drop(prepared);
+        agent.session.save()?;
+        let history = serde_json::to_value(&agent.session.messages)?;
+        assert!(
+            agent
+                .run_turn(false)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("outside the native managed-primary boundary")
+        );
+        let (tx, _rx) = mpsc::unbounded_channel();
+        assert!(
+            agent
+                .run_turn_streaming_mpsc(tx)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("outside the native managed-primary boundary")
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(serde_json::to_value(&agent.session.messages)?, history);
+        crate::tool::clear_session_tool_policy(agent.session_id());
+        Ok(())
     }
 }

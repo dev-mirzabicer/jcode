@@ -126,6 +126,7 @@ impl Agent {
                 ));
             }
             self.apply_primary_location_changes().await?;
+            self.require_native_scope_provider()?;
             self.session.require_published_primary()?;
             let messages = self.messages_for_provider()?;
 

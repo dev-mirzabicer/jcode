@@ -153,3 +153,34 @@ fn native_files_follow_actual_case_and_unicode_alias_identity() {
         assert_eq!(permit.read(&path).unwrap().unwrap(), b"updated through alias");
     }
 }
+
+#[cfg(all(test, target_os = "macos"))]
+#[test]
+fn removal_only_directory_references_and_ordered_recreation_preserve_contents() {
+    use std::os::unix::fs::symlink;
+    let temp = tempfile::tempdir().unwrap();
+    let directory = temp.path().join("directory");
+    std::fs::create_dir(&directory).unwrap();
+    let sentinel = directory.join("sentinel");
+    std::fs::write(&sentinel, "retained").unwrap();
+    let link = temp.path().join("link");
+    symlink(&directory, &link).unwrap();
+    let mut plan = NativeFilePlan::default();
+    plan.remove(link.clone()); plan.file(link.clone());
+    let paths = [(link.clone(), resolve_target(&link).unwrap())];
+    let mut permit = VerifiedFiles::acquire_plan(&paths, &plan).unwrap();
+    assert!(permit.write(&link, b"not before unlink").is_err());
+    permit.remove(&link).unwrap();
+    permit.write(&link, b"new regular file").unwrap();
+    assert_eq!(std::fs::read(&link).unwrap(), b"new regular file");
+    assert_eq!(std::fs::read(&sentinel).unwrap(), b"retained");
+    drop(permit);
+    let root_link = temp.path().join("root-link");
+    symlink("/", &root_link).unwrap();
+    let plan = NativeFilePlan::new(Vec::new(),vec![root_link.clone()]);
+    let mut permit = VerifiedFiles::acquire_plan(&[(root_link.clone(),resolve_target(&root_link).unwrap())],&plan).unwrap();
+    permit.remove(&root_link).unwrap();
+    assert!(std::fs::symlink_metadata(&root_link).is_err());
+    assert!(Path::new("/").is_dir());
+    assert!(VerifiedFiles::acquire_plan(&[(directory.clone(),resolve_target(&directory).unwrap())],&NativeFilePlan::new(Vec::new(),vec![directory])).is_err());
+}

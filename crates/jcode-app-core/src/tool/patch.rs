@@ -78,19 +78,16 @@ impl Tool for PatchTool {
         if patches.is_empty() {
             return Err(anyhow::anyhow!("No valid patches found in input"));
         }
-        let files = super::native_files::NativeFiles::acquire_with_removals(
-            &ctx,
-            patches
-                .iter()
-                .map(|patch| ctx.resolve_path(Path::new(&patch.path)))
-                .collect(),
-            patches
-                .iter()
-                .filter(|patch| patch.is_delete)
-                .map(|patch| ctx.resolve_path(Path::new(&patch.path)))
-                .collect(),
-        )
-        .await?;
+        let mut plan = jcode_tool_core::native_files::NativeFilePlan::default();
+        for patch in &patches {
+            let path = ctx.resolve_path(Path::new(&patch.path));
+            if patch.is_delete {
+                plan.remove(path);
+            } else {
+                plan.file(path);
+            }
+        }
+        let files = super::native_files::NativeFiles::acquire_plan(&ctx, plan).await?;
 
         // Watch config.toml across the whole invocation so an edit that lands
         // on it is reported regardless of which patch produced it.
