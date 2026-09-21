@@ -98,6 +98,24 @@ pub struct LocationChangeRequest {
     pub cwd: PathBuf,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LegacyLocationAdoptionRequest {
+    pub request: RequestId,
+    pub session: String,
+    pub expected_working_dir: Option<PathBuf>,
+    pub expected_catalog_revision: Revision,
+    pub placement: Placement,
+    pub cwd: PathBuf,
+}
+
+/// Absence remains unknown historical data, never a fabricated old directory.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LegacyLocationOrigin {
+    pub working_dir: Option<PathBuf>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LocationChangeState {
@@ -117,14 +135,25 @@ pub struct LocationChangeRecord {
     pub effective_revision: Option<Revision>,
     pub notice_message: Option<String>,
     pub issue: Option<crate::Issue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_origin: Option<LegacyLocationOrigin>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PrimaryLocationCommand {
-    Change { request: LocationChangeRequest },
-    Cancel { operation: OperationId },
-    Inspect { operation: OperationId },
+    Change {
+        request: LocationChangeRequest,
+    },
+    AdoptLegacy {
+        request: LegacyLocationAdoptionRequest,
+    },
+    Cancel {
+        operation: OperationId,
+    },
+    Inspect {
+        operation: OperationId,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

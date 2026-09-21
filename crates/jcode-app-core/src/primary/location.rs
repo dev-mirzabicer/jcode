@@ -10,10 +10,15 @@ impl PrimaryHost {
         pool: &Arc<crate::mcp::SharedMcpPool>,
         repositories: &crate::instruction::InstructionRepositoryService,
     ) -> PrimaryLocationResponse {
+        let target = match &command {
+            PrimaryLocationCommand::Change { request } => Some(request.session.as_str()),
+            PrimaryLocationCommand::AdoptLegacy { request } => Some(request.session.as_str()),
+            _ => None,
+        };
         if launch_enabled()
-            && let PrimaryLocationCommand::Change { request } = &command
+            && let Some(session) = target
             && let Err(error) = self
-                .restore_for_location_repair(&request.session, provider, pool, repositories)
+                .restore_for_location_repair(session, provider, pool, repositories)
                 .await
         {
             return PrimaryLocationResponse::Rejected {
@@ -29,7 +34,12 @@ impl PrimaryHost {
         self: &Arc<Self>,
         command: PrimaryLocationCommand,
     ) -> PrimaryLocationResponse {
-        if !launch_enabled() && matches!(&command, PrimaryLocationCommand::Change { .. }) {
+        if !launch_enabled()
+            && matches!(
+                &command,
+                PrimaryLocationCommand::Change { .. } | PrimaryLocationCommand::AdoptLegacy { .. }
+            )
+        {
             return PrimaryLocationResponse::Rejected { issue: Issue { code: IssueCode::UnsupportedCapability, detail: "Managed location controls are staged until workspace management is available".into() } };
         }
         let result = self.location_command(command).await;
@@ -63,9 +73,14 @@ impl PrimaryHost {
                 let _owner = self.claim(&record.input.session)?;
                 Ok(workspace.cancel_location_change(operation)?)
             }
-            PrimaryLocationCommand::Change { request } => {
+            command @ (PrimaryLocationCommand::Change { .. }
+            | PrimaryLocationCommand::AdoptLegacy { .. }) => {
                 ensure!(self.accepts_input(), "Primary runtime is stopping");
-                let session = request.session.clone();
+                let session = match &command {
+                    PrimaryLocationCommand::Change { request } => request.session.clone(),
+                    PrimaryLocationCommand::AdoptLegacy { request } => request.session.clone(),
+                    _ => unreachable!(),
+                };
                 let agent = self
                     .read()
                     .await
@@ -73,7 +88,15 @@ impl PrimaryHost {
                     .cloned()
                     .context("Attach the primary before requesting its location change")?;
                 let _owner = self.claim(&session)?;
-                let record = workspace.request_location_change(request)?;
+                let record = match command {
+                    PrimaryLocationCommand::Change { request } => {
+                        workspace.request_location_change(request)?
+                    }
+                    PrimaryLocationCommand::AdoptLegacy { request } => {
+                        workspace.request_legacy_adoption(request)?
+                    }
+                    _ => unreachable!(),
+                };
                 if record.state != LocationChangeState::Pending {
                     return Ok(record);
                 }

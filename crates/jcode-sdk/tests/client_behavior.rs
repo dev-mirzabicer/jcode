@@ -1086,7 +1086,7 @@ fn durable_primary_controls_negotiate_and_validate_receipt_identity() {
                 issue: None,
             };
             let event=match &frame.request {
-            ApiRequest::PrimaryControlProbe=>ApiEvent::PrimaryControlCapabilities{input_version:1,location_version:1,location_enabled:false},
+            ApiRequest::PrimaryControlProbe=>ApiEvent::PrimaryControlCapabilities{input_version:1,location_version:1,location_enabled:false,legacy_adoption_version:None},
             ApiRequest::PrimaryInput{input}=>{assert_eq!(**input,original);ApiEvent::PrimaryInputReceipt{receipt}},
             ApiRequest::PrimaryInputInspect{..}=>ApiEvent::PrimaryInputReceipt{receipt},
             ApiRequest::PrimaryInputRead{..}=>ApiEvent::PrimaryInputDetail{receipt,input:Box::new(original.clone())},
@@ -1128,4 +1128,47 @@ fn durable_primary_controls_negotiate_and_validate_receipt_identity() {
             })
             .is_ok()
     );
+}
+
+#[test]
+fn legacy_adoption_requires_negotiation_and_correlates_the_exact_session() {
+    use jcode_harness_api::PrimaryLocationCommand;
+    let command:PrimaryLocationCommand=serde_json::from_value(serde_json::json!({"action":"adopt_legacy","request":{"request":"12a99e11-e967-4a1e-a47c-000000000001","session":"legacy_fixture","expected_working_dir":"/old","expected_catalog_revision":1,"placement":{"kind":"standalone","id":"12a99e11-e967-4a1e-a47c-000000000002"},"cwd":"/new"}})).unwrap();
+    for (version, foreign) in [(None, false), (Some(1), false), (Some(1), true)] {
+        let client = fake_harness_with_capabilities(
+            vec!["primary_control_v1".into()],
+            move |frame, writer| {
+                let event = match &frame.request {
+                    ApiRequest::PrimaryControlProbe => ApiEvent::PrimaryControlCapabilities {
+                        input_version: 1,
+                        location_version: 1,
+                        location_enabled: true,
+                        legacy_adoption_version: version,
+                    },
+                    ApiRequest::PrimaryLocation { command } => {
+                        assert_eq!(version, Some(1), "Unsupported adoption must not be sent");
+                        let PrimaryLocationCommand::AdoptLegacy { request } = command.as_ref()
+                        else {
+                            panic!()
+                        };
+                        let session = if foreign {
+                            "foreign"
+                        } else {
+                            request.session.as_str()
+                        };
+                        let response = serde_json::from_value(serde_json::json!({"status":"state","record":{"operation":request.request,"input":{"request":request.request,"session":session,"expected_session_revision":0,"expected_catalog_revision":1,"placement":request.placement,"cwd":request.cwd},"state":"complete","effective_revision":1,"notice_message":"synthetic","issue":null,"legacy_origin":{"working_dir":request.expected_working_dir}}})).unwrap();
+                        ApiEvent::PrimaryLocation { response }
+                    }
+                    _ => panic!("Unexpected operation"),
+                };
+                reply(frame, event, writer);
+            },
+        );
+        let result = client.primary_location(command.clone());
+        match (version, foreign) {
+            (None, _) => assert_eq!(result.unwrap_err().kind, ErrorKind::UnsupportedCapability),
+            (_, true) => assert_eq!(result.unwrap_err().kind, ErrorKind::UnexpectedReply),
+            _ => assert!(result.is_ok()),
+        }
+    }
 }

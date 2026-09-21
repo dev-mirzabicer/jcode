@@ -121,6 +121,34 @@ impl WorkspaceService {
     fn marker(&self) -> PathBuf {
         self.root.with_file_name("workspace-installation.json")
     }
+    /// A derived row can prove a contradiction, never reconstruct permission.
+    /// Genuine pre-catalog legacy state remains usable without initialization.
+    pub fn require_legacy_scope_absent(&self, session: &str) -> Result<()> {
+        let present = |path: &Path| match std::fs::symlink_metadata(path) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(corrupt(error)),
+        };
+        if !present(&self.marker())? && !present(&self.root)? {
+            return Ok(());
+        }
+        let _lease = self.lease(false)?;
+        let connection = self.connection()?;
+        let indexed: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM session_index WHERE session=?1)",
+                [session],
+                |row| row.get(0),
+            )
+            .map_err(corrupt)?;
+        if indexed {
+            return Err(issue(
+                IssueCode::RecoveryRequired,
+                "Session binding is missing but managed history exists; restore authoritative Session state instead of granting unscoped access",
+            ));
+        }
+        Ok(())
+    }
     pub fn lease(&self, exclusive: bool) -> Result<CatalogLease> {
         let parent = self.root.parent().ok_or_else(|| io("Missing state root"))?;
         if !parent.is_dir() {

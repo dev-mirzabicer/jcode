@@ -647,3 +647,171 @@ fn native_admission_rejects_root_replacement_between_validation_and_pinning() {
         "retained"
     );
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn legacy_adoption_checkpoints_one_notice_without_rewriting_history_or_frozen_state() {
+    let _lock = crate::storage::lock_test_env();
+    let mut f = Fixture::new();
+    f.session.location = None;
+    f.session.ensure_initial_session_context_message();
+    f.session
+        .install_system_prompt(crate::session::StoredSystemPromptState {
+            text: "SYNTHETIC FROZEN SYSTEM".into(),
+            active_agent: crate::session::StoredAgentReference {
+                scope: crate::instruction::InstructionScope::Global,
+                id: "fixture".into(),
+                display_name: "Fixture".into(),
+            },
+            first_provider_dispatch_at: None,
+            active_transition_message_id: None,
+        });
+    f.session.save().unwrap();
+    let before = crate::session::Session::load(&f.session.id).unwrap();
+    let input = LegacyLocationAdoptionRequest {
+        request: RequestId::new(),
+        session: f.session.id.clone(),
+        expected_working_dir: before.working_dir.as_ref().map(PathBuf::from),
+        expected_catalog_revision: f.service.status().unwrap().revision,
+        placement: Placement::Directory(f.b),
+        cwd: f._temporary.path().join("b"),
+    };
+    let record = f.service.request_legacy_adoption(input.clone()).unwrap();
+    let mut stale = input.clone();
+    stale.request = RequestId::new();
+    stale.expected_working_dir = None;
+    assert_eq!(
+        f.service.request_legacy_adoption(stale).unwrap_err().code,
+        IssueCode::Conflict
+    );
+    let mut cancelled = input.clone();
+    cancelled.request = RequestId::new();
+    let pending = f
+        .service
+        .request_legacy_adoption(cancelled.clone())
+        .unwrap();
+    let cancelled_record = f.service.cancel_location_change(pending.operation).unwrap();
+    assert_eq!(cancelled_record.state, LocationChangeState::Cancelled);
+    assert_eq!(
+        f.service.request_legacy_adoption(cancelled).unwrap(),
+        cancelled_record
+    );
+    assert_eq!(record.state, LocationChangeState::Pending);
+    assert_eq!(
+        serde_json::to_value(
+            crate::session::Session::load(&f.session.id)
+                .unwrap()
+                .messages
+        )
+        .unwrap(),
+        serde_json::to_value(&before.messages).unwrap()
+    );
+    assert!(
+        crate::session::Session::load_startup_stub(&f.session.id)
+            .unwrap()
+            .location
+            .is_none()
+    );
+    assert_eq!(
+        f.service.request_legacy_adoption(input.clone()).unwrap(),
+        record
+    );
+    let mut conflict = input.clone();
+    conflict.cwd = f._temporary.path().join("outside");
+    assert_eq!(
+        f.service
+            .request_legacy_adoption(conflict)
+            .unwrap_err()
+            .code,
+        IssueCode::Conflict
+    );
+    let mut tampered = record.clone();
+    tampered.input.placement = Placement::Project(f.project);
+    assert!(
+        matches!(f.service.prepare_legacy_adoption(&tampered, &f.session), Err(problem) if problem.code == IssueCode::Conflict)
+    );
+    let prepared = f
+        .service
+        .prepare_legacy_adoption(&record, &f.session)
+        .unwrap();
+    let candidate = f
+        .session
+        .stage_legacy_location_adoption(
+            prepared.location.clone(),
+            "SYNTHETIC ADOPTION NOTICE".into(),
+        )
+        .unwrap();
+    f.session.commit_location_candidate(candidate).unwrap();
+    drop(prepared);
+    // This is the crash-after-checkpoint/before-index recovery path.
+    let complete = f
+        .service
+        .reconcile_location_change(record.operation)
+        .unwrap();
+    assert_eq!(complete.state, LocationChangeState::Complete);
+    assert_eq!(f.service.request_legacy_adoption(input).unwrap(), complete);
+    let after = crate::session::Session::load(&f.session.id).unwrap();
+    assert_eq!(after.messages.len(), before.messages.len() + 1);
+    assert_eq!(
+        serde_json::to_value(&after.messages[..before.messages.len()]).unwrap(),
+        serde_json::to_value(&before.messages).unwrap()
+    );
+    assert_eq!(after.system_prompt, before.system_prompt);
+    assert_eq!(after.active_skill, before.active_skill);
+    assert_eq!(after.startup_context, before.startup_context);
+    assert_eq!(
+        serde_json::to_value(&after.context_view).unwrap(),
+        serde_json::to_value(&before.context_view).unwrap()
+    );
+    assert_eq!(
+        after.location.as_ref().unwrap().initial_cwd,
+        PathBuf::from(before.working_dir.unwrap())
+    );
+    assert_eq!(
+        f.service
+            .sessions(None, None, 100)
+            .unwrap()
+            .iter()
+            .filter(|s| s.session == after.id)
+            .count(),
+        1
+    );
+    let mut unknown = Session::create_with_id(
+        format!("session_unknown_cwd_{}", RequestId::new()),
+        None,
+        None,
+    );
+    unknown.working_dir = None;
+    unknown.save().unwrap();
+    let request = LegacyLocationAdoptionRequest {
+        request: RequestId::new(),
+        session: unknown.id.clone(),
+        expected_working_dir: None,
+        expected_catalog_revision: f.service.status().unwrap().revision,
+        placement: Placement::Directory(f.b),
+        cwd: f._temporary.path().join("b"),
+    };
+    let record = f.service.request_legacy_adoption(request).unwrap();
+    assert_eq!(record.legacy_origin.as_ref().unwrap().working_dir, None);
+    let prepared = f
+        .service
+        .prepare_legacy_adoption(&record, &unknown)
+        .unwrap();
+    let candidate = unknown
+        .stage_legacy_location_adoption(
+            prepared.location.clone(),
+            "SYNTHETIC UNKNOWN ORIGIN".into(),
+        )
+        .unwrap();
+    unknown.commit_location_candidate(candidate).unwrap();
+    drop(prepared);
+    assert_eq!(
+        f.service
+            .reconcile_location_change(record.operation)
+            .unwrap()
+            .legacy_origin
+            .unwrap()
+            .working_dir,
+        None
+    );
+}

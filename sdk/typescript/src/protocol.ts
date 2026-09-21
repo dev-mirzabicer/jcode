@@ -37,8 +37,9 @@ export interface PrimaryInputEnvelope {
 }
 export interface PrimaryInputReceipt { id:string; session:string; state:"accepted"|"committed"|"failed"|"cancelled"; messages:string[]; issue:string|null }
 export interface LocationChangeRequest { request:string; session:string; expected_session_revision:number; expected_catalog_revision:number; placement:WorkspacePlacement; cwd:string }
-export type PrimaryLocationCommand = {action:"change"; request:LocationChangeRequest} | {action:"inspect"|"cancel"; operation:string};
-export interface LocationChangeRecord { operation:string; input:LocationChangeRequest; state:"pending"|"complete"|"cancelled"|"failed"|"recovery_required"; effective_revision:number|null; notice_message:string|null; issue:{code:WorkspaceIssueCode; detail:string}|null }
+export interface LegacyLocationAdoptionRequest { request:string; session:string; expected_working_dir:string|null; expected_catalog_revision:number; placement:WorkspacePlacement; cwd:string }
+export type PrimaryLocationCommand = {action:"change"; request:LocationChangeRequest} | {action:"adopt_legacy"; request:LegacyLocationAdoptionRequest} | {action:"inspect"|"cancel"; operation:string};
+export interface LocationChangeRecord { legacy_origin?:{working_dir:string|null}|null; operation:string; input:LocationChangeRequest; state:"pending"|"complete"|"cancelled"|"failed"|"recovery_required"; effective_revision:number|null; notice_message:string|null; issue:{code:WorkspaceIssueCode; detail:string}|null }
 export type PrimaryLocationResponse = {status:"state"; record:LocationChangeRecord} | {status:"rejected"; issue:{code:WorkspaceIssueCode; detail:string}};
 
 export type ExecutionState = "prepared" | "queued" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
@@ -242,7 +243,7 @@ export type ApiRequest =
   | { req: "ping" };
 
 export type ApiEvent =
-  | {ev: "primary_control_capabilities"; input_version:number; location_version:number; location_enabled:boolean}
+  | {ev: "primary_control_capabilities"; input_version:number; location_version:number; location_enabled:boolean; legacy_adoption_version?:number|null}
   | {ev: "primary_input_receipt"; receipt:PrimaryInputReceipt}
   | {ev: "primary_input_detail"; receipt:PrimaryInputReceipt; input:PrimaryInputEnvelope}
   | {ev: "primary_location"; response:PrimaryLocationResponse}

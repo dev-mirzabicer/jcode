@@ -845,3 +845,27 @@ test("durable primary controls negotiate and preserve original identity", async 
     await assert.rejects(()=>client.primaryLocation({action:"change",request:{request:input.id,session:input.session,expected_session_revision:1,expected_catalog_revision:1,placement:{kind:"standalone",id:input.id},cwd:"/fixture"}}),(error:unknown)=>error instanceof HarnessError && error.code === "unsupported_capability");
   } finally {client.close();await server.close();}
 });
+
+test("legacy adoption negotiates explicitly and rejects foreign session replies", async () => {
+  const request: import("../src/protocol.js").LegacyLocationAdoptionRequest = {
+    request:"12a99e11-e967-4a1e-a47c-000000000001",session:"legacy_fixture",expected_working_dir:"/old",
+    expected_catalog_revision:1,placement:{kind:"standalone",id:"12a99e11-e967-4a1e-a47c-000000000002"},cwd:"/new",
+  };
+  for (const [version, foreign] of [[undefined,false],[1,false],[1,true]] as const) {
+    const server = await startMockHarness({capabilities:["primary_control_v1"],onRequest(frame,send) {
+      const header = {v:1,reply_to:frame.id};
+      if(frame.req === "primary_control_probe") send({...header,ev:"primary_control_capabilities",input_version:1,location_version:1,location_enabled:true,legacy_adoption_version:version});
+      else if(frame.req === "primary_location") {
+        assert.equal(version,1,"Unsupported adoption must not be sent");
+        assert.deepEqual(frame.command,{action:"adopt_legacy",request});
+        send({...header,ev:"primary_location",response:{status:"state",record:{operation:request.request,input:{request:request.request,session:foreign?"foreign":request.session,expected_session_revision:0,expected_catalog_revision:1,placement:request.placement,cwd:request.cwd},state:"complete",effective_revision:1,notice_message:"synthetic",issue:null,legacy_origin:{working_dir:request.expected_working_dir}}}});
+      } else assert.fail("Unexpected request");
+    }});
+    const client = await JcodeClient.connect({socketPath:server.socketPath});
+    try {
+      const invoke=()=>client.primaryLocation({action:"adopt_legacy",request});
+      if(version === undefined || foreign) await assert.rejects(invoke,(error:unknown)=>error instanceof HarnessError && error.code === (version === undefined?"unsupported_capability":"unexpected_reply"));
+      else assert.equal((await invoke()).status,"state");
+    } finally { client.close(); await server.close(); }
+  }
+});

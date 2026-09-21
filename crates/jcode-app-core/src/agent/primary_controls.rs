@@ -1,6 +1,6 @@
 use super::*;
 use crate::workspace::{IssueCode, WorkspaceService};
-use anyhow::{Context, ensure};
+use anyhow::ensure;
 
 impl Agent {
     pub(crate) async fn run_primary_input_capture(
@@ -188,18 +188,16 @@ impl Agent {
     /// complete tool-result batch. Location controls never enter the interrupt
     /// queue and cannot themselves request a provider continuation.
     pub(crate) async fn apply_primary_location_changes(&mut self) -> Result<()> {
-        if self.session.location.is_none() || self.session.isolated_child.is_some() {
+        if self.session.isolated_child.is_some()
+            || (self.session.location.is_none() && !crate::primary::launch_enabled())
+        {
             return Ok(());
         }
         let workspace = WorkspaceService::new(&crate::storage::durable_state_dir());
         let _control = workspace.primary_control_lease(self.session_id())?;
         for record in workspace.pending_location_changes(self.session_id())? {
-            let current = self
-                .session
-                .location
-                .as_ref()
-                .context("Primary lost its location")?;
-            if current.last_operation == Some(record.operation) {
+            let current = self.session.location.as_ref();
+            if current.and_then(|location| location.last_operation) == Some(record.operation) {
                 workspace.reconcile_location_change(record.operation)?;
                 continue;
             }
@@ -208,7 +206,11 @@ impl Agent {
                 // historical or uncheckpointed intent cannot move this Session.
                 continue;
             }
-            let prepared = match workspace.prepare_location_change(&record, current) {
+            let preparation = match current {
+                Some(current) => workspace.prepare_location_change(&record, current),
+                None => workspace.prepare_legacy_adoption(&record, &self.session),
+            };
+            let prepared = match preparation {
                 Ok(prepared) => prepared,
                 Err(problem)
                     if matches!(
@@ -226,9 +228,15 @@ impl Agent {
                 }
                 Err(problem) => return Err(problem.into()),
             };
-            let old_placement = format!("{:?}", current.placement);
+            let old_placement = current
+                .map(|location| format!("{:?}", location.placement))
+                .unwrap_or_else(|| "Legacy (unbound)".into());
             let new_placement = format!("{:?}", prepared.location.placement);
-            let old_cwd = current.cwd.observed_path().to_string_lossy();
+            let old_cwd = self
+                .session
+                .working_dir
+                .clone()
+                .unwrap_or_else(|| "Unknown (not recorded in legacy state)".into());
             let new_cwd = prepared.location.cwd.observed_path().to_string_lossy();
             // Scope enforcement/grants retain their WP-05 owner. The staged
             // backend reports placement semantics, not a shell sandbox.
@@ -248,9 +256,13 @@ impl Agent {
                 !notice.trim().is_empty(),
                 "Location notice is empty; repair its managed source before applying"
             );
-            let mut candidate = self
-                .session
-                .stage_location_change(prepared.location.clone(), notice)?;
+            let mut candidate = if current.is_some() {
+                self.session
+                    .stage_location_change(prepared.location.clone(), notice)?
+            } else {
+                self.session
+                    .stage_legacy_location_adoption(prepared.location.clone(), notice)?
+            };
             let projected = candidate.projected_messages_for_provider()?;
             let split = self.build_system_prompt_split(None)?;
             let tools = match &self.locked_tools {

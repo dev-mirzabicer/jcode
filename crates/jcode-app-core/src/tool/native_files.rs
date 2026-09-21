@@ -82,7 +82,17 @@ impl NativeFilePolicy for BoundPolicy {
             None
         };
         let principal = parent.as_ref().unwrap_or(&session);
+        if !artifacts_only {
+            principal.validate_primary_publication(&WorkspaceService::new(&self.durable))?;
+        }
         let managed = principal.location.is_some();
+        if !artifacts_only && !managed {
+            ensure!(
+                principal.primary_creation.is_none(),
+                "Managed primary binding is missing; restore its Session state"
+            );
+            WorkspaceService::new(&self.durable).require_legacy_scope_absent(&principal.id)?;
+        }
         ensure!(
             artifacts_only || managed || !crate::config::config().features.managed_primary_launch,
             "Legacy Session needs reviewed placement before native mutation; open workspace management"

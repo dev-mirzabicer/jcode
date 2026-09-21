@@ -1204,6 +1204,8 @@ pub enum ServerEvent {
         input_version: u32,
         location_version: u32,
         location_enabled: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        legacy_adoption_version: Option<u32>,
     },
     #[serde(rename = "primary_input_detail")]
     PrimaryInputDetail {

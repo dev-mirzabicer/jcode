@@ -4766,6 +4766,7 @@ fn primary_control_read(request: &Request) -> Option<ServerEvent> {
             input_version: 1,
             location_version: 1,
             location_enabled: crate::primary::launch_enabled(),
+            legacy_adoption_version: Some(1),
         }),
         Request::PrimaryInputRead { id, session, input } => {
             let result = (|| -> Result<_> {

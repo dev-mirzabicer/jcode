@@ -950,22 +950,10 @@ impl Session {
     /// cwd. Publication integrity still applies; dispatch separately requires
     /// the witnessed location to be available.
     pub fn require_primary_publication(&self) -> anyhow::Result<()> {
-        if let Some(creation) = &self.primary_creation {
-            anyhow::ensure!(
-                creation.ready,
-                "Primary preparation is incomplete; resume launch request {}",
-                creation.request
-            );
+        if self.primary_creation.is_some() {
             let service =
                 crate::workspace::WorkspaceService::new(&crate::storage::durable_state_dir());
-            let record = service.inspect_primary_launch(creation.request)?;
-            anyhow::ensure!(
-                record.operation == creation.operation
-                    && record.session == self.id
-                    && record.state == jcode_workspace_types::PrimaryLaunchState::Complete,
-                "Primary publication needs reconciliation; resume launch request {}",
-                creation.request
-            );
+            self.validate_primary_publication(&service)?;
             if let Some(location) = &self.location {
                 service.reconcile_session_index(&jcode_workspace_types::SessionIndex {
                     session: self.id.clone(),
@@ -978,6 +966,34 @@ impl Session {
                     reconciled: true,
                 })?;
             }
+        }
+        Ok(())
+    }
+
+    /// Read-only integrity for invocation-bound namespaces. This cannot repair an
+    /// index or use a later ambient state directory to authorize background work.
+    pub fn validate_primary_publication(
+        &self,
+        service: &crate::workspace::WorkspaceService,
+    ) -> anyhow::Result<()> {
+        if let Some(creation) = &self.primary_creation {
+            anyhow::ensure!(
+                self.location.is_some(),
+                "Managed primary binding is missing; restore its Session state"
+            );
+            anyhow::ensure!(
+                creation.ready,
+                "Primary preparation is incomplete; resume launch request {}",
+                creation.request
+            );
+            let record = service.inspect_primary_launch(creation.request)?;
+            anyhow::ensure!(
+                record.operation == creation.operation
+                    && record.session == self.id
+                    && record.state == jcode_workspace_types::PrimaryLaunchState::Complete,
+                "Primary publication needs reconciliation; resume launch request {}",
+                creation.request
+            );
         }
         Ok(())
     }
@@ -1006,6 +1022,38 @@ impl Session {
             location.initial_cwd == previous.initial_cwd,
             "Initial cwd must remain historical"
         );
+        self.stage_bound_location(location, notice)
+    }
+
+    pub fn stage_legacy_location_adoption(
+        &self,
+        location: StoredSessionLocation,
+        notice: String,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            self.location.is_none()
+                && self.primary_creation.is_none()
+                && self.isolated_child.is_none(),
+            "Only an unbound legacy primary can be adopted"
+        );
+        anyhow::ensure!(
+            location.revision == 1,
+            "Legacy adoption starts at location revision one"
+        );
+        if let Some(cwd) = &self.working_dir {
+            anyhow::ensure!(
+                location.initial_cwd == std::path::Path::new(cwd),
+                "Legacy cwd must remain historical"
+            );
+        }
+        self.stage_bound_location(location, notice)
+    }
+
+    fn stage_bound_location(
+        &self,
+        location: StoredSessionLocation,
+        notice: String,
+    ) -> anyhow::Result<Self> {
         let operation = location
             .last_operation
             .context("Location change has no operation identity")?;

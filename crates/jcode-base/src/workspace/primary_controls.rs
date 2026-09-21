@@ -52,11 +52,38 @@ impl WorkspaceService {
         &self,
         input: LocationChangeRequest,
     ) -> Result<LocationChangeRecord> {
+        self.request_location_control(input, None)
+    }
+
+    pub fn request_legacy_adoption(
+        &self,
+        input: LegacyLocationAdoptionRequest,
+    ) -> Result<LocationChangeRecord> {
+        self.request_location_control(
+            LocationChangeRequest {
+                request: input.request,
+                session: input.session,
+                expected_session_revision: 0,
+                expected_catalog_revision: input.expected_catalog_revision,
+                placement: input.placement,
+                cwd: input.cwd,
+            },
+            Some(LegacyLocationOrigin {
+                working_dir: input.expected_working_dir,
+            }),
+        )
+    }
+
+    fn request_location_control(
+        &self,
+        input: LocationChangeRequest,
+        legacy_origin: Option<LegacyLocationOrigin>,
+    ) -> Result<LocationChangeRecord> {
         let _control = self.primary_control_lease(&input.session)?;
         let connection = self.connection()?;
         let operation: OperationId = input.request.to_string().parse().map_err(corrupt)?;
         if let Some(stored) = read_change(&connection, operation)? {
-            if stored.record.input != input {
+            if stored.record.input != input || stored.record.legacy_origin != legacy_origin {
                 return Err(issue(
                     IssueCode::Conflict,
                     "Location request identity already has different input",
@@ -65,19 +92,37 @@ impl WorkspaceService {
             return Ok(stored.record);
         }
         let session = crate::session::Session::load_startup_stub(&input.session).map_err(io)?;
-        let location = session.location.as_ref().ok_or_else(|| {
-            issue(
-                IssueCode::RecoveryRequired,
-                "Legacy Session needs explicit location adoption before a move",
-            )
-        })?;
-        // A dependent FIFO request may name the revision produced by an earlier
-        // pending request. Application still rechecks that exact revision.
-        if input.expected_session_revision < location.revision {
+        if session.isolated_child.is_some() {
             return Err(issue(
-                IssueCode::Conflict,
-                "Session location revision is stale",
+                IssueCode::PermissionRequired,
+                "Child placement remains part of its fixed execution identity",
             ));
+        }
+        if let Some(origin) = &legacy_origin {
+            self.require_legacy_scope_absent(&session.id)?;
+            if session.location.is_some()
+                || session.primary_creation.is_some()
+                || session.working_dir.as_ref().map(PathBuf::from) != origin.working_dir
+            {
+                return Err(issue(
+                    IssueCode::Conflict,
+                    "Legacy adoption review no longer matches the Session",
+                ));
+            }
+        } else {
+            let location = session.location.as_ref().ok_or_else(|| {
+                issue(
+                    IssueCode::RecoveryRequired,
+                    "Legacy Session needs explicit adoption, not a location move",
+                )
+            })?;
+            // Dependent FIFO controls still name the exact expected revision.
+            if input.expected_session_revision < location.revision {
+                return Err(issue(
+                    IssueCode::Conflict,
+                    "Session location revision is stale",
+                ));
+            }
         }
         let prepared =
             self.prepare_primary_location(input.placement, Some(&input.cwd), operation)?;
@@ -95,6 +140,7 @@ impl WorkspaceService {
                 effective_revision: None,
                 notice_message: None,
                 issue: None,
+                legacy_origin,
             },
             target: prepared.location.cwd,
         };
@@ -183,15 +229,71 @@ impl WorkspaceService {
                 "Session location revision changed before application",
             ));
         }
+        if record.legacy_origin.is_some() {
+            return Err(issue(
+                IssueCode::Conflict,
+                "Adoption already has a managed binding",
+            ));
+        }
+        let mut prepared = self.prepare_reviewed_location(record)?;
+        prepared.location.initial_cwd = current.initial_cwd.clone();
+        prepared.location.revision = current
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| corrupt("Session location revision exhausted"))?;
+        Ok(prepared)
+    }
+
+    pub fn prepare_legacy_adoption(
+        &self,
+        record: &LocationChangeRecord,
+        session: &crate::session::Session,
+    ) -> Result<PreparedPrimaryLocation> {
+        let origin = record.legacy_origin.as_ref().ok_or_else(|| {
+            issue(
+                IssueCode::InvalidInput,
+                "A move cannot implicitly adopt a legacy Session",
+            )
+        })?;
+        if session.id != record.input.session
+            || session.location.is_some()
+            || session.primary_creation.is_some()
+            || session.isolated_child.is_some()
+            || session.working_dir.as_ref().map(PathBuf::from) != origin.working_dir
+            || record.input.expected_session_revision != 0
+        {
+            return Err(issue(
+                IssueCode::Conflict,
+                "Legacy Session changed since adoption review",
+            ));
+        }
+        let mut prepared = self.prepare_reviewed_location(record)?;
+        if let Some(cwd) = &origin.working_dir {
+            prepared.location.initial_cwd = cwd.clone();
+        }
+        // Missing historical cwd remains explicit in the adoption receipt.
+        Ok(prepared)
+    }
+
+    fn prepare_reviewed_location(
+        &self,
+        record: &LocationChangeRecord,
+    ) -> Result<PreparedPrimaryLocation> {
         let stored = read_change(&self.connection()?, record.operation)?
             .ok_or_else(|| issue(IssueCode::InvalidIdentity, "Unknown location change"))?;
+        if stored.record != *record {
+            return Err(issue(
+                IssueCode::Conflict,
+                "Location control differs from its authoritative intent",
+            ));
+        }
         if stored.record.state != LocationChangeState::Pending {
             return Err(issue(
                 IssueCode::RecoveryRequired,
                 "Location change is not pending",
             ));
         }
-        let mut prepared = self.prepare_primary_location(
+        let prepared = self.prepare_primary_location(
             record.input.placement,
             Some(&record.input.cwd),
             record.operation,
@@ -208,11 +310,6 @@ impl WorkspaceService {
                 "Reviewed location target was replaced or relocated",
             ));
         }
-        prepared.location.initial_cwd = current.initial_cwd.clone();
-        prepared.location.revision = current
-            .revision
-            .checked_add(1)
-            .ok_or_else(|| corrupt("Session location revision exhausted"))?;
         Ok(prepared)
     }
 

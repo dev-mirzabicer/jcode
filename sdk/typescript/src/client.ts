@@ -463,10 +463,11 @@ export class JcodeClient extends EventEmitter {
   }
 
   /** Publish one prepared primary. Retain the request identity for retry, then attach explicitly. */
-  private async requirePrimaryControl(location?: boolean): Promise<void> {
+  private async requirePrimaryControl(location?: boolean): Promise<number> {
     if (!this.supports("primary_control_v1")) throw new HarnessError("unsupported_capability", "Primary controls require primary_control_v1");
     const reply = await this.expectReply({req:"primary_control_probe"},"primary_control_capabilities");
     if (reply.ev !== "primary_control_capabilities" || (location === undefined ? reply.input_version !== 1 : reply.location_version !== 1 || (location && !reply.location_enabled))) throw new HarnessError("unsupported_capability", "Requested primary control is unsupported or staged");
+    return reply.legacy_adoption_version ?? 0;
   }
 
   async submitPrimaryInput(input: import("./protocol.js").PrimaryInputEnvelope): Promise<import("./protocol.js").PrimaryInputReceipt> {
@@ -491,10 +492,12 @@ export class JcodeClient extends EventEmitter {
   }
 
   async primaryLocation(command: import("./protocol.js").PrimaryLocationCommand): Promise<import("./protocol.js").PrimaryLocationResponse> {
-    await this.requirePrimaryControl(command.action === "change");
-    const expected = command.action === "change" ? command.request.request : command.operation;
+    const adoption = await this.requirePrimaryControl(command.action === "change" || command.action === "adopt_legacy");
+    if (command.action === "adopt_legacy" && adoption !== 1) throw new HarnessError("unsupported_capability", "Explicit legacy adoption requires legacy_adoption_version=1");
+    const expected = command.action === "change" || command.action === "adopt_legacy" ? command.request.request : command.operation;
+    const expectedSession = command.action === "change" || command.action === "adopt_legacy" ? command.request.session : undefined;
     const reply = await this.expectReply({req:"primary_location",command},"primary_location");
-    if (reply.ev !== "primary_location" || (reply.response.status === "state" && reply.response.record.operation !== expected)) throw new HarnessError("unexpected_reply","Primary location identity mismatch");
+    if (reply.ev !== "primary_location" || (reply.response.status === "state" && (reply.response.record.operation !== expected || (expectedSession !== undefined && reply.response.record.input.session !== expectedSession)))) throw new HarnessError("unexpected_reply","Primary location identity mismatch");
     return reply.response;
   }
 

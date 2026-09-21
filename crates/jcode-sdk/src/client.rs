@@ -665,7 +665,7 @@ impl JcodeClient {
         }
     }
 
-    fn require_primary_control(&self, location: Option<bool>) -> Result<()> {
+    fn require_primary_control(&self, location: Option<bool>) -> Result<u32> {
         if !self.supports("primary_control_v1") {
             return Err(Error::new(
                 ErrorKind::UnsupportedCapability,
@@ -677,12 +677,13 @@ impl JcodeClient {
                 input_version,
                 location_version,
                 location_enabled,
+                legacy_adoption_version,
             } if match location {
                 None => input_version == 1,
                 Some(change) => location_version == 1 && (!change || location_enabled),
             } =>
             {
-                Ok(())
+                Ok(legacy_adoption_version.unwrap_or_default())
             }
             _ => Err(Error::new(
                 ErrorKind::UnsupportedCapability,
@@ -770,12 +771,35 @@ impl JcodeClient {
         &self,
         command: jcode_harness_api::PrimaryLocationCommand,
     ) -> Result<jcode_harness_api::PrimaryLocationResponse> {
-        self.require_primary_control(Some(matches!(
+        let adoption = self.require_primary_control(Some(matches!(
             command,
             jcode_harness_api::PrimaryLocationCommand::Change { .. }
+                | jcode_harness_api::PrimaryLocationCommand::AdoptLegacy { .. }
         )))?;
+        if matches!(
+            &command,
+            jcode_harness_api::PrimaryLocationCommand::AdoptLegacy { .. }
+        ) && adoption != 1
+        {
+            return Err(Error::new(
+                ErrorKind::UnsupportedCapability,
+                "Explicit legacy adoption requires legacy_adoption_version=1",
+            ));
+        }
+        let expected_session = match &command {
+            jcode_harness_api::PrimaryLocationCommand::Change { request } => {
+                Some(request.session.clone())
+            }
+            jcode_harness_api::PrimaryLocationCommand::AdoptLegacy { request } => {
+                Some(request.session.clone())
+            }
+            _ => None,
+        };
         let expected = match &command {
             jcode_harness_api::PrimaryLocationCommand::Change { request } => {
+                request.request.to_string()
+            }
+            jcode_harness_api::PrimaryLocationCommand::AdoptLegacy { request } => {
                 request.request.to_string()
             }
             jcode_harness_api::PrimaryLocationCommand::Inspect { operation }
@@ -793,6 +817,9 @@ impl JcodeClient {
                 if match &response {
                     jcode_harness_api::PrimaryLocationResponse::State { record } => {
                         record.operation.to_string() == expected
+                            && expected_session
+                                .as_ref()
+                                .is_none_or(|session| record.input.session == *session)
                     }
                     jcode_harness_api::PrimaryLocationResponse::Rejected { .. } => true,
                 } =>

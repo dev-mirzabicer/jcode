@@ -41,8 +41,9 @@ pub use jcode_tool_types::inspection::{
     TranscriptRange,
 };
 pub use jcode_workspace_types::{
-    Issue as WorkspaceIssue, LocationChangeRecord, PrimaryLaunchRecord, PrimaryLaunchRequest,
-    PrimaryLaunchResponse, PrimaryLocationCommand, PrimaryLocationResponse, RequestId,
+    Issue as WorkspaceIssue, LegacyLocationAdoptionRequest, LegacyLocationOrigin,
+    LocationChangeRecord, PrimaryLaunchRecord, PrimaryLaunchRequest, PrimaryLaunchResponse,
+    PrimaryLocationCommand, PrimaryLocationResponse, RequestId,
 };
 pub use requests::*;
 pub use sockets::{api_socket_path, legacy_socket_path, runtime_dir};

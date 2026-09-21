@@ -202,6 +202,38 @@ rows unreconciled. Primary publication validation refreshes that index through
 its existing revisioned owner from current Session state. Pending operations
 invalidated by restore are not permission to repeat a historical move.
 
+## Explicit legacy adoption
+
+`primary_control_probe` separately advertises `legacy_adoption_version=1`.
+`primary_location` accepts `adopt_legacy` with the exact Session, request UUID,
+expected old working directory (or explicit unknown), catalog revision, placement
+and absolute new cwd. Both SDKs negotiate this capability and correlate the
+operation and target Session. A normal move cannot implicitly adopt an unbound
+Session. Adoption remains gated by `location_enabled`, not merely API availability.
+
+History inspection stays available without adoption. Once managed rollout is
+enabled, an unbound primary cannot dispatch inference until the explicit binding
+is committed. Adoption reuses the location intent, safe-boundary, complete-budget,
+Session checkpoint and derived-index owners. It appends one non-waking notice and
+preserves earlier history and existing frozen system, skill and Startup Context
+snapshots. The ordinary prerequisite restoration policy still owns genuinely
+missing historical snapshots.
+
+The receipt retains `legacy_origin.working_dir`. A missing old cwd stays unknown
+there and in the notice. The selected cwd then becomes the first known binding,
+not a reconstructed historical path. Stale reviews reject, pending adoption can
+be cancelled, and replay after checkpoint/index/reply loss adds no second notice.
+
+A missing managed binding is damage, not evidence of an unrestricted legacy
+Session. Launch receipts and contradictory derived-index history reject that
+downgrade and require authoritative state repair. The index never supplies
+permission by itself. Native effects validate publication in their original
+storage namespace without mutating the index or borrowing later ambient state.
+
+See [native write scope](dev/NATIVE_WRITE_SCOPE.md) for enforced effects and the
+explicit shell/external-tool limitations. This API does not activate the later
+workspace management UI or advertise a new agent administration tool.
+
 ## Verification boundary
 
 Mechanism tests use synthetic input and real isolated Session/catalog storage.

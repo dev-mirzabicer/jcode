@@ -525,3 +525,59 @@ fn launch_service_rejects_invalid_preparation_without_dispatch_or_session_and_re
         Ok(())
     })
 }
+
+#[test]
+#[cfg(target_os = "macos")]
+fn legacy_adoption_uses_the_real_idle_primary_control_without_inference() -> Result<()> {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir()?;
+    let _env = Env::new(temp.path());
+    crate::instruction::SystemPromptComposer::new().ensure_global_store()?;
+    std::fs::write(
+        crate::config::Config::path().unwrap(),
+        "[features]\nmanaged_primary_launch = false\n",
+    )?;
+    crate::config::Config::invalidate_cache();
+    tokio::runtime::Runtime::new()?.block_on(async {
+        let old = temp.path().join("old"); let next = temp.path().join("next");
+        std::fs::create_dir(&old)?;std::fs::create_dir(&next)?;
+        let old = old.canonicalize()?; let next = next.canonicalize()?;
+        let service = WorkspaceService::new(&crate::storage::durable_state_dir()); service.initialize(RequestId::new())?;
+        let EntityId::Location(target) = change(&service,OrganizationChange::RegisterLocation {name:"next".into(),path:next.clone(),registration:Registration::Standalone})?.targets[0] else { panic!() };
+        let provider = FixtureProvider::default();
+        let registry = crate::tool::Registry::new(Arc::new(provider.clone())).await;
+        let mut session = Session::create(None,None); session.working_dir = Some(old.to_string_lossy().into());
+        let (mut agent,_) = Agent::prepare_primary_session(Arc::new(provider.clone()),registry,session,StartupContextActivation::primary(StartupContextCaller::HarnessApi),AgentSelection::Default,false,InstructionRepositoryService::new())?;
+        agent.startup_context_session_mut().save()?;
+        let id = agent.session_id().to_string();
+        let input = LegacyLocationAdoptionRequest {request:RequestId::new(),session:id.clone(),expected_working_dir:Some(old.clone()),expected_catalog_revision:service.status()?.revision,placement:Placement::Standalone(target),cwd:next.clone()};
+        let host = Arc::new(PrimaryHost::default());
+        agent.primary_owner = Some(host.adopt_owner(&agent)?);
+        let agent = Arc::new(tokio::sync::Mutex::new(agent));
+        host.write().await.insert(id.clone(),agent.clone());
+        assert!(matches!(host.request_location(PrimaryLocationCommand::AdoptLegacy{request:input.clone()}).await,PrimaryLocationResponse::Rejected {issue} if issue.code == IssueCode::UnsupportedCapability));
+        std::fs::write(crate::config::Config::path().unwrap(),"[features]\nmanaged_primary_launch = true\n")?;
+        crate::config::Config::invalidate_cache();
+        // Inspection remains available. An unreviewed primary cannot dispatch.
+        let failure = agent.lock().await.run_once_capture("SYNTHETIC RETAINED LEGACY INPUT").await.unwrap_err();
+        assert!(failure.to_string().contains("Legacy primary requires explicit placement"));
+        assert_eq!(provider.0.load(Ordering::SeqCst),0);
+        let before = Session::load(&id)?;
+        let result = host.request_location(PrimaryLocationCommand::AdoptLegacy{request:input.clone()}).await;
+        let PrimaryLocationResponse::State {record} = result else { anyhow::bail!("adoption failed: {result:?}") };
+        assert_eq!(record.state,LocationChangeState::Complete);
+        assert!(host.processing(&id).is_none());
+        let after = Session::load(&id)?;
+        assert_eq!(after.working_dir.as_deref(),next.to_str());
+        assert_eq!(after.location.as_ref().unwrap().initial_cwd,old);
+        assert_eq!(after.system_prompt,before.system_prompt);
+        assert_eq!(after.startup_context,before.startup_context);
+        assert_eq!(after.messages.len(),before.messages.len()+1);
+        assert_eq!(serde_json::to_value(&after.messages[..before.messages.len()])?,serde_json::to_value(&before.messages)?);
+        assert_eq!(host.request_location(PrimaryLocationCommand::AdoptLegacy{request:input}).await,PrimaryLocationResponse::State {record});
+        assert_eq!(Session::load(&id)?.messages.len(),after.messages.len());
+        assert_eq!(provider.0.load(Ordering::SeqCst),0);
+        host.shutdown().await?;
+        Ok(())
+    })
+}

@@ -954,3 +954,62 @@ async fn native_scope_revocation_during_real_pre_tool_hook_prevents_the_effect()
     assert!(result.is_err());
     assert!(!target.exists());
 }
+
+#[tokio::test]
+async fn missing_managed_binding_cannot_downgrade_to_legacy_authority() {
+    let _guard = crate::storage::lock_test_env();
+    let mut f = ScopeFixture::new();
+    let location = f.session.location.clone().unwrap();
+    f.workspace
+        .reconcile_session_index(&SessionIndex {
+            session: f.session.id.clone(),
+            placement: location.placement,
+            session_revision: location.revision,
+            operation: location.last_operation.unwrap(),
+            active: true,
+            reconciled: true,
+        })
+        .unwrap();
+    f.session.location = None;
+    f.session.save().unwrap();
+    let target = f.b.join("no-downgrade");
+    assert!(
+        write::WriteTool
+            .execute(
+                json!({"file_path":target,"content":"forged legacy"}),
+                f.ctx()
+            )
+            .await
+            .is_err()
+    );
+    assert!(!target.exists());
+    assert_eq!(
+        f.workspace
+            .request_legacy_adoption(LegacyLocationAdoptionRequest {
+                request: RequestId::new(),
+                session: f.session.id.clone(),
+                expected_working_dir: f.session.working_dir.as_ref().map(PathBuf::from),
+                expected_catalog_revision: f.workspace.status().unwrap().revision,
+                placement: Placement::Standalone(f.b_id),
+                cwd: f.b.clone()
+            })
+            .unwrap_err()
+            .code,
+        IssueCode::RecoveryRequired
+    );
+    // A genuinely legacy identity remains supported while rollout is disabled.
+    let mut legacy = Session::create_with_id(
+        format!("session_real_legacy_{}", RequestId::new()),
+        None,
+        None,
+    );
+    legacy.working_dir = Some(f.a.to_string_lossy().into());
+    legacy.save().unwrap();
+    let mut ctx = f.ctx();
+    ctx.session_id = legacy.id;
+    write::WriteTool
+        .execute(json!({"file_path":target,"content":"genuine legacy"}), ctx)
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(target).unwrap(), "genuine legacy");
+}
