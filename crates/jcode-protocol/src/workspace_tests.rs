@@ -16,6 +16,7 @@ fn workspace_catalog_control_is_session_independent_and_roundtrips() {
     let capabilities = ServerEvent::WorkspaceCapabilities {
         id: 42,
         catalog_version: 1,
+        permissions_version: Some(1),
         managed_rollout: false,
     };
     let bytes = serde_json::to_vec(&capabilities).unwrap();
@@ -37,7 +38,7 @@ fn workspace_catalog_control_is_session_independent_and_roundtrips() {
 }
 
 #[test]
-fn catalog_cannot_decode_grant_approval_or_session_authority_mutations() {
+fn catalog_rejects_unreviewed_approval_and_session_authority_mutations() {
     for action in [
         "approve_grant",
         "close_checkout",
@@ -53,4 +54,39 @@ fn catalog_cannot_decode_grant_approval_or_session_authority_mutations() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn permissions_negotiate_without_enabling_rollout_or_accepting_forged_authority() {
+    use jcode_workspace_types::{
+        Audience, GrantChange, LocationId, PermissionRequest, ProjectId, WriteTarget,
+    };
+    let request = WorkspaceRequest::Permissions {
+        request: PermissionRequest::Review {
+            expected_revision: 2,
+            change: GrantChange::Issue {
+                audience: Audience::Project(ProjectId::new()),
+                target: WriteTarget::Root(LocationId::new()),
+                proposal: None,
+            },
+        },
+    };
+    let mut value = serde_json::to_value(&request).unwrap();
+    assert_eq!(
+        serde_json::from_value::<WorkspaceRequest>(value.clone()).unwrap(),
+        request
+    );
+    value["request"]["trusted"] = serde_json::json!(true);
+    assert!(serde_json::from_value::<WorkspaceRequest>(value).is_err());
+    let old = serde_json::json!({"type":"workspace_capabilities","id":1,"catalog_version":1,"managed_rollout":false});
+    assert!(matches!(
+        serde_json::from_value::<ServerEvent>(old).unwrap(),
+        ServerEvent::WorkspaceCapabilities {
+            permissions_version: None,
+            managed_rollout: false,
+            ..
+        }
+    ));
+    let forged = serde_json::json!({"action":"propose","session":"s","request":RequestId::new(),"target":{"kind":"root","id":LocationId::new()},"reason":"synthetic","audience":{"kind":"project","id":ProjectId::new()}});
+    assert!(serde_json::from_value::<PermissionRequest>(forged).is_err());
 }

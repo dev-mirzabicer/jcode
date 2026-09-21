@@ -8,6 +8,8 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 mod backup;
+mod grants;
+pub use grants::WorkspaceClientAuthority;
 mod organization;
 mod portable;
 mod primary_controls;
@@ -22,9 +24,12 @@ pub use primary_controls::PrimaryControlLease;
 pub use primary_launch::PrimaryLaunchLease;
 pub use primary_location::PreparedPrimaryLocation;
 #[cfg(test)]
+mod permission_tests;
+#[cfg(test)]
 mod process_tests;
 mod query;
 mod restore;
+mod scope;
 mod storage;
 #[cfg(test)]
 mod tests;

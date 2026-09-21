@@ -1,6 +1,8 @@
 //! Workspace contracts contain no storage, filesystem execution or UI policy.
 mod primary;
 pub use primary::*;
+mod permissions;
+pub use permissions::*;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -368,7 +370,7 @@ pub enum GrantState {
     Active,
     Revoked,
 }
-/// Definitions only in the catalog foundation. Enforcement is a separate capability.
+/// A definition is not authority without a same-installation authorization.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GrantDefinition {
@@ -378,6 +380,8 @@ pub struct GrantDefinition {
     pub state: GrantState,
     pub revision: Revision,
     pub copied_from: Option<GrantId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization: Option<GrantAuthorization>,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -386,6 +390,12 @@ pub struct AccessProposal {
     pub session: String,
     pub target: WriteTarget,
     pub revision: Revision,
+    #[serde(default)]
+    pub state: AccessProposalState,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant: Option<GrantId>,
 }
 
 /// A projection of a committed Session, never a replacement Session authority.
@@ -453,6 +463,9 @@ pub struct RestoreReview {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkspaceRequest {
+    Permissions {
+        request: PermissionRequest,
+    },
     Status {},
     Initialize {
         request: RequestId,
@@ -512,6 +525,7 @@ pub enum WorkspaceRequest {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum WorkspaceResponse {
+    Permissions(Box<PermissionResponse>),
     Status(CatalogStatus),
     Page(Page),
     Entity(Entity),

@@ -119,6 +119,7 @@ fn cross_project_grant_definitions_roundtrip_without_authorizing_external_target
         state: GrantState::Active,
         revision: 1,
         copied_from: None,
+        authorization: None,
     };
     portable::save_grant(&source.connection().unwrap(), &grant).unwrap();
     let export = source
@@ -553,6 +554,7 @@ fn portable_offline_locations_and_reviewed_remap_do_not_create_paths_or_activate
         state: GrantState::Active,
         revision: 1,
         copied_from: None,
+        authorization: None,
     };
     portable::save_grant(&source.connection().unwrap(), &grant).unwrap();
     let export = source
@@ -755,6 +757,7 @@ fn portable_import_collision_new_identity_and_atomic_rollback() {
         state: GrantState::Active,
         revision: 1,
         copied_from: None,
+        authorization: None,
     };
     portable::save_grant(&source.connection().unwrap(), &grant).unwrap();
     source
@@ -995,6 +998,7 @@ fn archive_keeps_active_sessions_and_retirement_keeps_references() {
         state: GrantState::Active,
         revision: 1,
         copied_from: None,
+        authorization: None,
     };
     portable::save_grant(&service.connection().unwrap(), &grant).unwrap();
     let index = SessionIndex {

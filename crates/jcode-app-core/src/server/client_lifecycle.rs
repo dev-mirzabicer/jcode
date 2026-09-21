@@ -547,6 +547,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
     let writer = Arc::new(Mutex::new(writer));
     let mut line = String::new();
 
+    let client_connection_id = id::new_id("conn");
     let mut primary_stream_enabled = false;
     let initial_request = loop {
         line.clear();
@@ -780,6 +781,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
                         &ServerEvent::WorkspaceCapabilities {
                             id: *id,
                             catalog_version: 1,
+                            permissions_version: Some(1),
                             managed_rollout: false,
                         },
                     )
@@ -787,7 +789,9 @@ pub(super) async fn handle_client_with_instruction_repositories(
                     continue;
                 }
                 if let Request::Workspace { id, request } = &request {
-                    let response = crate::workspace::dispatch(*request.clone()).await;
+                    let response =
+                        crate::workspace::dispatch(*request.clone(), client_connection_id.clone())
+                            .await;
                     write_direct_event(
                         &writer,
                         &ServerEvent::WorkspaceResponse {
@@ -1126,7 +1130,6 @@ pub(super) async fn handle_client_with_instruction_repositories(
         target_available,
         client_start.elapsed().as_millis()
     ));
-    let client_connection_id = id::new_id("conn");
     let connected_at = Instant::now();
     let (disconnect_tx, mut disconnect_rx) = mpsc::unbounded_channel::<()>();
 
@@ -3670,13 +3673,15 @@ pub(super) async fn handle_client_with_instruction_repositories(
                 let _ = client_event_tx.send(ServerEvent::WorkspaceCapabilities {
                     id,
                     catalog_version: 1,
+                    permissions_version: Some(1),
                     managed_rollout: false,
                 });
             }
             Request::Workspace { id, request } => {
                 let event_tx = client_event_tx.clone();
+                let client = client_connection_id.clone();
                 inspection_requests.spawn(async move {
-                    let response = crate::workspace::dispatch(*request).await;
+                    let response = crate::workspace::dispatch(*request, client).await;
                     let _ = event_tx.send(ServerEvent::WorkspaceResponse {
                         id,
                         response: Box::new(response),

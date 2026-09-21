@@ -1246,6 +1246,8 @@ pub enum ServerEvent {
     WorkspaceCapabilities {
         id: u64,
         catalog_version: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        permissions_version: Option<u32>,
         managed_rollout: bool,
     },
     #[serde(rename = "workspace_response")]

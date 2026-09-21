@@ -2,10 +2,15 @@
 //! Catalog administration does not create a provisional inference Session.
 pub use jcode_base::workspace::*;
 
-pub async fn dispatch(request: WorkspaceRequest) -> WorkspaceResponse {
+pub async fn dispatch(request: WorkspaceRequest, client: String) -> WorkspaceResponse {
     let root = crate::storage::durable_state_dir();
-    match tokio::task::spawn_blocking(move || dispatch_with(&WorkspaceService::new(&root), request))
-        .await
+    match tokio::task::spawn_blocking(move || {
+        match WorkspaceClientAuthority::authenticated(client) {
+            Ok(client) => dispatch_with(&WorkspaceService::new(&root), request, &client),
+            Err(error) => WorkspaceResponse::Error(error),
+        }
+    })
+    .await
     {
         Ok(response) => response,
         Err(error) => WorkspaceResponse::Error(Issue {
@@ -16,9 +21,15 @@ pub async fn dispatch(request: WorkspaceRequest) -> WorkspaceResponse {
         }),
     }
 }
-pub fn dispatch_with(service: &WorkspaceService, request: WorkspaceRequest) -> WorkspaceResponse {
+pub fn dispatch_with(
+    service: &WorkspaceService,
+    request: WorkspaceRequest,
+    client: &WorkspaceClientAuthority,
+) -> WorkspaceResponse {
     use WorkspaceResponse as Response;
     let result = match request {
+        WorkspaceRequest::Permissions { request } => dispatch_permissions(service, request, client)
+            .map(|value| Response::Permissions(Box::new(value))),
         WorkspaceRequest::Status {} => service.status().map(Response::Status),
         WorkspaceRequest::Initialize { request } => {
             service.initialize(request).map(Response::Status)
@@ -78,4 +89,51 @@ pub fn dispatch_with(service: &WorkspaceService, request: WorkspaceRequest) -> W
             .map(Response::Receipt),
     };
     result.unwrap_or_else(Response::Error)
+}
+
+fn dispatch_permissions(
+    service: &WorkspaceService,
+    request: PermissionRequest,
+    client: &WorkspaceClientAuthority,
+) -> Result<PermissionResponse> {
+    use PermissionResponse as Response;
+    let load = |id: &str| {
+        crate::session::Session::load_startup_stub(id).map_err(|error| Issue {
+            code: IssueCode::RecoveryRequired,
+            detail: format!("Read authoritative Session: {error:#}"),
+        })
+    };
+    match request {
+        PermissionRequest::Scope { session } => service
+            .session_write_scope(&load(&session)?)
+            .map(Response::Scope),
+        PermissionRequest::Review {
+            expected_revision,
+            change,
+        } => service
+            .review_grant_change(expected_revision, change)
+            .map(Response::Review),
+        PermissionRequest::Apply { request, review } => service
+            .apply_grant_change(client, request, review)
+            .map(Response::Mutation),
+        PermissionRequest::Grant { grant } => service.inspect_grant(grant).map(Response::Grant),
+        PermissionRequest::Propose {
+            session,
+            request,
+            target,
+            reason,
+        } => service
+            .request_access(&load(&session)?, request, target, reason)
+            .map(Response::Mutation),
+        PermissionRequest::Proposal { proposal } => service
+            .inspect_access_proposal(proposal)
+            .map(Response::Proposal),
+        PermissionRequest::List {
+            query,
+            after,
+            limit,
+        } => service
+            .list_permissions(query, after, limit)
+            .map(Response::Page),
+    }
 }

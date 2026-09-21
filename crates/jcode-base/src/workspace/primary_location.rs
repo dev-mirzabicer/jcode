@@ -1,4 +1,5 @@
 //! Read-only launch preparation over the existing catalog and physical resolver.
+use super::scope::ordinary_member;
 use super::*;
 use crate::session::StoredSessionLocation;
 
@@ -108,26 +109,7 @@ impl WorkspaceService {
     }
 }
 
-fn ordinary_member(
-    connection: &Connection,
-    placement: Placement,
-    location: &Location,
-) -> Result<bool> {
-    Ok(match placement {
-        Placement::Checkout(id) | Placement::Directory(id) | Placement::Standalone(id) => {
-            id == location.id
-        }
-        Placement::WorkArea(id) => location.home == Some(Home::WorkArea(id)),
-        Placement::Project(id) => match location.home {
-            Some(Home::Project(home)) => home == id,
-            Some(Home::WorkArea(area)) => {
-                matches!(entity(connection,EntityId::WorkArea(area))?,Entity::WorkArea(area) if area.project==id)
-            }
-            None => false,
-        },
-    })
-}
-fn location_issue(error: crate::location::volume::LocationError) -> Issue {
+pub(super) fn location_issue(error: crate::location::volume::LocationError) -> Issue {
     use crate::location::volume::LocationIssue;
     let code = match error.kind {
         LocationIssue::OfflineVolume

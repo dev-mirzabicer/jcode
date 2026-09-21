@@ -152,6 +152,43 @@ An old server must be probed before sending catalog requests.
 There is no alternative full workspace CLI or new agent-facing permission tool.
 The later basic management client and final SDK reconciliation consume these owners.
 
+### Staged permission catalog
+
+`workspace_capabilities.permissions_version=1` separately negotiates the
+permission catalog API. It does not enable managed rollout, mandatory legacy
+adoption, a workspace agent tool, or filesystem enforcement by itself.
+Older capabilities omit this field and must not be assumed to support it.
+
+The nested `permissions` request supports scope inspection, revision-bound grant
+review/apply, exact grant and proposal inspection, paged lists and access
+proposals. A grant review names its audience and target. Apply records the
+authenticated connection identity supplied by the server, not a client-provided
+`trusted` flag. Proposals name their actual Session and never grant access.
+Approving a proposal binds its exact pending Session audience and target.
+
+Scope resolution uses the authoritative Session placement and current catalog
+relationships. Cwd does not confer scope. Project and area grants apply to
+existing and future descendants, while member targets follow current roots
+without inheriting the target's grants. A checkout or directory session does not
+inherit an ancestor's ordinary scope. Archive is not revocation. Unavailable,
+replaced, closed and retired roots remain inspectable with an issue instead of
+being presented as writable.
+
+Active grant definitions require same-installation authorization provenance.
+Old foundation definitions without that provenance confer no authority. Portable
+imports remain disabled until a fresh explicit review. Revocation changes
+catalog authority transactionally. Inspection of explanatory Session prose is
+never an authorization source. Native mutation admission and new-context grant
+carry are separate consumers of this service, not implied by catalog availability.
+
+Permission mutations retain their result in the existing operation/receipt
+tables. Same request and reviewed intent can be retried across connections.
+Replay returns the original operation, even if the grant has since been revoked,
+and cannot reactivate it. Interrupted post-commit backup finalization resumes
+through the existing snapshot owner without repeating the grant mutation.
+List cursors bind the complete filter and catalog revision and report totals.
+The 200-record transport page bound is not an organizational member limit.
+
 ## Verification
 
 Focused mechanism and real-store checks are in `workspace::tests` and
