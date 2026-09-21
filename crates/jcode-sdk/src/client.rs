@@ -678,6 +678,7 @@ impl JcodeClient {
                 location_version,
                 location_enabled,
                 legacy_adoption_version,
+                ..
             } if match location {
                 None => input_version == 1,
                 Some(change) => location_version == 1 && (!change || location_enabled),
@@ -764,6 +765,74 @@ impl JcodeClient {
                 Ok((receipt, *original))
             }
             other => Err(unexpected("primary_input_detail", &other)),
+        }
+    }
+
+    fn require_context_scope(&self, mutation: bool) -> Result<()> {
+        if !self.supports("primary_control_v1") {
+            return Err(Error::new(
+                ErrorKind::UnsupportedCapability,
+                "Scoped contexts require primary_control_v1",
+            ));
+        }
+        match self.request_ok(ApiRequest::PrimaryControlProbe)?.event {
+            ApiEvent::PrimaryControlCapabilities {
+                context_scope_version: Some(1),
+                location_enabled,
+                ..
+            } if !mutation || location_enabled => Ok(()),
+            _ => Err(Error::new(
+                ErrorKind::UnsupportedCapability,
+                "Scoped contexts are unsupported or staged",
+            )),
+        }
+    }
+    pub fn review_grant_carry(&self, session: &str) -> Result<jcode_harness_api::GrantCarryReview> {
+        self.require_context_scope(false)?;
+        match self
+            .request_ok(ApiRequest::GrantCarryReview {
+                session: session.into(),
+            })?
+            .event
+        {
+            ApiEvent::GrantCarryReview { review } if review.source == session => Ok(review),
+            other => Err(unexpected("grant_carry_review", &other)),
+        }
+    }
+    pub fn create_scoped_context(
+        &self,
+        session_id: &str,
+        kind: jcode_harness_api::NewContextKind,
+        grant_carry: jcode_harness_api::GrantCarryChoice,
+    ) -> Result<String> {
+        self.require_context_scope(true)?;
+        match self
+            .request_ok(ApiRequest::ScopedContext {
+                session_id: session_id.into(),
+                kind,
+                grant_carry,
+            })?
+            .event
+        {
+            ApiEvent::ScopedContextCreated {
+                source_session,
+                session_id: target,
+                kind: actual,
+            } if source_session == session_id
+                && actual == kind
+                && !target.is_empty()
+                && target != session_id =>
+            {
+                Ok(target)
+            }
+            ApiEvent::ScopedContextRejected {
+                source_session,
+                issue,
+            } if source_session == session_id => Err(Error::new(
+                ErrorKind::PrimaryLaunch(issue.clone()),
+                issue.to_string(),
+            )),
+            other => Err(unexpected("scoped_context_created", &other)),
         }
     }
 

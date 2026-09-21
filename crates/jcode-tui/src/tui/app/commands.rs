@@ -462,44 +462,37 @@ pub(super) fn create_transfer_session_from_parent(
     parent: &crate::session::Session,
     summary: Option<String>,
 ) -> anyhow::Result<(String, String)> {
-    let todos = crate::todo::load_todos(parent_session_id).unwrap_or_default();
-    let mut child = crate::session::Session::create(Some(parent_session_id.to_string()), None);
-    child.messages.clear();
-    child.compaction = None;
-    child.context_view = Default::default();
-    child.working_dir = parent.working_dir.clone();
-    match summary {
-        Some(summary) => {
-            if !child.append_transfer_handoff(parent_session_id, &summary)? {
-                anyhow::bail!("transfer summary was empty; refusing to create a contextless child");
-            }
-        }
-        None if !parent.messages.is_empty() => {
-            anyhow::bail!("transfer produced no readable summary for a non-empty parent session");
-        }
-        None => {}
-    }
-    child.working_dir = parent.working_dir.clone();
-    child.model = parent.model.clone();
-    child.provider_key = parent.provider_key.clone();
-    child.route_api_method = parent.route_api_method.clone();
-    child.subagent_model = parent.subagent_model.clone();
-    child.improve_mode = parent.improve_mode;
-    child.autoreview_enabled = parent.autoreview_enabled;
-    child.autojudge_enabled = parent.autojudge_enabled;
-    child.is_canary = parent.is_canary;
-    child.testing_build = parent.testing_build.clone();
-    child.status = crate::session::SessionStatus::Closed;
-    child.provider_session_id = None;
-    child.save()?;
-    crate::todo::save_todos(&child.id, &todos)?;
-    Ok((child.id.clone(), child.display_name().to_string()))
+    create_transfer_session_with_grants(parent_session_id, parent, summary, None)
+}
+
+pub(super) fn create_transfer_session_with_grants(
+    parent_session_id: &str,
+    parent: &crate::session::Session,
+    summary: Option<String>,
+    choice: Option<crate::workspace::GrantCarryChoice>,
+) -> anyhow::Result<(String, String)> {
+    anyhow::ensure!(
+        parent.id == parent_session_id,
+        "Transfer source identity mismatch"
+    );
+    crate::primary::prepare_transfer_session(
+        parent,
+        &crate::instruction::InstructionRepositoryService::new(),
+        summary,
+        choice,
+    )
 }
 
 async fn prepare_transfer_session_local(
     mut parent: crate::session::Session,
     provider: std::sync::Arc<dyn crate::provider::Provider>,
 ) -> anyhow::Result<super::PreparedTransferSession> {
+    let workspace = crate::workspace::WorkspaceService::new(&crate::storage::durable_state_dir());
+    let _scope = workspace.prepare_context_scope(
+        &parent,
+        None,
+        &crate::workspace::WorkspaceClientAuthority::authenticated("local-primary-context")?,
+    )?;
     let messages = parent.projected_messages_for_provider()?;
     let summary = crate::transfer_handoff::build_transfer_handoff_summary(
         provider,

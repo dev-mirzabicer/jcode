@@ -1281,3 +1281,184 @@ fn workflow_split_renders_before_creation_and_uses_one_parent_snapshot() {
         serde_json::to_value(&parent.messages).unwrap()
     );
 }
+
+#[tokio::test]
+#[cfg(target_os = "macos")]
+async fn split_and_transfer_require_reviewed_carry_and_keep_context_semantics() -> Result<()> {
+    use crate::workspace::*;
+    let _home = crate::auth::test_sandbox::AuthTestSandbox::new()?;
+    let work = tempfile::tempdir()?;
+    crate::instruction::SystemPromptComposer::new().ensure_global_store()?;
+    let service = WorkspaceService::new(&crate::storage::durable_state_dir());
+    service.initialize(RequestId::new())?;
+    let mut roots = Vec::new();
+    for name in ["a", "b"] {
+        let path = work.path().join(name);
+        std::fs::create_dir(&path)?;
+        let path = path.canonicalize()?;
+        let review = service.review_organization_change(
+            service.status()?.revision,
+            OrganizationChange::RegisterLocation {
+                name: name.into(),
+                path: path.clone(),
+                registration: Registration::Standalone,
+            },
+        )?;
+        let EntityId::Location(id) = service
+            .apply_organization_change(RequestId::new(), review.id)?
+            .targets[0]
+        else {
+            panic!()
+        };
+        roots.push((id, path));
+    }
+    let mut parent = crate::session::Session::create(None, None);
+    let prepared = service.prepare_primary_location(
+        Placement::Standalone(roots[0].0),
+        Some(&roots[0].1),
+        OperationId::new(),
+    )?;
+    parent.location = Some(prepared.location.clone());
+    parent.working_dir = Some(roots[0].1.to_string_lossy().into());
+    drop(prepared);
+    parent.install_system_prompt(crate::session::StoredSystemPromptState {
+        text: "SYNTHETIC FROZEN".into(),
+        active_agent: crate::session::StoredAgentReference {
+            scope: crate::instruction::InstructionScope::Global,
+            id: "jcode".into(),
+            display_name: "Fixture".into(),
+        },
+        first_provider_dispatch_at: None,
+        active_transition_message_id: None,
+    });
+    parent.active_skill = Some(crate::session::StoredActiveSkill {
+        skill_id: "synthetic".into(),
+        rendered_text: "SYNTHETIC SKILL".into(),
+    });
+    parent.add_user_message_with_origin(
+        vec![ContentBlock::Text {
+            text: "SYNTHETIC SOURCE".into(),
+            cache_control: None,
+        }],
+        None,
+        None,
+    )?;
+    parent.reasoning_effort = Some("high".into());
+    parent.save()?;
+    let review = service.review_grant_change(
+        service.status()?.revision,
+        GrantChange::Issue {
+            audience: Audience::Session(parent.id.clone()),
+            target: WriteTarget::Root(roots[1].0),
+            proposal: None,
+        },
+    )?;
+    let grant = service
+        .apply_grant_change(
+            &WorkspaceClientAuthority::authenticated("test-human")?,
+            RequestId::new(),
+            review.id,
+        )?
+        .grant
+        .unwrap();
+    let repositories = crate::instruction::InstructionRepositoryService::new();
+    assert!(clone_split_session(&parent.id).is_err());
+    assert!(
+        create_transfer_child_session(
+            &parent.id,
+            &parent,
+            &repositories,
+            Some("SYNTHETIC SUMMARY".into())
+        )
+        .is_err()
+    );
+    let registry = Registry::new(Arc::new(MockProvider)).await;
+    for kind in [
+        NewContextKind::Split,
+        NewContextKind::Transfer,
+        NewContextKind::Clear,
+    ] {
+        for carry in [true, false] {
+            let review = service.review_grant_carry(&parent.id)?;
+            let choice = Some(GrantCarryChoice {
+                review: review.id,
+                carry,
+            });
+            let (id, _) = match kind {
+                NewContextKind::Split => super::clone_split_parent_with_grants(&parent, choice)?,
+                NewContextKind::Clear => {
+                    let created = crate::primary::prepare_local_clear_session(
+                        &parent,
+                        &repositories,
+                        choice,
+                    )?;
+                    (created.id.clone(), created.display_name().to_string())
+                }
+                _ => super::create_transfer_child_session_with_grants(
+                    &parent.id,
+                    &parent,
+                    &repositories,
+                    Some("SYNTHETIC SUMMARY".into()),
+                    choice,
+                )?,
+            };
+            let child = crate::session::Session::load(&id)?;
+            assert_eq!(
+                child.parent_id.as_deref(),
+                (kind != NewContextKind::Clear).then_some(parent.id.as_str())
+            );
+            assert_eq!(
+                child.location.as_ref().unwrap().placement,
+                parent.location.as_ref().unwrap().placement
+            );
+            assert!(child.scope_copy.is_some());
+            assert_eq!(child.reasoning_effort, parent.reasoning_effort);
+            let copies = service
+                .session_write_scope(&child)?
+                .grants
+                .into_iter()
+                .filter(|g| g.copied_from == Some(grant.id))
+                .count();
+            assert_eq!(copies, usize::from(carry));
+            if kind == NewContextKind::Split {
+                assert_eq!(child.system_prompt, parent.system_prompt);
+                assert_eq!(child.active_skill, parent.active_skill);
+                assert_eq!(child.startup_context, parent.startup_context);
+                assert_eq!(
+                    serde_json::to_value(&child.messages[..parent.messages.len()])?,
+                    serde_json::to_value(&parent.messages)?
+                );
+            } else {
+                assert!(child.active_skill.is_none());
+                assert!(child.startup_context.is_some());
+                assert_eq!(child.context_view, Default::default());
+            }
+            let path = roots[1].1.join(format!("{id}.txt"));
+            let ctx = crate::tool::ToolContext {
+                session_id: id,
+                message_id: "scope".into(),
+                tool_call_id: "write".into(),
+                working_dir: Some(roots[0].1.clone()),
+                stdin_request_tx: None,
+                graceful_shutdown_signal: None,
+                execution_mode: crate::tool::ToolExecutionMode::Direct,
+                invocation: Default::default(),
+            };
+            let result = registry
+                .execute(
+                    "write",
+                    serde_json::json!({"file_path":path,"content":"copied scope"}),
+                    ctx,
+                )
+                .await;
+            assert_eq!(result.is_ok(), carry, "{kind:?}, carry={carry}: {result:?}");
+        }
+    }
+    let original = crate::session::Session::load(&parent.id)?;
+    assert_eq!(
+        serde_json::to_value(original.messages)?,
+        serde_json::to_value(parent.messages)?
+    );
+    assert_eq!(service.inspect_grant(grant.id)?.state, GrantState::Active);
+    Ok(())
+}

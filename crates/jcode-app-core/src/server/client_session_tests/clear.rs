@@ -139,6 +139,7 @@ async fn handle_clear_session_replaces_runtime_handles_and_updates_shutdown_regi
     let source_before = serde_json::to_vec(source.lock().await.messages())?;
     let agent = handle_clear_session(
         7,
+        None,
         &mut client_session_id,
         "conn_clear",
         &source,

@@ -37,6 +37,7 @@ const REQUIRES_ATTACH: &[&str] = &[
     "soft_interrupt",
     "cancel_soft_interrupts",
     "clear",
+    "scoped_context",
     "rewind",
     "rewind_undo",
     "get_history",
@@ -567,11 +568,33 @@ impl BridgeState {
                     "include_instructions": request["include_instructions"].as_bool().unwrap_or(false),
                 }))]
             }
+            "grant_carry_review" => {
+                let session = match request["session"].as_str() {
+                    Some(id) if !id.is_empty() => id,
+                    _ => {
+                        return Self::error_reply(
+                            api_id,
+                            ErrorCode::InvalidRequest,
+                            "Carry review requires a source Session",
+                        );
+                    }
+                };
+                let id = self.legacy_id();
+                self.pending_simple.push((
+                    id,
+                    api_id,
+                    SimpleKind::PrimaryControl("grant_carry_review"),
+                ));
+                vec![Outbound::Legacy(
+                    json!({"type":"workspace","id":id,"request":{"action":"permissions","request":{"action":"review_carry","session":session}}}),
+                )]
+            }
             "primary_control_probe"
             | "primary_input"
             | "primary_input_inspect"
             | "primary_input_read"
-            | "primary_location" => {
+            | "primary_location"
+            | "scoped_context" => {
                 let typed = match serde_json::from_value::<jcode_harness_api::ApiRequest>(
                     request.clone(),
                 ) {
@@ -591,11 +614,15 @@ impl BridgeState {
                     "primary_input" | "primary_input_inspect" => "primary_input_receipt",
                     "primary_input_read" => "primary_input_detail",
                     "primary_location" => "primary_location_response",
+                    "scoped_context" => "scoped_context_created",
                     _ => unreachable!(),
                 };
                 let id = self.legacy_id();
                 let body = wire.as_object_mut().expect("typed request object");
                 body.remove("req");
+                if kind == "scoped_context" {
+                    body.remove("session_id");
+                }
                 body.insert("type".into(), json!(kind));
                 body.insert("id".into(), json!(id));
                 self.pending_simple
@@ -1423,12 +1450,49 @@ impl BridgeState {
                     },
                 )]
             }
+            "workspace_response" => {
+                let id = event["id"].as_u64().unwrap_or_default();
+                let Some(api_id) =
+                    self.take_simple(id, SimpleKind::PrimaryControl("grant_carry_review"))
+                else {
+                    return vec![];
+                };
+                let response = &event["response"];
+                let result = if response["kind"] == "permissions"
+                    && response["value"]["kind"] == "carry_review"
+                {
+                    serde_json::from_value::<jcode_harness_api::GrantCarryReview>(
+                        response["value"]["value"].clone(),
+                    )
+                    .map(|review| ApiEvent::GrantCarryReview { review })
+                } else {
+                    return vec![ServerFrame::reply(
+                        api_id,
+                        ApiEvent::Error {
+                            code: ErrorCode::InvalidRequest,
+                            message: response["value"]["detail"]
+                                .as_str()
+                                .unwrap_or("Invalid carry review response")
+                                .into(),
+                        },
+                    )];
+                };
+                vec![ServerFrame::reply(
+                    api_id,
+                    result.unwrap_or_else(|error| ApiEvent::Error {
+                        code: ErrorCode::Internal,
+                        message: format!("Invalid carry review: {error}"),
+                    }),
+                )]
+            }
             "primary_control_capabilities"
             | "primary_input_receipt"
             | "primary_input_detail"
-            | "primary_location_response" => {
+            | "primary_location_response"
+            | "scoped_context_created"
+            | "scoped_context_rejected" => {
                 let id = event["id"].as_u64().unwrap_or(0);
-                let Some(index) = self.pending_simple.iter().position(|(legacy,_,kind)| *legacy == id && matches!(kind,SimpleKind::PrimaryControl(expected) if Some(*expected) == event["type"].as_str())) else { return vec![]; };
+                let Some(index) = self.pending_simple.iter().position(|(legacy,_,kind)| *legacy == id && matches!(kind,SimpleKind::PrimaryControl(expected) if (Some(*expected) == event["type"].as_str() || (*expected=="scoped_context_created" && event["type"]=="scoped_context_rejected")))) else { return vec![]; };
                 let (_, api_id, _) = self.pending_simple.remove(index);
                 let mut wire = event.clone();
                 let kind = if event["type"] == "primary_location_response" {

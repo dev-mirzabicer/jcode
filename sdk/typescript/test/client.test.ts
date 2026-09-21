@@ -869,3 +869,24 @@ test("legacy adoption negotiates explicitly and rejects foreign session replies"
     } finally { client.close(); await server.close(); }
   }
 });
+
+test("scoped contexts require explicit negotiated carry and exact reply targets",async()=>{
+  const review:import("../src/protocol.js").GrantCarryReview={id:"12a99e11-e967-4a1e-a47c-000000000005",source:"source",session_revision:1,catalog_revision:2,direct_grants:[]};
+  for(const [version,foreign] of [[undefined,false],[1,false],[1,true]] as const) {
+    const server=await startMockHarness({capabilities:["primary_control_v1"],onRequest(frame,send){
+      const header={v:1,reply_to:frame.id};
+      if(frame.req==="primary_control_probe")send({...header,ev:"primary_control_capabilities",input_version:1,location_version:1,location_enabled:true,context_scope_version:version});
+      else if(frame.req==="grant_carry_review"){assert.equal(version,1);send({...header,ev:"grant_carry_review",review});}
+      else if(frame.req==="scoped_context" && !frame.grant_carry.carry) send({...header,ev:"scoped_context_rejected",source_session:frame.session_id,issue:{code:"conflict",detail:"synthetic stale review"}});
+      else if(frame.req==="scoped_context"){assert.equal(version,1);assert.deepEqual(frame.grant_carry,{review:review.id,carry:true});send({...header,ev:"scoped_context_created",source_session:foreign?"foreign":"source",session_id:"target",kind:frame.kind});}
+      else assert.fail("Unexpected scoped operation");
+    }});
+    const client=await JcodeClient.connect({socketPath:server.socketPath});
+    try {
+      if(version===undefined){await assert.rejects(()=>client.reviewGrantCarry("source"),(e:unknown)=>e instanceof HarnessError && e.code==="unsupported_capability");continue;}
+      assert.deepEqual(await client.reviewGrantCarry("source"),review);
+      await assert.rejects(()=>client.createScopedContext("source","clear",{review:review.id,carry:false}),(e:unknown)=>e instanceof HarnessError && e.code==="primary_launch");
+      for(const kind of ["clear","split","transfer"] as const){const invoke=()=>client.createScopedContext("source",kind,{review:review.id,carry:true});if(foreign)await assert.rejects(invoke,(e:unknown)=>e instanceof HarnessError && e.code==="unexpected_reply");else assert.equal(await invoke(),"target");}
+    } finally {client.close();await server.close();}
+  }
+});

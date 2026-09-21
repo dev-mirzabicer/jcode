@@ -12,6 +12,12 @@ pub struct PreparedPrimaryLocation {
     _root_lease: RootLease,
 }
 
+enum PreparationScope<'a> {
+    Placement,
+    Session(&'a str),
+    Carry(&'a ContextScopePlan),
+}
+
 impl WorkspaceService {
     /// Resolve an explicitly chosen cwd. Organization never supplies a guessed
     /// command directory and this operation creates no directory or clone.
@@ -20,6 +26,42 @@ impl WorkspaceService {
         placement: Placement,
         cwd: Option<&Path>,
         operation: OperationId,
+    ) -> Result<PreparedPrimaryLocation> {
+        self.prepare_location(placement, cwd, operation, PreparationScope::Placement)
+    }
+    pub fn prepare_session_location(
+        &self,
+        session: &str,
+        placement: Placement,
+        cwd: Option<&Path>,
+        operation: OperationId,
+    ) -> Result<PreparedPrimaryLocation> {
+        self.prepare_location(
+            placement,
+            cwd,
+            operation,
+            PreparationScope::Session(session),
+        )
+    }
+    pub fn prepare_context_location(
+        &self,
+        plan: &ContextScopePlan,
+        operation: OperationId,
+    ) -> Result<PreparedPrimaryLocation> {
+        let location = plan.source_location();
+        self.prepare_location(
+            location.placement,
+            Some(location.cwd.observed_path()),
+            operation,
+            PreparationScope::Carry(plan),
+        )
+    }
+    fn prepare_location(
+        &self,
+        placement: Placement,
+        cwd: Option<&Path>,
+        operation: OperationId,
+        scope: PreparationScope<'_>,
     ) -> Result<PreparedPrimaryLocation> {
         let cwd = cwd.ok_or_else(|| {
             issue(
@@ -77,10 +119,22 @@ impl WorkspaceService {
                 "Working root is not ready for new primary work",
             ));
         }
-        if !ordinary_member(&connection, placement, &root)? {
+        let session = match &scope {
+            PreparationScope::Session(session) => *session,
+            _ => "",
+        };
+        let mut grants = super::scope::applicable_grants(&connection, session, placement)?;
+        if let PreparationScope::Carry(plan) = &scope {
+            grants.extend_from_slice(plan.grants_for_copy(&connection)?);
+        }
+        let mut allowed = ordinary_member(&connection, placement, &root)?;
+        for grant in &grants {
+            allowed |= super::scope::target_contains(&connection, &grant.target, &root)?;
+        }
+        if !allowed {
             return Err(issue(
                 IssueCode::PermissionRequired,
-                "Working directory lies outside this placement's ordinary roots; resolve scope before launch",
+                "Command cwd is outside the new placement's writable roots; choose an ordinary cwd or explicitly carry/approve its grant",
             ));
         }
         let root_lease = self.acquire_root(root.id)?;

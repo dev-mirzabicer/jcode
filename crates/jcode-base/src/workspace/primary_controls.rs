@@ -102,6 +102,7 @@ impl WorkspaceService {
             self.require_legacy_scope_absent(&session.id)?;
             if session.location.is_some()
                 || session.primary_creation.is_some()
+                || session.scope_copy.is_some()
                 || session.working_dir.as_ref().map(PathBuf::from) != origin.working_dir
             {
                 return Err(issue(
@@ -124,8 +125,12 @@ impl WorkspaceService {
                 ));
             }
         }
-        let prepared =
-            self.prepare_primary_location(input.placement, Some(&input.cwd), operation)?;
+        let prepared = self.prepare_session_location(
+            &input.session,
+            input.placement,
+            Some(&input.cwd),
+            operation,
+        )?;
         if prepared.catalog_revision != input.expected_catalog_revision {
             return Err(issue(
                 IssueCode::Conflict,
@@ -258,6 +263,7 @@ impl WorkspaceService {
         if session.id != record.input.session
             || session.location.is_some()
             || session.primary_creation.is_some()
+            || session.scope_copy.is_some()
             || session.isolated_child.is_some()
             || session.working_dir.as_ref().map(PathBuf::from) != origin.working_dir
             || record.input.expected_session_revision != 0
@@ -293,7 +299,8 @@ impl WorkspaceService {
                 "Location change is not pending",
             ));
         }
-        let prepared = self.prepare_primary_location(
+        let prepared = self.prepare_session_location(
+            &record.input.session,
             record.input.placement,
             Some(&record.input.cwd),
             record.operation,

@@ -8,7 +8,9 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 mod backup;
+mod context_scope;
 mod grants;
+pub use context_scope::ContextScopePlan;
 mod native_mutation;
 pub use grants::WorkspaceClientAuthority;
 pub use native_mutation::WorkspaceMutationPermit;

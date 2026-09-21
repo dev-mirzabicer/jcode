@@ -164,6 +164,14 @@ pub enum ApiRequest {
     },
 
     /// Clear conversation history.
+    GrantCarryReview {
+        session: String,
+    },
+    ScopedContext {
+        session_id: String,
+        kind: crate::NewContextKind,
+        grant_carry: crate::GrantCarryChoice,
+    },
     Clear {
         session_id: String,
     },

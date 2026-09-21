@@ -24,3 +24,10 @@ pub struct StoredPrimaryCreation {
     pub operation: OperationId,
     pub ready: bool,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoredContextScope {
+    pub operation: OperationId,
+    pub ready: bool,
+}

@@ -1,5 +1,49 @@
 use super::*;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GrantCarryChoice {
+    pub review: ReviewId,
+    pub carry: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NewContextKind {
+    Split,
+    Clear,
+    Transfer,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct GrantCarryReview {
+    pub id: ReviewId,
+    pub source: String,
+    pub session_revision: Revision,
+    pub catalog_revision: Revision,
+    pub direct_grants: Vec<GrantDefinition>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ContextScopeStatus {
+    pub review: Option<ReviewId>,
+    pub operation: OperationId,
+    pub source: String,
+    pub target: String,
+    pub kind: NewContextKind,
+    pub state: ContextScopeState,
+    pub revision: Option<Revision>,
+    pub backup_pending: bool,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextScopeState {
+    Pending,
+    Complete,
+    Failed,
+    RecoveryRequired,
+}
+
 /// Audit provenance from the authenticated client adapter, never model input.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -74,6 +118,18 @@ pub struct SessionWriteScope {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PermissionRequest {
+    AbandonContextScope {
+        session: String,
+    },
+    ContextScopeStatus {
+        review: ReviewId,
+    },
+    ReconcileContextScope {
+        session: String,
+    },
+    ReviewCarry {
+        session: String,
+    },
     Scope {
         session: String,
     },
@@ -134,6 +190,8 @@ pub struct PermissionPage {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum PermissionResponse {
+    ContextScopes(Vec<ContextScopeStatus>),
+    CarryReview(GrantCarryReview),
     Scope(SessionWriteScope),
     Review(GrantReview),
     Mutation(PermissionMutation),

@@ -581,3 +581,52 @@ fn legacy_adoption_uses_the_real_idle_primary_control_without_inference() -> Res
         Ok(())
     })
 }
+
+#[test]
+#[cfg(target_os = "macos")]
+fn shared_clear_carries_only_reviewed_direct_grants_as_independent_authority() -> Result<()> {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir()?;
+    let _env = Env::new(temp.path());
+    crate::instruction::SystemPromptComposer::new().ensure_global_store()?;
+    std::fs::write(
+        crate::config::Config::path().unwrap(),
+        "[features]\nmanaged_primary_launch = true\n",
+    )?;
+    crate::config::Config::invalidate_cache();
+    tokio::runtime::Runtime::new()?.block_on(async {
+        let service=WorkspaceService::new(&crate::storage::durable_state_dir());service.initialize(RequestId::new())?;
+        let mut roots=Vec::new();
+        for name in ["source","other"] {let path=temp.path().join(name);std::fs::create_dir(&path)?;let path=path.canonicalize()?;let EntityId::Location(id)=change(&service,OrganizationChange::RegisterLocation{name:name.into(),path:path.clone(),registration:Registration::Standalone})?.targets[0] else {panic!()};roots.push((id,path));}
+        let provider=FixtureProvider::default();let pool=Arc::new(crate::mcp::SharedMcpPool::new(Default::default()));
+        let launcher=PrimaryLauncher{workspace:service.clone(),repositories:InstructionRepositoryService::new(),provider:Arc::new(provider.clone()),registry:PrimaryRegistryMode::Shared(pool.clone())};
+        let host=Arc::new(PrimaryHost::default());
+        let created=launcher.launch_hosted(&host,RequestId::new(),service.status()?.revision,PrimaryLaunchInput{placement:PrimaryPlacement::Existing{placement:Placement::Standalone(roots[0].0)},cwd:Some(PrimaryCwd::Existing{path:roots[0].1.clone()}),agent:None,model:None,selfdev:false},StartupContextCaller::HarnessApi).await?;
+        let source=host.read().await.get(&created.session).cloned().unwrap();
+        let auth=WorkspaceClientAuthority::authenticated("human-fixture")?;
+        let review=service.review_grant_change(service.status()?.revision,GrantChange::Issue{audience:Audience::Session(created.session.clone()),target:WriteTarget::Root(roots[1].0),proposal:None})?;
+        let original=service.apply_grant_change(&auth,RequestId::new(),review.id)?.grant.unwrap();
+        let before=Session::load(&created.session)?;
+        assert!(host.clear_context(&source,&created.session,&launcher.repositories,&pool).await.is_err());
+        assert_eq!(host.read().await.len(),1);
+        assert_eq!(provider.0.load(Ordering::SeqCst),0);
+        let review=service.review_grant_carry(&created.session)?;
+        let child=host.clear_context_with_grants(&source,&created.session,&launcher.repositories,&pool,Some(GrantCarryChoice{review:review.id,carry:true})).await?;
+        let child_id=child.lock().await.session_id().to_owned();
+        let copied=service.session_write_scope(&Session::load(&child_id)?)?.grants.into_iter().find(|g|g.copied_from==Some(original.id)).unwrap();
+        assert_ne!(copied.id,original.id);
+        let revoke=service.review_grant_change(service.status()?.revision,GrantChange::Revoke{grant:original.id})?;service.apply_grant_change(&auth,RequestId::new(),revoke.id)?;
+        let target=roots[1].1.join("copied-authority.txt");
+        child.lock().await.execute_tool("write",serde_json::json!({"file_path":target,"content":"independent copy","intent":"Exercise copied scope"})).await?;
+        assert_eq!(std::fs::read_to_string(&target)?,"independent copy");
+        let review=service.review_grant_carry(&child_id)?;
+        let dropped=host.clear_context_with_grants(&child,&child_id,&launcher.repositories,&pool,Some(GrantCarryChoice{review:review.id,carry:false})).await?;
+        assert!(dropped.lock().await.execute_tool("write",serde_json::json!({"file_path":target,"content":"not allowed","intent":"Exercise drop"})).await.is_err());
+        assert_eq!(std::fs::read_to_string(&target)?,"independent copy");
+        let after=Session::load(&created.session)?;
+        assert_eq!(serde_json::to_value(after.messages)?,serde_json::to_value(before.messages)?);assert_eq!(after.system_prompt,before.system_prompt);
+        assert_eq!(provider.0.load(Ordering::SeqCst),0);
+        host.shutdown().await?;
+        Ok(())
+    })
+}

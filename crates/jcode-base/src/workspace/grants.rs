@@ -5,7 +5,7 @@ use rusqlite::{TransactionBehavior, params};
 
 /// Only trusted application adapters construct this. It is deliberately not a wire type.
 /// Same-user IPC is trusted, not physical-human attestation or shell containment.
-pub struct WorkspaceClientAuthority(String);
+pub struct WorkspaceClientAuthority(pub(super) String);
 impl WorkspaceClientAuthority {
     pub fn authenticated(client: impl Into<String>) -> Result<Self> {
         let client = client.into();

@@ -12,6 +12,20 @@ pub enum ApiEvent {
         location_enabled: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         legacy_adoption_version: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_scope_version: Option<u32>,
+    },
+    GrantCarryReview {
+        review: crate::GrantCarryReview,
+    },
+    ScopedContextCreated {
+        source_session: String,
+        session_id: String,
+        kind: crate::NewContextKind,
+    },
+    ScopedContextRejected {
+        source_session: String,
+        issue: crate::WorkspaceIssue,
     },
     PrimaryInputReceipt {
         receipt: crate::PrimaryInputReceipt,

@@ -35,24 +35,7 @@ impl WorkspaceService {
     ) -> Result<SessionWriteScope> {
         query::validate_placement(connection, location.placement)?;
         let status = storage::status(connection)?;
-        let grants = portable::grants(connection)?
-            .into_iter()
-            .filter_map(|grant| {
-                if grant.state != GrantState::Active
-                    || !grant
-                        .authorization
-                        .as_ref()
-                        .is_some_and(|a| a.installation == status.installation)
-                {
-                    return None;
-                }
-                match audience_applies(connection, &grant.audience, session, location.placement) {
-                    Ok(true) => Some(Ok(grant)),
-                    Ok(false) => None,
-                    Err(error) => Some(Err(error)),
-                }
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let grants = applicable_grants(connection, session, location.placement)?;
         let mut roots = Vec::new();
         for root in locations(connection)? {
             let ordinary = ordinary_member(connection, location.placement, &root)?;
@@ -205,4 +188,30 @@ pub(super) fn audience_applies(
         Audience::WorkArea(id) => home == Some(Home::WorkArea(*id)),
         Audience::Checkout(id) => placement == Placement::Checkout(*id),
     })
+}
+
+pub(super) fn applicable_grants(
+    connection: &Connection,
+    session: &str,
+    placement: Placement,
+) -> Result<Vec<GrantDefinition>> {
+    let installation = storage::status(connection)?.installation;
+    portable::grants(connection)?
+        .into_iter()
+        .filter_map(|grant| {
+            if grant.state != GrantState::Active
+                || !grant
+                    .authorization
+                    .as_ref()
+                    .is_some_and(|a| a.installation == installation)
+            {
+                return None;
+            }
+            match audience_applies(connection, &grant.audience, session, placement) {
+                Ok(true) => Some(Ok(grant)),
+                Ok(false) => None,
+                Err(error) => Some(Err(error)),
+            }
+        })
+        .collect::<Result<Vec<_>>>()
 }

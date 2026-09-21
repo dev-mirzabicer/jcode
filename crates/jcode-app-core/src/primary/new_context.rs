@@ -6,12 +6,25 @@ use crate::workspace::*;
 use anyhow::Result;
 
 impl PrimaryHost {
+    #[cfg(test)]
     pub(crate) async fn clear_context(
         self: &Arc<Self>,
         source: &Arc<Mutex<Agent>>,
         source_id: &str,
         repositories: &InstructionRepositoryService,
         pool: &Arc<crate::mcp::SharedMcpPool>,
+    ) -> Result<Arc<Mutex<Agent>>> {
+        self.clear_context_with_grants(source, source_id, repositories, pool, None)
+            .await
+    }
+
+    pub(crate) async fn clear_context_with_grants(
+        self: &Arc<Self>,
+        source: &Arc<Mutex<Agent>>,
+        source_id: &str,
+        repositories: &InstructionRepositoryService,
+        pool: &Arc<crate::mcp::SharedMcpPool>,
+        choice: Option<GrantCarryChoice>,
     ) -> Result<Arc<Mutex<Agent>>> {
         let (send, receive) = tokio::sync::oneshot::channel();
         let host = Arc::downgrade(self);
@@ -22,8 +35,14 @@ impl PrimaryHost {
         self.retain_delivery(async move {
             let result = match host.upgrade() {
                 Some(host) => {
-                    Box::pin(host.clear_context_owned(&source, &source_id, &repositories, &pool))
-                        .await
+                    Box::pin(host.clear_context_owned(
+                        &source,
+                        &source_id,
+                        &repositories,
+                        &pool,
+                        choice,
+                    ))
+                    .await
                 }
                 None => Err(anyhow::anyhow!(
                     "Primary runtime ended before Clear preparation"
@@ -42,6 +61,7 @@ impl PrimaryHost {
         source_id: &str,
         repositories: &InstructionRepositoryService,
         pool: &Arc<crate::mcp::SharedMcpPool>,
+        choice: Option<GrantCarryChoice>,
     ) -> Result<Arc<Mutex<Agent>>> {
         // Retain this guard through preparation/publication. A busy check followed
         // by a later lock would let a peer admit work in the middle of Clear.
@@ -61,6 +81,12 @@ impl PrimaryHost {
         source
             .startup_context_session()
             .require_published_primary()?;
+        let workspace = WorkspaceService::new(&crate::storage::durable_state_dir());
+        let scope = workspace.prepare_context_scope(
+            source.startup_context_session(),
+            choice,
+            &WorkspaceClientAuthority::authenticated("shared-primary-context")?,
+        )?;
         let selection = source
             .active_agent()
             .map(AgentSelection::from_stored)
@@ -88,7 +114,7 @@ impl PrimaryHost {
                 registry: PrimaryRegistryMode::Shared(pool.clone()),
             };
             let record = launcher
-                .launch_hosted(
+                .launch_hosted_scoped(
                     self,
                     RequestId::new(),
                     expected,
@@ -106,7 +132,10 @@ impl PrimaryHost {
                         model: None,
                         selfdev: source.is_canary(),
                     },
-                    StartupContextCaller::Clear,
+                    super::launch::PrimaryPreparation {
+                        caller: StartupContextCaller::Clear,
+                        scope: scope.as_ref(),
+                    },
                 )
                 .await?;
             return self
@@ -168,6 +197,238 @@ impl PrimaryHost {
         self.write().await.insert(identity, fresh.clone());
         Ok(fresh)
     }
+}
+
+/// Shared primary transfer preparation for hosted and process-owned clients.
+/// The caller owns summary generation, this owner owns complete new context publication.
+pub fn prepare_transfer_session(
+    parent: &crate::session::Session,
+    instruction_repositories: &InstructionRepositoryService,
+    summary: Option<String>,
+    choice: Option<GrantCarryChoice>,
+) -> Result<(String, String)> {
+    let child = prepare_fresh_context(
+        parent,
+        instruction_repositories,
+        summary,
+        choice,
+        NewContextKind::Transfer,
+    )?;
+    Ok((child.id.clone(), child.display_name().to_string()))
+}
+
+pub fn prepare_local_clear_session(
+    parent: &crate::session::Session,
+    repositories: &InstructionRepositoryService,
+    choice: Option<GrantCarryChoice>,
+) -> Result<crate::session::Session> {
+    prepare_fresh_context(parent, repositories, None, choice, NewContextKind::Clear)
+}
+
+fn prepare_fresh_context(
+    parent: &crate::session::Session,
+    instruction_repositories: &InstructionRepositoryService,
+    summary: Option<String>,
+    choice: Option<GrantCarryChoice>,
+    kind: NewContextKind,
+) -> Result<crate::session::Session> {
+    use crate::session::Session;
+    let parent_session_id = parent.id.as_str();
+    let workspace = crate::workspace::WorkspaceService::new(&crate::storage::durable_state_dir());
+    let scope = workspace.prepare_context_scope(
+        parent,
+        choice,
+        &crate::workspace::WorkspaceClientAuthority::authenticated("primary-context-control")?,
+    )?;
+    let todos = if kind == NewContextKind::Transfer {
+        crate::todo::load_todos(parent_session_id).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let mut child = Session::create(
+        (kind == NewContextKind::Transfer).then(|| parent_session_id.to_string()),
+        None,
+    );
+    child.messages.clear();
+    child.compaction = None;
+    child.context_view = Default::default();
+    child.working_dir = parent.working_dir.clone();
+    if let Some(scope) = &scope {
+        workspace.stage_context_scope(scope, &mut child, kind)?;
+    }
+    child.model = parent.model.clone();
+    child.provider_key = parent.provider_key.clone();
+    child.route_api_method = parent.route_api_method.clone();
+    child.reasoning_effort = parent.reasoning_effort.clone();
+    child.subagent_model = parent.subagent_model.clone();
+    child.improve_mode = parent.improve_mode;
+    child.autoreview_enabled = parent.autoreview_enabled;
+    child.autojudge_enabled = parent.autojudge_enabled;
+    child.is_canary = parent.is_canary;
+    child.is_debug = parent.is_debug;
+    child.testing_build = parent.testing_build.clone();
+    child.provider_session_id = None;
+    child.clear_active_skill();
+    child.status = if kind == NewContextKind::Clear {
+        crate::session::SessionStatus::Active
+    } else {
+        crate::session::SessionStatus::Closed
+    };
+
+    let child_id = child.id.clone();
+    let instruction_selection = parent
+        .active_agent()
+        .map(crate::instruction::AgentSelection::from_stored)
+        .transpose()
+        .map_err(anyhow::Error::new)
+        .and_then(|selection| match selection {
+            Some(selection) => Ok(selection),
+            None => Ok(crate::instruction::AgentSelection::Explicit(
+                crate::instruction::InstructionSelector::global(
+                    crate::instruction::InstructionKind::Agent,
+                    "jcode",
+                )?,
+            )),
+        });
+    let instruction_activation = instruction_selection.and_then(|selection| {
+        let global_skills = crate::skill::SkillRegistry::shared_snapshot();
+        let effective_skills = crate::skill::SkillRegistry::effective_for_working_dir(
+            &global_skills,
+            child.working_dir.as_deref().map(std::path::Path::new),
+        );
+        let available_skills = effective_skills
+            .list()
+            .iter()
+            .map(|skill| crate::prompt::SkillInfo {
+                name: skill.name.clone(),
+                description: skill.description.clone(),
+            })
+            .collect::<Vec<_>>();
+        crate::instruction::SystemPromptComposer::from_repository_service(
+            instruction_repositories.clone(),
+        )
+        .activate(crate::instruction::SystemPromptActivationRequest {
+            working_dir: child.working_dir.as_deref().map(std::path::Path::new),
+            selection,
+            is_selfdev: child.is_canary,
+            capabilities: crate::prompt::PromptCapabilities::current(),
+            available_skills: &available_skills,
+        })
+        .map_err(anyhow::Error::new)
+    });
+    match instruction_activation {
+        Ok(activation) => child.install_system_prompt(activation.state),
+        Err(error) => {
+            if let Err(cleanup) = crate::session::remove_unpublished_session(&child_id) {
+                anyhow::bail!(
+                    "new-context instruction activation failed ({error}); unpublished child cleanup also failed: {cleanup}"
+                );
+            }
+            return Err(error.context("new-context instruction activation failed"));
+        }
+    }
+    let transfer_activation = if parent.is_debug {
+        crate::agent::StartupContextActivation::Disabled
+    } else {
+        crate::agent::StartupContextActivation::primary(if kind == NewContextKind::Clear {
+            crate::agent::StartupContextCaller::Clear
+        } else {
+            crate::agent::StartupContextCaller::Transfer
+        })
+    };
+    if let Err(error) =
+        crate::agent::activate_session_startup_context(&mut child, transfer_activation)
+    {
+        if let Err(cleanup) = crate::session::remove_unpublished_session(&child_id) {
+            anyhow::bail!(
+                "new-context Startup Context failed ({error}); unpublished child cleanup also failed: {cleanup}"
+            );
+        }
+        return Err(error.into());
+    }
+
+    let handoff_result = match summary {
+        Some(summary) => child
+            .append_transfer_handoff(parent_session_id, &summary)
+            .and_then(|appended| {
+                if appended {
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!(
+                        "transfer summary was empty; refusing to create a contextless child"
+                    ))
+                }
+            }),
+        None if kind == NewContextKind::Transfer && !parent.messages.is_empty() => Err(
+            anyhow::anyhow!("transfer produced no readable summary for a non-empty parent session"),
+        ),
+        None => Ok(()),
+    };
+    if let Err(error) = handoff_result
+        .and_then(|()| crate::todo::save_todos(&child.id, &todos))
+        .and_then(|()| {
+            child.seal_context_scope();
+            child.save()
+        })
+    {
+        if let Err(cleanup) = crate::session::remove_unpublished_session(&child_id) {
+            anyhow::bail!(
+                "new-context creation failed ({error}); unpublished child cleanup also failed: {cleanup}"
+            );
+        }
+        return Err(error);
+    }
+    if child.scope_copy.is_some() {
+        workspace.reconcile_context_scope(&child.id)?;
+    }
+    Ok(child)
+}
+
+pub fn prepare_split_session(
+    parent: &crate::session::Session,
+    choice: Option<GrantCarryChoice>,
+) -> Result<crate::session::Session> {
+    use crate::session::Session;
+    let workspace = crate::workspace::WorkspaceService::new(&crate::storage::durable_state_dir());
+    let scope = workspace.prepare_context_scope(
+        parent,
+        choice,
+        &crate::workspace::WorkspaceClientAuthority::authenticated("shared-primary-context")?,
+    )?;
+    let parent_session_id = &parent.id;
+    let mut child = Session::create(Some(parent_session_id.to_string()), None);
+    child.inherit_continuation_state_from(parent);
+    if let Some(scope) = &scope {
+        workspace.stage_context_scope(
+            scope,
+            &mut child,
+            crate::workspace::NewContextKind::Split,
+        )?;
+    }
+    child.status = crate::session::SessionStatus::Closed;
+    // The parent agent keeps ownership of any in-flight request; tell the
+    // forked agent so it treats the next prompt as fresh work instead of
+    // continuing (and duplicating) the parent's current turn.
+    if let Err(error) = child
+        .append_fork_notice(parent_session_id, parent.display_name())
+        .map(|_| ())
+        .and_then(|()| {
+            child.seal_context_scope();
+            child.save()
+        })
+    {
+        if let Err(cleanup) = crate::session::remove_unpublished_session(&child.id) {
+            anyhow::bail!(
+                "split child preparation failed ({error}); cleanup also failed: {cleanup}"
+            );
+        }
+        return Err(error);
+    }
+
+    if child.scope_copy.is_some() {
+        workspace.reconcile_context_scope(&child.id)?;
+    }
+    Ok(child)
 }
 
 #[cfg(test)]

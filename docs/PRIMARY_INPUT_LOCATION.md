@@ -1,8 +1,10 @@
 # Primary input and location controls
 
 This is the C01 backend contract for durable primary input and explicit location
-changes. It does not expose the later workspace management TUI, scope/grant
-policy, runtime service supervision, or the C04/C05 final interface and corpus.
+changes. [Reviewed new-context scope](PRIMARY_CONTEXT_SCOPE.md) documents grant
+carry and continuation publication. These backends do not expose the later
+workspace management TUI, runtime service supervision, or C04/C05's final interface
+and corpus.
 
 ## Owners and availability
 

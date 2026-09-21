@@ -312,6 +312,7 @@ fn scheduled_live_delivery_uses_notify_without_a_provisional_subscription() -> R
                             location_version: 1,
                             location_enabled: false,
                             legacy_adoption_version: None,
+                            context_scope_version: None,
                         },
                     )
                     .as_bytes(),

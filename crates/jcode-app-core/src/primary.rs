@@ -13,6 +13,9 @@ use tokio::task::{AbortHandle, JoinSet};
 mod launch;
 mod location;
 mod new_context;
+pub use new_context::{
+    prepare_local_clear_session, prepare_split_session, prepare_transfer_session,
+};
 mod transport;
 pub use transport::{configured_launch, launch_enabled, launch_local_request};
 pub(crate) mod presentation;
@@ -718,5 +721,23 @@ impl Drop for PrimaryHost {
                 Ordering::Acquire,
             );
         }
+    }
+}
+
+pub(crate) fn scope_rejection(
+    id: u64,
+    source: &str,
+    error: &anyhow::Error,
+) -> crate::protocol::ServerEvent {
+    crate::protocol::ServerEvent::ScopedContextRejected {
+        id,
+        source_session: source.into(),
+        issue: error
+            .downcast_ref::<crate::workspace::Issue>()
+            .cloned()
+            .unwrap_or_else(|| crate::workspace::Issue {
+                code: crate::workspace::IssueCode::RecoveryRequired,
+                detail: format!("{error:#}"),
+            }),
     }
 }

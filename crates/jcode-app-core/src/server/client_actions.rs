@@ -642,164 +642,53 @@ pub(super) async fn handle_trigger_memory_extraction(
     let _ = client_event_tx.send(ServerEvent::Done { id });
 }
 
+#[cfg(test)]
 fn clone_split_session(parent_session_id: &str) -> anyhow::Result<(String, String)> {
     let parent = Session::load(parent_session_id)?;
     clone_split_parent(&parent)
 }
 
+#[cfg(test)]
 fn clone_split_parent(parent: &Session) -> anyhow::Result<(String, String)> {
-    let parent_session_id = &parent.id;
-    let mut child = Session::create(Some(parent_session_id.to_string()), None);
-    child.inherit_continuation_state_from(parent);
-    child.status = crate::session::SessionStatus::Closed;
-    // The parent agent keeps ownership of any in-flight request; tell the
-    // forked agent so it treats the next prompt as fresh work instead of
-    // continuing (and duplicating) the parent's current turn.
-    if let Err(error) = child
-        .append_fork_notice(parent_session_id, parent.display_name())
-        .map(|_| ())
-        .and_then(|()| child.save())
-    {
-        if let Err(cleanup) = crate::session::remove_unpublished_session(&child.id) {
-            anyhow::bail!(
-                "split child preparation failed ({error}); cleanup also failed: {cleanup}"
-            );
-        }
-        return Err(error);
-    }
-
-    let name = child.display_name().to_string();
-    Ok((child.id.clone(), name))
+    clone_split_parent_with_grants(parent, None)
 }
 
+fn clone_split_parent_with_grants(
+    parent: &Session,
+    choice: Option<crate::workspace::GrantCarryChoice>,
+) -> anyhow::Result<(String, String)> {
+    let child = crate::primary::prepare_split_session(parent, choice)?;
+    Ok((child.id.clone(), child.display_name().to_string()))
+}
+
+#[cfg(test)]
 fn create_transfer_child_session(
     parent_session_id: &str,
     parent: &Session,
     instruction_repositories: &crate::instruction::InstructionRepositoryService,
     summary: Option<String>,
 ) -> anyhow::Result<(String, String)> {
-    let todos = crate::todo::load_todos(parent_session_id).unwrap_or_default();
-    let mut child = Session::create(Some(parent_session_id.to_string()), None);
-    child.messages.clear();
-    child.compaction = None;
-    child.context_view = Default::default();
-    child.working_dir = parent.working_dir.clone();
-    child.model = parent.model.clone();
-    child.provider_key = parent.provider_key.clone();
-    child.route_api_method = parent.route_api_method.clone();
-    child.subagent_model = parent.subagent_model.clone();
-    child.improve_mode = parent.improve_mode;
-    child.autoreview_enabled = parent.autoreview_enabled;
-    child.autojudge_enabled = parent.autojudge_enabled;
-    child.is_canary = parent.is_canary;
-    child.testing_build = parent.testing_build.clone();
-    child.provider_session_id = None;
-    child.clear_active_skill();
-    child.status = crate::session::SessionStatus::Closed;
-
-    let child_id = child.id.clone();
-    let instruction_selection = parent
-        .active_agent()
-        .map(crate::instruction::AgentSelection::from_stored)
-        .transpose()
-        .map_err(anyhow::Error::new)
-        .and_then(|selection| match selection {
-            Some(selection) => Ok(selection),
-            None => Ok(crate::instruction::AgentSelection::Explicit(
-                crate::instruction::InstructionSelector::global(
-                    crate::instruction::InstructionKind::Agent,
-                    "jcode",
-                )?,
-            )),
-        });
-    let instruction_activation = instruction_selection.and_then(|selection| {
-        let global_skills = crate::skill::SkillRegistry::shared_snapshot();
-        let effective_skills = crate::skill::SkillRegistry::effective_for_working_dir(
-            &global_skills,
-            child.working_dir.as_deref().map(std::path::Path::new),
-        );
-        let available_skills = effective_skills
-            .list()
-            .iter()
-            .map(|skill| crate::prompt::SkillInfo {
-                name: skill.name.clone(),
-                description: skill.description.clone(),
-            })
-            .collect::<Vec<_>>();
-        crate::instruction::SystemPromptComposer::from_repository_service(
-            instruction_repositories.clone(),
-        )
-        .activate(crate::instruction::SystemPromptActivationRequest {
-            working_dir: child.working_dir.as_deref().map(std::path::Path::new),
-            selection,
-            is_selfdev: child.is_canary,
-            capabilities: crate::prompt::PromptCapabilities::current(),
-            available_skills: &available_skills,
-        })
-        .map_err(anyhow::Error::new)
-    });
-    match instruction_activation {
-        Ok(activation) => child.install_system_prompt(activation.state),
-        Err(error) => {
-            if let Err(cleanup) = remove_failed_transfer_child(&child_id) {
-                anyhow::bail!(
-                    "transfer instruction activation failed ({error}); unpublished child cleanup also failed: {cleanup}"
-                );
-            }
-            return Err(error.context("transfer instruction activation failed"));
-        }
-    }
-    let transfer_activation = if parent.is_debug {
-        crate::agent::StartupContextActivation::Disabled
-    } else {
-        crate::agent::StartupContextActivation::primary(
-            crate::agent::StartupContextCaller::Transfer,
-        )
-    };
-    if let Err(error) =
-        crate::agent::activate_session_startup_context(&mut child, transfer_activation)
-    {
-        if let Err(cleanup) = remove_failed_transfer_child(&child_id) {
-            anyhow::bail!(
-                "transfer Startup Context failed ({error}); unpublished child cleanup also failed: {cleanup}"
-            );
-        }
-        return Err(error.into());
-    }
-
-    let handoff_result = match summary {
-        Some(summary) => child
-            .append_transfer_handoff(parent_session_id, &summary)
-            .and_then(|appended| {
-                if appended {
-                    Ok(())
-                } else {
-                    Err(anyhow::anyhow!(
-                        "transfer summary was empty; refusing to create a contextless child"
-                    ))
-                }
-            }),
-        None if !parent.messages.is_empty() => Err(anyhow::anyhow!(
-            "transfer produced no readable summary for a non-empty parent session"
-        )),
-        None => Ok(()),
-    };
-    if let Err(error) = handoff_result
-        .and_then(|()| child.save())
-        .and_then(|()| crate::todo::save_todos(&child.id, &todos))
-    {
-        if let Err(cleanup) = remove_failed_transfer_child(&child_id) {
-            anyhow::bail!(
-                "transfer child creation failed ({error}); unpublished child cleanup also failed: {cleanup}"
-            );
-        }
-        return Err(error);
-    }
-    Ok((child.id.clone(), child.display_name().to_string()))
+    create_transfer_child_session_with_grants(
+        parent_session_id,
+        parent,
+        instruction_repositories,
+        summary,
+        None,
+    )
 }
 
-fn remove_failed_transfer_child(session_id: &str) -> anyhow::Result<()> {
-    crate::session::remove_unpublished_session(session_id)
+fn create_transfer_child_session_with_grants(
+    parent_session_id: &str,
+    parent: &Session,
+    instruction_repositories: &crate::instruction::InstructionRepositoryService,
+    summary: Option<String>,
+    choice: Option<crate::workspace::GrantCarryChoice>,
+) -> anyhow::Result<(String, String)> {
+    anyhow::ensure!(
+        parent.id == parent_session_id,
+        "Transfer source identity mismatch"
+    );
+    crate::primary::prepare_transfer_session(parent, instruction_repositories, summary, choice)
 }
 
 pub(super) async fn handle_split(
@@ -808,6 +697,25 @@ pub(super) async fn handle_split(
     instruction_repositories: &crate::instruction::InstructionRepositoryService,
     workflow: Option<&jcode_task_types::WorkflowPromptRequest>,
     client_event_tx: &crate::client_delivery::ClientEventSender,
+) {
+    handle_split_with_grants(
+        id,
+        client_session_id,
+        instruction_repositories,
+        workflow,
+        client_event_tx,
+        None,
+    )
+    .await
+}
+
+pub(super) async fn handle_split_with_grants(
+    id: u64,
+    client_session_id: &str,
+    instruction_repositories: &crate::instruction::InstructionRepositoryService,
+    workflow: Option<&jcode_task_types::WorkflowPromptRequest>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
+    choice: Option<crate::workspace::GrantCarryChoice>,
 ) {
     if workflow.is_some_and(|workflow| workflow.requires_swarm())
         && !crate::config::config().features.swarm
@@ -834,15 +742,24 @@ pub(super) async fn handle_split(
                 parent.working_dir.as_deref().map(std::path::Path::new),
                 workflow,
             )?;
-            let (id, name) = clone_split_parent(&parent)?;
+            let (id, name) = clone_split_parent_with_grants(&parent, choice)?;
             Ok((id, name, Some(text)))
         })
     } else {
-        clone_split_session(client_session_id).map(|(id, name)| (id, name, None))
+        Session::load(client_session_id)
+            .and_then(|parent| clone_split_parent_with_grants(&parent, choice))
+            .map(|(id, name)| (id, name, None))
     };
     let (new_session_id, new_session_name, startup_message) = match prepared {
         Ok(result) => result,
         Err(e) => {
+            if choice.is_some() {
+                let _ = client_event_tx.send(crate::primary::scope_rejection(
+                    id,
+                    client_session_id,
+                    &e,
+                ));
+            }
             crate::logging::event_warn(
                 "SESSION_LIFECYCLE",
                 vec![
@@ -878,6 +795,14 @@ pub(super) async fn handle_split(
         ],
     );
 
+    if choice.is_some() {
+        let _ = client_event_tx.send(ServerEvent::ScopedContextCreated {
+            id,
+            source_session: client_session_id.into(),
+            session_id: new_session_id.clone(),
+            kind: crate::workspace::NewContextKind::Split,
+        });
+    }
     let event = match startup_message {
         Some(startup_message) => ServerEvent::WorkflowSplitResponse {
             id,
@@ -894,12 +819,13 @@ pub(super) async fn handle_split(
     let _ = client_event_tx.send(event);
 }
 
-pub(super) async fn handle_transfer(
+pub(super) async fn handle_transfer_with_grants(
     id: u64,
     client_session_id: &str,
     agent: &Arc<Mutex<Agent>>,
     instruction_repositories: &crate::instruction::InstructionRepositoryService,
     client_event_tx: &crate::client_delivery::ClientEventSender,
+    choice: Option<crate::workspace::GrantCarryChoice>,
 ) {
     let started = Instant::now();
     crate::logging::event_info(
@@ -913,6 +839,13 @@ pub(super) async fn handle_transfer(
     let mut parent = match Session::load(client_session_id) {
         Ok(session) => session,
         Err(error) => {
+            if choice.is_some() {
+                let _ = client_event_tx.send(crate::primary::scope_rejection(
+                    id,
+                    client_session_id,
+                    &error,
+                ));
+            }
             crate::logging::event_warn(
                 "SESSION_LIFECYCLE",
                 vec![
@@ -937,9 +870,42 @@ pub(super) async fn handle_transfer(
         agent_guard.provider_fork()
     };
 
+    let workspace = crate::workspace::WorkspaceService::new(&crate::storage::durable_state_dir());
+    let scope =
+        match crate::workspace::WorkspaceClientAuthority::authenticated("shared-primary-context")
+            .and_then(|authority| workspace.prepare_context_scope(&parent, choice, &authority))
+        {
+            Ok(scope) => scope,
+            Err(error) => {
+                if choice.is_some() {
+                    let _ = client_event_tx.send(crate::primary::scope_rejection(
+                        id,
+                        client_session_id,
+                        &anyhow::Error::new(error.clone()),
+                    ));
+                }
+                let _ = client_event_tx.send(ServerEvent::Error {
+                    id,
+                    message: format!("Transfer scope preparation failed: {error}"),
+                    retry_after_secs: None,
+                });
+                return;
+            }
+        };
+    // Hold replacement exclusion across the summary, but revalidate permissions
+    // at checkpoint publication. No inference is spent for a missing choice.
+    let _scope = scope;
     let projected_messages = match parent.projected_messages_for_provider() {
         Ok(messages) => messages,
         Err(error) => {
+            let error = anyhow::Error::new(error);
+            if choice.is_some() {
+                let _ = client_event_tx.send(crate::primary::scope_rejection(
+                    id,
+                    client_session_id,
+                    &error,
+                ));
+            }
             let _ = client_event_tx.send(ServerEvent::Error {
                 id,
                 message: format!("Failed to project session for transfer: {error}"),
@@ -958,6 +924,13 @@ pub(super) async fn handle_transfer(
     {
         Ok(summary) => summary,
         Err(error) => {
+            if choice.is_some() {
+                let _ = client_event_tx.send(crate::primary::scope_rejection(
+                    id,
+                    client_session_id,
+                    &error,
+                ));
+            }
             crate::logging::event_warn(
                 "SESSION_LIFECYCLE",
                 vec![
@@ -977,14 +950,22 @@ pub(super) async fn handle_transfer(
         }
     };
 
-    let (new_session_id, new_session_name) = match create_transfer_child_session(
+    let (new_session_id, new_session_name) = match create_transfer_child_session_with_grants(
         client_session_id,
         &parent,
         instruction_repositories,
         transfer_summary,
+        choice,
     ) {
         Ok(result) => result,
         Err(error) => {
+            if choice.is_some() {
+                let _ = client_event_tx.send(crate::primary::scope_rejection(
+                    id,
+                    client_session_id,
+                    &error,
+                ));
+            }
             crate::logging::event_warn(
                 "SESSION_LIFECYCLE",
                 vec![
@@ -1014,6 +995,14 @@ pub(super) async fn handle_transfer(
         ],
     );
 
+    if choice.is_some() {
+        let _ = client_event_tx.send(ServerEvent::ScopedContextCreated {
+            id,
+            source_session: client_session_id.into(),
+            session_id: new_session_id.clone(),
+            kind: crate::workspace::NewContextKind::Transfer,
+        });
+    }
     let _ = client_event_tx.send(ServerEvent::SplitResponse {
         id,
         new_session_id,

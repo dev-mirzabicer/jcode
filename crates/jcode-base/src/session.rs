@@ -263,7 +263,7 @@ impl std::error::Error for SystemPromptDispatchError {
     }
 }
 
-pub use jcode_session_types::StoredPrimaryCreation;
+pub use jcode_session_types::{StoredContextScope, StoredPrimaryCreation};
 pub type StoredSessionLocation =
     jcode_session_types::StoredSessionLocation<crate::location::volume::PhysicalBinding>;
 
@@ -365,6 +365,8 @@ pub struct Session {
     pub location: Option<StoredSessionLocation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub primary_creation: Option<StoredPrimaryCreation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_copy: Option<StoredContextScope>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub primary_inputs: Vec<jcode_session_types::StoredPrimaryInputReceipt>,
     /// Memorable short name (e.g., "fox", "oak")
@@ -480,6 +482,8 @@ struct SessionStartupStub {
     location: Option<StoredSessionLocation>,
     #[serde(default)]
     primary_creation: Option<StoredPrimaryCreation>,
+    #[serde(default)]
+    scope_copy: Option<StoredContextScope>,
     #[serde(default)]
     primary_inputs: Vec<jcode_session_types::StoredPrimaryInputReceipt>,
     #[serde(default)]
@@ -950,9 +954,10 @@ impl Session {
     /// cwd. Publication integrity still applies; dispatch separately requires
     /// the witnessed location to be available.
     pub fn require_primary_publication(&self) -> anyhow::Result<()> {
-        if self.primary_creation.is_some() {
+        if self.primary_creation.is_some() || self.scope_copy.is_some() {
             let service =
                 crate::workspace::WorkspaceService::new(&crate::storage::durable_state_dir());
+            service.resume_context_scope(self)?;
             self.validate_primary_publication(&service)?;
             if let Some(location) = &self.location {
                 service.reconcile_session_index(&jcode_workspace_types::SessionIndex {
@@ -970,12 +975,22 @@ impl Session {
         Ok(())
     }
 
+    /// Called by the creation owner only after its complete context and auxiliary
+    /// state are prepared. The ready bit and final history share one checkpoint.
+    pub fn seal_context_scope(&mut self) {
+        if let Some(copy) = &mut self.scope_copy {
+            copy.ready = true;
+            self.persist_state.force_snapshot = true;
+        }
+    }
+
     /// Read-only integrity for invocation-bound namespaces. This cannot repair an
     /// index or use a later ambient state directory to authorize background work.
     pub fn validate_primary_publication(
         &self,
         service: &crate::workspace::WorkspaceService,
     ) -> anyhow::Result<()> {
+        service.validate_context_scope(self)?;
         if let Some(creation) = &self.primary_creation {
             anyhow::ensure!(
                 self.location.is_some(),
@@ -1033,6 +1048,7 @@ impl Session {
         anyhow::ensure!(
             self.location.is_none()
                 && self.primary_creation.is_none()
+                && self.scope_copy.is_none()
                 && self.isolated_child.is_none(),
             "Only an unbound legacy primary can be adopted"
         );
@@ -1211,6 +1227,7 @@ impl Session {
         session.working_dir = stub.working_dir;
         session.location = stub.location;
         session.primary_creation = stub.primary_creation;
+        session.scope_copy = stub.scope_copy;
         session.primary_inputs = stub.primary_inputs;
         session.short_name = stub.short_name;
         session.status = stub.status;
@@ -1437,6 +1454,7 @@ impl Session {
             working_dir: self.working_dir.clone(),
             location: self.location.clone(),
             primary_creation: self.primary_creation.clone(),
+            scope_copy: self.scope_copy,
             primary_inputs: self.primary_inputs.clone(),
             short_name: self.short_name.clone(),
             status: self.status.clone(),
@@ -1754,6 +1772,7 @@ impl Session {
         self.working_dir = meta.working_dir;
         self.location = meta.location;
         self.primary_creation = meta.primary_creation;
+        self.scope_copy = meta.scope_copy;
         self.primary_inputs = meta.primary_inputs;
         self.short_name = meta.short_name;
         self.status = meta.status;
@@ -2005,6 +2024,7 @@ impl Session {
             working_dir: current_working_dir_string(),
             location: None,
             primary_creation: None,
+            scope_copy: None,
             primary_inputs: Vec::new(),
             short_name,
             status: SessionStatus::Active,
@@ -2081,6 +2101,7 @@ impl Session {
             working_dir: current_working_dir_string(),
             location: None,
             primary_creation: None,
+            scope_copy: None,
             primary_inputs: Vec::new(),
             short_name: Some(short_name),
             status: SessionStatus::Active,

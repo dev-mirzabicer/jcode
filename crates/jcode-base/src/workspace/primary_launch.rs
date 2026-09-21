@@ -246,7 +246,8 @@ impl WorkspaceService {
                 "Session cwd differs from launch intent",
             ));
         }
-        let prepared = self.prepare_primary_location(
+        let prepared = self.prepare_session_location(
+            &session.id,
             location.placement,
             Some(location.cwd.observed_path()),
             record.operation,

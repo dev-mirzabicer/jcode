@@ -321,6 +321,7 @@ pub struct Receipt {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IssueCode {
+    NeedsGrantChoice,
     NeedsCwd,
     PermissionRequired,
     InvalidIdentity,

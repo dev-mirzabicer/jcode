@@ -161,6 +161,12 @@ pub enum Request {
     /// Clear conversation history
     #[serde(rename = "clear")]
     Clear { id: u64 },
+    #[serde(rename = "scoped_context")]
+    ScopedContext {
+        id: u64,
+        kind: jcode_workspace_types::NewContextKind,
+        grant_carry: jcode_workspace_types::GrantCarryChoice,
+    },
 
     /// Render and persist one skill without starting a model turn.
     #[serde(rename = "activate_skill")]
@@ -1206,6 +1212,21 @@ pub enum ServerEvent {
         location_enabled: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         legacy_adoption_version: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_scope_version: Option<u32>,
+    },
+    #[serde(rename = "scoped_context_created")]
+    ScopedContextCreated {
+        id: u64,
+        source_session: String,
+        session_id: String,
+        kind: jcode_workspace_types::NewContextKind,
+    },
+    #[serde(rename = "scoped_context_rejected")]
+    ScopedContextRejected {
+        id: u64,
+        source_session: String,
+        issue: jcode_workspace_types::Issue,
     },
     #[serde(rename = "primary_input_detail")]
     PrimaryInputDetail {

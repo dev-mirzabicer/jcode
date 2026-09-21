@@ -268,33 +268,31 @@ pub(crate) fn clear_side_panel_for_new_session(app: &mut App) {
 }
 
 pub(super) fn reset_current_session(app: &mut App) {
-    let mut previous_session = app.session.clone();
+    if app.is_remote {
+        app.push_display_message(DisplayMessage::error(
+            "Remote Clear must use the authoritative server control",
+        ));
+        return;
+    }
+    let previous_session = app.session.clone();
     let previous_session_id = previous_session.id.clone();
+    let session = match crate::primary::prepare_local_clear_session(
+        &previous_session,
+        &crate::instruction::InstructionRepositoryService::new(),
+        None,
+    ) {
+        Ok(session) => session,
+        Err(error) => {
+            app.push_display_message(DisplayMessage::error(format!(
+                "Clear preparation failed; original context is unchanged: {error:#}"
+            )));
+            return;
+        }
+    };
     let mut closed_session = previous_session.clone();
     closed_session.mark_closed();
     if let Err(error) = closed_session.save() {
-        app.push_display_message(DisplayMessage::error(format!(
-            "Failed to persist the current session before clear; nothing was changed: {error}"
-        )));
-        return;
-    }
-
-    let mut session = Session::create(None, None);
-    session.mark_active();
-    session.model = Some(app.provider.model());
-    session.provider_key = crate::session::derive_session_provider_key(app.provider.name());
-    session.autoreview_enabled = Some(app.autoreview_enabled);
-    session.autojudge_enabled = Some(app.autojudge_enabled);
-    session.ensure_initial_session_context_message();
-    if let Err(error) = session.save() {
-        if previous_session.save().is_err() {
-            crate::logging::error(
-                "Local session clear failed and restoring the prior durable session also failed",
-            );
-        }
-        app.push_display_message(DisplayMessage::error(format!(
-            "Failed to create the replacement session; the prior session remains active: {error}"
-        )));
+        app.push_display_message(DisplayMessage::error(format!("Replacement {} was prepared, but source close metadata failed: {error}. Original context remains selected; inspect the retained replacement before retrying.",session.id)));
         return;
     }
 
@@ -524,15 +522,7 @@ fn clone_session_for_review(
 }
 
 fn clone_session_for_prompt(app: &App) -> anyhow::Result<(String, String)> {
-    let parent_session_id = active_session_id(app);
-    let mut child = Session::create(Some(parent_session_id.clone()), None);
-    child.inherit_continuation_state_from(&app.session);
-    child.status = crate::session::SessionStatus::Closed;
-    // The parent agent keeps ownership of any in-flight request; tell the
-    // forked agent so it treats the next prompt as fresh work instead of
-    // continuing (and duplicating) the parent's current turn.
-    child.append_fork_notice(&parent_session_id, app.session.display_name())?;
-    child.save()?;
+    let child = crate::primary::prepare_split_session(&app.session, None)?;
     Ok((child.id.clone(), child.display_name().to_string()))
 }
 

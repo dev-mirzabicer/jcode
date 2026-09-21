@@ -123,20 +123,23 @@ impl WorkspaceService {
     }
     /// A derived row can prove a contradiction, never reconstruct permission.
     /// Genuine pre-catalog legacy state remains usable without initialization.
-    pub fn require_legacy_scope_absent(&self, session: &str) -> Result<()> {
+    pub(super) fn catalog_present(&self) -> Result<bool> {
         let present = |path: &Path| match std::fs::symlink_metadata(path) {
             Ok(_) => Ok(true),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(error) => Err(corrupt(error)),
         };
-        if !present(&self.marker())? && !present(&self.root)? {
+        Ok(present(&self.marker())? || present(&self.root)?)
+    }
+    pub fn require_legacy_scope_absent(&self, session: &str) -> Result<()> {
+        if !self.catalog_present()? {
             return Ok(());
         }
         let _lease = self.lease(false)?;
         let connection = self.connection()?;
         let indexed: bool = connection
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM session_index WHERE session=?1)",
+                "SELECT EXISTS(SELECT 1 FROM session_index WHERE session=?1) OR EXISTS(SELECT 1 FROM operations WHERE kind='context_scope' AND json_extract(body,'$.target')=?1)",
                 [session],
                 |row| row.get(0),
             )

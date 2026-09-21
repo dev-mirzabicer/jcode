@@ -104,6 +104,28 @@ fn dispatch_permissions(
         })
     };
     match request {
+        PermissionRequest::AbandonContextScope { session } => {
+            service.abandon_unpublished_context_scope(&session)?;
+            service
+                .context_scope_status_for_session(&session)
+                .map(Response::ContextScopes)
+        }
+        PermissionRequest::ContextScopeStatus { review } => service
+            .context_scope_status(review)
+            .map(Response::ContextScopes),
+        PermissionRequest::ReconcileContextScope { session } => {
+            service.reconcile_context_scope(&session)?;
+            let stored = load(&session)?;
+            if let Some(creation) = stored.primary_creation {
+                service.reconcile_primary_launch(creation.request)?;
+            }
+            service
+                .context_scope_status_for_session(&session)
+                .map(Response::ContextScopes)
+        }
+        PermissionRequest::ReviewCarry { session } => service
+            .review_grant_carry(&session)
+            .map(Response::CarryReview),
         PermissionRequest::Scope { session } => service
             .session_write_scope(&load(&session)?)
             .map(Response::Scope),

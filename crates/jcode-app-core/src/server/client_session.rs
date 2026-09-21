@@ -107,6 +107,7 @@ fn mark_remote_reload_started(request_id: &str) {
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_clear_session(
     id: u64,
+    grant_carry: Option<crate::workspace::GrantCarryChoice>,
     client_session_id: &mut String,
     client_connection_id: &str,
     agent: &Arc<Mutex<Agent>>,
@@ -126,11 +127,21 @@ pub(super) async fn handle_clear_session(
 ) -> Arc<Mutex<Agent>> {
     let old_session = client_session_id.clone();
     let fresh = match sessions
-        .clear_context(agent, &old_session, instruction_repositories, mcp_pool)
+        .clear_context_with_grants(
+            agent,
+            &old_session,
+            instruction_repositories,
+            mcp_pool,
+            grant_carry,
+        )
         .await
     {
         Ok(fresh) => fresh,
         Err(error) => {
+            if grant_carry.is_some() {
+                let _ =
+                    client_event_tx.send(crate::primary::scope_rejection(id, &old_session, &error));
+            }
             if let Some(activation) =
                 error.downcast_ref::<crate::agent::StartupContextActivationError>()
             {
@@ -186,7 +197,17 @@ pub(super) async fn handle_clear_session(
         connection.current_tool_name = None;
         connection.last_seen = Instant::now();
     }
-    let _ = client_event_tx.send(ServerEvent::SessionId { session_id: new_id });
+    let _ = client_event_tx.send(ServerEvent::SessionId {
+        session_id: new_id.clone(),
+    });
+    if grant_carry.is_some() {
+        let _ = client_event_tx.send(ServerEvent::ScopedContextCreated {
+            id,
+            source_session: old_session.clone(),
+            session_id: new_id.clone(),
+            kind: crate::workspace::NewContextKind::Clear,
+        });
+    }
     let _ = client_event_tx.send(ServerEvent::Done { id });
     fresh
 }

@@ -1086,7 +1086,7 @@ fn durable_primary_controls_negotiate_and_validate_receipt_identity() {
                 issue: None,
             };
             let event=match &frame.request {
-            ApiRequest::PrimaryControlProbe=>ApiEvent::PrimaryControlCapabilities{input_version:1,location_version:1,location_enabled:false,legacy_adoption_version:None},
+            ApiRequest::PrimaryControlProbe=>ApiEvent::PrimaryControlCapabilities{input_version:1,location_version:1,location_enabled:false,legacy_adoption_version:None,context_scope_version:None},
             ApiRequest::PrimaryInput{input}=>{assert_eq!(**input,original);ApiEvent::PrimaryInputReceipt{receipt}},
             ApiRequest::PrimaryInputInspect{..}=>ApiEvent::PrimaryInputReceipt{receipt},
             ApiRequest::PrimaryInputRead{..}=>ApiEvent::PrimaryInputDetail{receipt,input:Box::new(original.clone())},
@@ -1144,6 +1144,7 @@ fn legacy_adoption_requires_negotiation_and_correlates_the_exact_session() {
                         location_version: 1,
                         location_enabled: true,
                         legacy_adoption_version: version,
+                        context_scope_version: None,
                     },
                     ApiRequest::PrimaryLocation { command } => {
                         assert_eq!(version, Some(1), "Unsupported adoption must not be sent");
@@ -1169,6 +1170,101 @@ fn legacy_adoption_requires_negotiation_and_correlates_the_exact_session() {
             (None, _) => assert_eq!(result.unwrap_err().kind, ErrorKind::UnsupportedCapability),
             (_, true) => assert_eq!(result.unwrap_err().kind, ErrorKind::UnexpectedReply),
             _ => assert!(result.is_ok()),
+        }
+    }
+}
+
+#[test]
+fn scoped_contexts_negotiate_review_and_validate_destination() {
+    use jcode_harness_api::{GrantCarryChoice, NewContextKind};
+    let review = "12a99e11-e967-4a1e-a47c-000000000005".parse().unwrap();
+    for (version, foreign) in [(None, false), (Some(1), false), (Some(1), true)] {
+        let client = fake_harness_with_capabilities(
+            vec!["primary_control_v1".into()],
+            move |frame, writer| {
+                let event = match &frame.request {
+                    ApiRequest::PrimaryControlProbe => ApiEvent::PrimaryControlCapabilities {
+                        input_version: 1,
+                        location_version: 1,
+                        location_enabled: true,
+                        legacy_adoption_version: Some(1),
+                        context_scope_version: version,
+                    },
+                    ApiRequest::GrantCarryReview { session } => {
+                        assert_eq!(version, Some(1));
+                        ApiEvent::GrantCarryReview {
+                            review: jcode_harness_api::GrantCarryReview {
+                                id: review,
+                                source: session.clone(),
+                                session_revision: 1,
+                                catalog_revision: 2,
+                                direct_grants: Vec::new(),
+                            },
+                        }
+                    }
+                    ApiRequest::ScopedContext {session_id,grant_carry,..} if !grant_carry.carry => ApiEvent::ScopedContextRejected {source_session:session_id.clone(),issue:serde_json::from_value(serde_json::json!({"code":"conflict","detail":"synthetic stale review"})).unwrap()},
+                    ApiRequest::ScopedContext {
+                        session_id,
+                        kind,
+                        grant_carry,
+                    } => {
+                        assert_eq!(version, Some(1));
+                        assert_eq!(grant_carry.review, review);
+                        ApiEvent::ScopedContextCreated {
+                            source_session: if foreign {
+                                "foreign".into()
+                            } else {
+                                session_id.clone()
+                            },
+                            session_id: "target".into(),
+                            kind: *kind,
+                        }
+                    }
+                    _ => panic!("unexpected scoped operation"),
+                };
+                reply(frame, event, writer);
+            },
+        );
+        if version.is_none() {
+            assert_eq!(
+                client.review_grant_carry("source").unwrap_err().kind,
+                ErrorKind::UnsupportedCapability
+            );
+            continue;
+        }
+        assert_eq!(client.review_grant_carry("source").unwrap().id, review);
+        assert!(matches!(
+            client
+                .create_scoped_context(
+                    "source",
+                    NewContextKind::Clear,
+                    GrantCarryChoice {
+                        review,
+                        carry: false
+                    }
+                )
+                .unwrap_err()
+                .kind,
+            ErrorKind::PrimaryLaunch(_)
+        ));
+        for kind in [
+            NewContextKind::Split,
+            NewContextKind::Clear,
+            NewContextKind::Transfer,
+        ] {
+            let result = client.create_scoped_context(
+                "source",
+                kind,
+                GrantCarryChoice {
+                    review,
+                    carry: true,
+                },
+            );
+            if foreign {
+                assert_eq!(result.unwrap_err().kind, ErrorKind::UnexpectedReply);
+            } else {
+                assert_eq!(result.unwrap(), "target");
+            }
         }
     }
 }

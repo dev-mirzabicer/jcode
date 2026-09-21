@@ -2,7 +2,7 @@ use super::available_models_dedup::available_models_dedup_key;
 use super::client_actions::{
     NotifySessionContext, handle_input_shell, handle_notify_session, handle_rename_session,
     handle_run_subagent, handle_set_feature, handle_set_subagent_model, handle_split,
-    handle_stdin_response, handle_transfer, handle_trigger_memory_extraction,
+    handle_stdin_response, handle_trigger_memory_extraction,
 };
 use super::client_comm::{
     handle_comm_channel_members, handle_comm_list, handle_comm_list_channels, handle_comm_message,
@@ -1631,6 +1631,14 @@ pub(super) async fn handle_client_with_instruction_repositories(
             continue;
         }
 
+        let (request, grant_carry) = match request {
+            Request::ScopedContext {id,kind,grant_carry} => {
+                if !crate::primary::launch_enabled() { let _ = client_event_tx.send(ServerEvent::Error{id,message:"Scoped context controls are staged until workspace management is available".into(),retry_after_secs:None}); continue; }
+                let request = match kind { crate::workspace::NewContextKind::Clear => Request::Clear{id},crate::workspace::NewContextKind::Split => Request::Split{id},crate::workspace::NewContextKind::Transfer => Request::Transfer{id} };
+                (request,Some(grant_carry))
+            }
+            request => (request,None),
+        };
         let (request, queued_messages) = match request {
             Request::QueuedMessages {
                 id,
@@ -1652,6 +1660,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
             request => (request, None),
         };
         match request {
+            Request::ScopedContext { .. } => unreachable!("Scoped context was normalized before dispatch"),
             Request::PrimaryControlProbe { .. } | Request::PrimaryInputRead { .. } => {
                 if let Some(event) = primary_control_read(&request) { let _ = client_event_tx.send(event); }
             }
@@ -1796,7 +1805,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
                 let previous_session = client_session_id.clone();
                 agent = crate::hooks::with_client_terminal_env(
                     active_terminal_env.clone(),
-                    handle_clear_session(id,&mut client_session_id,&client_connection_id,&agent,&instruction_repositories,&sessions,&startup_context,&mcp_pool,&shutdown_signals,&soft_interrupt_queues,&client_connections,&swarm_members,&swarms_by_id,&event_history,&event_counter,&swarm_event_tx,&client_event_tx),
+                    handle_clear_session(id,grant_carry,&mut client_session_id,&client_connection_id,&agent,&instruction_repositories,&sessions,&startup_context,&mcp_pool,&shutdown_signals,&soft_interrupt_queues,&client_connections,&swarm_members,&swarms_by_id,&event_history,&event_counter,&swarm_event_tx,&client_event_tx),
                 ).await;
                 if client_session_id != previous_session {
                     let resources = sessions.resources(&client_session_id, &agent)?;
@@ -3813,12 +3822,13 @@ pub(super) async fn handle_client_with_instruction_repositories(
             }
 
             Request::Split { id } => {
-                handle_split(
+                super::client_actions::handle_split_with_grants(
                     id,
                     &client_session_id,
                     &instruction_repositories,
                     None,
                     &client_event_tx,
+                    grant_carry,
                 )
                 .await;
             }
@@ -3844,12 +3854,13 @@ pub(super) async fn handle_client_with_instruction_repositories(
                 ) {
                     continue;
                 }
-                handle_transfer(
+                super::client_actions::handle_transfer_with_grants(
                     id,
                     &client_session_id,
                     &agent,
                     &instruction_repositories,
                     &client_event_tx,
+                    grant_carry,
                 )
                 .await;
             }
@@ -4767,6 +4778,7 @@ fn primary_control_read(request: &Request) -> Option<ServerEvent> {
             location_version: 1,
             location_enabled: crate::primary::launch_enabled(),
             legacy_adoption_version: Some(1),
+            context_scope_version: Some(1),
         }),
         Request::PrimaryInputRead { id, session, input } => {
             let result = (|| -> Result<_> {

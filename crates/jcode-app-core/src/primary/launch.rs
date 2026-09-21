@@ -23,6 +23,12 @@ pub struct PrimaryLauncher {
     pub provider: Arc<dyn Provider>,
     pub registry: PrimaryRegistryMode,
 }
+#[derive(Clone, Copy)]
+pub(crate) struct PrimaryPreparation<'a> {
+    pub caller: StartupContextCaller,
+    pub scope: Option<&'a ContextScopePlan>,
+}
+
 impl PrimaryLauncher {
     pub async fn launch_hosted(
         &self,
@@ -31,6 +37,27 @@ impl PrimaryLauncher {
         expected: Revision,
         input: PrimaryLaunchInput,
         caller: StartupContextCaller,
+    ) -> Result<PrimaryLaunchRecord> {
+        self.launch_hosted_scoped(
+            host,
+            request,
+            expected,
+            input,
+            PrimaryPreparation {
+                caller,
+                scope: None,
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn launch_hosted_scoped(
+        &self,
+        host: &Arc<PrimaryHost>,
+        request: RequestId,
+        expected: Revision,
+        input: PrimaryLaunchInput,
+        preparation: PrimaryPreparation<'_>,
     ) -> Result<PrimaryLaunchRecord> {
         let _lease = self.workspace.primary_launch_lease(request)?;
         if let Ok(record) = self.workspace.inspect_primary_launch(request) {
@@ -48,7 +75,7 @@ impl PrimaryLauncher {
             host.accepting.load(std::sync::atomic::Ordering::Acquire),
             "Primary runtime is stopping"
         );
-        let (agent, record) = self.prepare(request, expected, input, caller).await?;
+        let (agent, record) = self.prepare(request, expected, input, preparation).await?;
         if let PrimaryRegistryMode::Shared(pool) = &self.registry {
             agent
                 .registry()
@@ -92,7 +119,16 @@ impl PrimaryLauncher {
         caller: StartupContextCaller,
     ) -> Result<(Agent, PrimaryLaunchRecord)> {
         let _lease = self.workspace.primary_launch_lease(request)?;
-        self.prepare(request, expected, input, caller).await
+        self.prepare(
+            request,
+            expected,
+            input,
+            PrimaryPreparation {
+                caller,
+                scope: None,
+            },
+        )
+        .await
     }
 
     async fn prepare(
@@ -100,7 +136,7 @@ impl PrimaryLauncher {
         request: RequestId,
         expected: Revision,
         input: PrimaryLaunchInput,
-        caller: StartupContextCaller,
+        preparation: PrimaryPreparation<'_>,
     ) -> Result<(Agent, PrimaryLaunchRecord)> {
         let saved = match self.workspace.inspect_primary_launch(request) {
             Ok(record) => {
@@ -135,7 +171,7 @@ impl PrimaryLauncher {
             .workspace
             .reserve_primary_launch(request, expected, input, model)?;
         let result = self
-            .prepare_record(&record, provider, selection, caller)
+            .prepare_record(&record, provider, selection, preparation)
             .await;
         match result {
             Ok(agent) => Ok((agent, self.workspace.inspect_primary_launch(request)?)),
@@ -158,7 +194,7 @@ impl PrimaryLauncher {
         record: &PrimaryLaunchRecord,
         provider: Arc<dyn Provider>,
         selection: AgentSelection,
-        caller: StartupContextCaller,
+        preparation: PrimaryPreparation<'_>,
     ) -> Result<Agent> {
         if crate::session::session_exists(&record.session) {
             let owner = Arc::new(PrimaryLease::acquire(&record.session)?);
@@ -172,6 +208,9 @@ impl PrimaryLauncher {
                 "Existing Session belongs to another launch"
             );
             if creation.ready {
+                if stored.scope_copy.is_some() {
+                    self.workspace.reconcile_context_scope(&record.session)?;
+                }
                 self.workspace.reconcile_primary_launch(record.request)?;
                 let registry = self.registry(provider.clone()).await?;
                 return Agent::restore_primary(
@@ -195,11 +234,16 @@ impl PrimaryLauncher {
             );
         }
         let placement = self.workspace.prepare_launch_filesystem(record.request)?;
-        let prepared = self.workspace.prepare_primary_location(
-            placement,
-            record.input.cwd.as_ref().map(PrimaryCwd::path),
-            record.operation,
-        )?;
+        let prepared = match preparation.scope {
+            Some(scope) => self
+                .workspace
+                .prepare_context_location(scope, record.operation)?,
+            None => self.workspace.prepare_primary_location(
+                placement,
+                record.input.cwd.as_ref().map(PrimaryCwd::path),
+                record.operation,
+            )?,
+        };
         let registry = self.registry(provider.clone()).await?;
         let mut session = Session::create_with_id(record.session.clone(), None, None);
         session.working_dir = Some(
@@ -217,11 +261,15 @@ impl PrimaryLauncher {
             operation: record.operation,
             ready: false,
         });
+        if let Some(scope) = preparation.scope {
+            self.workspace
+                .stage_context_scope(scope, &mut session, NewContextKind::Clear)?;
+        }
         let (mut agent, outcome) = Agent::prepare_primary_session(
             provider,
             registry,
             session,
-            StartupContextActivation::primary(caller),
+            StartupContextActivation::primary(preparation.caller),
             selection,
             record.input.selfdev,
             self.repositories.clone(),
@@ -247,8 +295,12 @@ impl PrimaryLauncher {
             .as_mut()
             .context("Preparation lost its launch identity")?
             .ready = true;
+        session.seal_context_scope();
         session.save()?;
         drop(prepared);
+        if session.scope_copy.is_some() {
+            self.workspace.reconcile_context_scope(&record.session)?;
+        }
         self.workspace.reconcile_primary_launch(record.request)?;
         Ok(agent)
     }

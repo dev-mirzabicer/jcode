@@ -431,9 +431,16 @@ export class JcodeClient extends EventEmitter {
     request: ApiRequest,
     kind: K,
   ): Promise<Extract<ApiEvent, { ev: K }>> {
+    return this.expectReplyOneOf(request, [kind]);
+  }
+
+  private async expectReplyOneOf<K extends ApiEvent["ev"]>(
+    request: ApiRequest,
+    kinds: readonly K[],
+  ): Promise<Extract<ApiEvent, { ev: K }>> {
     const frame = await this.requestOk(request);
-    if (frame.ev !== kind) {
-      throw new HarnessError("unexpected_reply", `expected ${kind}, got ${frame.ev}`);
+    if (!kinds.some((kind) => frame.ev === kind)) {
+      throw new HarnessError("unexpected_reply", `expected ${kinds.join(" or ")}, got ${frame.ev}`);
     }
     return frame as unknown as Extract<ApiEvent, { ev: K }>;
   }
@@ -489,6 +496,25 @@ export class JcodeClient extends EventEmitter {
     const reply = await this.expectReply({req:"primary_input_read",session,input},"primary_input_detail");
     if (reply.ev !== "primary_input_detail" || reply.receipt.id !== input || reply.receipt.session !== session || reply.input.id !== input || reply.input.session !== session) throw new HarnessError("unexpected_reply","Primary input detail identity mismatch");
     return {receipt:reply.receipt,input:reply.input};
+  }
+
+  private async requireContextScope(mutation: boolean): Promise<void> {
+    if (!this.supports("primary_control_v1")) throw new HarnessError("unsupported_capability", "Scoped contexts require primary_control_v1");
+    const reply = await this.expectReply({req:"primary_control_probe"},"primary_control_capabilities");
+    if (reply.ev !== "primary_control_capabilities" || reply.context_scope_version !== 1 || (mutation && !reply.location_enabled)) throw new HarnessError("unsupported_capability", "Scoped contexts are unsupported or staged");
+  }
+  async reviewGrantCarry(session: string): Promise<import("./protocol.js").GrantCarryReview> {
+    await this.requireContextScope(false);
+    const reply = await this.expectReply({req:"grant_carry_review",session},"grant_carry_review");
+    if (reply.ev !== "grant_carry_review" || reply.review.source !== session) throw new HarnessError("unexpected_reply","Grant-carry review belongs to another Session");
+    return reply.review;
+  }
+  async createScopedContext(sessionId:string, kind:import("./protocol.js").NewContextKind, grantCarry:import("./protocol.js").GrantCarryChoice): Promise<string> {
+    await this.requireContextScope(true);
+    const reply = await this.expectReplyOneOf({req:"scoped_context",session_id:sessionId,kind,grant_carry:grantCarry}, ["scoped_context_created", "scoped_context_rejected"]);
+    if (reply.ev === "scoped_context_rejected" && reply.source_session === sessionId) throw new HarnessError("primary_launch",reply.issue.detail,reply.issue);
+    if (reply.ev !== "scoped_context_created" || reply.source_session !== sessionId || reply.kind !== kind || !reply.session_id || reply.session_id === sessionId) throw new HarnessError("unexpected_reply","Scoped context identity mismatch");
+    return reply.session_id;
   }
 
   async primaryLocation(command: import("./protocol.js").PrimaryLocationCommand): Promise<import("./protocol.js").PrimaryLocationResponse> {

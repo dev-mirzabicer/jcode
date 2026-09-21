@@ -54,6 +54,8 @@ pub fn session_exists(session_id: &str) -> bool {
 /// Callers use it only while they still exclusively own a newly-created session
 /// that never became usable.
 pub fn remove_unpublished_session(session_id: &str) -> Result<()> {
+    crate::workspace::WorkspaceService::new(&storage::durable_state_dir())
+        .abandon_unpublished_context_scope(session_id)?;
     storage::unregister_active_pid(session_id);
     let snapshot = session_path(session_id)?;
     let _lease = super::capture::persistence_lease(&snapshot)?;

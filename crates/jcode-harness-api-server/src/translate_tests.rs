@@ -1937,3 +1937,52 @@ fn primary_controls_preserve_identity_and_ignore_transport_ack_without_attachmen
         assert!(bridge.legacy_event_to_api(&response).is_empty());
     }
 }
+
+#[test]
+fn scoped_context_review_and_creation_keep_authority_and_reply_identity_separate() {
+    let mut bridge = BridgeState::default();
+    let review_id = "12a99e11-e967-4a1e-a47c-000000000005";
+    let out = bridge
+        .api_request_to_legacy(&json!({"id":301,"req":"grant_carry_review","session":"source"}));
+    let Outbound::Legacy(wire) = &out[0] else {
+        panic!()
+    };
+    assert_eq!(wire["request"]["request"]["action"], "review_carry");
+    assert!(bridge.session_id.is_none());
+    let replies=bridge.legacy_event_to_api(&json!({"type":"workspace_response","id":wire["id"],"response":{"kind":"permissions","value":{"kind":"carry_review","value":{"id":review_id,"source":"source","session_revision":1,"catalog_revision":2,"direct_grants":[]}}}}));
+    assert_eq!(replies[0].reply_to, Some(301));
+    assert!(matches!(
+        replies[0].event,
+        ApiEvent::GrantCarryReview { .. }
+    ));
+    bridge.session_id = Some("source".into());
+    for (index, kind) in ["clear", "split", "transfer"].into_iter().enumerate() {
+        bridge.session_id = Some("source".into());
+        let id = 400 + index;
+        let out=bridge.api_request_to_legacy(&json!({"id":id,"req":"scoped_context","session_id":"source","kind":kind,"grant_carry":{"review":review_id,"carry":true}}));
+        let Outbound::Legacy(wire) = &out[0] else {
+            panic!("{out:?}")
+        };
+        assert_eq!(wire["type"], "scoped_context");
+        assert!(wire.get("session_id").is_none());
+        assert!(
+            bridge
+                .legacy_event_to_api(&json!({"type":"ack","id":wire["id"]}))
+                .is_empty()
+        );
+        if kind == "clear" {
+            bridge.legacy_event_to_api(&json!({"type":"session","session_id":"target"}));
+        }
+        let response = json!({"type":"scoped_context_created","id":wire["id"],"source_session":"source","session_id":"target","kind":kind});
+        let replies = bridge.legacy_event_to_api(&response);
+        assert_eq!(replies[0].reply_to, Some(id as u64));
+        assert!(
+            matches!(&replies[0].event,ApiEvent::ScopedContextCreated{source_session,session_id,..} if source_session=="source" && session_id=="target")
+        );
+        assert!(bridge.legacy_event_to_api(&response).is_empty());
+        assert_eq!(
+            bridge.session_id.as_deref(),
+            Some(if kind == "clear" { "target" } else { "source" })
+        );
+    }
+}

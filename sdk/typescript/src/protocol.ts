@@ -24,7 +24,7 @@ export interface PrimaryLaunchRecord {
   registration_request: string; state: "pending" | "complete" | "failed" | "recovery_required";
   reviewed_revision: number; published_revision: number | null; issue: string | null; backup_pending: boolean;
 }
-export type WorkspaceIssueCode = "needs_cwd" | "permission_required" | "invalid_identity" | "conflict" | "busy" | "offline_volume" | "replaced_root" | "corrupt_state" | "recovery_required" | "unsupported_capability" | "invalid_input" | "referenced" | "backup_failed" | "io";
+export type WorkspaceIssueCode = "needs_grant_choice" | "needs_cwd" | "permission_required" | "invalid_identity" | "conflict" | "busy" | "offline_volume" | "replaced_root" | "corrupt_state" | "recovery_required" | "unsupported_capability" | "invalid_input" | "referenced" | "backup_failed" | "io";
 export type PrimaryLaunchResponse = {status: "launched"; record: PrimaryLaunchRecord} | {status: "rejected"; request: string; issue: {code: WorkspaceIssueCode; detail: string}};
 
 export interface PrimaryInputEnvelope {
@@ -37,6 +37,10 @@ export interface PrimaryInputEnvelope {
 }
 export interface PrimaryInputReceipt { id:string; session:string; state:"accepted"|"committed"|"failed"|"cancelled"; messages:string[]; issue:string|null }
 export interface LocationChangeRequest { request:string; session:string; expected_session_revision:number; expected_catalog_revision:number; placement:WorkspacePlacement; cwd:string }
+export type NewContextKind = "split" | "clear" | "transfer";
+export interface GrantCarryChoice { review: string; carry: boolean }
+export interface WorkspaceGrantDefinition { id:string; audience:{kind:"session"|"project"|"work_area"|"checkout"; id:string}; target:{kind:"root"|"project_members"|"work_area_members"; id:string}; state:"disabled"|"active"|"revoked"; revision:number; copied_from:string|null; authorization?:{client:string;request:string;installation:string}|null }
+export interface GrantCarryReview { id:string; source:string; session_revision:number; catalog_revision:number; direct_grants:WorkspaceGrantDefinition[] }
 export interface LegacyLocationAdoptionRequest { request:string; session:string; expected_working_dir:string|null; expected_catalog_revision:number; placement:WorkspacePlacement; cwd:string }
 export type PrimaryLocationCommand = {action:"change"; request:LocationChangeRequest} | {action:"adopt_legacy"; request:LegacyLocationAdoptionRequest} | {action:"inspect"|"cancel"; operation:string};
 export interface LocationChangeRecord { legacy_origin?:{working_dir:string|null}|null; operation:string; input:LocationChangeRequest; state:"pending"|"complete"|"cancelled"|"failed"|"recovery_required"; effective_revision:number|null; notice_message:string|null; issue:{code:WorkspaceIssueCode; detail:string}|null }
@@ -185,6 +189,8 @@ export type ApiRequest =
   | {req: "primary_input"; input:PrimaryInputEnvelope}
   | {req: "primary_input_inspect"; session:string; input:string}
   | {req: "primary_input_read"; session:string; input:string}
+  | {req: "grant_carry_review"; session:string}
+  | {req: "scoped_context"; session_id:string; kind:NewContextKind; grant_carry:GrantCarryChoice}
   | {req: "primary_location"; command:PrimaryLocationCommand}
   | {req: "primary_launch_probe"}
   | {req: "primary_launch"; request: PrimaryLaunchRequest}
@@ -243,7 +249,10 @@ export type ApiRequest =
   | { req: "ping" };
 
 export type ApiEvent =
-  | {ev: "primary_control_capabilities"; input_version:number; location_version:number; location_enabled:boolean; legacy_adoption_version?:number|null}
+  | {ev: "grant_carry_review"; review:GrantCarryReview}
+  | {ev: "scoped_context_rejected"; source_session:string; issue:{code:WorkspaceIssueCode;detail:string}}
+  | {ev: "scoped_context_created"; source_session:string;session_id:string;kind:NewContextKind}
+  | {ev: "primary_control_capabilities"; input_version:number; location_version:number; location_enabled:boolean; legacy_adoption_version?:number|null; context_scope_version?:number|null}
   | {ev: "primary_input_receipt"; receipt:PrimaryInputReceipt}
   | {ev: "primary_input_detail"; receipt:PrimaryInputReceipt; input:PrimaryInputEnvelope}
   | {ev: "primary_location"; response:PrimaryLocationResponse}
@@ -394,6 +403,9 @@ export const KNOWN_EVENT_KINDS = [
   "output_cleanup",
   "execution",
   "primary_control_capabilities",
+  "grant_carry_review",
+  "scoped_context_created",
+  "scoped_context_rejected",
   "primary_input_receipt",
   "primary_input_detail",
   "primary_location",
@@ -446,6 +458,8 @@ export const KNOWN_REQUEST_KINDS = [
   "restore_session",
   "set_retention_policy",
   "primary_control_probe",
+  "grant_carry_review",
+  "scoped_context",
   "primary_input",
   "primary_input_inspect",
   "primary_input_read",

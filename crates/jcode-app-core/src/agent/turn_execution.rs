@@ -537,6 +537,34 @@ impl Agent {
         crate::agent::StartupContextActivationOutcome,
         crate::agent::StartupContextActivationError,
     > {
+        self.clear_with_grants(None)
+    }
+
+    pub fn clear_with_grants(
+        &mut self,
+        choice: Option<crate::workspace::GrantCarryChoice>,
+    ) -> std::result::Result<
+        crate::agent::StartupContextActivationOutcome,
+        crate::agent::StartupContextActivationError,
+    > {
+        let workspace =
+            crate::workspace::WorkspaceService::new(&crate::storage::durable_state_dir());
+        let prepare = || -> anyhow::Result<_> {
+            Ok(workspace.prepare_context_scope(
+                &self.session,
+                choice,
+                &crate::workspace::WorkspaceClientAuthority::authenticated(
+                    "local-primary-context",
+                )?,
+            )?)
+        };
+        let scope =
+            prepare().map_err(
+                |source| crate::agent::StartupContextActivationError::Ownership {
+                    caller: crate::agent::StartupContextCaller::Clear,
+                    source,
+                },
+            )?;
         let preserve_canary = self.session.is_canary;
         let preserve_testing_build = self.session.testing_build.clone();
         let preserve_debug = self.session.is_debug;
@@ -593,6 +621,20 @@ impl Agent {
         new_session.testing_build = preserve_testing_build;
         new_session.is_debug = preserve_debug;
         new_session.working_dir = preserve_working_dir;
+        if let Some(scope) = &scope {
+            workspace
+                .stage_context_scope(
+                    scope,
+                    &mut new_session,
+                    crate::workspace::NewContextKind::Clear,
+                )
+                .map_err(
+                    |source| crate::agent::StartupContextActivationError::Ownership {
+                        caller,
+                        source: source.into(),
+                    },
+                )?;
+        }
         new_session.ensure_initial_session_context_message();
 
         let prompt_activation = match self
@@ -644,6 +686,7 @@ impl Agent {
                 return Err(error);
             }
         };
+        new_session.seal_context_scope();
         if let Err(source) = new_session.save() {
             let activation_error = source.to_string();
             new_session.mark_closed();
@@ -658,6 +701,17 @@ impl Agent {
                 caller,
                 source: crate::agent::PrimaryInstructionActivationError::Persistence(source),
             });
+        }
+
+        if new_session.scope_copy.is_some() {
+            workspace
+                .reconcile_context_scope(&new_session.id)
+                .map_err(
+                    |source| crate::agent::StartupContextActivationError::Ownership {
+                        caller,
+                        source: source.into(),
+                    },
+                )?;
         }
 
         let previous_session_id = self.session.id.clone();

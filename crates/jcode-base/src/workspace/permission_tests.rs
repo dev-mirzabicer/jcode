@@ -4,6 +4,7 @@ use crate::session::Session;
 struct Environment(Vec<(&'static str, Option<std::ffi::OsString>)>);
 impl Drop for Environment {
     fn drop(&mut self) {
+        crate::config::Config::invalidate_cache();
         for (key, value) in &self.0 {
             match value {
                 Some(value) => crate::env::set_var(key, value),
@@ -33,6 +34,7 @@ impl Fixture {
         ]);
         crate::env::set_var("JCODE_HOME", temporary.path().join("home"));
         crate::env::set_var("JCODE_RUNTIME_DIR", temporary.path().join("runtime"));
+        crate::config::Config::invalidate_cache();
         let service = WorkspaceService::new(&temporary.path().join("state"));
         service.initialize(RequestId::new()).unwrap();
         let project = match change(
@@ -814,4 +816,244 @@ fn legacy_adoption_checkpoints_one_notice_without_rewriting_history_or_frozen_st
             .working_dir,
         None
     );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn context_scope_carry_is_reviewed_checkpointed_independent_and_replay_safe() {
+    let _lock = crate::storage::lock_test_env();
+    let mut f = Fixture::new();
+    f.session.save().unwrap();
+    let auth = WorkspaceClientAuthority::authenticated("context-fixture").unwrap();
+    let inherited = f
+        .issue(Audience::Project(f.project), WriteTarget::Root(f.b))
+        .grant
+        .unwrap();
+    let direct = f
+        .issue(
+            Audience::Session(f.session.id.clone()),
+            WriteTarget::Root(f.outside),
+        )
+        .grant
+        .unwrap();
+    assert!(
+        matches!(f.service.prepare_context_scope(&f.session,None,&auth),Err(e) if e.code == IssueCode::NeedsGrantChoice)
+    );
+    for (kind, carry) in [
+        (NewContextKind::Split, true),
+        (NewContextKind::Clear, false),
+        (NewContextKind::Transfer, true),
+    ] {
+        let review = f.service.review_grant_carry(&f.session.id).unwrap();
+        assert_eq!(review.direct_grants, vec![direct.clone()]);
+        let plan = f
+            .service
+            .prepare_context_scope(
+                &f.session,
+                Some(GrantCarryChoice {
+                    review: review.id,
+                    carry,
+                }),
+                &auth,
+            )
+            .unwrap()
+            .unwrap();
+        let mut child = Session::create(Some(f.session.id.clone()), None);
+        if kind == NewContextKind::Split {
+            child.inherit_continuation_state_from(&f.session);
+        }
+        f.service
+            .stage_context_scope(&plan, &mut child, kind)
+            .unwrap();
+        assert!(f.service.validate_context_scope(&child).is_err());
+        child.save().unwrap();
+        assert!(f.service.reconcile_context_scope(&child.id).is_err());
+        let mut racing = Session::create(None, None);
+        assert!(
+            matches!(f.service.stage_context_scope(&plan, &mut racing, kind), Err(e) if e.code == IssueCode::Conflict)
+        );
+        assert_eq!(f.service.context_scope_status(review.id).unwrap().len(), 1);
+        child.seal_context_scope();
+        child.save().unwrap();
+        let loaded = Session::load_startup_stub(&child.id).unwrap();
+        assert_eq!(loaded.scope_copy, child.scope_copy);
+        assert!(
+            f.service
+                .session_write_scope(&loaded)
+                .unwrap()
+                .grants
+                .iter()
+                .all(|g| g.id != direct.id)
+        );
+        let faulty = WorkspaceService {
+            fault: Some(std::sync::Arc::new(|point| {
+                if point == "context_scope_committed" {
+                    Err(io("synthetic post-commit loss"))
+                } else {
+                    Ok(())
+                }
+            })),
+            ..f.service.clone()
+        };
+        assert!(faulty.reconcile_context_scope(&child.id).is_err());
+        f.service.reconcile_context_scope(&child.id).unwrap();
+        f.service.validate_context_scope(&child).unwrap();
+        let before = f.service.session_write_scope(&child).unwrap();
+        assert!(before.grants.iter().any(|g| g.id == inherited.id));
+        let copies = before
+            .grants
+            .iter()
+            .filter(|g| g.copied_from == Some(direct.id))
+            .collect::<Vec<_>>();
+        assert_eq!(copies.len(), usize::from(carry));
+        if carry {
+            let copy = copies[0];
+            assert_ne!(copy.id, direct.id);
+            assert_eq!(copy.audience, Audience::Session(child.id.clone()));
+            apply(&f.service, GrantChange::Revoke { grant: copy.id });
+            assert_eq!(
+                f.service.inspect_grant(direct.id).unwrap().state,
+                GrantState::Active
+            );
+        }
+        f.service.reconcile_context_scope(&child.id).unwrap();
+        assert_eq!(
+            f.service
+                .session_write_scope(&child)
+                .unwrap()
+                .grants
+                .iter()
+                .filter(|g| g.copied_from == Some(direct.id))
+                .count(),
+            0
+        );
+    }
+    let review = f.service.review_grant_carry(&f.session.id).unwrap();
+    let plan = f
+        .service
+        .prepare_context_scope(
+            &f.session,
+            Some(GrantCarryChoice {
+                review: review.id,
+                carry: true,
+            }),
+            &auth,
+        )
+        .unwrap()
+        .unwrap();
+    let mut child = Session::create(None, None);
+    f.service
+        .stage_context_scope(&plan, &mut child, NewContextKind::Clear)
+        .unwrap();
+    child.seal_context_scope();
+    child.save().unwrap();
+    apply(&f.service, GrantChange::Revoke { grant: direct.id });
+    assert!(f.service.reconcile_context_scope(&child.id).is_err());
+    assert!(f.service.validate_context_scope(&child).is_err());
+    assert!(
+        matches!(f.service.prepare_context_scope(&f.session,Some(GrantCarryChoice{review:review.id,carry:false}),&auth),Err(e) if e.code==IssueCode::Conflict)
+    );
+    assert!(
+        f.service
+            .prepare_context_scope(&f.session, None, &auth)
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn context_cwd_uses_live_inherited_or_reviewed_direct_grants_not_a_scope_override() {
+    let _lock = crate::storage::lock_test_env();
+    let mut f = Fixture::new();
+    f.session.save().unwrap();
+    let auth = WorkspaceClientAuthority::authenticated("context-cwd-fixture").unwrap();
+    let cwd = f._temporary.path().join("outside");
+    assert!(
+        f.service
+            .prepare_primary_location(Placement::Directory(f.a), Some(&cwd), OperationId::new())
+            .is_err()
+    );
+    let direct = f
+        .issue(
+            Audience::Session(f.session.id.clone()),
+            WriteTarget::Root(f.outside),
+        )
+        .grant
+        .unwrap();
+    let prepared = f
+        .service
+        .prepare_session_location(
+            &f.session.id,
+            Placement::Directory(f.a),
+            Some(&cwd),
+            OperationId::new(),
+        )
+        .unwrap();
+    f.session.location = Some(prepared.location.clone());
+    f.session.working_dir = Some(
+        prepared
+            .location
+            .cwd
+            .observed_path()
+            .to_string_lossy()
+            .into(),
+    );
+    drop(prepared);
+    f.session.save().unwrap();
+    let review = f.service.review_grant_carry(&f.session.id).unwrap();
+    assert!(
+        matches!(f.service.prepare_context_scope(&f.session,Some(GrantCarryChoice{review:review.id,carry:false}),&auth),Err(e) if e.code==IssueCode::PermissionRequired)
+    );
+    let plan = f
+        .service
+        .prepare_context_scope(
+            &f.session,
+            Some(GrantCarryChoice {
+                review: review.id,
+                carry: true,
+            }),
+            &auth,
+        )
+        .unwrap()
+        .unwrap();
+    let mut child = Session::create(None, None);
+    f.service
+        .stage_context_scope(&plan, &mut child, NewContextKind::Clear)
+        .unwrap();
+    child.seal_context_scope();
+    child.save().unwrap();
+    f.service.reconcile_context_scope(&child.id).unwrap();
+    drop(plan);
+    assert_eq!(
+        child.location.as_ref().unwrap().placement,
+        Placement::Directory(f.a)
+    );
+    let copy = f
+        .service
+        .session_write_scope(&child)
+        .unwrap()
+        .grants
+        .into_iter()
+        .find(|g| g.copied_from == Some(direct.id))
+        .unwrap();
+    assert_eq!(copy.target, WriteTarget::Root(f.outside));
+    apply(&f.service, GrantChange::Revoke { grant: direct.id });
+    assert!(
+        f.service
+            .prepare_session_location(
+                &f.session.id,
+                Placement::Directory(f.a),
+                Some(&cwd),
+                OperationId::new()
+            )
+            .is_err()
+    );
+    f.issue(Audience::Project(f.project), WriteTarget::Root(f.outside));
+    let future = f
+        .service
+        .prepare_primary_location(Placement::Directory(f.a), Some(&cwd), OperationId::new())
+        .unwrap();
+    assert_eq!(future.location.placement, Placement::Directory(f.a));
+    assert_eq!(future.root, f.outside);
 }
