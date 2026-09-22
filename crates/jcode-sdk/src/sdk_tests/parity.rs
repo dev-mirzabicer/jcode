@@ -38,6 +38,8 @@ const CAPABILITIES: &[Capability] = &[
     cap("inspect_primary_input", "inspectPrimaryInput"),
     cap("read_primary_input", "readPrimaryInput"),
     cap("primary_location", "primaryLocation"),
+    cap("review_grant_carry", "reviewGrantCarry"),
+    cap("create_scoped_context", "createScopedContext"),
     cap("attach_session", "attachSession"),
     cap("detach_session", "detachSession"),
     cap("send_message", "sendMessage"),

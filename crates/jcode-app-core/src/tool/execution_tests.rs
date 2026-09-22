@@ -1078,6 +1078,16 @@ async fn atomic_image_read_retains_exact_pixels_and_reports_oversized_source_wit
     Ok(())
 }
 
+fn mutation_context(directory: &std::path::Path) -> anyhow::Result<ToolContext> {
+    let mut session = crate::session::Session::create(None, None);
+    session.working_dir = Some(directory.to_string_lossy().into());
+    session.save()?;
+    let mut ctx = context();
+    ctx.session_id = session.id;
+    ctx.working_dir = Some(directory.into());
+    Ok(ctx)
+}
+
 #[tokio::test]
 async fn mutation_receipts_retain_all_changed_lines_and_whitespace_before_presentation()
 -> anyhow::Result<()> {
@@ -1107,8 +1117,7 @@ async fn mutation_receipts_retain_all_changed_lines_and_whitespace_before_presen
                 serde_json::json!({"patch_text":format!("*** Begin Patch\n*** Add File: {name}\n{}*** End Patch\n",body.lines().map(|line|format!("+{line}\n")).collect::<String>()),"output_size":100})
             }
         };
-        let mut ctx = context();
-        ctx.working_dir = Some(directory.path().into());
+        let ctx = mutation_context(directory.path())?;
         let output = registry.execute(tool, input, ctx).await?;
         let OutputSource::Retained(reference) = output.source else {
             panic!()
@@ -1128,8 +1137,7 @@ async fn unified_patch_receipt_uses_actual_whole_file_line_numbers() -> anyhow::
     let registry = Registry::new(Arc::new(MockProvider)).await;
     let directory = tempfile::tempdir()?;
     std::fs::write(directory.path().join("source"), "first\nsecond\nthird\n")?;
-    let mut ctx = context();
-    ctx.working_dir = Some(directory.path().into());
+    let ctx = mutation_context(directory.path())?;
     let output=registry.execute("patch",serde_json::json!({"patch_text":"--- a/source\n+++ b/source\n@@ -3,1 +3,1 @@\n-third\n+changed\n"}),ctx).await?;
     assert!(output.output.contains("3- third\n3+ changed\n"));
     Ok(())
@@ -1140,11 +1148,12 @@ async fn partial_mutation_failure_retains_prior_receipts_and_does_not_rollback_e
 -> anyhow::Result<()> {
     let registry = Registry::new(Arc::new(MockProvider)).await;
     let directory = tempfile::tempdir()?;
-    std::fs::write(directory.path().join("blocker"), "not a directory")?;
-    let mut ctx = context();
-    ctx.working_dir = Some(directory.path().into());
+    // All destinations must initially be valid. The patch itself creates the
+    // file that obstructs a later parent, exercising genuine post-admission I/O
+    // failure rather than the intentional all-destination preflight rejection.
+    let ctx = mutation_context(directory.path())?;
     let id = crate::execution::invocation_id(&ctx);
-    let error=registry.execute("apply_patch",serde_json::json!({"patch_text":"*** Begin Patch\n*** Add File: first.txt\n+completed-first\n*** Add File: blocker/child\n+cannot-write\n*** Add File: unstarted.txt\n+must-not-start\n*** End Patch\n"}),ctx).await.expect_err("Second write must fail");
+    let error=registry.execute("apply_patch",serde_json::json!({"patch_text":"*** Begin Patch\n*** Add File: first.txt\n+completed-first\n*** Add File: blocker\n+created-during-this-operation\n*** Add File: blocker/child\n+cannot-write\n*** Add File: unstarted.txt\n+must-not-start\n*** End Patch\n"}),ctx).await.expect_err("Second write must fail");
     let record = crate::execution::wait_for(&id).await?;
     assert_eq!(record.state, crate::execution::RunState::Failed);
     let receipt = std::fs::read_to_string(record.output_path.unwrap())?;
@@ -1166,8 +1175,7 @@ async fn multi_edit_and_unified_patch_report_partial_failure_structurally() -> a
     let registry = Registry::new(Arc::new(MockProvider)).await;
     let directory = tempfile::tempdir()?;
     std::fs::write(directory.path().join("source"), "original\n")?;
-    let mut ctx = context();
-    ctx.working_dir = Some(directory.path().into());
+    let ctx = mutation_context(directory.path())?;
     let result=registry.execute("multiedit",serde_json::json!({"file_path":"source","edits":[{"old_string":"original","new_string":"changed"},{"old_string":"missing","new_string":"unused"}]}),ctx).await;
     assert!(
         result.is_err(),
@@ -1177,8 +1185,7 @@ async fn multi_edit_and_unified_patch_report_partial_failure_structurally() -> a
         std::fs::read_to_string(directory.path().join("source"))?,
         "changed\n"
     );
-    let mut ctx = context();
-    ctx.working_dir = Some(directory.path().into());
+    let ctx = mutation_context(directory.path())?;
     assert!(registry.execute("patch",serde_json::json!({"patch_text":"--- a/missing\n+++ b/missing\n@@ -1,1 +1,1 @@\n-old\n+new\n"}),ctx).await.is_err());
     Ok(())
 }
@@ -1189,8 +1196,7 @@ async fn same_target_patch_move_does_not_delete_the_written_source() -> anyhow::
     let directory = tempfile::tempdir()?;
     std::fs::create_dir(directory.path().join("nested"))?;
     std::fs::write(directory.path().join("source"), "old\n")?;
-    let mut ctx = context();
-    ctx.working_dir = Some(directory.path().into());
+    let ctx = mutation_context(directory.path())?;
     registry.execute("apply_patch",serde_json::json!({"patch_text":"*** Begin Patch\n*** Update File: source\n*** Move to: nested/../source\n@@\n-old\n+new\n*** End Patch\n"}),ctx).await?;
     assert_eq!(
         std::fs::read_to_string(directory.path().join("source"))?,
