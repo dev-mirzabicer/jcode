@@ -782,6 +782,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
                             id: *id,
                             catalog_version: 1,
                             permissions_version: Some(1),
+                            clone_version: Some(1),
                             managed_rollout: false,
                         },
                     )
@@ -3683,6 +3684,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
                     id,
                     catalog_version: 1,
                     permissions_version: Some(1),
+                    clone_version: Some(1),
                     managed_rollout: false,
                 });
             }

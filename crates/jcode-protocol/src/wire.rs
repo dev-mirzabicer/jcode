@@ -1271,6 +1271,8 @@ pub enum ServerEvent {
         catalog_version: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         permissions_version: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        clone_version: Option<u32>,
         managed_rollout: bool,
     },
     #[serde(rename = "workspace_response")]

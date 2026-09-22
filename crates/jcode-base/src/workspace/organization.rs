@@ -308,7 +308,7 @@ pub(super) fn home_project(connection: &Connection, home: Home) -> Result<Projec
     usable(connection, EntityId::Project(project))?;
     Ok(project)
 }
-fn association(
+pub(super) fn association(
     connection: &Connection,
     home: Home,
     repository: RepositoryId,

@@ -129,6 +129,12 @@ pub struct PathBinding {
     suffix: PathBuf,
 }
 impl PathBinding {
+    pub fn existing_ancestor(&self) -> &PhysicalBinding {
+        &self.ancestor
+    }
+    pub fn missing_suffix(&self) -> &Path {
+        &self.suffix
+    }
     pub fn volume(&self) -> &VolumeIdentity {
         self.ancestor.volume()
     }

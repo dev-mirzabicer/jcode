@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 mod backup;
+mod checkout;
 mod context_scope;
 mod grants;
 pub use context_scope::ContextScopePlan;

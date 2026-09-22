@@ -3,6 +3,8 @@ mod primary;
 pub use primary::*;
 mod permissions;
 pub use permissions::*;
+mod checkout;
+pub use checkout::*;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -464,6 +466,23 @@ pub struct RestoreReview {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkspaceRequest {
+    ReviewClone {
+        expected_revision: Revision,
+        spec: CloneSpec,
+    },
+    BeginClone {
+        request: RequestId,
+        review: ReviewId,
+    },
+    InspectClone {
+        request: RequestId,
+    },
+    CancelClone {
+        request: RequestId,
+    },
+    ResumeClone {
+        request: RequestId,
+    },
     Permissions {
         request: PermissionRequest,
     },
@@ -526,6 +545,8 @@ pub enum WorkspaceRequest {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum WorkspaceResponse {
+    CloneReview(CloneReview),
+    Clone(CloneRecord),
     Permissions(Box<PermissionResponse>),
     Status(CatalogStatus),
     Page(Page),

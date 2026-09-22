@@ -12,7 +12,7 @@ use jcode_base::execution::control_transport::exchange;
 pub use jcode_base::execution::control_transport::{ControlOperation, ControlReply, control};
 use jcode_base::execution::control_transport::{MAX_REQUEST, Request, Response, VERSION};
 
-pub(super) struct RuntimeHandle {
+pub(crate) struct RuntimeHandle {
     pub endpoint: RuntimeEndpoint,
     listener: tokio::task::JoinHandle<()>,
     _lease: Arc<File>,
@@ -45,7 +45,7 @@ impl Drop for EndpointLifetime {
     }
 }
 
-pub(super) async fn ensure_running(store: &ExecutionStore) -> Result<Arc<RuntimeHandle>> {
+pub(crate) async fn ensure_running(store: &ExecutionStore) -> Result<Arc<RuntimeHandle>> {
     let slot = RUNTIMES
         .lock()
         .unwrap_or_else(|p| p.into_inner())

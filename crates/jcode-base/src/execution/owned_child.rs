@@ -11,6 +11,9 @@ pub struct OwnedChild {
     identity: Option<ProcessIdentity>,
 }
 impl OwnedChild {
+    pub fn id(&self) -> Option<u32> {
+        self.child.id()
+    }
     pub fn spawn(command: &mut Command) -> Result<Self> {
         command.process_group(0).kill_on_drop(true);
         let child = command.spawn()?;

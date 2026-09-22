@@ -1,8 +1,15 @@
 //! Trusted same-user client adapter. No tool is registered by this module.
 //! Catalog administration does not create a provisional inference Session.
 pub use jcode_base::workspace::*;
+mod clone_runner;
 
 pub async fn dispatch(request: WorkspaceRequest, client: String) -> WorkspaceResponse {
+    if let WorkspaceRequest::BeginClone { request, review } = request {
+        return clone_runner::begin(request, review, client).await;
+    }
+    if let WorkspaceRequest::ResumeClone { request } = request {
+        return clone_runner::resume(request, client).await;
+    }
     let root = crate::storage::durable_state_dir();
     match tokio::task::spawn_blocking(move || {
         match WorkspaceClientAuthority::authenticated(client) {
@@ -28,6 +35,24 @@ pub fn dispatch_with(
 ) -> WorkspaceResponse {
     use WorkspaceResponse as Response;
     let result = match request {
+        WorkspaceRequest::ReviewClone {
+            expected_revision,
+            spec,
+        } => service
+            .review_clone(expected_revision, spec)
+            .map(Response::CloneReview),
+        WorkspaceRequest::InspectClone { request } => {
+            service.inspect_clone(request).map(Response::Clone)
+        }
+        WorkspaceRequest::CancelClone { request } => {
+            service.request_clone_cancel(request).map(Response::Clone)
+        }
+        WorkspaceRequest::BeginClone { .. } | WorkspaceRequest::ResumeClone { .. } => Err(Issue {
+            code: IssueCode::UnsupportedCapability,
+            detail:
+                "A clone operation requires the runtime-owned asynchronous workspace dispatcher"
+                    .into(),
+        }),
         WorkspaceRequest::Permissions { request } => dispatch_permissions(service, request, client)
             .map(|value| Response::Permissions(Box::new(value))),
         WorkspaceRequest::Status {} => service.status().map(Response::Status),

@@ -26,6 +26,7 @@ pub use provider_ingress::ProviderIngress;
 mod provider_capture;
 pub use provider_capture::ProviderCaptureScope;
 mod runtime;
+pub(crate) use runtime::ensure_running as ensure_execution_runtime;
 pub use runtime::{ControlOperation, ControlReply, control};
 
 type Producer = Box<dyn FnOnce(ToolContext) -> BoxFuture<'static, Result<ToolOutput>> + Send>;

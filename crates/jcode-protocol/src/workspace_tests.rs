@@ -17,6 +17,7 @@ fn workspace_catalog_control_is_session_independent_and_roundtrips() {
         id: 42,
         catalog_version: 1,
         permissions_version: Some(1),
+        clone_version: Some(1),
         managed_rollout: false,
     };
     let bytes = serde_json::to_vec(&capabilities).unwrap();
@@ -83,10 +84,65 @@ fn permissions_negotiate_without_enabling_rollout_or_accepting_forged_authority(
         serde_json::from_value::<ServerEvent>(old).unwrap(),
         ServerEvent::WorkspaceCapabilities {
             permissions_version: None,
+            clone_version: None,
             managed_rollout: false,
             ..
         }
     ));
     let forged = serde_json::json!({"action":"propose","session":"s","request":RequestId::new(),"target":{"kind":"root","id":LocationId::new()},"reason":"synthetic","audience":{"kind":"project","id":ProjectId::new()}});
     assert!(serde_json::from_value::<PermissionRequest>(forged).is_err());
+}
+
+#[test]
+fn checkout_clone_request_requires_review_identity_and_does_not_confer_human_authority() {
+    use jcode_workspace_types::{
+        CloneBase, CloneBranch, CloneDestination, CloneSource, CloneSpec, Home, ProjectId,
+        RepositoryId, ReviewId,
+    };
+    let request = WorkspaceRequest::ReviewClone {
+        expected_revision: 7,
+        spec: CloneSpec {
+            home: Home::Project(ProjectId::new()),
+            repository: RepositoryId::new(),
+            name: "synthetic".into(),
+            source: CloneSource::Local {
+                path: "/fixture/source".into(),
+            },
+            base: CloneBase::Branch {
+                name: "main".into(),
+            },
+            branch: CloneBranch::Detached,
+            remotes: vec![],
+            destination: CloneDestination::Custom {
+                volume_uuid: "00000000-0000-0000-0000-000000000001".into(),
+                path: "/fixture/checkout".into(),
+            },
+            submodules: true,
+            lfs: true,
+            trusted_local_submodule_urls: vec![],
+            trusted_lfs_urls: vec![],
+        },
+    };
+    let wire = serde_json::to_value(&request).unwrap();
+    assert_eq!(
+        serde_json::from_value::<WorkspaceRequest>(wire.clone()).unwrap(),
+        request
+    );
+    let mut forged = wire;
+    forged["trusted"] = serde_json::json!(true);
+    assert!(serde_json::from_value::<WorkspaceRequest>(forged).is_err());
+    let begin = WorkspaceRequest::BeginClone {
+        request: RequestId::new(),
+        review: ReviewId::new(),
+    };
+    assert_eq!(
+        serde_json::from_value::<WorkspaceRequest>(serde_json::to_value(&begin).unwrap()).unwrap(),
+        begin
+    );
+    assert!(
+        serde_json::from_value::<WorkspaceRequest>(
+            serde_json::json!({"action":"begin_clone","request":RequestId::new()})
+        )
+        .is_err()
+    );
 }
