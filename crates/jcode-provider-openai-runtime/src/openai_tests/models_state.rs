@@ -47,19 +47,16 @@ fn gpt_5_6_sol_1m_is_a_distinct_oauth_profile_over_the_same_wire_model() {
 
     let provider = OpenAIProvider::new(CodexCredentials {
         access_token: "test".to_string(),
-        refresh_token: String::new(),
+        // Budget semantics follow credential shape, not the route environment hint.
+        refresh_token: "test-refresh-token".to_string(),
         id_token: None,
         account_id: None,
         expires_at: None,
     });
 
     let switching_models = provider.available_models_for_switching();
-    assert!(
-        switching_models.contains(&jcode_provider_core::GPT_5_6_SOL_MODEL.to_string())
-    );
-    assert!(
-        switching_models.contains(&jcode_provider_core::GPT_5_6_SOL_1M_MODEL.to_string())
-    );
+    assert!(switching_models.contains(&jcode_provider_core::GPT_5_6_SOL_MODEL.to_string()));
+    assert!(switching_models.contains(&jcode_provider_core::GPT_5_6_SOL_1M_MODEL.to_string()));
 
     provider
         .set_model(jcode_provider_core::GPT_5_6_SOL_MODEL)
@@ -116,6 +113,79 @@ fn test_openai_switching_models_include_dynamic_catalog_entries() {
     assert!(models.contains(&"gpt-5.4".to_string()));
     assert!(models.contains(&dynamic_model.to_string()));
 
+    jcode_base::auth::codex::set_active_account_override(None);
+}
+
+#[test]
+fn gpt_6_sol_and_luna_select_without_long_context_profiles() {
+    let _guard = jcode_base::storage::lock_test_env();
+    let _model = EnvVarGuard::remove("JCODE_OPENAI_MODEL");
+    let _effort = EnvVarGuard::remove("JCODE_OPENAI_REASONING_EFFORT");
+    jcode_base::auth::codex::set_active_account_override(Some("gpt-6-options".to_string()));
+    let models = [
+        jcode_provider_core::GPT_6_SOL_MODEL,
+        jcode_provider_core::GPT_6_LUNA_MODEL,
+    ];
+    jcode_base::provider::populate_account_models(models.map(str::to_string).to_vec());
+
+    for oauth in [false, true] {
+        let _route = EnvVarGuard::set(
+            "JCODE_RUNTIME_PROVIDER",
+            if oauth { "openai-oauth" } else { "openai-api" },
+        );
+        let provider = OpenAIProvider::new(CodexCredentials {
+            access_token: "test".to_string(),
+            refresh_token: if oauth {
+                "test".to_string()
+            } else {
+                String::new()
+            },
+            id_token: None,
+            account_id: None,
+            expires_at: None,
+        });
+        for model in models {
+            let options = provider.available_models_for_switching();
+            assert!(options.iter().any(|id| id == model));
+            assert!(!options.contains(&format!("{model}[1m]")));
+            provider.set_model(model).unwrap();
+            assert_eq!(provider.model(), model);
+            assert!(provider.supports_image_input());
+            assert_eq!(
+                OpenAIProvider::default_reasoning_effort_for_model(model),
+                None
+            );
+            provider.set_reasoning_effort("high").unwrap();
+            assert_eq!(provider.reasoning_effort().as_deref(), Some("high"));
+            let budget = provider.context_request_budget();
+            assert_eq!(budget.context_window, 1_000_000);
+            assert_eq!(
+                budget.semantics,
+                if oauth {
+                    jcode_provider_core::ContextWindowSemantics::InputOnly
+                } else {
+                    jcode_provider_core::ContextWindowSemantics::InputPlusOutput
+                }
+            );
+            if oauth {
+                assert_eq!(budget.safe_input_budget(), 995_904);
+            }
+            let request = OpenAIProvider::build_response_request(
+                &provider.model(),
+                "system".to_string(),
+                &[],
+                &[],
+                false,
+                None,
+                provider.reasoning_effort().as_deref(),
+                None,
+                None,
+                None,
+            );
+            assert_eq!(request["model"], model);
+            assert_eq!(request["reasoning"]["effort"], "high");
+        }
+    }
     jcode_base::auth::codex::set_active_account_override(None);
 }
 

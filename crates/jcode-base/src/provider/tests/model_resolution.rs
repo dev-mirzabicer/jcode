@@ -1970,6 +1970,8 @@ fn test_normalize_model_id_strips_1m_suffix() {
 fn test_merge_openai_model_ids_appends_dynamic_oauth_models() {
     let models = models::merge_openai_model_ids(vec![
         "gpt-6-astra".to_string(),
+        "gpt-6-sol".to_string(),
+        "gpt-6-luna".to_string(),
         "gpt-5.4".to_string(),
         "gpt-5.4-fast-preview".to_string(),
         "gpt-5.4-fast-preview".to_string(),
@@ -1979,6 +1981,14 @@ fn test_merge_openai_model_ids_appends_dynamic_oauth_models() {
     assert!(models.iter().any(|model| model == "gpt-5.4"));
     assert!(models.iter().any(|model| model == "gpt-5.6-sol"));
     assert!(models.iter().any(|model| model == "gpt-5.6-sol[1m]"));
+    for model in ["gpt-6-sol", "gpt-6-luna"] {
+        assert_eq!(models.iter().filter(|id| id.as_str() == model).count(), 1);
+        assert!(
+            models::merge_openai_model_ids(Vec::new())
+                .iter()
+                .any(|id| id == model)
+        );
+    }
     assert_eq!(
         models
             .iter()

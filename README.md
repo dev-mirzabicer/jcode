@@ -349,11 +349,14 @@ safe-input budget. **GPT-5.6 Sol (1M)** (`gpt-5.6-sol[1m]`) is an explicit opt-i
 upstream model slug `gpt-5.6-sol`; `[1m]` is a Jcode picker/session/config identity,
 not an OpenRouter model slug and not an automatic-compaction mode.
 
-**GPT-6 Astra** (`gpt-6-astra`) is also available on current OpenAI and
-OpenRouter catalogs. Jcode treats it as a native 1,000,000-token model when a
-live catalog does not provide a more specific limit. GPT-5.6 Sol remains the
-quality-first default; the OpenAI account fallback list tries Astra immediately
-after Sol.
+**GPT-6 Astra** (`gpt-6-astra`), **GPT-6 Sol** (`gpt-6-sol`) and **GPT-6 Luna**
+(`gpt-6-luna`) are built-in OpenAI options, including offline catalog fallback.
+Live account availability still controls selection. They use the existing GPT-6
+context policy without separate `[1m]` picker entries: the native OpenAI runtime
+uses a 1,000,000-token window, while cache-aware capability lookup honors a
+catalog-supplied limit before that fallback. This client policy is not verification
+of the upstream route's maximum accepted request. GPT-5.6 Sol remains the default;
+existing fallback preferences, saved selections and the model roster are unchanged.
 
 For custom OpenAI-compatible endpoints, jcode now prompts for the API base and supports local localhost servers without requiring an API key.
 

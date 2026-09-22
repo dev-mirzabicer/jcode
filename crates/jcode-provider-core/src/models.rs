@@ -13,6 +13,10 @@ pub const GPT_5_6_SOL_1M_CONTEXT_WINDOW: usize = 1_000_000;
 /// OpenRouter catalogs. It is explicit because frontier auto-promotion accepts
 /// only bare numeric GPT ids and skips named suffixes such as `-astra`.
 pub const GPT_6_ASTRA_MODEL: &str = "gpt-6-astra";
+/// Named GPT-6 options use the ordinary GPT-6 context policy, not the
+/// GPT-5.6 Sol-specific short/long profile split.
+pub const GPT_6_SOL_MODEL: &str = "gpt-6-sol";
+pub const GPT_6_LUNA_MODEL: &str = "gpt-6-luna";
 pub const DEFAULT_OPENAI_MODEL: &str = GPT_5_6_SOL_MODEL;
 
 /// Available Claude models used by model lists and provider routing.
@@ -71,6 +75,8 @@ pub const ALL_OPENAI_MODELS: &[&str] = &[
     DEFAULT_OPENAI_MODEL,
     GPT_5_6_SOL_1M_MODEL,
     GPT_6_ASTRA_MODEL,
+    GPT_6_SOL_MODEL,
+    GPT_6_LUNA_MODEL,
     "gpt-5.6-pro",
     // ChatGPT web-only route. The `[web]` suffix is intentionally part of the
     // jcode model id so it can never be mistaken for an API/Codex model with
@@ -108,9 +114,11 @@ mod openai_catalog_tests {
     use super::*;
 
     #[test]
-    fn openai_catalog_exposes_astra_and_the_complete_gpt_5_6_family() {
+    fn openai_catalog_exposes_named_gpt_6_and_the_complete_gpt_5_6_family() {
         for model in [
             GPT_6_ASTRA_MODEL,
+            GPT_6_SOL_MODEL,
+            GPT_6_LUNA_MODEL,
             "gpt-5.6-sol",
             "gpt-5.6-sol[1m]",
             "gpt-5.6-pro",
@@ -124,27 +132,32 @@ mod openai_catalog_tests {
         assert!(is_openai_api_only_pro_model("gpt-5.6-pro"));
         assert!(!is_openai_api_only_pro_model("gpt-5.6-sol"));
         assert!(!is_openai_api_only_pro_model("gpt-5.6-sol[1m]"));
+        for model in [GPT_6_SOL_MODEL, GPT_6_LUNA_MODEL] {
+            assert!(!is_openai_api_only_pro_model(model));
+            assert_eq!(
+                ALL_OPENAI_MODELS.iter().filter(|id| **id == model).count(),
+                1
+            );
+            assert!(!ALL_OPENAI_MODELS.contains(&format!("{model}[1m]").as_str()));
+        }
+        assert_eq!(ALL_OPENAI_MODELS[0], GPT_5_6_SOL_MODEL);
     }
 
     #[test]
-    fn gpt_6_astra_is_openai_native_1m_and_respects_catalog_overrides() {
-        assert_eq!(provider_for_model(GPT_6_ASTRA_MODEL), Some("openai"));
-        assert_eq!(
-            context_limit_for_model_with_provider_and_cache(
-                GPT_6_ASTRA_MODEL,
-                Some("openai"),
-                |_| None,
-            ),
-            Some(1_000_000),
-        );
-        assert_eq!(
-            context_limit_for_model_with_provider_and_cache(
-                GPT_6_ASTRA_MODEL,
-                Some("openai"),
-                |_| Some(900_000),
-            ),
-            Some(900_000),
-        );
+    fn named_gpt_6_models_use_same_context_policy_and_respect_catalog_overrides() {
+        for model in [GPT_6_ASTRA_MODEL, GPT_6_SOL_MODEL, GPT_6_LUNA_MODEL] {
+            assert_eq!(provider_for_model(model), Some("openai"));
+            assert_eq!(
+                context_limit_for_model_with_provider_and_cache(model, Some("openai"), |_| None),
+                Some(1_000_000),
+            );
+            assert_eq!(
+                context_limit_for_model_with_provider_and_cache(model, Some("openai"), |_| {
+                    Some(900_000)
+                }),
+                Some(900_000),
+            );
+        }
     }
 
     #[test]
