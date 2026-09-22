@@ -31,3 +31,14 @@ pub struct StoredContextScope {
     pub operation: OperationId,
     pub ready: bool,
 }
+
+/// Last explanation committed with Session history, not permission authority.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoredScopeNotice {
+    pub location_revision: u64,
+    pub installation: jcode_workspace_types::InstallationId,
+    pub catalog_revision: u64,
+    pub fingerprint: String,
+    pub message: String,
+}

@@ -45,6 +45,8 @@ pub(super) struct SessionJournalMeta {
     pub(super) primary_creation: Option<super::StoredPrimaryCreation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) scope_copy: Option<super::StoredContextScope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) scope_notice: Option<jcode_session_types::StoredScopeNotice>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(super) primary_inputs: Vec<jcode_session_types::StoredPrimaryInputReceipt>,
     pub(super) short_name: Option<String>,
@@ -126,6 +128,7 @@ pub(super) fn metadata_requires_snapshot(
         || prev.location != current.location
         || prev.primary_creation != current.primary_creation
         || prev.scope_copy != current.scope_copy
+        || prev.scope_notice != current.scope_notice
         || prev.primary_inputs != current.primary_inputs
         || prev.short_name != current.short_name
         || prev.status != current.status

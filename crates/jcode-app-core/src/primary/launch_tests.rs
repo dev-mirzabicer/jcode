@@ -630,3 +630,48 @@ fn shared_clear_carries_only_reviewed_direct_grants_as_independent_authority() -
         Ok(())
     })
 }
+
+#[test]
+#[cfg(target_os = "macos")]
+fn scope_notices_are_durable_non_waking_and_do_not_delay_revocation() -> Result<()> {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir()?;
+    let _env = Env::new(temp.path());
+    crate::config::Config::invalidate_cache();
+    crate::instruction::SystemPromptComposer::new().ensure_global_store()?;
+    tokio::runtime::Runtime::new()?.block_on(async {
+        let service=WorkspaceService::new(&crate::storage::durable_state_dir());service.initialize(RequestId::new())?;
+        let mut roots=Vec::new();for name in ["source","other"] {let path=temp.path().join(name);std::fs::create_dir(&path)?;let path=path.canonicalize()?;let EntityId::Location(id)=change(&service,OrganizationChange::RegisterLocation{name:name.into(),path:path.clone(),registration:Registration::Standalone})?.targets[0] else {panic!()};roots.push((id,path));}
+        let provider=FixtureProvider::default();let host=Arc::new(PrimaryHost::default());
+        let launcher=PrimaryLauncher{workspace:service.clone(),repositories:InstructionRepositoryService::new(),provider:Arc::new(provider.clone()),registry:PrimaryRegistryMode::Process};
+        let created=launcher.launch_hosted(&host,RequestId::new(),service.status()?.revision,PrimaryLaunchInput{placement:PrimaryPlacement::Existing{placement:Placement::Standalone(roots[0].0)},cwd:Some(PrimaryCwd::Existing{path:roots[0].1.clone()}),agent:None,model:None,selfdev:false},StartupContextCaller::HarnessApi).await?;
+        let agent=host.read().await.get(&created.session).cloned().unwrap();
+        host.reconcile_idle_scope_notices().await;
+        let initial=Session::load(&created.session)?;assert!(initial.scope_notice.is_some());
+        let auth=WorkspaceClientAuthority::authenticated("notice-fixture")?;
+        let review=service.review_grant_change(service.status()?.revision,GrantChange::Issue{audience:Audience::Session(created.session.clone()),target:WriteTarget::Root(roots[1].0),proposal:None})?;
+        let grant=service.apply_grant_change(&auth,RequestId::new(),review.id)?.grant.unwrap();
+        // An exclusively owned active batch cannot be interrupted by idle polling.
+        let busy=agent.lock().await;
+        host.reconcile_idle_scope_notices().await;
+        assert_eq!(Session::load(&created.session)?.scope_notice,initial.scope_notice);
+        drop(busy);host.reconcile_idle_scope_notices().await;
+        let granted=Session::load(&created.session)?;assert_ne!(granted.scope_notice,initial.scope_notice);
+        assert_eq!(granted.system_prompt,initial.system_prompt);assert_eq!(granted.active_skill,initial.active_skill);
+        assert_eq!(serde_json::to_value(&granted.messages[..initial.messages.len()])?,serde_json::to_value(&initial.messages)?);
+        let review=service.review_grant_change(service.status()?.revision,GrantChange::Revoke{grant:grant.id})?;
+        service.apply_grant_change(&auth,RequestId::new(),review.id)?;
+        // Broken occurrence text prevents explanation, never current enforcement.
+        let path=crate::storage::jcode_dir()?.join("instructions/notifications/session-write-access-changed.md");
+        let old=std::fs::read(&path)?;std::fs::write(&path,[0xff])?;
+        host.reconcile_idle_scope_notices().await;
+        assert_eq!(Session::load(&created.session)?.scope_notice,granted.scope_notice);
+        assert!(agent.lock().await.execute_tool("write",serde_json::json!({"file_path":roots[1].1.join("denied"),"content":"no","intent":"Verify revocation"})).await.is_err());
+        std::fs::write(&path,old)?;
+        host.reconcile_idle_scope_notices().await;
+        let revoked=Session::load(&created.session)?;assert_ne!(revoked.scope_notice,granted.scope_notice);
+        host.reconcile_idle_scope_notices().await;
+        assert_eq!(Session::load(&created.session)?.messages.len(),revoked.messages.len());
+        assert_eq!(provider.0.load(Ordering::SeqCst),0);host.shutdown().await?;Ok(())
+    })
+}

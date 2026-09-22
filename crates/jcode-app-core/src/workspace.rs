@@ -104,6 +104,17 @@ fn dispatch_permissions(
         })
     };
     match request {
+        PermissionRequest::DecideProposal {
+            request,
+            proposal,
+            expected_revision,
+            decision,
+        } => service
+            .decide_access_proposal(client, request, proposal, expected_revision, decision)
+            .map(Response::Mutation),
+        PermissionRequest::ImportedGrants { after, limit } => {
+            service.list_imported_grants(after, limit)
+        }
         PermissionRequest::AbandonContextScope { session } => {
             service.abandon_unpublished_context_scope(&session)?;
             service

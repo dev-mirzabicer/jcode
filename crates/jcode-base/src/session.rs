@@ -367,6 +367,8 @@ pub struct Session {
     pub primary_creation: Option<StoredPrimaryCreation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope_copy: Option<StoredContextScope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_notice: Option<jcode_session_types::StoredScopeNotice>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub primary_inputs: Vec<jcode_session_types::StoredPrimaryInputReceipt>,
     /// Memorable short name (e.g., "fox", "oak")
@@ -484,6 +486,8 @@ struct SessionStartupStub {
     primary_creation: Option<StoredPrimaryCreation>,
     #[serde(default)]
     scope_copy: Option<StoredContextScope>,
+    #[serde(default)]
+    scope_notice: Option<jcode_session_types::StoredScopeNotice>,
     #[serde(default)]
     primary_inputs: Vec<jcode_session_types::StoredPrimaryInputReceipt>,
     #[serde(default)]
@@ -1151,10 +1155,69 @@ impl Session {
             }
             anyhow::ensure!(
                 committed.location == candidate.location
+                    && committed.scope_notice == candidate.scope_notice
                     && serde_json::to_value(&committed.messages)?
                         == serde_json::to_value(&candidate.messages)?,
                 "Location checkpoint outcome needs recovery"
             );
+            candidate = committed;
+        }
+        *self = candidate;
+        Ok(())
+    }
+
+    pub fn stage_scope_notice(
+        &self,
+        observation: &crate::workspace::ScopeObservation,
+        text: String,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            self.location
+                .as_ref()
+                .is_some_and(|l| l.revision == observation.location_revision),
+            "Scope notice has a stale Session binding"
+        );
+        let mut candidate = self.clone();
+        let message = crate::id::new_id("scope");
+        candidate.append_stored_message(StoredMessage {
+            id: message.clone(),
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text,
+                cache_control: None,
+            }],
+            display_role: Some(StoredDisplayRole::System),
+            origin: None,
+            timestamp: None,
+            tool_duration_ms: None,
+            token_usage: None,
+        });
+        candidate.scope_notice = Some(jcode_session_types::StoredScopeNotice {
+            installation: observation.installation,
+            catalog_revision: observation.catalog_revision,
+            location_revision: observation.location_revision,
+            fingerprint: observation.fingerprint.clone(),
+            message,
+        });
+        candidate.persist_state.force_snapshot = true;
+        Ok(candidate)
+    }
+    pub fn commit_scope_notice(&mut self, mut candidate: Self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            candidate.id == self.id
+                && candidate.location == self.location
+                && candidate.scope_notice.is_some(),
+            "Scope notice candidate changed Session authority"
+        );
+        if let Err(error) = candidate.save() {
+            let committed = Self::load(&self.id)?;
+            if committed.scope_notice != candidate.scope_notice
+                || committed.location != candidate.location
+                || serde_json::to_value(&committed.messages)?
+                    != serde_json::to_value(&candidate.messages)?
+            {
+                return Err(error);
+            }
             candidate = committed;
         }
         *self = candidate;
@@ -1228,6 +1291,7 @@ impl Session {
         session.location = stub.location;
         session.primary_creation = stub.primary_creation;
         session.scope_copy = stub.scope_copy;
+        session.scope_notice = stub.scope_notice;
         session.primary_inputs = stub.primary_inputs;
         session.short_name = stub.short_name;
         session.status = stub.status;
@@ -1455,6 +1519,7 @@ impl Session {
             location: self.location.clone(),
             primary_creation: self.primary_creation.clone(),
             scope_copy: self.scope_copy,
+            scope_notice: self.scope_notice.clone(),
             primary_inputs: self.primary_inputs.clone(),
             short_name: self.short_name.clone(),
             status: self.status.clone(),
@@ -1773,6 +1838,7 @@ impl Session {
         self.location = meta.location;
         self.primary_creation = meta.primary_creation;
         self.scope_copy = meta.scope_copy;
+        self.scope_notice = meta.scope_notice;
         self.primary_inputs = meta.primary_inputs;
         self.short_name = meta.short_name;
         self.status = meta.status;
@@ -2025,6 +2091,7 @@ impl Session {
             location: None,
             primary_creation: None,
             scope_copy: None,
+            scope_notice: None,
             primary_inputs: Vec::new(),
             short_name,
             status: SessionStatus::Active,
@@ -2102,6 +2169,7 @@ impl Session {
             location: None,
             primary_creation: None,
             scope_copy: None,
+            scope_notice: None,
             primary_inputs: Vec::new(),
             short_name: Some(short_name),
             status: SessionStatus::Active,

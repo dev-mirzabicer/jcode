@@ -31,7 +31,159 @@ struct PermissionOperation {
     backup_pending: bool,
 }
 
+#[derive(Serialize, Deserialize)]
+struct ImportedGrantBinding {
+    reference: OperationId,
+    installation: InstallationId,
+    grant: GrantId,
+    bound_grant: GrantId,
+}
+
 impl WorkspaceService {
+    pub fn decide_access_proposal(
+        &self,
+        client: &WorkspaceClientAuthority,
+        request: RequestId,
+        id: ProposalId,
+        expected: Revision,
+        decision: ProposalDecision,
+    ) -> Result<PermissionMutation> {
+        let _lease = self.lease(false)?;
+        let mut connection = self.connection()?;
+        let input = digest(encode(&("access_decision", id, expected, decision))?.as_bytes());
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(io)?;
+        if let Some(receipt) = replay(&transaction, request, &input)? {
+            let result = permission_result(&transaction, receipt)?;
+            drop(transaction);
+            return self.finish_permission_mutation(result);
+        }
+        require_revision(&transaction, expected)?;
+        let mut pending = proposal(&transaction, id)?;
+        if pending.state != AccessProposalState::Pending {
+            return Err(issue(
+                IssueCode::Conflict,
+                "Only a pending proposal may be declined or cancelled",
+            ));
+        }
+        pending.state = match decision {
+            ProposalDecision::Decline => AccessProposalState::Declined,
+            ProposalDecision::Cancel => AccessProposalState::Cancelled,
+        };
+        let receipt = commit_receipt(
+            &transaction,
+            request,
+            &input,
+            vec![target_entity(&pending.target)],
+        )?;
+        pending.revision = receipt.revision;
+        transaction
+            .execute(
+                "UPDATE proposals SET body=?1 WHERE id=?2",
+                params![encode(&pending)?, id.to_string()],
+            )
+            .map_err(io)?;
+        let result = PermissionMutation {
+            receipt,
+            grant: None,
+            proposal: Some(pending),
+        };
+        save_permission_result(&transaction, &result)?;
+        transaction
+            .execute(
+                "INSERT INTO operations VALUES(?1,'proposal_decision','complete',?2)",
+                params![
+                    OperationId::new().to_string(),
+                    encode(&(client.0.as_str(), request, id, decision))?
+                ],
+            )
+            .map_err(io)?;
+        self.checkpoint("proposal_decision_before_commit")?;
+        transaction.commit().map_err(io)?;
+        self.checkpoint("proposal_decision_committed")?;
+        self.finish_permission_mutation(result)
+    }
+
+    pub fn list_imported_grants(
+        &self,
+        after: Option<Cursor>,
+        limit: u32,
+    ) -> Result<PermissionResponse> {
+        if !(1..=200).contains(&limit) {
+            return Err(issue(
+                IssueCode::InvalidInput,
+                "Page size must be 1 through 200",
+            ));
+        }
+        let _lease = self.lease(false)?;
+        let connection = self.connection()?;
+        let transaction = connection.unchecked_transaction().map_err(io)?;
+        let revision = storage::status(&transaction)?.revision;
+        let query_digest = digest(b"imported-grant-references-v1");
+        if after
+            .as_ref()
+            .is_some_and(|c| c.revision != revision || c.query_digest != query_digest)
+        {
+            return Err(issue(
+                IssueCode::Conflict,
+                "Imported grants changed or cursor belongs to another query",
+            ));
+        }
+        let total:i64=transaction.query_row("SELECT count(*) FROM imported_references r,json_each(r.body,'$.grant_definitions') g",[],|row|row.get(0)).map_err(io)?;
+        let mut statement=transaction.prepare("SELECT r.id,json_extract(r.body,'$.installation'),g.value,r.id||'/'||json_extract(g.value,'$.id') AS cursor FROM imported_references r,json_each(r.body,'$.grant_definitions') g WHERE cursor>?1 ORDER BY cursor LIMIT ?2").map_err(io)?;
+        let mut rows = statement
+            .query_map(
+                params![
+                    after.as_ref().map(|c| c.after.as_str()).unwrap_or(""),
+                    limit + 1
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .map_err(io)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(io)?;
+        let next = if rows.len() > limit as usize {
+            rows.pop();
+            rows.last().map(|r| Cursor {
+                revision,
+                after: r.3.clone(),
+                query_digest,
+            })
+        } else {
+            None
+        };
+        let items = rows
+            .into_iter()
+            .map(|(reference, installation, body, _)| {
+                let reference = reference.parse().map_err(corrupt)?;
+                let installation = installation.parse().map_err(corrupt)?;
+                let grant: GrantDefinition = decode(&body)?;
+                let bound_grant = import_binding(&transaction, reference, grant.id)?
+                    .map(|binding| binding.bound_grant);
+                Ok(ImportedGrantReference {
+                    reference,
+                    installation,
+                    grant,
+                    bound_grant,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(PermissionResponse::ImportedGrants {
+            revision,
+            total: total.try_into().map_err(corrupt)?,
+            items,
+            next,
+        })
+    }
+
     pub fn list_permissions(
         &self,
         query: PermissionQuery,
@@ -141,6 +293,25 @@ impl WorkspaceService {
         let transaction = connection.transaction().map_err(io)?;
         require_revision(&transaction, expected)?;
         let mut value = match &change {
+            GrantChange::BindImported {
+                reference,
+                installation,
+                grant,
+                audience,
+                target,
+            } => {
+                let source = imported_grant(&transaction, *reference, *installation, *grant)?;
+                require_unbound_import(&transaction, *reference, *grant)?;
+                GrantDefinition {
+                    id: GrantId::new(),
+                    audience: audience.clone(),
+                    target: target.clone(),
+                    state: GrantState::Disabled,
+                    revision: expected,
+                    copied_from: Some(source.id),
+                    authorization: None,
+                }
+            }
             GrantChange::Issue {
                 audience,
                 target,
@@ -183,12 +354,19 @@ impl WorkspaceService {
             GrantChange::Revoke { grant: id } => grant(&transaction, *id)?,
         };
         let mut roots = Vec::new();
+        let mut excluded_roots = Vec::new();
         let mut bindings = Vec::new();
         if !matches!(change, GrantChange::Revoke { .. }) {
             validate_audience(&transaction, &value.audience)?;
             validate_target(&transaction, &value.target)?;
             for root in scope::locations(&transaction)? {
                 if scope::target_contains(&transaction, &value.target, &root)? {
+                    if !matches!(value.target, WriteTarget::Root(_))
+                        && (root.retired || root.lifecycle == LocationLifecycle::Closed)
+                    {
+                        excluded_roots.push(root);
+                        continue;
+                    }
                     bindings.push(self.verify_writable_root(&transaction, &root)?);
                     roots.push(root);
                 }
@@ -203,6 +381,7 @@ impl WorkspaceService {
             change,
             grant: value,
             roots,
+            excluded_roots,
         };
         transaction.commit().map_err(io)?;
         let transaction = connection
@@ -264,6 +443,15 @@ impl WorkspaceService {
         let mut value = prepared.review.grant;
         let mut pending = None;
         match &prepared.review.change {
+            GrantChange::BindImported {
+                reference,
+                installation,
+                grant,
+                ..
+            } => {
+                imported_grant(&transaction, *reference, *installation, *grant)?;
+                require_unbound_import(&transaction, *reference, *grant)?;
+            }
             GrantChange::Issue { proposal: id, .. } => {
                 if let Some(id) = id {
                     let mut p = proposal(&transaction, *id)?;
@@ -293,13 +481,36 @@ impl WorkspaceService {
         let targets = portable::grant_targets(&value);
         let receipt = commit_receipt(&transaction, request, &input, targets)?;
         value.revision = receipt.revision;
-        if matches!(prepared.review.change, GrantChange::Issue { .. }) {
+        if matches!(
+            prepared.review.change,
+            GrantChange::Issue { .. } | GrantChange::BindImported { .. }
+        ) {
             portable::save_grant(&transaction, &value)?;
         } else {
             transaction
                 .execute(
                     "UPDATE grants SET body=?1 WHERE id=?2",
                     params![encode(&value)?, value.id.to_string()],
+                )
+                .map_err(io)?;
+        }
+        if let GrantChange::BindImported {
+            reference,
+            installation,
+            grant,
+            ..
+        } = &prepared.review.change
+        {
+            let binding = ImportedGrantBinding {
+                reference: *reference,
+                installation: *installation,
+                grant: *grant,
+                bound_grant: value.id,
+            };
+            transaction
+                .execute(
+                    "INSERT INTO operations VALUES(?1,'imported_grant_binding','complete',?2)",
+                    params![OperationId::new().to_string(), encode(&binding)?],
                 )
                 .map_err(io)?;
         }
@@ -573,4 +784,62 @@ fn validate_audience(connection: &Connection, audience: &Audience) -> Result<()>
             Ok(())
         }
     }
+}
+
+fn imported_grant(
+    connection: &Connection,
+    reference: OperationId,
+    installation: InstallationId,
+    id: GrantId,
+) -> Result<GrantDefinition> {
+    let mut statement=connection.prepare("SELECT g.value FROM imported_references r,json_each(r.body,'$.grant_definitions') g WHERE r.id=?1 AND json_extract(r.body,'$.installation')=?2 AND json_extract(g.value,'$.id')=?3").map_err(io)?;
+    let values = statement
+        .query_map(
+            params![
+                reference.to_string(),
+                installation.to_string(),
+                id.to_string()
+            ],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(io)?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(io)?;
+    if values.len() != 1 {
+        return Err(issue(
+            IssueCode::InvalidIdentity,
+            "Imported grant must identify one source-qualified retained definition",
+        ));
+    }
+    let value: GrantDefinition = decode(&values[0])?;
+    if value.state != GrantState::Disabled {
+        return Err(corrupt(
+            "Imported reference unexpectedly carries active authority",
+        ));
+    }
+    Ok(value)
+}
+fn import_binding(
+    connection: &Connection,
+    reference: OperationId,
+    grant: GrantId,
+) -> Result<Option<ImportedGrantBinding>> {
+    let value:Option<String>=connection.query_row("SELECT body FROM operations WHERE kind='imported_grant_binding' AND state='complete' AND json_extract(body,'$.reference')=?1 AND json_extract(body,'$.grant')=?2",params![reference.to_string(),grant.to_string()],|row|row.get(0)).optional().map_err(io)?;
+    value.as_deref().map(decode).transpose()
+}
+fn require_unbound_import(
+    connection: &Connection,
+    reference: OperationId,
+    grant: GrantId,
+) -> Result<()> {
+    if let Some(binding) = import_binding(connection, reference, grant)? {
+        return Err(issue(
+            IssueCode::Conflict,
+            format!(
+                "Imported reference already bound as {}; inspect or revoke that grant rather than importing again",
+                binding.bound_grant
+            ),
+        ));
+    }
+    Ok(())
 }

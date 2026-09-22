@@ -3,6 +3,74 @@ use super::*;
 use crate::session::{Session, StoredSessionLocation};
 
 impl WorkspaceService {
+    /// Metadata-only comparison. Durable catalog authority plus the committed
+    /// Session receipt is also the recoverable pending-notice state.
+    pub fn observe_session_scope(&self, session: &Session) -> Result<Option<ScopeObservation>> {
+        let Some(location) = &session.location else {
+            return Ok(None);
+        };
+        let _lease = self.lease(false)?;
+        let connection = self.connection()?;
+        let transaction = connection.unchecked_transaction().map_err(io)?;
+        let status = storage::status(&transaction)?;
+        if session.scope_notice.as_ref().is_some_and(|notice| {
+            notice.installation == status.installation
+                && notice.catalog_revision == status.revision
+                && notice.location_revision == location.revision
+        }) {
+            return Ok(None);
+        }
+        let scope = self.scope_snapshot_mode(&transaction, &session.id, location, false)?;
+        let roots = scope
+            .roots
+            .iter()
+            .map(|root| {
+                (
+                    &root.location.id,
+                    &root.location.observed_path,
+                    root.location.binding_generation,
+                    root.location.lifecycle,
+                    root.location.retired,
+                    root.ordinary,
+                    &root.grants,
+                )
+            })
+            .collect::<Vec<_>>();
+        let fingerprint = digest(
+            encode(&(
+                status.installation,
+                location.placement,
+                &roots,
+                &scope.grants,
+            ))?
+            .as_bytes(),
+        );
+        if session
+            .scope_notice
+            .as_ref()
+            .is_some_and(|notice| notice.fingerprint == fingerprint)
+        {
+            return Ok(None);
+        }
+        let ordinary_roots = scope.roots.iter().filter(|root| root.ordinary).count();
+        Ok(Some(ScopeObservation {
+            installation: status.installation,
+            catalog_revision: status.revision,
+            location_revision: location.revision,
+            fingerprint,
+            ordinary_roots,
+            additional_roots: scope.roots.len() - ordinary_roots,
+            inactive_roots: scope
+                .roots
+                .iter()
+                .filter(|root| {
+                    root.location.retired || root.location.lifecycle != LocationLifecycle::Ready
+                })
+                .count(),
+            explicit_grants: scope.grants.len(),
+        }))
+    }
+
     /// The caller supplies its authoritative Session, never a client-selected placement.
     /// Inspection includes unavailable roots. Mutation admission must reject their issues.
     pub fn session_write_scope(&self, session: &Session) -> Result<SessionWriteScope> {

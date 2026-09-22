@@ -1,6 +1,6 @@
 use super::*;
 use crate::workspace::{IssueCode, WorkspaceService};
-use anyhow::ensure;
+use anyhow::{Context, ensure};
 
 impl Agent {
     pub(crate) async fn run_primary_input_capture(
@@ -238,9 +238,13 @@ impl Agent {
                 .clone()
                 .unwrap_or_else(|| "Unknown (not recorded in legacy state)".into());
             let new_cwd = prepared.location.cwd.observed_path().to_string_lossy();
-            // Scope enforcement/grants retain their WP-05 owner. The staged
-            // backend reports placement semantics, not a shell sandbox.
-            let scope = format!("ordinary roots of {new_placement}; direct grants unchanged");
+            let mut observed_session = self.session.clone();
+            observed_session.location = Some(prepared.location.clone());
+            observed_session.scope_notice = None;
+            let observed = workspace
+                .observe_session_scope(&observed_session)?
+                .context("Prepared location has no scope observation")?;
+            let scope = scope_summary(&observed);
             let notice = crate::instruction::notification::Notification::SessionLocationChanged {
                 old_placement: &old_placement,
                 new_placement: &new_placement,
@@ -263,6 +267,13 @@ impl Agent {
                 self.session
                     .stage_legacy_location_adoption(prepared.location.clone(), notice)?
             };
+            candidate.scope_notice = Some(jcode_session_types::StoredScopeNotice {
+                installation: observed.installation,
+                catalog_revision: observed.catalog_revision,
+                location_revision: observed.location_revision,
+                fingerprint: observed.fingerprint.clone(),
+                message: format!("location_{}", record.operation),
+            });
             let projected = candidate.projected_messages_for_provider()?;
             let split = self.build_system_prompt_split(None)?;
             let tools = match &self.locked_tools {
@@ -290,8 +301,73 @@ impl Agent {
             }
             workspace.reconcile_location_change(record.operation)?;
         }
+        self.apply_scope_notice(&workspace).await?;
         Ok(())
     }
+    async fn apply_scope_notice(&mut self, workspace: &WorkspaceService) -> Result<()> {
+        if self.session.location.is_none() {
+            return Ok(());
+        }
+        let Some(observed) = workspace.observe_session_scope(&self.session)? else {
+            return Ok(());
+        };
+        let summary = scope_summary(&observed);
+        let notice = crate::instruction::notification::Notification::SessionWriteAccessChanged {
+            change_summary: &summary,
+        }
+        .render_with(
+            &self.instruction_repositories,
+            self.session
+                .working_dir
+                .as_deref()
+                .map(std::path::Path::new),
+        )?;
+        ensure!(
+            !notice.trim().is_empty(),
+            "Scope notice is empty; repair its managed source"
+        );
+        let mut candidate = self.session.stage_scope_notice(&observed, notice)?;
+        let projected = candidate.projected_messages_for_provider()?;
+        let split = self.build_system_prompt_split(None)?;
+        let tools = match &self.locked_tools {
+            Some(tools) => tools.clone(),
+            None => self.tool_definitions_for_session(&candidate).await?,
+        };
+        let breakdown = crate::context::request_token_breakdown(&projected, 0, 0, &split, &tools);
+        let preflight = crate::context::evaluate_context_preflight(
+            candidate.context_view.revision,
+            self.provider.context_request_budget(),
+            breakdown,
+        );
+        ensure!(
+            preflight.pressure != crate::protocol::ContextPressureLevel::Blocked,
+            "Scope notice exceeds request budget; explanation remains pending, current write policy is already enforced"
+        );
+        // A change during rendering is not an excuse to deliver stale authority
+        // as current. Retry from durable facts at the next safe boundary.
+        ensure!(
+            workspace.observe_session_scope(&self.session)?.as_ref() == Some(&observed),
+            "Scope changed during notice preparation; retry its pending explanation"
+        );
+        self.session.commit_scope_notice(candidate)?;
+        self.rewind_undo_snapshot = None;
+        if let Some(context) = self.active_turn_context.as_mut() {
+            context.transcript_len_before_pending = self.session.messages.len();
+            context.pending_input = None;
+        }
+        Ok(())
+    }
+}
+
+fn scope_summary(observed: &crate::workspace::ScopeObservation) -> String {
+    format!(
+        "Catalog revision {}: {} ordinary roots, {} additional roots, {} explicit grants; {} roots are not ready for writes",
+        observed.catalog_revision,
+        observed.ordinary_roots,
+        observed.additional_roots,
+        observed.explicit_grants,
+        observed.inactive_roots
+    )
 }
 
 #[cfg(test)]

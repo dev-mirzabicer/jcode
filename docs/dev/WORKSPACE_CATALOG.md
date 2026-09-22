@@ -215,3 +215,38 @@ checks zero provisional Sessions/model requests, and verifies original fixture f
 remain unchanged. It is not final management-TUI or primary-runtime acceptance.
 Native physical binding is macOS-supported. Portable DTO compilation does not imply
 native volume or service parity on other operating systems.
+
+## Policy explanations and retained permission decisions
+
+Primary scope explanations use the approved managed `session-write-access-changed`
+notification resource (seed30). An append-only Session receipt records the last
+explained catalog scope, not permission authority. Current catalog policy minus
+that receipt is recoverable pending explanation state. A restart does not lose
+an undelivered change. Unchanged effective scope, including archive-only changes,
+does not append repeated notices. Large scopes are summarized as typed counts,
+not eager file or transcript injection.
+
+The runtime reconciles idle primaries without waking inference. Busy primaries
+apply notices at their established full-tool-batch boundaries. Location changes
+include their new scope observation in the same atomic checkpoint as the location
+notice. Rendering, budget or persistence failure leaves the explanation pending.
+Native admission still enforces the current durable grants immediately. Earlier
+prose and projected history cannot restore revoked permission.
+
+Trusted clients may decline or cancel a pending access proposal using its current
+catalog revision and an idempotent request ID. The original reason and decision
+remain retained. A terminal proposal cannot later authorize an Issue review.
+These operations do not create grants or infer human approval from agent output.
+
+Imported cross-project definitions are available through bounded, revision-bound
+`imported_grants` pages. `bind_imported` explicitly names the retained reference,
+source installation and grant, plus fresh local audience/target identities. Review
+shows the resolved roots before trusted application creates a new local grant with
+provenance. The retained foreign definition stays disabled. A bound reference cannot
+be reapplied to resurrect a subsequently revoked local grant.
+
+Member-target grant reviews list retired/closed roots as exclusions. Historical
+roots do not permanently block a current-member grant and do not regain authority.
+Other not-ready roots still block physical authorization where required. Direct
+root grants continue to require a verified writable target. Grant/root provenance
+and the remaining native/shell trust limits remain inspectable.

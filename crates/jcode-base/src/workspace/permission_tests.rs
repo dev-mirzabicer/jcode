@@ -1057,3 +1057,307 @@ fn context_cwd_uses_live_inherited_or_reviewed_direct_grants_not_a_scope_overrid
     assert_eq!(future.location.placement, Placement::Directory(f.a));
     assert_eq!(future.root, f.outside);
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn scope_explanation_receipts_follow_policy_not_organization_noise_or_history() {
+    let _lock = crate::storage::lock_test_env();
+    let mut f = Fixture::new();
+    f.session.save().unwrap();
+    let initial = f
+        .service
+        .observe_session_scope(&f.session)
+        .unwrap()
+        .unwrap();
+    let before = serde_json::to_value(&f.session.messages).unwrap();
+    let candidate = f
+        .session
+        .stage_scope_notice(&initial, "SYNTHETIC SCOPE".into())
+        .unwrap();
+    f.session.commit_scope_notice(candidate).unwrap();
+    assert_eq!(
+        serde_json::to_value(&f.session.messages[..f.session.messages.len() - 1]).unwrap(),
+        before
+    );
+    assert!(
+        f.service
+            .observe_session_scope(&Session::load_startup_stub(&f.session.id).unwrap())
+            .unwrap()
+            .is_none()
+    );
+    change(
+        &f.service,
+        OrganizationChange::Archive {
+            target: EntityId::Project(f.project),
+            archived: true,
+        },
+    );
+    assert!(
+        f.service
+            .observe_session_scope(&f.session)
+            .unwrap()
+            .is_none()
+    );
+    let grant = f
+        .issue(
+            Audience::Session(f.session.id.clone()),
+            WriteTarget::Root(f.outside),
+        )
+        .grant
+        .unwrap();
+    let granted = f
+        .service
+        .observe_session_scope(&f.session)
+        .unwrap()
+        .unwrap();
+    assert_eq!(granted.additional_roots, 1);
+    assert_eq!(granted.explicit_grants, 1);
+    f.session
+        .commit_scope_notice(
+            f.session
+                .stage_scope_notice(&granted, "SYNTHETIC GRANT".into())
+                .unwrap(),
+        )
+        .unwrap();
+    apply(&f.service, GrantChange::Revoke { grant: grant.id });
+    assert!(!writable(&f.scope(), f.outside));
+    let revoked = f
+        .service
+        .observe_session_scope(&f.session)
+        .unwrap()
+        .unwrap();
+    assert_eq!(revoked.additional_roots, 0);
+    // Prior prose and a copied transcript do not acknowledge another identity's scope.
+    let mut split = Session::create(Some(f.session.id.clone()), None);
+    split.inherit_continuation_state_from(&f.session);
+    assert!(split.scope_notice.is_none());
+    assert!(f.service.observe_session_scope(&split).unwrap().is_some());
+    f.session
+        .commit_scope_notice(
+            f.session
+                .stage_scope_notice(&revoked, "SYNTHETIC REVOKE".into())
+                .unwrap(),
+        )
+        .unwrap();
+    let restored = Session::load(&f.session.id).unwrap();
+    assert_eq!(restored.scope_notice, f.session.scope_notice);
+    assert!(
+        f.service
+            .observe_session_scope(&restored)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn permission_decisions_and_import_bindings_retain_history_without_implicit_authority() {
+    let _lock = crate::storage::lock_test_env();
+    let mut f = Fixture::new();
+    f.session.save().unwrap();
+    let auth = WorkspaceClientAuthority::authenticated("human-permission-fixture").unwrap();
+    for decision in [ProposalDecision::Decline, ProposalDecision::Cancel] {
+        let pending = f
+            .service
+            .request_access(
+                &f.session,
+                RequestId::new(),
+                WriteTarget::Root(f.outside),
+                "synthetic reason".into(),
+            )
+            .unwrap()
+            .proposal
+            .unwrap();
+        let revision = f.service.status().unwrap().revision;
+        let request = RequestId::new();
+        let fault = WorkspaceService {
+            fault: Some(std::sync::Arc::new(|stage| {
+                if stage == "proposal_decision_committed" {
+                    Err(io("synthetic lost reply"))
+                } else {
+                    Ok(())
+                }
+            })),
+            ..f.service.clone()
+        };
+        assert!(
+            fault
+                .decide_access_proposal(&auth, request, pending.id, revision, decision)
+                .is_err()
+        );
+        let result = f
+            .service
+            .decide_access_proposal(&auth, request, pending.id, revision, decision)
+            .unwrap();
+        assert_eq!(
+            result,
+            f.service
+                .decide_access_proposal(&auth, request, pending.id, revision, decision)
+                .unwrap()
+        );
+        assert_eq!(result.proposal.unwrap().reason, pending.reason);
+        assert!(!writable(&f.scope(), f.outside));
+        assert!(
+            f.service
+                .review_grant_change(
+                    f.service.status().unwrap().revision,
+                    GrantChange::Issue {
+                        audience: Audience::Session(f.session.id.clone()),
+                        target: pending.target,
+                        proposal: Some(pending.id)
+                    }
+                )
+                .is_err()
+        );
+    }
+    // Source export has a cross-project grant whose audience is deliberately foreign.
+    let source_root = tempfile::tempdir().unwrap();
+    let source = WorkspaceService::new(source_root.path());
+    source.initialize(RequestId::new()).unwrap();
+    let EntityId::Project(a) = change(
+        &source,
+        OrganizationChange::CreateProject {
+            name: "source-a".into(),
+        },
+    )
+    .targets[0] else {
+        panic!()
+    };
+    let EntityId::Project(b) = change(
+        &source,
+        OrganizationChange::CreateProject {
+            name: "source-b".into(),
+        },
+    )
+    .targets[0] else {
+        panic!()
+    };
+    let foreign = apply(
+        &source,
+        GrantChange::Issue {
+            audience: Audience::Project(a),
+            target: WriteTarget::ProjectMembers(b),
+            proposal: None,
+        },
+    )
+    .grant
+    .unwrap();
+    let export = source
+        .export_project(RequestId::new(), a, "portable permission".into())
+        .unwrap();
+    let review = f
+        .service
+        .review_import(
+            export,
+            f.service.status().unwrap().revision,
+            ImportCollisionPolicy::Reject,
+            vec![],
+        )
+        .unwrap();
+    f.service.apply_import(RequestId::new(), review.id).unwrap();
+    let PermissionResponse::ImportedGrants { items, total, .. } =
+        f.service.list_imported_grants(None, 1).unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(total, 1);
+    let retained = &items[0];
+    assert_eq!(retained.grant.id, foreign.id);
+    assert!(retained.bound_grant.is_none());
+    assert!(!writable(&f.scope(), f.outside));
+    let binding = GrantChange::BindImported {
+        reference: retained.reference,
+        installation: retained.installation,
+        grant: foreign.id,
+        audience: Audience::Session(f.session.id.clone()),
+        target: WriteTarget::Root(f.outside),
+    };
+    let mut wrong = binding.clone();
+    if let GrantChange::BindImported { installation, .. } = &mut wrong {
+        *installation = InstallationId::new();
+    }
+    assert!(
+        f.service
+            .review_grant_change(f.service.status().unwrap().revision, wrong)
+            .is_err()
+    );
+    let review = f
+        .service
+        .review_grant_change(f.service.status().unwrap().revision, binding.clone())
+        .unwrap();
+    let request = RequestId::new();
+    let receipt = f
+        .service
+        .apply_grant_change(&auth, request, review.id)
+        .unwrap();
+    let bound = receipt.grant.as_ref().unwrap();
+    assert_ne!(bound.id, foreign.id);
+    assert_eq!(bound.copied_from, Some(foreign.id));
+    assert!(writable(&f.scope(), f.outside));
+    assert_eq!(
+        f.service
+            .apply_grant_change(&auth, request, review.id)
+            .unwrap(),
+        receipt
+    );
+    assert!(
+        f.service
+            .review_grant_change(f.service.status().unwrap().revision, binding)
+            .is_err()
+    );
+    let PermissionResponse::ImportedGrants { items, .. } =
+        f.service.list_imported_grants(None, 1).unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(items[0].grant.state, GrantState::Disabled);
+    assert_eq!(items[0].bound_grant, Some(bound.id));
+    apply(&f.service, GrantChange::Revoke { grant: bound.id });
+    assert!(!writable(&f.scope(), f.outside));
+    assert_eq!(
+        source.inspect_grant(foreign.id).unwrap().state,
+        GrantState::Active
+    );
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn member_grant_reviews_exclude_retired_history_without_reviving_its_files() {
+    let _lock = crate::storage::lock_test_env();
+    let f = Fixture::new();
+    change(
+        &f.service,
+        OrganizationChange::Retire {
+            target: EntityId::Location(f.b),
+        },
+    );
+    let review = f
+        .service
+        .review_grant_change(
+            f.service.status().unwrap().revision,
+            GrantChange::Issue {
+                audience: Audience::WorkArea(f.area),
+                target: WriteTarget::ProjectMembers(f.project),
+                proposal: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        review
+            .excluded_roots
+            .iter()
+            .map(|r| r.id)
+            .collect::<Vec<_>>(),
+        vec![f.b]
+    );
+    assert!(!review.roots.iter().any(|r| r.id == f.b));
+    f.service
+        .apply_grant_change(
+            &WorkspaceClientAuthority::authenticated("fixture").unwrap(),
+            RequestId::new(),
+            review.id,
+        )
+        .unwrap();
+    assert!(!writable(&f.scope(), f.b));
+    assert!(f._temporary.path().join("b").exists());
+}

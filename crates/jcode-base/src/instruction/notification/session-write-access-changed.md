@@ -1,0 +1,1 @@
+Write access changed for this session. {{change_summary}}. Current access and its sources are available through workspace discovery. This notice does not authorize publication, credential changes or checkout deletion.

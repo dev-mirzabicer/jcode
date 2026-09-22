@@ -53,6 +53,7 @@ macro_rules! notifications {
 }
 
 notifications! {
+    SessionWriteAccessChanged { change_summary: &'a str } => ("session-write-access-changed", "primary scope change", Handlebars),
     SessionLocationChanged { old_placement: &'a str, new_placement: &'a str, old_cwd: &'a str, new_cwd: &'a str, scope_summary: &'a str } => ("session-location-changed", "primary location change", Handlebars),
     TodoLongReview => ("todo-long-session-review", "todo notification", Plain),
     TodoIntent => ("todo-intent-review", "todo notification", Plain),

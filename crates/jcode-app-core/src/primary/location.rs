@@ -3,6 +3,29 @@ use crate::workspace::*;
 use anyhow::Result;
 
 impl PrimaryHost {
+    /// Idle reconciliation never restores an evicted Agent, admits a turn, or
+    /// creates a provider call. Busy owners flush at their existing safe points.
+    pub(crate) async fn reconcile_idle_scope_notices(&self) {
+        if !self.accepts_input() {
+            return;
+        }
+        let agents = self.read().await.values().cloned().collect::<Vec<_>>();
+        for agent in agents {
+            let Ok(mut guard) = agent.try_lock() else {
+                continue;
+            };
+            if guard.startup_context_session().location.is_none() {
+                continue;
+            }
+            if let Err(error) = guard.apply_primary_location_changes().await {
+                crate::logging::debug(&format!(
+                    "Scope explanation remains pending for {}: {error:#}",
+                    guard.session_id()
+                ));
+            }
+        }
+    }
+
     pub(crate) async fn request_location_restoring(
         self: &Arc<Self>,
         command: PrimaryLocationCommand,

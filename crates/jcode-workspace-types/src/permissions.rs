@@ -66,6 +66,13 @@ pub enum AccessProposalState {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GrantChange {
+    BindImported {
+        reference: OperationId,
+        installation: InstallationId,
+        grant: GrantId,
+        audience: Audience,
+        target: WriteTarget,
+    },
     Issue {
         audience: Audience,
         target: WriteTarget,
@@ -87,6 +94,23 @@ pub struct GrantReview {
     pub grant: GrantDefinition,
     /// Current roots observed in this review. Member targets include future members too.
     pub roots: Vec<Location>,
+    #[serde(default)]
+    pub excluded_roots: Vec<Location>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProposalDecision {
+    Decline,
+    Cancel,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ImportedGrantReference {
+    pub reference: OperationId,
+    pub installation: InstallationId,
+    pub grant: GrantDefinition,
+    pub bound_grant: Option<GrantId>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -116,8 +140,30 @@ pub struct SessionWriteScope {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ScopeObservation {
+    pub location_revision: Revision,
+    pub installation: InstallationId,
+    pub catalog_revision: Revision,
+    pub fingerprint: String,
+    pub ordinary_roots: usize,
+    pub additional_roots: usize,
+    pub inactive_roots: usize,
+    pub explicit_grants: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PermissionRequest {
+    DecideProposal {
+        request: RequestId,
+        proposal: ProposalId,
+        expected_revision: Revision,
+        decision: ProposalDecision,
+    },
+    ImportedGrants {
+        after: Option<Cursor>,
+        limit: u32,
+    },
     AbandonContextScope {
         session: String,
     },
@@ -190,6 +236,12 @@ pub struct PermissionPage {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum PermissionResponse {
+    ImportedGrants {
+        revision: Revision,
+        total: u64,
+        items: Vec<ImportedGrantReference>,
+        next: Option<Cursor>,
+    },
     ContextScopes(Vec<ContextScopeStatus>),
     CarryReview(GrantCarryReview),
     Scope(SessionWriteScope),

@@ -1377,12 +1377,15 @@ impl Server {
             }
         });
 
-        // Spawn reload monitor (event-driven via in-process channel).
+        // Retained delivery and idle policy explanations use the runtime owner,
+        // independently of client attachment. Neither is an inference trigger.
+        let policy_sessions = Arc::clone(&self.sessions);
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 interval.tick().await;
+                policy_sessions.reconcile_idle_scope_notices().await;
                 if let Err(error) = crate::background::global().retry_managed_delivery().await {
                     crate::logging::warn(&format!(
                         "Execution delivery reconciliation failed: {error}"
