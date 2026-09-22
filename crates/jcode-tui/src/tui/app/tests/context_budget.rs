@@ -1209,6 +1209,7 @@ fn local_provider_send_projection_failure_is_actionable_and_preserves_raw_transc
 
 #[derive(Clone, Default)]
 struct LocalInvocationRecordingProvider {
+    internal_tools: bool,
     requests: StdArc<StdMutex<Vec<Vec<Message>>>>,
     invalidations: StdArc<AtomicUsize>,
     reject_context_validation: StdArc<AtomicBool>,
@@ -1231,6 +1232,7 @@ impl LocalInvocationRecordingProvider {
 
 #[async_trait::async_trait]
 impl Provider for LocalInvocationRecordingProvider {
+    fn handles_tools_internally(&self) -> bool {self.internal_tools}
     async fn complete(
         &self,
         messages: &[Message],
@@ -2063,4 +2065,26 @@ fn durable_context_action_restores_only_the_exact_primary_input() {
         .display_messages()
         .iter()
         .all(|message| !(message.role == "user" && message.content == "review [paste 1]")));
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn local_provider_scope_guard_rejects_opaque_and_unadopted_routes_before_dispatch() {
+    use crate::workspace::*;
+    let _environment=crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let work=tempfile::tempdir().unwrap();
+    let service=WorkspaceService::new(&crate::storage::durable_state_dir());service.initialize(RequestId::new()).unwrap();
+    let review=service.review_organization_change(service.status().unwrap().revision,OrganizationChange::RegisterLocation{name:"local".into(),path:work.path().into(),registration:Registration::Standalone}).unwrap();
+    let EntityId::Location(root)=service.apply_organization_change(RequestId::new(),review.id).unwrap().targets[0] else {panic!()};
+    let provider=LocalInvocationRecordingProvider {internal_tools:true,..Default::default()};
+    let mut app=create_local_invocation_recording_app(provider.clone());
+    let prepared=service.prepare_primary_location(Placement::Standalone(root),Some(work.path()),OperationId::new()).unwrap();
+    app.session.location=Some(prepared.location.clone());app.session.working_dir=Some(prepared.location.cwd.observed_path().to_string_lossy().into());drop(prepared);
+    let before=serde_json::to_value(&app.session.messages).unwrap();
+    let runtime=tokio::runtime::Runtime::new().unwrap();
+    assert!(runtime.block_on(app.prepare_local_provider_invocation()).is_err());
+    assert!(provider.requests().is_empty());assert_eq!(serde_json::to_value(&app.session.messages).unwrap(),before);
+    app.session.location=None;
+    std::fs::write(crate::config::Config::path().unwrap(),"[features]\nmanaged_primary_launch=true\n").unwrap();crate::config::Config::invalidate_cache();
+    assert!(runtime.block_on(app.prepare_local_provider_invocation()).is_err());assert!(provider.requests().is_empty());
 }

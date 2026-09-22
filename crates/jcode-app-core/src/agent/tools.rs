@@ -4,25 +4,8 @@ use crate::tool::ToolOutput;
 
 impl super::Agent {
     pub(super) fn require_native_scope_provider(&self) -> anyhow::Result<()> {
-        if self.session.location.is_none() && self.session.isolated_child.is_none() {
-            anyhow::ensure!(
-                self.session.primary_creation.is_none(),
-                "Managed primary binding is missing; restore its Session state"
-            );
-            crate::workspace::WorkspaceService::new(&crate::storage::durable_state_dir())
-                .require_legacy_scope_absent(&self.session.id)?;
-        }
-        anyhow::ensure!(
-            !crate::config::config().features.managed_primary_launch
-                || self.session.isolated_child.is_some()
-                || self.session.location.is_some(),
-            "Legacy primary requires explicit placement and cwd adoption before continuing; inspect history or use workspace management"
-        );
-        anyhow::ensure!(
-            self.session.location.is_none() || !self.provider.handles_tools_internally(),
-            "Selected provider performs tools outside the native managed-primary boundary; select a host-enforced route explicitly"
-        );
-        Ok(())
+        self.session
+            .require_native_scope_route(self.provider.handles_tools_internally())
     }
     pub(super) fn provider_leaves_tool_to_host(&self, name: &str) -> bool {
         self.provider.handles_tools_internally()

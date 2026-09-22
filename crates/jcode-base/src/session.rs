@@ -937,6 +937,28 @@ impl Session {
 
     /// An interrupted preparation remains inspectable, but cannot become a live
     /// primary merely because a partial Session file is present.
+    pub fn require_native_scope_route(&self, internal_tools: bool) -> anyhow::Result<()> {
+        if self.location.is_none() && self.isolated_child.is_none() {
+            anyhow::ensure!(
+                self.primary_creation.is_none() && self.scope_copy.is_none(),
+                "Managed primary binding is missing; restore its Session state"
+            );
+            crate::workspace::WorkspaceService::new(&crate::storage::durable_state_dir())
+                .require_legacy_scope_absent(&self.id)?;
+        }
+        anyhow::ensure!(
+            !crate::config::config().features.managed_primary_launch
+                || self.isolated_child.is_some()
+                || self.location.is_some(),
+            "Legacy primary requires explicit placement and cwd adoption before continuing; inspect history or use workspace management"
+        );
+        anyhow::ensure!(
+            self.location.is_none() || !internal_tools,
+            "Selected provider performs tools outside the native managed-primary boundary; select a host-enforced route explicitly"
+        );
+        Ok(())
+    }
+
     pub fn require_published_primary(&self) -> anyhow::Result<()> {
         if let Some(location) = &self.location {
             let resolved = crate::location::volume::LocationResolver::new()

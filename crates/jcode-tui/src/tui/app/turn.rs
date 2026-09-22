@@ -58,6 +58,16 @@ impl App {
     pub(super) async fn prepare_local_provider_invocation(
         &mut self,
     ) -> std::result::Result<PreparedLocalProviderInvocation, String> {
+        if let Err(error) = self
+            .session
+            .require_native_scope_route(self.provider.handles_tools_internally())
+            .and_then(|()| self.session.require_published_primary())
+        {
+            self.rollback_pending_local_turn_before_output();
+            return Err(format!(
+                "Local primary scope blocks provider dispatch: {error:#}"
+            ));
+        }
         self.partial_output_checkpointed = false;
         self.partial_output_persistence_error = None;
         let provider_messages = self.projected_messages_for_provider_send()?;
