@@ -70,7 +70,20 @@ impl App {
         }
         self.partial_output_checkpointed = false;
         self.partial_output_persistence_error = None;
-        let provider_messages = self.projected_messages_for_provider_send()?;
+        let workspace =
+            crate::workspace::WorkspaceService::new(&crate::storage::durable_state_dir());
+        let mut scope_candidate = workspace
+            .prepare_scope_notice(
+                &self.session,
+                &crate::instruction::InstructionRepositoryService::new(),
+            )
+            .map_err(|error| error.to_string())?;
+        let provider_messages = match scope_candidate.as_mut() {
+            Some((_, candidate)) => candidate
+                .projected_messages_for_provider()
+                .map_err(|error| error.to_string())?,
+            None => self.projected_messages_for_provider_send()?,
+        };
         if let Some(pending) = self.pending_composer_input.as_mut() {
             pending.request_payload_pressure =
                 Some(crate::context::request_payload_pressure(&provider_messages));
@@ -157,6 +170,30 @@ impl App {
                 "Request not sent, but durable prompt restoration failed; the pending turn remains in authoritative history and must not be resubmitted"
                     .to_string(),
             );
+        }
+
+        if let Some((observed, candidate)) = scope_candidate {
+            if workspace
+                .observe_session_scope(&self.session)
+                .map_err(|error| error.to_string())?
+                .as_ref()
+                != Some(&observed)
+            {
+                return Err(
+                    "Scope changed while preparing its explanation; retry before dispatch".into(),
+                );
+            }
+            self.session
+                .commit_scope_notice(candidate)
+                .map_err(|error| error.to_string())?;
+            self.rewind_undo_snapshot = None;
+            // A later provider rejection cannot erase this committed control or
+            // replay input whose append is already durable. The original stays
+            // in history when prompt rollback is no longer safe.
+            if let Some(pending) = self.pending_composer_input.as_mut() {
+                pending.local_session_len_before = None;
+            }
+            self.replace_provider_messages(provider_messages.clone());
         }
 
         let request_messages = if crate::config::config().features.message_timestamps {

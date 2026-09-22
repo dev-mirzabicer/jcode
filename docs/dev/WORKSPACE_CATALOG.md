@@ -233,6 +233,12 @@ notice. Rendering, budget or persistence failure leaves the explanation pending.
 Native admission still enforces the current durable grants immediately. Earlier
 prose and projected history cannot restore revoked permission.
 
+Direct local TUI inference shares the same notice preparation and Session receipt
+owner. It includes the candidate in full request preflight before checkpointing
+and dispatch. It does not fabricate a hosted idle loop for a process-owned client.
+Once the notice and pending input are committed, a later request failure retains
+that history instead of rolling back across the control and inviting duplicate input.
+
 Trusted clients may decline or cancel a pending access proposal using its current
 catalog revision and an idempotent request ID. The original reason and decision
 remain retained. A terminal proposal cannot later authorize an Issue review.

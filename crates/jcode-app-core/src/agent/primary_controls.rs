@@ -244,7 +244,7 @@ impl Agent {
             let observed = workspace
                 .observe_session_scope(&observed_session)?
                 .context("Prepared location has no scope observation")?;
-            let scope = scope_summary(&observed);
+            let scope = WorkspaceService::scope_summary(&observed);
             let notice = crate::instruction::notification::Notification::SessionLocationChanged {
                 old_placement: &old_placement,
                 new_placement: &new_placement,
@@ -305,28 +305,11 @@ impl Agent {
         Ok(())
     }
     async fn apply_scope_notice(&mut self, workspace: &WorkspaceService) -> Result<()> {
-        if self.session.location.is_none() {
-            return Ok(());
-        }
-        let Some(observed) = workspace.observe_session_scope(&self.session)? else {
+        let Some((observed, mut candidate)) =
+            workspace.prepare_scope_notice(&self.session, &self.instruction_repositories)?
+        else {
             return Ok(());
         };
-        let summary = scope_summary(&observed);
-        let notice = crate::instruction::notification::Notification::SessionWriteAccessChanged {
-            change_summary: &summary,
-        }
-        .render_with(
-            &self.instruction_repositories,
-            self.session
-                .working_dir
-                .as_deref()
-                .map(std::path::Path::new),
-        )?;
-        ensure!(
-            !notice.trim().is_empty(),
-            "Scope notice is empty; repair its managed source"
-        );
-        let mut candidate = self.session.stage_scope_notice(&observed, notice)?;
         let projected = candidate.projected_messages_for_provider()?;
         let split = self.build_system_prompt_split(None)?;
         let tools = match &self.locked_tools {
@@ -357,17 +340,6 @@ impl Agent {
         }
         Ok(())
     }
-}
-
-fn scope_summary(observed: &crate::workspace::ScopeObservation) -> String {
-    format!(
-        "Catalog revision {}: {} ordinary roots, {} additional roots, {} explicit grants; {} roots are not ready for writes",
-        observed.catalog_revision,
-        observed.ordinary_roots,
-        observed.additional_roots,
-        observed.explicit_grants,
-        observed.inactive_roots
-    )
 }
 
 #[cfg(test)]

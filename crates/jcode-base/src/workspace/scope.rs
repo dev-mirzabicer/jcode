@@ -3,6 +3,40 @@ use super::*;
 use crate::session::{Session, StoredSessionLocation};
 
 impl WorkspaceService {
+    /// The caller checks its complete provider budget before committing this
+    /// candidate. Source lookup and receipt construction are shared by hosted
+    /// and direct local primary owners.
+    pub fn prepare_scope_notice(
+        &self,
+        session: &Session,
+        repositories: &crate::instruction::InstructionRepositoryService,
+    ) -> anyhow::Result<Option<(ScopeObservation, Session)>> {
+        let Some(observed) = self.observe_session_scope(session)? else {
+            return Ok(None);
+        };
+        let summary = Self::scope_summary(&observed);
+        let notice = crate::instruction::notification::Notification::SessionWriteAccessChanged {
+            change_summary: &summary,
+        }
+        .render_with(repositories, session.working_dir.as_deref().map(Path::new))?;
+        anyhow::ensure!(
+            !notice.trim().is_empty(),
+            "Scope notice is empty; repair its managed source"
+        );
+        let candidate = session.stage_scope_notice(&observed, notice)?;
+        Ok(Some((observed, candidate)))
+    }
+    pub fn scope_summary(observed: &ScopeObservation) -> String {
+        format!(
+            "Catalog revision {}: {} ordinary roots, {} additional roots, {} explicit grants; {} roots are not ready for writes",
+            observed.catalog_revision,
+            observed.ordinary_roots,
+            observed.additional_roots,
+            observed.explicit_grants,
+            observed.inactive_roots
+        )
+    }
+
     /// Metadata-only comparison. Durable catalog authority plus the committed
     /// Session receipt is also the recoverable pending-notice state.
     pub fn observe_session_scope(&self, session: &Session) -> Result<Option<ScopeObservation>> {

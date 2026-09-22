@@ -2088,3 +2088,30 @@ fn local_provider_scope_guard_rejects_opaque_and_unadopted_routes_before_dispatc
     std::fs::write(crate::config::Config::path().unwrap(),"[features]\nmanaged_primary_launch=true\n").unwrap();crate::config::Config::invalidate_cache();
     assert!(runtime.block_on(app.prepare_local_provider_invocation()).is_err());assert!(provider.requests().is_empty());
 }
+
+#[test]
+#[cfg(target_os = "macos")]
+fn local_scope_notices_checkpoint_before_dispatch_and_keep_history_prefix() {
+    use crate::workspace::*;
+    let _environment=crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let work=tempfile::tempdir().unwrap();
+    let service=WorkspaceService::new(&crate::storage::durable_state_dir());service.initialize(RequestId::new()).unwrap();
+    let mut roots=Vec::new();for name in ["a","b"] {let path=work.path().join(name);std::fs::create_dir(&path).unwrap();let review=service.review_organization_change(service.status().unwrap().revision,OrganizationChange::RegisterLocation{name:name.into(),path:path.clone(),registration:Registration::Standalone}).unwrap();let EntityId::Location(id)=service.apply_organization_change(RequestId::new(),review.id).unwrap().targets[0] else {panic!()};roots.push((id,path));}
+    let provider=LocalInvocationRecordingProvider::default();let mut app=create_local_invocation_recording_app(provider.clone());
+    crate::instruction::SystemPromptComposer::new().ensure_global_store().unwrap();
+    let prepared=service.prepare_primary_location(Placement::Standalone(roots[0].0),Some(&roots[0].1),OperationId::new()).unwrap();
+    app.session.location=Some(prepared.location.clone());app.session.working_dir=Some(prepared.location.cwd.observed_path().to_string_lossy().into());drop(prepared);app.session.save().unwrap();
+    let history=serde_json::to_value(&app.session.messages).unwrap();let count=app.session.messages.len();
+    let rt=tokio::runtime::Runtime::new().unwrap();
+    let invocation=rt.block_on(app.prepare_local_provider_invocation()).unwrap();
+    assert!(provider.requests().is_empty());assert!(app.session.scope_notice.is_some());
+    assert_eq!(serde_json::to_value(&app.session.messages[..count]).unwrap(),history);
+    assert_eq!(crate::session::Session::load(&app.session.id).unwrap().scope_notice,app.session.scope_notice);
+    drop(rt.block_on(invocation.invoke()).unwrap());assert_eq!(provider.requests().len(),1);
+    let review=service.review_grant_change(service.status().unwrap().revision,GrantChange::Issue{audience:Audience::Session(app.session.id.clone()),target:WriteTarget::Root(roots[1].0),proposal:None}).unwrap();
+    let grant=service.apply_grant_change(&WorkspaceClientAuthority::authenticated("local-fixture").unwrap(),RequestId::new(),review.id).unwrap().grant.unwrap();
+    let before=app.session.scope_notice.clone();rt.block_on(app.prepare_local_provider_invocation()).unwrap();assert_ne!(app.session.scope_notice,before);assert_eq!(provider.requests().len(),1);
+    let review=service.review_grant_change(service.status().unwrap().revision,GrantChange::Revoke{grant:grant.id}).unwrap();service.apply_grant_change(&WorkspaceClientAuthority::authenticated("local-fixture").unwrap(),RequestId::new(),review.id).unwrap();
+    let before=app.session.scope_notice.clone();rt.block_on(app.prepare_local_provider_invocation()).unwrap();assert_ne!(app.session.scope_notice,before);
+    let count=app.session.messages.len();rt.block_on(app.prepare_local_provider_invocation()).unwrap();assert_eq!(app.session.messages.len(),count);assert_eq!(provider.requests().len(),1);
+}
