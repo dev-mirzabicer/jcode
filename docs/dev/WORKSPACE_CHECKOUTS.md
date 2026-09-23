@@ -56,8 +56,14 @@ human-facing clone form.
    No unreviewed transport is contacted or checkout marked Ready.
    The service materializes and verifies requested submodules at recorded gitlinks
    and LFS bytes, and installs only reviewed resulting remotes. Readiness
-   requires an exact HEAD, branch/remotes, clean tree, recursive submodules,
-   content hashes, fsck, stage witness and reviewed volume.
+   requires an exact HEAD, branch/remotes, clean tree, fsck, stage witness and
+   reviewed volume. Requested recursive submodules and LFS payloads also
+   require exact gitlinks and verified content hashes. A reviewed false
+   submodule/LFS selection is a recorded materialization exclusion: its
+   gitlinks may remain uninitialized and its files may remain LFS pointers,
+   never a claim of complete default materialization. An existing local
+   source can supply committed LFS objects without a hosted LFS service;
+   dirty working files are not copied as a substitute for missing objects.
 5. A marker in the independent clone's `.git` directory identifies its exact
    operation. Publication uses exclusive no-replacement rename on the same
    volume, then the catalog binds one Ready `ManagedClone` location. A restart

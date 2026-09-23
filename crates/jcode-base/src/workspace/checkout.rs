@@ -1025,22 +1025,30 @@ fn read_clone(connection: &Connection, request: RequestId) -> Result<Option<Clon
         .optional()
         .map_err(io)?;
     row.map(|(body, state)| {
-        let mut operation: CloneOperation = decode(&body)?;
-        operation.public.state = match state.as_str() {
-            "complete" => CloneState::Ready,
-            "failed" if operation.public.state == CloneState::Cancelled => CloneState::Cancelled,
-            "failed" => CloneState::PreparationFailed,
-            "recovery_required" => CloneState::RecoveryRequired,
-            "pending"
-                if !matches!(
-                    operation.public.state,
-                    CloneState::Ready | CloneState::Cancelled
-                ) =>
-            {
-                operation.public.state
-            }
-            _ => return Err(corrupt("Invalid checkout operation state")),
-        };
+        let operation: CloneOperation = decode(&body)?;
+        let consistent = matches!(
+            (state.as_str(), operation.public.state),
+            ("complete", CloneState::Ready)
+                | (
+                    "failed",
+                    CloneState::Cancelled | CloneState::PreparationFailed
+                )
+                | ("recovery_required", CloneState::RecoveryRequired)
+                | (
+                    "pending",
+                    CloneState::Pending
+                        | CloneState::Acquiring
+                        | CloneState::Materializing
+                        | CloneState::AwaitingTrust
+                        | CloneState::Verifying
+                        | CloneState::Publishing
+                )
+        );
+        if !consistent {
+            return Err(corrupt(
+                "Checkout SQL state disagrees with its typed operation journal",
+            ));
+        }
         Ok(operation)
     })
     .transpose()

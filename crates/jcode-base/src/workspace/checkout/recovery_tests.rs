@@ -1362,3 +1362,90 @@ async fn nested_submodules_require_separate_stage_reviews_without_second_top_lev
         git(root, &["fsck", "--full"]);
     }
 }
+
+#[test]
+fn inconsistent_clone_sql_state_cannot_invent_a_ready_location() {
+    let fixture = Fixture::new();
+    let review = fixture
+        .service
+        .review_clone(fixture.service.status().unwrap().revision, fixture.spec())
+        .unwrap();
+    let request = RequestId::new();
+    let pending = fixture.service.begin_clone(request, review.id).unwrap();
+    assert_eq!(pending.state, CloneState::Pending);
+    assert!(!fixture.destination.exists());
+    fixture
+        .service
+        .connection()
+        .unwrap()
+        .execute(
+            "UPDATE operations SET state='complete' WHERE id=?1",
+            [request.to_string()],
+        )
+        .unwrap();
+    assert_eq!(
+        fixture.service.inspect_clone(request).unwrap_err().code,
+        IssueCode::CorruptState
+    );
+    assert!(!fixture.destination.exists());
+}
+
+#[tokio::test]
+async fn local_source_lfs_cache_materializes_committed_bytes_without_server_or_dirty_copy() {
+    let fixture = Fixture::new();
+    git(&fixture.source, &["lfs", "install", "--local"]);
+    git(&fixture.source, &["lfs", "track", "*.bin"]);
+    let committed = b"committed payload that exists only in the local source cache\n";
+    std::fs::write(fixture.source.join("payload.bin"), committed).unwrap();
+    git(&fixture.source, &["add", "."]);
+    git(
+        &fixture.source,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "local LFS source",
+        ],
+    );
+    std::fs::write(
+        fixture.source.join("payload.bin"),
+        "dirty worktree is not the committed payload",
+    )
+    .unwrap();
+    let mut spec = fixture.spec();
+    spec.lfs = true;
+    assert!(spec.trusted_lfs_urls.is_empty());
+    let review = fixture
+        .service
+        .review_clone(fixture.service.status().unwrap().revision, spec)
+        .unwrap();
+    let request = RequestId::new();
+    fixture.service.begin_clone(request, review.id).unwrap();
+    let ready = fixture
+        .service
+        .execute_clone(request, &fixture.capture(request))
+        .await
+        .unwrap();
+    assert_eq!(ready.state, CloneState::Ready);
+    assert!(ready.discovered_sources.is_empty());
+    assert!(ready.pending_trust.is_empty());
+    assert_eq!(
+        std::fs::read(fixture.destination.join("payload.bin")).unwrap(),
+        committed
+    );
+    assert_eq!(
+        std::fs::read(fixture.source.join("payload.bin")).unwrap(),
+        b"dirty worktree is not the committed payload"
+    );
+    assert!(
+        !fixture
+            .destination
+            .join(".git/objects/info/alternates")
+            .exists()
+    );
+    git(&fixture.destination, &["fsck", "--full"]);
+    git(&fixture.destination, &["lfs", "fsck"]);
+}
