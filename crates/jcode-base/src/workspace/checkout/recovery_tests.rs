@@ -410,6 +410,46 @@ async fn recursive_submodules_and_lfs_payloads_are_materialized_without_project_
             &[grand_bare.clone(), git_dir(&grand)],
         );
     }
+    let requests_before_excluded = lfs.events();
+    let excluded = fixture.temp.path().join("explicit-exclusions");
+    let mut exclude_spec = review.spec.clone();
+    exclude_spec.name = "explicit-exclusions".into();
+    exclude_spec.destination = CloneDestination::Custom {
+        volume_uuid: review.volume_uuid.clone(),
+        path: excluded.clone(),
+    };
+    exclude_spec.submodules = false;
+    exclude_spec.lfs = false;
+    exclude_spec.trusted_submodule_urls.clear();
+    exclude_spec.trusted_lfs_urls.clear();
+    let exclude_review = fixture
+        .service
+        .review_clone(fixture.service.status().unwrap().revision, exclude_spec)
+        .unwrap();
+    let exclude_request = RequestId::new();
+    fixture
+        .service
+        .begin_clone(exclude_request, exclude_review.id)
+        .unwrap();
+    let excluded_ready = fixture
+        .service
+        .execute_clone(exclude_request, &fixture.capture(exclude_request))
+        .await
+        .unwrap();
+    assert_eq!(excluded_ready.state, CloneState::Ready);
+    assert!(!excluded_ready.review.spec.submodules && !excluded_ready.review.spec.lfs);
+    assert!(!excluded.join("libs/child/payload.bin").exists());
+    assert!(
+        std::fs::read(excluded.join("root.bin"))
+            .unwrap()
+            .starts_with(b"version https://git-lfs.github.com/spec/v1")
+    );
+    assert_eq!(
+        lfs.events(),
+        requests_before_excluded,
+        "excluded clone contacted an LFS endpoint"
+    );
+    git(&excluded, &["fsck", "--full"]);
     std::fs::rename(&fixture.source, fixture.temp.path().join("source-offline")).unwrap();
     std::fs::rename(child_bare, fixture.temp.path().join("child-offline.git")).unwrap();
     std::fs::rename(grand_bare, fixture.temp.path().join("grand-offline.git")).unwrap();
@@ -953,6 +993,88 @@ async fn discovered_lfs_endpoint_waits_for_review_before_transfer_and_never_publ
         lfs.events()
             .iter()
             .any(|event| event.starts_with("GET /objects/"))
+    );
+    git(&fixture.destination, &["fsck", "--full"]);
+}
+
+#[tokio::test]
+async fn missing_lfs_payload_is_recoverable_on_the_same_stage_after_source_repair() {
+    let fixture = Fixture::new();
+    let lfs = LfsTestServer::start();
+    git(&fixture.source, &["lfs", "install", "--local"]);
+    git(&fixture.source, &["lfs", "track", "*.bin"]);
+    std::fs::write(
+        fixture.source.join(".lfsconfig"),
+        format!("[lfs]\n\turl = {}\n", lfs.url()),
+    )
+    .unwrap();
+    let bytes = b"payload missing at first, restored later\n";
+    std::fs::write(fixture.source.join("payload.bin"), bytes).unwrap();
+    git(&fixture.source, &["add", "."]);
+    git(
+        &fixture.source,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "lfs source",
+        ],
+    );
+    let mut spec = fixture.spec();
+    spec.lfs = true;
+    spec.trusted_lfs_urls = vec![lfs.url()];
+    let review = fixture
+        .service
+        .review_clone(fixture.service.status().unwrap().revision, spec)
+        .unwrap();
+    let request = RequestId::new();
+    let initial = fixture.service.begin_clone(request, review.id).unwrap();
+    let capture = fixture.capture(request);
+    let failure = fixture
+        .service
+        .execute_clone(request, &capture)
+        .await
+        .unwrap_err();
+    assert_eq!(failure.code, IssueCode::RecoveryRequired);
+    let blocked = fixture.service.inspect_clone(request).unwrap();
+    assert_eq!(blocked.state, CloneState::PreparationFailed);
+    assert!(!fixture.destination.exists());
+    let stage = blocked.stage.as_ref().unwrap();
+    assert!(stage.join(".git").exists());
+    assert!(
+        std::fs::read(stage.join("payload.bin"))
+            .unwrap()
+            .starts_with(b"version https://git-lfs.github.com/spec/v1")
+    );
+    assert!(
+        lfs.events()
+            .iter()
+            .any(|event| event.starts_with("POST /lfs/objects/batch"))
+    );
+    let witness = fixture.service.resolver.bind_directory(stage).unwrap();
+    lfs.add_repo_objects(&fixture.source);
+    let ready = fixture
+        .service
+        .execute_clone(request, &capture)
+        .await
+        .unwrap();
+    assert_eq!(ready.state, CloneState::Ready);
+    assert_eq!(ready.location, initial.location);
+    assert_eq!(
+        witness.root_witness(),
+        fixture
+            .service
+            .resolver
+            .bind_directory(&fixture.destination)
+            .unwrap()
+            .root_witness()
+    );
+    assert_eq!(
+        std::fs::read(fixture.destination.join("payload.bin")).unwrap(),
+        bytes
     );
     git(&fixture.destination, &["fsck", "--full"]);
 }
