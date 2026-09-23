@@ -43,8 +43,14 @@ human-facing clone form.
    still hardlink local source objects, so the service copies and fsyncs
    any borrowed object inode inside the owned stage before publishing.
    It checks out the reviewed commit and selects the reviewed branch. For
-   each discovered `.gitmodules` URL and explicit `.lfsconfig` endpoint, it
-   records the declaring repository, path and exact transport before use.
+   each discovered `.gitmodules` URL, it records the declaring repository,
+   path and exact transport before use. For LFS it asks the installed Git LFS
+   for the effective download endpoint and compares it with a clean origin-only
+   derivation before fetching. This covers `.lfsconfig` `lfs.url`,
+   `remote.origin.lfsurl`, their precedence and repository-local overrides;
+   a changed endpoint is recorded with its declaring repository and source
+   before any transfer. A missing tracked LFS configuration blocks rather
+   than falling back silently to index/HEAD content.
    Sources already named in the initial review proceed. Otherwise the
    operation becomes `awaiting_trust` with a witnessed non-published stage.
    `review_clone_trust` returns its current catalog/clone revision, pinned

@@ -244,9 +244,6 @@ impl WorkspaceService {
     ) -> Result<()> {
         let mut pending = vec![root.to_path_buf()];
         while let Some(parent) = pending.pop() {
-            if let Some(source) = lfs_source(project_root, &parent)? {
-                self.record_clone_sources(request, &[source])?;
-            }
             let installed = git::git(Some(&parent), [OsStr::new("lfs"), OsStr::new("version")])
                 .output()
                 .map_err(io)?;
@@ -255,6 +252,9 @@ impl WorkspaceService {
                     IssueCode::UnsupportedCapability,
                     "Git LFS is required; install it before retrying materialization",
                 ));
+            }
+            if let Some(source) = lfs_source(project_root, &parent)? {
+                self.record_clone_sources(request, &[source])?;
             }
             if !lfs_inventory(&parent)?.is_empty() {
                 self.git_step(
@@ -560,7 +560,22 @@ pub(super) fn submodule_sources(stage: &Path, repository: &Path) -> Result<Vec<C
 pub(super) fn lfs_source(stage: &Path, repository: &Path) -> Result<Option<CloneTrustSource>> {
     let config = repository.join(".lfsconfig");
     match std::fs::symlink_metadata(&config) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // Git LFS falls back to the index/HEAD when the working file is
+            // absent. Such a stage is not an approved empty configuration.
+            let tracked = git::git(
+                Some(repository),
+                ["ls-files", "--error-unmatch", ".lfsconfig"],
+            )
+            .output()
+            .map_err(io)?;
+            if tracked.status.success() {
+                return Err(issue(
+                    IssueCode::RecoveryRequired,
+                    "Tracked LFS configuration is missing from the stage; inspect before transfer",
+                ));
+            }
+        }
         Ok(metadata) if metadata.file_type().is_file() => {}
         Ok(_) => {
             return Err(issue(
@@ -570,39 +585,136 @@ pub(super) fn lfs_source(stage: &Path, repository: &Path) -> Result<Option<Clone
         }
         Err(error) => return Err(io(error)),
     }
-    let output = git::git(
-        Some(repository),
+    let origin = checked_git(repository, ["remote", "get-url", "origin"])?;
+    let origin = origin.trim();
+    if origin.is_empty() {
+        return Err(issue(
+            IssueCode::RecoveryRequired,
+            "Clone acquisition origin is missing",
+        ));
+    }
+    // Query the same Git LFS implementation and command environment that will
+    // fetch. This covers lfs.url, remote.origin.lfsurl, their precedence and
+    // local Git configuration, without trying to duplicate Git LFS policy.
+    let effective = lfs_endpoint(repository)?;
+    let baseline = tempfile::tempdir().map_err(io)?;
+    let init = git::git(
+        None,
         [
-            OsStr::new("config"),
-            OsStr::new("-z"),
-            OsStr::new("--file"),
-            OsStr::new(".lfsconfig"),
-            OsStr::new("--get"),
-            OsStr::new("lfs.url"),
+            OsStr::new("init"),
+            OsStr::new("--bare"),
+            OsStr::new("--quiet"),
+            baseline.path().as_os_str(),
         ],
     )
     .output()
     .map_err(io)?;
-    if output.status.code() == Some(1) {
-        return Ok(None);
-    }
-    if !output.status.success() || output.stdout.last() != Some(&0) {
+    if !init.status.success() {
         return Err(issue(
             IssueCode::RecoveryRequired,
-            "Checkout LFS configuration is unreadable",
+            "Could not inspect the clean Git LFS source endpoint",
         ));
     }
-    let url = String::from_utf8(output.stdout[..output.stdout.len() - 1].to_vec()).map_err(io)?;
-    if url.is_empty() {
+    let add = git::git(
+        Some(baseline.path()),
+        [
+            OsStr::new("remote"),
+            OsStr::new("add"),
+            OsStr::new("origin"),
+            OsStr::new(origin),
+        ],
+    )
+    .output()
+    .map_err(io)?;
+    if !add.status.success() {
+        return Err(issue(
+            IssueCode::RecoveryRequired,
+            "Could not inspect the reviewed Git LFS source endpoint",
+        ));
+    }
+    if effective == lfs_endpoint(baseline.path())? {
         return Ok(None);
     }
-    checked_git_url(&url)?;
+    checked_git_url(&effective)?;
+    let local = ["lfs.url", "remote.origin.lfsurl"]
+        .into_iter()
+        .map(|key| local_lfs_value(repository, key))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .any(|value| value == effective);
     Ok(Some(CloneTrustSource {
         kind: CloneTrustKind::Lfs,
         repository: repository.strip_prefix(stage).map_err(io)?.to_path_buf(),
-        path: PathBuf::from(".lfsconfig"),
-        url,
+        path: if local || !config.exists() {
+            PathBuf::from(".git/config")
+        } else {
+            PathBuf::from(".lfsconfig")
+        },
+        url: effective,
     }))
+}
+
+fn local_lfs_value(repository: &Path, key: &str) -> Result<Option<String>> {
+    let output = git::git(Some(repository), ["config", "--local", "--get", key])
+        .output()
+        .map_err(io)?;
+    if output.status.code() == Some(1) {
+        return Ok(None);
+    }
+    if !output.status.success() || output.stdout.len() > 8192 {
+        return Err(issue(
+            IssueCode::RecoveryRequired,
+            "Repository-local Git LFS endpoint configuration is invalid",
+        ));
+    }
+    Ok(Some(
+        String::from_utf8(output.stdout)
+            .map_err(io)?
+            .trim_end()
+            .to_owned(),
+    ))
+}
+
+fn lfs_endpoint(repository: &Path) -> Result<String> {
+    let output = git::git_lfs(Some(repository), ["lfs", "env"])
+        .output()
+        .map_err(io)?;
+    if !output.status.success() || output.stdout.len() > 64 * 1024 {
+        return Err(issue(
+            IssueCode::RecoveryRequired,
+            "Git LFS cannot report its effective endpoint before transfer",
+        ));
+    }
+    let text = std::str::from_utf8(&output.stdout).map_err(io)?;
+    let mut endpoints = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("Endpoint="));
+    let value = endpoints.next().ok_or_else(|| {
+        issue(
+            IssueCode::RecoveryRequired,
+            "Git LFS reported no effective transfer endpoint",
+        )
+    })?;
+    if endpoints.next().is_some() {
+        return Err(issue(
+            IssueCode::RecoveryRequired,
+            "Git LFS reported ambiguous transfer endpoints",
+        ));
+    }
+    let (endpoint, auth) = value.rsplit_once(" (auth=").ok_or_else(|| {
+        issue(
+            IssueCode::RecoveryRequired,
+            "Git LFS endpoint format changed; no transfer was started",
+        )
+    })?;
+    if endpoint.is_empty() || !auth.ends_with(')') {
+        return Err(issue(
+            IssueCode::RecoveryRequired,
+            "Git LFS endpoint format changed; no transfer was started",
+        ));
+    }
+    Ok(endpoint.to_owned())
 }
 
 fn verify_lfs_files(root: &Path) -> Result<()> {

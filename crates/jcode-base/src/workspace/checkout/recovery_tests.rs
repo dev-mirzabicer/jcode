@@ -1108,6 +1108,379 @@ async fn discovered_lfs_endpoint_waits_for_review_before_transfer_and_never_publ
 }
 
 #[tokio::test]
+async fn remote_scoped_lfs_override_pauses_before_network_and_resumes_on_exact_stage() {
+    let fixture = Fixture::new();
+    let lfs = LfsTestServer::start();
+    git(&fixture.source, &["lfs", "install", "--local"]);
+    git(&fixture.source, &["lfs", "track", "*.bin"]);
+    std::fs::write(
+        fixture.source.join(".lfsconfig"),
+        format!("[remote \"origin\"]\n\tlfsurl = {}\n", lfs.url()),
+    )
+    .unwrap();
+    let bytes = b"remote-scoped LFS payload\n";
+    std::fs::write(fixture.source.join("payload.bin"), bytes).unwrap();
+    git(&fixture.source, &["add", "."]);
+    git(
+        &fixture.source,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "remote LFS override",
+        ],
+    );
+    lfs.add_repo_objects(&fixture.source);
+    let mut spec = fixture.spec();
+    spec.lfs = true;
+    let bare = fixture.temp.path().join("remote-lfs.git");
+    git(
+        fixture.temp.path(),
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            fixture.source.to_str().unwrap(),
+            bare.to_str().unwrap(),
+        ],
+    );
+    spec.source = CloneSource::Remote {
+        url: format!("file://{}", bare.canonicalize().unwrap().display()),
+    };
+    let review = fixture
+        .service
+        .review_clone(fixture.service.status().unwrap().revision, spec)
+        .unwrap();
+    let request = RequestId::new();
+    fixture.service.begin_clone(request, review.id).unwrap();
+    let capture = fixture.capture(request);
+    assert_eq!(
+        fixture
+            .service
+            .execute_clone(request, &capture)
+            .await
+            .unwrap_err()
+            .code,
+        IssueCode::PermissionRequired
+    );
+    let paused = fixture.service.inspect_clone(request).unwrap();
+    assert_eq!(paused.state, CloneState::AwaitingTrust);
+    assert_eq!(paused.pending_trust.len(), 1);
+    assert_eq!(paused.pending_trust[0].kind, CloneTrustKind::Lfs);
+    assert_eq!(paused.pending_trust[0].url, lfs.url());
+    assert!(
+        lfs.events().is_empty(),
+        "unreviewed LFS transport was contacted"
+    );
+    assert!(!fixture.destination.exists());
+    let stage = paused.stage.as_ref().unwrap();
+    let witness = fixture.service.resolver.bind_directory(stage).unwrap();
+    let trust = fixture
+        .service
+        .review_clone_trust(request, paused.revision)
+        .unwrap();
+    fixture
+        .service
+        .apply_clone_trust(
+            RequestId::new(),
+            trust.id,
+            &WorkspaceClientAuthority::authenticated("fixture-human").unwrap(),
+        )
+        .unwrap();
+    let ready = fixture
+        .service
+        .execute_clone(request, &capture)
+        .await
+        .unwrap();
+    assert_eq!(ready.state, CloneState::Ready);
+    assert_eq!(ready.trust_approvals[0].sources, trust.sources);
+    assert_eq!(
+        witness.root_witness(),
+        fixture
+            .service
+            .resolver
+            .bind_directory(&fixture.destination)
+            .unwrap()
+            .root_witness()
+    );
+    assert_eq!(
+        std::fs::read(fixture.destination.join("payload.bin")).unwrap(),
+        bytes
+    );
+    assert!(
+        lfs.events()
+            .iter()
+            .any(|event| event.starts_with("GET /objects/"))
+    );
+}
+
+#[tokio::test]
+async fn lfs_url_precedes_remote_override_and_never_contacts_lower_priority_source() {
+    let fixture = Fixture::new();
+    let selected = LfsTestServer::start();
+    let ignored = LfsTestServer::start();
+    git(&fixture.source, &["lfs", "install", "--local"]);
+    git(&fixture.source, &["lfs", "track", "*.bin"]);
+    std::fs::write(
+        fixture.source.join(".lfsconfig"),
+        format!(
+            "[lfs]\n\turl = {}\n[remote \"origin\"]\n\tlfsurl = {}\n",
+            selected.url(),
+            ignored.url()
+        ),
+    )
+    .unwrap();
+    let bytes = b"selected LFS payload\n";
+    std::fs::write(fixture.source.join("payload.bin"), bytes).unwrap();
+    git(&fixture.source, &["add", "."]);
+    git(
+        &fixture.source,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "LFS precedence",
+        ],
+    );
+    selected.add_repo_objects(&fixture.source);
+    let bare = fixture.temp.path().join("precedence.git");
+    git(
+        fixture.temp.path(),
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            fixture.source.to_str().unwrap(),
+            bare.to_str().unwrap(),
+        ],
+    );
+    let mut spec = fixture.spec();
+    spec.source = CloneSource::Remote {
+        url: format!("file://{}", bare.canonicalize().unwrap().display()),
+    };
+    spec.lfs = true;
+    spec.trusted_lfs_urls = vec![selected.url()];
+    let review = fixture
+        .service
+        .review_clone(fixture.service.status().unwrap().revision, spec)
+        .unwrap();
+    let request = RequestId::new();
+    fixture.service.begin_clone(request, review.id).unwrap();
+    let record = fixture
+        .service
+        .execute_clone(request, &fixture.capture(request))
+        .await
+        .unwrap();
+    assert_eq!(record.state, CloneState::Ready);
+    assert_eq!(record.discovered_sources.len(), 1);
+    assert_eq!(record.discovered_sources[0].url, selected.url());
+    assert!(record.pending_trust.is_empty());
+    assert_eq!(
+        std::fs::read(fixture.destination.join("payload.bin")).unwrap(),
+        bytes
+    );
+    assert!(
+        selected
+            .events()
+            .iter()
+            .any(|event| event.starts_with("GET /objects/"))
+    );
+    assert!(
+        ignored.events().is_empty(),
+        "lower-priority LFS source was contacted"
+    );
+}
+
+#[test]
+fn lfs_review_attributes_the_effective_local_override_without_network_access() {
+    let fixture = Fixture::new();
+    git(
+        &fixture.source,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://fixture.invalid/repo.git",
+        ],
+    );
+    assert!(
+        super::materialize::lfs_source(&fixture.source, &fixture.source)
+            .unwrap()
+            .is_none()
+    );
+    let from_file = "https://fixture.invalid/manifest-lfs";
+    let from_local = "https://fixture.invalid/local-lfs";
+    std::fs::write(
+        fixture.source.join(".lfsconfig"),
+        format!("[lfs]\nurl = {from_file}\n"),
+    )
+    .unwrap();
+    let observed = super::materialize::lfs_source(&fixture.source, &fixture.source)
+        .unwrap()
+        .unwrap();
+    assert_eq!(observed.url, from_file);
+    assert_eq!(observed.path, PathBuf::from(".lfsconfig"));
+    git(
+        &fixture.source,
+        &["config", "--local", "lfs.url", from_local],
+    );
+    let observed = super::materialize::lfs_source(&fixture.source, &fixture.source)
+        .unwrap()
+        .unwrap();
+    assert_eq!(observed.url, from_local);
+    assert_eq!(observed.path, PathBuf::from(".git/config"));
+}
+
+#[tokio::test]
+async fn nested_submodule_lfs_override_requires_its_own_review_before_transfer() {
+    let fixture = Fixture::new();
+    let lfs = LfsTestServer::start();
+    let child = fixture.temp.path().join("nested-lfs-source");
+    std::fs::create_dir(&child).unwrap();
+    git(&child, &["init", "-q", "-b", "main"]);
+    git(&child, &["lfs", "install", "--local"]);
+    git(&child, &["lfs", "track", "*.bin"]);
+    std::fs::write(
+        child.join(".lfsconfig"),
+        format!("[remote \"origin\"]\n\tlfsurl = {}\n", lfs.url()),
+    )
+    .unwrap();
+    let bytes = b"nested submodule LFS bytes\n";
+    std::fs::write(child.join("child.bin"), bytes).unwrap();
+    git(&child, &["add", "."]);
+    git(
+        &child,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "child LFS payload",
+        ],
+    );
+    lfs.add_repo_objects(&child);
+    let child_bare = fixture.temp.path().join("nested-lfs.git");
+    git(
+        fixture.temp.path(),
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            child.to_str().unwrap(),
+            child_bare.to_str().unwrap(),
+        ],
+    );
+    git(
+        &fixture.source,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            "../nested-lfs.git",
+            "libs/nested-lfs",
+        ],
+    );
+    git(&fixture.source, &["add", "."]);
+    git(
+        &fixture.source,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "include LFS child",
+        ],
+    );
+    let mut spec = fixture.spec();
+    spec.submodules = true;
+    spec.lfs = true;
+    spec.trusted_submodule_urls = vec!["../nested-lfs.git".into()];
+    let review = fixture
+        .service
+        .review_clone(fixture.service.status().unwrap().revision, spec)
+        .unwrap();
+    let request = RequestId::new();
+    fixture.service.begin_clone(request, review.id).unwrap();
+    let capture = fixture.capture(request);
+    assert_eq!(
+        fixture
+            .service
+            .execute_clone(request, &capture)
+            .await
+            .unwrap_err()
+            .code,
+        IssueCode::PermissionRequired
+    );
+    let paused = fixture.service.inspect_clone(request).unwrap();
+    assert_eq!(paused.state, CloneState::AwaitingTrust);
+    assert_eq!(paused.pending_trust.len(), 1);
+    assert_eq!(paused.pending_trust[0].kind, CloneTrustKind::Lfs);
+    assert_eq!(
+        paused.pending_trust[0].repository,
+        PathBuf::from("libs/nested-lfs")
+    );
+    assert_eq!(paused.pending_trust[0].url, lfs.url());
+    assert!(
+        lfs.events().is_empty(),
+        "nested unreviewed endpoint was contacted"
+    );
+    assert!(!fixture.destination.exists());
+    let witness = fixture
+        .service
+        .resolver
+        .bind_directory(paused.stage.as_ref().unwrap())
+        .unwrap();
+    let trust = fixture
+        .service
+        .review_clone_trust(request, paused.revision)
+        .unwrap();
+    fixture
+        .service
+        .apply_clone_trust(
+            RequestId::new(),
+            trust.id,
+            &WorkspaceClientAuthority::authenticated("fixture-human").unwrap(),
+        )
+        .unwrap();
+    let ready = fixture
+        .service
+        .execute_clone(request, &capture)
+        .await
+        .unwrap();
+    assert_eq!(ready.state, CloneState::Ready);
+    assert_eq!(
+        witness.root_witness(),
+        fixture
+            .service
+            .resolver
+            .bind_directory(&fixture.destination)
+            .unwrap()
+            .root_witness()
+    );
+    assert_eq!(
+        std::fs::read(fixture.destination.join("libs/nested-lfs/child.bin")).unwrap(),
+        bytes
+    );
+    assert!(
+        lfs.events()
+            .iter()
+            .any(|event| event.starts_with("GET /objects/"))
+    );
+}
+
+#[tokio::test]
 async fn missing_lfs_payload_is_recoverable_on_the_same_stage_after_source_repair() {
     let fixture = Fixture::new();
     let lfs = LfsTestServer::start();
