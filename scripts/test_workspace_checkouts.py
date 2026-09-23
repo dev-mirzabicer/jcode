@@ -171,6 +171,70 @@ try:
     assert git(bare, 'rev-parse', 'refs/heads/main') == commit
     assert not (remote_destination / '.git/objects/info/alternates').exists()
 
+    # An acquired commit can reveal a submodule source absent from the initial
+    # remote-ref review. Retain this exact stage until the trusted client sees
+    # and approves the source. No second top-level acquisition is permitted.
+    child = f.ROOT / 'child'
+    child.mkdir()
+    git(child, 'init', '-q', '-b', 'main')
+    (child / 'nested.txt').write_text('CHILD COMMITTED DATA\n')
+    git(child, 'add', 'nested.txt')
+    git(child, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+        'commit', '-qm', 'child')
+    child_bare = f.ROOT / 'child.git'
+    subprocess.run(['git', 'clone', '--bare', '-q', str(child), str(child_bare)],
+                   env=f.env, check=True, capture_output=True, timeout=30)
+    git(source, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q',
+        '../child.git', 'libs/child')
+    git(source, 'add', '.gitmodules', 'libs/child')
+    git(source, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+        'commit', '-qm', 'parent with submodule')
+    trust_destination = f.ROOT / 'reviewed-checkout'
+    trust_spec = dict(local_spec, name='reviewed-checkout', branch={'kind': 'detached'},
+                      destination={'kind': 'custom', 'volume_uuid': volume['uuid'],
+                                   'path': str(trust_destination)}, submodules=True)
+    trust_review = rpc('review_clone', 'clone_review', expected_revision=status()['revision'], spec=trust_spec)
+    trust_id = uid()
+    trust_initial = rpc('begin_clone', 'clone', request=trust_id, review=trust_review['id'])
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        paused = rpc('inspect_clone', 'clone', request=trust_id)
+        if paused['state'] in ('awaiting_trust', 'ready', 'preparation_failed', 'recovery_required'):
+            break
+        time.sleep(.1)
+    assert paused['state'] == 'awaiting_trust' and not trust_destination.exists(), paused
+    source_notice, = paused['pending_trust']
+    assert source_notice['kind'] == 'submodule' and source_notice['url'] == '../child.git', paused
+    assert source_notice['path'] == 'libs/child'
+    stage = Path(paused['stage'])
+    witness = (stage.stat().st_dev, stage.stat().st_ino)
+    assert not (stage / 'libs/child/nested.txt').exists(), 'unreviewed transport was used'
+    assert len(paused['output_runs']) == 1, paused
+    assert rpc('resume_clone', 'clone', request=trust_id)['state'] == 'awaiting_trust'
+    assert rpc('inspect_clone', 'clone', request=trust_id)['output_runs'] == paused['output_runs']
+    existing = rpc('clone_output', 'clone_output', clone=trust_id,
+                   request={'action': 'inspect', 'run_id': paused['output_runs'][0]})
+    assert existing['kind'] == 'status' and existing['run']['state'] == 'failed' and existing['run']['complete'], existing
+    source_review = rpc('review_clone_trust', 'clone_trust_review',
+                        clone=trust_id, expected_revision=paused['revision'])
+    assert source_review['sources'] == paused['pending_trust'] and source_review['stage'] == str(stage)
+    approval_id = uid()
+    approval = rpc('apply_clone_trust', 'receipt', request=approval_id, review=source_review['id'])
+    assert not approval['issues'], approval
+    assert rpc('apply_clone_trust', 'receipt', request=approval_id, review=source_review['id']) == approval
+    pending = rpc('resume_clone', 'clone', request=trust_id)
+    assert pending['location'] == trust_initial['location']
+    trust_ready = await_clone(trust_id)
+    assert trust_ready['location'] == trust_initial['location']
+    assert len(trust_ready['trust_approvals']) == 1 and not trust_ready['pending_trust'], trust_ready
+    assert len(trust_ready['output_runs']) == 2, trust_ready
+    await_output(trust_id, trust_ready['output_runs'][-1])
+    assert (trust_destination.stat().st_dev, trust_destination.stat().st_ino) == witness
+    assert (trust_destination / 'libs/child/nested.txt').read_text() == 'CHILD COMMITTED DATA\n'
+    git(trust_destination, 'fsck', '--full')
+    git(trust_destination / 'libs/child', 'fsck', '--full')
+    assert not (trust_destination / 'libs/child/.git/objects/info/alternates').exists()
+
     # Existing data adoption is an explicit organization operation, not cloning.
     standalone, = change('register_location', name='existing', path=str(source),
                          registration={'kind': 'standalone'})['targets']
@@ -219,6 +283,7 @@ try:
     result = dict(binary=subprocess.check_output([f.BIN, '--version'], text=True).strip(),
                   artifact=str(f.ROOT), checkout_version=probe['checkout_version'],
                   local_request=local_ready['request'], remote_request=remote_ready['request'],
+                  paused_trust_request=trust_id, reviewed_resume_one_stage=True,
                   local_independent=True, remote_independent=True,
                   adopted_existing_identity=True, rebind_generation=history['new_generation'],
                   startup_copy_target_capture=detail['content'],

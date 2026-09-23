@@ -30,8 +30,8 @@ human-facing clone form.
    IDs for existing execution `inspect`, `read`, or `read_part` semantics,
    even when no primary Session is attached. Cross-clone runs, unscoped
    listings and execution Stop/force/background controls are not granted by
-   this route. A lost
-   reply is resolved with the same request, not a second checkout.
+   this route. A lost reply is resolved with the same request, not a second
+   checkout.
 4. The runtime owns acquisition independently of the client connection. It
    records the operation before effects, pins a witnessed destination parent,
    creates an owned same-volume `.jcode-clone-<operation>` stage and runs
@@ -39,8 +39,22 @@ human-facing clone form.
    no alternates for the top-level repository. Git's submodule helper can
    still hardlink local source objects, so the service copies and fsyncs
    any borrowed object inode inside the owned stage before publishing.
-   It checks out the reviewed commit, selects the reviewed
-   branch, materializes and verifies requested submodules at recorded gitlinks
+   It checks out the reviewed commit and selects the reviewed branch. For
+   each discovered `.gitmodules` URL and explicit `.lfsconfig` endpoint, it
+   records the declaring repository, path and exact transport before use.
+   Sources already named in the initial review proceed. Otherwise the
+   operation becomes `awaiting_trust` with a witnessed non-published stage.
+   `review_clone_trust` returns its current catalog/clone revision, pinned
+   commit, exact stage and outstanding sources. The authenticated client
+   checks those facts and calls `apply_clone_trust` once with a new request
+   UUID and that review ID. Approval records the client and exact sources,
+   not a global trust setting or broad future transport permission. A changed
+   stage, manifest, source or catalog revision rejects approval without
+   deleting the stage. `resume_clone` waits for the previous retained run to
+   become terminal and continues that stage without reacquiring Git. A
+   nested submodule or LFS manifest can require another review round.
+   No unreviewed transport is contacted or checkout marked Ready.
+   The service materializes and verifies requested submodules at recorded gitlinks
    and LFS bytes, and installs only reviewed resulting remotes. Readiness
    requires an exact HEAD, branch/remotes, clean tree, recursive submodules,
    content hashes, fsck, stage witness and reviewed volume.
@@ -53,7 +67,9 @@ human-facing clone form.
 `cancel_clone` durably requests cancellation. It stops owned Git process work,
 not already completed filesystem effects. Only an empty *witnessed owned*
 stage may be removed automatically. Nonempty, changed or ambiguous stages
-remain available for inspection. `resume_clone` reuses the exact operation
+remain available for inspection. Cancellation of an idle `awaiting_trust`
+operation becomes terminal and retains its nonempty stage; a review cannot
+revive it. `resume_clone` reuses the exact operation
 only after the prior execution owner proves its run terminal. An unknown live
 owner blocks reacquisition; a failed/recovery-required stage is never
 automatically reset or deleted. A failed automatic catalog backup is reported
@@ -67,8 +83,8 @@ The selected source's standard credential helper and SSH agent retain
 credential custody. Embedded URL credentials, ambient Git path redirection,
 unrequested hooks/templates/filters, shell command injection, unknown Git
 options and interactive authentication are rejected/neutralized. A selected
-local/relative submodule URL and an explicit `.lfsconfig` endpoint require
-separate review. Git LFS is required when requested and missing dependency
+submodule URL, local or remote, and an explicit `.lfsconfig` endpoint require
+exact initial or stage-bound review. Git LFS is required when requested and missing dependency
 errors are actionable. Only the new clone receives repository-local LFS
 filters (`--skip-repo` avoids installing hooks). No global Git configuration,
 project setup command, package-manager install or background service is run

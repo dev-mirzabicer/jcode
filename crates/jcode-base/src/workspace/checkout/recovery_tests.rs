@@ -120,7 +120,7 @@ impl Fixture {
             },
             submodules: false,
             lfs: false,
-            trusted_local_submodule_urls: vec![],
+            trusted_submodule_urls: vec![],
             trusted_lfs_urls: vec![],
         }
     }
@@ -364,7 +364,7 @@ async fn recursive_submodules_and_lfs_payloads_are_materialized_without_project_
     let mut spec = fixture.spec();
     spec.submodules = true;
     spec.lfs = true;
-    spec.trusted_local_submodule_urls = vec!["../child.git".into(), "../grand.git".into()];
+    spec.trusted_submodule_urls = vec!["../child.git".into(), "../grand.git".into()];
     spec.trusted_lfs_urls = vec![lfs.url()];
     let review = fixture
         .service
@@ -659,4 +659,407 @@ async fn injected_enospc_retains_owned_stage_and_ready_output_failure_is_separat
     assert!(warned.issue.is_none());
     assert_eq!(fixture.service.inspect_clone(request).unwrap(), warned);
     git(&fixture.destination, &["fsck", "--full"]);
+}
+
+#[tokio::test]
+async fn discovered_submodule_trust_pauses_then_resumes_without_reacquiring_source() {
+    let fixture = Fixture::new();
+    let child = fixture.temp.path().join("child");
+    std::fs::create_dir(&child).unwrap();
+    git(&child, &["init", "-q", "-b", "main"]);
+    std::fs::write(child.join("nested.txt"), "committed child\n").unwrap();
+    git(&child, &["add", "nested.txt"]);
+    git(
+        &child,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "child",
+        ],
+    );
+    let bare = fixture.temp.path().join("child.git");
+    git(
+        fixture.temp.path(),
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            child.to_str().unwrap(),
+            bare.to_str().unwrap(),
+        ],
+    );
+    git(
+        &fixture.source,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            "../child.git",
+            "libs/child",
+        ],
+    );
+    git(&fixture.source, &["add", ".gitmodules", "libs/child"]);
+    git(
+        &fixture.source,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "parent",
+        ],
+    );
+    let mut spec = fixture.spec();
+    spec.submodules = true;
+    let review = fixture
+        .service
+        .review_clone(fixture.service.status().unwrap().revision, spec)
+        .unwrap();
+    let request = RequestId::new();
+    fixture.service.begin_clone(request, review.id).unwrap();
+    let capture = fixture.capture(request);
+    let problem = fixture
+        .service
+        .execute_clone(request, &capture)
+        .await
+        .unwrap_err();
+    assert_eq!(problem.code, IssueCode::PermissionRequired);
+    let paused = fixture.service.inspect_clone(request).unwrap();
+    assert_eq!(paused.state, CloneState::AwaitingTrust);
+    assert_eq!(paused.pending_trust.len(), 1);
+    assert_eq!(paused.pending_trust[0].kind, CloneTrustKind::Submodule);
+    assert_eq!(paused.pending_trust[0].path, PathBuf::from("libs/child"));
+    assert_eq!(paused.pending_trust[0].url, "../child.git");
+    assert_eq!(paused.discovered_sources, paused.pending_trust);
+    assert!(!fixture.destination.exists());
+    let stage = paused.stage.as_ref().unwrap();
+    let stage_witness = fixture.service.resolver.bind_directory(stage).unwrap();
+    assert!(
+        !stage.join("libs/child/nested.txt").exists(),
+        "untrusted transport executed"
+    );
+    assert_eq!(
+        fixture
+            .service
+            .execute_clone(request, &capture)
+            .await
+            .unwrap_err()
+            .code,
+        IssueCode::PermissionRequired
+    );
+    let trust = fixture
+        .service
+        .review_clone_trust(request, paused.revision)
+        .unwrap();
+    assert_eq!(trust.sources, paused.pending_trust);
+    assert_eq!(trust.stage, *stage);
+    assert_eq!(
+        fixture
+            .service
+            .review_clone_trust(request, paused.revision + 1)
+            .unwrap_err()
+            .code,
+        IssueCode::Conflict
+    );
+    let authority = WorkspaceClientAuthority::authenticated("fixture-human").unwrap();
+    let approval = RequestId::new();
+    let manifest = stage.join(".gitmodules");
+    let original_manifest = std::fs::read(&manifest).unwrap();
+    std::fs::write(
+        &manifest,
+        b"[submodule \"wrong\"]\n\tpath = libs/child\n\turl = ../unreviewed.git\n",
+    )
+    .unwrap();
+    assert_eq!(
+        fixture
+            .service
+            .apply_clone_trust(approval, trust.id, &authority)
+            .unwrap_err()
+            .code,
+        IssueCode::RecoveryRequired
+    );
+    assert!(
+        fixture
+            .service
+            .inspect_clone(request)
+            .unwrap()
+            .trust_approvals
+            .is_empty()
+    );
+    std::fs::write(&manifest, &original_manifest).unwrap();
+    let receipt = fixture
+        .service
+        .apply_clone_trust(approval, trust.id, &authority)
+        .unwrap();
+    assert_eq!(
+        fixture
+            .service
+            .apply_clone_trust(approval, trust.id, &authority)
+            .unwrap(),
+        receipt
+    );
+    let other = WorkspaceClientAuthority::authenticated("another-human").unwrap();
+    assert_eq!(
+        fixture
+            .service
+            .apply_clone_trust(approval, trust.id, &other)
+            .unwrap_err()
+            .code,
+        IssueCode::Conflict
+    );
+    let approved = fixture.service.inspect_clone(request).unwrap();
+    assert_eq!(approved.state, CloneState::Materializing);
+    assert!(approved.pending_trust.is_empty());
+    assert_eq!(approved.trust_approvals[0].issued_by, "fixture-human");
+    assert!(
+        approved.review.spec.trusted_submodule_urls.is_empty(),
+        "original reviewed intent changed"
+    );
+    std::fs::write(
+        &manifest,
+        b"[submodule \"wrong\"]\n\tpath = libs/child\n\turl = ../unreviewed.git\n",
+    )
+    .unwrap();
+    assert_eq!(
+        fixture
+            .service
+            .execute_clone(request, &capture)
+            .await
+            .unwrap_err()
+            .code,
+        IssueCode::RecoveryRequired
+    );
+    assert!(!fixture.destination.exists());
+    assert!(stage.join(".git").exists());
+    std::fs::write(&manifest, &original_manifest).unwrap();
+    let ready = fixture
+        .service
+        .execute_clone(request, &capture)
+        .await
+        .unwrap();
+    assert_eq!(ready.state, CloneState::Ready);
+    assert_eq!(ready.location, paused.location);
+    assert_eq!(ready.trust_approvals[0].sources, trust.sources);
+    let published = fixture
+        .service
+        .resolver
+        .bind_directory(&fixture.destination)
+        .unwrap();
+    assert_eq!(stage_witness.root_witness(), published.root_witness());
+    assert_eq!(
+        std::fs::read(fixture.destination.join("libs/child/nested.txt")).unwrap(),
+        b"committed child\n"
+    );
+    git(&fixture.destination, &["fsck", "--full"]);
+}
+
+#[tokio::test]
+async fn discovered_lfs_endpoint_waits_for_review_before_transfer_and_never_publishes_pointers() {
+    let fixture = Fixture::new();
+    let lfs = LfsTestServer::start();
+    git(&fixture.source, &["lfs", "install", "--local"]);
+    git(&fixture.source, &["lfs", "track", "*.bin"]);
+    std::fs::write(
+        fixture.source.join(".lfsconfig"),
+        format!("[lfs]\n\turl = {}\n", lfs.url()),
+    )
+    .unwrap();
+    let bytes = b"exact reviewed LFS content, not a pointer\n";
+    std::fs::write(fixture.source.join("payload.bin"), bytes).unwrap();
+    git(&fixture.source, &["add", "."]);
+    git(
+        &fixture.source,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "lfs source",
+        ],
+    );
+    lfs.add_repo_objects(&fixture.source);
+    let mut spec = fixture.spec();
+    spec.lfs = true;
+    let review = fixture
+        .service
+        .review_clone(fixture.service.status().unwrap().revision, spec)
+        .unwrap();
+    let request = RequestId::new();
+    fixture.service.begin_clone(request, review.id).unwrap();
+    let capture = fixture.capture(request);
+    assert_eq!(
+        fixture
+            .service
+            .execute_clone(request, &capture)
+            .await
+            .unwrap_err()
+            .code,
+        IssueCode::PermissionRequired
+    );
+    let paused = fixture.service.inspect_clone(request).unwrap();
+    assert_eq!(paused.state, CloneState::AwaitingTrust);
+    assert_eq!(paused.pending_trust.len(), 1);
+    assert_eq!(paused.pending_trust[0].kind, CloneTrustKind::Lfs);
+    assert_eq!(paused.pending_trust[0].url, lfs.url());
+    assert!(
+        lfs.events().is_empty(),
+        "unreviewed LFS endpoint was contacted"
+    );
+    assert!(!fixture.destination.exists());
+    let stage = paused.stage.as_ref().unwrap();
+    assert!(
+        std::fs::read(stage.join("payload.bin"))
+            .unwrap()
+            .starts_with(b"version https://git-lfs.github.com/spec/v1")
+    );
+    let witness = fixture.service.resolver.bind_directory(stage).unwrap();
+    let trust = fixture
+        .service
+        .review_clone_trust(request, paused.revision)
+        .unwrap();
+    let authority = WorkspaceClientAuthority::authenticated("fixture-human").unwrap();
+    fixture
+        .service
+        .apply_clone_trust(RequestId::new(), trust.id, &authority)
+        .unwrap();
+    let ready = fixture
+        .service
+        .execute_clone(request, &capture)
+        .await
+        .unwrap();
+    assert_eq!(ready.state, CloneState::Ready);
+    assert_eq!(ready.trust_approvals[0].sources, trust.sources);
+    let published = fixture
+        .service
+        .resolver
+        .bind_directory(&fixture.destination)
+        .unwrap();
+    assert_eq!(witness.root_witness(), published.root_witness());
+    assert_eq!(
+        std::fs::read(fixture.destination.join("payload.bin")).unwrap(),
+        bytes
+    );
+    assert!(
+        lfs.events()
+            .iter()
+            .any(|event| event.starts_with("GET /objects/"))
+    );
+    git(&fixture.destination, &["fsck", "--full"]);
+}
+
+#[tokio::test]
+async fn cancelling_an_idle_trust_wait_retains_nonempty_stage_and_cannot_publish() {
+    let fixture = Fixture::new();
+    let child = fixture.temp.path().join("child");
+    std::fs::create_dir(&child).unwrap();
+    git(&child, &["init", "-q", "-b", "main"]);
+    std::fs::write(child.join("nested.txt"), "retained child").unwrap();
+    git(&child, &["add", "."]);
+    git(
+        &child,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "child",
+        ],
+    );
+    let bare = fixture.temp.path().join("child.git");
+    git(
+        fixture.temp.path(),
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            child.to_str().unwrap(),
+            bare.to_str().unwrap(),
+        ],
+    );
+    git(
+        &fixture.source,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            "../child.git",
+            "libs/child",
+        ],
+    );
+    git(&fixture.source, &["add", "."]);
+    git(
+        &fixture.source,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "parent",
+        ],
+    );
+    let mut spec = fixture.spec();
+    spec.submodules = true;
+    let review = fixture
+        .service
+        .review_clone(fixture.service.status().unwrap().revision, spec)
+        .unwrap();
+    let request = RequestId::new();
+    fixture.service.begin_clone(request, review.id).unwrap();
+    let capture = fixture.capture(request);
+    assert_eq!(
+        fixture
+            .service
+            .execute_clone(request, &capture)
+            .await
+            .unwrap_err()
+            .code,
+        IssueCode::PermissionRequired
+    );
+    let paused = fixture.service.inspect_clone(request).unwrap();
+    assert_eq!(paused.state, CloneState::AwaitingTrust);
+    let stage = paused.stage.as_ref().unwrap().clone();
+    assert!(stage.join(".git").exists());
+    let cancelled = fixture.service.request_clone_cancel(request).unwrap();
+    assert_eq!(cancelled.state, CloneState::Cancelled);
+    assert!(cancelled.cancel_requested);
+    assert_eq!(cancelled.stage, Some(stage.clone()));
+    assert_eq!(
+        cancelled.issue.as_ref().unwrap().code,
+        IssueCode::RecoveryRequired
+    );
+    assert!(stage.join(".git").exists(), "nonempty stage was destroyed");
+    assert!(!fixture.destination.exists());
+    assert_eq!(
+        fixture
+            .service
+            .execute_clone(request, &capture)
+            .await
+            .unwrap_err()
+            .code,
+        IssueCode::Conflict
+    );
+    assert_eq!(
+        fixture
+            .service
+            .review_clone_trust(request, cancelled.revision)
+            .unwrap_err()
+            .code,
+        IssueCode::Conflict
+    );
 }

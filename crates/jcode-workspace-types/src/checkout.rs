@@ -68,8 +68,8 @@ pub struct CloneSpec {
     pub destination: CloneDestination,
     pub submodules: bool,
     pub lfs: bool,
-    #[serde(default)]
-    pub trusted_local_submodule_urls: Vec<String>,
+    #[serde(default, alias = "trusted_local_submodule_urls")]
+    pub trusted_submodule_urls: Vec<String>,
     #[serde(default)]
     pub trusted_lfs_urls: Vec<String>,
 }
@@ -92,12 +92,52 @@ pub enum CloneState {
     Pending,
     Acquiring,
     Materializing,
+    AwaitingTrust,
     Verifying,
     Publishing,
     Ready,
     PreparationFailed,
     Cancelled,
     RecoveryRequired,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CloneTrustKind {
+    Submodule,
+    Lfs,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloneTrustSource {
+    pub kind: CloneTrustKind,
+    /// Relative location of the declaring repository inside the owned stage.
+    pub repository: PathBuf,
+    /// Submodule path relative to that repository, or `.lfsconfig`.
+    pub path: PathBuf,
+    pub url: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloneTrustReview {
+    pub id: ReviewId,
+    pub clone: RequestId,
+    pub catalog_revision: Revision,
+    pub clone_revision: Revision,
+    pub stage: PathBuf,
+    pub source_commit: String,
+    pub sources: Vec<CloneTrustSource>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloneTrustApproval {
+    pub request: RequestId,
+    pub review: ReviewId,
+    pub issued_by: String,
+    pub sources: Vec<CloneTrustSource>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -111,6 +151,12 @@ pub struct CloneRecord {
     pub cancel_requested: bool,
     pub stage: Option<PathBuf>,
     pub output_runs: Vec<String>,
+    #[serde(default)]
+    pub discovered_sources: Vec<CloneTrustSource>,
+    #[serde(default)]
+    pub pending_trust: Vec<CloneTrustSource>,
+    #[serde(default)]
+    pub trust_approvals: Vec<CloneTrustApproval>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_issue: Option<Issue>,
     pub issue: Option<Issue>,

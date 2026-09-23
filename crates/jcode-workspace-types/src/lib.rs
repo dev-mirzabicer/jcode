@@ -496,6 +496,14 @@ pub enum WorkspaceRequest {
     ResumeClone {
         request: RequestId,
     },
+    ReviewCloneTrust {
+        clone: RequestId,
+        expected_revision: Revision,
+    },
+    ApplyCloneTrust {
+        request: RequestId,
+        review: ReviewId,
+    },
     InspectRebind {
         operation: OperationId,
     },
@@ -579,7 +587,8 @@ pub enum WorkspaceResponse {
     Volumes(Vec<WorkspaceVolume>),
     CloneOutput(jcode_tool_types::execution::ExecutionResponse),
     CloneReview(CloneReview),
-    Clone(CloneRecord),
+    Clone(Box<CloneRecord>),
+    CloneTrustReview(CloneTrustReview),
     Rebind(RebindRecord),
     StartupCopyReview(StartupCopyReview),
     StartupCopy(StartupCopyRecord),

@@ -101,7 +101,7 @@ pub(super) async fn begin(
             if record.state == CloneState::Pending && record.output_runs.is_empty() {
                 start(root, request);
             }
-            WorkspaceResponse::Clone(record)
+            WorkspaceResponse::Clone(Box::new(record))
         }
         Ok(Err(error)) => WorkspaceResponse::Error(error),
         Err(error) => WorkspaceResponse::Error(Issue {
@@ -122,7 +122,12 @@ pub(super) async fn resume(request: RequestId, client: String) -> WorkspaceRespo
     })
     .await;
     match record {
-        Ok(Ok(record)) if !matches!(record.state, CloneState::Ready | CloneState::Cancelled) => {
+        Ok(Ok(record))
+            if !matches!(
+                record.state,
+                CloneState::Ready | CloneState::Cancelled | CloneState::AwaitingTrust
+            ) =>
+        {
             if let Some(previous) = record.output_runs.last() {
                 let previous = previous.clone();
                 let output_root = match crate::storage::jcode_dir() {
@@ -151,7 +156,7 @@ pub(super) async fn resume(request: RequestId, client: String) -> WorkspaceRespo
                 }
             }
             start(root, request);
-            WorkspaceResponse::Clone(record)
+            WorkspaceResponse::Clone(Box::new(record))
         }
         Ok(Ok(record)) if record.state == CloneState::Ready => {
             let root = crate::storage::durable_state_dir();
@@ -160,12 +165,12 @@ pub(super) async fn resume(request: RequestId, client: String) -> WorkspaceRespo
             })
             .await
             {
-                Ok(Ok(ready)) => WorkspaceResponse::Clone(ready),
+                Ok(Ok(ready)) => WorkspaceResponse::Clone(Box::new(ready)),
                 Ok(Err(error)) => WorkspaceResponse::Error(error),
                 Err(error) => WorkspaceResponse::Error(problem(error)),
             }
         }
-        Ok(Ok(record)) => WorkspaceResponse::Clone(record),
+        Ok(Ok(record)) => WorkspaceResponse::Clone(Box::new(record)),
         Ok(Err(error)) => WorkspaceResponse::Error(error),
         Err(error) => WorkspaceResponse::Error(Issue {
             code: IssueCode::RecoveryRequired,
@@ -196,6 +201,12 @@ fn start(root: PathBuf, request: RequestId) {
 }
 
 async fn run(service: &WorkspaceService, request: RequestId) -> Result<()> {
+    if matches!(
+        service.inspect_clone(request)?.state,
+        CloneState::Ready | CloneState::Cancelled | CloneState::AwaitingTrust
+    ) {
+        return Ok(());
+    }
     let run_root = crate::storage::jcode_dir().map_err(problem)?;
     let store = tokio::task::spawn_blocking(move || ExecutionStore::open(&run_root))
         .await

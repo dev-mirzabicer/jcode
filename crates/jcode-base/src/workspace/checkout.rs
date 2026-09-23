@@ -13,6 +13,7 @@ mod lfs_test_server;
 mod materialize;
 #[cfg(test)]
 mod recovery_tests;
+mod trust;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -113,19 +114,8 @@ impl WorkspaceService {
                 url: url.clone(),
             });
         }
-        for url in &spec.trusted_local_submodule_urls {
-            if !(url.starts_with("../")
-                || url.starts_with("./")
-                || url.starts_with("file://")
-                || Path::new(url).is_absolute())
-                || url.chars().any(char::is_control)
-                || url.starts_with('-')
-            {
-                return Err(issue(
-                    IssueCode::InvalidInput,
-                    "Trusted local submodule URL must be a reviewed local or relative reference",
-                ));
-            }
+        for url in &spec.trusted_submodule_urls {
+            trust::validate_submodule_url(url)?;
         }
         for url in &spec.trusted_lfs_urls {
             checked_git_url(url)?;
@@ -295,6 +285,9 @@ impl WorkspaceService {
             cancel_requested: false,
             stage: None,
             output_runs: Vec::new(),
+            discovered_sources: Vec::new(),
+            pending_trust: Vec::new(),
+            trust_approvals: Vec::new(),
             output_issue: None,
             issue: None,
             revision,
@@ -355,12 +348,32 @@ impl WorkspaceService {
     }
 
     pub fn request_clone_cancel(&self, request: RequestId) -> Result<CloneRecord> {
-        self.update_clone(request, |op| {
-            if op.public.state != CloneState::Ready {
-                op.public.cancel_requested = true;
+        let idle = match self.clone_lease(request) {
+            Ok(lease) => Some(lease),
+            Err(error) if error.code == IssueCode::Busy => None,
+            Err(error) => return Err(error),
+        };
+        let record = self.update_clone(request, |op| {
+            if op.public.state == CloneState::Ready || op.public.state == CloneState::Cancelled {
+                return Ok(());
+            }
+            if op.published_binding.is_some() || op.public.state == CloneState::Publishing {
+                return Err(issue(IssueCode::Conflict,
+                    "Clone already reached physical publication; reconcile it instead of cancelling"));
+            }
+            op.public.cancel_requested = true;
+            if idle.is_some() {
+                op.public.state = CloneState::Cancelled;
+                op.public.issue = None;
             }
             Ok(())
-        })
+        })?;
+        if idle.is_some() && record.state == CloneState::Cancelled {
+            self.cleanup_cancelled_empty_stage(request)?;
+            self.inspect_clone(request)
+        } else {
+            Ok(record)
+        }
     }
 
     pub fn record_clone_output(&self, request: RequestId, run: String) -> Result<CloneRecord> {
@@ -371,10 +384,13 @@ impl WorkspaceService {
             ));
         }
         self.update_clone(request, |op| {
-            if op.public.state == CloneState::Ready {
+            if matches!(
+                op.public.state,
+                CloneState::Ready | CloneState::Cancelled | CloneState::AwaitingTrust
+            ) {
                 return Err(issue(
                     IssueCode::Conflict,
-                    "Ready checkout cannot start another operation",
+                    "Completed or trust-paused checkout cannot start another execution run",
                 ));
             }
             if !op.public.output_runs.contains(&run) {
@@ -461,6 +477,12 @@ impl WorkspaceService {
                 "Cancelled clone needs a fresh review",
             ));
         }
+        if matches!(operation.public.state, CloneState::AwaitingTrust) {
+            return Err(issue(
+                IssueCode::PermissionRequired,
+                "Review the discovered submodule/LFS sources before resuming this clone",
+            ));
+        }
         let outcome = self.execute_clone_owned(request, capture).await;
         match outcome {
             Ok(()) => self.inspect_clone(request),
@@ -469,6 +491,8 @@ impl WorkspaceService {
                     if operation.public.state != CloneState::Ready {
                         operation.public.state = if operation.public.cancel_requested {
                             CloneState::Cancelled
+                        } else if operation.public.state == CloneState::AwaitingTrust {
+                            CloneState::AwaitingTrust
                         } else if operation.published_binding.is_some() {
                             CloneState::RecoveryRequired
                         } else {
@@ -628,6 +652,9 @@ impl WorkspaceService {
         }
         operation = self.load_clone(request)?;
         if !operation.materialized {
+            if !operation.public.trust_approvals.is_empty() {
+                trust::verify_source_observations(self, &operation, &stage)?;
+            }
             self.materialize_clone(request, &operation, &stage, capture)
                 .await?;
             self.update_clone(request, |op| {
@@ -1186,7 +1213,7 @@ mod tests {
                     },
                     submodules: false,
                     lfs: false,
-                    trusted_local_submodule_urls: vec![],
+                    trusted_submodule_urls: vec![],
                     trusted_lfs_urls: vec![],
                 },
             )

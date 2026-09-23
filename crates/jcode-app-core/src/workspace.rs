@@ -57,12 +57,21 @@ pub fn dispatch_with(
         } => service
             .review_clone(expected_revision, spec)
             .map(Response::CloneReview),
-        WorkspaceRequest::InspectClone { request } => {
-            service.inspect_clone(request).map(Response::Clone)
-        }
-        WorkspaceRequest::CancelClone { request } => {
-            service.request_clone_cancel(request).map(Response::Clone)
-        }
+        WorkspaceRequest::InspectClone { request } => service
+            .inspect_clone(request)
+            .map(|record| Response::Clone(Box::new(record))),
+        WorkspaceRequest::ReviewCloneTrust {
+            clone,
+            expected_revision,
+        } => service
+            .review_clone_trust(clone, expected_revision)
+            .map(Response::CloneTrustReview),
+        WorkspaceRequest::ApplyCloneTrust { request, review } => service
+            .apply_clone_trust(request, review, client)
+            .map(Response::Receipt),
+        WorkspaceRequest::CancelClone { request } => service
+            .request_clone_cancel(request)
+            .map(|record| Response::Clone(Box::new(record))),
         WorkspaceRequest::InspectRebind { operation } => {
             service.inspect_rebind(operation).map(Response::Rebind)
         }

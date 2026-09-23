@@ -1,5 +1,5 @@
 use super::*;
-use jcode_workspace_types::{RequestId, WorkspaceRequest, WorkspaceResponse};
+use jcode_workspace_types::{RequestId, ReviewId, WorkspaceRequest, WorkspaceResponse};
 
 #[test]
 fn workspace_catalog_control_is_session_independent_and_roundtrips() {
@@ -119,7 +119,7 @@ fn checkout_clone_request_requires_review_identity_and_does_not_confer_human_aut
             },
             submodules: true,
             lfs: true,
-            trusted_local_submodule_urls: vec![],
+            trusted_submodule_urls: vec![],
             trusted_lfs_urls: vec![],
         },
     };
@@ -222,6 +222,41 @@ fn checkout_output_inspection_is_correlated_to_a_clone_request() {
     assert!(
         serde_json::from_value::<WorkspaceRequest>(serde_json::json!({
             "action":"clone_output", "request":{"action":"inspect","run_id":"run-any"}
+        }))
+        .is_err()
+    );
+}
+
+#[test]
+fn clone_source_trust_review_and_approval_require_exact_clone_revision_and_review_id() {
+    let clone = RequestId::new();
+    let review = WorkspaceRequest::ReviewCloneTrust {
+        clone,
+        expected_revision: 9,
+    };
+    let approval = WorkspaceRequest::ApplyCloneTrust {
+        request: RequestId::new(),
+        review: ReviewId::new(),
+    };
+    for operation in [review, approval] {
+        let value = serde_json::to_value(&operation).unwrap();
+        assert_eq!(
+            serde_json::from_value::<WorkspaceRequest>(value.clone()).unwrap(),
+            operation
+        );
+        let mut forged = value;
+        forged["trusted"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<WorkspaceRequest>(forged).is_err());
+    }
+    assert!(
+        serde_json::from_value::<WorkspaceRequest>(serde_json::json!({
+            "action":"apply_clone_trust", "request":RequestId::new()
+        }))
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<WorkspaceRequest>(serde_json::json!({
+            "action":"review_clone_trust", "clone":clone
         }))
         .is_err()
     );

@@ -50,7 +50,7 @@ impl WorkspaceService {
         }
         if spec.submodules {
             let mut visited = HashSet::new();
-            self.materialize_submodules(request, root, root, spec, capture, &mut visited)
+            self.materialize_submodules(request, root, root, capture, &mut visited)
                 .await?;
         }
         if spec.lfs {
@@ -172,7 +172,6 @@ impl WorkspaceService {
         request: RequestId,
         project_root: &Path,
         root: &Path,
-        spec: &CloneSpec,
         capture: &dyn OutputCapture,
         visited: &mut HashSet<PathBuf>,
     ) -> Result<()> {
@@ -185,7 +184,11 @@ impl WorkspaceService {
                     "Submodule path escaped or repeated a repository",
                 ));
             }
-            for (name, relative) in submodules(&parent)? {
+            let sources = submodule_sources(project_root, &parent)?;
+            self.record_clone_sources(request, &sources)?;
+            for source in sources {
+                let relative = source.path;
+                let url = source.url;
                 let candidate = parent.join(&relative);
                 if !candidate.starts_with(project_root) {
                     return Err(issue(
@@ -193,37 +196,11 @@ impl WorkspaceService {
                         "Submodule path escaped the selected clone",
                     ));
                 }
-                let url = checked_git(
-                    &parent,
-                    [
-                        OsStr::new("config"),
-                        OsStr::new("--file"),
-                        OsStr::new(".gitmodules"),
-                        OsStr::new("--get"),
-                        OsStr::new(&format!("submodule.{name}.url")),
-                    ],
-                )?;
-                let url = url.trim();
                 let local = url.starts_with("../")
                     || url.starts_with("./")
                     || url.starts_with("file://")
                     || url.starts_with('/');
-                if local
-                    && !spec
-                        .trusted_local_submodule_urls
-                        .iter()
-                        .any(|approved| approved == url)
-                {
-                    return Err(issue(
-                        IssueCode::PermissionRequired,
-                        format!(
-                            "Submodule {name} uses a local/relative transport not approved in the clone review"
-                        ),
-                    ));
-                }
-                if !local {
-                    checked_git_url(url)?;
-                }
+                trust::validate_submodule_url(&url)?;
                 let mut command = git::git(
                     Some(&parent),
                     [
@@ -267,36 +244,8 @@ impl WorkspaceService {
     ) -> Result<()> {
         let mut pending = vec![root.to_path_buf()];
         while let Some(parent) = pending.pop() {
-            let config = parent.join(".lfsconfig");
-            if config.exists() {
-                let output = git::git(
-                    Some(&parent),
-                    [
-                        OsStr::new("config"),
-                        OsStr::new("--file"),
-                        OsStr::new(".lfsconfig"),
-                        OsStr::new("--get"),
-                        OsStr::new("lfs.url"),
-                    ],
-                )
-                .output()
-                .map_err(io)?;
-                if output.status.success() {
-                    let url = std::str::from_utf8(&output.stdout).map_err(io)?.trim();
-                    if !url.is_empty()
-                        && !spec.trusted_lfs_urls.iter().any(|approved| approved == url)
-                    {
-                        return Err(issue(
-                            IssueCode::PermissionRequired,
-                            "Checkout declares an LFS endpoint outside the reviewed trusted sources",
-                        ));
-                    }
-                } else if output.status.code() != Some(1) {
-                    return Err(issue(
-                        IssueCode::RecoveryRequired,
-                        "Checkout LFS configuration is unreadable",
-                    ));
-                }
+            if let Some(source) = lfs_source(project_root, &parent)? {
+                self.record_clone_sources(request, &[source])?;
             }
             let installed = git::git(Some(&parent), [OsStr::new("lfs"), OsStr::new("version")])
                 .output()
@@ -375,6 +324,18 @@ impl WorkspaceService {
         capture: &dyn OutputCapture,
     ) -> Result<()> {
         let root = stage.observed_path();
+        if !operation.public.pending_trust.is_empty()
+            || operation
+                .public
+                .discovered_sources
+                .iter()
+                .any(|source| !trust::approved(operation, source))
+        {
+            return Err(issue(
+                IssueCode::PermissionRequired,
+                "Clone cannot be Ready while discovered Git or LFS sources are unapproved",
+            ));
+        }
         self.verify_acquired(operation, stage)?;
         let head = checked_git(root, [OsStr::new("rev-parse"), OsStr::new("HEAD")])?;
         if head.trim() != operation.public.review.source_commit {
@@ -447,7 +408,7 @@ impl WorkspaceService {
     }
 }
 
-fn verify_clean_tree(root: &Path, spec: &CloneSpec) -> Result<()> {
+pub(super) fn verify_clean_tree(root: &Path, spec: &CloneSpec) -> Result<()> {
     let mut status_args = Vec::new();
     if spec.lfs {
         status_args.extend([
@@ -495,8 +456,17 @@ where
 }
 
 fn submodules(root: &Path) -> Result<Vec<(String, PathBuf)>> {
-    if !root.join(".gitmodules").exists() {
-        return Ok(vec![]);
+    let manifest = root.join(".gitmodules");
+    match std::fs::symlink_metadata(&manifest) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => {
+            return Err(issue(
+                IssueCode::InvalidInput,
+                "Submodule manifest is not a regular file",
+            ));
+        }
+        Err(error) => return Err(io(error)),
     }
     let output = git::git(
         Some(root),
@@ -545,6 +515,94 @@ fn submodules(root: &Path) -> Result<Vec<(String, PathBuf)>> {
         found.push((name.to_string(), path));
     }
     Ok(found)
+}
+
+/// Discover the exact URLs Git would read from this checked-out manifest.
+/// These facts are retained before contacting a submodule transport.
+pub(super) fn submodule_sources(stage: &Path, repository: &Path) -> Result<Vec<CloneTrustSource>> {
+    let relative = repository.strip_prefix(stage).map_err(io)?.to_path_buf();
+    let mut sources = Vec::new();
+    for (name, path) in submodules(repository)? {
+        let output = git::git(
+            Some(repository),
+            [
+                OsStr::new("config"),
+                OsStr::new("-z"),
+                OsStr::new("--file"),
+                OsStr::new(".gitmodules"),
+                OsStr::new("--get"),
+                OsStr::new(&format!("submodule.{name}.url")),
+            ],
+        )
+        .output()
+        .map_err(io)?;
+        if !output.status.success() || output.stdout.last() != Some(&0) {
+            return Err(issue(
+                IssueCode::InvalidInput,
+                "Submodule has no valid transport URL",
+            ));
+        }
+        let url =
+            String::from_utf8(output.stdout[..output.stdout.len() - 1].to_vec()).map_err(io)?;
+        trust::validate_submodule_url(&url)?;
+        sources.push(CloneTrustSource {
+            kind: CloneTrustKind::Submodule,
+            repository: relative.clone(),
+            path,
+            url,
+        });
+    }
+    sources.sort();
+    sources.dedup();
+    Ok(sources)
+}
+
+pub(super) fn lfs_source(stage: &Path, repository: &Path) -> Result<Option<CloneTrustSource>> {
+    let config = repository.join(".lfsconfig");
+    match std::fs::symlink_metadata(&config) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => {
+            return Err(issue(
+                IssueCode::InvalidInput,
+                "LFS configuration is not a regular file",
+            ));
+        }
+        Err(error) => return Err(io(error)),
+    }
+    let output = git::git(
+        Some(repository),
+        [
+            OsStr::new("config"),
+            OsStr::new("-z"),
+            OsStr::new("--file"),
+            OsStr::new(".lfsconfig"),
+            OsStr::new("--get"),
+            OsStr::new("lfs.url"),
+        ],
+    )
+    .output()
+    .map_err(io)?;
+    if output.status.code() == Some(1) {
+        return Ok(None);
+    }
+    if !output.status.success() || output.stdout.last() != Some(&0) {
+        return Err(issue(
+            IssueCode::RecoveryRequired,
+            "Checkout LFS configuration is unreadable",
+        ));
+    }
+    let url = String::from_utf8(output.stdout[..output.stdout.len() - 1].to_vec()).map_err(io)?;
+    if url.is_empty() {
+        return Ok(None);
+    }
+    checked_git_url(&url)?;
+    Ok(Some(CloneTrustSource {
+        kind: CloneTrustKind::Lfs,
+        repository: repository.strip_prefix(stage).map_err(io)?.to_path_buf(),
+        path: PathBuf::from(".lfsconfig"),
+        url,
+    }))
 }
 
 fn verify_lfs_files(root: &Path) -> Result<()> {
