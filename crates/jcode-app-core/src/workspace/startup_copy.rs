@@ -47,6 +47,9 @@ fn commit(
     coordinator: &crate::server::startup_context::StartupContextCoordinator,
 ) -> Result<StartupCopyRecord> {
     let intent = service.reserve_startup_copy(request, review)?;
+    if intent.record.state == StartupCopyState::Complete {
+        return service.finish_startup_copy(request);
+    }
     let _root = service.acquire_root(intent.record.review.target)?;
     let intent = service.validate_startup_copy_intent(request)?;
     if intent.record.state == StartupCopyState::Complete {

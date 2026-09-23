@@ -371,3 +371,42 @@ fn plan_commit_without_catalog_receipt_reconciles_one_copy_after_restart() {
         ready
     );
 }
+
+#[test]
+fn completed_copy_replay_is_historical_after_source_and_target_move() {
+    let fixture = Fixture::new();
+    let review = fixture.review(fixture.approved()).unwrap();
+    let request = RequestId::new();
+    let original = commit(
+        &fixture.service,
+        request,
+        review.id,
+        "fixture-client",
+        &fixture.coordinator,
+    )
+    .unwrap();
+    assert_eq!(original.state, StartupCopyState::Complete);
+    std::fs::rename(
+        &fixture.source,
+        fixture.temp.path().join("source-relocated"),
+    )
+    .unwrap();
+    std::fs::rename(
+        &fixture.target,
+        fixture.temp.path().join("target-relocated"),
+    )
+    .unwrap();
+    let replay = commit(
+        &fixture.service,
+        request,
+        review.id,
+        "fixture-client",
+        &fixture.coordinator,
+    )
+    .unwrap();
+    assert_eq!(replay, original);
+    assert_eq!(
+        fixture.service.inspect_startup_copy(request).unwrap(),
+        original
+    );
+}

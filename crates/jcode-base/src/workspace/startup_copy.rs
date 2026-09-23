@@ -239,7 +239,9 @@ impl WorkspaceService {
                     "Copy request ID belongs to another review",
                 ));
             }
-            self.validate_copy_target(&connection, &operation.prepared)?;
+            if operation.public.state != StartupCopyState::Complete {
+                self.validate_copy_target(&connection, &operation.prepared)?;
+            }
             return Ok(operation.intent());
         }
         let prepared: PreparedCopy =
@@ -333,6 +335,9 @@ impl WorkspaceService {
                 "Unknown Startup Context copy request",
             )
         })?;
+        if operation.public.state == StartupCopyState::Complete {
+            return Ok(operation.intent());
+        }
         self.validate_copy_target(&connection, &operation.prepared)?;
         if operation.public.state != StartupCopyState::Complete {
             let engine = self.startup_engine()?;
@@ -361,6 +366,9 @@ impl WorkspaceService {
                 "Unknown Startup Context copy request",
             )
         })?;
+        if operation.public.state == StartupCopyState::Complete {
+            return self.finish_startup_copy_backup(request);
+        }
         self.validate_copy_target(&connection, &operation.prepared)?;
         let engine = self.startup_engine()?;
         let target = engine
