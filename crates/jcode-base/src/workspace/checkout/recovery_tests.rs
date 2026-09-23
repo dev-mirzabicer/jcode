@@ -591,6 +591,116 @@ async fn file_remote_bare_repository_keeps_reviewed_commit_and_never_publishes_u
     git(&fixture.destination, &["fsck", "--full"]);
 }
 
+#[tokio::test]
+async fn advertised_remote_commit_accepts_branch_tip_and_peeled_tag_not_unknown_object() {
+    let fixture = Fixture::new();
+    let bare = fixture.temp.path().join("advertised.git");
+    git(
+        fixture.temp.path(),
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            fixture.source.to_str().unwrap(),
+            bare.to_str().unwrap(),
+        ],
+    );
+    let tagged = git(&bare, &["rev-parse", "refs/heads/main"]);
+    git(
+        &fixture.source,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "tag",
+            "-am",
+            "reviewed old commit",
+            "reviewed",
+        ],
+    );
+    std::fs::write(fixture.source.join("later.txt"), "branch advanced").unwrap();
+    git(&fixture.source, &["add", "later.txt"]);
+    git(
+        &fixture.source,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "advanced main",
+        ],
+    );
+    git(
+        &fixture.source,
+        &[
+            "push",
+            bare.to_str().unwrap(),
+            "refs/heads/main",
+            "refs/tags/reviewed",
+        ],
+    );
+    let tip = git(&bare, &["rev-parse", "refs/heads/main"]);
+    let tag_object = git(&bare, &["rev-parse", "refs/tags/reviewed"]);
+    assert_ne!(tagged, tip);
+    let url = format!("file://{}", bare.canonicalize().unwrap().display());
+    let mut spec = fixture.spec();
+    spec.source = CloneSource::Remote { url };
+    spec.branch = CloneBranch::Detached;
+    spec.base = CloneBase::Commit { oid: tip.clone() };
+    let review = fixture
+        .service
+        .review_clone(fixture.service.status().unwrap().revision, spec.clone())
+        .unwrap();
+    assert_eq!(review.source_commit, tip);
+    let request = RequestId::new();
+    fixture.service.begin_clone(request, review.id).unwrap();
+    let ready = fixture
+        .service
+        .execute_clone(request, &fixture.capture(request))
+        .await
+        .unwrap();
+    assert_eq!(ready.state, CloneState::Ready);
+    assert_eq!(git(&fixture.destination, &["rev-parse", "HEAD"]), tip);
+    spec.destination = CloneDestination::Custom {
+        volume_uuid: review.volume_uuid.clone(),
+        path: fixture.temp.path().join("peeled-tag-clone"),
+    };
+    spec.base = CloneBase::Commit {
+        oid: tagged.clone(),
+    };
+    assert_eq!(
+        fixture
+            .service
+            .review_clone(fixture.service.status().unwrap().revision, spec.clone())
+            .unwrap()
+            .source_commit,
+        tagged
+    );
+    spec.base = CloneBase::Commit { oid: tag_object };
+    assert_eq!(
+        fixture
+            .service
+            .review_clone(fixture.service.status().unwrap().revision, spec.clone())
+            .unwrap_err()
+            .code,
+        IssueCode::InvalidInput
+    );
+    spec.base = CloneBase::Commit {
+        oid: "f".repeat(40),
+    };
+    assert_eq!(
+        fixture
+            .service
+            .review_clone(fixture.service.status().unwrap().revision, spec)
+            .unwrap_err()
+            .code,
+        IssueCode::InvalidInput
+    );
+}
+
 #[test]
 fn moving_source_ref_or_populating_destination_invalidates_review_before_effects() {
     let fixture = Fixture::new();

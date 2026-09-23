@@ -66,19 +66,29 @@ pub(super) fn resolve_base(source: &CloneSource, base: &CloneBase) -> Result<Str
         CloneSource::Remote { url } => {
             if matches!(base, CloneBase::Commit { .. }) {
                 // An arbitrary unreachable object is not proof of a reviewed base.
-                // Inspect advertised refs; acquisition later verifies the commit object.
-                let output = git(
-                    None,
-                    [
-                        OsStr::new("ls-remote"),
-                        OsStr::new(url),
-                        OsStr::new(&reference),
-                    ],
-                )
-                .output()
-                .map_err(io)?;
+                // ls-remote's trailing arguments filter *names*, not object IDs.
+                // A peeled annotated tag is a commit; its tag object is not.
+                let output = git(None, [OsStr::new("ls-remote"), OsStr::new(url)])
+                    .output()
+                    .map_err(io)?;
                 let lines = parse_ls_remote(output)?;
-                if !lines.iter().any(|(oid, _)| oid == &reference) {
+                let annotated_tags: std::collections::HashSet<_> = lines
+                    .iter()
+                    .filter_map(|(_, name)| name.strip_suffix("^{}"))
+                    .collect();
+                let tag_objects: std::collections::HashSet<_> = lines
+                    .iter()
+                    .filter(|(_, name)| annotated_tags.contains(name.as_str()))
+                    .map(|(oid, _)| oid.as_str())
+                    .collect();
+                if !lines.iter().any(|(oid, name)| {
+                    oid == &reference
+                        && !tag_objects.contains(oid.as_str())
+                        && (name == "HEAD"
+                            || name.starts_with("refs/heads/")
+                            || name.ends_with("^{}")
+                            || name.starts_with("refs/tags/"))
+                }) {
                     return Err(issue(
                         IssueCode::InvalidInput,
                         "Commit is not advertised by this source; select a branch or tag, or an existing local checkout",

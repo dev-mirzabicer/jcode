@@ -22,7 +22,10 @@ human-facing clone form.
    choices. A local source's dirty/untracked content is never requested for
    copying. A remote clone suggests its source as `origin`; local acquisition
    does not make the local directory a push destination. The review binds a
-   source commit, volume, destination and current catalog revision.
+   source commit, volume, destination and current catalog revision. A remote
+   commit selection must match an advertised branch/HEAD value, a lightweight
+   tag or a peeled annotated tag; an unadvertised object or annotated tag
+   object is not accepted as a commit. Begin rechecks moving source refs.
 3. `begin_clone` takes the review and a caller-generated request UUID. It
    returns an operation/Location identity before completion. `inspect_clone`
    observes its stage, progress, retained-output run IDs and any issue. A
