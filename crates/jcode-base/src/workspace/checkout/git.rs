@@ -175,7 +175,7 @@ fn parse_ls_remote(output: std::process::Output) -> Result<Vec<(String, String)>
 /// Restrict Git environment without evaluating repository hooks, ambient Git
 /// redirection, global filters or SSH overrides. Network operations separately
 /// select user/system credential settings without inheriting unrelated config.
-pub(super) fn git<I, S>(cwd: Option<&Path>, arguments: I) -> Command
+pub(in crate::workspace) fn git<I, S>(cwd: Option<&Path>, arguments: I) -> Command
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,

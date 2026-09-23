@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 mod backup;
 mod checkout;
+mod closeout;
 mod context_scope;
 mod grants;
 pub use context_scope::ContextScopePlan;

@@ -5,6 +5,8 @@ mod permissions;
 pub use permissions::*;
 mod checkout;
 pub use checkout::*;
+mod closeout;
+pub use closeout::*;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -329,6 +331,9 @@ pub struct Receipt {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IssueCode {
+    PreservationIncomplete,
+    LiveWork,
+    IncompleteCapture,
     NeedsGrantChoice,
     NeedsCwd,
     PermissionRequired,

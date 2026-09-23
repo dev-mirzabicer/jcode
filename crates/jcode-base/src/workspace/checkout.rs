@@ -7,7 +7,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::path::Component;
 
-mod git;
+pub(super) mod git;
 #[cfg(test)]
 mod lfs_test_server;
 mod materialize;
