@@ -215,6 +215,16 @@ try:
     existing = rpc('clone_output', 'clone_output', clone=trust_id,
                    request={'action': 'inspect', 'run_id': paused['output_runs'][0]})
     assert existing['kind'] == 'status' and existing['run']['state'] == 'failed' and existing['run']['complete'], existing
+    f.proc.kill()
+    f.proc.wait(timeout=30)
+    f.reader.close()
+    f.client.close()
+    f.start()
+    recovered = rpc('inspect_clone', 'clone', request=trust_id)
+    assert recovered == paused, ('paused operation changed across isolated daemon restart', recovered, paused)
+    retained = rpc('clone_output', 'clone_output', clone=trust_id,
+                   request={'action': 'inspect', 'run_id': paused['output_runs'][0]})
+    assert retained == existing, ('retained output changed across isolated daemon restart', retained, existing)
     source_review = rpc('review_clone_trust', 'clone_trust_review',
                         clone=trust_id, expected_revision=paused['revision'])
     assert source_review['sources'] == paused['pending_trust'] and source_review['stage'] == str(stage)

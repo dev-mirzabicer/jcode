@@ -1063,3 +1063,180 @@ async fn cancelling_an_idle_trust_wait_retains_nonempty_stage_and_cannot_publish
         IssueCode::Conflict
     );
 }
+
+#[tokio::test]
+async fn nested_submodules_require_separate_stage_reviews_without_second_top_level_clone() {
+    let fixture = Fixture::new();
+    let grand = fixture.temp.path().join("grand");
+    std::fs::create_dir(&grand).unwrap();
+    git(&grand, &["init", "-q", "-b", "main"]);
+    std::fs::write(grand.join("deep.txt"), "deep committed\n").unwrap();
+    git(&grand, &["add", "."]);
+    git(
+        &grand,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "grand",
+        ],
+    );
+    let grand_bare = fixture.temp.path().join("grand.git");
+    git(
+        fixture.temp.path(),
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            grand.to_str().unwrap(),
+            grand_bare.to_str().unwrap(),
+        ],
+    );
+
+    let child = fixture.temp.path().join("child");
+    std::fs::create_dir(&child).unwrap();
+    git(&child, &["init", "-q", "-b", "main"]);
+    git(
+        &child,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            "../grand.git",
+            "nested/grand",
+        ],
+    );
+    git(&child, &["add", "."]);
+    git(
+        &child,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "child",
+        ],
+    );
+    let child_bare = fixture.temp.path().join("child.git");
+    git(
+        fixture.temp.path(),
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            child.to_str().unwrap(),
+            child_bare.to_str().unwrap(),
+        ],
+    );
+
+    git(
+        &fixture.source,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            "../child.git",
+            "libs/child",
+        ],
+    );
+    git(&fixture.source, &["add", "."]);
+    git(
+        &fixture.source,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "parent",
+        ],
+    );
+    let mut spec = fixture.spec();
+    spec.submodules = true;
+    let review = fixture
+        .service
+        .review_clone(fixture.service.status().unwrap().revision, spec)
+        .unwrap();
+    let request = RequestId::new();
+    fixture.service.begin_clone(request, review.id).unwrap();
+    let capture = fixture.capture(request);
+    let mut rounds = Vec::new();
+    let mut witness = None;
+    for _ in 0..2 {
+        assert_eq!(
+            fixture
+                .service
+                .execute_clone(request, &capture)
+                .await
+                .unwrap_err()
+                .code,
+            IssueCode::PermissionRequired
+        );
+        let paused = fixture.service.inspect_clone(request).unwrap();
+        assert_eq!(paused.state, CloneState::AwaitingTrust);
+        assert_eq!(paused.pending_trust.len(), 1);
+        let stage = fixture
+            .service
+            .resolver
+            .bind_directory(paused.stage.as_ref().unwrap())
+            .unwrap();
+        if let Some(ref expected) = witness {
+            assert_eq!(stage.root_witness(), expected);
+        } else {
+            witness = Some(stage.root_witness().clone());
+        }
+        assert!(!fixture.destination.exists());
+        rounds.push(paused.pending_trust[0].url.clone());
+        let trust = fixture
+            .service
+            .review_clone_trust(request, paused.revision)
+            .unwrap();
+        fixture
+            .service
+            .apply_clone_trust(
+                RequestId::new(),
+                trust.id,
+                &WorkspaceClientAuthority::authenticated("fixture-human").unwrap(),
+            )
+            .unwrap();
+    }
+    assert_eq!(rounds, ["../child.git", "../grand.git"]);
+    let ready = fixture
+        .service
+        .execute_clone(request, &capture)
+        .await
+        .unwrap();
+    assert_eq!(ready.state, CloneState::Ready);
+    assert_eq!(ready.trust_approvals.len(), 2);
+    assert_eq!(ready.discovered_sources.len(), 2);
+    assert_eq!(
+        fixture
+            .service
+            .resolver
+            .bind_directory(&fixture.destination)
+            .unwrap()
+            .root_witness(),
+        &witness.unwrap()
+    );
+    assert_eq!(
+        std::fs::read(fixture.destination.join("libs/child/nested/grand/deep.txt")).unwrap(),
+        b"deep committed\n"
+    );
+    for root in [
+        &fixture.destination,
+        &fixture.destination.join("libs/child"),
+        &fixture.destination.join("libs/child/nested/grand"),
+    ] {
+        git(root, &["fsck", "--full"]);
+    }
+}
