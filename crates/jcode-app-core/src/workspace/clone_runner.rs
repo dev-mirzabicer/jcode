@@ -157,14 +157,20 @@ async fn run(service: &WorkspaceService, request: RequestId) -> Result<()> {
             });
         }
     };
-    let capture = Capture::create(
+    if let Err(error) = service.record_clone_output(request, run.id.clone()) {
+        return Err(no_effect_failure(&store, &run, error));
+    }
+    if let Err(error) = store.start(&run.id, &owner) {
+        return Err(no_effect_failure(&store, &run, problem(error)));
+    }
+    let capture = match Capture::create(
         store.clone(),
         run.clone(),
         crate::config::config().output.storage.clone(),
-    )
-    .map_err(problem)?;
-    service.record_clone_output(request, run.id.clone())?;
-    store.start(&run.id, &owner).map_err(problem)?;
+    ) {
+        Ok(capture) => capture,
+        Err(error) => return Err(no_effect_failure(&store, &run, problem(error))),
+    };
     let result = service.execute_clone(request, &capture).await;
     let mut output = ToolOutput::new("");
     output.is_error = result.is_err();
@@ -181,9 +187,68 @@ async fn run(service: &WorkspaceService, request: RequestId) -> Result<()> {
     result.map(|_| ())
 }
 
+fn no_effect_failure(
+    store: &ExecutionStore,
+    prepared: &crate::execution::RunRecord,
+    problem: Issue,
+) -> Issue {
+    let mut failed = prepared.clone();
+    failed.state = RunState::Failed;
+    if let Err(error) = store.finish(&failed) {
+        return Issue {
+            code: IssueCode::RecoveryRequired,
+            detail: format!(
+                "No Git work started: {}; retained execution could not seal its failed run: {error}",
+                problem.detail
+            ),
+        };
+    }
+    problem
+}
+
 fn problem(error: impl std::fmt::Display) -> Issue {
     Issue {
         code: IssueCode::RecoveryRequired,
         detail: format!("Retained clone execution: {error}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_output_start_has_terminal_no_effect_receipt() {
+        let state = tempfile::tempdir().unwrap();
+        let store = ExecutionStore::open(state.path()).unwrap();
+        let invocation = Invocation {
+            session_id: "fixture-workspace".into(),
+            message_id: RequestId::new().to_string(),
+            call_path: vec!["attempt".into()],
+            tool: "workspace_clone".into(),
+            input: serde_json::json!({"fixture":true}),
+            working_dir: None,
+            received_result_digest: None,
+        };
+        let PreparedInvocation::New(prepared) =
+            store.prepare(&invocation, "fixture-owner").unwrap()
+        else {
+            panic!()
+        };
+        store.start(&prepared.id, "fixture-owner").unwrap();
+        let error = no_effect_failure(
+            &store,
+            &prepared,
+            Issue {
+                code: IssueCode::Io,
+                detail: "synthetic output allocation failure".into(),
+            },
+        );
+        assert_eq!(error.code, IssueCode::Io);
+        let retained = store.inspect(&prepared.id).unwrap().unwrap();
+        assert_eq!(retained.state, RunState::Failed);
+        assert!(!retained.complete);
+        assert!(retained.output_path.is_none());
+        assert_eq!(retained.output_bytes, 0);
     }
 }
