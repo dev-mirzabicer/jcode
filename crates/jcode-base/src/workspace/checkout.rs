@@ -13,6 +13,7 @@ mod lfs_test_server;
 mod materialize;
 #[cfg(test)]
 mod recovery_tests;
+mod remotes;
 mod trust;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -32,8 +33,19 @@ struct CloneOperation {
     stage_binding: Option<PhysicalBinding>,
     published_binding: Option<PhysicalBinding>,
     acquired: bool,
+    #[serde(default)]
+    acquired_refs: Option<Vec<AcquiredRef>>,
+    #[serde(default)]
+    content_materialized: bool,
     materialized: bool,
     backup_pending: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AcquiredRef {
+    branch: String,
+    oid: String,
 }
 
 struct CloneLease {
@@ -299,6 +311,8 @@ impl WorkspaceService {
             stage_binding: None,
             published_binding: None,
             acquired: false,
+            acquired_refs: None,
+            content_materialized: false,
             materialized: false,
             backup_pending: false,
         };
@@ -651,11 +665,32 @@ impl WorkspaceService {
             self.checkpoint("clone_acquired")?;
         }
         operation = self.load_clone(request)?;
+        if operation.acquired_refs.is_none() {
+            remotes::verify_acquisition_origin(&operation, stage.observed_path())?;
+            let snapshot = remotes::observe_acquired_refs(stage.observed_path())?;
+            self.update_clone(request, |op| {
+                op.acquired_refs = Some(snapshot);
+                Ok(())
+            })?;
+            self.checkpoint("clone_refs_recorded")?;
+            operation = self.load_clone(request)?;
+        }
         if !operation.materialized {
-            if !operation.public.trust_approvals.is_empty() {
-                trust::verify_source_observations(self, &operation, &stage)?;
+            if !operation.content_materialized {
+                remotes::verify_acquisition_origin(&operation, stage.observed_path())?;
+                if !operation.public.trust_approvals.is_empty() {
+                    trust::verify_source_observations(self, &operation, &stage)?;
+                }
+                self.materialize_clone_content(request, &operation, &stage, capture)
+                    .await?;
+                self.update_clone(request, |op| {
+                    op.content_materialized = true;
+                    Ok(())
+                })?;
+                self.checkpoint("clone_content_materialized")?;
+                operation = self.load_clone(request)?;
             }
-            self.materialize_clone(request, &operation, &stage, capture)
+            self.configure_clone_remotes(request, &operation, &stage, capture)
                 .await?;
             self.update_clone(request, |op| {
                 op.materialized = true;

@@ -3,7 +3,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 
 impl WorkspaceService {
-    pub(super) async fn materialize_clone(
+    pub(super) async fn materialize_clone_content(
         &self,
         request: RequestId,
         operation: &CloneOperation,
@@ -56,31 +56,6 @@ impl WorkspaceService {
         if spec.lfs {
             self.materialize_lfs_tree(request, root, root, spec, capture)
                 .await?;
-        }
-        self.git_step(
-            request,
-            root,
-            [
-                OsStr::new("remote"),
-                OsStr::new("remove"),
-                OsStr::new("origin"),
-            ],
-            capture,
-        )
-        .await?;
-        for remote in &spec.remotes {
-            self.git_step(
-                request,
-                root,
-                [
-                    OsStr::new("remote"),
-                    OsStr::new("add"),
-                    OsStr::new(&remote.name),
-                    OsStr::new(&remote.url),
-                ],
-                capture,
-            )
-            .await?;
         }
         verify_clean_tree(root, spec)?;
         self.check_cancel(request)?;
@@ -137,7 +112,7 @@ impl WorkspaceService {
         }
     }
 
-    async fn git_step<I, S>(
+    pub(super) async fn git_step<I, S>(
         &self,
         request: RequestId,
         root: &Path,
@@ -383,6 +358,7 @@ impl WorkspaceService {
                 return Err(issue(IssueCode::Conflict, "A resulting remote URL changed"));
             }
         }
+        remotes::verify_result_refs(operation, root)?;
         verify_clean_tree(root, spec)?;
         self.git_step(
             operation.public.request,
@@ -434,7 +410,7 @@ pub(super) fn verify_clean_tree(root: &Path, spec: &CloneSpec) -> Result<()> {
     Ok(())
 }
 
-fn checked_git<I, S>(root: &Path, args: I) -> Result<String>
+pub(super) fn checked_git<I, S>(root: &Path, args: I) -> Result<String>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,

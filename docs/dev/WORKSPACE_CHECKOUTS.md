@@ -73,6 +73,17 @@ human-facing clone form.
    never a claim of complete default materialization. An existing local
    source can supply committed LFS objects without a hosted LFS service;
    dirty working files are not copied as a substitute for missing objects.
+   Acquisition and resulting remote configuration are separate journal phases.
+   If the reviewed `origin` is unchanged, its remote-tracking branches and
+   existing upstream configuration remain intact. Otherwise every acquired
+   branch tip is preserved under
+   `refs/jcode/checkout-acquired/<operation-id>/<branch>` before removing the
+   acquisition remote. These local historical refs keep acquired commits
+   reachable without implying that the new remote owns them or that the old
+   local source is a push destination. Reviewed remotes are reconciled by
+   exact name/URL, so interruption after one ref or remote effect retries in
+   the same stage. Missing or changed source-history refs block publication;
+   `fsck` alone is not proof that branch names survived.
 5. A marker in the independent clone's `.git` directory identifies its exact
    operation. Publication uses exclusive no-replacement rename on the same
    volume, then the catalog binds one Ready `ManagedClone` location. A restart

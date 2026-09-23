@@ -701,6 +701,206 @@ async fn advertised_remote_commit_accepts_branch_tip_and_peeled_tag_not_unknown_
     );
 }
 
+#[tokio::test]
+async fn unchanged_origin_retains_all_acquired_branches_and_selected_tracking_offline() {
+    let fixture = Fixture::new();
+    git(&fixture.source, &["switch", "-q", "-c", "topic"]);
+    std::fs::write(fixture.source.join("topic-only"), "unique unpushed history").unwrap();
+    git(&fixture.source, &["add", "topic-only"]);
+    git(
+        &fixture.source,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "topic",
+        ],
+    );
+    let topic = git(&fixture.source, &["rev-parse", "HEAD"]);
+    git(&fixture.source, &["switch", "-q", "main"]);
+    let bare = fixture.temp.path().join("multi-branch.git");
+    git(
+        fixture.temp.path(),
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            fixture.source.to_str().unwrap(),
+            bare.to_str().unwrap(),
+        ],
+    );
+    let mut spec = fixture.spec();
+    let url = format!("file://{}", bare.canonicalize().unwrap().display());
+    spec.source = CloneSource::Remote { url: url.clone() };
+    spec.branch = CloneBranch::KeepName;
+    let review = fixture
+        .service
+        .review_clone(fixture.service.status().unwrap().revision, spec)
+        .unwrap();
+    let request = RequestId::new();
+    fixture.service.begin_clone(request, review.id).unwrap();
+    let ready = fixture
+        .service
+        .execute_clone(request, &fixture.capture(request))
+        .await
+        .unwrap();
+    assert_eq!(ready.state, CloneState::Ready);
+    assert_eq!(
+        git(&fixture.destination, &["remote", "get-url", "origin"]),
+        url
+    );
+    assert_eq!(
+        git(
+            &fixture.destination,
+            &["rev-parse", "refs/remotes/origin/topic"]
+        ),
+        topic
+    );
+    assert_eq!(
+        git(
+            &fixture.destination,
+            &["config", "--get", "branch.main.remote"]
+        ),
+        "origin"
+    );
+    assert_eq!(
+        git(
+            &fixture.destination,
+            &["config", "--get", "branch.main.merge"]
+        ),
+        "refs/heads/main"
+    );
+    std::fs::rename(&bare, fixture.temp.path().join("remote-offline.git")).unwrap();
+    assert_eq!(
+        git(
+            &fixture.destination,
+            &["rev-parse", "refs/remotes/origin/topic"]
+        ),
+        topic
+    );
+    git(&fixture.destination, &["fsck", "--full", "--no-reflogs"]);
+}
+
+#[tokio::test]
+async fn reviewed_remote_transition_recovers_every_checkpoint_without_losing_source_history() {
+    for (result_name, checkpoint) in [
+        (Some("reviewed"), "clone_acquired_ref_saved"),
+        (None, "clone_remote_removed"),
+        (Some("reviewed"), "clone_remote_added"),
+        (Some("origin"), "clone_remote_removed"),
+        (Some("reviewed"), "clone_content_materialized"),
+        (Some("reviewed"), "clone_materialized"),
+    ] {
+        let fixture = Fixture::new();
+        git(&fixture.source, &["switch", "-q", "-c", "topic"]);
+        std::fs::write(
+            fixture.source.join("topic-only"),
+            "unpublished branch bytes",
+        )
+        .unwrap();
+        git(&fixture.source, &["add", "topic-only"]);
+        git(
+            &fixture.source,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-qm",
+                "unique topic",
+            ],
+        );
+        let topic = git(&fixture.source, &["rev-parse", "HEAD"]);
+        git(&fixture.source, &["switch", "-q", "main"]);
+        let bare = fixture.temp.path().join("result.git");
+        git(
+            fixture.temp.path(),
+            &[
+                "clone",
+                "-q",
+                "--bare",
+                fixture.source.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ],
+        );
+        let mut spec = fixture.spec();
+        if let Some(name) = result_name {
+            spec.remotes.push(CloneRemote {
+                name: name.into(),
+                url: format!("file://{}", bare.canonicalize().unwrap().display()),
+            });
+        }
+        let review = fixture
+            .service
+            .review_clone(fixture.service.status().unwrap().revision, spec)
+            .unwrap();
+        let request = RequestId::new();
+        let initial = fixture.service.begin_clone(request, review.id).unwrap();
+        let capture = fixture.capture(request);
+        let once = Arc::new(AtomicBool::new(false));
+        let mut interrupted = fixture.service.clone();
+        interrupted.fault = Some(Arc::new({
+            let once = once.clone();
+            move |at| {
+                if at == checkpoint && !once.swap(true, Ordering::SeqCst) {
+                    Err(issue(
+                        IssueCode::RecoveryRequired,
+                        format!("synthetic stop at {checkpoint}"),
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
+        }));
+        let failure = interrupted
+            .execute_clone(request, &capture)
+            .await
+            .unwrap_err();
+        assert!(failure.detail.contains(checkpoint), "{failure:?}");
+        let stage = fixture
+            .service
+            .inspect_clone(request)
+            .unwrap()
+            .stage
+            .unwrap();
+        let witness = fixture.service.resolver.bind_directory(&stage).unwrap();
+        assert!(!fixture.destination.exists());
+        let ready = fixture
+            .service
+            .execute_clone(request, &capture)
+            .await
+            .unwrap();
+        assert_eq!(ready.state, CloneState::Ready);
+        assert_eq!(ready.location, initial.location);
+        assert_eq!(
+            fixture
+                .service
+                .resolver
+                .bind_directory(&fixture.destination)
+                .unwrap()
+                .root_witness(),
+            witness.root_witness()
+        );
+        let refname = format!("refs/jcode/checkout-acquired/{request}/topic");
+        assert_eq!(git(&fixture.destination, &["rev-parse", &refname]), topic);
+        let remotes = git(&fixture.destination, &["remote"]);
+        assert_eq!(remotes, result_name.unwrap_or_default());
+        if let Some(name) = result_name {
+            assert_eq!(
+                git(&fixture.destination, &["remote", "get-url", name]),
+                format!("file://{}", bare.canonicalize().unwrap().display())
+            );
+        }
+        std::fs::rename(&fixture.source, fixture.temp.path().join("source-offline")).unwrap();
+        assert_eq!(git(&fixture.destination, &["rev-parse", &refname]), topic);
+        git(&fixture.destination, &["fsck", "--full", "--no-reflogs"]);
+    }
+}
+
 #[test]
 fn moving_source_ref_or_populating_destination_invalidates_review_before_effects() {
     let fixture = Fixture::new();
@@ -990,6 +1190,39 @@ async fn discovered_submodule_trust_pauses_then_resumes_without_reacquiring_sour
     assert!(!fixture.destination.exists());
     assert!(stage.join(".git").exists());
     std::fs::write(&manifest, &original_manifest).unwrap();
+    let once = Arc::new(AtomicBool::new(false));
+    let mut interrupted = fixture.service.clone();
+    interrupted.fault = Some(Arc::new({
+        let once = once.clone();
+        move |at| {
+            if at == "clone_remote_removed" && !once.swap(true, Ordering::SeqCst) {
+                Err(issue(
+                    IssueCode::RecoveryRequired,
+                    "synthetic stop after approved nested source and remote removal",
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }));
+    assert_eq!(
+        interrupted
+            .execute_clone(request, &capture)
+            .await
+            .unwrap_err()
+            .code,
+        IssueCode::RecoveryRequired
+    );
+    assert!(!fixture.destination.exists());
+    assert_eq!(
+        fixture
+            .service
+            .inspect_clone(request)
+            .unwrap()
+            .trust_approvals[0]
+            .sources,
+        trust.sources
+    );
     let ready = fixture
         .service
         .execute_clone(request, &capture)
