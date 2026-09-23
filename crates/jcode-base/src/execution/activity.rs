@@ -38,6 +38,43 @@ impl Drop for SessionActivityGuard {
 }
 
 impl ExecutionStore {
+    /// Kernel ownership, not UI presence or a PID timestamp. A stopped activity
+    /// owner is separate from unfinished native/child runs, which callers must
+    /// inspect too. Missing/damaged ownership evidence is an error, never idle.
+    pub fn session_has_live_activity(&self, session: &str) -> Result<bool> {
+        let connection = self.connection()?;
+        let mut query =
+            connection.prepare("SELECT token FROM session_activity_leases WHERE session_id=?1")?;
+        let tokens = query
+            .query_map([session], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        for token in tokens {
+            ensure!(
+                token.len() == 32 && token.bytes().all(|b| b.is_ascii_hexdigit()),
+                "Invalid activity identity"
+            );
+            let mut options = OpenOptions::new();
+            options.read(true).write(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+            }
+            let file = options
+                .open(self.root().join("activity-leases").join(token))
+                .context("Session activity ownership is unknown")?;
+            ensure!(
+                file.metadata()?.is_file(),
+                "Activity ownership changed type"
+            );
+            match file.try_lock() {
+                Ok(()) => {}
+                Err(std::fs::TryLockError::WouldBlock) => return Ok(true),
+                Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+            }
+        }
+        Ok(false)
+    }
     pub(super) fn touch_activity_in(
         connection: &Connection,
         session: &str,

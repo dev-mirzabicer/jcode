@@ -352,6 +352,12 @@ pub(super) async fn preserve(
     if let Some(head) = &snapshot.head {
         refs.insert(format!("{prefix}/head"), head.clone());
     }
+    for name in snapshot.refs.keys() {
+        if let Some(original) = name.strip_prefix("refs/replace/") {
+            validate_oid(original)?;
+            refs.insert(format!("{prefix}/replaced/{original}"), original.into());
+        }
+    }
     for oid in &snapshot.reflog {
         refs.insert(format!("{prefix}/reflog/{oid}"), oid.clone());
     }
@@ -510,10 +516,77 @@ async fn run(
     output: &Path,
     capture: &dyn OutputCapture,
 ) -> Result<()> {
-    let mut command = tokio::process::Command::from(checkout::git::git(Some(cwd), args));
+    // Status can invoke repository-local clean/process filters. Discover only
+    // their keys with an owned, non-filtering config read, then disable every
+    // configured filter for this observation. Never execute project setup.
+    let keys = output.with_extension(format!("filters-{}", RequestId::new()));
+    let query = tokio::process::Command::from(checkout::git::git(
+        Some(cwd),
+        [
+            "config",
+            "--null",
+            "--name-only",
+            "--get-regexp",
+            "^filter\\..*\\.(clean|smudge|process|required)$",
+        ],
+    ));
+    let status = run_command(service, operation, query, None, &keys, capture).await?;
+    if !matches!(status.code(), Some(0 | 1)) {
+        return Err(issue(
+            IssueCode::IncompleteCapture,
+            "Cannot inspect repository filter configuration safely",
+        ));
+    }
+    let mut arguments = Vec::new();
+    for key in std::fs::read(&keys)
+        .map_err(io)?
+        .split(|b| *b == 0)
+        .filter(|key| !key.is_empty())
+    {
+        let key = std::str::from_utf8(key).map_err(corrupt)?;
+        if key.contains('=') || key.chars().any(char::is_control) {
+            return Err(issue(
+                IssueCode::IncompleteCapture,
+                "Repository filter key cannot be safely overridden",
+            ));
+        }
+        arguments.push("-c".to_owned());
+        arguments.push(format!(
+            "{key}={}",
+            if key.ends_with(".required") {
+                "false"
+            } else {
+                ""
+            }
+        ));
+    }
+    arguments.extend(args.iter().map(|s| s.to_string()));
+    let command = tokio::process::Command::from(checkout::git::git(Some(cwd), arguments));
+    if !run_command(service, operation, command, input, output, capture)
+        .await?
+        .success()
+    {
+        return Err(issue(
+            IssueCode::PreservationIncomplete,
+            "Offline Git operation failed; inspect retained execution diagnostics",
+        ));
+    }
+    Ok(())
+}
+
+async fn run_command(
+    service: &WorkspaceService,
+    operation: OperationId,
+    mut command: tokio::process::Command,
+    input: Option<&Path>,
+    output: &Path,
+    capture: &dyn OutputCapture,
+) -> Result<std::process::ExitStatus> {
     command
         .env("GIT_NO_LAZY_FETCH", "1")
-        .env("GIT_OPTIONAL_LOCKS", "0");
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .env("GIT_GRAFT_FILE", "/dev/null");
     // All operations are local. The only file transport exception is the exact
     // owned bundle used for the restoration above, never an arbitrary source.
     command.env("GIT_ALLOW_PROTOCOL", "file");
@@ -569,16 +642,10 @@ async fn run(
     capture.finish_process(&ticket).map_err(io)?;
     out?;
     err?;
-    if !status?.success() {
-        return Err(issue(
-            IssueCode::PreservationIncomplete,
-            "Offline Git operation failed; inspect retained execution diagnostics",
-        ));
-    }
-    Ok(())
+    status
 }
 
-async fn drain(
+pub(super) async fn drain(
     reader: &mut (impl AsyncRead + Unpin),
     capture: &dyn OutputCapture,
     stream: OutputStream,

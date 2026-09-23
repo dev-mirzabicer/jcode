@@ -12,6 +12,8 @@ mod inventory;
 mod preservation;
 #[cfg(all(test, target_os = "macos"))]
 mod tests;
+#[cfg(unix)]
+mod work;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct StoredCloseout {
@@ -29,6 +31,57 @@ struct StoredCloseout {
 }
 
 impl WorkspaceService {
+    fn fence_closeout(&self, operation: OperationId, expected: Revision) -> Result<CloseoutRecord> {
+        let _catalog = self.lease(false)?;
+        let mut connection = self.connection()?;
+        let observed = load(&connection, operation)?;
+        require_current(&connection, &observed, expected)?;
+        let resolved = self
+            .resolver
+            .resolve_directory(&observed.binding)
+            .map_err(io)?;
+        if resolved.relocated {
+            return Err(issue(
+                IssueCode::RecoveryRequired,
+                "Checkout moved; review its current binding before closeout preparation",
+            ));
+        }
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(io)?;
+        let mut stored = load(&transaction, operation)?;
+        require_current(&transaction, &stored, expected)?;
+        inventory::require_preparation(&stored)?;
+        let Entity::Location(mut location) = entity(
+            &transaction,
+            EntityId::Location(stored.record.spec.location),
+        )?
+        else {
+            return Err(corrupt("Closeout lost its checkout"));
+        };
+        if location.lifecycle == LocationLifecycle::Closing {
+            return Ok(stored.record);
+        }
+        if location.lifecycle != LocationLifecycle::Ready || location.retired {
+            return Err(issue(
+                IssueCode::Conflict,
+                "Checkout is not available for closing",
+            ));
+        }
+        transaction
+            .execute(
+                "UPDATE catalog SET revision=revision+1 WHERE singleton=1",
+                [],
+            )
+            .map_err(io)?;
+        stored.record.revision = storage::status(&transaction)?.revision;
+        location.lifecycle = LocationLifecycle::Closing;
+        location.revision = stored.record.revision;
+        organization::save_entity(&transaction, &Entity::Location(location))?;
+        save(&transaction, &stored)?;
+        transaction.commit().map_err(io)?;
+        self.closeout_backup(stored.record)
+    }
     fn closeout_lease(&self, operation: OperationId) -> Result<std::fs::File> {
         let directory = self.root.join("leases");
         storage::private_dir(&directory)?;
@@ -182,7 +235,7 @@ impl WorkspaceService {
             return Ok(load(&transaction, operation)?.record);
         }
         let mut stored = load(&transaction, operation)?;
-        require_current(&transaction, &stored, expected)?;
+        require_authorization_revision(&transaction, &stored, expected)?;
         if matches!(
             stored.record.stage,
             CloseoutStage::Removing | CloseoutStage::Closed
@@ -206,6 +259,8 @@ impl WorkspaceService {
             &transaction,
             EntityId::Location(stored.record.spec.location),
         )? && location.lifecycle == LocationLifecycle::Closing
+            && location.binding_generation == stored.binding.generation()
+            && location.observed_path == stored.binding.observed_path()
         {
             location.lifecycle = LocationLifecycle::Ready;
             location.revision = receipt.revision;
@@ -279,14 +334,7 @@ fn require_current(
     stored: &StoredCloseout,
     expected: Revision,
 ) -> Result<()> {
-    if stored.record.revision != expected
-        || stored.installation != storage::status(connection)?.installation
-    {
-        return Err(issue(
-            IssueCode::Conflict,
-            "Closeout revision or installation changed",
-        ));
-    }
+    require_authorization_revision(connection, stored, expected)?;
     let Entity::Location(location) =
         entity(connection, EntityId::Location(stored.record.spec.location))?
     else {
@@ -298,6 +346,22 @@ fn require_current(
         return Err(issue(
             IssueCode::ReplacedRoot,
             "Checkout binding changed since authorization",
+        ));
+    }
+    Ok(())
+}
+
+fn require_authorization_revision(
+    connection: &Connection,
+    stored: &StoredCloseout,
+    expected: Revision,
+) -> Result<()> {
+    if stored.record.revision != expected
+        || stored.installation != storage::status(connection)?.installation
+    {
+        return Err(issue(
+            IssueCode::Conflict,
+            "Closeout revision or installation changed",
         ));
     }
     Ok(())

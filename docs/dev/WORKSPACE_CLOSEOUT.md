@@ -1,8 +1,8 @@
 # Checkout closeout
 
 This service is being integrated in SP-58-C01/WP-07. The current foundation
-provides catalog-owned authorization, private inventories and verified
-preservation. It does **not** expose checkout removal, a client capability,
+provides catalog-owned authorization, private inventories, verified
+preservation and closing admission/work observation. It does **not** expose checkout removal, a client capability,
 a workspace agent tool, or a completed closeout workflow. Ordinary managed
 rollout remains unchanged. The rest of WP-07 must integrate current-work gates,
 final approval, removal/recovery, retained history and the public adapter before
@@ -62,6 +62,24 @@ current quiescence, approval or removability. Partial artifacts remain outside
 the source checkout, and a failed capture does not acquire removal authority.
 
 ## Current verification route
+
+The closing fence changes the catalog lifecycle before checking existing work.
+New dependent turn/tool admission is refused. Already admitted native operations
+retain their shared physical-root leases and may finish. A whole-turn admission
+lease is held only until the execution owner's activity record is established,
+so a later safe-boundary location move does not pin the old cwd indefinitely.
+The actual tool producer, independent native worker and detached observer hook
+hold their own use leases through their work, not merely until a foreground
+waiter returns. This adds lifetime safety, not a new read-access grant or shell
+sandbox.
+
+Work observation reads existing execution ownership, exact native-command cwd,
+Session activity, pending inputs/location controls and catalog references. It
+also retains actual macOS `lsof` observations of open files/directories. Unknown
+or incomplete observation is a blocker, not idle. The executor's own cwd is
+explicitly reported. Preparation never kills these owners. These observations
+are not final approval or a guarantee against a later arbitrary external writer.
+Final destructive integration must revalidate them under exclusive ownership.
 
 Run through the coordinated selfdev test owner:
 

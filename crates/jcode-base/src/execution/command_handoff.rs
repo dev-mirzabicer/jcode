@@ -45,6 +45,19 @@ fn validate_id(id: &str) -> Result<()> {
     Ok(())
 }
 impl ExecutionStore {
+    /// Observe the exact prepared cwd even when a legacy invocation omitted
+    /// its display cwd. Payload integrity remains owned by this handoff service.
+    pub fn command_working_directory(&self, id: &str) -> Result<Option<PathBuf>> {
+        let exists: bool = self.connection()?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM command_handoffs WHERE run_id=?1)",
+            [id],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Ok(None);
+        }
+        Ok(Some(self.command_payload(id)?.request.working_dir))
+    }
     pub fn is_command_handoff(&self, id: &str, parent: &str, worker: &str) -> Result<bool> {
         Ok(self.connection()?.query_row("SELECT EXISTS(SELECT 1 FROM command_handoffs WHERE run_id=?1 AND parent_owner=?2 AND worker_owner=?3)",params![id,parent,worker],|row|row.get(0))?)
     }

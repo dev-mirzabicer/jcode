@@ -43,6 +43,7 @@ mod skill;
 mod todo;
 mod webfetch;
 mod websearch;
+mod workspace_use;
 mod write;
 
 use crate::context_budget::ContextBudgetTracker;
@@ -968,6 +969,8 @@ impl Registry {
         let registry = self.clone_with_shared_context_runtime();
         let requested = name.to_string();
         let canonical = resolved_name.to_string();
+        let workspace =
+            crate::workspace::WorkspaceService::new(&crate::storage::durable_state_dir());
         let result = crate::execution::execute(
             invocation,
             ctx.clone(),
@@ -975,6 +978,8 @@ impl Registry {
             Box::new(move |ctx| {
                 Box::pin(async move {
                     let (input, tool) = action?;
+                    let _filesystem_use =
+                        workspace_use::acquire(&workspace, &canonical, &input, &ctx)?;
                     registry
                         .execute_bound(&requested, &canonical, input, tool, ctx)
                         .await

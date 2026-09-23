@@ -279,13 +279,21 @@ impl PrimaryInputStore {
     }
 
     pub fn pending(&self, session: &str) -> Result<Vec<PrimaryInputEnvelope>> {
+        self.pending_in(&crate::storage::jcode_dir()?, session)
+    }
+
+    pub fn pending_in(
+        &self,
+        session_root: &Path,
+        session: &str,
+    ) -> Result<Vec<PrimaryInputEnvelope>> {
         if !self.root.join(format!("{session}.json")).try_exists()?
             && !self.root.join(format!("{session}.lock")).try_exists()?
         {
             return Ok(Vec::new());
         }
         let mut lease = self.lock(session)?;
-        let source = crate::session::Session::load_startup_stub(session)?;
+        let source = crate::session::Session::load_startup_stub_in(session_root, session)?;
         lease.reconcile(&source)?;
         Ok(lease
             .inbox

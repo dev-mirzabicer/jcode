@@ -108,3 +108,30 @@ pub struct CloseoutInventoryPage {
     pub entries: Vec<CloseoutEntry>,
     pub next: Option<u64>,
 }
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CloseoutWorkKind {
+    Session,
+    Execution,
+    PendingInput,
+    PendingControl,
+    ExternalProcess,
+    PhysicalLease,
+    Executor,
+    Unknown,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CloseoutWorkFinding {
+    pub kind: CloseoutWorkKind,
+    pub identity: String,
+    pub detail: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CloseoutWorkReport {
+    pub operation: OperationId,
+    pub observed_at: String,
+    pub findings: Vec<CloseoutWorkFinding>,
+}

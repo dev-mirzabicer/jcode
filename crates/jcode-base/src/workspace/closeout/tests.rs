@@ -384,6 +384,354 @@ fn catalog_restore_cannot_reactivate_historical_conditional_authority() {
     assert!(fixture.root.exists());
 }
 
+#[test]
+fn closing_fence_blocks_aliases_and_ancestor_reads_but_retains_admitted_work() {
+    let fixture = Fixture::new();
+    let started = fixture.begin(false);
+    let alias = fixture._directory.path().join("checkout-alias");
+    std::os::unix::fs::symlink(&fixture.root, &alias).unwrap();
+    let admitted = fixture
+        .service
+        .acquire_location_use(Some(&alias), &[])
+        .unwrap();
+    assert_eq!(
+        fixture
+            .service
+            .acquire_root(fixture.location)
+            .err()
+            .unwrap()
+            .code,
+        IssueCode::Busy
+    );
+    let fenced = fixture
+        .service
+        .fence_closeout(started.operation, started.revision)
+        .unwrap();
+    assert_eq!(
+        fixture
+            .service
+            .acquire_location_use(Some(&alias), &[])
+            .err()
+            .unwrap()
+            .code,
+        IssueCode::LiveWork
+    );
+    assert_eq!(
+        fixture
+            .service
+            .acquire_location_use(None, &[fixture._directory.path().to_path_buf()])
+            .err()
+            .unwrap()
+            .code,
+        IssueCode::LiveWork
+    );
+    assert!(fixture.service.acquire_location_use(None, &[]).is_ok());
+    assert_eq!(
+        fixture
+            .service
+            .acquire_root(fixture.location)
+            .err()
+            .unwrap()
+            .code,
+        IssueCode::Busy
+    );
+    drop(admitted);
+    drop(fixture.service.acquire_root(fixture.location).unwrap());
+    fixture
+        .service
+        .revoke_closeout(
+            &fixture.client,
+            RequestId::new(),
+            fenced.operation,
+            fenced.revision,
+        )
+        .unwrap();
+    assert!(
+        fixture
+            .service
+            .acquire_location_use(Some(&fixture.root), &[])
+            .is_ok()
+    );
+}
+
+#[test]
+fn stale_authorization_can_be_revoked_without_reopening_the_rebound_location() {
+    let fixture = Fixture::new();
+    let started = fixture.begin(true);
+    let Entity::Location(prior) = fixture
+        .service
+        .inspect(EntityId::Location(fixture.location))
+        .unwrap()
+    else {
+        panic!()
+    };
+    let relocated = fixture.root.with_file_name("relocated");
+    std::fs::rename(&fixture.root, &relocated).unwrap();
+    let relocated = relocated.canonicalize().unwrap();
+    change(
+        &fixture.service,
+        OrganizationChange::RebindLocation {
+            location: fixture.location,
+            expected_old_path: prior.observed_path,
+            expected_generation: prior.binding_generation,
+            new_path: relocated.clone(),
+        },
+    );
+    assert_eq!(
+        fixture
+            .service
+            .inventory_closeout(started.operation, started.revision)
+            .unwrap_err()
+            .code,
+        IssueCode::ReplacedRoot
+    );
+    let revoked = fixture
+        .service
+        .revoke_closeout(
+            &fixture.client,
+            RequestId::new(),
+            started.operation,
+            started.revision,
+        )
+        .unwrap();
+    assert_eq!(revoked.stage, CloseoutStage::Revoked);
+    let Entity::Location(location) = fixture
+        .service
+        .inspect(EntityId::Location(fixture.location))
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(location.observed_path, relocated);
+    assert_eq!(location.binding_generation, 2);
+    let mut spec = fixture.spec(false);
+    spec.expected_generation = 2;
+    fixture
+        .service
+        .begin_closeout(
+            &fixture.client,
+            RequestId::new(),
+            fixture.service.status().unwrap().revision,
+            spec,
+        )
+        .unwrap();
+    assert!(relocated.is_dir());
+}
+
+#[test]
+fn new_top_level_data_invalidates_the_complete_inventory() {
+    let fixture = Fixture::new();
+    let started = fixture.begin(false);
+    let record = fixture
+        .service
+        .inventory_closeout(started.operation, started.revision)
+        .unwrap();
+    let stored = load(&fixture.service.connection().unwrap(), record.operation).unwrap();
+    inventory::verify_source(&stored).unwrap();
+    std::fs::write(fixture.root.join("new-important-data"), "must survive").unwrap();
+    assert_eq!(
+        inventory::verify_source(&stored).unwrap_err().code,
+        IssueCode::Conflict
+    );
+    assert!(fixture.root.join("new-important-data").exists());
+}
+
+#[test]
+fn explicit_directory_retention_overrides_archive_defaults() {
+    for full_archive in [false, true] {
+        let fixture = Fixture::new();
+        let mut spec = fixture.spec(false);
+        spec.full_archive = full_archive;
+        let started = fixture
+            .service
+            .begin_closeout(
+                &fixture.client,
+                RequestId::new(),
+                fixture.service.status().unwrap().revision,
+                spec,
+            )
+            .unwrap();
+        let inventoried = fixture
+            .service
+            .inventory_closeout(started.operation, started.revision)
+            .unwrap();
+        let page = fixture
+            .service
+            .closeout_inventory(
+                started.operation,
+                inventoried.inventory_digest.as_ref().unwrap(),
+                0,
+                200,
+            )
+            .unwrap();
+        let first = page.entries.first().unwrap();
+        assert_eq!(first.kind, CloseoutEntryKind::Directory);
+        fixture
+            .service
+            .record_closeout_disposition(
+                started.operation,
+                inventoried.revision,
+                CloseoutDecision {
+                    entry: first.id.clone(),
+                    disposition: CloseoutDisposition::Retain {
+                        reason: "Keep this fixture's directory in place".into(),
+                    },
+                    recorded_by: "fixture".into(),
+                },
+            )
+            .unwrap();
+        let stored = load(&fixture.service.connection().unwrap(), started.operation).unwrap();
+        let destination = fixture._directory.path().join("preservation");
+        storage::private_dir(&destination).unwrap();
+        assert_eq!(
+            files::preserve(&stored, &destination).unwrap_err().code,
+            IssueCode::PreservationIncomplete
+        );
+        // The first inventory entry is the root itself. Capture creates its
+        // empty container before evaluating dispositions, but must copy no data.
+        assert_eq!(
+            std::fs::read_dir(destination.join("files"))
+                .unwrap()
+                .count(),
+            0
+        );
+        assert!(fixture.root.join(&first.path).is_dir());
+    }
+}
+
+#[tokio::test]
+async fn inventory_does_not_execute_repository_configured_filters() {
+    let fixture = Fixture::new();
+    let marker = fixture._directory.path().join("filter-executed");
+    std::fs::write(
+        fixture.root.join(".gitattributes"),
+        "filtered filter=fixture\n",
+    )
+    .unwrap();
+    std::fs::write(fixture.root.join("filtered"), "before").unwrap();
+    git(&fixture.root, &["add", "."]);
+    git(
+        &fixture.root,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "filtered file",
+        ],
+    );
+    git(
+        &fixture.root,
+        &[
+            "config",
+            "filter.fixture.clean",
+            &format!("sh -c 'echo executed > {}; cat'", marker.display()),
+        ],
+    );
+    git(
+        &fixture.root,
+        &["config", "filter.fixture.required", "true"],
+    );
+    std::fs::write(fixture.root.join("filtered"), "different worktree bytes").unwrap();
+    let started = fixture.begin(false);
+    let capture = capture(&fixture, started.operation);
+    fixture
+        .service
+        .refresh_closeout(started.operation, started.revision, &capture)
+        .await
+        .unwrap();
+    assert!(
+        !marker.exists(),
+        "Closeout must never invoke an adopted checkout's clean/process filters"
+    );
+    assert_eq!(
+        std::fs::read(fixture.root.join("filtered")).unwrap(),
+        b"different worktree bytes"
+    );
+    finish_capture(&capture);
+}
+
+struct FixtureProcess(std::process::Child);
+impl Drop for FixtureProcess {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[tokio::test]
+async fn work_review_observes_external_file_and_cwd_without_stopping_them() {
+    let fixture = Fixture::new();
+    let started = fixture.begin(false);
+    let capture = capture(&fixture, started.operation);
+    let execution =
+        crate::execution::ExecutionStore::open(&fixture._directory.path().join("output")).unwrap();
+    std::fs::write(fixture.root.join("tracked"), "open-file fixture").unwrap();
+    let file = std::fs::File::open(fixture.root.join("tracked")).unwrap();
+    let mut process = FixtureProcess(
+        std::process::Command::new("/bin/sleep")
+            .arg("60")
+            .current_dir(&fixture.root)
+            .spawn()
+            .unwrap(),
+    );
+    let pid = process.0.id();
+    let result = fixture
+        .service
+        .prepare_closeout_work(
+            started.operation,
+            started.revision,
+            &fixture._directory.path().join("sessions-state"),
+            &execution,
+            &fixture.root,
+            &capture,
+        )
+        .await;
+    let still_running = process.0.try_wait().unwrap().is_none();
+    drop(process);
+    drop(file);
+    let (record, report) = result.unwrap();
+    assert!(still_running, "Review must not cancel observed work");
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|f| f.kind == CloseoutWorkKind::Executor)
+    );
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|f| f.kind == CloseoutWorkKind::ExternalProcess
+                && f.identity.starts_with(&format!("{pid}:"))),
+        "{report:?}"
+    );
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|f| f.kind == CloseoutWorkKind::ExternalProcess
+                && f.identity.starts_with(&format!("{}:", std::process::id()))),
+        "{report:?}"
+    );
+    let (_, quiet) = fixture
+        .service
+        .prepare_closeout_work(
+            record.operation,
+            record.revision,
+            &fixture._directory.path().join("sessions-state"),
+            &execution,
+            fixture._directory.path(),
+            &capture,
+        )
+        .await
+        .unwrap();
+    assert!(quiet.findings.is_empty(), "{quiet:?}");
+    finish_capture(&capture);
+}
+
 fn capture(fixture: &Fixture, operation: OperationId) -> crate::execution::Capture {
     use crate::execution::{
         Capture, ExecutionStore, Invocation, PreparedInvocation, StorageConfig,

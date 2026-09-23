@@ -27,21 +27,31 @@ pub(super) fn preserve(stored: &StoredCloseout, directory: &Path) -> Result<Path
         }
         validate_relative(&item.entry.path)?;
         let source = stored.binding.observed_path().join(&item.entry.path);
-        let disposition =
-            if stored.record.spec.full_archive || item.entry.kind == CloseoutEntryKind::Directory {
+        let disposition = match stored.decisions.get(&item.entry.id) {
+            Some(decision) => decision.disposition.clone(),
+            None if stored.record.spec.full_archive
+                || item.entry.kind == CloseoutEntryKind::Directory =>
+            {
                 CloseoutDisposition::Preserve
-            } else {
-                stored
-                    .decisions
-                    .get(&item.entry.id)
-                    .map(|d| d.disposition.clone())
-                    .ok_or_else(|| {
-                        issue(
-                            IssueCode::PreservationIncomplete,
-                            format!("Unresolved data: {}", item.entry.path.display()),
-                        )
-                    })?
-            };
+            }
+            None => {
+                return Err(issue(
+                    IssueCode::PreservationIncomplete,
+                    format!("Unresolved data: {}", item.entry.path.display()),
+                ));
+            }
+        };
+        if stored.record.spec.full_archive
+            && matches!(
+                disposition,
+                CloseoutDisposition::Redundant { .. } | CloseoutDisposition::Preserved { .. }
+            )
+        {
+            return Err(issue(
+                IssueCode::PreservationIncomplete,
+                "A full archive cannot exclude entries or substitute external references; reconcile the preservation plan",
+            ));
+        }
         if !item.entry.blockers.is_empty() {
             return Err(issue(
                 IssueCode::PreservationIncomplete,

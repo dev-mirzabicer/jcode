@@ -227,16 +227,43 @@ pub fn dispatch_observer(event: HookEvent) {
     }
     let event_name = event.event;
     for command_line in command_lines {
+        let workspace =
+            crate::workspace::WorkspaceService::new(&crate::storage::durable_state_dir());
+        let filesystem_use = match workspace
+            .acquire_location_use(event.cwd.as_deref().map(std::path::Path::new), &[])
+        {
+            Ok(lease) => lease,
+            Err(error) => {
+                crate::logging::warn(&format!(
+                    "Hook '{event_name}' not started because its working location is unavailable: {error}"
+                ));
+                continue;
+            }
+        };
         match build_hook_process(&command_line, &event) {
             Ok(mut cmd) => {
                 cmd.stdin(std::process::Stdio::null())
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null());
                 match crate::platform::spawn_detached(&mut cmd) {
-                    Ok(_) => crate::logging::debug(&format!(
-                        "Hook '{event_name}' dispatched to '{command_line}' (session={:?})",
-                        event.session_id
-                    )),
+                    Ok(mut child) => {
+                        // The caller remains fire-and-forget, but root ownership
+                        // belongs to the actual process until it exits.
+                        match std::thread::Builder::new()
+                            .name("jcode-hook-owner".into())
+                            .spawn(move || {
+                                let _filesystem_use = filesystem_use;
+                                let _ = child.wait();
+                            }) {
+                            Ok(_) => crate::logging::debug(&format!(
+                                "Hook '{event_name}' dispatched to '{command_line}' (session={:?})",
+                                event.session_id
+                            )),
+                            Err(error) => crate::logging::warn(&format!(
+                                "Hook '{event_name}' started but its wait owner failed: {error}; OS process inspection remains required"
+                            )),
+                        }
+                    }
                     Err(error) => crate::logging::warn(&format!(
                         "Hook '{event_name}' command '{command_line}' failed to start: {error}"
                     )),

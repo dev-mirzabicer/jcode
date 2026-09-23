@@ -21,7 +21,17 @@ pub struct StreamingGuard {
 }
 
 impl StreamingGuard {
-    pub fn new(session_id: impl Into<String>) -> anyhow::Result<Self> {
+    pub fn for_session(session: &Session) -> anyhow::Result<Self> {
+        // Hold admission until durable activity is registered. Closeout takes
+        // exclusive root ownership before querying activity, closing the race
+        // without pinning an old cwd across a later safe-boundary location move.
+        let workspace =
+            crate::workspace::WorkspaceService::new(&crate::storage::durable_state_dir());
+        let _admission =
+            workspace.acquire_location_use(session.working_dir.as_deref().map(Path::new), &[])?;
+        Self::new(session.id.clone())
+    }
+    pub(crate) fn new(session_id: impl Into<String>) -> anyhow::Result<Self> {
         let session_id = session_id.into();
         let activity = crate::execution::ExecutionStore::open(&crate::storage::jcode_dir()?)?
             .begin_session_activity(&session_id)?;

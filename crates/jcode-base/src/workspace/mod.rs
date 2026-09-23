@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 mod backup;
 mod checkout;
 mod closeout;
+mod use_gate;
+pub use use_gate::WorkspaceUseLease;
 mod context_scope;
 mod grants;
 pub use context_scope::ContextScopePlan;

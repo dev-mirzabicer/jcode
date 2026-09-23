@@ -377,6 +377,24 @@ impl ExecutionStore {
             .collect()
     }
 
+    /// Unfinished producer ownership, including queued and detached native work.
+    /// No recovery, cancellation, output read or activity refresh is performed.
+    pub fn unresolved_runs(&self) -> Result<Vec<RunRecord>> {
+        let connection = self.connection()?;
+        let mut query = connection.prepare(
+            "SELECT id FROM runs WHERE state IN ('prepared','queued','running') ORDER BY id",
+        )?;
+        let ids = query
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        ids.into_iter()
+            .map(|id| {
+                query_record(&connection, &id)?
+                    .context("Unfinished invocation disappeared during inspection")
+            })
+            .collect()
+    }
+
     pub fn prepare(&self, invocation: &Invocation, owner: &str) -> Result<PreparedInvocation> {
         ensure!(
             !invocation.session_id.is_empty()

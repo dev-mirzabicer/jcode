@@ -312,7 +312,13 @@ async fn worker_with_child(id: &str, child: tokio::process::Command) -> Result<(
         run_id: record.id.clone(),
         owner: record.owner.clone(),
     };
-    let operation = command::run_gated(spec, capture.clone(), run.stop.clone(), gate);
+    let workspace = crate::workspace::WorkspaceService::new(&crate::storage::durable_state_dir());
+    let command_capture = capture.clone();
+    let command_stop = run.stop.clone();
+    let operation = async move {
+        let _filesystem_use = workspace.acquire_location_use(Some(&spec.working_dir), &[])?;
+        command::run_gated(spec, command_capture, command_stop, gate).await
+    };
     tokio::pin!(operation);
     let mut parent_tick = tokio::time::interval(Duration::from_millis(250));
     parent_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
