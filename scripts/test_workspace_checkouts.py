@@ -6,8 +6,11 @@ Never touches a real checkout, catalog, credential, provider or mounted volume.
 """
 import json
 import os
+import shutil
 import socket
+import stat
 import subprocess
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -102,6 +105,10 @@ def clone(spec):
 
 
 result = {}
+external_fixture = None
+external_owner = None
+external_witness = None
+external_cleanup = {'state': 'not_requested'}
 try:
     source = f.project
     git(source, 'init', '-q', '-b', 'main')
@@ -170,6 +177,40 @@ try:
     assert git(remote_destination, 'remote', 'get-url', 'origin') == bare.resolve().as_uri()
     assert git(bare, 'rev-parse', 'refs/heads/main') == commit
     assert not (remote_destination / '.git/objects/info/alternates').exists()
+
+    external_result = None
+    if os.environ.get('JCODE_WP06_EXTERNAL_MOUNT'):
+        mount = Path(os.environ['JCODE_WP06_EXTERNAL_MOUNT'])
+        assert mount.is_absolute() and mount.is_dir() and not mount.is_symlink()
+        assert mount.resolve(strict=True) == mount
+        selected = [v for v in volumes if not v['internal'] and v['writable']
+                    and Path(v['mount']).resolve(strict=True) == mount]
+        assert len(selected) == 1 and selected[0]['uuid'] != volume['uuid'], selected
+        external_volume = selected[0]
+        external_fixture = Path(tempfile.mkdtemp(prefix='jcode-wp06-owned-', dir=mount))
+        external_owner = uid()
+        external_witness = external_fixture.stat()
+        assert external_witness.st_dev == mount.stat().st_dev
+        (external_fixture / '.jcode-wp06-owner.json').write_text(json.dumps({
+            'owner': external_owner, 'volume_uuid': external_volume['uuid'],
+            'mount': str(mount), 'device': external_witness.st_dev,
+            'inode': external_witness.st_ino,
+        }))
+        external_destination = external_fixture / 'checkout'
+        external_spec = dict(local_spec, name='external-volume',
+                             branch={'kind': 'detached'},
+                             destination={'kind': 'custom',
+                                          'volume_uuid': external_volume['uuid'],
+                                          'path': str(external_destination)})
+        external_ready = clone(external_spec)
+        assert external_ready['state'] == 'ready'
+        assert external_destination.stat().st_dev == external_witness.st_dev
+        assert git(external_destination, 'rev-parse', 'HEAD') == commit
+        git(external_destination, 'fsck', '--full')
+        assert not (external_destination / '.git/objects/info/alternates').exists()
+        external_result = {'volume_uuid': external_volume['uuid'],
+                           'mount': str(mount), 'fixture': str(external_fixture),
+                           'request': external_ready['request'], 'fsck': 'passed'}
 
     # An acquired commit can reveal a submodule source absent from the initial
     # remote-ref review. Retain this exact stage until the trusted client sees
@@ -297,6 +338,7 @@ try:
                   local_independent=True, remote_independent=True,
                   adopted_existing_identity=True, rebind_generation=history['new_generation'],
                   startup_copy_target_capture=detail['content'],
+                  external_volume=external_result,
                   provider_requests=len(f.posts), managed_rollout=False)
     (f.ROOT / 'checkout-result.json').write_text(json.dumps(result, indent=2))
     print(json.dumps(result))
@@ -314,10 +356,35 @@ finally:
             f.proc.wait()
     f.http.shutdown()
     f.log.close()
+    if external_fixture is not None:
+        external_cleanup = {'state': 'retained_for_failure_inspection', 'path': str(external_fixture)}
+        if result:
+            try:
+                assert shutil.rmtree.avoids_symlink_attacks
+                assert external_fixture.parent == Path(os.environ['JCODE_WP06_EXTERNAL_MOUNT'])
+                now = os.lstat(external_fixture)
+                assert stat.S_ISDIR(now.st_mode) and not stat.S_ISLNK(now.st_mode)
+                assert (now.st_dev, now.st_ino) == (external_witness.st_dev, external_witness.st_ino)
+                marker = json.loads((external_fixture / '.jcode-wp06-owner.json').read_text())
+                assert marker['owner'] == external_owner
+                assert marker['volume_uuid'] == result['external_volume']['volume_uuid']
+                for root, dirs, files in os.walk(external_fixture, followlinks=False):
+                    for name in dirs + files:
+                        entry = os.lstat(Path(root) / name)
+                        assert entry.st_dev == external_witness.st_dev
+                        assert stat.S_ISREG(entry.st_mode) or stat.S_ISDIR(entry.st_mode), (root, name)
+                shutil.rmtree(external_fixture)
+                assert not external_fixture.exists()
+                external_cleanup = {'state': 'removed_exact_owned_fixture', 'path': str(external_fixture),
+                                    'volume_uuid': marker['volume_uuid']}
+            except Exception as error:
+                external_cleanup['error'] = repr(error)
     (f.ROOT / 'events.json').write_text(json.dumps(f.events, indent=2))
     (f.ROOT / 'provider-posts.json').write_text(json.dumps(f.posts, indent=2))
     (f.ROOT / 'cleanup.json').write_text(json.dumps({
         'owned_daemon_terminal': f.proc is None or f.proc.poll() is not None,
         'fixture_checkout_preserved_for_audit': True,
+        'external_fixture': external_cleanup,
     }, indent=2))
+    assert external_cleanup['state'] != 'retained_for_failure_inspection' or not result, external_cleanup
     print('artifacts=' + str(f.ROOT))

@@ -154,4 +154,11 @@ execution and existing Startup Context editor coordination;
 execution store owns retained Git output and actual child process control.
 Reproduction uses focused `workspace::checkout`, `workspace::startup_copy`
 and protocol tests, plus `scripts/test_workspace_checkouts.py` through
-`scripts/run_isolated_test.py` against an activated TUI binary.
+`scripts/run_isolated_test.py` against an activated TUI binary. Set
+`JCODE_WP06_EXTERNAL_MOUNT` to an already mounted, writable external volume
+for the optional actual-volume path. The fixture creates a unique private
+directory there, verifies the selected UUID and Git object independence,
+and removes only that directory after matching its owner marker and physical
+identity. A failed or changed fixture is retained with an exact cleanup
+receipt for inspection; no volume is mounted, unmounted or modified outside
+that owned directory.
