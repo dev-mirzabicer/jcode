@@ -701,6 +701,75 @@ async fn advertised_remote_commit_accepts_branch_tip_and_peeled_tag_not_unknown_
     );
 }
 
+#[test]
+fn remote_branch_ref_change_after_review_rejects_begin_without_reserving_checkout() {
+    let fixture = Fixture::new();
+    let bare = fixture.temp.path().join("moving.git");
+    git(
+        fixture.temp.path(),
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            fixture.source.to_str().unwrap(),
+            bare.to_str().unwrap(),
+        ],
+    );
+    let before = git(&bare, &["rev-parse", "refs/heads/main"]);
+    let mut spec = fixture.spec();
+    spec.source = CloneSource::Remote {
+        url: format!("file://{}", bare.canonicalize().unwrap().display()),
+    };
+    spec.branch = CloneBranch::KeepName;
+    let review = fixture
+        .service
+        .review_clone(fixture.service.status().unwrap().revision, spec.clone())
+        .unwrap();
+    assert_eq!(review.source_commit, before);
+    std::fs::write(fixture.source.join("later"), "changed remote branch tip").unwrap();
+    git(&fixture.source, &["add", "later"]);
+    git(
+        &fixture.source,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "move remote main",
+        ],
+    );
+    git(
+        &fixture.source,
+        &["push", bare.to_str().unwrap(), "refs/heads/main"],
+    );
+    let request = RequestId::new();
+    assert_eq!(
+        fixture
+            .service
+            .begin_clone(request, review.id)
+            .unwrap_err()
+            .code,
+        IssueCode::Conflict
+    );
+    assert_eq!(
+        fixture.service.inspect_clone(request).unwrap_err().code,
+        IssueCode::InvalidIdentity
+    );
+    assert!(!fixture.destination.exists());
+    spec.base = CloneBase::Commit { oid: before };
+    spec.branch = CloneBranch::Detached;
+    assert_eq!(
+        fixture
+            .service
+            .review_clone(fixture.service.status().unwrap().revision, spec)
+            .unwrap_err()
+            .code,
+        IssueCode::InvalidInput
+    );
+}
+
 #[tokio::test]
 async fn unchanged_origin_retains_all_acquired_branches_and_selected_tracking_offline() {
     let fixture = Fixture::new();
