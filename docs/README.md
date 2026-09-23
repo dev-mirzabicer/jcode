@@ -21,7 +21,7 @@ Reference documentation for the jcode codebase.
 - Process RAM and allocator diagnostics: `MEMORY_BUDGET.md`, `MEMORY_INCIDENT_RUNBOOK.md`
 - Tool execution: [retained output, exact reads and cancellation](TOOL_EXECUTION.md), [storage/control architecture](dev/EXECUTION_STORAGE.md), [producer inventory](dev/EXECUTION_PRODUCERS.md), [acceptance reconciliation](dev/EXECUTION_ACCEPTANCE.md)
 - Primary runtime: [creation, detached ownership and native verification](dev/PRIMARY_HOST_ACCEPTANCE.md), [durable input and atomic location controls](PRIMARY_INPUT_LOCATION.md), and [reviewed new-context scope](PRIMARY_CONTEXT_SCOPE.md). Managed creation and location controls are explicitly staged; ordinary client detach does not stop hosted work.
-- Workspace foundation: [private catalog and recovery](dev/WORKSPACE_CATALOG.md). Managed session/scope rollout and the human management client remain separately gated.
+- Workspace foundation: [private catalog and recovery](dev/WORKSPACE_CATALOG.md), [independent checkout provisioning, adoption and path-only Startup Context copy](dev/WORKSPACE_CHECKOUTS.md). Managed session/scope rollout and the human management client remain separately gated.
 - Task monitor: [native task/output controls, child Context Editor and storage review](TASK_MONITOR.md)
 - Combined execution/delegation verification: [requirements, native journeys and evidence boundaries](dev/PHASE4_INTEGRATION_ACCEPTANCE.md)
 - Independent Phase 4 closeout: [requirement reconciliation, repairs and acceptance limits](dev/PHASE4_CLOSEOUT_ACCEPTANCE.md)

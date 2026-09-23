@@ -8,6 +8,17 @@ pub enum CloneSource {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceVolume {
+    pub uuid: String,
+    pub mount: PathBuf,
+    pub label: String,
+    pub internal: bool,
+    pub writable: bool,
+    pub available_bytes: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CloneBase {
     Branch { name: String },
@@ -97,8 +108,73 @@ pub struct CloneRecord {
     pub location: LocationId,
     pub review: CloneReview,
     pub state: CloneState,
+    pub cancel_requested: bool,
     pub stage: Option<PathBuf>,
-    pub output_run: Option<String>,
+    pub output_runs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_issue: Option<Issue>,
     pub issue: Option<Issue>,
     pub revision: Revision,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RebindRecord {
+    pub operation: OperationId,
+    pub location: LocationId,
+    pub old_path: PathBuf,
+    pub new_path: PathBuf,
+    pub old_volume_uuid: String,
+    pub new_volume_uuid: String,
+    pub old_generation: u64,
+    pub new_generation: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StartupCopyApproval {
+    pub source_spec_id: String,
+    pub approved_resolved_target: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StartupCopyEntry {
+    pub source_spec_id: String,
+    pub selected_path: PathBuf,
+    pub resolved_target: PathBuf,
+    pub external: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StartupCopyReview {
+    pub id: ReviewId,
+    pub catalog_revision: Revision,
+    pub source: PathBuf,
+    pub target: LocationId,
+    pub target_path: PathBuf,
+    pub target_binding_generation: u64,
+    pub source_plan_revision: u64,
+    pub target_plan_revision: u64,
+    pub proposed_plan_revision: u64,
+    pub entries: Vec<StartupCopyEntry>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StartupCopyState {
+    Pending,
+    Complete,
+    RecoveryRequired,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StartupCopyRecord {
+    pub request: RequestId,
+    pub operation: OperationId,
+    pub review: StartupCopyReview,
+    pub state: StartupCopyState,
+    pub issue: Option<Issue>,
 }

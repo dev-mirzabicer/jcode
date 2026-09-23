@@ -876,6 +876,153 @@ fn repository(service: &WorkspaceService, name: &str) -> RepositoryId {
 }
 
 #[test]
+fn adopted_git_rebind_preserves_identity_and_old_startup_plan_without_rewriting_files() {
+    use crate::startup_context::{StartupContext, StartupSelectionInput};
+    let dir = tempfile::tempdir().unwrap();
+    let service = WorkspaceService::new(dir.path());
+    service.initialize(RequestId::new()).unwrap();
+    let project = project(&service, "rebind");
+    let repository = repository(&service, "repo");
+    change(
+        &service,
+        OrganizationChange::AssociateRepository {
+            project,
+            repository,
+        },
+    );
+    let old = dir.path().join("old-checkout");
+    std::fs::create_dir(&old).unwrap();
+    let git = |cwd: &Path, args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .current_dir(cwd)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&old, &["init", "-q", "-b", "main"]);
+    std::fs::write(old.join("readme.txt"), "source words").unwrap();
+    git(&old, &["add", "readme.txt"]);
+    git(
+        &old,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "source",
+        ],
+    );
+    let registered = change(
+        &service,
+        OrganizationChange::RegisterLocation {
+            name: "adopted".into(),
+            path: old.clone(),
+            registration: Registration::Checkout {
+                home: Home::Project(project),
+                repository,
+            },
+        },
+    );
+    let EntityId::Location(id) = registered.targets[0] else {
+        panic!("location")
+    };
+    let old_location = match service.inspect(EntityId::Location(id)).unwrap() {
+        Entity::Location(loc) => loc,
+        _ => unreachable!(),
+    };
+    let startup = StartupContext::from_durable_state_dir(dir.path().to_path_buf());
+    let prior = startup.resolve_project(&old).unwrap();
+    let selection =
+        startup.preview_selection(&prior, vec![StartupSelectionInput::new("readme.txt")]);
+    assert!(selection.is_valid());
+    let saved = startup.save_project_plan(&prior, 0, &selection).unwrap();
+    assert_eq!(saved.entries().len(), 1);
+    let original_git_config = std::fs::read(old.join(".git/config")).unwrap();
+    let moved = dir.path().join("moved-checkout");
+    std::fs::rename(&old, &moved).unwrap();
+    let moved_canonical = moved.canonicalize().unwrap();
+    let review = service
+        .review_organization_change(
+            service.status().unwrap().revision,
+            OrganizationChange::RebindLocation {
+                location: id,
+                expected_old_path: old_location.observed_path.clone(),
+                expected_generation: old_location.binding_generation,
+                new_path: moved.clone(),
+            },
+        )
+        .unwrap();
+    let request = RequestId::new();
+    let receipt = service
+        .apply_organization_change(request, review.id)
+        .unwrap();
+    assert_eq!(
+        receipt,
+        service
+            .apply_organization_change(request, review.id)
+            .unwrap()
+    );
+    let history = service.inspect_rebind(receipt.operation).unwrap();
+    assert_eq!(
+        (history.old_path, history.new_path),
+        (old_location.observed_path.clone(), moved_canonical.clone())
+    );
+    assert_eq!(history.old_generation + 1, history.new_generation);
+    let Entity::Location(now) = service.inspect(EntityId::Location(id)).unwrap() else {
+        panic!("location")
+    };
+    assert_eq!(now.id, old_location.id);
+    assert_eq!(now.binding_generation, old_location.binding_generation + 1);
+    assert_eq!(now.observed_path, moved_canonical);
+    assert!(matches!(
+        now.kind,
+        LocationKind::Checkout {
+            origin: CheckoutOrigin::AdoptedGit,
+            ..
+        }
+    ));
+    assert_eq!(
+        std::fs::read(now.observed_path.join(".git/config")).unwrap(),
+        original_git_config
+    );
+    assert_eq!(
+        startup.load_project_plan(&prior).unwrap().plan().entries(),
+        saved.entries()
+    );
+    let new_physical_project = startup.resolve_project(&now.observed_path).unwrap();
+    assert_ne!(prior.key(), new_physical_project.key());
+    assert!(
+        startup
+            .load_project_plan(&new_physical_project)
+            .unwrap()
+            .plan()
+            .entries()
+            .is_empty()
+    );
+    assert!(
+        service
+            .review_organization_change(
+                service.status().unwrap().revision,
+                OrganizationChange::RebindLocation {
+                    location: id,
+                    expected_old_path: old,
+                    expected_generation: old_location.binding_generation,
+                    new_path: now.observed_path
+                }
+            )
+            .is_err()
+    );
+}
+
+#[test]
 fn organization_ids_replays_conflicts_and_paging() {
     let dir = tempfile::tempdir().unwrap();
     let service = WorkspaceService::new(dir.path());

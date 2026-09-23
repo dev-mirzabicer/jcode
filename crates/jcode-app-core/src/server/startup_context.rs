@@ -197,6 +197,80 @@ impl Drop for CrossProcessEditorGuard {
 }
 
 impl StartupContextCoordinator {
+    /// Trusted workspace copy is an administrative plan transition, not a
+    /// provisional Session or editor Save. It shares the exact project lock
+    /// and validator with ordinary Startup Context editing.
+    pub(crate) fn commit_workspace_copy(
+        &self,
+        target_path: &Path,
+        transition: &jcode_base::startup_context::StartupProjectPlanTransition,
+        request: crate::workspace::RequestId,
+        connection_id: &str,
+        revalidate: impl FnOnce() -> Result<(), StartupContextFailure>,
+    ) -> Result<jcode_base::startup_context::StartupProjectPlanCommitOutcome, StartupContextFailure>
+    {
+        let operation = StartupContextOperation::ApplySelection;
+        let project = self
+            .inner
+            .engine
+            .resolve_project(target_path)
+            .map_err(|error| startup_context_error_failure(operation, error))?;
+        if project.active_root() != target_path {
+            return Err(failure(
+                operation,
+                StartupContextFailureKind::ProjectIdentity,
+                "Copy target must be the exact bound physical root",
+                false,
+            ));
+        }
+        let digest = project.key().digest();
+        let mut state = self.lock_state();
+        expire_locked(&mut state, self.inner.lease_duration);
+        if state.leases.contains_key(&digest) || state.active_apply_projects.contains_key(&digest) {
+            return Err(failure(
+                operation,
+                StartupContextFailureKind::LeaseBusy,
+                "Target Startup Context plan is being edited or applied",
+                true,
+            ));
+        }
+        let now = Utc::now();
+        let lease_id = format!("workspace_copy_{request}");
+        let metadata = EditorOwnerMetadata {
+            schema_version: OWNER_METADATA_SCHEMA_VERSION,
+            project_key_digest: digest.clone(),
+            lease_id,
+            server_id: self.inner.server_id.clone(),
+            server_name: self.inner.server_name.clone(),
+            session_id: "workspace-administration".into(),
+            connection_id: connection_id.into(),
+            pid: std::process::id(),
+            process_start_identity: self.inner.process_start_identity.clone(),
+            acquired_at: now,
+            renewed_at: now,
+            expires_at: now + chrono_duration(self.inner.lease_duration),
+        };
+        let _guard = match CrossProcessEditorGuard::try_acquire(
+            &self.ownership_paths(&digest),
+            &metadata,
+        )? {
+            GuardAcquireOutcome::Acquired(guard) => guard,
+            GuardAcquireOutcome::Busy(_) => {
+                return Err(failure(
+                    operation,
+                    StartupContextFailureKind::LeaseBusy,
+                    "Another client owns the target Startup Context plan",
+                    true,
+                ));
+            }
+        };
+        revalidate()?;
+        self.inner
+            .engine
+            .commit_project_plan_transition(&project, transition)
+            .map_err(|error| startup_context_error_failure(operation, error))
+    }
+
     pub(super) fn new(identity: &ServerIdentity) -> Self {
         let coordinator = Self::from_durable_state_dir(
             crate::storage::durable_state_dir(),
@@ -241,7 +315,11 @@ impl StartupContextCoordinator {
     }
 
     #[cfg(test)]
-    fn for_test(durable_state_dir: PathBuf, server_name: &str, lease_duration: Duration) -> Self {
+    pub(crate) fn for_test(
+        durable_state_dir: PathBuf,
+        server_name: &str,
+        lease_duration: Duration,
+    ) -> Self {
         Self::from_durable_state_dir(
             durable_state_dir,
             format!("test-{server_name}"),

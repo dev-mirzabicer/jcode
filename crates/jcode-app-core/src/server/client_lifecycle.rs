@@ -782,7 +782,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
                             id: *id,
                             catalog_version: 1,
                             permissions_version: Some(1),
-                            clone_version: Some(1),
+                            checkout_version: Some(1),
                             managed_rollout: false,
                         },
                     )
@@ -790,9 +790,12 @@ pub(super) async fn handle_client_with_instruction_repositories(
                     continue;
                 }
                 if let Request::Workspace { id, request } = &request {
-                    let response =
-                        crate::workspace::dispatch(*request.clone(), client_connection_id.clone())
-                            .await;
+                    let response = crate::workspace::dispatch(
+                        *request.clone(),
+                        client_connection_id.clone(),
+                        startup_context.clone(),
+                    )
+                    .await;
                     write_direct_event(
                         &writer,
                         &ServerEvent::WorkspaceResponse {
@@ -3684,15 +3687,16 @@ pub(super) async fn handle_client_with_instruction_repositories(
                     id,
                     catalog_version: 1,
                     permissions_version: Some(1),
-                    clone_version: Some(1),
+                    checkout_version: Some(1),
                     managed_rollout: false,
                 });
             }
             Request::Workspace { id, request } => {
                 let event_tx = client_event_tx.clone();
                 let client = client_connection_id.clone();
+                let startup = startup_context.clone();
                 inspection_requests.spawn(async move {
-                    let response = crate::workspace::dispatch(*request, client).await;
+                    let response = crate::workspace::dispatch(*request, client, startup).await;
                     let _ = event_tx.send(ServerEvent::WorkspaceResponse {
                         id,
                         response: Box::new(response),

@@ -2,13 +2,21 @@
 //! Catalog administration does not create a provisional inference Session.
 pub use jcode_base::workspace::*;
 mod clone_runner;
+mod startup_copy;
 
-pub async fn dispatch(request: WorkspaceRequest, client: String) -> WorkspaceResponse {
+pub(crate) async fn dispatch(
+    request: WorkspaceRequest,
+    client: String,
+    coordinator: std::sync::Arc<crate::server::startup_context::StartupContextCoordinator>,
+) -> WorkspaceResponse {
     if let WorkspaceRequest::BeginClone { request, review } = request {
         return clone_runner::begin(request, review, client).await;
     }
     if let WorkspaceRequest::ResumeClone { request } = request {
         return clone_runner::resume(request, client).await;
+    }
+    if let WorkspaceRequest::ApplyStartupCopy { request, review } = request {
+        return startup_copy::apply(request, review, client, coordinator).await;
     }
     let root = crate::storage::durable_state_dir();
     match tokio::task::spawn_blocking(move || {
@@ -35,6 +43,7 @@ pub fn dispatch_with(
 ) -> WorkspaceResponse {
     use WorkspaceResponse as Response;
     let result = match request {
+        WorkspaceRequest::Volumes {} => service.volumes().map(Response::Volumes),
         WorkspaceRequest::ReviewClone {
             expected_revision,
             spec,
@@ -47,6 +56,34 @@ pub fn dispatch_with(
         WorkspaceRequest::CancelClone { request } => {
             service.request_clone_cancel(request).map(Response::Clone)
         }
+        WorkspaceRequest::InspectRebind { operation } => {
+            service.inspect_rebind(operation).map(Response::Rebind)
+        }
+        WorkspaceRequest::ReviewStartupCopy {
+            expected_catalog_revision,
+            source,
+            target,
+            expected_source_plan_revision,
+            expected_target_plan_revision,
+            external_approvals,
+        } => service
+            .review_startup_copy(
+                expected_catalog_revision,
+                source,
+                target,
+                expected_source_plan_revision,
+                expected_target_plan_revision,
+                external_approvals,
+            )
+            .map(Response::StartupCopyReview),
+        WorkspaceRequest::InspectStartupCopy { request } => service
+            .inspect_startup_copy(request)
+            .map(Response::StartupCopy),
+        WorkspaceRequest::ApplyStartupCopy { .. } => Err(Issue {
+            code: IssueCode::UnsupportedCapability,
+            detail: "Startup Context copy requires the runtime-owned plan editor coordinator"
+                .into(),
+        }),
         WorkspaceRequest::BeginClone { .. } | WorkspaceRequest::ResumeClone { .. } => Err(Issue {
             code: IssueCode::UnsupportedCapability,
             detail:

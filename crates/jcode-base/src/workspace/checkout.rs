@@ -8,7 +8,11 @@ use std::fs::File;
 use std::path::Component;
 
 mod git;
+#[cfg(test)]
+mod lfs_test_server;
 mod materialize;
+#[cfg(test)]
+mod recovery_tests;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -26,7 +30,6 @@ struct CloneOperation {
     source_binding: Option<PhysicalBinding>,
     stage_binding: Option<PhysicalBinding>,
     published_binding: Option<PhysicalBinding>,
-    cancel_requested: bool,
     acquired: bool,
     materialized: bool,
     backup_pending: bool,
@@ -38,6 +41,22 @@ struct CloneLease {
 }
 
 impl WorkspaceService {
+    pub fn volumes(&self) -> Result<Vec<WorkspaceVolume>> {
+        Ok(self
+            .resolver
+            .mounted_volumes()
+            .map_err(io)?
+            .into_iter()
+            .map(|volume| WorkspaceVolume {
+                uuid: volume.identity.as_str().into(),
+                mount: volume.mount,
+                label: volume.label,
+                internal: volume.internal,
+                writable: volume.writable,
+                available_bytes: volume.available_bytes,
+            })
+            .collect())
+    }
     pub fn review_clone(&self, expected: Revision, mut spec: CloneSpec) -> Result<CloneReview> {
         let _lease = self.lease(false)?;
         let mut connection = self.connection()?;
@@ -252,7 +271,7 @@ impl WorkspaceService {
         }
         organization::require_revision(&transaction, prepared.review.revision)?;
         let reserved: bool = transaction.query_row(
-            "SELECT EXISTS(SELECT 1 FROM operations WHERE kind='checkout_clone' AND json_extract(body,'$.public.review.destination')=?1 AND state!='complete')",
+            "SELECT EXISTS(SELECT 1 FROM operations WHERE kind='checkout_clone' AND json_extract(body,'$.public.review.destination')=?1 AND state!='complete' AND json_extract(body,'$.public.state')!='cancelled')",
             [prepared.review.destination.to_string_lossy().as_ref()], |row| row.get(0),
         ).map_err(io)?;
         if reserved {
@@ -273,8 +292,10 @@ impl WorkspaceService {
             location,
             review: prepared.review,
             state: CloneState::Pending,
+            cancel_requested: false,
             stage: None,
-            output_run: None,
+            output_runs: Vec::new(),
+            output_issue: None,
             issue: None,
             revision,
         };
@@ -284,7 +305,6 @@ impl WorkspaceService {
             source_binding: prepared.source_binding,
             stage_binding: None,
             published_binding: None,
-            cancel_requested: false,
             acquired: false,
             materialized: false,
             backup_pending: false,
@@ -337,7 +357,7 @@ impl WorkspaceService {
     pub fn request_clone_cancel(&self, request: RequestId) -> Result<CloneRecord> {
         self.update_clone(request, |op| {
             if op.public.state != CloneState::Ready {
-                op.cancel_requested = true;
+                op.public.cancel_requested = true;
             }
             Ok(())
         })
@@ -357,7 +377,9 @@ impl WorkspaceService {
                     "Ready checkout cannot start another operation",
                 ));
             }
-            op.public.output_run = Some(run);
+            if !op.public.output_runs.contains(&run) {
+                op.public.output_runs.push(run);
+            }
             Ok(())
         })
     }
@@ -371,6 +393,14 @@ impl WorkspaceService {
             if op.public.state == CloneState::Pending {
                 op.public.state = CloneState::PreparationFailed;
                 op.public.issue = Some(problem);
+            } else if op.public.state == CloneState::Ready {
+                op.public.output_issue = Some(issue(
+                    IssueCode::RecoveryRequired,
+                    format!(
+                        "Checkout is Ready but its retained output could not be sealed: {}",
+                        problem.detail
+                    ),
+                ));
             }
             Ok(())
         })
@@ -380,6 +410,7 @@ impl WorkspaceService {
         let _lease = self.lease(false)?;
         Ok(read_clone(&self.connection()?, request)?
             .ok_or_else(|| issue(IssueCode::InvalidIdentity, "Unknown checkout clone"))?
+            .public
             .cancel_requested)
     }
 
@@ -436,7 +467,7 @@ impl WorkspaceService {
             Err(problem) => {
                 let retained = self.update_clone(request, |operation| {
                     if operation.public.state != CloneState::Ready {
-                        operation.public.state = if operation.cancel_requested {
+                        operation.public.state = if operation.public.cancel_requested {
                             CloneState::Cancelled
                         } else if operation.published_binding.is_some() {
                             CloneState::RecoveryRequired
@@ -448,6 +479,9 @@ impl WorkspaceService {
                     Ok(())
                 });
                 retained?;
+                if self.inspect_clone(request)?.state == CloneState::Cancelled {
+                    self.cleanup_cancelled_empty_stage(request)?;
+                }
                 Err(problem)
             }
         }
@@ -584,6 +618,7 @@ impl WorkspaceService {
                 git::run(self, request, command, capture).await?;
                 self.verify_acquired(&operation, &stage)?;
             }
+            git::detach_borrowed_objects(stage.observed_path(), stage.observed_path())?;
             self.update_clone(request, |op| {
                 op.acquired = true;
                 op.public.state = CloneState::Materializing;
@@ -668,6 +703,47 @@ impl WorkspaceService {
             ));
         }
         Ok(current)
+    }
+
+    fn cleanup_cancelled_empty_stage(&self, request: RequestId) -> Result<()> {
+        let operation = self.load_clone(request)?;
+        let Some(stage) = &operation.stage_binding else {
+            return Ok(());
+        };
+        let Some(stage_path) = &operation.public.stage else {
+            return Err(corrupt("Clone stage has no path"));
+        };
+        if operation.public.state != CloneState::Cancelled || stage.observed_path() != stage_path {
+            return Err(corrupt("Clone cancellation ownership mismatch"));
+        }
+        let parent = self
+            .resolver
+            .bind_directory(
+                stage_path
+                    .parent()
+                    .ok_or_else(|| corrupt("Clone stage has no parent"))?,
+            )
+            .map_err(io)?;
+        let _root = self.acquire_binding(&parent)?;
+        if let Ok(resolved) = self.resolver.resolve_directory(stage)
+            && !resolved.relocated
+            && resolved.path == *stage_path
+            && std::fs::read_dir(stage_path).map_err(io)?.next().is_none()
+        {
+            std::fs::remove_dir(stage_path).map_err(io)?;
+            self.update_clone(request, |op| {
+                op.stage_binding = None;
+                op.public.stage = None;
+                Ok(())
+            })?;
+        } else {
+            self.update_clone(request, |op| {
+                op.public.issue = Some(issue(IssueCode::RecoveryRequired,
+                    format!("Clone cancelled. Its nonempty or changed stage is retained at {} for inspection; no user data was deleted", stage_path.display())));
+                Ok(())
+            })?;
+        }
+        Ok(())
     }
 
     fn check_cancel(&self, request: RequestId) -> Result<()> {
@@ -875,7 +951,11 @@ impl WorkspaceService {
             .map_err(io)?;
         let mut operation = read_clone(&transaction, request)?
             .ok_or_else(|| issue(IssueCode::InvalidIdentity, "Unknown checkout clone request"))?;
+        let prior = encode(&operation)?;
         update(&mut operation)?;
+        if encode(&operation)? == prior {
+            return Ok(operation.public);
+        }
         let revision = storage::status(&transaction)?
             .revision
             .checked_add(1)
@@ -985,7 +1065,7 @@ fn checked_git_url(value: &str) -> Result<String> {
     }
     if cleaned.contains("://") {
         let url = url::Url::parse(&cleaned).map_err(io)?;
-        if !matches!(url.scheme(), "https" | "ssh" | "git" | "file") {
+        if !matches!(url.scheme(), "https" | "http" | "ssh" | "git" | "file") {
             return Err(issue(
                 IssueCode::InvalidInput,
                 "Unsupported Git clone transport",

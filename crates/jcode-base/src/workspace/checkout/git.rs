@@ -2,6 +2,8 @@ use super::*;
 use crate::execution::owned_child::OwnedChild;
 use jcode_tool_core::{OutputCapture, OutputStream};
 use std::ffi::OsStr;
+#[cfg(unix)]
+use std::fs::{File, OpenOptions};
 use std::process::{Command, Stdio};
 use tokio::io::AsyncReadExt;
 
@@ -167,6 +169,170 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
+    command(cwd, arguments, false)
+}
+
+/// Explicit LFS work uses repository-local filters installed without hooks.
+/// Ordinary acquisition keeps smudge/process disabled until requested content
+/// is fully fetched, verified and ready for publication.
+pub(super) fn git_lfs<I, S>(cwd: Option<&Path>, arguments: I) -> Command
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    command(cwd, arguments, true)
+}
+
+/// Git's submodule helper may use local hardlinks even when the enclosing
+/// checkout was cloned with --no-local. Replace only aliases within our
+/// witnessed, unpublished stage. This preserves every object and ref while
+/// removing a source inode dependency without modifying the source repository.
+pub(super) fn detach_borrowed_objects(stage: &Path, checkout: &Path) -> Result<()> {
+    let stage = stage.canonicalize().map_err(io)?;
+    let checkout = checkout.canonicalize().map_err(io)?;
+    if !checkout.starts_with(&stage) {
+        return Err(issue(
+            IssueCode::ReplacedRoot,
+            "Git checkout escaped the owned clone stage",
+        ));
+    }
+    let response = git(Some(&checkout), ["rev-parse", "--absolute-git-dir"])
+        .output()
+        .map_err(io)?;
+    if !response.status.success() {
+        return Err(issue(
+            IssueCode::RecoveryRequired,
+            "Clone Git directory is unavailable",
+        ));
+    }
+    let text = std::str::from_utf8(&response.stdout).map_err(io)?.trim();
+    let git_dir = Path::new(text).canonicalize().map_err(io)?;
+    if !git_dir.starts_with(&stage) {
+        return Err(issue(
+            IssueCode::RecoveryRequired,
+            "Clone borrows Git metadata outside its own stage",
+        ));
+    }
+    let objects = git_dir.join("objects");
+    if objects.join("info/alternates").try_exists().map_err(io)? {
+        return Err(issue(
+            IssueCode::RecoveryRequired,
+            "Clone borrows source Git objects through alternates",
+        ));
+    }
+    detach_tree(&objects)?;
+    let lfs = git_dir.join("lfs/objects");
+    if lfs.try_exists().map_err(io)? {
+        detach_tree(&lfs)?;
+    }
+    Ok(())
+}
+
+fn detach_tree(root: &Path) -> Result<()> {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        if !std::fs::symlink_metadata(&directory)
+            .map_err(io)?
+            .file_type()
+            .is_dir()
+        {
+            return Err(issue(
+                IssueCode::RecoveryRequired,
+                "Git object directory is not an ordinary directory",
+            ));
+        }
+        for entry in std::fs::read_dir(&directory).map_err(io)? {
+            let entry = entry.map_err(io)?;
+            let path = entry.path();
+            let metadata = std::fs::symlink_metadata(&path).map_err(io)?;
+            if metadata.file_type().is_dir() {
+                pending.push(path);
+            } else if metadata.file_type().is_file() {
+                detach_file(&path, &metadata)?;
+            } else {
+                return Err(issue(
+                    IssueCode::RecoveryRequired,
+                    "Clone object store contains an unexpected link or special file",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn detach_file(path: &Path, metadata: &std::fs::Metadata) -> Result<()> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    if metadata.nlink() <= 1 {
+        return Ok(());
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| corrupt("Git object has no parent"))?;
+    let mut original = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(io)?;
+    let initial = original.metadata().map_err(io)?;
+    if initial.dev() != metadata.dev()
+        || initial.ino() != metadata.ino()
+        || initial.len() != metadata.len()
+    {
+        return Err(issue(
+            IssueCode::RecoveryRequired,
+            "Clone object changed before detaching a borrowed inode",
+        ));
+    }
+    let mut owned = tempfile::NamedTempFile::new_in(parent).map_err(io)?;
+    let copied = std::io::copy(&mut original, owned.as_file_mut()).map_err(io)?;
+    if copied != initial.len() {
+        return Err(issue(
+            IssueCode::RecoveryRequired,
+            "Clone object changed while copying an independent copy",
+        ));
+    }
+    owned
+        .as_file()
+        .set_permissions(metadata.permissions())
+        .map_err(io)?;
+    owned.as_file().sync_all().map_err(io)?;
+    let current = std::fs::symlink_metadata(path).map_err(io)?;
+    if current.dev() != initial.dev()
+        || current.ino() != initial.ino()
+        || current.len() != initial.len()
+    {
+        return Err(issue(
+            IssueCode::RecoveryRequired,
+            "Clone object was replaced before independent publication",
+        ));
+    }
+    owned.persist(path).map_err(io)?;
+    File::open(parent)
+        .and_then(|dir| dir.sync_all())
+        .map_err(io)?;
+    if std::fs::symlink_metadata(path).map_err(io)?.nlink() != 1 {
+        return Err(issue(
+            IssueCode::RecoveryRequired,
+            "Clone object is still hardlinked after detachment",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn detach_file(_path: &Path, _metadata: &std::fs::Metadata) -> Result<()> {
+    Err(issue(
+        IssueCode::UnsupportedCapability,
+        "Independent native Git object detachment is unavailable on this platform",
+    ))
+}
+
+fn command<I, S>(cwd: Option<&Path>, arguments: I, materializing_lfs: bool) -> Command
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
     let mut command = Command::new("git");
     for (key, _) in std::env::vars_os() {
         if key.to_string_lossy().starts_with("GIT_") {
@@ -177,7 +343,6 @@ where
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_LFS_SKIP_SMUDGE", "1")
         .env(
             "GIT_SSH_COMMAND",
             "/usr/bin/ssh -o BatchMode=yes -o StrictHostKeyChecking=yes",
@@ -190,6 +355,9 @@ where
             "core.fsmonitor=false",
             "-c",
             "protocol.ext.allow=never",
+        ]);
+    if !materializing_lfs {
+        command.env("GIT_LFS_SKIP_SMUDGE", "1").args([
             "-c",
             "filter.lfs.smudge=",
             "-c",
@@ -197,6 +365,7 @@ where
             "-c",
             "filter.lfs.required=false",
         ]);
+    }
     #[cfg(target_os = "macos")]
     command.args(["-c", "credential.helper=osxkeychain"]);
     command

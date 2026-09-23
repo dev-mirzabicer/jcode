@@ -17,7 +17,7 @@ fn workspace_catalog_control_is_session_independent_and_roundtrips() {
         id: 42,
         catalog_version: 1,
         permissions_version: Some(1),
-        clone_version: Some(1),
+        checkout_version: Some(1),
         managed_rollout: false,
     };
     let bytes = serde_json::to_vec(&capabilities).unwrap();
@@ -84,7 +84,7 @@ fn permissions_negotiate_without_enabling_rollout_or_accepting_forged_authority(
         serde_json::from_value::<ServerEvent>(old).unwrap(),
         ServerEvent::WorkspaceCapabilities {
             permissions_version: None,
-            clone_version: None,
+            checkout_version: None,
             managed_rollout: false,
             ..
         }
@@ -143,6 +143,52 @@ fn checkout_clone_request_requires_review_identity_and_does_not_confer_human_aut
         serde_json::from_value::<WorkspaceRequest>(
             serde_json::json!({"action":"begin_clone","request":RequestId::new()})
         )
+        .is_err()
+    );
+}
+
+#[test]
+fn checkout_rebind_and_startup_copy_require_typed_reviews_and_external_approvals() {
+    use jcode_workspace_types::{LocationId, OrganizationChange, ReviewId, StartupCopyApproval};
+    let target = LocationId::new();
+    let rebind = WorkspaceRequest::Review {
+        expected_revision: 5,
+        change: OrganizationChange::RebindLocation {
+            location: target,
+            expected_old_path: "/fixture/old".into(),
+            expected_generation: 1,
+            new_path: "/fixture/new".into(),
+        },
+    };
+    let copy = WorkspaceRequest::ReviewStartupCopy {
+        expected_catalog_revision: 5,
+        source: "/fixture/source".into(),
+        target,
+        expected_source_plan_revision: 2,
+        expected_target_plan_revision: 0,
+        external_approvals: vec![StartupCopyApproval {
+            source_spec_id: "a".repeat(64),
+            approved_resolved_target: "/fixture/shared".into(),
+        }],
+    };
+    let apply = WorkspaceRequest::ApplyStartupCopy {
+        request: RequestId::new(),
+        review: ReviewId::new(),
+    };
+    for operation in [rebind, copy, apply] {
+        let wire = serde_json::to_value(&operation).unwrap();
+        assert_eq!(
+            serde_json::from_value::<WorkspaceRequest>(wire.clone()).unwrap(),
+            operation
+        );
+        let mut forged = wire;
+        forged["trusted"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<WorkspaceRequest>(forged).is_err());
+    }
+    assert!(
+        serde_json::from_value::<WorkspaceRequest>(serde_json::json!({
+            "action": "apply_startup_copy", "request": RequestId::new()
+        }))
         .is_err()
     );
 }

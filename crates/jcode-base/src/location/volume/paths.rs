@@ -103,6 +103,10 @@ pub struct PhysicalBinding {
     generation: u64,
 }
 impl PhysicalBinding {
+    pub(crate) fn with_generation(mut self, generation: u64) -> Self {
+        self.generation = generation;
+        self
+    }
     pub fn volume(&self) -> &VolumeIdentity {
         &self.volume
     }

@@ -1,5 +1,5 @@
 use super::*;
-use crate::location::volume::{PathBinding, VolumeIdentity};
+use crate::location::volume::{LocationIssue, PathBinding, VolumeIdentity};
 use crate::location::{ProjectKey, resolve_project};
 use rusqlite::{TransactionBehavior, params};
 
@@ -9,6 +9,8 @@ pub(super) struct PreparedChange {
     pub entities: Vec<Entity>,
     pub binding: Option<PhysicalBinding>,
     pub default: Option<PathBinding>,
+    #[serde(default)]
+    pub previous_binding: Option<PhysicalBinding>,
 }
 
 impl WorkspaceService {
@@ -21,7 +23,8 @@ impl WorkspaceService {
         let mut connection = self.connection()?;
         // External observations precede a short metadata transaction.
         let binding = match &change {
-            OrganizationChange::RegisterLocation { path, .. } => {
+            OrganizationChange::RegisterLocation { path, .. }
+            | OrganizationChange::RebindLocation { new_path: path, .. } => {
                 Some(self.resolver.bind_directory(path).map_err(io)?)
             }
             OrganizationChange::AdoptStandalone { location, .. } => {
@@ -47,6 +50,59 @@ impl WorkspaceService {
             }
             _ => None,
         };
+        let previous_binding = if let OrganizationChange::RebindLocation {
+            location,
+            expected_old_path,
+            expected_generation,
+            ..
+        } = &change
+        {
+            let old: BoundLocation = decode(
+                &connection
+                    .query_row(
+                        "SELECT body FROM bindings WHERE location=?1",
+                        [location.to_string()],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .map_err(corrupt)?,
+            )?;
+            let previous = old.binding;
+            if previous.observed_path() != expected_old_path
+                || previous.generation() != *expected_generation
+            {
+                return Err(issue(
+                    IssueCode::Conflict,
+                    "Checkout binding path or generation changed before rebind review",
+                ));
+            }
+            let new = binding
+                .as_ref()
+                .ok_or_else(|| corrupt("Rebind needs a new physical target"))?;
+            if previous.volume() == new.volume()
+                && previous.root_witness() == new.root_witness()
+                && previous.observed_path() == new.observed_path()
+            {
+                return Err(issue(
+                    IssueCode::Conflict,
+                    "Location is already bound to this physical root",
+                ));
+            }
+            require_old_rebindable(&self.resolver, &previous, new)?;
+            Some(previous)
+        } else {
+            None
+        };
+        let binding = match (binding, &previous_binding) {
+            (Some(binding), Some(previous)) => Some(
+                binding.with_generation(
+                    previous
+                        .generation()
+                        .checked_add(1)
+                        .ok_or_else(|| corrupt("Physical binding generation exhausted"))?,
+                ),
+            ),
+            (other, _) => other,
+        };
         let default = if let OrganizationChange::SetVolumeDefault { path, volume_uuid } = &change {
             let bound = self.resolver.bind_path(path).map_err(io)?;
             if bound.volume() != &VolumeIdentity::parse(volume_uuid).map_err(io)? {
@@ -60,7 +116,14 @@ impl WorkspaceService {
             None
         };
         require_revision(&connection, expected)?;
-        let prepared = prepare(&connection, expected, change, binding, default)?;
+        let prepared = prepare(
+            &connection,
+            expected,
+            change,
+            binding,
+            default,
+            previous_binding,
+        )?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(io)?;
@@ -92,6 +155,19 @@ impl WorkspaceService {
             .as_ref()
             .map(|binding| self.acquire_binding(binding))
             .transpose()?;
+        let _old_root_lease = match (&prepared.previous_binding, &prepared.binding) {
+            (Some(previous), Some(current)) => {
+                require_old_rebindable(&self.resolver, previous, current)?;
+                if storage::physical_key(previous)? == storage::physical_key(current)? {
+                    None
+                } else if self.resolver.resolve_directory(previous).is_ok() {
+                    Some(self.acquire_binding(previous)?)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
         if let Some(binding) = &prepared.binding {
             self.resolver
                 .resolve_directory(binding)
@@ -100,8 +176,11 @@ impl WorkspaceService {
                 if let Entity::Location(location) = value {
                     match &location.kind {
                         LocationKind::Checkout { repository, .. } => {
-                            if checkout_kind(binding.observed_path(), *repository)? != location.kind
-                            {
+                            if !matching_checkout_kind(
+                                binding.observed_path(),
+                                *repository,
+                                &location.kind,
+                            )? {
                                 return Err(issue(
                                     IssueCode::ReplacedRoot,
                                     "Git layout changed after review",
@@ -154,6 +233,38 @@ impl WorkspaceService {
             &input,
             prepared.review.targets.clone(),
         )?;
+        if let (
+            OrganizationChange::RebindLocation { location, .. },
+            Some(previous),
+            Some(current),
+        ) = (
+            &prepared.review.change,
+            &prepared.previous_binding,
+            &prepared.binding,
+        ) {
+            let history = RebindRecord {
+                operation: receipt.operation,
+                location: *location,
+                old_path: previous.observed_path().to_path_buf(),
+                new_path: current.observed_path().to_path_buf(),
+                old_volume_uuid: previous.volume().as_str().into(),
+                new_volume_uuid: current.volume().as_str().into(),
+                old_generation: previous.generation(),
+                new_generation: current.generation(),
+            };
+            transaction
+                .execute(
+                    "INSERT INTO operations VALUES(?1,'location_rebind','complete',?2)",
+                    params![receipt.operation.to_string(), encode(&history)?],
+                )
+                .map_err(io)?;
+            transaction
+                .execute(
+                    "INSERT INTO operation_targets VALUES(?1,?2)",
+                    params![receipt.operation.to_string(), location.to_string()],
+                )
+                .map_err(io)?;
+        }
         transaction.commit().map_err(io)?;
         self.after_mutation(receipt)
     }
@@ -170,6 +281,21 @@ impl WorkspaceService {
             .optional()
             .map_err(io)?;
         decode(&body.ok_or_else(|| issue(IssueCode::InvalidIdentity, "Unknown request"))?)
+    }
+
+    pub fn inspect_rebind(&self, operation: OperationId) -> Result<RebindRecord> {
+        let _lease = self.lease(false)?;
+        let body: Option<String> = self.connection()?.query_row(
+            "SELECT body FROM operations WHERE id=?1 AND kind='location_rebind' AND state='complete'",
+            [operation.to_string()], |row| row.get(0),
+        ).optional().map_err(io)?;
+        let result: RebindRecord = decode(
+            &body.ok_or_else(|| issue(IssueCode::InvalidIdentity, "Unknown rebind operation"))?,
+        )?;
+        if result.operation != operation {
+            return Err(corrupt("Rebind history identity mismatch"));
+        }
+        Ok(result)
     }
 }
 
@@ -358,12 +484,86 @@ pub(super) fn checkout_kind(path: &Path, repository: RepositoryId) -> Result<Loc
     }
 }
 
+fn require_old_rebindable(
+    resolver: &crate::location::volume::LocationResolver,
+    previous: &PhysicalBinding,
+    next: &PhysicalBinding,
+) -> Result<()> {
+    match resolver.resolve_directory(previous) {
+        Ok(observed)
+            if previous.volume() != next.volume()
+                || previous.root_witness() != next.root_witness() =>
+        {
+            Err(issue(
+                IssueCode::Conflict,
+                format!(
+                    "Original root remains available at {}; rebind does not replace or move its files",
+                    observed.path.display()
+                ),
+            ))
+        }
+        Ok(_) => Ok(()),
+        Err(error)
+            if matches!(
+                error.kind,
+                LocationIssue::OfflineVolume
+                    | LocationIssue::WrongVolume
+                    | LocationIssue::ReplacedRoot
+            ) =>
+        {
+            Ok(())
+        }
+        Err(error)
+            if error.kind == LocationIssue::Io
+                && std::fs::symlink_metadata(previous.observed_path())
+                    .is_err_and(|io| io.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(issue(
+            IssueCode::RecoveryRequired,
+            format!("Cannot establish whether the old root is still active: {error}"),
+        )),
+    }
+}
+
+fn matching_checkout_kind(
+    path: &Path,
+    repository: RepositoryId,
+    expected: &LocationKind,
+) -> Result<bool> {
+    let current = checkout_kind(path, repository)?;
+    let (
+        LocationKind::Checkout {
+            origin: actual,
+            common_directory: common,
+            ..
+        },
+        LocationKind::Checkout {
+            origin: old,
+            common_directory: expected_common,
+            ..
+        },
+    ) = (&current, expected)
+    else {
+        return Ok(false);
+    };
+    let same_layout = match old {
+        CheckoutOrigin::LinkedWorktree => *actual == CheckoutOrigin::LinkedWorktree,
+        CheckoutOrigin::AdoptedGit | CheckoutOrigin::ManagedClone => {
+            *actual == CheckoutOrigin::AdoptedGit
+        }
+    };
+    Ok(same_layout && common == expected_common)
+}
+
 fn prepare(
     connection: &Connection,
     expected: Revision,
     mut change: OrganizationChange,
     binding: Option<PhysicalBinding>,
     default: Option<PathBinding>,
+    previous_binding: Option<PhysicalBinding>,
 ) -> Result<PreparedChange> {
     let revision = expected
         .checked_add(1)
@@ -475,6 +675,118 @@ fn prepare(
                     revision,
                 }));
             }
+        }
+        OrganizationChange::RebindLocation {
+            location: id,
+            expected_old_path,
+            expected_generation,
+            new_path,
+        } => {
+            let mut value = location(connection, *id)?;
+            if matches!(
+                value.lifecycle,
+                LocationLifecycle::Closing | LocationLifecycle::Closed
+            ) || value.retired
+            {
+                return Err(issue(
+                    IssueCode::InvalidIdentity,
+                    "Closing, closed or retired roots cannot be rebound",
+                ));
+            }
+            let old = previous_binding
+                .as_ref()
+                .ok_or_else(|| corrupt("Missing prior rebind witness"))?;
+            if value.observed_path != *expected_old_path
+                || value.binding_generation != *expected_generation
+                || value.volume_uuid != old.volume().as_str()
+                || old.observed_path() != expected_old_path
+                || old.generation() != *expected_generation
+            {
+                return Err(issue(
+                    IssueCode::Conflict,
+                    "Reviewed old root no longer matches catalog location",
+                ));
+            }
+            let bound = binding
+                .as_ref()
+                .ok_or_else(|| corrupt("Missing new rebind witness"))?;
+            let key = storage::physical_key(bound)?;
+            let other: Option<String> = connection
+                .query_row(
+                    "SELECT location FROM bindings WHERE live_key=?1",
+                    [key],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(io)?;
+            if other.is_some_and(|existing| existing != id.to_string()) {
+                return Err(issue(
+                    IssueCode::Conflict,
+                    "New root is already registered under another location identity",
+                ));
+            }
+            value.kind = match value.kind {
+                LocationKind::Checkout {
+                    repository, origin, ..
+                } => {
+                    let actual = checkout_kind(bound.observed_path(), repository)?;
+                    let LocationKind::Checkout {
+                        origin: found,
+                        common_directory,
+                        ..
+                    } = actual
+                    else {
+                        unreachable!()
+                    };
+                    if (origin == CheckoutOrigin::LinkedWorktree)
+                        != (found == CheckoutOrigin::LinkedWorktree)
+                    {
+                        return Err(issue(
+                            IssueCode::InvalidInput,
+                            "Rebind cannot silently convert an independent checkout to a linked worktree or vice versa",
+                        ));
+                    }
+                    LocationKind::Checkout {
+                        repository,
+                        origin,
+                        common_directory,
+                    }
+                }
+                LocationKind::Directory => {
+                    if resolve_project(bound.observed_path())
+                        .map_err(io)?
+                        .key()
+                        .is_git()
+                    {
+                        return Err(issue(
+                            IssueCode::InvalidInput,
+                            "A directory reference cannot silently become a checkout",
+                        ));
+                    }
+                    LocationKind::Directory
+                }
+                LocationKind::Standalone { git } => {
+                    if resolve_project(bound.observed_path())
+                        .map_err(io)?
+                        .key()
+                        .is_git()
+                        != git
+                    {
+                        return Err(issue(
+                            IssueCode::InvalidInput,
+                            "Standalone rebind cannot change its physical Git kind",
+                        ));
+                    }
+                    LocationKind::Standalone { git }
+                }
+            };
+            *new_path = bound.observed_path().to_path_buf();
+            value.observed_path = new_path.clone();
+            value.volume_uuid = bound.volume().as_str().into();
+            value.binding_generation = bound.generation();
+            value.lifecycle = LocationLifecycle::Ready;
+            value.revision = revision;
+            entities.push(Entity::Location(value));
         }
         OrganizationChange::MoveLocation {
             location: id,
@@ -634,6 +946,7 @@ fn prepare(
         entities,
         binding,
         default,
+        previous_binding,
     })
 }
 
@@ -717,6 +1030,40 @@ fn apply(connection: &Connection, prepared: &PreparedChange) -> Result<()> {
                     ],
                 )
                 .map_err(|e| issue(IssueCode::Conflict, e.to_string()))?;
+        }
+        if let (Entity::Location(loc), Some(binding), Some(previous)) =
+            (value, &prepared.binding, &prepared.previous_binding)
+            && matches!(
+                prepared.review.change,
+                OrganizationChange::RebindLocation { .. }
+            )
+        {
+            let changed = connection
+                .execute(
+                    "UPDATE bindings SET body=?2,live_key=?3 WHERE location=?1 AND body=?4",
+                    params![
+                        loc.id.to_string(),
+                        encode(&BoundLocation {
+                            binding: binding.clone()
+                        })?,
+                        storage::physical_key(binding)?,
+                        encode(&BoundLocation {
+                            binding: previous.clone()
+                        })?
+                    ],
+                )
+                .map_err(|e| {
+                    issue(
+                        IssueCode::Conflict,
+                        format!("Rebind target is already owned or the old binding changed: {e}"),
+                    )
+                })?;
+            if changed != 1 {
+                return Err(issue(
+                    IssueCode::Conflict,
+                    "Old physical binding changed after review",
+                ));
+            }
         }
     }
     Ok(())

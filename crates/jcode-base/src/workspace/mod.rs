@@ -35,6 +35,8 @@ mod process_tests;
 mod query;
 mod restore;
 mod scope;
+mod startup_copy;
+pub use startup_copy::StartupCopyIntent;
 mod storage;
 #[cfg(test)]
 mod tests;

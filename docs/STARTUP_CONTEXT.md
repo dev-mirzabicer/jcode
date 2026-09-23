@@ -90,6 +90,16 @@ Consequences:
 Moving or copying a repository to another common-directory path creates a new local
 project identity. Jcode does not guess identity from repository names or remotes.
 
+The workspace checkout service can explicitly review and copy an ordered saved
+**path-only** selection from one physical root to a registered Ready location.
+It validates the target's current files through the existing Startup Context
+selector and requires fresh resolved-target approval for every external file.
+This does not copy file bodies, rewrite older Session captures or automatically
+reseed the instruction store. A catalog rebind alone does not copy a plan.
+The copy is currently a trusted backend operation; its final management form
+belongs to the staged workspace client. See
+[`dev/WORKSPACE_CHECKOUTS.md`](dev/WORKSPACE_CHECKOUTS.md).
+
 ### Non-Git projects
 
 A non-Git project uses the canonical launch directory for both project identity and path

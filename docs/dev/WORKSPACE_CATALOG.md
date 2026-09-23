@@ -1,9 +1,12 @@
 # Recoverable workspace catalog
 
 The catalog is the private organization and recovery foundation for workspace
-management. It does **not** enable managed primary placement, write enforcement,
-clone provisioning, checkout removal, independent primary hosting, or new agent
-tools. Those consumers have separate activation gates. Existing primary sessions,
+management. The catalog alone does **not** enable managed primary placement,
+write enforcement, clone provisioning, checkout removal or new agent tools.
+Independent primary hosting and scoped native enforcement now have their own
+owners, and [reviewed checkout provisioning](WORKSPACE_CHECKOUTS.md) is a
+separate service. Their ordinary managed rollout retains its human-control
+gate. Existing primary sessions,
 Startup Context, instruction stores, execution storage and context projection retain
 their existing owners and behavior.
 
@@ -136,8 +139,9 @@ Before attaching a Session, an authenticated same-user daemon client may send:
 ```
 
 The reply is `workspace_capabilities`, with `catalog_version: 1` and
-`managed_rollout: false`. Only catalog semantics are available. Do not infer the
-later complete `workspace_v1`/primary-host capabilities from this foundation.
+`managed_rollout: false`. Permissions and checkout administration negotiate
+their own optional version fields. Do not infer ordinary managed launch or
+agent-tool exposure from the presence of a backend capability.
 
 `workspace {id, request}` returns correlated `workspace_response {id, response}`.
 Typed operations include status/explicit initialize, paged list, inspect,

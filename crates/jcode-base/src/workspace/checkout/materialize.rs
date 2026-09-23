@@ -152,6 +152,21 @@ impl WorkspaceService {
         git::run(self, request, git::git(Some(root), args), capture).await
     }
 
+    async fn lfs_step<I, S>(
+        &self,
+        request: RequestId,
+        root: &Path,
+        args: I,
+        capture: &dyn OutputCapture,
+    ) -> Result<()>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        self.check_cancel(request)?;
+        git::run(self, request, git::git_lfs(Some(root), args), capture).await
+    }
+
     async fn materialize_submodules(
         &self,
         request: RequestId,
@@ -235,6 +250,7 @@ impl WorkspaceService {
                         "Submodule resolved outside the checked-out repository",
                     ));
                 }
+                git::detach_borrowed_objects(project_root, &actual)?;
                 pending.push(actual);
             }
         }
@@ -253,8 +269,8 @@ impl WorkspaceService {
         while let Some(parent) = pending.pop() {
             let config = parent.join(".lfsconfig");
             if config.exists() {
-                let url = checked_git(
-                    &parent,
+                let output = git::git(
+                    Some(&parent),
                     [
                         OsStr::new("config"),
                         OsStr::new("--file"),
@@ -262,16 +278,23 @@ impl WorkspaceService {
                         OsStr::new("--get"),
                         OsStr::new("lfs.url"),
                     ],
-                )?;
-                if !url.trim().is_empty()
-                    && !spec
-                        .trusted_lfs_urls
-                        .iter()
-                        .any(|approved| approved == url.trim())
-                {
+                )
+                .output()
+                .map_err(io)?;
+                if output.status.success() {
+                    let url = std::str::from_utf8(&output.stdout).map_err(io)?.trim();
+                    if !url.is_empty()
+                        && !spec.trusted_lfs_urls.iter().any(|approved| approved == url)
+                    {
+                        return Err(issue(
+                            IssueCode::PermissionRequired,
+                            "Checkout declares an LFS endpoint outside the reviewed trusted sources",
+                        ));
+                    }
+                } else if output.status.code() != Some(1) {
                     return Err(issue(
-                        IssueCode::PermissionRequired,
-                        "Checkout declares an LFS endpoint outside the reviewed trusted sources",
+                        IssueCode::RecoveryRequired,
+                        "Checkout LFS configuration is unreadable",
                     ));
                 }
             }
@@ -285,8 +308,20 @@ impl WorkspaceService {
                 ));
             }
             if !lfs_inventory(&parent)?.is_empty() {
-                let head = checked_git(&parent, [OsStr::new("rev-parse"), OsStr::new("HEAD")])?;
                 self.git_step(
+                    request,
+                    &parent,
+                    [
+                        OsStr::new("lfs"),
+                        OsStr::new("install"),
+                        OsStr::new("--local"),
+                        OsStr::new("--skip-repo"),
+                    ],
+                    capture,
+                )
+                .await?;
+                let head = checked_git(&parent, [OsStr::new("rev-parse"), OsStr::new("HEAD")])?;
+                self.lfs_step(
                     request,
                     &parent,
                     [
@@ -298,7 +333,7 @@ impl WorkspaceService {
                     capture,
                 )
                 .await?;
-                self.git_step(
+                self.lfs_step(
                     request,
                     &parent,
                     [OsStr::new("lfs"), OsStr::new("checkout")],
@@ -306,7 +341,7 @@ impl WorkspaceService {
                 )
                 .await?;
                 verify_lfs_files(&parent)?;
-                self.git_step(
+                self.lfs_step(
                     request,
                     &parent,
                     [OsStr::new("lfs"), OsStr::new("fsck")],
@@ -314,6 +349,7 @@ impl WorkspaceService {
                 )
                 .await?;
             }
+            git::detach_borrowed_objects(project_root, &parent)?;
             for (_, relative) in if spec.submodules {
                 submodules(&parent)?
             } else {

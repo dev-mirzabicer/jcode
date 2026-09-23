@@ -224,6 +224,12 @@ pub enum OrganizationChange {
         path: PathBuf,
         registration: Registration,
     },
+    RebindLocation {
+        location: LocationId,
+        expected_old_path: PathBuf,
+        expected_generation: u64,
+        new_path: PathBuf,
+    },
     MoveLocation {
         location: LocationId,
         home: Home,
@@ -466,6 +472,7 @@ pub struct RestoreReview {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkspaceRequest {
+    Volumes {},
     ReviewClone {
         expected_revision: Revision,
         spec: CloneSpec,
@@ -481,6 +488,24 @@ pub enum WorkspaceRequest {
         request: RequestId,
     },
     ResumeClone {
+        request: RequestId,
+    },
+    InspectRebind {
+        operation: OperationId,
+    },
+    ReviewStartupCopy {
+        expected_catalog_revision: Revision,
+        source: PathBuf,
+        target: LocationId,
+        expected_source_plan_revision: u64,
+        expected_target_plan_revision: u64,
+        external_approvals: Vec<StartupCopyApproval>,
+    },
+    ApplyStartupCopy {
+        request: RequestId,
+        review: ReviewId,
+    },
+    InspectStartupCopy {
         request: RequestId,
     },
     Permissions {
@@ -545,8 +570,12 @@ pub enum WorkspaceRequest {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum WorkspaceResponse {
+    Volumes(Vec<WorkspaceVolume>),
     CloneReview(CloneReview),
     Clone(CloneRecord),
+    Rebind(RebindRecord),
+    StartupCopyReview(StartupCopyReview),
+    StartupCopy(StartupCopyRecord),
     Permissions(Box<PermissionResponse>),
     Status(CatalogStatus),
     Page(Page),

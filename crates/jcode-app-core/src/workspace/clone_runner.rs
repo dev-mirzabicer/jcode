@@ -32,7 +32,7 @@ pub(super) async fn begin(
     .await;
     match record {
         Ok(Ok(record)) => {
-            if record.state == CloneState::Pending && record.output_run.is_none() {
+            if record.state == CloneState::Pending && record.output_runs.is_empty() {
                 start(root, request);
             }
             WorkspaceResponse::Clone(record)
@@ -57,7 +57,7 @@ pub(super) async fn resume(request: RequestId, client: String) -> WorkspaceRespo
     .await;
     match record {
         Ok(Ok(record)) if !matches!(record.state, CloneState::Ready | CloneState::Cancelled) => {
-            if let Some(previous) = &record.output_run {
+            if let Some(previous) = record.output_runs.last() {
                 let previous = previous.clone();
                 let output_root = match crate::storage::jcode_dir() {
                     Ok(path) => path,
@@ -142,7 +142,7 @@ async fn run(service: &WorkspaceService, request: RequestId) -> Result<()> {
     let invocation = Invocation {
         session_id: "workspace-operations".into(),
         message_id: request.to_string(),
-        call_path: vec!["clone".into(), crate::id::new_id("attempt")],
+        call_path: vec![crate::id::new_id("clone-attempt")],
         tool: "workspace_clone".into(),
         input: serde_json::json!({"request": request}),
         working_dir: None,

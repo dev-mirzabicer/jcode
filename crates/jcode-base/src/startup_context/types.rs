@@ -549,6 +549,30 @@ impl StartupProjectPlanTransition {
             || self.previous_entries != self.proposed_entries
     }
 
+    /// A fresh validation may have a different preparation timestamp while
+    /// describing exactly the same revisioned path-only transition.
+    pub fn same_change(&self, other: &Self) -> bool {
+        self.project == other.project
+            && self.previous_revision == other.previous_revision
+            && self.proposed_revision == other.proposed_revision
+            && self.previous_entries == other.previous_entries
+            && self.proposed_entries == other.proposed_entries
+    }
+
+    pub fn matches_applied_plan(
+        &self,
+        plan: &StartupProjectPlan,
+    ) -> Result<bool, StartupContextError> {
+        Ok(plan.project_key().to_stored()? == self.project
+            && plan.revision() == self.proposed_revision
+            && plan
+                .entries()
+                .iter()
+                .map(StartupFileSpec::to_stored)
+                .collect::<Result<Vec<_>, _>>()?
+                == self.proposed_entries)
+    }
+
     pub(super) fn project(&self) -> &StoredStartupProjectIdentity {
         &self.project
     }
