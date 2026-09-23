@@ -105,15 +105,21 @@ publication, the Ready checkout retains a separate `output_issue`; failure to
 record diagnostics is not misreported as filesystem rollback.
 No operation moves/removes another user's existing path to create a clone.
 
-The selected source's standard credential helper and SSH agent retain
-credential custody. Embedded URL credentials, ambient Git path redirection,
-unrequested hooks/templates/filters, shell command injection, unknown Git
-options and interactive authentication are rejected/neutralized. A selected
-submodule URL, local or remote, and an explicit `.lfsconfig` endpoint require
-exact initial or stage-bound review. Git LFS is required when requested and missing dependency
-errors are actionable. Only the new clone receives repository-local LFS
-filters (`--skip-repo` avoids installing hooks). No global Git configuration,
-project setup command, package-manager install or background service is run
+For selected network Git and LFS operations, Git receives only trusted
+system/global `credential.helper`, URL-scoped helper, username and
+`useHttpPath` settings, transiently in its command environment. Repository
+and ambient `GIT_CONFIG_*` values cannot substitute executable helpers.
+The user's configured helper and SSH agent retain credential custody. No
+helper is invented when the trusted configuration has none. Unavailable
+credentials fail noninteractively with the reviewed intent intact.
+Embedded URL credentials, ambient Git path redirection, unrequested
+hooks/templates/filters, shell command injection and unknown Git options
+remain rejected/neutralized. A selected submodule URL and a changed effective
+LFS endpoint require exact initial or stage-bound review. Git LFS is required
+when requested, and missing-dependency errors are actionable. Only the new
+clone receives repository-local LFS filters (`--skip-repo` avoids installing
+hooks). No global Git configuration is changed. No project setup command,
+package-manager install or background service is run
 as a consequence of cloning. Auth and network failure leave an inspectable
 incomplete operation, not a Ready checkout.
 

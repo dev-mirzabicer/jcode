@@ -68,7 +68,7 @@ pub(super) fn resolve_base(source: &CloneSource, base: &CloneBase) -> Result<Str
                 // An arbitrary unreachable object is not proof of a reviewed base.
                 // ls-remote's trailing arguments filter *names*, not object IDs.
                 // A peeled annotated tag is a commit; its tag object is not.
-                let output = git(None, [OsStr::new("ls-remote"), OsStr::new(url)])
+                let output = authorized(None, [OsStr::new("ls-remote"), OsStr::new(url)], false)?
                     .output()
                     .map_err(io)?;
                 let lines = parse_ls_remote(output)?;
@@ -97,7 +97,7 @@ pub(super) fn resolve_base(source: &CloneSource, base: &CloneBase) -> Result<Str
                 reference
             } else {
                 let peeled = format!("{reference}^{{}}");
-                let output = git(
+                let output = authorized(
                     None,
                     [
                         OsStr::new("ls-remote"),
@@ -105,7 +105,8 @@ pub(super) fn resolve_base(source: &CloneSource, base: &CloneBase) -> Result<Str
                         OsStr::new(&reference),
                         OsStr::new(&peeled),
                     ],
-                )
+                    false,
+                )?
                 .output()
                 .map_err(io)?;
                 let lines = parse_ls_remote(output)?;
@@ -172,8 +173,8 @@ fn parse_ls_remote(output: std::process::Output) -> Result<Vec<(String, String)>
 }
 
 /// Restrict Git environment without evaluating repository hooks, ambient Git
-/// redirection, global filters, credential command helpers or SSH overrides.
-/// macOS keychain and the user's ordinary SSH agent retain credential custody.
+/// redirection, global filters or SSH overrides. Network operations separately
+/// select user/system credential settings without inheriting unrelated config.
 pub(super) fn git<I, S>(cwd: Option<&Path>, arguments: I) -> Command
 where
     I: IntoIterator<Item = S>,
@@ -191,6 +192,94 @@ where
     S: AsRef<OsStr>,
 {
     command(cwd, arguments, true)
+}
+
+/// Only an explicitly selected Git transport may use the user's configured
+/// credential helpers. The selected config remains process-local, never in a
+/// clone review, catalog receipt, invocation input or command-line argument.
+pub(super) fn authorized<I, S>(cwd: Option<&Path>, arguments: I, lfs: bool) -> Result<Command>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let mut command = command(cwd, arguments, lfs);
+    let mut selected = vec![("credential.helper".to_owned(), String::new())];
+    selected.extend(configured_credentials()?);
+    command.env("GIT_CONFIG_COUNT", selected.len().to_string());
+    for (index, (key, value)) in selected.into_iter().enumerate() {
+        command.env(format!("GIT_CONFIG_KEY_{index}"), key);
+        command.env(format!("GIT_CONFIG_VALUE_{index}"), value);
+    }
+    command
+        .env("GIT_ASKPASS", "/usr/bin/false")
+        .env("SSH_ASKPASS", "/usr/bin/false")
+        .env("GCM_INTERACTIVE", "never");
+    Ok(command)
+}
+
+fn configured_credentials() -> Result<Vec<(String, String)>> {
+    let directory = tempfile::tempdir().map_err(io)?;
+    let mut query = Command::new("git");
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("GIT_") {
+            query.env_remove(key);
+        }
+    }
+    // A caller may disable system configuration. It cannot redirect the
+    // trusted user/system config paths through ambient GIT_CONFIG_* values.
+    if std::env::var("GIT_CONFIG_NOSYSTEM").is_ok_and(|v| v == "1") {
+        query.env("GIT_CONFIG_NOSYSTEM", "1");
+    }
+    let output = query
+        .current_dir(directory.path())
+        .args(["config", "--includes", "--null", "--list", "--show-scope"])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(io)?;
+    if !output.status.success() || output.stdout.len() > 1024 * 1024 {
+        return Err(issue(
+            IssueCode::RecoveryRequired,
+            "Trusted Git credential configuration is unreadable; repair it before retrying the source",
+        ));
+    }
+    select_credential_settings(&output.stdout)
+}
+
+fn select_credential_settings(source: &[u8]) -> Result<Vec<(String, String)>> {
+    if !source.is_empty() && source.last() != Some(&0) {
+        return Err(corrupt("Truncated scoped Git configuration"));
+    }
+    let entries = source.split(|byte| *byte == 0).collect::<Vec<_>>();
+    let entries = &entries[..entries.len().saturating_sub(1)];
+    if entries.len() % 2 != 0 || entries.iter().any(|entry| entry.is_empty()) {
+        return Err(corrupt("Malformed scoped Git configuration"));
+    }
+    let mut selected = Vec::new();
+    for record in entries.chunks_exact(2) {
+        let scope = std::str::from_utf8(record[0]).map_err(io)?;
+        if !matches!(scope, "global" | "system") {
+            continue;
+        }
+        let split = record[1]
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .ok_or_else(|| corrupt("Malformed Git credential setting"))?;
+        let (key, value) = record[1].split_at(split);
+        let value = &value[1..];
+        let key = std::str::from_utf8(key).map_err(io)?;
+        let lower = key.to_ascii_lowercase();
+        if lower.starts_with("credential.")
+            && [".helper", ".username", ".usehttppath"]
+                .iter()
+                .any(|suffix| lower.ends_with(suffix))
+        {
+            selected.push((
+                key.to_owned(),
+                String::from_utf8(value.to_vec()).map_err(io)?,
+            ));
+        }
+    }
+    Ok(selected)
 }
 
 /// Git's submodule helper may use local hardlinks even when the enclosing
@@ -376,8 +465,6 @@ where
             "filter.lfs.required=false",
         ]);
     }
-    #[cfg(target_os = "macos")]
-    command.args(["-c", "credential.helper=osxkeychain"]);
     command
         .args(arguments)
         .stdin(Stdio::null())
@@ -478,5 +565,48 @@ async fn pipe(
         Err(error)
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod credential_tests {
+    use super::*;
+
+    #[test]
+    fn only_trusted_scopes_and_selected_credential_keys_cross_git_config_boundary() {
+        let raw = b"local\0credential.helper\n/fixture/untrusted-repo-helper\0\
+                    global\0credential.helper\n/fixture/user-helper\0\
+                    global\0credential.http://fixture.invalid.helper\n/fixture/scoped-helper\0\
+                    system\0credential.helper\nosxkeychain\0\
+                    global\0credential.http://fixture.invalid.usehttppath\ntrue\0\
+                    global\0filter.lfs.process\n/fixture/untrusted-filter\0\
+                    global\0core.hookspath\n/fixture/untrusted-hook\0\
+                    global\0credential.password\nsynthetic-private-data\0";
+        assert_eq!(
+            select_credential_settings(raw).unwrap(),
+            vec![
+                ("credential.helper".into(), "/fixture/user-helper".into()),
+                (
+                    "credential.http://fixture.invalid.helper".into(),
+                    "/fixture/scoped-helper".into()
+                ),
+                ("credential.helper".into(), "osxkeychain".into()),
+                (
+                    "credential.http://fixture.invalid.usehttppath".into(),
+                    "true".into()
+                ),
+            ]
+        );
+        assert_eq!(select_credential_settings(b"").unwrap(), Vec::new());
+        assert_eq!(
+            select_credential_settings(b"global\0credential.helper\n\0").unwrap(),
+            vec![("credential.helper".into(), String::new())]
+        );
+        assert_eq!(
+            select_credential_settings(b"global\0credential.helper\nmissing terminal record")
+                .unwrap_err()
+                .code,
+            IssueCode::CorruptState
+        );
     }
 }

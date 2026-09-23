@@ -651,7 +651,7 @@ impl WorkspaceService {
                     source,
                     stage.observed_path().as_os_str().into(),
                 ]);
-                let mut command = git::git(None, args);
+                let mut command = git::authorized(None, args, false)?;
                 command.env("GIT_PROTOCOL_FROM_USER", "0");
                 git::run(self, request, command, capture).await?;
                 self.verify_acquired(&operation, &stage)?;

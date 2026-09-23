@@ -139,7 +139,13 @@ impl WorkspaceService {
         S: AsRef<OsStr>,
     {
         self.check_cancel(request)?;
-        git::run(self, request, git::git_lfs(Some(root), args), capture).await
+        git::run(
+            self,
+            request,
+            git::authorized(Some(root), args, true)?,
+            capture,
+        )
+        .await
     }
 
     async fn materialize_submodules(
@@ -176,7 +182,7 @@ impl WorkspaceService {
                     || url.starts_with("file://")
                     || url.starts_with('/');
                 trust::validate_submodule_url(&url)?;
-                let mut command = git::git(
+                let mut command = git::authorized(
                     Some(&parent),
                     [
                         OsStr::new("-c"),
@@ -192,7 +198,8 @@ impl WorkspaceService {
                         OsStr::new("--"),
                         relative.as_os_str(),
                     ],
-                );
+                    false,
+                )?;
                 command.env("GIT_PROTOCOL_FROM_USER", "0");
                 git::run(self, request, command, capture).await?;
                 let actual = candidate.canonicalize().map_err(io)?;
