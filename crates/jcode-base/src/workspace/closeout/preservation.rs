@@ -10,6 +10,7 @@ pub(super) struct PreservationManifest {
     pub files_digest: String,
     pub bundles: Vec<(PathBuf, String)>,
     pub git_manifests: Vec<(PathBuf, String)>,
+    pub references: (PathBuf, String),
 }
 
 impl WorkspaceService {
@@ -35,6 +36,15 @@ impl WorkspaceService {
             return Err(corrupt("Closeout Git inventory integrity changed"));
         }
         let snapshots: Vec<git::RepositorySnapshot> = storage::read_json(history)?;
+        let references = stored.references.clone().ok_or_else(|| {
+            issue(
+                IssueCode::IncompleteCapture,
+                "Refresh checkout references before preservation",
+            )
+        })?;
+        if backup::file_digest(&references.0)? != references.1 {
+            return Err(corrupt("Closeout reference inventory integrity changed"));
+        }
         let _root = self.acquire_binding(&stored.binding)?;
         let destination = self
             .resolver
@@ -46,12 +56,17 @@ impl WorkspaceService {
                 "Preservation destination moved; review its binding before proceeding",
             ));
         }
+        let destination_archive = archive::Archive::open(&destination.path)?;
+        self.resolver
+            .resolve_directory(&stored.destination)
+            .map_err(io)?;
+        destination_archive.verify()?;
         inventory::verify_source(&stored)?;
         let directory = stored
             .record
             .preservation_directory
             .join(format!("capture-{}", RequestId::new()));
-        storage::private_dir(&directory)?;
+        let archive = destination_archive.subtree(&directory)?;
         {
             let mut connection = self.connection()?;
             let transaction = connection
@@ -83,10 +98,11 @@ impl WorkspaceService {
                 snapshot,
                 &directory.join(format!("git-{index}")),
                 capture,
+                &archive,
             )
             .await?;
             bundles.push((path.clone(), backup::file_digest(&path)?));
-            for name in ["lfs.json", "verified-refs.json"] {
+            for name in ["lfs.json", "verified-refs.json", "administration.json"] {
                 let manifest = path
                     .parent()
                     .ok_or_else(|| corrupt("Git preservation has no directory"))?
@@ -96,7 +112,7 @@ impl WorkspaceService {
                 }
             }
         }
-        let files = files::preserve(&stored, &directory)?;
+        let files = files::preserve_in(&stored, &directory, &archive)?;
         self.resolver
             .resolve_directory(&stored.destination)
             .map_err(io)?;
@@ -116,9 +132,10 @@ impl WorkspaceService {
             files,
             bundles,
             git_manifests,
+            references,
         };
         let path = directory.join("manifest.json");
-        storage::atomic_json(&path, &manifest)?;
+        archive.json(&path, &manifest)?;
         let hash = backup::file_digest(&path)?;
         self.checkpoint("closeout_preservation_written")?;
         let mut connection = self.connection()?;

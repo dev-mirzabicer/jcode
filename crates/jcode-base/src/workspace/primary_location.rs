@@ -137,7 +137,9 @@ impl WorkspaceService {
                 "Command cwd is outside the new placement's writable roots; choose an ordinary cwd or explicitly carry/approve its grant",
             ));
         }
-        let root_lease = self.acquire_root(root.id)?;
+        // Preparation protects against relocation/removal, not ordinary work
+        // in the same checkout. Multiple sessions may share a busy Ready root.
+        let root_lease = self.acquire_mutation_binding(&physical.binding)?;
         root_lease.validate_binding(&physical.binding)?;
         self.resolver
             .resolve_directory(&binding)

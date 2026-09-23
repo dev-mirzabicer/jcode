@@ -4,12 +4,14 @@ use super::*;
 use rusqlite::{TransactionBehavior, params};
 use std::collections::BTreeMap;
 
+mod archive;
 mod files;
 #[cfg(unix)]
 mod git;
 mod inventory;
 #[cfg(unix)]
 mod preservation;
+mod references;
 #[cfg(all(test, target_os = "macos"))]
 mod tests;
 #[cfg(unix)]
@@ -24,6 +26,7 @@ struct StoredCloseout {
     inventory: Option<PathBuf>,
     history: Option<PathBuf>,
     history_digest: Option<String>,
+    references: Option<(PathBuf, String)>,
     preservation: Option<PathBuf>,
     decisions: BTreeMap<String, CloseoutDecision>,
     final_approval: Option<String>,
@@ -135,6 +138,11 @@ impl WorkspaceService {
             }
         };
         let destination = self.resolver.bind_directory(&base).map_err(io)?;
+        let preservation_volume_ownership = crate::location::native_files::VerifiedDirectory::open(
+            destination.observed_path().into(),
+        )
+        .and_then(|directory| directory.volume_ownership_enforced())
+        .map_err(io)?;
         if destination
             .observed_path()
             .starts_with(binding.observed_path())
@@ -180,6 +188,7 @@ impl WorkspaceService {
                 .join(location.id.to_string())
                 .join(receipt.operation.to_string()),
             preservation_digest: None,
+            preservation_volume_ownership,
             quarantine: None,
             removed_entries: 0,
             issues: vec![],
@@ -192,6 +201,7 @@ impl WorkspaceService {
             inventory: None,
             history: None,
             history_digest: None,
+            references: None,
             preservation: None,
             decisions: BTreeMap::new(),
             final_approval: None,

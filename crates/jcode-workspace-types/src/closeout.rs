@@ -44,6 +44,9 @@ pub struct CloseoutRecord {
     pub inventory_digest: Option<String>,
     pub inventory_entries: u64,
     pub preservation_directory: PathBuf,
+    /// Observed filesystem property, not a claim of encryption or a sandbox.
+    #[serde(default)]
+    pub preservation_volume_ownership: Option<bool>,
     pub preservation_digest: Option<String>,
     pub quarantine: Option<PathBuf>,
     pub removed_entries: u64,

@@ -2,7 +2,7 @@
 //! index, LFS payload, ignored document, symlink or filesystem metadata.
 use super::*;
 use inventory::{Item, Witness};
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{BufWriter, Read, Write};
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -12,26 +12,50 @@ pub(super) struct PreservedItem {
     pub saved: Option<PathBuf>,
 }
 
+#[cfg(test)]
 pub(super) fn preserve(stored: &StoredCloseout, directory: &Path) -> Result<PathBuf> {
+    preserve_in(stored, directory, &archive::Archive::open(directory)?)
+}
+
+pub(super) fn preserve_in(
+    stored: &StoredCloseout,
+    directory: &Path,
+    archive: &archive::Archive,
+) -> Result<PathBuf> {
+    preserve_tree(
+        &inventory::source(stored)?,
+        &stored.decisions,
+        stored.record.spec.full_archive,
+        directory,
+        archive,
+    )
+}
+
+pub(super) fn preserve_tree(
+    source_tree: &inventory::TreeSnapshot,
+    decisions: &BTreeMap<String, CloseoutDecision>,
+    full_archive: bool,
+    directory: &Path,
+    archive: &archive::Archive,
+) -> Result<PathBuf> {
+    inventory::verify_tree(source_tree)?;
     let tree = directory.join("files");
     let restored = directory.join("verified-restore");
-    storage::private_dir(&tree)?;
-    storage::private_dir(&restored)?;
+    archive.directory(&tree)?;
+    archive.directory(&restored)?;
     let manifest = directory.join("files.jsonl");
-    let mut output = BufWriter::new(storage::private_file(&manifest, true)?);
+    let mut output = BufWriter::new(archive.file(&manifest)?);
     let mut directories = Vec::new();
     let mut hardlinks: BTreeMap<(u64, u64), (PathBuf, PathBuf)> = BTreeMap::new();
-    inventory::visit(stored, |item| {
+    inventory::visit_tree(source_tree, |item| {
         if item.witness.is_none() {
             return Ok(());
         }
         validate_relative(&item.entry.path)?;
-        let source = stored.binding.observed_path().join(&item.entry.path);
-        let disposition = match stored.decisions.get(&item.entry.id) {
+        let source = source_tree.root.join(&item.entry.path);
+        let disposition = match decisions.get(&item.entry.id) {
             Some(decision) => decision.disposition.clone(),
-            None if stored.record.spec.full_archive
-                || item.entry.kind == CloseoutEntryKind::Directory =>
-            {
+            None if full_archive || item.entry.kind == CloseoutEntryKind::Directory => {
                 CloseoutDisposition::Preserve
             }
             None => {
@@ -41,7 +65,7 @@ pub(super) fn preserve(stored: &StoredCloseout, directory: &Path) -> Result<Path
                 ));
             }
         };
-        if stored.record.spec.full_archive
+        if full_archive
             && matches!(
                 disposition,
                 CloseoutDisposition::Redundant { .. } | CloseoutDisposition::Preserved { .. }
@@ -71,11 +95,17 @@ pub(super) fn preserve(stored: &StoredCloseout, directory: &Path) -> Result<Path
                     ),
                 ));
             }
-            CloseoutDisposition::Redundant { .. } => None,
+            CloseoutDisposition::Redundant { .. } => {
+                if item.entry.kind == CloseoutEntryKind::Directory {
+                    archive.directory(&tree.join(&item.entry.path))?;
+                    archive.directory(&restored.join(&item.entry.path))?;
+                }
+                None
+            }
             CloseoutDisposition::Preserved { path } => {
                 let destination =
                     crate::location::native_files::resolve_removal_entry(path).map_err(io)?;
-                if destination.starts_with(stored.binding.observed_path()) {
+                if destination.starts_with(&source_tree.root) {
                     return Err(issue(
                         IssueCode::PreservationIncomplete,
                         "Preservation reference is inside the checkout",
@@ -85,15 +115,22 @@ pub(super) fn preserve(stored: &StoredCloseout, directory: &Path) -> Result<Path
                 // Exercise restoration from the claimed durable reference, not
                 // merely the source or a caller-supplied digest.
                 let test = restored.join(&item.entry.path);
-                copy_entry(&item, &destination, &test)?;
+                if item.entry.kind == CloseoutEntryKind::Directory {
+                    archive.directory(&test)?;
+                    let local = tree.join(&item.entry.path);
+                    archive.directory(&local)?;
+                    directories.push((item.clone(), destination.clone(), local));
+                } else {
+                    copy_entry(archive, &item, &destination, &test)?;
+                }
                 verify_copy(&item, &test)?;
                 Some(destination)
             }
             CloseoutDisposition::Preserve => {
                 let destination = tree.join(&item.entry.path);
                 if item.entry.kind == CloseoutEntryKind::Directory {
-                    storage::private_dir(&destination)?;
-                    storage::private_dir(&restored.join(&item.entry.path))?;
+                    archive.directory(&destination)?;
+                    archive.directory(&restored.join(&item.entry.path))?;
                     directories.push((item.clone(), source.clone(), destination.clone()));
                 } else {
                     let test = restored.join(&item.entry.path);
@@ -101,11 +138,11 @@ pub(super) fn preserve(stored: &StoredCloseout, directory: &Path) -> Result<Path
                     if item.entry.kind == CloseoutEntryKind::File
                         && let Some((saved, checked)) = key.and_then(|key| hardlinks.get(&key))
                     {
-                        std::fs::hard_link(saved, &destination).map_err(io)?;
-                        std::fs::hard_link(checked, &test).map_err(io)?;
+                        link_entry(archive, saved, &destination)?;
+                        link_entry(archive, checked, &test)?;
                     } else {
-                        copy_entry(&item, &source, &destination)?;
-                        copy_entry(&item, &destination, &test)?;
+                        copy_entry(archive, &item, &source, &destination)?;
+                        copy_entry(archive, &item, &destination, &test)?;
                         if item.entry.kind == CloseoutEntryKind::File
                             && item.entry.links > 1
                             && let Some(key) = key
@@ -134,13 +171,19 @@ pub(super) fn preserve(stored: &StoredCloseout, directory: &Path) -> Result<Path
     // Directory modes/times/ACLs are installed last so read-only source modes
     // cannot prevent the remaining children from being captured or restored.
     for (item, source, destination) in directories.into_iter().rev() {
-        copy_metadata(&source, &destination, false)?;
-        copy_metadata(&destination, &restored.join(&item.entry.path), false)?;
+        copy_metadata(archive, &source, &destination, false)?;
+        copy_metadata(
+            archive,
+            &destination,
+            &restored.join(&item.entry.path),
+            false,
+        )?;
     }
     output.flush().map_err(io)?;
     output.get_ref().sync_all().map_err(io)?;
-    inventory::verify_source(stored)?;
+    inventory::verify_tree(source_tree)?;
     storage::sync_dir(directory)?;
+    archive.verify()?;
     Ok(manifest)
 }
 
@@ -190,24 +233,35 @@ fn validate_relative(path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn copy_entry(item: &Item, source: &Path, destination: &Path) -> Result<()> {
+pub(super) fn copy_entry(
+    archive: &archive::Archive,
+    item: &Item,
+    source: &Path,
+    destination: &Path,
+) -> Result<()> {
     let parent = destination
         .parent()
         .ok_or_else(|| corrupt("Preserved file has no parent"))?;
-    storage::private_dir(parent)?;
     let source_before = Witness::of(&std::fs::symlink_metadata(source).map_err(io)?)?;
-    let parent_guard =
-        crate::location::native_files::VerifiedDirectory::open(parent.to_path_buf()).map_err(io)?;
+    let parent_guard = archive.directory(parent)?;
+    let source_parent = crate::location::native_files::VerifiedDirectory::open(
+        source
+            .parent()
+            .ok_or_else(|| corrupt("Source has no parent"))?
+            .into(),
+    )
+    .map_err(io)?;
+    let source_name = source
+        .file_name()
+        .ok_or_else(|| corrupt("Source has no leaf"))?;
+    let destination_name = destination
+        .file_name()
+        .ok_or_else(|| corrupt("Destination has no leaf"))?;
     match item.entry.kind {
         CloseoutEntryKind::File => {
-            let mut options = OpenOptions::new();
-            options.read(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-            }
-            let mut input = options.open(source).map_err(io)?;
+            let mut input = source_parent
+                .open_preserved_entry(source_name, false)
+                .map_err(io)?;
             if !input.metadata().map_err(io)?.is_file()
                 || Witness::of(&input.metadata().map_err(io)?)? != source_before
             {
@@ -216,7 +270,9 @@ pub(super) fn copy_entry(item: &Item, source: &Path, destination: &Path) -> Resu
                     "Preservation source identity changed",
                 ));
             }
-            let mut output = storage::private_file(destination, true)?;
+            let mut output = parent_guard
+                .create_preserved_file(destination_name)
+                .map_err(io)?;
             let mut hasher = Sha256::new();
             let mut buffer = [0u8; 65536];
             loop {
@@ -243,14 +299,10 @@ pub(super) fn copy_entry(item: &Item, source: &Path, destination: &Path) -> Resu
             if Some(&target) != item.entry.link_target.as_ref() {
                 return Err(issue(IssueCode::Conflict, "Source symlink changed"));
             }
-            #[cfg(unix)]
-            std::os::unix::fs::symlink(target, destination).map_err(io)?;
-            #[cfg(not(unix))]
-            return Err(issue(
-                IssueCode::UnsupportedCapability,
-                "Native symlink preservation unavailable",
-            ));
-            copy_metadata(source, destination, true)?;
+            parent_guard
+                .create_preserved_symlink(destination_name, &target)
+                .map_err(io)?;
+            copy_metadata(archive, source, destination, true)?;
         }
         _ => {
             return Err(issue(
@@ -260,19 +312,43 @@ pub(super) fn copy_entry(item: &Item, source: &Path, destination: &Path) -> Resu
         }
     }
     parent_guard.verify().map_err(io)?;
+    source_parent.verify().map_err(io)?;
     if Witness::of(&std::fs::symlink_metadata(source).map_err(io)?)? != source_before {
         return Err(issue(
             IssueCode::Conflict,
             "Preservation source changed after copy",
         ));
     }
-    storage::sync_dir(parent)
+    archive.verify()
+}
+
+fn link_entry(archive: &archive::Archive, source: &Path, destination: &Path) -> Result<()> {
+    let from = archive.directory(
+        source
+            .parent()
+            .ok_or_else(|| corrupt("Link source parent missing"))?,
+    )?;
+    let to = archive.directory(
+        destination
+            .parent()
+            .ok_or_else(|| corrupt("Link destination parent missing"))?,
+    )?;
+    to.link_preserved_file(
+        destination
+            .file_name()
+            .ok_or_else(|| corrupt("Link destination missing"))?,
+        &from,
+        source
+            .file_name()
+            .ok_or_else(|| corrupt("Link source missing"))?,
+    )
+    .map_err(io)
 }
 
 #[cfg(target_os = "macos")]
 fn copy_open_metadata(source: &File, destination: &File) -> Result<()> {
     use std::os::fd::AsRawFd;
-    // SAFETY: both descriptors are owned, verified regular files. This uses
+    // SAFETY: both descriptors are owned, verified filesystem entries. This uses
     // macOS's complete metadata copier, including ACLs and extended attributes.
     if unsafe {
         libc::fcopyfile(
@@ -295,38 +371,51 @@ fn copy_open_metadata(_: &File, _: &File) -> Result<()> {
     ))
 }
 
-#[cfg(target_os = "macos")]
-fn copy_metadata(source: &Path, destination: &Path, symlink: bool) -> Result<()> {
-    use std::os::unix::ffi::OsStrExt;
-    let source = std::ffi::CString::new(source.as_os_str().as_bytes()).map_err(io)?;
-    let destination = std::ffi::CString::new(destination.as_os_str().as_bytes()).map_err(io)?;
-    let flags = libc::COPYFILE_METADATA | libc::COPYFILE_NOFOLLOW;
-    // SAFETY: NUL-terminated paths name previously created directory or symlink
-    // entries. NOFOLLOW applies to both sides; no link target is accessed.
-    if unsafe {
-        libc::copyfile(
-            source.as_ptr(),
-            destination.as_ptr(),
-            std::ptr::null_mut(),
-            flags,
+fn copy_metadata(
+    archive: &archive::Archive,
+    source: &Path,
+    destination: &Path,
+    symlink: bool,
+) -> Result<()> {
+    use crate::location::native_files::VerifiedDirectory;
+    if symlink {
+        let from = VerifiedDirectory::open(
+            source
+                .parent()
+                .ok_or_else(|| corrupt("Metadata source parent missing"))?
+                .into(),
         )
-    } != 0
-    {
-        return Err(io(std::io::Error::last_os_error()));
-    }
-    if !symlink {
-        File::open(Path::new(std::ffi::OsStr::from_bytes(
-            destination.as_bytes(),
-        )))
-        .and_then(|file| file.sync_all())
         .map_err(io)?;
+        let to = archive.directory(
+            destination
+                .parent()
+                .ok_or_else(|| corrupt("Metadata destination parent missing"))?,
+        )?;
+        let input = from
+            .open_preserved_entry(
+                source
+                    .file_name()
+                    .ok_or_else(|| corrupt("Metadata source missing"))?,
+                true,
+            )
+            .map_err(io)?;
+        let output = to
+            .open_preserved_entry(
+                destination
+                    .file_name()
+                    .ok_or_else(|| corrupt("Metadata destination missing"))?,
+                true,
+            )
+            .map_err(io)?;
+        copy_open_metadata(&input, &output)?;
+        from.verify().map_err(io)?;
+        to.verify().map_err(io)?;
+    } else {
+        let from = VerifiedDirectory::open(source.into()).map_err(io)?;
+        let mut to = archive.existing_directory(destination)?;
+        to.copy_preserved_metadata(from.preservation_handle().map_err(io)?)
+            .map_err(io)?;
+        from.verify().map_err(io)?;
     }
-    Ok(())
-}
-#[cfg(not(target_os = "macos"))]
-fn copy_metadata(_: &Path, _: &Path, _: bool) -> Result<()> {
-    Err(issue(
-        IssueCode::UnsupportedCapability,
-        "Native metadata preservation unavailable",
-    ))
+    archive.verify()
 }

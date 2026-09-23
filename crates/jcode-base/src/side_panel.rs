@@ -12,6 +12,40 @@ pub fn snapshot_for_session(session_id: &str) -> Result<SidePanelSnapshot> {
     hydrate_snapshot(state)
 }
 
+/// Read-only reference projection. Missing linked content is not loaded, and
+/// inspection cannot create state or turn a corrupt index into an empty one.
+pub fn references_for_session_in(
+    root: &Path,
+    session_id: &str,
+) -> Result<Vec<PersistedSidePanelPage>> {
+    anyhow::ensure!(
+        !session_id.is_empty()
+            && session_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-'),
+        "Invalid Session identity"
+    );
+    let path = root.join("side_panel").join(session_id).join("index.json");
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = match options.open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    anyhow::ensure!(
+        file.metadata()?.is_file(),
+        "Side-panel index is not a regular file"
+    );
+    let state: PersistedSidePanelState = serde_json::from_reader(file)?;
+    Ok(state.pages)
+}
+
 pub fn write_markdown_page(
     session_id: &str,
     page_id: &str,

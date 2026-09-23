@@ -10,26 +10,23 @@ pub(super) struct LfsObject {
 }
 
 pub(super) async fn preserve(
-    service: &WorkspaceService,
-    operation: OperationId,
+    runner: &GitExecution<'_>,
     snapshot: &RepositorySnapshot,
     stage: &Path,
     restored: &Path,
-    capture: &dyn OutputCapture,
+    archive: &archive::Archive,
 ) -> Result<()> {
     // The restored refs include detached/reflog history as well as every
     // original ref. Git LFS supplies its established pointer parser, offline.
     let listing = stage.join("lfs-history.json");
-    run(
-        service,
-        operation,
-        restored,
-        &["lfs", "ls-files", "--all", "--json"],
-        None,
-        &listing,
-        capture,
-    )
-    .await?;
+    runner
+        .run(
+            restored,
+            &["lfs", "ls-files", "--all", "--json"],
+            None,
+            &listing,
+        )
+        .await?;
     let value: serde_json::Value =
         serde_json::from_reader(File::open(&listing).map_err(io)?).map_err(io)?;
     let entries = match value.get("files") {
@@ -38,16 +35,14 @@ pub(super) async fn preserve(
         _ => return Err(corrupt("Invalid Git LFS history inventory")),
     };
     let config = stage.join("lfs-storage");
-    run(
-        service,
-        operation,
-        &snapshot.root,
-        &["config", "--null", "--default", "", "--get", "lfs.storage"],
-        None,
-        &config,
-        capture,
-    )
-    .await?;
+    runner
+        .run(
+            &snapshot.root,
+            &["config", "--null", "--default", "", "--get", "lfs.storage"],
+            None,
+            &config,
+        )
+        .await?;
     let bytes = std::fs::read(&config).map_err(io)?;
     let value = bytes
         .strip_suffix(&[0])
@@ -121,9 +116,9 @@ pub(super) async fn preserve(
             witness: Some(witness),
         };
         let destination = stage.join("lfs").join(oid);
-        files::copy_entry(&item, &source, &destination)?;
+        files::copy_entry(archive, &item, &source, &destination)?;
         let target = restored.join("lfs/objects").join(suffix);
-        files::copy_entry(&item, &destination, &target)?;
+        files::copy_entry(archive, &item, &destination, &target)?;
         files::verify_copy(&item, &target)?;
         preserved.insert(
             oid.to_owned(),
@@ -136,5 +131,5 @@ pub(super) async fn preserve(
             },
         );
     }
-    storage::atomic_json(&stage.join("lfs.json"), &preserved)
+    archive.json(&stage.join("lfs.json"), &preserved)
 }

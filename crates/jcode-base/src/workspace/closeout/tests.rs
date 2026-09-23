@@ -7,6 +7,270 @@ struct Fixture {
     location: LocationId,
     client: WorkspaceClientAuthority,
 }
+
+#[tokio::test]
+async fn configured_external_volume_preserves_and_reports_actual_protection() {
+    let Some(mount) = std::env::var_os("JCODE_WP07_EXTERNAL_MOUNT") else {
+        eprintln!("External-volume fixture not selected; no external-volume acceptance claim");
+        return;
+    };
+    let fixture = Fixture::new();
+    let mount = PathBuf::from(mount);
+    let binding = fixture.service.resolver.bind_directory(&mount).unwrap();
+    assert_eq!(
+        binding.volume().as_str(),
+        std::env::var("JCODE_WP07_EXPECTED_VOLUME_UUID").unwrap()
+    );
+    let destination = tempfile::Builder::new()
+        .prefix(".jcode-wp07-owned-")
+        .tempdir_in(&mount)
+        .unwrap();
+    let owned_binding = fixture
+        .service
+        .resolver
+        .bind_directory(destination.path())
+        .unwrap();
+    std::fs::write(
+        destination.path().join("OWNER.json"),
+        b"{\"fixture\":\"SP-58-C01/WP-07\"}",
+    )
+    .unwrap();
+    let data = vec![37u8; 128 * 1024];
+    std::fs::write(fixture.root.join("retained.bin"), &data).unwrap();
+    let mut spec = fixture.spec(false);
+    spec.full_archive = true;
+    spec.preservation_directory = Some(destination.path().into());
+    let started = fixture
+        .service
+        .begin_closeout(
+            &fixture.client,
+            RequestId::new(),
+            fixture.service.status().unwrap().revision,
+            spec,
+        )
+        .unwrap();
+    let expected = std::env::var("JCODE_WP07_EXPECTED_OWNERSHIP")
+        .unwrap()
+        .parse::<bool>()
+        .unwrap();
+    assert_eq!(started.preservation_volume_ownership, Some(expected));
+    let capture = capture(&fixture, started.operation);
+    let current = fixture
+        .service
+        .refresh_closeout(started.operation, started.revision, &capture)
+        .await
+        .unwrap();
+    let preserved = fixture
+        .service
+        .preserve_closeout(current.operation, current.revision, &capture)
+        .await
+        .unwrap();
+    let stored = load(&fixture.service.connection().unwrap(), preserved.operation).unwrap();
+    let manifest: preservation::PreservationManifest =
+        storage::read_json(stored.preservation.as_ref().unwrap()).unwrap();
+    let restored = manifest
+        .files
+        .parent()
+        .unwrap()
+        .join("verified-restore/retained.bin");
+    assert_eq!(std::fs::read(restored).unwrap(), data);
+    assert_eq!(
+        std::fs::read(fixture.root.join("retained.bin")).unwrap(),
+        data
+    );
+    fixture
+        .service
+        .resolver
+        .resolve_directory(&owned_binding)
+        .unwrap();
+    finish_capture(&capture);
+    let path = destination.path().to_path_buf();
+    destination.close().unwrap();
+    assert!(!path.exists());
+    eprintln!(
+        "Owned external fixture completed and cleaned: {}",
+        path.display()
+    );
+}
+
+#[test]
+fn reference_inventory_retains_session_and_linked_document_without_hydration_or_rewrite() {
+    let _environment = crate::storage::lock_test_env();
+    let fixture = Fixture::new();
+    let home = crate::storage::jcode_dir().unwrap();
+    let mut session = crate::session::Session::create(None, None);
+    session.working_dir = Some(fixture.root.canonicalize().unwrap().display().to_string());
+    let block = serde_json::from_value(
+        serde_json::json!({"type":"text","text":"synthetic retained transcript"}),
+    )
+    .unwrap();
+    session.add_message(crate::message::Role::User, vec![block]);
+    session.save().unwrap();
+    let session_path = home.join("sessions").join(format!("{}.json", session.id));
+    let session_before = std::fs::read(&session_path).unwrap();
+    let document = fixture.root.join("linked.md");
+    std::fs::write(&document, "synthetic linked document").unwrap();
+    crate::side_panel::load_markdown_file(&session.id, "linked", None, &document, false).unwrap();
+    let index = home.join("side_panel").join(&session.id).join("index.json");
+    let index_before = std::fs::read(&index).unwrap();
+    std::fs::remove_file(&document).unwrap();
+    let metadata = crate::side_panel::references_for_session_in(&home, &session.id).unwrap();
+    assert_eq!(metadata.len(), 1);
+    assert_eq!(metadata[0].id, "linked");
+    assert!(!document.exists());
+    std::fs::write(&document, "synthetic linked document").unwrap();
+    let started = fixture.begin(false);
+    let stored = load(&fixture.service.connection().unwrap(), started.operation).unwrap();
+    let references = fixture.service.closeout_references(&stored, &home).unwrap();
+    assert!(
+        references
+            .sessions
+            .iter()
+            .any(|reference| reference.session == session.id)
+    );
+    assert!(
+        references
+            .links
+            .iter()
+            .any(|link| link.owner == format!("{}/linked", session.id)
+                && link.path == document.canonicalize().unwrap())
+    );
+    assert_eq!(std::fs::read(session_path).unwrap(), session_before);
+    assert_eq!(std::fs::read(index).unwrap(), index_before);
+    assert!(!fixture.root.join(".jcode").exists());
+}
+
+#[test]
+fn archive_does_not_recreate_missing_destination_or_follow_replaced_ancestors() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("archive");
+    std::fs::create_dir(&root).unwrap();
+    let archive = archive::Archive::open(&root).unwrap();
+    let nested = archive.subtree(&root.join("a/b")).unwrap();
+    let outside = temporary.path().join("outside");
+    std::fs::rename(root.join("a"), &outside).unwrap();
+    std::os::unix::fs::symlink(&outside, root.join("a")).unwrap();
+    assert!(nested.file(&root.join("a/b/should-not-exist")).is_err());
+    assert!(!outside.join("b/should-not-exist").exists());
+    std::fs::rename(&root, temporary.path().join("offline")).unwrap();
+    assert!(archive.directory(&root.join("fallback")).is_err());
+    assert!(!root.exists());
+    std::fs::create_dir(&root).unwrap();
+    assert!(archive.file(&root.join("replacement-file")).is_err());
+    assert!(!root.join("replacement-file").exists());
+}
+
+#[tokio::test]
+async fn linked_worktree_staged_blob_and_split_index_restore_without_source() {
+    split_index_restore(true).await;
+}
+
+#[tokio::test]
+async fn ordinary_checkout_staged_blob_and_split_index_restore_without_source() {
+    split_index_restore(false).await;
+}
+
+async fn split_index_restore(linked: bool) {
+    let mut fixture = Fixture::new();
+    let main = fixture.root.clone();
+    let worktree = if linked {
+        fixture._directory.path().join("linked")
+    } else {
+        main.clone()
+    };
+    if linked {
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "linked",
+                worktree.to_str().unwrap(),
+            ],
+        );
+    }
+    std::fs::write(worktree.join("staged"), "staged-only contents\n").unwrap();
+    git(&worktree, &["add", "staged"]);
+    git(&worktree, &["update-index", "--split-index"]);
+    std::fs::write(worktree.join("staged"), "different unstaged contents\n").unwrap();
+    let expected_index = git_text(&worktree, &["ls-files", "--stage"]);
+    let blob = git_text(&worktree, &["rev-parse", ":staged"]);
+    if linked {
+        let Entity::Location(original) = fixture
+            .service
+            .inspect(EntityId::Location(fixture.location))
+            .unwrap()
+        else {
+            panic!()
+        };
+        let LocationKind::Checkout { repository, .. } = original.kind else {
+            panic!()
+        };
+        let EntityId::Location(location) = change(
+            &fixture.service,
+            OrganizationChange::RegisterLocation {
+                name: "linked".into(),
+                path: worktree.clone(),
+                registration: Registration::Checkout {
+                    home: original.home.unwrap(),
+                    repository,
+                },
+            },
+        ) else {
+            panic!()
+        };
+        fixture.root = worktree;
+        fixture.location = location;
+    }
+    let started = fixture.begin(false);
+    let capture = capture(&fixture, started.operation);
+    let record = fixture
+        .service
+        .refresh_closeout(started.operation, started.revision, &capture)
+        .await
+        .unwrap();
+    let stored = load(&fixture.service.connection().unwrap(), record.operation).unwrap();
+    let snapshots: Vec<super::git::RepositorySnapshot> =
+        storage::read_json(stored.history.as_ref().unwrap()).unwrap();
+    assert!(snapshots[0].index_blobs.contains(blob.trim()));
+    assert_eq!(
+        snapshots[0].git_directory != snapshots[0].common_directory,
+        linked
+    );
+    let bundle = super::git::preserve(
+        &fixture.service,
+        record.operation,
+        &snapshots[0],
+        &fixture._directory.path().join("preserved-linked"),
+        &capture,
+        &archive::Archive::open(fixture._directory.path()).unwrap(),
+    )
+    .await
+    .unwrap();
+    let stage = bundle.parent().unwrap();
+    let restored = stage.join("restored.git");
+    assert!(
+        stage
+            .join("administration/verified-restore/index")
+            .is_file()
+    );
+    assert!(restored.join("index").is_file());
+    std::fs::rename(&fixture.root, fixture.root.with_extension("offline")).unwrap();
+    if linked {
+        std::fs::rename(&main, main.with_extension("offline")).unwrap();
+    }
+    assert_eq!(
+        git_text(&restored, &["cat-file", "blob", blob.trim()]),
+        "staged-only contents\n"
+    );
+    assert_eq!(
+        git_text(&restored, &["ls-files", "--stage"]),
+        expected_index
+    );
+    git(&restored, &["fsck", "--full", "--no-reflogs"]);
+    finish_capture(&capture);
+}
 impl Fixture {
     fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
@@ -394,6 +658,16 @@ fn closing_fence_blocks_aliases_and_ancestor_reads_but_retains_admitted_work() {
         .service
         .acquire_location_use(Some(&alias), &[])
         .unwrap();
+    let launch = fixture
+        .service
+        .prepare_primary_location(
+            Placement::Checkout(fixture.location),
+            Some(&fixture.root),
+            OperationId::new(),
+        )
+        .unwrap();
+    assert_eq!(launch.root, fixture.location);
+    drop(launch);
     assert_eq!(
         fixture
             .service
@@ -810,6 +1084,7 @@ async fn bundle_restores_acquired_refs_detached_stash_and_reflog_without_source(
         &snapshots[0],
         &fixture._directory.path().join("preserved"),
         &capture,
+        &archive::Archive::open(fixture._directory.path()).unwrap(),
     )
     .await
     .unwrap();
@@ -1001,6 +1276,7 @@ async fn historical_lfs_payloads_restore_and_missing_payload_blocks_preservation
         &snapshots[0],
         &fixture._directory.path().join("history"),
         &capture,
+        &archive::Archive::open(fixture._directory.path()).unwrap(),
     )
     .await
     .unwrap();
@@ -1030,6 +1306,26 @@ async fn historical_lfs_payloads_restore_and_missing_payload_blocks_preservation
         &snapshots[0],
         &fixture._directory.path().join("missing-history"),
         &capture,
+        &archive::Archive::open(fixture._directory.path()).unwrap(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, IssueCode::Conflict);
+    let current = fixture
+        .service
+        .refresh_closeout(refreshed.operation, refreshed.revision, &capture)
+        .await
+        .unwrap();
+    let stored = load(&fixture.service.connection().unwrap(), current.operation).unwrap();
+    let snapshots: Vec<super::git::RepositorySnapshot> =
+        storage::read_json(stored.history.as_ref().unwrap()).unwrap();
+    let error = super::git::preserve(
+        &fixture.service,
+        current.operation,
+        &snapshots[0],
+        &fixture._directory.path().join("missing-history-fresh"),
+        &capture,
+        &archive::Archive::open(fixture._directory.path()).unwrap(),
     )
     .await
     .unwrap_err();

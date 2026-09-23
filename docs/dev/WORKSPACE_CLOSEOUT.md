@@ -33,6 +33,13 @@ mount/special-file findings block preservation, and changed source entries
 invalidate the observation. Dispositions identify exact entries and provenance.
 Unknown data is not implicitly classified as disposable.
 
+Refresh also snapshots organization/grants, related Session placement and cwd,
+original child-parent identity, side-panel links, child artifacts and instruction
+repository references. These use metadata-only owner APIs, not transcript or
+Markdown hydration. Harness-state containment is rejected before inventory;
+independently registered nested locations remain explicit findings. History and
+side-panel state are not rewritten by this inspection.
+
 Complete refresh additionally records offline Git status/index, refs, reflogs,
 worktree/submodule sharing and metadata locations, including nested repositories.
 Git commands reuse the hardened checkout command constructor. Their owned process
@@ -44,18 +51,40 @@ History preservation creates temporary private refs for original refs, detached
 HEAD and reflog tips. It writes a bundle, restores it into a separate bare
 repository without alternates, checks exact refs and runs Git integrity checks.
 The acquired refs from clone provisioning remain ordinary preserved source refs.
+Staged and conflict-index blobs are retained through an isolated preservation
+commit. Original index, split-index and per-worktree administration are separately
+copied and restored, including metadata outside a linked worktree's directory.
+The production verifier loads the restored index and compares its complete
+entries before accepting the capture. Source indexes are not converted: Git's
+private expanded index supports observation with the original repository's
+configuration. Cache preparation precedes immutable filesystem witnesses.
+Initialized nested repositories are inspected individually, including their
+submodule relationships, without letting parent status refresh child indexes.
 Git LFS inventories the restored history offline. Required payloads are copied
 and restored separately with pointer size/SHA-256 verification. Missing payloads
 block preservation rather than being treated as preserved pointers.
 
 File dispositions remain separate from Git preservation. An explicit full
 archive captures all supported entries. Otherwise file data needs an explicit
-disposition. Selected files are copied to private storage and restored to an
+disposition. Selected files are copied to the chosen storage and restored to an
 independent verification tree. Native macOS metadata copying retains modes,
 ACLs and extended attributes. In-tree hardlink relationships and symlink targets
 are retained. Source equality is rechecked after copying. A verified existing
 preservation reference is exercised as a restore source, not accepted from a
 caller-supplied hash.
+
+Preservation writes traverse held directory descriptors, create files and links
+relative to those handles, and verify retained ancestors. A missing or replaced
+destination cannot become a recursive fallback mkdir. Git writes use a pinned
+working directory and relative artifact destinations. These safeguards do not
+claim adversarial containment of arbitrary same-user filesystem changes.
+
+Containment directories and metadata files request owner-only permissions where
+supported; preserved entries retain restoration metadata. The record exposes
+the selected filesystem's actual ownership-enforcement state, including disabled
+ownership on an external volume. Destination selection does not require a second
+privacy gate and does not change drive settings. This is ordinary personal-use
+protection, not encryption or a promise of stronger filesystem enforcement.
 
 Preservation completion records an integrity-bound manifest. It is not proof of
 current quiescence, approval or removability. Partial artifacts remain outside
@@ -68,6 +97,8 @@ New dependent turn/tool admission is refused. Already admitted native operations
 retain their shared physical-root leases and may finish. A whole-turn admission
 lease is held only until the execution owner's activity record is established,
 so a later safe-boundary location move does not pin the old cwd indefinitely.
+Location preparation likewise holds a shared physical lease, so a second primary
+can be prepared in a busy Ready checkout while relocation/removal remains blocked.
 The actual tool producer, independent native worker and detached observer hook
 hold their own use leases through their work, not merely until a foreground
 waiter returns. This adds lifetime safety, not a new read-access grant or shell
@@ -87,6 +118,12 @@ Run through the coordinated selfdev test owner:
 scripts/dev_cargo.sh test --profile selfdev -p jcode-base --lib workspace::closeout::tests:: -- --test-threads=1
 scripts/dev_cargo.sh clippy --profile selfdev -p jcode-base -p jcode-workspace-types --lib -- -D warnings
 ```
+
+The external-volume fixture is opt-in through `JCODE_WP07_EXTERNAL_MOUNT`,
+`JCODE_WP07_EXPECTED_VOLUME_UUID` and `JCODE_WP07_EXPECTED_OWNERSHIP`. It checks the
+independently supplied identity before creating an owned temporary directory,
+exercises preservation/restoration and verifies cleanup. An unselected fixture
+does not establish external-volume acceptance.
 
 Fixtures use disposable repositories and private catalog/output namespaces.
 They are mechanism evidence for the implemented foundation, not acceptance of

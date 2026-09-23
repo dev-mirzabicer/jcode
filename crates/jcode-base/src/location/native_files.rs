@@ -131,6 +131,7 @@ mod platform {
         path: PathBuf,
         file: File,
         identity: Identity,
+        ancestors: Vec<(PathBuf, File, Identity)>,
     }
     impl Directory {
         pub fn verify_volume(&self, path: &Path) -> Result<()> {
@@ -162,11 +163,22 @@ mod platform {
                 path,
                 file,
                 identity,
+                ancestors: Vec::new(),
             };
             result.verify()?;
             Ok(result)
         }
         pub fn verify(&self) -> Result<()> {
+            for (path, file, identity) in &self.ancestors {
+                let metadata = std::fs::symlink_metadata(path)?;
+                ensure!(
+                    metadata.is_dir()
+                        && Identity::of(&metadata)? == *identity
+                        && Identity::of(&file.metadata()?)? == *identity,
+                    "Preservation ancestor changed: {}",
+                    path.display()
+                );
+            }
             let current = std::fs::symlink_metadata(&self.path)?;
             ensure!(
                 current.is_dir()
@@ -178,6 +190,14 @@ mod platform {
             Ok(())
         }
         fn child(&self, name: &OsStr, create: bool) -> Result<(Self, bool)> {
+            self.child_with_mode(name, create, 0o777)
+        }
+        fn child_with_mode(
+            &self,
+            name: &OsStr,
+            create: bool,
+            mode: libc::mode_t,
+        ) -> Result<(Self, bool)> {
             self.verify()?;
             let name = component(name)?;
             let mut created = false;
@@ -194,7 +214,7 @@ mod platform {
                 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::NotFound
             {
                 // SAFETY: same retained descriptor/component, default directory mode respects umask.
-                if unsafe { libc::mkdirat(self.file.as_raw_fd(), name.as_ptr(), 0o777) } != 0 {
+                if unsafe { libc::mkdirat(self.file.as_raw_fd(), name.as_ptr(), mode) } != 0 {
                     let error = std::io::Error::last_os_error();
                     if error.kind() != std::io::ErrorKind::AlreadyExists {
                         return Err(error.into());
@@ -225,9 +245,209 @@ mod platform {
                 path,
                 file,
                 identity,
+                ancestors: Vec::new(),
             };
             value.verify()?;
             Ok((value, created))
+        }
+
+        /// Traverse only real directories on this filesystem. Creation is
+        /// relative to retained descriptors, never recursive path-based mkdir.
+        pub fn preservation_directory(&self, relative: &Path, create: bool) -> Result<Self> {
+            self.verify()?;
+            let ancestors = self
+                .ancestors
+                .iter()
+                .map(|(path, file, identity)| {
+                    Ok((path.clone(), file.try_clone()?, identity.clone()))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let mut current = Self {
+                path: self.path.clone(),
+                file: self.file.try_clone()?,
+                identity: self.identity.clone(),
+                ancestors,
+            };
+            for part in relative.components() {
+                let std::path::Component::Normal(name) = part else {
+                    anyhow::bail!("Preservation path must be relative without traversal");
+                };
+                let (mut next, _) = current.child_with_mode(name, create, 0o700)?;
+                ensure!(
+                    next.identity.device == self.identity.device,
+                    "Preservation crosses a nested filesystem"
+                );
+                next.ancestors = current.ancestors;
+                next.ancestors
+                    .push((current.path, current.file, current.identity));
+                current = next;
+            }
+            self.verify()?;
+            Ok(current)
+        }
+
+        pub fn create_preserved_file(&self, name: &OsStr) -> Result<File> {
+            self.verify()?;
+            let name = component(name)?;
+            // SAFETY: one validated component relative to a retained directory.
+            let fd = unsafe {
+                libc::openat(
+                    self.file.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_WRONLY
+                        | libc::O_CREAT
+                        | libc::O_EXCL
+                        | libc::O_NOFOLLOW
+                        | libc::O_CLOEXEC,
+                    0o600,
+                )
+            };
+            ensure!(
+                fd >= 0,
+                "Create preserved file: {}",
+                std::io::Error::last_os_error()
+            );
+            // SAFETY: openat returned a fresh owned descriptor.
+            let file = unsafe { File::from_raw_fd(fd) };
+            self.file.sync_all()?;
+            self.verify()?;
+            Ok(file)
+        }
+
+        pub fn open_preserved_entry(&self, name: &OsStr, symlink: bool) -> Result<File> {
+            self.verify()?;
+            let name = component(name)?;
+            let mut flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC;
+            #[cfg(target_os = "macos")]
+            if symlink {
+                flags = (flags & !libc::O_NOFOLLOW) | libc::O_SYMLINK;
+            }
+            #[cfg(not(target_os = "macos"))]
+            ensure!(
+                !symlink,
+                "Symlink metadata handles require the native macOS adapter"
+            );
+            // SAFETY: retained parent, validated component and read-only flags.
+            let fd = unsafe { libc::openat(self.file.as_raw_fd(), name.as_ptr(), flags) };
+            ensure!(
+                fd >= 0,
+                "Open preserved entry: {}",
+                std::io::Error::last_os_error()
+            );
+            // SAFETY: openat returned a fresh owned descriptor.
+            let file = unsafe { File::from_raw_fd(fd) };
+            ensure!(
+                !symlink || file.metadata()?.file_type().is_symlink(),
+                "Preserved symlink changed type before metadata access"
+            );
+            self.verify()?;
+            Ok(file)
+        }
+
+        pub fn create_preserved_symlink(&self, name: &OsStr, target: &Path) -> Result<()> {
+            self.verify()?;
+            let name = component(name)?;
+            let target = CString::new(target.as_os_str().as_bytes())?;
+            // SAFETY: target is inert NUL-terminated link text, not traversed.
+            ensure!(
+                unsafe { libc::symlinkat(target.as_ptr(), self.file.as_raw_fd(), name.as_ptr()) }
+                    == 0,
+                "Create preserved symlink: {}",
+                std::io::Error::last_os_error()
+            );
+            self.file.sync_all()?;
+            self.verify()
+        }
+
+        pub fn link_preserved_file(
+            &self,
+            name: &OsStr,
+            source: &Self,
+            source_name: &OsStr,
+        ) -> Result<()> {
+            self.verify()?;
+            source.verify()?;
+            let name = component(name)?;
+            let source_name = component(source_name)?;
+            // SAFETY: both directories and component strings remain owned.
+            ensure!(
+                unsafe {
+                    libc::linkat(
+                        source.file.as_raw_fd(),
+                        source_name.as_ptr(),
+                        self.file.as_raw_fd(),
+                        name.as_ptr(),
+                        0,
+                    )
+                } == 0,
+                "Link preserved file: {}",
+                std::io::Error::last_os_error()
+            );
+            self.file.sync_all()?;
+            source.verify()?;
+            self.verify()
+        }
+
+        /// Used for native metadata copy and child fchdir, without reopening a
+        /// possibly replaced pathname. The descriptor stays owned by this guard.
+        pub fn preservation_handle(&self) -> Result<&File> {
+            self.verify()?;
+            Ok(&self.file)
+        }
+
+        #[cfg(target_os = "macos")]
+        pub fn volume_ownership_enforced(&self) -> Result<Option<bool>> {
+            self.verify()?;
+            let mut filesystem = std::mem::MaybeUninit::<libc::statfs>::uninit();
+            // SAFETY: fstatfs initializes the supplied structure on success;
+            // the descriptor remains owned and this observation changes nothing.
+            ensure!(
+                unsafe { libc::fstatfs(self.file.as_raw_fd(), filesystem.as_mut_ptr()) } == 0,
+                "Inspect filesystem ownership: {}",
+                std::io::Error::last_os_error()
+            );
+            // SAFETY: the successful call above initialized the entire value.
+            let filesystem = unsafe { filesystem.assume_init() };
+            self.verify()?;
+            Ok(Some(
+                u64::from(filesystem.f_flags) & (libc::MNT_IGNORE_OWNERSHIP as u64) == 0,
+            ))
+        }
+        #[cfg(not(target_os = "macos"))]
+        pub fn volume_ownership_enforced(&self) -> Result<Option<bool>> {
+            Ok(None)
+        }
+
+        #[cfg(target_os = "macos")]
+        pub fn copy_preserved_metadata(&mut self, source: &File) -> Result<()> {
+            self.verify()?;
+            // SAFETY: both descriptors remain owned. COPYFILE_METADATA changes
+            // attributes, including birth time, but cannot replace this inode.
+            ensure!(
+                unsafe {
+                    libc::fcopyfile(
+                        source.as_raw_fd(),
+                        self.file.as_raw_fd(),
+                        std::ptr::null_mut(),
+                        libc::COPYFILE_METADATA,
+                    )
+                } == 0,
+                "Copy directory metadata: {}",
+                std::io::Error::last_os_error()
+            );
+            let after = Identity::of(&self.file.metadata()?)?;
+            ensure!(
+                after.device == self.identity.device && after.inode == self.identity.inode,
+                "Directory identity changed during metadata copy"
+            );
+            self.identity = after;
+            self.verify()?;
+            self.file.sync_all()?;
+            Ok(())
+        }
+        #[cfg(not(target_os = "macos"))]
+        pub fn copy_preserved_metadata(&mut self, _: &File) -> Result<()> {
+            anyhow::bail!("Complete preservation metadata requires macOS")
         }
     }
     struct Target {
@@ -686,6 +906,36 @@ pub struct VerifiedFiles;
 pub struct VerifiedDirectory;
 #[cfg(not(unix))]
 impl VerifiedDirectory {
+    pub fn volume_ownership_enforced(&self) -> Result<Option<bool>> {
+        Ok(None)
+    }
+    pub fn copy_preserved_metadata(&mut self, _: &std::fs::File) -> Result<()> {
+        anyhow::bail!("Native preservation unsupported")
+    }
+    pub fn preservation_directory(&self, _: &Path, _: bool) -> Result<Self> {
+        anyhow::bail!("Native preservation unsupported")
+    }
+    pub fn create_preserved_file(&self, _: &std::ffi::OsStr) -> Result<std::fs::File> {
+        anyhow::bail!("Native preservation unsupported")
+    }
+    pub fn open_preserved_entry(&self, _: &std::ffi::OsStr, _: bool) -> Result<std::fs::File> {
+        anyhow::bail!("Native preservation unsupported")
+    }
+    pub fn create_preserved_symlink(&self, _: &std::ffi::OsStr, _: &Path) -> Result<()> {
+        anyhow::bail!("Native preservation unsupported")
+    }
+    pub fn link_preserved_file(
+        &self,
+        _: &std::ffi::OsStr,
+        _: &Self,
+        _: &std::ffi::OsStr,
+    ) -> Result<()> {
+        anyhow::bail!("Native preservation unsupported")
+    }
+    pub fn preservation_handle(&self) -> Result<&std::fs::File> {
+        anyhow::bail!("Native preservation unsupported")
+    }
+
     pub fn verify_volume(&self, _: &Path) -> Result<()> {
         anyhow::bail!("Verified directory handles are unsupported on this platform")
     }

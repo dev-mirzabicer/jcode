@@ -47,6 +47,47 @@ pub(super) struct Item {
     pub witness: Option<Witness>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub(super) struct TreeSnapshot {
+    pub root: PathBuf,
+    pub manifest: PathBuf,
+    pub digest: String,
+}
+
+pub(super) fn source(stored: &StoredCloseout) -> Result<TreeSnapshot> {
+    Ok(TreeSnapshot {
+        root: stored.binding.observed_path().into(),
+        manifest: stored.inventory.clone().ok_or_else(|| {
+            issue(
+                IssueCode::IncompleteCapture,
+                "Closeout has no completed inventory",
+            )
+        })?,
+        digest: stored
+            .record
+            .inventory_digest
+            .clone()
+            .ok_or_else(|| corrupt("Inventory digest missing"))?,
+    })
+}
+
+pub(super) fn capture_git_administration(root: &Path, manifest: &Path) -> Result<TreeSnapshot> {
+    let witness = Witness::of(&std::fs::symlink_metadata(root).map_err(io)?)?;
+    let mut writer = InventoryWriter {
+        file: BufWriter::new(storage::private_file(manifest, true)?),
+        hash: Sha256::new(),
+        count: 0,
+    };
+    scan_policy(root, Path::new(""), witness.device, &mut writer, true)?;
+    writer.file.flush().map_err(io)?;
+    writer.file.get_ref().sync_all().map_err(io)?;
+    Ok(TreeSnapshot {
+        root: root.into(),
+        manifest: manifest.into(),
+        digest: format!("{:x}", writer.hash.finalize()),
+    })
+}
+
 pub(super) struct InventoryWriter {
     file: BufWriter<File>,
     hash: Sha256,
@@ -130,6 +171,7 @@ impl WorkspaceService {
         stored.inventory = Some(stage);
         stored.history = None;
         stored.history_digest = None;
+        stored.references = None;
         stored.decisions.clear();
         stored.final_approval = None;
         stored.no_loss = None;
@@ -258,16 +300,18 @@ pub(super) fn require_preparation(stored: &StoredCloseout) -> Result<()> {
 
 pub(super) fn visit(
     stored: &StoredCloseout,
+    visitor: impl FnMut(Item) -> Result<()>,
+) -> Result<()> {
+    visit_tree(&source(stored)?, visitor)
+}
+
+pub(super) fn visit_tree(
+    tree: &TreeSnapshot,
     mut visitor: impl FnMut(Item) -> Result<()>,
 ) -> Result<()> {
-    let path = stored.inventory.as_ref().ok_or_else(|| {
-        issue(
-            IssueCode::IncompleteCapture,
-            "Closeout has no completed inventory",
-        )
-    })?;
+    let path = &tree.manifest;
     // Validate the entire retained inventory before any consumer performs effects.
-    if backup::file_digest(path)? != stored.record.inventory_digest.as_deref().unwrap_or("") {
+    if backup::file_digest(path)? != tree.digest {
         return Err(corrupt("Closeout inventory integrity changed"));
     }
     for line in BufReader::new(File::open(path).map_err(io)?).lines() {
@@ -277,11 +321,15 @@ pub(super) fn visit(
 }
 
 pub(super) fn verify_source(stored: &StoredCloseout) -> Result<()> {
-    visit(stored, |item| {
+    verify_tree(&source(stored)?)
+}
+
+pub(super) fn verify_tree(tree: &TreeSnapshot) -> Result<()> {
+    visit_tree(tree, |item| {
         let Some(witness) = item.witness else {
             return Ok(());
         };
-        let path = stored.binding.observed_path().join(&item.entry.path);
+        let path = tree.root.join(&item.entry.path);
         if Witness::of(&std::fs::symlink_metadata(&path).map_err(io)?)? != witness {
             return Err(issue(
                 IssueCode::Conflict,
@@ -335,6 +383,16 @@ pub(super) fn append(
 }
 
 fn scan(root: &Path, relative: &Path, device: u64, writer: &mut InventoryWriter) -> Result<()> {
+    scan_policy(root, relative, device, writer, false)
+}
+
+fn scan_policy(
+    root: &Path,
+    relative: &Path,
+    device: u64,
+    writer: &mut InventoryWriter,
+    git_administration: bool,
+) -> Result<()> {
     let path = root.join(relative);
     let before = std::fs::symlink_metadata(&path).map_err(io)?;
     let witness = Witness::of(&before)?;
@@ -394,7 +452,22 @@ fn scan(root: &Path, relative: &Path, device: u64, writer: &mut InventoryWriter)
             .map_err(io)?;
         children.sort();
         for child in children {
-            scan(root, &relative.join(child), device, writer)?;
+            // The repository's object database/refs are restored through the
+            // verified bundle. Per-worktree index, split indexes, sequencer,
+            // rebase state, logs and nested module administration remain files.
+            if git_administration
+                && relative.as_os_str().is_empty()
+                && (child == "objects" || child == "refs")
+            {
+                continue;
+            }
+            scan_policy(
+                root,
+                &relative.join(child),
+                device,
+                writer,
+                git_administration,
+            )?;
         }
     }
     if Witness::of(&std::fs::symlink_metadata(&path).map_err(io)?)? != witness {
