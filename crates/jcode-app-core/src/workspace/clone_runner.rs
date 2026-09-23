@@ -1,12 +1,15 @@
 use super::*;
 use crate::execution::{Capture, ExecutionStore, Invocation, PreparedInvocation, RunState};
 use jcode_tool_core::OutputCapture;
+use jcode_tool_types::execution::ExecutionRequest;
 use jcode_tool_types::{OutputSource, ToolOutput};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
 
 type Key = (PathBuf, RequestId);
+const CLONE_EXECUTION_SESSION: &str = "workspace-operations";
+const CLONE_EXECUTION_TOOL: &str = "workspace_clone";
 static LIVE: LazyLock<Mutex<HashSet<Key>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
 struct Active(Key);
@@ -15,6 +18,69 @@ impl Drop for Active {
         LIVE.lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(&self.0);
+    }
+}
+
+pub(super) async fn output(
+    clone: RequestId,
+    request: ExecutionRequest,
+    client: String,
+) -> WorkspaceResponse {
+    let run_id = match &request {
+        ExecutionRequest::Inspect { run_id }
+        | ExecutionRequest::Read { run_id, .. }
+        | ExecutionRequest::ReadPart { run_id, .. } => run_id.clone(),
+        _ => return WorkspaceResponse::Error(Issue {
+            code: IssueCode::UnsupportedCapability,
+            detail: "Clone output supports inspection and exact reads, not execution control or unscoped listings".into(),
+        }),
+    };
+    let state_root = crate::storage::durable_state_dir();
+    let output_root = match crate::storage::jcode_dir() {
+        Ok(root) => root,
+        Err(error) => return WorkspaceResponse::Error(problem(error)),
+    };
+    let read_root = output_root.clone();
+    let permitted = tokio::task::spawn_blocking(move || -> Result<()> {
+        let _trusted = WorkspaceClientAuthority::authenticated(client)?;
+        let operation = WorkspaceService::new(&state_root).inspect_clone(clone)?;
+        if !operation.output_runs.contains(&run_id) {
+            return Err(Issue {
+                code: IssueCode::InvalidIdentity,
+                detail: "This retained run does not belong to the requested checkout operation"
+                    .into(),
+            });
+        }
+        let store = ExecutionStore::open(&read_root).map_err(problem)?;
+        let run = store
+            .inspect(&run_id)
+            .map_err(problem)?
+            .ok_or_else(|| Issue {
+                code: IssueCode::RecoveryRequired,
+                detail: "Checkout output run is missing from its execution store".into(),
+            })?;
+        if run.session_id != CLONE_EXECUTION_SESSION
+            || run.message_id != clone.to_string()
+            || run.tool != CLONE_EXECUTION_TOOL
+        {
+            return Err(Issue {
+                code: IssueCode::CorruptState,
+                detail: "Checkout operation and retained execution identity disagree".into(),
+            });
+        }
+        Ok(())
+    })
+    .await;
+    match permitted {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => return WorkspaceResponse::Error(error),
+        Err(error) => return WorkspaceResponse::Error(problem(error)),
+    }
+    match crate::execution::inspection::inspect(&output_root, CLONE_EXECUTION_SESSION, request)
+        .await
+    {
+        Ok(response) => WorkspaceResponse::CloneOutput(response),
+        Err(error) => WorkspaceResponse::Error(problem(error)),
     }
 }
 
@@ -140,10 +206,10 @@ async fn run(service: &WorkspaceService, request: RequestId) -> Result<()> {
         .map_err(problem)?;
     let owner = runtime.endpoint.id.clone();
     let invocation = Invocation {
-        session_id: "workspace-operations".into(),
+        session_id: CLONE_EXECUTION_SESSION.into(),
         message_id: request.to_string(),
         call_path: vec![crate::id::new_id("clone-attempt")],
-        tool: "workspace_clone".into(),
+        tool: CLONE_EXECUTION_TOOL.into(),
         input: serde_json::json!({"request": request}),
         working_dir: None,
         received_result_digest: None,

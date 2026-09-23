@@ -473,6 +473,12 @@ pub struct RestoreReview {
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkspaceRequest {
     Volumes {},
+    /// Read a retained clone run through the existing execution owner. Clone
+    /// output inspection is available without attaching a primary Session.
+    CloneOutput {
+        clone: RequestId,
+        request: jcode_tool_types::execution::ExecutionRequest,
+    },
     ReviewClone {
         expected_revision: Revision,
         spec: CloneSpec,
@@ -571,6 +577,7 @@ pub enum WorkspaceRequest {
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum WorkspaceResponse {
     Volumes(Vec<WorkspaceVolume>),
+    CloneOutput(jcode_tool_types::execution::ExecutionResponse),
     CloneReview(CloneReview),
     Clone(CloneRecord),
     Rebind(RebindRecord),

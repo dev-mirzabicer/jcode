@@ -72,11 +72,11 @@ def await_clone(rid):
     raise AssertionError(('clone did not finish', rid, rpc('inspect_clone', 'clone', request=rid)))
 
 
-def await_output(run_id):
+def await_output(clone_id, run_id):
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
-        row = request('execution', 'execution_response',
-                      request={'action': 'inspect', 'run_id': run_id})['response']
+        row = rpc('clone_output', 'clone_output', clone=clone_id,
+                  request={'action': 'inspect', 'run_id': run_id})
         assert row['kind'] == 'status', row
         run = row['run']
         if run['state'] in ('completed', 'failed', 'cancelled', 'interrupted'):
@@ -95,7 +95,7 @@ def clone(spec):
     ready = await_clone(rid)
     assert ready['location'] == initial['location']
     assert len(ready['output_runs']) == 1, ready
-    await_output(ready['output_runs'][0])
+    await_output(rid, ready['output_runs'][0])
     assert rpc('begin_clone', 'clone', request=rid, review=review['id'])['location'] == ready['location']
     assert rpc('inspect_clone', 'clone', request=rid) == ready
     return ready

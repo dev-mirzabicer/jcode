@@ -18,6 +18,9 @@ pub(crate) async fn dispatch(
     if let WorkspaceRequest::ApplyStartupCopy { request, review } = request {
         return startup_copy::apply(request, review, client, coordinator).await;
     }
+    if let WorkspaceRequest::CloneOutput { clone, request } = request {
+        return clone_runner::output(clone, request, client).await;
+    }
     let root = crate::storage::durable_state_dir();
     match tokio::task::spawn_blocking(move || {
         match WorkspaceClientAuthority::authenticated(client) {
@@ -44,6 +47,10 @@ pub fn dispatch_with(
     use WorkspaceResponse as Response;
     let result = match request {
         WorkspaceRequest::Volumes {} => service.volumes().map(Response::Volumes),
+        WorkspaceRequest::CloneOutput { .. } => Err(Issue {
+            code: IssueCode::UnsupportedCapability,
+            detail: "Clone output inspection requires the runtime execution reader".into(),
+        }),
         WorkspaceRequest::ReviewClone {
             expected_revision,
             spec,

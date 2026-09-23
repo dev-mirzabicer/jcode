@@ -4616,6 +4616,7 @@ dependencies = [
 name = "jcode-workspace-types"
 version = "0.1.0"
 dependencies = [
+ "jcode-tool-types",
  "serde",
  "uuid",
 ]

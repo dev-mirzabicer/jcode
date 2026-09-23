@@ -192,3 +192,37 @@ fn checkout_rebind_and_startup_copy_require_typed_reviews_and_external_approvals
         .is_err()
     );
 }
+
+#[test]
+fn checkout_output_inspection_is_correlated_to_a_clone_request() {
+    let operation = WorkspaceRequest::CloneOutput {
+        clone: RequestId::new(),
+        request: jcode_tool_types::execution::ExecutionRequest::Inspect {
+            run_id: format!("run-{}", "a".repeat(64)),
+        },
+    };
+    let request = Request::Workspace {
+        id: 89,
+        request: Box::new(operation.clone()),
+    };
+    let wire = serde_json::to_value(&request).unwrap();
+    assert_eq!(
+        serde_json::from_value::<Request>(wire.clone())
+            .unwrap()
+            .id(),
+        89
+    );
+    assert_eq!(
+        serde_json::from_value::<WorkspaceRequest>(wire["request"].clone()).unwrap(),
+        operation
+    );
+    let mut forged = wire["request"].clone();
+    forged["trusted"] = serde_json::json!(true);
+    assert!(serde_json::from_value::<WorkspaceRequest>(forged).is_err());
+    assert!(
+        serde_json::from_value::<WorkspaceRequest>(serde_json::json!({
+            "action":"clone_output", "request":{"action":"inspect","run_id":"run-any"}
+        }))
+        .is_err()
+    );
+}

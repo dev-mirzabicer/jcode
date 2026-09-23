@@ -25,7 +25,12 @@ human-facing clone form.
    source commit, volume, destination and current catalog revision.
 3. `begin_clone` takes the review and a caller-generated request UUID. It
    returns an operation/Location identity before completion. `inspect_clone`
-   observes its stage, progress, retained-output run IDs and any issue. A lost
+   observes its stage, progress, retained-output run IDs and any issue. A
+   trusted client uses `clone_output` with this operation and one of its run
+   IDs for existing execution `inspect`, `read`, or `read_part` semantics,
+   even when no primary Session is attached. Cross-clone runs, unscoped
+   listings and execution Stop/force/background controls are not granted by
+   this route. A lost
    reply is resolved with the same request, not a second checkout.
 4. The runtime owns acquisition independently of the client connection. It
    records the operation before effects, pins a witnessed destination parent,
