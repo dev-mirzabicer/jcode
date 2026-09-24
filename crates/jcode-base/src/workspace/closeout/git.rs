@@ -195,6 +195,8 @@ pub(super) struct RepositorySnapshot {
     pub capture_directory: PathBuf,
     pub administration: inventory::TreeSnapshot,
     pub index_blobs: BTreeSet<String>,
+    #[serde(default)]
+    pub dangling: BTreeMap<String, String>,
 }
 
 impl WorkspaceService {
@@ -428,7 +430,7 @@ pub(super) async fn observe(
                 validate_oid(&oid)?;
                 Some(oid)
             }
-            Err(error) if refs.is_empty() && reflog.is_empty() => {
+            Err(error) => {
                 // Prove an unborn symbolic branch, not an unreadable/missing object.
                 runner
                     .run(
@@ -438,10 +440,14 @@ pub(super) async fn observe(
                         &destination.join("unborn"),
                     )
                     .await
-                    .map_err(|_| error)?;
+                    .map_err(|_| error.clone())?;
+                let symbolic = std::fs::read_to_string(destination.join("unborn")).map_err(io)?;
+                if !symbolic.trim().starts_with("refs/heads/") || refs.contains_key(symbolic.trim())
+                {
+                    return Err(error);
+                }
                 None
             }
-            Err(error) => return Err(error),
         }
     };
     if std::fs::read_to_string(destination.join("bare"))
@@ -493,6 +499,29 @@ pub(super) async fn observe(
             }
         }
     }
+    // Git owns reachability. Preserve dangling roots instead of guessing which
+    // OID-looking bytes in pseudorefs, autostash or sequencer files matter.
+    // Their descendants are included by ordinary bundle traversal.
+    let mut args = vec!["fsck", "--full", "--no-reflogs", "--dangling"];
+    if let Some(head) = &head {
+        args.push(head);
+    }
+    let dangling_path = destination.join("dangling");
+    runner.run(root, &args, None, &dangling_path).await?;
+    let mut dangling = BTreeMap::new();
+    for line in BufReader::new(File::open(&dangling_path).map_err(io)?).lines() {
+        let line = line.map_err(io)?;
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        if fields.len() != 3
+            || fields[0] != "dangling"
+            || !matches!(fields[1], "commit" | "tree" | "blob" | "tag")
+        {
+            return Err(corrupt("Unrecognized Git object-integrity observation"));
+        }
+        validate_oid(fields[2])?;
+        dangling.insert(fields[2].into(), fields[1].into());
+    }
+    observations.insert("dangling".into(), backup::file_digest(&dangling_path)?);
     let administration = inventory::capture_git_administration(
         &git_directory,
         &destination.join("administration.jsonl"),
@@ -510,6 +539,7 @@ pub(super) async fn observe(
         capture_directory: destination.into(),
         administration,
         index_blobs,
+        dangling,
     })
 }
 
@@ -530,6 +560,15 @@ pub(super) async fn preserve(
         index_file: None,
     };
     inventory::verify_tree(&snapshot.administration)?;
+    let dangling_observation = snapshot.observations.get("dangling").ok_or_else(|| {
+        issue(
+            IssueCode::IncompleteCapture,
+            "Refresh the Git inventory to capture unreferenced operation history",
+        )
+    })?;
+    if backup::file_digest(&snapshot.capture_directory.join("dangling"))? != *dangling_observation {
+        return Err(corrupt("Git object-integrity inventory changed"));
+    }
     let stage = directory.join(format!("history-{}", RequestId::new()));
     archive.directory(&stage)?;
     let bare = stage.join("source.git");
@@ -615,6 +654,10 @@ pub(super) async fn preserve(
     }
     for oid in &snapshot.reflog {
         refs.insert(format!("{prefix}/reflog/{oid}"), oid.clone());
+    }
+    for (oid, kind) in &snapshot.dangling {
+        validate_oid(oid)?;
+        refs.insert(format!("{prefix}/dangling/{kind}/{oid}"), oid.clone());
     }
     let commands = stage.join("refs.input");
     let mut input = archive.file(&commands)?;
@@ -823,7 +866,7 @@ impl GitExecution<'_> {
         I: IntoIterator<Item = S>,
         S: AsRef<std::ffi::OsStr>,
     {
-        let arguments = args
+        let mut arguments = args
             .into_iter()
             .map(|arg| {
                 let path = Path::new(arg.as_ref());
@@ -834,6 +877,15 @@ impl GitExecution<'_> {
                 }
             })
             .collect::<Vec<_>>();
+        if self.index_file.is_some() {
+            // These change only the private index's representation, not sparse
+            // worktree selection. Re-compaction can freshen source tree objects.
+            arguments.splice(
+                0..0,
+                ["-c", "index.sparse=false", "-c", "core.splitIndex=false"]
+                    .map(std::ffi::OsString::from),
+            );
+        }
         let mut command = tokio::process::Command::from(checkout::git::git(Some(cwd), arguments));
         if let Some(index) = self.index_file {
             command.env("GIT_INDEX_FILE", index);

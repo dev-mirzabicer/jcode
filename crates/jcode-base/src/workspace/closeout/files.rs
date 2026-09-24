@@ -3,13 +3,16 @@
 use super::*;
 use inventory::{Item, Witness};
 use std::fs::File;
-use std::io::{BufWriter, Read, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
+mod metadata;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct PreservedItem {
     pub item: Item,
     pub disposition: CloseoutDisposition,
     pub saved: Option<PathBuf>,
+    #[serde(default)]
+    pub metadata_digest: Option<String>,
 }
 
 #[cfg(test)]
@@ -44,7 +47,8 @@ pub(super) fn preserve_tree(
     archive.directory(&tree)?;
     archive.directory(&restored)?;
     let manifest = directory.join("files.jsonl");
-    let mut output = BufWriter::new(archive.file(&manifest)?);
+    let plan = directory.join("files-plan.jsonl");
+    let mut output = BufWriter::new(archive.file(&plan)?);
     let mut directories = Vec::new();
     let mut hardlinks: BTreeMap<(u64, u64), (PathBuf, PathBuf)> = BTreeMap::new();
     inventory::visit_tree(source_tree, |item| {
@@ -112,7 +116,7 @@ pub(super) fn preserve_tree(
                         "Preservation reference is inside the checkout",
                     ));
                 }
-                verify_copy(&item, &destination)?;
+                verify_contents(&item, &destination, false)?;
                 // Exercise restoration from the claimed durable reference, not
                 // merely the source or a caller-supplied digest.
                 let test = restored.join(&item.entry.path);
@@ -120,12 +124,31 @@ pub(super) fn preserve_tree(
                     archive.directory(&test)?;
                     let local = tree.join(&item.entry.path);
                     archive.directory(&local)?;
-                    directories.push((item.clone(), destination.clone(), local));
+                    directories.push((item.clone(), source.clone(), local));
                 } else {
-                    copy_entry(archive, &item, &destination, &test)?;
+                    let key = item.witness.as_ref().map(|w| (w.device, w.inode));
+                    if item.entry.kind == CloseoutEntryKind::File
+                        && let Some((_, checked)) = key.and_then(|key| hardlinks.get(&key))
+                    {
+                        link_entry(archive, checked, &test)?;
+                    } else {
+                        copy_entry(archive, &item, &destination, &test)?;
+                    }
+                    // The reference proves content, not the source's ACLs,
+                    // attributes or timestamps. Keep the already-exercised
+                    // restoration as durable evidence with original metadata.
+                    copy_metadata(archive, &source, &test, item.entry.kind)?;
+                    if item.entry.kind == CloseoutEntryKind::File
+                        && item.entry.links > 1
+                        && let Some(key) = key
+                    {
+                        hardlinks
+                            .entry(key)
+                            .or_insert_with(|| (test.clone(), test.clone()));
+                    }
                 }
                 verify_copy(&item, &test)?;
-                Some(destination)
+                Some(test)
             }
             CloseoutDisposition::Preserve => {
                 let destination = tree.join(&item.entry.path);
@@ -163,6 +186,7 @@ pub(super) fn preserve_tree(
                 item,
                 disposition,
                 saved,
+                metadata_digest: None,
             },
         )
         .map_err(io)?;
@@ -172,16 +196,33 @@ pub(super) fn preserve_tree(
     // Directory modes/times/ACLs are installed last so read-only source modes
     // cannot prevent the remaining children from being captured or restored.
     for (item, source, destination) in directories.into_iter().rev() {
-        copy_metadata(archive, &source, &destination, false)?;
+        copy_metadata(archive, &source, &destination, CloseoutEntryKind::Directory)?;
         copy_metadata(
             archive,
             &destination,
             &restored.join(&item.entry.path),
-            false,
+            CloseoutEntryKind::Directory,
         )?;
     }
     output.flush().map_err(io)?;
     output.get_ref().sync_all().map_err(io)?;
+    let plan_guard = archive.existing_directory(directory)?;
+    let input = plan_guard
+        .open_preserved_entry(std::ffi::OsStr::new("files-plan.jsonl"), false)
+        .map_err(io)?;
+    let mut sealed = BufWriter::new(archive.file(&manifest)?);
+    for line in BufReader::new(input).lines() {
+        archive.check_cancelled()?;
+        let mut item: PreservedItem = decode(&line.map_err(io)?)?;
+        if let Some(saved) = &item.saved {
+            item.metadata_digest = Some(metadata::fingerprint(saved, item.item.entry.kind)?);
+        }
+        serde_json::to_writer(&mut sealed, &item).map_err(io)?;
+        sealed.write_all(b"\n").map_err(io)?;
+    }
+    sealed.flush().map_err(io)?;
+    sealed.get_ref().sync_all().map_err(io)?;
+    plan_guard.verify().map_err(io)?;
     inventory::verify_tree_controlled(source_tree, archive.control())?;
     storage::sync_dir(directory)?;
     archive.verify()?;
@@ -189,12 +230,27 @@ pub(super) fn preserve_tree(
 }
 
 pub(super) fn verify_copy(item: &Item, path: &Path) -> Result<()> {
+    verify_contents(item, path, true)
+}
+
+pub(super) fn verify_saved(item: &PreservedItem, path: &Path) -> Result<()> {
+    verify_copy(&item.item, path)?;
+    if item.metadata_digest.as_ref() != Some(&metadata::fingerprint(path, item.item.entry.kind)?) {
+        return Err(issue(
+            IssueCode::PreservationIncomplete,
+            "Preserved metadata differs or has no verified receipt; prepare preservation again",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_contents(item: &Item, path: &Path, enforce_mode: bool) -> Result<()> {
     let metadata = std::fs::symlink_metadata(path).map_err(io)?;
     match item.entry.kind {
         CloseoutEntryKind::File => {
             let witness = Witness::of(&metadata)?;
             if !metadata.is_file()
-                || witness.mode != item.entry.mode
+                || (enforce_mode && witness.mode != item.entry.mode)
                 || Some(inventory::hash_file(path, &witness)?) != item.entry.sha256
             {
                 return Err(issue(
@@ -304,7 +360,7 @@ pub(super) fn copy_entry(
             parent_guard
                 .create_preserved_symlink(destination_name, &target)
                 .map_err(io)?;
-            copy_metadata(archive, source, destination, true)?;
+            copy_metadata(archive, source, destination, CloseoutEntryKind::Symlink)?;
         }
         _ => {
             return Err(issue(
@@ -377,10 +433,10 @@ fn copy_metadata(
     archive: &archive::Archive<'_>,
     source: &Path,
     destination: &Path,
-    symlink: bool,
+    kind: CloseoutEntryKind,
 ) -> Result<()> {
     use crate::location::native_files::VerifiedDirectory;
-    if symlink {
+    if kind != CloseoutEntryKind::Directory {
         let from = VerifiedDirectory::open(
             source
                 .parent()
@@ -398,7 +454,7 @@ fn copy_metadata(
                 source
                     .file_name()
                     .ok_or_else(|| corrupt("Metadata source missing"))?,
-                true,
+                kind == CloseoutEntryKind::Symlink,
             )
             .map_err(io)?;
         let output = to
@@ -406,10 +462,11 @@ fn copy_metadata(
                 destination
                     .file_name()
                     .ok_or_else(|| corrupt("Metadata destination missing"))?,
-                true,
+                kind == CloseoutEntryKind::Symlink,
             )
             .map_err(io)?;
         copy_open_metadata(&input, &output)?;
+        output.sync_all().map_err(io)?;
         from.verify().map_err(io)?;
         to.verify().map_err(io)?;
     } else {

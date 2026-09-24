@@ -127,13 +127,22 @@ History preservation creates temporary private refs for original refs, detached
 HEAD and reflog tips. It writes a bundle, restores it into a separate bare
 repository without alternates, checks exact refs and runs Git integrity checks.
 The acquired refs from clone provisioning remain ordinary preserved source refs.
+Git's own dangling-root graph inspection also retains otherwise unreferenced
+commits, trees, blobs and tags, including objects named only by pseudorefs or
+unfinished-operation metadata. It does not classify prose or edit source refs.
+An unborn symbolic branch is distinguished from a damaged existing ref even
+when other branches remain. Git-inventory receipts predating this graph capture
+must be refreshed before new preservation can be authorized.
 Staged and conflict-index blobs are retained through an isolated preservation
 commit. Original index, split-index and per-worktree administration are separately
 copied and restored, including metadata outside a linked worktree's directory.
 The production verifier loads the restored index and compares its complete
 entries before accepting the capture. Source indexes are not converted: Git's
 private expanded index supports observation with the original repository's
-configuration. Cache preparation precedes immutable filesystem witnesses.
+configuration, with split/sparse index representation disabled only for the
+private view. Otherwise Git can compact the view and freshen source tree objects
+during nominal inspection. Cache preparation precedes immutable filesystem
+witnesses; changed source witnesses are not ignored to accommodate Git.
 Initialized nested repositories are inspected individually, including their
 submodule relationships, without letting parent status refresh child indexes.
 Git LFS inventories the restored history offline. Required payloads are copied
@@ -147,7 +156,18 @@ independent verification tree. Native macOS metadata copying retains modes,
 ACLs and extended attributes. In-tree hardlink relationships and symlink targets
 are retained. Source equality is rechecked after copying. A verified existing
 preservation reference is exercised as a restore source, not accepted from a
-caller-supplied hash.
+caller-supplied hash. Its verified restoration remains in the preservation store
+with metadata copied from the original source, not assumed present in the external
+reference. Later loss of that external copy cannot invalidate the retained copy.
+
+The final file manifest is sealed after directory metadata and hardlinks finish.
+It records integrity fingerprints of the retained modes, ownership, birth/modified
+times, flags, ACLs and extended attributes. Resource-fork verification is streamed
+through the native positioned-read API. Inode, access time and ctime are not
+metadata-content fingerprints. Final approval/removal rechecks these receipts as
+well as file bytes, so metadata-only corruption is not mistaken for a valid copy.
+Older captures missing metadata receipts require fresh preservation, not an
+implicit upgrade of old removal authority.
 
 Preservation writes traverse held directory descriptors, create files and links
 relative to those handles, and verify retained ancestors. A missing or replaced

@@ -1,4 +1,5 @@
 use super::*;
+mod git_edges;
 
 struct Fixture {
     _directory: tempfile::TempDir,
@@ -1697,6 +1698,41 @@ async fn final_authorization_rechecks_preservation_and_source() {
         .unwrap()
         .saved
         .unwrap();
+    assert!(
+        std::process::Command::new("/usr/bin/xattr")
+            .args(["-w", "jcode.approval-fixture", "changed metadata only"])
+            .arg(&saved)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert_eq!(
+        fixture
+            .service
+            .approve_closeout_removal(&fixture.client, RequestId::new(), review.target(), &runtime)
+            .await
+            .unwrap_err()
+            .code,
+        IssueCode::PreservationIncomplete
+    );
+    assert!(
+        fixture
+            .service
+            .inspect_closeout(record.operation)
+            .unwrap()
+            .authorization
+            .is_none()
+    );
+    assert_eq!(std::fs::read_to_string(&saved).unwrap(), "preserved data");
+    assert!(
+        std::process::Command::new("/usr/bin/xattr")
+            .args(["-d", "jcode.approval-fixture"])
+            .arg(&saved)
+            .status()
+            .unwrap()
+            .success()
+    );
+    verification::preservation(&stored).unwrap();
     std::fs::write(&saved, "corrupt archive").unwrap();
     assert!(
         fixture
@@ -2963,6 +2999,209 @@ async fn full_archive_restores_ignored_files_symlinks_hardlinks_and_metadata() {
     assert!(xattr.status.success());
     assert_eq!(xattr.stdout, b"preserved\n");
     assert!(fixture.root.join("ignored").exists());
+    finish_capture(&capture);
+}
+
+#[test]
+fn external_reference_retains_original_metadata_and_verified_local_restoration() {
+    use std::io::BufRead;
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    let source = fixture.root.join("important");
+    std::fs::write(&source, "original information").unwrap();
+    let external = fixture._directory.path().join("existing-copy");
+    std::fs::write(&external, "original information").unwrap();
+    std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o750)).unwrap();
+    std::fs::write(source.join("..namedfork/rsrc"), vec![37u8; 200_000]).unwrap();
+    assert!(
+        std::process::Command::new("/bin/chmod")
+            .args([
+                "+a",
+                "everyone allow read,readattr,readextattr,readsecurity"
+            ])
+            .arg(&source)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        std::process::Command::new("/usr/bin/xattr")
+            .args(["-w", "jcode.fixture", "source-only-metadata"])
+            .arg(&source)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let record = fixture
+        .service
+        .begin_closeout(
+            &fixture.client,
+            RequestId::new(),
+            fixture.service.status().unwrap().revision,
+            fixture.spec(false),
+        )
+        .unwrap();
+    let record = fixture
+        .service
+        .inventory_closeout(record.operation, record.revision)
+        .unwrap();
+    let mut stored = load(&fixture.service.connection().unwrap(), record.operation).unwrap();
+    let mut decisions = BTreeMap::new();
+    inventory::visit(&stored, |item| {
+        if item.entry.kind != CloseoutEntryKind::Directory {
+            let disposition = if item.entry.path == Path::new("important") {CloseoutDisposition::Preserved {path:external.clone()}} else {CloseoutDisposition::Redundant {reason:"synthetic fixture excludes unrelated Git internals from this file-copy test".into()}};
+            decisions.insert(item.entry.id.clone(), CloseoutDecision {entry:item.entry.id, disposition, recorded_by:"fixture".into()});
+        }
+        Ok(())
+    }).unwrap();
+    stored.decisions = decisions;
+    let archive = fixture._directory.path().join("archive");
+    std::fs::create_dir(&archive).unwrap();
+    let manifest = files::preserve(&stored, &archive).unwrap();
+    let restored = archive.join("verified-restore/important");
+    let value = std::process::Command::new("/usr/bin/xattr")
+        .args(["-p", "jcode.fixture"])
+        .arg(&restored)
+        .output()
+        .unwrap();
+    assert!(
+        value.status.success(),
+        "{}",
+        String::from_utf8_lossy(&value.stderr)
+    );
+    assert_eq!(value.stdout, b"source-only-metadata\n");
+    let saved = std::io::BufReader::new(std::fs::File::open(manifest).unwrap())
+        .lines()
+        .map(|line| decode::<files::PreservedItem>(&line.unwrap()).unwrap())
+        .find(|item| item.item.entry.path == Path::new("important"))
+        .unwrap();
+    assert!(saved.saved.as_ref().unwrap().starts_with(&archive));
+    std::fs::remove_file(&external).unwrap();
+    files::verify_saved(&saved, saved.saved.as_ref().unwrap()).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&restored).unwrap(),
+        "original information"
+    );
+    assert_eq!(
+        std::fs::read(restored.join("..namedfork/rsrc")).unwrap(),
+        vec![37u8; 200_000]
+    );
+    assert_eq!(
+        std::fs::metadata(&restored).unwrap().permissions().mode() & 0o777,
+        0o750
+    );
+    assert!(
+        std::process::Command::new("/usr/bin/xattr")
+            .args(["-w", "jcode.fixture", "changed"])
+            .arg(&restored)
+            .status()
+            .unwrap()
+            .success()
+    );
+    files::verify_copy(&saved.item, &restored).unwrap();
+    assert_eq!(
+        files::verify_saved(&saved, &restored).unwrap_err().code,
+        IssueCode::PreservationIncomplete
+    );
+    assert!(
+        std::process::Command::new("/usr/bin/xattr")
+            .args(["-w", "jcode.fixture", "source-only-metadata"])
+            .arg(&restored)
+            .status()
+            .unwrap()
+            .success()
+    );
+    files::verify_saved(&saved, &restored).unwrap();
+    assert!(
+        std::process::Command::new("/bin/chmod")
+            .arg("-N")
+            .arg(&restored)
+            .status()
+            .unwrap()
+            .success()
+    );
+    files::verify_copy(&saved.item, &restored).unwrap();
+    assert_eq!(
+        files::verify_saved(&saved, &restored).unwrap_err().code,
+        IssueCode::PreservationIncomplete
+    );
+    assert!(source.exists());
+}
+
+#[tokio::test]
+async fn git_restores_pseudoref_and_unreferenced_graph_roots_without_source() {
+    let fixture = Fixture::new();
+    let tree = git_text(&fixture.root, &["rev-parse", "HEAD^{tree}"]);
+    let lost = git_text(
+        &fixture.root,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@localhost",
+            "commit-tree",
+            tree.trim(),
+            "-m",
+            "unique original operation",
+        ],
+    );
+    std::fs::write(fixture.root.join(".git/ORIG_HEAD"), &lost).unwrap();
+    let input = fixture._directory.path().join("object-source");
+    std::fs::write(&input, "unique loose object").unwrap();
+    let blob = git_text(
+        &fixture.root,
+        &["hash-object", "-w", input.to_str().unwrap()],
+    );
+    std::fs::create_dir(fixture.root.join(".git/saved-operation")).unwrap();
+    std::fs::write(fixture.root.join(".git/saved-operation/object"), &blob).unwrap();
+    let before_refs = git_text(&fixture.root, &["show-ref"]);
+    let record = fixture
+        .service
+        .begin_closeout(
+            &fixture.client,
+            RequestId::new(),
+            fixture.service.status().unwrap().revision,
+            fixture.spec(false),
+        )
+        .unwrap();
+    let capture = capture(&fixture, record.operation);
+    let record = fixture
+        .service
+        .refresh_closeout(record.operation, record.revision, &capture)
+        .await
+        .unwrap();
+    let stored = load(&fixture.service.connection().unwrap(), record.operation).unwrap();
+    let snapshots: Vec<git::RepositorySnapshot> =
+        storage::read_json(stored.history.as_ref().unwrap()).unwrap();
+    assert!(!snapshots[0].reflog.contains(lost.trim()));
+    let archive = fixture._directory.path().join("git-preservation");
+    std::fs::create_dir(&archive).unwrap();
+    let bundle = git::preserve(
+        &fixture.service,
+        record.operation,
+        &snapshots[0],
+        &archive,
+        &capture,
+        &archive::Archive::open(&archive).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(git_text(&fixture.root, &["show-ref"]), before_refs);
+    std::fs::rename(
+        &fixture.root,
+        fixture._directory.path().join("source-offline"),
+    )
+    .unwrap();
+    let restored = bundle.parent().unwrap().join("restored.git");
+    assert_eq!(
+        git_text(&restored, &["cat-file", "-t", lost.trim()]).trim(),
+        "commit"
+    );
+    assert_eq!(
+        git_text(&restored, &["cat-file", "-p", blob.trim()]).trim(),
+        "unique loose object"
+    );
+    git_text(&restored, &["fsck", "--full", "--no-reflogs"]);
     finish_capture(&capture);
 }
 

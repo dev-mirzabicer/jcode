@@ -73,16 +73,16 @@ fn verify_files(path: &Path, expected: &str, source: &Path) -> Result<()> {
     }
     for line in std::io::BufReader::new(std::fs::File::open(path).map_err(io)?).lines() {
         let saved: files::PreservedItem = decode(&line.map_err(io)?)?;
-        if let Some(path) = saved.saved {
+        if let Some(path) = &saved.saved {
             let resolved =
-                crate::location::native_files::resolve_removal_entry(&path).map_err(io)?;
+                crate::location::native_files::resolve_removal_entry(path).map_err(io)?;
             if resolved.starts_with(source) {
                 return Err(issue(
                     IssueCode::PreservationIncomplete,
                     "A preservation reference now resolves inside the checkout",
                 ));
             }
-            files::verify_copy(&saved.item, &resolved)?;
+            files::verify_saved(&saved, &resolved)?;
         } else if !matches!(saved.disposition, CloseoutDisposition::Redundant { .. }) {
             return Err(issue(
                 IssueCode::PreservationIncomplete,
