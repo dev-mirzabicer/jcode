@@ -267,7 +267,7 @@ impl WorkspaceService {
             if let Err(error) = self.resolver.resolve_directory(&bound.binding) {
                 unavailable.insert(id);
                 if let Entity::Location(mut location) = entity(connection, EntityId::Location(id))?
-                    && location.lifecycle != LocationLifecycle::Closed
+                    && !location.lifecycle.is_historical()
                 {
                     location.lifecycle = LocationLifecycle::Unavailable;
                     organization::save_entity(connection, &Entity::Location(location))?;

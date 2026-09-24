@@ -93,7 +93,7 @@ impl WorkspaceService {
         }
         for other in scope::locations(&transaction)? {
             if other.id != location.id
-                && other.lifecycle != LocationLifecycle::Closed
+                && !other.lifecycle.is_historical()
                 && other.observed_path.starts_with(&location.observed_path)
             {
                 result.issues.push(issue(IssueCode::Referenced, format!("Registered location {} is inside this checkout; resolve its independent lifecycle before removal", other.id)));
@@ -183,22 +183,47 @@ impl WorkspaceService {
                 .parent()
                 .ok_or_else(|| corrupt("Catalog has no parent"))?,
         );
-        match instructions.preservation_references(&location.observed_path) {
-            Ok(paths) => {
-                for path in paths {
-                    if contained(&path, &location.observed_path)? {
-                        result.links.push(Link {
-                            owner: location.id.to_string(),
-                            kind: "instruction_location".into(),
-                            path,
-                        });
+        let original_absent = matches!(std::fs::symlink_metadata(&location.observed_path), Err(error) if error.kind() == std::io::ErrorKind::NotFound);
+        if stored.removal.is_some() && original_absent {
+            let (path, digest) = stored.references.as_ref().ok_or_else(|| {
+                issue(
+                    IssueCode::IncompleteCapture,
+                    "Removed source has no retained reference inventory",
+                )
+            })?;
+            if backup::file_digest(path)? != *digest {
+                return Err(corrupt("Retained reference inventory changed"));
+            }
+            let historical: References = storage::read_json(path)?;
+            result.issues.extend(historical.issues);
+            result.links.extend(
+                historical
+                    .links
+                    .into_iter()
+                    .filter(|link| link.kind == "instruction_location")
+                    .map(|mut link| {
+                        link.kind = "recorded_instruction_location".into();
+                        link
+                    }),
+            );
+        } else {
+            match instructions.preservation_references(&location.observed_path) {
+                Ok(paths) => {
+                    for path in paths {
+                        if contained(&path, &location.observed_path)? {
+                            result.links.push(Link {
+                                owner: location.id.to_string(),
+                                kind: "instruction_location".into(),
+                                path,
+                            });
+                        }
                     }
                 }
+                Err(error) => result.issues.push(issue(
+                    IssueCode::IncompleteCapture,
+                    format!("Instruction binding cannot be inspected: {error}"),
+                )),
             }
-            Err(error) => result.issues.push(issue(
-                IssueCode::IncompleteCapture,
-                format!("Instruction binding cannot be inspected: {error}"),
-            )),
         }
         result.sessions.sort_by(|a, b| a.session.cmp(&b.session));
         result

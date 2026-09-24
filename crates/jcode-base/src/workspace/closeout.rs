@@ -259,7 +259,7 @@ impl WorkspaceService {
         if stored.removal.is_some()
             || matches!(
                 stored.record.stage,
-                CloseoutStage::Removing | CloseoutStage::Closed
+                CloseoutStage::Removing | CloseoutStage::Closed | CloseoutStage::Retained
             )
         {
             return Err(issue(
@@ -366,7 +366,7 @@ pub(super) fn invalidate_restored_authority(
 
 fn save(connection: &Connection, stored: &StoredCloseout) -> Result<()> {
     let state = match stored.record.stage {
-        CloseoutStage::Closed => "complete",
+        CloseoutStage::Closed | CloseoutStage::Retained => "complete",
         CloseoutStage::Revoked => "failed",
         CloseoutStage::RecoveryRequired => "recovery_required",
         _ => "pending",

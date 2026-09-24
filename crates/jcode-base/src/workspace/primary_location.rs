@@ -94,7 +94,7 @@ impl WorkspaceService {
             let bound: BoundLocation = decode(&physical)?;
             // Historical closed roots cannot confer live authority. A new root
             // later occupying that spelling must acquire its own identity.
-            if location.lifecycle == LocationLifecycle::Closed {
+            if location.lifecycle.is_historical() {
                 continue;
             }
             if binding.observed_path().starts_with(&location.observed_path) {

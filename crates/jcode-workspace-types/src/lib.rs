@@ -144,6 +144,14 @@ pub enum LocationLifecycle {
     Unavailable,
     Closing,
     Closed,
+    /// Registration ended explicitly; files were retained, not removed.
+    Unregistered,
+}
+
+impl LocationLifecycle {
+    pub fn is_historical(self) -> bool {
+        matches!(self, Self::Closed | Self::Unregistered)
+    }
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

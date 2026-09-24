@@ -31,6 +31,34 @@ pub enum CloseoutStage {
     Closed,
     Revoked,
     RecoveryRequired,
+    Retained,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CloseoutRecoveryAction {
+    RestartPreparation,
+    ResumeRemoval,
+    UnregisterRetainFiles,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CloseoutRecoveryPath {
+    pub path: PathBuf,
+    pub present: bool,
+    pub matches_recorded_root: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CloseoutRecoveryReview {
+    pub id: ReviewId,
+    pub operation: OperationId,
+    pub revision: Revision,
+    pub action: CloseoutRecoveryAction,
+    pub paths: Vec<CloseoutRecoveryPath>,
+    pub adopt_empty_holding: Option<PathBuf>,
+    pub work: CloseoutWorkReport,
+    pub issues: Vec<Issue>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

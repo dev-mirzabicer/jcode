@@ -5,6 +5,10 @@ use crate::location::native_files::VerifiedDirectory;
 use inventory::{Item, Witness};
 use std::ffi::OsStr;
 use std::io::{Read, Seek, SeekFrom};
+#[cfg(target_os = "macos")]
+mod recovery;
+#[cfg(target_os = "macos")]
+mod remainder;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct Removal {
@@ -16,6 +20,11 @@ pub(super) struct Removal {
     pending: Option<Pending>,
     root_removed: bool,
     worktree: Option<WorktreeRetirement>,
+}
+impl Removal {
+    pub(super) fn control_paths(&self) -> [&Path; 2] {
+        [&self.quarantine, &self.holding]
+    }
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct WorktreeRetirement {
@@ -112,7 +121,7 @@ impl WorkspaceService {
         let Entity::Location(location) = entity(&transaction, EntityId::Location(location))? else {
             return Err(corrupt("Location history target changed kind"));
         };
-        if location.lifecycle != LocationLifecycle::Closed {
+        if !location.lifecycle.is_historical() {
             return Err(issue(IssueCode::InvalidIdentity, "Checkout has not closed"));
         }
         let body: String = transaction
@@ -132,7 +141,11 @@ impl WorkspaceService {
             .map_err(io)?;
         let record = if exists {
             let record = load(&transaction, reference.operation)?.record;
-            if record.stage != CloseoutStage::Closed || record.spec.location != location.id {
+            if !matches!(
+                record.stage,
+                CloseoutStage::Closed | CloseoutStage::Retained
+            ) || record.spec.location != location.id
+            {
                 return Err(corrupt("Closed receipt does not match its location"));
             }
             Some(record)
@@ -350,6 +363,14 @@ impl WorkspaceService {
         runtime: &CloseoutRuntime<'_>,
     ) -> Result<()> {
         verification::preservation(stored)?;
+        let mut findings = Vec::new();
+        runtime.observe_internal(self, stored, &mut findings)?;
+        if !findings.is_empty() {
+            return Err(issue(
+                IssueCode::LiveWork,
+                format!("Recovery paths have dependent work: {findings:?}"),
+            ));
+        }
         let destination = self
             .resolver
             .resolve_directory(&stored.destination)
@@ -494,6 +515,16 @@ impl WorkspaceService {
                 }
             }
             runtime.check_stop()?;
+            if present(&removal.holding)? {
+                for entry in std::fs::read_dir(&removal.holding).map_err(io)? {
+                    if entry.map_err(io)?.file_name() != "entry" {
+                        return Err(issue(
+                            IssueCode::Conflict,
+                            "Unexpected data in holding directory is retained",
+                        ));
+                    }
+                }
+            }
             self.retire_worktree(stored, runtime).await?;
             if present(&removal.holding)?
                 && !work::external_work(
@@ -516,6 +547,7 @@ impl WorkspaceService {
                     .resolver
                     .create_empty_child(&removal.parent, removal.holding.file_name().unwrap())
                     .map_err(io)?;
+                self.checkpoint("closeout_holding_created")?;
                 stored.removal.as_mut().unwrap().holding_binding = Some(binding);
                 self.save_removal(stored)?;
             }

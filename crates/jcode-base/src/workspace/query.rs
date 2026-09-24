@@ -52,13 +52,15 @@ impl WorkspaceService {
         let visibility = match query.visibility {
             Visibility::All => "1",
             Visibility::Current => {
-                "(has_active OR (own_state='active' AND area_state='active' AND project_state='active' AND coalesce(json_extract(body,'$.value.lifecycle'),'ready')!='closed'))"
+                "(has_active OR (own_state='active' AND area_state='active' AND project_state='active' AND coalesce(json_extract(body,'$.value.lifecycle'),'ready') NOT IN ('closed','unregistered')))"
             }
             Visibility::Archived => {
                 "(own_state='archived' OR area_state='archived' OR project_state='archived')"
             }
             Visibility::Retired => "own_state='retired'",
-            Visibility::Closed => "json_extract(body,'$.value.lifecycle')='closed'",
+            Visibility::Closed => {
+                "json_extract(body,'$.value.lifecycle') IN ('closed','unregistered')"
+            }
         };
         let filter=format!(" WHERE (?1 IS NULL OR kind=?1)
             AND (?2 IS NULL OR owner_project=?2 OR area_project=?2 OR (kind='repository' AND EXISTS(SELECT 1 FROM associations WHERE project=?2 AND repository=visible.id)))

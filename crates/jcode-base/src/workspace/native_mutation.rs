@@ -190,7 +190,7 @@ impl WorkspaceService {
                 .max_by_key(|root| {
                     (
                         root.observed_path.components().count(),
-                        root.lifecycle != LocationLifecycle::Closed && !root.retired,
+                        !root.lifecycle.is_historical() && !root.retired,
                     )
                 })
                 .with_context(|| {

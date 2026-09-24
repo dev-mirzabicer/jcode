@@ -104,7 +104,7 @@ pub(super) fn validate_graph(connection: &Connection) -> Result<()> {
                         |r| r.get(0),
                     )
                     .map_err(corrupt)?;
-                let expected_key = if loc.lifecycle == LocationLifecycle::Closed {
+                let expected_key = if loc.lifecycle.is_historical() {
                     None
                 } else {
                     Some(storage::physical_key(&bound.binding)?)
@@ -495,7 +495,7 @@ impl WorkspaceService {
                     {
                         loc.kind = organization::checkout_kind(&loc.observed_path, repository)?;
                     }
-                    if loc.lifecycle != LocationLifecycle::Closed {
+                    if !loc.lifecycle.is_historical() {
                         loc.lifecycle = if available && loc.lifecycle == LocationLifecycle::Ready {
                             LocationLifecycle::Ready
                         } else {
@@ -685,7 +685,7 @@ fn install_portable(
         let closed = matches!(
             entity(connection, EntityId::Location(*id))?,
             Entity::Location(Location {
-                lifecycle: LocationLifecycle::Closed,
+                lifecycle: LocationLifecycle::Closed | LocationLifecycle::Unregistered,
                 ..
             })
         );

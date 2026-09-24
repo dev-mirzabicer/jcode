@@ -154,8 +154,8 @@ or forcing removal. Sibling files and shared refs remain outside the target.
 `closeout_removal_progress` supplies revision-bound pages of NotProcessed,
 Unconfirmed and Removed entries. An effect without its final receipt stays
 Unconfirmed even if an unlink may already have happened. Pre-removal revocation
-cannot reopen an operation that has started removing data. Further recovery
-controls and their public client remain part of the integration boundary.
+cannot reopen an operation that has started removing data. Its trusted recovery
+review is a separate operation, not ordinary revocation.
 
 Removal observes its existing execution's durable Stop cause before destructive
 admission and between journaled entries. An admitted entry finishes its receipt,
@@ -163,6 +163,43 @@ then Stop retains partial progress for a new, separately identified attempt.
 The production adapter must own the blocking producer independently of client
 waiting and keep inspection/control responsive. Stop is not new deletion
 authority, rollback, or permission to reuse an old terminal execution.
+
+## Trusted recovery and retaining files
+
+`review_closeout_recovery` requires trusted client authority. It fences the
+location and clears earlier final and conditional authorization before collecting
+current findings. `pending_closeout_recovery` finds a committed current review
+after lost delivery. `apply_closeout_recovery` binds a request ID to that exact
+operation/review, rechecks physical observations, references and live work, and
+records the trusted decision. A committed fence or backup failure is not reported
+as a rolled-back operation.
+
+- Restart preparation requires the intact original root and no evidence that
+  removal began. Old inventories and preservation references remain in review
+  history, but they no longer authorize the restarted operation.
+- Resume removal checks preserved data and every remaining or pending entry
+  against the retained journal. Unknown disappearances, replacements and newly
+  arrived entries block it. A precisely inspected empty holding directory whose
+  creation receipt was interrupted can be adopted only by this fresh human
+  decision. It is never adopted automatically from its name.
+- Unregister and retain files performs no checkout, quarantine, holding-directory
+  or shared Git deletion. It ends the registration and retains inspectable paths,
+  reports and earlier evidence. The Location is `unregistered`, and the operation
+  is `retained`, not `closed`. This does not claim that missing data was preserved
+  or that an old unconfirmed effect completed. Re-adoption is an explicit new
+  registration, with no inherited authority from the old identity.
+
+Closed-history queries include both historical outcomes with their distinct
+typed states. Export/import retains their external references without inventing
+a local operation or reenabling grants. After quarantine, instruction references
+come from the integrity-checked pre-removal snapshot and are labeled recorded,
+not newly resolved from a missing cwd. Current Session, catalog and side-panel
+references remain independently observed.
+
+A restored older catalog cannot manufacture receipts for later filesystem
+effects. If those effects cannot be reconciled, resumed removal stays blocked;
+the trusted retain-files alternative remains available without deleting data.
+The ordinary agent capability and public client integration remain gated.
 
 Closed is published only after the original/quarantine paths are absent and the
 owned holding directory is empty and removed. `closed_checkout_history` retains

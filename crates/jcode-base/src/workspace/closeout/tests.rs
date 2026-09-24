@@ -9,6 +9,562 @@ struct Fixture {
 }
 
 #[tokio::test]
+async fn trusted_recovery_does_not_invent_effects_missing_from_an_old_snapshot() {
+    let (fixture, record, capture) = prepared_approval_fixture(true, false).await;
+    let sessions = fixture._directory.path().join("sessions-state");
+    let execution =
+        crate::execution::ExecutionStore::open(&fixture._directory.path().join("output")).unwrap();
+    let runtime = CloseoutRuntime::new(&sessions, &execution, fixture._directory.path(), &capture);
+    let review = fixture
+        .service
+        .review_closeout_removal(record.operation, record.revision, &runtime)
+        .await
+        .unwrap();
+    fixture
+        .service
+        .declare_closeout_no_loss(
+            "fixture",
+            RequestId::new(),
+            review.target(),
+            "synthetic assessment",
+            &runtime,
+        )
+        .await
+        .unwrap();
+    let old = fixture
+        .service
+        .backup(RequestId::new(), "before-effects".into())
+        .unwrap();
+    let mut interrupted = fixture.service.clone();
+    interrupted.fault = Some(std::sync::Arc::new(|stage| {
+        if stage == "closeout_entry_unlinked" {
+            Err(issue(IssueCode::Io, "fixture interruption"))
+        } else {
+            Ok(())
+        }
+    }));
+    assert!(
+        interrupted
+            .finish_closeout(record.operation, &runtime)
+            .await
+            .is_err()
+    );
+    let quarantine = fixture
+        .service
+        .inspect_closeout(record.operation)
+        .unwrap()
+        .quarantine
+        .unwrap();
+    let retained_file = quarantine.join(".git/HEAD");
+    let bytes = std::fs::read(&retained_file).unwrap();
+    let restore = fixture.service.review_restore(old.id).unwrap();
+    fixture
+        .service
+        .apply_restore(RequestId::new(), restore.id)
+        .unwrap();
+    let restored = fixture.service.inspect_closeout(record.operation).unwrap();
+    let unsafe_resume = fixture
+        .service
+        .review_closeout_recovery(
+            &fixture.client,
+            restored.operation,
+            restored.revision,
+            CloseoutRecoveryAction::ResumeRemoval,
+            &runtime,
+        )
+        .await
+        .unwrap();
+    assert!(
+        unsafe_resume
+            .issues
+            .iter()
+            .any(|issue| issue.code == IssueCode::RecoveryRequired)
+    );
+    assert!(
+        fixture
+            .service
+            .apply_closeout_recovery(
+                &fixture.client,
+                RequestId::new(),
+                CloseoutReviewTarget {
+                    operation: record.operation,
+                    review: unsafe_resume.id
+                },
+                &runtime
+            )
+            .await
+            .is_err()
+    );
+    let current = fixture.service.inspect_closeout(record.operation).unwrap();
+    let keep = fixture
+        .service
+        .review_closeout_recovery(
+            &fixture.client,
+            current.operation,
+            current.revision,
+            CloseoutRecoveryAction::UnregisterRetainFiles,
+            &runtime,
+        )
+        .await
+        .unwrap();
+    assert!(keep.issues.is_empty(), "{:?}", keep.issues);
+    assert_eq!(
+        fixture
+            .service
+            .pending_closeout_recovery(record.operation)
+            .unwrap()
+            .unwrap()
+            .id,
+        keep.id
+    );
+    let kept = fixture
+        .service
+        .apply_closeout_recovery(
+            &fixture.client,
+            RequestId::new(),
+            CloseoutReviewTarget {
+                operation: record.operation,
+                review: keep.id,
+            },
+            &runtime,
+        )
+        .await
+        .unwrap();
+    assert_eq!(kept.stage, CloseoutStage::Retained);
+    assert!(
+        fixture
+            .service
+            .pending_closeout_recovery(record.operation)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(std::fs::read(&retained_file).unwrap(), bytes);
+    assert!(
+        fixture
+            .service
+            .closed_checkout_history(fixture.location)
+            .unwrap()
+            .preservation_paths
+            .contains(&quarantine)
+    );
+    finish_capture(&capture);
+}
+
+#[tokio::test]
+async fn trusted_recovery_after_catalog_restore_requires_fresh_human_decision() {
+    for new_data in [false, true] {
+        let (fixture, record, capture) = prepared_approval_fixture(true, false).await;
+        let sessions = fixture._directory.path().join("sessions-state");
+        let execution =
+            crate::execution::ExecutionStore::open(&fixture._directory.path().join("output"))
+                .unwrap();
+        let runtime =
+            CloseoutRuntime::new(&sessions, &execution, fixture._directory.path(), &capture);
+        let review = fixture
+            .service
+            .review_closeout_removal(record.operation, record.revision, &runtime)
+            .await
+            .unwrap();
+        fixture
+            .service
+            .declare_closeout_no_loss(
+                "fixture",
+                RequestId::new(),
+                review.target(),
+                "synthetic assessment",
+                &runtime,
+            )
+            .await
+            .unwrap();
+        let mut interrupted = fixture.service.clone();
+        interrupted.fault = Some(std::sync::Arc::new(|stage| {
+            if stage == "closeout_entry_unlinked" {
+                Err(issue(IssueCode::Io, "fixture interruption"))
+            } else {
+                Ok(())
+            }
+        }));
+        assert!(
+            interrupted
+                .finish_closeout(record.operation, &runtime)
+                .await
+                .is_err()
+        );
+        let snapshot = fixture
+            .service
+            .backup(RequestId::new(), "partial-removal".into())
+            .unwrap();
+        let restore = fixture.service.review_restore(snapshot.id).unwrap();
+        fixture
+            .service
+            .apply_restore(RequestId::new(), restore.id)
+            .unwrap();
+        let restored = fixture.service.inspect_closeout(record.operation).unwrap();
+        assert!(restored.authorization.is_none());
+        assert!(!restored.spec.conditional_no_loss);
+        assert!(
+            fixture
+                .service
+                .finish_closeout(record.operation, &runtime)
+                .await
+                .is_err()
+        );
+        let review = fixture
+            .service
+            .review_closeout_recovery(
+                &fixture.client,
+                restored.operation,
+                restored.revision,
+                CloseoutRecoveryAction::ResumeRemoval,
+                &runtime,
+            )
+            .await
+            .unwrap();
+        assert!(review.issues.is_empty(), "{:?}", review.issues);
+        let target = CloseoutReviewTarget {
+            operation: record.operation,
+            review: review.id,
+        };
+        if new_data {
+            let path = restored
+                .quarantine
+                .as_ref()
+                .unwrap()
+                .join("new-unpreserved-data");
+            std::fs::write(&path, "keep these new bytes").unwrap();
+            assert!(
+                fixture
+                    .service
+                    .apply_closeout_recovery(&fixture.client, RequestId::new(), target, &runtime)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                "keep these new bytes"
+            );
+            let current = fixture.service.inspect_closeout(record.operation).unwrap();
+            let keep = fixture
+                .service
+                .review_closeout_recovery(
+                    &fixture.client,
+                    current.operation,
+                    current.revision,
+                    CloseoutRecoveryAction::UnregisterRetainFiles,
+                    &runtime,
+                )
+                .await
+                .unwrap();
+            assert!(keep.issues.is_empty(), "{:?}", keep.issues);
+            let retained = fixture
+                .service
+                .apply_closeout_recovery(
+                    &fixture.client,
+                    RequestId::new(),
+                    CloseoutReviewTarget {
+                        operation: current.operation,
+                        review: keep.id,
+                    },
+                    &runtime,
+                )
+                .await
+                .unwrap();
+            assert_eq!(retained.stage, CloseoutStage::Retained);
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                "keep these new bytes"
+            );
+            assert!(
+                fixture
+                    .service
+                    .closed_checkout_history(fixture.location)
+                    .unwrap()
+                    .preservation_paths
+                    .contains(restored.quarantine.as_ref().unwrap())
+            );
+        } else {
+            let renewed = fixture
+                .service
+                .apply_closeout_recovery(&fixture.client, RequestId::new(), target, &runtime)
+                .await
+                .unwrap();
+            assert!(matches!(
+                renewed.authorization.unwrap().source,
+                CloseoutAuthorizationSource::Human { .. }
+            ));
+            assert_eq!(
+                fixture
+                    .service
+                    .finish_closeout(record.operation, &runtime)
+                    .await
+                    .unwrap()
+                    .stage,
+                CloseoutStage::Closed
+            );
+        }
+        finish_capture(&capture);
+    }
+}
+
+#[tokio::test]
+async fn trusted_recovery_restart_and_unregister_retain_files_preserve_history() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.root.join("unknown-data"), "must remain").unwrap();
+    let record = fixture.begin(true);
+    let capture = capture(&fixture, record.operation);
+    let sessions = fixture._directory.path().join("sessions-state");
+    let execution =
+        crate::execution::ExecutionStore::open(&fixture._directory.path().join("output")).unwrap();
+    let runtime = CloseoutRuntime::new(&sessions, &execution, fixture._directory.path(), &capture);
+    let review = fixture
+        .service
+        .review_closeout_recovery(
+            &fixture.client,
+            record.operation,
+            record.revision,
+            CloseoutRecoveryAction::RestartPreparation,
+            &runtime,
+        )
+        .await
+        .unwrap();
+    assert!(review.issues.is_empty(), "{:?}", review.issues);
+    let restarted = fixture
+        .service
+        .apply_closeout_recovery(
+            &fixture.client,
+            RequestId::new(),
+            CloseoutReviewTarget {
+                operation: record.operation,
+                review: review.id,
+            },
+            &runtime,
+        )
+        .await
+        .unwrap();
+    assert_eq!(restarted.stage, CloseoutStage::Preparing);
+    assert!(!restarted.spec.conditional_no_loss);
+    let review = fixture
+        .service
+        .review_closeout_recovery(
+            &fixture.client,
+            record.operation,
+            restarted.revision,
+            CloseoutRecoveryAction::UnregisterRetainFiles,
+            &runtime,
+        )
+        .await
+        .unwrap();
+    assert!(review.issues.is_empty(), "{:?}", review.issues);
+    let target = CloseoutReviewTarget {
+        operation: record.operation,
+        review: review.id,
+    };
+    let request = RequestId::new();
+    let retained = fixture
+        .service
+        .apply_closeout_recovery(&fixture.client, request, target, &runtime)
+        .await
+        .unwrap();
+    assert_eq!(retained.stage, CloseoutStage::Retained);
+    assert!(retained.authorization.is_none());
+    assert_eq!(
+        fixture
+            .service
+            .apply_closeout_recovery(&fixture.client, request, target, &runtime)
+            .await
+            .unwrap(),
+        retained
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("unknown-data")).unwrap(),
+        "must remain"
+    );
+    let history = fixture
+        .service
+        .closed_checkout_history(fixture.location)
+        .unwrap();
+    assert_eq!(history.location.lifecycle, LocationLifecycle::Unregistered);
+    assert!(history.location.retired);
+    let Home::Project(project) = history.location.home.unwrap() else {
+        panic!()
+    };
+    let export = fixture
+        .service
+        .export_project(RequestId::new(), project, "retained-files".into())
+        .unwrap();
+    let imported = WorkspaceService::new(&fixture._directory.path().join("imported"));
+    imported.initialize(RequestId::new()).unwrap();
+    let import = imported
+        .review_import(
+            export,
+            imported.status().unwrap().revision,
+            ImportCollisionPolicy::Reject,
+            vec![],
+        )
+        .unwrap();
+    imported.apply_import(RequestId::new(), import.id).unwrap();
+    let imported_history = imported.closed_checkout_history(fixture.location).unwrap();
+    assert!(imported_history.record.is_none());
+    assert_eq!(
+        imported_history.location.lifecycle,
+        LocationLifecycle::Unregistered
+    );
+    assert_eq!(
+        imported_history.preservation_paths,
+        history.preservation_paths
+    );
+    portable::validate_graph(&imported.connection().unwrap()).unwrap();
+    assert!(
+        history
+            .preservation_paths
+            .contains(&fixture.root.canonicalize().unwrap())
+    );
+    portable::validate_graph(&fixture.service.connection().unwrap()).unwrap();
+    assert_eq!(
+        fixture
+            .service
+            .list(
+                Query {
+                    visibility: Visibility::Closed,
+                    ..Default::default()
+                },
+                None,
+                50
+            )
+            .unwrap()
+            .total,
+        1
+    );
+    let LocationKind::Checkout { repository, .. } = history.location.kind else {
+        panic!()
+    };
+    let registration = fixture
+        .service
+        .review_organization_change(
+            fixture.service.status().unwrap().revision,
+            OrganizationChange::RegisterLocation {
+                name: "explicitly readopted".into(),
+                path: fixture.root.clone(),
+                registration: Registration::Checkout {
+                    home: history.location.home.unwrap(),
+                    repository,
+                },
+            },
+        )
+        .unwrap();
+    let receipt = fixture
+        .service
+        .apply_organization_change(RequestId::new(), registration.id)
+        .unwrap();
+    assert!(
+        !receipt
+            .targets
+            .contains(&EntityId::Location(fixture.location))
+    );
+    assert!(
+        fixture
+            .service
+            .finish_closeout(record.operation, &runtime)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("unknown-data")).unwrap(),
+        "must remain"
+    );
+    finish_capture(&capture);
+}
+
+#[tokio::test]
+async fn trusted_recovery_reviews_empty_unconfirmed_holding_before_resuming() {
+    let (fixture, record, capture) = prepared_approval_fixture(true, false).await;
+    let sessions = fixture._directory.path().join("sessions-state");
+    let execution =
+        crate::execution::ExecutionStore::open(&fixture._directory.path().join("output")).unwrap();
+    let runtime = CloseoutRuntime::new(&sessions, &execution, fixture._directory.path(), &capture);
+    let review = fixture
+        .service
+        .review_closeout_removal(record.operation, record.revision, &runtime)
+        .await
+        .unwrap();
+    fixture
+        .service
+        .declare_closeout_no_loss(
+            "fixture",
+            RequestId::new(),
+            review.target(),
+            "synthetic assessment",
+            &runtime,
+        )
+        .await
+        .unwrap();
+    let mut interrupted = fixture.service.clone();
+    interrupted.fault = Some(std::sync::Arc::new(|stage| {
+        if stage == "closeout_holding_created" {
+            Err(issue(IssueCode::Io, "fixture interruption"))
+        } else {
+            Ok(())
+        }
+    }));
+    assert!(
+        interrupted
+            .finish_closeout(record.operation, &runtime)
+            .await
+            .is_err()
+    );
+    let partial = fixture.service.inspect_closeout(record.operation).unwrap();
+    assert!(
+        fixture
+            .service
+            .finish_closeout(record.operation, &runtime)
+            .await
+            .is_err()
+    );
+    let partial = fixture.service.inspect_closeout(partial.operation).unwrap();
+    let review = fixture
+        .service
+        .review_closeout_recovery(
+            &fixture.client,
+            partial.operation,
+            partial.revision,
+            CloseoutRecoveryAction::ResumeRemoval,
+            &runtime,
+        )
+        .await
+        .unwrap();
+    assert!(review.issues.is_empty(), "{:?}", review.issues);
+    assert!(review.adopt_empty_holding.is_some());
+    let authorized = fixture
+        .service
+        .apply_closeout_recovery(
+            &fixture.client,
+            RequestId::new(),
+            CloseoutReviewTarget {
+                operation: partial.operation,
+                review: review.id,
+            },
+            &runtime,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        authorized.authorization.unwrap().source,
+        CloseoutAuthorizationSource::Human { .. }
+    ));
+    assert!(!authorized.spec.conditional_no_loss);
+    assert_eq!(
+        fixture
+            .service
+            .finish_closeout(record.operation, &runtime)
+            .await
+            .unwrap()
+            .stage,
+        CloseoutStage::Closed
+    );
+    finish_capture(&capture);
+}
+
+#[tokio::test]
 async fn removal_honors_durable_execution_stop_and_resumes_with_new_capture() {
     use jcode_tool_core::OutputCapture;
     let (fixture, record, first_capture) = prepared_approval_fixture(true, false).await;

@@ -43,7 +43,7 @@ impl WorkspaceService {
             }
             // A newly registered replacement is a new identity, not revival of
             // the old location. Its own binding is validated below.
-            if location.lifecycle == LocationLifecycle::Closed
+            if location.lifecycle.is_historical()
                 && locations.iter().any(|other| {
                     other.id != location.id
                         && other.observed_path == *path

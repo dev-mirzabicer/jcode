@@ -288,7 +288,10 @@ pub(super) fn require_preparation(stored: &StoredCloseout) -> Result<()> {
     }
     if matches!(
         stored.record.stage,
-        CloseoutStage::Closed | CloseoutStage::Revoked | CloseoutStage::Removing
+        CloseoutStage::Closed
+            | CloseoutStage::Retained
+            | CloseoutStage::Revoked
+            | CloseoutStage::Removing
     ) {
         return Err(issue(
             IssueCode::Conflict,

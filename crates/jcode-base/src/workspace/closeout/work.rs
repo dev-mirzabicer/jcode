@@ -13,6 +13,20 @@ pub struct CloseoutRuntime<'a> {
 }
 
 impl<'a> CloseoutRuntime<'a> {
+    pub(super) fn observe_internal(
+        &self,
+        workspace: &WorkspaceService,
+        stored: &StoredCloseout,
+        findings: &mut Vec<CloseoutWorkFinding>,
+    ) -> Result<()> {
+        workspace.observe_closeout_work(
+            stored,
+            self.session_root,
+            self.execution,
+            self.executor_cwd,
+            findings,
+        )
+    }
     pub(super) fn check_stop(&self) -> Result<()> {
         let reference = self.capture.reference().map_err(io)?;
         let run = self
@@ -148,14 +162,17 @@ impl WorkspaceService {
         executor_cwd: &Path,
         findings: &mut Vec<CloseoutWorkFinding>,
     ) -> Result<()> {
-        let root = stored.binding.observed_path();
+        let mut roots = vec![stored.binding.observed_path()];
+        if let Some(removal) = &stored.removal {
+            roots.extend(removal.control_paths());
+        }
         match crate::execution::active_session_locations() {
             Ok(active) => {
                 for activity in active {
                     if activity
                         .working_directory
                         .as_deref()
-                        .map(|cwd| touches(cwd, root))
+                        .map(|cwd| touches(cwd, &roots))
                         .transpose()?
                         .unwrap_or(false)
                     {
@@ -171,7 +188,8 @@ impl WorkspaceService {
                 error.to_string(),
             )),
         }
-        if touches(executor_cwd, root)? || touches(&std::env::current_dir().map_err(io)?, root)? {
+        if touches(executor_cwd, &roots)? || touches(&std::env::current_dir().map_err(io)?, &roots)?
+        {
             findings.push(finding(
                 CloseoutWorkKind::Executor,
                 "executor-cwd",
@@ -208,7 +226,7 @@ impl WorkspaceService {
                 let affected = session
                     .working_dir
                     .as_deref()
-                    .map(|cwd| touches(Path::new(cwd), root))
+                    .map(|cwd| touches(Path::new(cwd), &roots))
                     .transpose()?
                     .unwrap_or(false);
                 if affected {
@@ -243,7 +261,7 @@ impl WorkspaceService {
                     }
                 }
                 for change in self.pending_location_changes(id)? {
-                    if affected || touches(&change.input.cwd, root)? {
+                    if affected || touches(&change.input.cwd, &roots)? {
                         findings.push(finding(
                             CloseoutWorkKind::PendingControl,
                             change.operation.to_string(),
@@ -258,13 +276,13 @@ impl WorkspaceService {
             let native_cwd = execution.command_working_directory(&run.id).map_err(io)?;
             if native_cwd
                 .as_deref()
-                .map(|cwd| touches(cwd, root))
+                .map(|cwd| touches(cwd, &roots))
                 .transpose()?
                 .unwrap_or(false)
                 || invocation
                     .working_dir
                     .as_deref()
-                    .map(|cwd| touches(cwd, root))
+                    .map(|cwd| touches(cwd, &roots))
                     .transpose()?
                     .unwrap_or(false)
             {
@@ -301,10 +319,9 @@ impl WorkspaceService {
     }
 }
 
-fn touches(path: &Path, root: &Path) -> Result<bool> {
-    Ok(crate::location::native_files::resolve_target(path)
-        .map_err(io)?
-        .starts_with(root))
+fn touches(path: &Path, roots: &[&Path]) -> Result<bool> {
+    let resolved = crate::location::native_files::resolve_target(path).map_err(io)?;
+    Ok(roots.iter().any(|root| resolved.starts_with(root)))
 }
 fn finding(
     kind: CloseoutWorkKind,

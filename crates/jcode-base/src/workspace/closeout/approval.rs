@@ -280,7 +280,7 @@ impl WorkspaceService {
         Ok(())
     }
 
-    fn verify_closeout_evidence(&self, stored: &StoredCloseout) -> Result<()> {
+    pub(super) fn verify_closeout_evidence(&self, stored: &StoredCloseout) -> Result<()> {
         let source = self
             .resolver
             .resolve_directory(&stored.binding)
@@ -299,7 +299,10 @@ impl WorkspaceService {
         verification::preservation(stored)
     }
 
-    fn closeout_destination_ownership(&self, stored: &StoredCloseout) -> Result<Option<bool>> {
+    pub(super) fn closeout_destination_ownership(
+        &self,
+        stored: &StoredCloseout,
+    ) -> Result<Option<bool>> {
         let destination = self
             .resolver
             .resolve_directory(&stored.destination)
