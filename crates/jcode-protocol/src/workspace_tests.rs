@@ -2,6 +2,45 @@ use super::*;
 use jcode_workspace_types::{RequestId, ReviewId, WorkspaceRequest, WorkspaceResponse};
 
 #[test]
+fn closeout_requests_are_correlated_without_session_or_caller_supplied_authority() {
+    use jcode_workspace_types::{CloseoutAction, CloseoutActionSpec, CloseoutRequest, OperationId};
+    let request = Request::Workspace {
+        id: 71,
+        request: Box::new(WorkspaceRequest::Closeout {
+            request: CloseoutRequest::Execute {
+                request: RequestId::new(),
+                spec: CloseoutActionSpec {
+                    operation: OperationId::new(),
+                    expected_revision: 9,
+                    action: CloseoutAction::ApproveRemoval {
+                        review: ReviewId::new(),
+                    },
+                },
+            },
+        }),
+    };
+    let encoded = serde_json::to_value(&request).unwrap();
+    let decoded: Request = serde_json::from_value(encoded.clone()).unwrap();
+    assert_eq!(decoded.id(), 71);
+    for field in ["trusted", "approved", "allow_loss", "actor"] {
+        let mut forged = encoded.clone();
+        forged["request"]["request"]["spec"]["action"][field] = serde_json::json!(true);
+        assert!(serde_json::from_value::<Request>(forged).is_err());
+    }
+    let old: ServerEvent = serde_json::from_value(serde_json::json!({
+        "type":"workspace_capabilities", "id":71, "catalog_version":1, "managed_rollout":false
+    }))
+    .unwrap();
+    assert!(matches!(
+        old,
+        ServerEvent::WorkspaceCapabilities {
+            closeout_version: None,
+            ..
+        }
+    ));
+}
+
+#[test]
 fn workspace_catalog_control_is_session_independent_and_roundtrips() {
     let request = Request::Workspace {
         id: 42,
@@ -18,6 +57,7 @@ fn workspace_catalog_control_is_session_independent_and_roundtrips() {
         catalog_version: 1,
         permissions_version: Some(1),
         checkout_version: Some(1),
+        closeout_version: Some(1),
         managed_rollout: false,
     };
     let bytes = serde_json::to_vec(&capabilities).unwrap();

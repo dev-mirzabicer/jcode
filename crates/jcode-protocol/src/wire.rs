@@ -1273,6 +1273,8 @@ pub enum ServerEvent {
         permissions_version: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         checkout_version: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        closeout_version: Option<u32>,
         managed_rollout: bool,
     },
     #[serde(rename = "workspace_response")]

@@ -14,7 +14,7 @@ pub(super) async fn preserve(
     snapshot: &RepositorySnapshot,
     stage: &Path,
     restored: &Path,
-    archive: &archive::Archive,
+    archive: &archive::Archive<'_>,
 ) -> Result<()> {
     // The restored refs include detached/reflog history as well as every
     // original ref. Git LFS supplies its established pointer parser, offline.

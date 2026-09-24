@@ -835,6 +835,9 @@ impl jcode_tool_core::OwnedExecutionControl for BackgroundControl {
     fn execution_id(&self) -> Option<String> {
         Some(self.run.invocation.id())
     }
+    fn execution_state_root(&self) -> Option<PathBuf> {
+        self.run.store.root().parent().map(PathBuf::from)
+    }
     async fn survives_reload(&self) -> Result<bool> {
         let store = self.run.store.clone();
         let id = self.run.invocation.id();

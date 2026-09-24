@@ -5,11 +5,22 @@ use crate::location::native_files::VerifiedDirectory;
 use std::fs::File;
 use std::io::Write;
 
-pub(super) struct Archive {
+pub(super) struct Archive<'a> {
+    control: Option<&'a dyn jcode_tool_core::OutputCapture>,
     root: PathBuf,
     directory: VerifiedDirectory,
 }
-impl Archive {
+impl<'a> Archive<'a> {
+    pub(super) fn with_control(mut self, control: &'a dyn jcode_tool_core::OutputCapture) -> Self {
+        self.control = Some(control);
+        self
+    }
+    pub(super) fn control(&self) -> Option<&dyn jcode_tool_core::OutputCapture> {
+        self.control
+    }
+    pub(super) fn check_cancelled(&self) -> Result<()> {
+        inventory::check_control(self.control)
+    }
     pub(super) fn contains(&self, path: &Path) -> bool {
         path.starts_with(&self.root)
     }
@@ -20,11 +31,13 @@ impl Archive {
     }
     pub(super) fn open(root: &Path) -> Result<Self> {
         Ok(Self {
+            control: None,
             root: root.into(),
             directory: VerifiedDirectory::open(root.into()).map_err(io)?,
         })
     }
     pub(super) fn directory(&self, path: &Path) -> Result<VerifiedDirectory> {
+        self.check_cancelled()?;
         let relative = path.strip_prefix(&self.root).map_err(corrupt)?;
         self.directory
             .preservation_directory(relative, true)
@@ -32,6 +45,7 @@ impl Archive {
     }
     pub(super) fn subtree(&self, path: &Path) -> Result<Self> {
         Ok(Self {
+            control: self.control,
             root: path.into(),
             directory: self.directory(path)?,
         })
@@ -56,6 +70,7 @@ impl Archive {
         self.verify()
     }
     pub(super) fn verify(&self) -> Result<()> {
+        self.check_cancelled()?;
         self.directory.verify().map_err(io)
     }
 }

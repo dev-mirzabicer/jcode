@@ -131,7 +131,10 @@ impl BackgroundTaskManager {
         let session = session.to_string();
         let saved = id.clone();
         let scope = (tool.clone(), session.clone());
-        let registration_root = crate::storage::jcode_dir()?;
+        let registration_root = match control.execution_state_root() {
+            Some(root) => root,
+            None => crate::storage::jcode_dir()?,
+        };
         let (info, created, registration_store) = tokio::task::spawn_blocking(move || {
             let store = ExecutionStore::open(&registration_root)?;
             let record = store

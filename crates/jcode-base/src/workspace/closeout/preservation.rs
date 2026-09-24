@@ -56,7 +56,7 @@ impl WorkspaceService {
                 "Preservation destination moved; review its binding before proceeding",
             ));
         }
-        let destination_archive = archive::Archive::open(&destination.path)?;
+        let destination_archive = archive::Archive::open(&destination.path)?.with_control(capture);
         self.resolver
             .resolve_directory(&stored.destination)
             .map_err(io)?;

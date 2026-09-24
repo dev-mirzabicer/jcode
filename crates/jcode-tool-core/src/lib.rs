@@ -19,6 +19,11 @@ pub enum OutputStream {
 /// Implemented by the output owner. A successful write acknowledges retention,
 /// not merely placement in an untracked in-memory preview buffer.
 pub trait OutputCapture: Send + Sync {
+    /// Optional cooperative cancellation observation. Retention itself remains
+    /// usable after Stop so partial output and terminal diagnostics survive.
+    fn check_cancelled(&self) -> Result<()> {
+        Ok(())
+    }
     /// Reserve before spawning so a crash in the launch/registration gap is
     /// explicitly unproven, not mistaken for an execution without children.
     fn begin_process(&self) -> Result<String>;
@@ -48,6 +53,11 @@ pub trait OwnedExecutionControl: Send + Sync {
     async fn request_stop(&self, cause: jcode_tool_types::StopCause) -> Result<bool>;
     async fn wait(&self) -> Result<jcode_tool_types::RunState>;
     fn execution_id(&self) -> Option<String> {
+        None
+    }
+    /// Original state root passed to the execution store, when this control
+    /// owns a retained invocation. Never supplied by a serialized tool input.
+    fn execution_state_root(&self) -> Option<PathBuf> {
         None
     }
     async fn survives_reload(&self) -> Result<bool> {

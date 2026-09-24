@@ -485,6 +485,9 @@ pub struct RestoreReview {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkspaceRequest {
+    Closeout {
+        request: CloseoutRequest,
+    },
     Volumes {},
     /// Read a retained clone run through the existing execution owner. Clone
     /// output inspection is available without attaching a primary Session.
@@ -597,6 +600,7 @@ pub enum WorkspaceRequest {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum WorkspaceResponse {
+    Closeout(Box<CloseoutResponse>),
     Volumes(Vec<WorkspaceVolume>),
     CloneOutput(jcode_tool_types::execution::ExecutionResponse),
     CloneReview(CloneReview),

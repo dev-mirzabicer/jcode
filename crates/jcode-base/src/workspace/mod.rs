@@ -136,4 +136,4 @@ pub(crate) fn entity(connection: &Connection, id: EntityId) -> Result<Entity> {
 }
 
 #[cfg(unix)]
-pub use closeout::CloseoutRuntime;
+pub use closeout::{CloseoutRuntime, CLOSEOUT_EXECUTION_SESSION, CLOSEOUT_EXECUTION_TOOL};

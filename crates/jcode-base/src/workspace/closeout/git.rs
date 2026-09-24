@@ -252,7 +252,7 @@ impl WorkspaceService {
             .await?;
             views.insert(root.clone(), view);
         }
-        let record = self.inventory_closeout(operation, expected)?;
+        let record = self.inventory_closeout_controlled(operation, expected, Some(capture))?;
         let mut stored = load(&self.connection()?, operation)?;
         let mut snapshots = Vec::new();
         let mut entries = Vec::new();
@@ -303,7 +303,7 @@ impl WorkspaceService {
             backup::file_digest(&references_path)?,
         ));
         entries.push(references::entry(&references)?);
-        inventory::verify_source(&stored)?;
+        inventory::verify_tree_controlled(&inventory::source(&stored)?, Some(capture))?;
         let history = directory.join("repositories.json");
         storage::atomic_json(&history, &snapshots)?;
         stored.history_digest = Some(backup::file_digest(&history)?);
@@ -496,6 +496,7 @@ pub(super) async fn observe(
     let administration = inventory::capture_git_administration(
         &git_directory,
         &destination.join("administration.jsonl"),
+        Some(capture),
     )?;
     Ok(RepositorySnapshot {
         root: root.into(),
@@ -518,7 +519,7 @@ pub(super) async fn preserve(
     snapshot: &RepositorySnapshot,
     directory: &Path,
     capture: &dyn OutputCapture,
-    archive: &archive::Archive,
+    archive: &archive::Archive<'_>,
 ) -> Result<PathBuf> {
     archive.directory(directory)?;
     let runner = GitExecution {
@@ -813,7 +814,7 @@ struct GitExecution<'a> {
     service: &'a WorkspaceService,
     operation: OperationId,
     capture: &'a dyn OutputCapture,
-    archive: Option<&'a archive::Archive>,
+    archive: Option<&'a archive::Archive<'a>>,
     index_file: Option<&'a Path>,
 }
 impl GitExecution<'_> {
@@ -963,6 +964,7 @@ impl GitExecution<'_> {
             None => storage::private_file(output, true)?,
         };
         let capture = self.capture;
+        capture.check_cancelled().map_err(io)?;
         let ticket = capture.begin_process().map_err(io)?;
         let mut child = match OwnedChild::spawn(&mut command) {
             Ok(child) => child,
@@ -992,6 +994,10 @@ impl GitExecution<'_> {
                 tokio::select! {
                     status = child.wait() => return status.map_err(io),
                     () = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                        if let Err(error) = capture.check_cancelled() {
+                            child.stop().await.map_err(io)?;
+                            return Err(io(error));
+                        }
                         if self.service.inspect_closeout(self.operation)?.stage == CloseoutStage::Revoked {
                             child.stop().await.map_err(io)?;
                             return Err(issue(IssueCode::PermissionRequired, "Closeout authorization was revoked"));

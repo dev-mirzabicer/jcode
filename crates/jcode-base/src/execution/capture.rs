@@ -399,6 +399,20 @@ impl CaptureState {
 }
 
 impl OutputCapture for Capture {
+    fn check_cancelled(&self) -> Result<()> {
+        let (store, id) = {
+            let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            (state.storage.store.clone(), state.record.id.clone())
+        };
+        let record = store
+            .inspect(&id)?
+            .context("Capture execution identity is unavailable")?;
+        ensure!(
+            record.stop_cause.is_none() && !record.state.terminal(),
+            "Execution {id} was stopped or completed"
+        );
+        Ok(())
+    }
     fn begin_process(&self) -> Result<String> {
         let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         ensure!(

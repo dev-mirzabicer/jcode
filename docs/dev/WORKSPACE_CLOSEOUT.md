@@ -3,13 +3,52 @@
 This service is being integrated in SP-58-C01/WP-07. The current foundation
 provides catalog-owned authorization, private inventories, verified
 preservation, closing admission/work observation, review-bound final approval,
-and catalog-journaled removal with retained history. The removal core has been
-exercised only through owned disposable fixtures. It is **not** yet exposed as a
-client capability or workspace agent tool. Ordinary managed rollout remains
-unchanged. Complete caller/admission coverage, public adapters and final runtime
-integration/activation remain WP-07 work before implementation acceptance.
+and catalog-journaled removal with retained history. The native workspace
+protocol now supplies the trusted macOS control path through the shared execution
+supervisor. It has been exercised with owned disposable fixtures, not real user
+checkout deletion. Harness/SDK reconciliation, remaining caller/admission and
+preservation cases, and final runtime integration/activation remain WP-07 work.
+There is no workspace agent tool or ordinary managed-rollout activation here.
 
-## Owners and authority
+## Native control and retained execution
+
+`workspace_probe` advertises optional `closeout_version=1` on macOS. Its absence
+means unsupported, not an empty closeout list. `WorkspaceRequest::Closeout`
+contains the typed `CloseoutRequest`; controls do not require creating or
+attaching a primary Session. The same authenticated same-user boundary applies,
+not physical-human attestation or arbitrary-shell containment.
+
+Begin records the exact initial human authorization. Long refresh, disposition,
+preservation, review, approval, recovery and finish operations use Execute with a
+caller-held request UUID, operation ID, expected revision and typed action. An
+action receipt identifies its retained execution run. Reusing a request with the
+same intent returns the original action; different intent conflicts. A new
+attempt requires a new request identity and current reviewed state. No schema
+field lets a caller manufacture trusted provenance or waive preservation.
+
+The action journal records immutable domain outcomes. It does not duplicate
+execution state: an applied domain result, a sealed output, and a terminal run
+are separate facts. InspectAction and Execution inspection expose those owners.
+Storage/control failure names the original action and run rather than starting
+another attempt. Output/status/Stop requests are restricted to that exact
+action's invocation. Force, arbitrary run listing and command-survival controls
+are not closeout operations.
+
+The existing execution supervisor owns the producer, Stop signal and capture.
+Blocking filesystem work runs in its retained blocking task, independent of
+client waiting. Background acceptance precedes completion. Quiet Git/process
+inspection observes Stop and drains/reaps owned processes; inventory and archive
+streaming observe it at bounded chunks/entries. Capture still retains partial
+and terminal evidence after Stop. Cooperative Stop does not abort the waiter
+and falsely claim that its filesystem worker has stopped.
+
+After preservation, inspect the new removal review and its issues, approve that
+exact review through the trusted path, then explicitly request Finish. Neither
+an action receipt nor preservation alone authorizes removal. Review and recovery
+results retain their revision/target identity. Existing human management and
+final agent-assisted guidance remain the later C01/C04/C05 consumers.
+
+## Domain authority
 
 `jcode-base::workspace::closeout` uses the existing workspace catalog,
 installation identity, operation/receipt tables and physical bindings. An
@@ -199,7 +238,9 @@ references remain independently observed.
 A restored older catalog cannot manufacture receipts for later filesystem
 effects. If those effects cannot be reconciled, resumed removal stays blocked;
 the trusted retain-files alternative remains available without deleting data.
-The ordinary agent capability and public client integration remain gated.
+The ordinary agent capability remains gated; the native trusted dispatcher uses
+these same operations. Harness/SDK and final activated-client verification remain
+part of the package's integration boundary.
 
 Closed is published only after the original/quarantine paths are absent and the
 owned holding directory is empty and removed. `closed_checkout_history` retains

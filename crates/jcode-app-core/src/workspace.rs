@@ -2,6 +2,7 @@
 //! Catalog administration does not create a provisional inference Session.
 pub use jcode_base::workspace::*;
 mod clone_runner;
+mod closeout_runner;
 mod startup_copy;
 
 pub(crate) async fn dispatch(
@@ -9,6 +10,9 @@ pub(crate) async fn dispatch(
     client: String,
     coordinator: std::sync::Arc<crate::server::startup_context::StartupContextCoordinator>,
 ) -> WorkspaceResponse {
+    if let WorkspaceRequest::Closeout { request } = request {
+        return closeout_runner::dispatch(request, client).await;
+    }
     if let WorkspaceRequest::BeginClone { request, review } = request {
         return clone_runner::begin(request, review, client).await;
     }
@@ -46,6 +50,10 @@ pub fn dispatch_with(
 ) -> WorkspaceResponse {
     use WorkspaceResponse as Response;
     let result = match request {
+        WorkspaceRequest::Closeout { .. } => Err(Issue {
+            code: IssueCode::UnsupportedCapability,
+            detail: "Closeout controls require the runtime-owned workspace dispatcher".into(),
+        }),
         WorkspaceRequest::Volumes {} => service.volumes().map(Response::Volumes),
         WorkspaceRequest::CloneOutput { .. } => Err(Issue {
             code: IssueCode::UnsupportedCapability,

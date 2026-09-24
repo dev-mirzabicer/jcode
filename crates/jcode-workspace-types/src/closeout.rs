@@ -6,6 +6,109 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CloseoutAction {
+    Refresh,
+    Preserve,
+    Disposition { decision: CloseoutDecision },
+    ReviewRemoval,
+    ApproveRemoval { review: ReviewId },
+    Finish,
+    ReviewRecovery { choice: CloseoutRecoveryAction },
+    ApplyRecovery { review: ReviewId },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloseoutActionSpec {
+    pub operation: OperationId,
+    pub expected_revision: Revision,
+    pub action: CloseoutAction,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CloseoutActionRecord {
+    pub request: RequestId,
+    pub spec: CloseoutActionSpec,
+    pub initiated_by: String,
+    pub run_id: String,
+    /// Domain receipt, not proof that the execution output has been sealed.
+    pub result: Option<CloseoutActionResult>,
+    pub issue: Option<Issue>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum CloseoutActionResult {
+    Record(Box<CloseoutRecord>),
+    Review(Box<CloseoutReview>),
+    Recovery(Box<CloseoutRecoveryReview>),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CloseoutRequest {
+    Begin {
+        request: RequestId,
+        expected_revision: Revision,
+        spec: CloseoutSpec,
+    },
+    Inspect {
+        operation: OperationId,
+    },
+    Inventory {
+        operation: OperationId,
+        digest: String,
+        after: u64,
+        limit: u32,
+    },
+    Revoke {
+        request: RequestId,
+        operation: OperationId,
+        expected_revision: Revision,
+    },
+    Execute {
+        request: RequestId,
+        spec: CloseoutActionSpec,
+    },
+    InspectAction {
+        request: RequestId,
+    },
+    Execution {
+        request: RequestId,
+        control: jcode_tool_types::execution::ExecutionRequest,
+    },
+    Review {
+        operation: OperationId,
+    },
+    Recovery {
+        operation: OperationId,
+    },
+    RemovalProgress {
+        operation: OperationId,
+        expected_revision: Revision,
+        after: u64,
+        limit: u32,
+    },
+    History {
+        location: LocationId,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum CloseoutResponse {
+    Record(Box<CloseoutRecord>),
+    Action(Box<CloseoutActionRecord>),
+    Inventory(CloseoutInventoryPage),
+    Review(Option<Box<CloseoutReview>>),
+    Recovery(Option<Box<CloseoutRecoveryReview>>),
+    RemovalProgress(CloseoutRemovalPage),
+    History(Box<CloseoutHistory>),
+    Execution(jcode_tool_types::execution::ExecutionResponse),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CloseoutSpec {
     pub location: LocationId,

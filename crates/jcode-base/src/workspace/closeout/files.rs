@@ -20,7 +20,7 @@ pub(super) fn preserve(stored: &StoredCloseout, directory: &Path) -> Result<Path
 pub(super) fn preserve_in(
     stored: &StoredCloseout,
     directory: &Path,
-    archive: &archive::Archive,
+    archive: &archive::Archive<'_>,
 ) -> Result<PathBuf> {
     preserve_tree(
         &inventory::source(stored)?,
@@ -36,9 +36,9 @@ pub(super) fn preserve_tree(
     decisions: &BTreeMap<String, CloseoutDecision>,
     full_archive: bool,
     directory: &Path,
-    archive: &archive::Archive,
+    archive: &archive::Archive<'_>,
 ) -> Result<PathBuf> {
-    inventory::verify_tree(source_tree)?;
+    inventory::verify_tree_controlled(source_tree, archive.control())?;
     let tree = directory.join("files");
     let restored = directory.join("verified-restore");
     archive.directory(&tree)?;
@@ -48,6 +48,7 @@ pub(super) fn preserve_tree(
     let mut directories = Vec::new();
     let mut hardlinks: BTreeMap<(u64, u64), (PathBuf, PathBuf)> = BTreeMap::new();
     inventory::visit_tree(source_tree, |item| {
+        archive.check_cancelled()?;
         if item.witness.is_none() {
             return Ok(());
         }
@@ -181,7 +182,7 @@ pub(super) fn preserve_tree(
     }
     output.flush().map_err(io)?;
     output.get_ref().sync_all().map_err(io)?;
-    inventory::verify_tree(source_tree)?;
+    inventory::verify_tree_controlled(source_tree, archive.control())?;
     storage::sync_dir(directory)?;
     archive.verify()?;
     Ok(manifest)
@@ -234,7 +235,7 @@ fn validate_relative(path: &Path) -> Result<()> {
 }
 
 pub(super) fn copy_entry(
-    archive: &archive::Archive,
+    archive: &archive::Archive<'_>,
     item: &Item,
     source: &Path,
     destination: &Path,
@@ -276,6 +277,7 @@ pub(super) fn copy_entry(
             let mut hasher = Sha256::new();
             let mut buffer = [0u8; 65536];
             loop {
+                archive.check_cancelled()?;
                 let count = input.read(&mut buffer).map_err(io)?;
                 if count == 0 {
                     break;
@@ -322,7 +324,7 @@ pub(super) fn copy_entry(
     archive.verify()
 }
 
-fn link_entry(archive: &archive::Archive, source: &Path, destination: &Path) -> Result<()> {
+fn link_entry(archive: &archive::Archive<'_>, source: &Path, destination: &Path) -> Result<()> {
     let from = archive.directory(
         source
             .parent()
@@ -372,7 +374,7 @@ fn copy_open_metadata(_: &File, _: &File) -> Result<()> {
 }
 
 fn copy_metadata(
-    archive: &archive::Archive,
+    archive: &archive::Archive<'_>,
     source: &Path,
     destination: &Path,
     symlink: bool,

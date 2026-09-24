@@ -71,14 +71,25 @@ pub(super) fn source(stored: &StoredCloseout) -> Result<TreeSnapshot> {
     })
 }
 
-pub(super) fn capture_git_administration(root: &Path, manifest: &Path) -> Result<TreeSnapshot> {
+pub(super) fn capture_git_administration(
+    root: &Path,
+    manifest: &Path,
+    control: Option<&dyn jcode_tool_core::OutputCapture>,
+) -> Result<TreeSnapshot> {
     let witness = Witness::of(&std::fs::symlink_metadata(root).map_err(io)?)?;
     let mut writer = InventoryWriter {
         file: BufWriter::new(storage::private_file(manifest, true)?),
         hash: Sha256::new(),
         count: 0,
     };
-    scan_policy(root, Path::new(""), witness.device, &mut writer, true)?;
+    scan_policy(
+        root,
+        Path::new(""),
+        witness.device,
+        &mut writer,
+        true,
+        control,
+    )?;
     writer.file.flush().map_err(io)?;
     writer.file.get_ref().sync_all().map_err(io)?;
     Ok(TreeSnapshot {
@@ -113,6 +124,16 @@ impl WorkspaceService {
         operation: OperationId,
         expected: Revision,
     ) -> Result<CloseoutRecord> {
+        self.inventory_closeout_controlled(operation, expected, None)
+    }
+
+    pub(super) fn inventory_closeout_controlled(
+        &self,
+        operation: OperationId,
+        expected: Revision,
+        control: Option<&dyn jcode_tool_core::OutputCapture>,
+    ) -> Result<CloseoutRecord> {
+        check_control(control)?;
         let _catalog = self.lease(false)?;
         let mut connection = self.connection()?;
         let mut stored = load(&connection, operation)?;
@@ -142,7 +163,14 @@ impl WorkspaceService {
         };
         let metadata = std::fs::symlink_metadata(&root).map_err(io)?;
         let witness = Witness::of(&metadata)?;
-        scan(&root, Path::new(""), witness.device, &mut writer)?;
+        scan_policy(
+            &root,
+            Path::new(""),
+            witness.device,
+            &mut writer,
+            false,
+            control,
+        )?;
         self.resolver
             .resolve_directory(&stored.binding)
             .map_err(io)?;
@@ -328,7 +356,16 @@ pub(super) fn verify_source(stored: &StoredCloseout) -> Result<()> {
 }
 
 pub(super) fn verify_tree(tree: &TreeSnapshot) -> Result<()> {
+    verify_tree_controlled(tree, None)
+}
+
+pub(super) fn verify_tree_controlled(
+    tree: &TreeSnapshot,
+    control: Option<&dyn jcode_tool_core::OutputCapture>,
+) -> Result<()> {
+    check_control(control)?;
     visit_tree(tree, |item| {
+        check_control(control)?;
         let Some(witness) = item.witness else {
             return Ok(());
         };
@@ -340,7 +377,7 @@ pub(super) fn verify_tree(tree: &TreeSnapshot) -> Result<()> {
             ));
         }
         if item.entry.kind == CloseoutEntryKind::File
-            && Some(hash_file(&path, &witness)?) != item.entry.sha256
+            && Some(hash_file_controlled(&path, &witness, control)?) != item.entry.sha256
         {
             return Err(issue(
                 IssueCode::Conflict,
@@ -385,17 +422,15 @@ pub(super) fn append(
     storage::sync_dir(directory)
 }
 
-fn scan(root: &Path, relative: &Path, device: u64, writer: &mut InventoryWriter) -> Result<()> {
-    scan_policy(root, relative, device, writer, false)
-}
-
 fn scan_policy(
     root: &Path,
     relative: &Path,
     device: u64,
     writer: &mut InventoryWriter,
     git_administration: bool,
+    control: Option<&dyn jcode_tool_core::OutputCapture>,
 ) -> Result<()> {
+    check_control(control)?;
     let path = root.join(relative);
     let before = std::fs::symlink_metadata(&path).map_err(io)?;
     let witness = Witness::of(&before)?;
@@ -423,7 +458,9 @@ fn scan_policy(
         blockers: vec![],
     };
     match kind {
-        CloseoutEntryKind::File => entry.sha256 = Some(hash_file(&path, &witness)?),
+        CloseoutEntryKind::File => {
+            entry.sha256 = Some(hash_file_controlled(&path, &witness, control)?)
+        }
         CloseoutEntryKind::Symlink => {
             entry.link_target = Some(std::fs::read_link(&path).map_err(io)?)
         }
@@ -470,6 +507,7 @@ fn scan_policy(
                 device,
                 writer,
                 git_administration,
+                control,
             )?;
         }
     }
@@ -483,6 +521,14 @@ fn scan_policy(
 }
 
 pub(super) fn hash_file(path: &Path, expected: &Witness) -> Result<String> {
+    hash_file_controlled(path, expected, None)
+}
+
+fn hash_file_controlled(
+    path: &Path,
+    expected: &Witness,
+    control: Option<&dyn jcode_tool_core::OutputCapture>,
+) -> Result<String> {
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -502,6 +548,7 @@ pub(super) fn hash_file(path: &Path, expected: &Witness) -> Result<String> {
     let mut hash = Sha256::new();
     let mut buffer = [0u8; 65536];
     loop {
+        check_control(control)?;
         let count = file.read(&mut buffer).map_err(io)?;
         if count == 0 {
             break;
@@ -514,4 +561,11 @@ pub(super) fn hash_file(path: &Path, expected: &Witness) -> Result<String> {
         return Err(issue(IssueCode::Conflict, "File changed while reading"));
     }
     Ok(format!("{:x}", hash.finalize()))
+}
+
+pub(super) fn check_control(control: Option<&dyn jcode_tool_core::OutputCapture>) -> Result<()> {
+    if let Some(control) = control {
+        control.check_cancelled().map_err(io)?;
+    }
+    Ok(())
 }

@@ -48,6 +48,9 @@ impl<'a> CloseoutRuntime<'a> {
                 ),
             ));
         }
+        self.capture
+            .check_cancelled()
+            .map_err(|error| issue(IssueCode::Busy, error.to_string()))?;
         Ok(())
     }
 
@@ -359,6 +362,7 @@ pub(super) async fn external_work(
         .stderr(std::process::Stdio::piped());
     // +D does not follow symlinks or cross mounted filesystems without -x.
     command.args(["-n", "-P", "-F0pcfn", "+D"]).arg(root);
+    capture.check_cancelled().map_err(io)?;
     let ticket = capture.begin_process().map_err(io)?;
     let mut child = match OwnedChild::spawn(&mut command) {
         Ok(child) => child,
@@ -388,6 +392,9 @@ pub(super) async fn external_work(
             tokio::select! {
                 status = child.wait() => return status.map_err(io),
                 () = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                    if let Err(error) = capture.check_cancelled() {
+                        child.stop().await.map_err(io)?; return Err(io(error));
+                    }
                     if service.inspect_closeout(operation)?.stage == CloseoutStage::Revoked {
                         child.stop().await.map_err(io)?; return Err(issue(IssueCode::PermissionRequired, "Closeout authorization was revoked"));
                     }
