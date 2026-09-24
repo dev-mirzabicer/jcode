@@ -187,7 +187,11 @@ impl WorkspaceService {
         );
         let original_absent = matches!(std::fs::symlink_metadata(&location.observed_path), Err(error) if error.kind() == std::io::ErrorKind::NotFound);
         if stored.removal.is_some() && original_absent {
-            let (path, digest) = stored.references.as_ref().ok_or_else(|| {
+            let reviewed = stored
+                .removal
+                .as_ref()
+                .and_then(|removal| removal.reference_snapshot());
+            let (path, digest) = reviewed.or(stored.references.as_ref()).ok_or_else(|| {
                 issue(
                     IssueCode::IncompleteCapture,
                     "Removed source has no retained reference inventory",
@@ -197,7 +201,12 @@ impl WorkspaceService {
                 return Err(corrupt("Retained reference inventory changed"));
             }
             let historical: References = storage::read_json(path)?;
-            result.issues.extend(historical.issues);
+            if reviewed.is_some() {
+                result.issues.extend(historical.issues);
+            } else {
+                result.issues.push(issue(IssueCode::IncompleteCapture,
+                    "This removed source predates review-bound reference capture; retain files or restore the reviewed source before resuming removal"));
+            }
             result.links.extend(
                 historical
                     .links

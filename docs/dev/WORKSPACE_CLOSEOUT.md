@@ -334,6 +334,16 @@ come from the integrity-checked pre-removal snapshot and are labeled recorded,
 not newly resolved from a missing cwd. Current Session, catalog and side-panel
 references remain independently observed.
 
+Removal intent retains its own immutable, digest-checked reference snapshot,
+matched to the current approved review before quarantine. Original inventory
+and preservation references remain untouched. Catalog-only resolution of a
+nested checkout therefore cannot be undone by replaying its historical blocker
+after an interruption. The removal report links both evidence boundaries.
+Corruption blocks further effects. An older journal without this snapshot may
+capture it only while its complete original source and review can still be
+revalidated. Once that source is gone, it cannot invent the missing evidence;
+trusted retain-files recovery remains available instead of guessed removal.
+
 A restored older catalog cannot manufacture receipts for later filesystem
 effects. If those effects cannot be reconciled, resumed removal stays blocked;
 the trusted retain-files alternative remains available without deleting data.
@@ -362,6 +372,20 @@ checkout. Rust reads the same retained history through its real SDK. Teardown
 checks terminal executions before ending the owned daemon/bridge. Artifacts
 record identities, complete/failed outcomes and cleanup; a passing fixture is
 not a claim that the user's shared runtime was activated.
+
+`scripts/test_workspace_closeout_retention.py` exercises an intentionally
+created primary, native command output and a linked side-panel document through
+the actual daemon. It enables managed launch only in its owned fixture config.
+`JCODE_WP07_SESSION_PROBE` names the compiled opt-in base integration test
+`closeout_retention_native`, which captures the complete Session plus journal
+through `Session::capture_readonly` and reads output through the existing
+execution inspector. It verifies prior messages and frozen content unchanged,
+allowing only the existing structurally identified non-waking scope notice and
+its checkpoint metadata. It then verifies failed continuation retains the
+original input, explicit cwd repair preserves historical context without
+inference or directory resurrection, and a new input uses the selected cwd.
+The provider is scripted localhost HTTP, not a paid model or behavioral test.
+Both successful and failed fixture outcomes retain cleanup and binary evidence.
 
 The closing fence changes the catalog lifecycle before checking existing work.
 New dependent turn/tool admission is refused. Already admitted native operations

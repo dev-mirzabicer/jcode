@@ -20,8 +20,13 @@ pub(super) struct Removal {
     pending: Option<Pending>,
     root_removed: bool,
     worktree: Option<WorktreeRetirement>,
+    #[serde(default)]
+    reference_snapshot: Option<(PathBuf, String)>,
 }
 impl Removal {
+    pub(super) fn reference_snapshot(&self) -> Option<&(PathBuf, String)> {
+        self.reference_snapshot.as_ref()
+    }
     pub(super) fn control_paths(&self) -> [&Path; 2] {
         [&self.quarantine, &self.holding]
     }
@@ -254,6 +259,7 @@ impl WorkspaceService {
         if stored.removal.is_none() {
             self.validate_closeout_review(&stored, &review, runtime)
                 .await?;
+            let reference_snapshot = self.capture_removal_references(&stored, &review, runtime)?;
             let snapshots: Vec<git::RepositorySnapshot> = storage::read_json(
                 stored
                     .history
@@ -302,10 +308,27 @@ impl WorkspaceService {
                 pending: None,
                 root_removed: false,
                 worktree,
+                reference_snapshot: Some(reference_snapshot),
             });
             stored.record.stage = CloseoutStage::Removing;
             self.save_removal(&mut stored)?;
             self.checkpoint("closeout_removal_intent")?;
+        }
+        if stored
+            .removal
+            .as_ref()
+            .is_some_and(|removal| removal.reference_snapshot.is_none())
+            && stored.binding.observed_path().try_exists().map_err(io)?
+        {
+            self.validate_closeout_review(&stored, &review, runtime)
+                .await?;
+            let snapshot = self.capture_removal_references(&stored, &review, runtime)?;
+            stored
+                .removal
+                .as_mut()
+                .ok_or_else(|| corrupt("Removal journal missing"))?
+                .reference_snapshot = Some(snapshot);
+            self.save_removal(&mut stored)?;
         }
         let result = self.remove_journaled(&mut stored, runtime).await;
         match result {
@@ -330,6 +353,40 @@ impl WorkspaceService {
                 ))
             }
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn capture_removal_references(
+        &self,
+        stored: &StoredCloseout,
+        review: &CloseoutReview,
+        runtime: &CloseoutRuntime<'_>,
+    ) -> Result<(PathBuf, String)> {
+        let references = self.closeout_references(stored, runtime.session_root)?;
+        if verification::references_digest(&references)? != review.references_digest {
+            return Err(issue(
+                IssueCode::Conflict,
+                "Closeout references changed before removal intent",
+            ));
+        }
+        let directory = self
+            .root
+            .join("closeout-inventories")
+            .join(stored.record.operation.to_string());
+        storage::private_dir(&directory)?;
+        let path = directory.join(format!("removal-references-{}.json", review.id));
+        if path.try_exists().map_err(io)? {
+            let retained: references::References = storage::read_json(&path)?;
+            if verification::references_digest(&retained)? != review.references_digest {
+                return Err(corrupt(
+                    "Existing removal reference snapshot does not match the review",
+                ));
+            }
+        } else {
+            storage::atomic_json(&path, &references)?;
+        }
+        let digest = backup::file_digest(&path)?;
+        Ok((path, digest))
     }
 
     fn save_removal(&self, stored: &mut StoredCloseout) -> Result<()> {
@@ -363,6 +420,19 @@ impl WorkspaceService {
         runtime: &CloseoutRuntime<'_>,
     ) -> Result<()> {
         verification::preservation(stored)?;
+        let (path, digest) = stored
+            .removal
+            .as_ref()
+            .and_then(Removal::reference_snapshot)
+            .ok_or_else(|| {
+                issue(
+                    IssueCode::IncompleteCapture,
+                    "Removal has no review-bound reference snapshot; use trusted recovery",
+                )
+            })?;
+        if backup::file_digest(path)? != *digest {
+            return Err(corrupt("Removal reference snapshot changed"));
+        }
         let mut findings = Vec::new();
         runtime.observe_internal(self, stored, &mut findings)?;
         if !findings.is_empty() {
@@ -928,6 +998,7 @@ impl WorkspaceService {
                 "kind": "checkout_removal_evidence", "operation": stored.record.operation,
                 "observed_at": chrono::Utc::now().to_rfc3339(), "binding": stored.binding,
                 "authorization": stored.record.authorization, "references": stored.references,
+                "removal_references": removal.reference_snapshot,
                 "preservation_manifest": stored.preservation, "preservation_digest": stored.record.preservation_digest,
                 "completed_entries": stored.record.removed_entries, "original_and_quarantine_absent": true
             }),
