@@ -18,6 +18,7 @@ mod inventory;
 #[cfg(unix)]
 mod preservation;
 mod references;
+mod removal;
 #[cfg(all(test, target_os = "macos"))]
 mod tests;
 #[cfg(unix)]
@@ -37,6 +38,8 @@ struct StoredCloseout {
     decisions: BTreeMap<String, CloseoutDecision>,
     #[serde(default)]
     review: Option<CloseoutReview>,
+    #[serde(default)]
+    removal: Option<removal::Removal>,
 }
 
 impl WorkspaceService {
@@ -212,6 +215,7 @@ impl WorkspaceService {
             preservation: None,
             decisions: BTreeMap::new(),
             review: None,
+            removal: None,
         };
         save(&transaction, &stored)?;
         transaction
@@ -252,10 +256,12 @@ impl WorkspaceService {
         }
         let mut stored = load(&transaction, operation)?;
         require_authorization_revision(&transaction, &stored, expected)?;
-        if matches!(
-            stored.record.stage,
-            CloseoutStage::Removing | CloseoutStage::Closed
-        ) {
+        if stored.removal.is_some()
+            || matches!(
+                stored.record.stage,
+                CloseoutStage::Removing | CloseoutStage::Closed
+            )
+        {
             return Err(issue(
                 IssueCode::Conflict,
                 "Removal has begun; inspect its exact journaled outcome",

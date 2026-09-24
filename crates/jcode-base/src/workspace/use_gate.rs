@@ -31,6 +31,7 @@ impl WorkspaceService {
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(io)?;
         let locations = scope::locations(&snapshot)?;
+        self.reject_closeout_control_paths(&snapshot, cwd.as_deref(), &targets)?;
         for location in &locations {
             let path = &location.observed_path;
             let touches = cwd.as_ref().is_some_and(|cwd| cwd.starts_with(path))

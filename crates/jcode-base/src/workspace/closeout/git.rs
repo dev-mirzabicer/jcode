@@ -789,7 +789,7 @@ fn validate_oid(oid: &str) -> Result<()> {
     Ok(())
 }
 
-async fn run(
+pub(super) async fn run(
     service: &WorkspaceService,
     operation: OperationId,
     cwd: &Path,

@@ -314,6 +314,73 @@ mod platform {
             Ok(file)
         }
 
+        /// Capture an entry into an owned holding directory without replacing
+        /// anything. Callers verify the captured entry before any unlink.
+        #[cfg(target_os = "macos")]
+        pub fn capture_entry(&self, name: &OsStr, holding: &Self, captured: &OsStr) -> Result<()> {
+            self.verify()?;
+            holding.verify()?;
+            ensure!(
+                self.identity.device == holding.identity.device,
+                "Capture crosses filesystems"
+            );
+            let name = component(name)?;
+            let captured = component(captured)?;
+            // SAFETY: both directories remain owned; both names are single
+            // NUL-free components. RENAME_EXCL never replaces a destination.
+            if unsafe {
+                libc::renameatx_np(
+                    self.file.as_raw_fd(),
+                    name.as_ptr(),
+                    holding.file.as_raw_fd(),
+                    captured.as_ptr(),
+                    libc::RENAME_EXCL,
+                )
+            } != 0
+            {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            self.file.sync_all()?;
+            holding.file.sync_all()?;
+            self.verify()?;
+            holding.verify()
+        }
+
+        /// Remove only the verified entry in an owned holding directory. A
+        /// nonempty directory is rejected by the kernel, never traversed here.
+        #[cfg(target_os = "macos")]
+        pub fn unlink_captured_entry(&self, name: &OsStr, expected: &Metadata) -> Result<()> {
+            self.verify()?;
+            let entry = self.open_preserved_entry(name, expected.file_type().is_symlink())?;
+            let current = entry.metadata()?;
+            ensure!(
+                Identity::of(&current)? == Identity::of(expected)?
+                    && current.mode() == expected.mode()
+                    && current.len() == expected.len()
+                    && current.modified()? == expected.modified()?
+                    && current.ctime() == expected.ctime()
+                    && current.ctime_nsec() == expected.ctime_nsec(),
+                "Captured entry changed before removal"
+            );
+            ensure!(
+                current.dev() == self.identity.device,
+                "Removal crosses a mounted filesystem"
+            );
+            let name = component(name)?;
+            let flags = if current.is_dir() {
+                libc::AT_REMOVEDIR
+            } else {
+                0
+            };
+            // SAFETY: verified descriptor and one component. AT_REMOVEDIR only
+            // accepts an empty directory; ordinary unlink never follows links.
+            if unsafe { libc::unlinkat(self.file.as_raw_fd(), name.as_ptr(), flags) } != 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            self.file.sync_all()?;
+            self.verify()
+        }
+
         pub fn open_preserved_entry(&self, name: &OsStr, symlink: bool) -> Result<File> {
             self.verify()?;
             let name = component(name)?;

@@ -2,12 +2,12 @@
 
 This service is being integrated in SP-58-C01/WP-07. The current foundation
 provides catalog-owned authorization, private inventories, verified
-preservation, closing admission/work observation and review-bound final approval.
-It does **not** expose checkout removal, a client capability,
-a workspace agent tool, or a completed closeout workflow. Ordinary managed
-rollout remains unchanged. The rest of WP-07 must integrate current-work gates,
-removal/recovery, retained history and the public adapter before
-implementation acceptance.
+preservation, closing admission/work observation, review-bound final approval,
+and catalog-journaled removal with retained history. The removal core has been
+exercised only through owned disposable fixtures. It is **not** yet exposed as a
+client capability or workspace agent tool. Ordinary managed rollout remains
+unchanged. Complete caller/admission coverage, public adapters and final runtime
+integration/activation remain WP-07 work before implementation acceptance.
 
 ## Owners and authority
 
@@ -32,8 +32,8 @@ Restoring the catalog clears pending closeout authority, including an operation
 that was already interrupted before the snapshot. Historical closed receipts are
 not turned into new authority. A review committed before automatic-backup failure
 remains inspectable and reports the partial outcome rather than pretending the
-review was rolled back. The future removal owner must retain physical ownership
-and re-run the same checks at its destructive boundary.
+review was rolled back. The removal owner retains physical ownership and re-runs
+the same checks at its destructive boundary.
 
 Preparation does not change Session history, stop an active task, retire a
 Location or delete checkout files. No historical cwd is rewritten. The native
@@ -111,6 +111,41 @@ protection, not encryption or a promise of stronger filesystem enforcement.
 Preservation completion records an integrity-bound manifest. It is not proof of
 current quiescence, approval or removability. Partial artifacts remain outside
 the source checkout, and a failed capture does not acquire removal authority.
+
+## Journaled removal and retained history
+
+`finish_closeout` consumes an existing current authorization, not a force flag.
+It rechecks authority after acquiring physical/catalog ownership, records intent
+before effects and exclusively renames the checkout to a same-volume quarantine.
+An unexpected root or replacement at the original name is retained and reported.
+The quarantine and holding paths remain protected by the Closing admission owner.
+
+Entries are processed sequentially in reverse inventory order with bounded-memory
+JSONL reading. Each entry has a durable intent, is captured into an exclusive
+holding slot, verified there, then unlinked through retained directory handles.
+Symlink targets are not followed. Directory removal must be empty and on the
+same filesystem. There is no recursive deletion of an unverified path or
+reset/stash/clean fallback. Late data or incomplete observations leave a partial
+result that can be inspected and reconciled.
+
+Linked-worktree registration is retired through ordinary Git worktree removal
+after quarantine and preservation of its administration. Its separate
+intent/receipt reconciles interruption without deleting shared Git directories
+or forcing removal. Sibling files and shared refs remain outside the target.
+
+`closeout_removal_progress` supplies revision-bound pages of NotProcessed,
+Unconfirmed and Removed entries. An effect without its final receipt stays
+Unconfirmed even if an unlink may already have happened. Pre-removal revocation
+cannot reopen an operation that has started removing data. Further recovery
+controls and their public client remain part of the integration boundary.
+
+Closed is published only after the original/quarantine paths are absent and the
+owned holding directory is empty and removed. `closed_checkout_history` retains
+the Location, operation, preservation references and private physical-removal
+report. The catalog owns lifecycle truth; the report records physical evidence.
+Portable imports may retain external history references without inventing a
+local operation. Session and execution owners retain transcripts and outputs,
+and missing-cwd repair remains explicit.
 
 ## Current verification route
 

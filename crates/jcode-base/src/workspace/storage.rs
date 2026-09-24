@@ -279,10 +279,25 @@ impl WorkspaceService {
         binding: &PhysicalBinding,
         shared_mutation: bool,
     ) -> Result<RootLease> {
-        let catalog = self.lease(false)?;
         self.resolver
             .resolve_directory(binding)
             .map_err(|e| issue(IssueCode::ReplacedRoot, e.to_string()))?;
+        self.acquire_recorded_binding_mode(binding, shared_mutation)
+    }
+
+    /// A journal owner may retain physical ownership after its own rename or
+    /// unlink. This grants no filesystem authority: that owner must separately
+    /// validate the journaled location and each entry before effects.
+    pub(super) fn acquire_recorded_binding(&self, binding: &PhysicalBinding) -> Result<RootLease> {
+        self.acquire_recorded_binding_mode(binding, false)
+    }
+
+    fn acquire_recorded_binding_mode(
+        &self,
+        binding: &PhysicalBinding,
+        shared_mutation: bool,
+    ) -> Result<RootLease> {
+        let catalog = self.lease(false)?;
         let key = physical_key(binding)?;
         // Same-user physical-root ownership spans independently named state roots.
         #[cfg(unix)]

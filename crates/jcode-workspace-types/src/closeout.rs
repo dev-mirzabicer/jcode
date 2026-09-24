@@ -159,6 +159,41 @@ pub struct CloseoutInventoryPage {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum CloseoutEntryProgress {
+    NotProcessed,
+    Unconfirmed,
+    Removed,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CloseoutRemovalEntry {
+    pub id: String,
+    pub path: PathBuf,
+    pub progress: CloseoutEntryProgress,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CloseoutRemovalPage {
+    pub operation: OperationId,
+    pub revision: Revision,
+    pub total: u64,
+    pub completed: u64,
+    pub pending: Option<CloseoutRemovalEntry>,
+    pub entries: Vec<CloseoutRemovalEntry>,
+    pub next: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CloseoutHistory {
+    pub location: crate::Location,
+    pub operation: OperationId,
+    pub record: Option<CloseoutRecord>,
+    pub preservation_paths: Vec<PathBuf>,
+    pub report: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CloseoutWorkKind {
     Session,
     Execution,

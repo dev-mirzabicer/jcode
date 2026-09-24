@@ -173,6 +173,7 @@ impl WorkspaceService {
             scope_paths.push(resolve_removal_entry(path)?);
         }
         let mut destination_roots = Vec::new();
+        self.reject_closeout_control_paths(&transaction, None, &scope_paths)?;
         for target in scope_paths {
             if artifacts
                 .as_ref()
